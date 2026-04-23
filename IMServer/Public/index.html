@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vapor Hello</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: linear-gradient(135deg, #f4efe6 0%, #dce7f5 100%);
+        --panel: rgba(255, 255, 255, 0.78);
+        --text: #162033;
+        --muted: #4f617d;
+        --accent: #d86b34;
+        --border: rgba(22, 32, 51, 0.12);
+        --shadow: 0 24px 60px rgba(22, 32, 51, 0.16);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .card {
+        width: min(680px, 100%);
+        padding: 40px 32px;
+        border: 1px solid var(--border);
+        border-radius: 28px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(14px);
+      }
+
+      .eyebrow {
+        margin: 0 0 14px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+
+      h1 {
+        margin: 0 0 16px;
+        font-size: clamp(2.4rem, 5vw, 4.2rem);
+        line-height: 0.94;
+      }
+
+      p {
+        margin: 0;
+        font-size: 1.05rem;
+        line-height: 1.75;
+        color: var(--muted);
+      }
+
+      code {
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: rgba(216, 107, 52, 0.12);
+        color: var(--text);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <p class="eyebrow">Vapor App</p>
+      <h1>Vapor Hello</h1>
+      <p>
+        Your HTML homepage is now mounted at <code>/</code>. Static files under
+        <code>Public/</code> can be served directly as well.
+      </p>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Xcode
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.moved-aside
+*.hmap
+
+# Swift Package Manager
+.build/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+
+# Vapor / local environment
+.env
+.env.*
+!*.env.example
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
+
+# Archives and local backups
+*.xcarchive
+*.ipa
+*.bundle
+monorepo-backups/
+

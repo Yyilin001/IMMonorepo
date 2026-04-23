@@ -1,0 +1,4 @@
+interface:
+  display_name: "AGENS Swift Review"
+  short_description: "按 AGENS 规则审查 Swift/SwiftUI 代码"
+  default_prompt: "使用 $agens-ios-review 按仓库 AGENS 规则审查当前 Swift 或 SwiftUI 变更。"

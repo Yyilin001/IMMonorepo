@@ -1,0 +1,51 @@
+# Vapor 的 Docker Compose 配置文件
+#
+# 在系统中安装 Docker 后，
+# 可以在接近生产环境的条件下运行和测试你的 Vapor 应用。
+#
+# 注意：此文件主要用于测试，
+# 并未遵循生产环境部署的最佳实践。
+#
+# 了解更多：https://docs.docker.com/compose/reference/
+#
+#   构建镜像：docker compose build
+#   启动应用：docker compose up app
+#   停止全部：docker compose down
+#
+
+x-shared_environment: &shared_environment
+  LOG_LEVEL: ${LOG_LEVEL:-debug}
+  DATABASE_HOST: ${DATABASE_HOST:-db}
+  DATABASE_PORT: ${DATABASE_PORT:-5432}
+  DATABASE_NAME: ${DATABASE_NAME:-vapor_auth}
+  DATABASE_USERNAME: ${DATABASE_USERNAME:-vapor}
+  DATABASE_PASSWORD: ${DATABASE_PASSWORD:-vapor_password}
+  JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me}
+  
+services:
+  app:
+    image: imserver:latest
+    build:
+      context: .
+    environment:
+      <<: *shared_environment
+    ports:
+      - '8080:8080'
+    depends_on:
+      - db
+    # user: '0' # 如需为测试目的以 root 身份运行，可取消注释；尽管 Dockerfile 中定义的是 'vapor' 用户。
+    command: ["serve", "--env", "production", "--hostname", "0.0.0.0", "--port", "8080"]
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME:-vapor_auth}
+      POSTGRES_USER: ${DATABASE_USERNAME:-vapor}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-vapor_password}
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
