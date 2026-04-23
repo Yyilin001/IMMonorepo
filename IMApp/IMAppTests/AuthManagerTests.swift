@@ -178,6 +178,14 @@ private actor IMConnectionTestHarness {
     private var continuation: AsyncThrowingStream<IMTCPConnectionEvent, Error>.Continuation?
     private var disconnectCount = 0
     private var sentLines: [String] = []
+    private var sendAttemptCount = 0
+    private let sendDelayNanoseconds: UInt64
+    private let failingSendNumbers: Set<Int>
+
+    init(sendDelayNanoseconds: UInt64 = 0, failingSendNumbers: Set<Int> = []) {
+        self.sendDelayNanoseconds = sendDelayNanoseconds
+        self.failingSendNumbers = failingSendNumbers
+    }
 
     func makeConnection() -> IMTCPConnection {
         let events = AsyncThrowingStream<IMTCPConnectionEvent, Error> { continuation in
@@ -194,7 +202,7 @@ private actor IMConnectionTestHarness {
             ),
             events: events,
             sendLine: { line in
-                await self.record(line)
+                try await self.record(line)
             },
             disconnectHandler: {
                 await self.disconnect()
@@ -220,7 +228,14 @@ private actor IMConnectionTestHarness {
         continuation = nil
     }
 
-    private func record(_ line: String) {
+    private func record(_ line: String) async throws {
+        if sendDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: sendDelayNanoseconds)
+        }
+        sendAttemptCount += 1
+        if failingSendNumbers.contains(sendAttemptCount) {
+            throw URLError(.notConnectedToInternet)
+        }
         sentLines.append(line)
     }
 }
@@ -782,6 +797,423 @@ struct AuthManagerTests {
         #expect(sentMessage?.serverMessageID == "srv-msg-9001")
         #expect(sentMessage?.serverSequence == 100)
         #expect(sentMessage?.createdAt == Date(timeIntervalSince1970: 1_700_001_000))
+    }
+
+    @Test func sendIMTextQueuesWhenTCPConnectionIsUnavailable() async throws {
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+        let manager = makeManager(
+            transport: transport,
+            openIMConnection: {
+                throw URLError(.notConnectedToInternet)
+            }
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run {
+                if case .signedIn = manager.phase {
+                    return true
+                }
+                return false
+            }
+        }
+
+        let didSend = await manager.sendIMText("queued while offline", to: "conv-local")
+
+        #expect(didSend)
+        let message = try #require(manager.imConversationStore.selectedConversation?.messages.first)
+        #expect(message.text == "queued while offline")
+        #expect(message.deliveryState == .queued(message: "等待 IM 长连接恢复后发送。"))
+    }
+
+    @Test func sendIMTextSendFailureLeavesMessageUnknown() async throws {
+        let harness = IMConnectionTestHarness(failingSendNumbers: [1])
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+        let manager = makeManager(
+            transport: transport,
+            openIMConnection: {
+                await harness.makeConnection()
+            }
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run { manager.imConnectionStatus == .connected }
+        }
+
+        let didSend = await manager.sendIMText("lost ack", to: "conv-local")
+
+        #expect(!didSend)
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.first?.deliveryState
+                    == .unknown(message: "发送状态未确认，请重试。")
+            }
+        }
+        let message = try #require(manager.imConversationStore.selectedConversation?.messages.first)
+        #expect(manager.imConversationStore.isRetryableFailure(message))
+        #expect(manager.imConversationStore.queueSummary(for: "conv-local").retryableIssueCount == 1)
+    }
+
+    @Test func cancelQueuedIMTextMessageRemovesOfflineQueuedMessage() async throws {
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+        let manager = makeManager(
+            transport: transport,
+            openIMConnection: {
+                throw URLError(.notConnectedToInternet)
+            }
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run {
+                if case .signedIn = manager.phase {
+                    return true
+                }
+                return false
+            }
+        }
+
+        let didSend = await manager.sendIMText("cancel me", to: "conv-local")
+        let message = try #require(manager.imConversationStore.selectedConversation?.messages.first)
+        let didCancel = manager.cancelQueuedIMTextMessage(localMessageID: message.id, in: "conv-local")
+
+        #expect(didSend)
+        #expect(didCancel)
+        #expect(manager.imConversationStore.selectedConversation?.messages.isEmpty == true)
+        #expect(!manager.imConversationStore.queueSummary(for: "conv-local").hasPendingWork)
+    }
+
+    @Test func loginFlushesRestoredQueuedMessagesAfterGapSync() async throws {
+        let harness = IMConnectionTestHarness()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let cache = InMemoryIMConversationCache()
+        await cache.seed(
+            IMConversationCacheSnapshot(
+                conversations: [
+                    IMCachedConversationState(
+                        id: conversationIDString,
+                        title: "缓存会话",
+                        kind: .direct,
+                        memberCount: 2,
+                        memberUserIDs: [Self.user.id],
+                        messages: [
+                            IMCachedMessageState(
+                                id: "queued-client-1",
+                                conversationID: conversationIDString,
+                                clientMessageID: "queued-client-1",
+                                serverMessageID: nil,
+                                senderUserID: Self.user.id,
+                                serverSequence: nil,
+                                kind: "text",
+                                text: "恢复后发送",
+                                direction: .outgoing,
+                                createdAt: Date(timeIntervalSince1970: 1_700_100_000),
+                                deliveryState: .queued(message: "等待 IM 长连接恢复后发送。")
+                            )
+                        ],
+                        hasLoadedMessages: true,
+                        lastMessagePreviewText: "恢复后发送",
+                        hasMoreHistory: false,
+                        latestSyncedServerSequence: nil,
+                        oldestLoadedServerSequence: nil,
+                        serverLastReadSequence: 0,
+                        serverUnreadCount: 0,
+                        updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
+                    )
+                ],
+                selectedConversationID: conversationIDString,
+                lastSummaryRefreshAt: nil
+            ),
+            for: Self.user.id
+        )
+
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        [
+                            IMConversationSummaryResponseBody(
+                                id: conversationID,
+                                title: "服务端会话",
+                                kind: IMConversationKind.direct.rawValue,
+                                memberCount: 2,
+                                memberUserIDs: [Self.user.id],
+                                lastMessage: nil,
+                                createdAt: Date(timeIntervalSince1970: 1_700_090_000),
+                                updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
+                            )
+                        ]
+                    )
+                )
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+        let manager = makeManager(
+            transport: transport,
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            imConversationCache: IMConversationCacheHandler(cache),
+            wrapDefaultIMResponses: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+
+        let messageLine = try await Self.requireRecordedLine(at: 0, from: harness)
+        let messagePacket = try Self.decode(IMTCPPacketEnvelope<IMTCPMessagePayload>.self, from: messageLine)
+        #expect(messagePacket.type == .message)
+        #expect(messagePacket.payload.conversationID == conversationIDString)
+        #expect(messagePacket.payload.clientMessageID == "queued-client-1")
+        #expect(messagePacket.payload.body["text"] == "恢复后发送")
+    }
+
+    @Test func queuedFlushPublishesProgressAndClearsWhenFinished() async throws {
+        let harness = IMConnectionTestHarness(sendDelayNanoseconds: 200_000_000)
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let cache = InMemoryIMConversationCache()
+        await cache.seed(
+            IMConversationCacheSnapshot(
+                conversations: [
+                    IMCachedConversationState(
+                        id: conversationIDString,
+                        title: "缓存会话",
+                        kind: .direct,
+                        memberCount: 2,
+                        memberUserIDs: [Self.user.id],
+                        messages: [
+                            IMCachedMessageState(
+                                id: "queued-client-1",
+                                conversationID: conversationIDString,
+                                clientMessageID: "queued-client-1",
+                                serverMessageID: nil,
+                                senderUserID: Self.user.id,
+                                serverSequence: nil,
+                                kind: "text",
+                                text: "恢复后发送",
+                                direction: .outgoing,
+                                createdAt: Date(timeIntervalSince1970: 1_700_100_000),
+                                deliveryState: .queued(message: "等待 IM 长连接恢复后发送。")
+                            )
+                        ],
+                        hasLoadedMessages: true,
+                        lastMessagePreviewText: "恢复后发送",
+                        hasMoreHistory: false,
+                        latestSyncedServerSequence: nil,
+                        oldestLoadedServerSequence: nil,
+                        serverLastReadSequence: 0,
+                        serverUnreadCount: 0,
+                        updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
+                    )
+                ],
+                selectedConversationID: conversationIDString,
+                lastSummaryRefreshAt: nil
+            ),
+            for: Self.user.id
+        )
+
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        [
+                            IMConversationSummaryResponseBody(
+                                id: conversationID,
+                                title: "服务端会话",
+                                kind: IMConversationKind.direct.rawValue,
+                                memberCount: 2,
+                                memberUserIDs: [Self.user.id],
+                                lastMessage: nil,
+                                createdAt: Date(timeIntervalSince1970: 1_700_090_000),
+                                updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
+                            )
+                        ]
+                    )
+                )
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+        let manager = makeManager(
+            transport: transport,
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            imConversationCache: IMConversationCacheHandler(cache),
+            wrapDefaultIMResponses: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.isFlushingQueuedIMTextMessages
+            }
+        }
+        _ = try await Self.requireRecordedLine(at: 0, from: harness)
+        try await Self.waitUntil {
+            await MainActor.run {
+                !manager.isFlushingQueuedIMTextMessages
+            }
+        }
+    }
+
+    @Test func queuedFlushFailureMakesInFlightUnknownAndLeavesUnsentQueued() async throws {
+        let harness = IMConnectionTestHarness(failingSendNumbers: [1])
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let cache = InMemoryIMConversationCache()
+        await cache.seed(
+            IMConversationCacheSnapshot(
+                conversations: [
+                    IMCachedConversationState(
+                        id: conversationIDString,
+                        title: "缓存会话",
+                        kind: .direct,
+                        memberCount: 2,
+                        memberUserIDs: [Self.user.id],
+                        messages: [
+                            IMCachedMessageState(
+                                id: "queued-client-1",
+                                conversationID: conversationIDString,
+                                clientMessageID: "queued-client-1",
+                                serverMessageID: nil,
+                                senderUserID: Self.user.id,
+                                serverSequence: nil,
+                                kind: "text",
+                                text: "第一条",
+                                direction: .outgoing,
+                                createdAt: Date(timeIntervalSince1970: 1_700_100_000),
+                                deliveryState: .queued(message: "等待 IM 长连接恢复后发送。")
+                            ),
+                            IMCachedMessageState(
+                                id: "queued-client-2",
+                                conversationID: conversationIDString,
+                                clientMessageID: "queued-client-2",
+                                serverMessageID: nil,
+                                senderUserID: Self.user.id,
+                                serverSequence: nil,
+                                kind: "text",
+                                text: "第二条",
+                                direction: .outgoing,
+                                createdAt: Date(timeIntervalSince1970: 1_700_100_001),
+                                deliveryState: .queued(message: "等待 IM 长连接恢复后发送。")
+                            )
+                        ],
+                        hasLoadedMessages: true,
+                        lastMessagePreviewText: "第二条",
+                        hasMoreHistory: false,
+                        latestSyncedServerSequence: nil,
+                        oldestLoadedServerSequence: nil,
+                        serverLastReadSequence: 0,
+                        serverUnreadCount: 0,
+                        updatedAt: Date(timeIntervalSince1970: 1_700_100_001)
+                    )
+                ],
+                selectedConversationID: conversationIDString,
+                lastSummaryRefreshAt: nil
+            ),
+            for: Self.user.id
+        )
+
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        [
+                            IMConversationSummaryResponseBody(
+                                id: conversationID,
+                                title: "服务端会话",
+                                kind: IMConversationKind.direct.rawValue,
+                                memberCount: 2,
+                                memberUserIDs: [Self.user.id],
+                                lastMessage: nil,
+                                createdAt: Date(timeIntervalSince1970: 1_700_090_000),
+                                updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
+                            )
+                        ]
+                    )
+                )
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+        let manager = makeManager(
+            transport: transport,
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            imConversationCache: IMConversationCacheHandler(cache),
+            wrapDefaultIMResponses: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.map(\.deliveryState) == [
+                    .unknown(message: "发送状态未确认，请重试。"),
+                    .queued(message: "等待 IM 长连接恢复后发送。")
+                ]
+            }
+        }
+        let summary = manager.imConversationStore.queueSummary(for: conversationIDString)
+        #expect(summary.queuedCount == 1)
+        #expect(summary.retryableIssueCount == 1)
     }
 
     @Test func loginLoadsServerConversationListAndHistory() async throws {

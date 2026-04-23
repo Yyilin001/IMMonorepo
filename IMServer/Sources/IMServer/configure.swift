@@ -45,6 +45,7 @@ public func configure(_ app: Application) async throws {
     app.migrations.add(AddConversationKind())
     app.migrations.add(CreateConversationMessage())
     app.migrations.add(AddConversationMessageClientMessageID())
+    app.migrations.add(AddConversationMessageClientMessageIDUniqueIndex())
     try await app.autoMigrate()
     try FileStorageService(app: app).prepareStorage()
     try await seedDevelopmentUserIfNeeded(in: app)

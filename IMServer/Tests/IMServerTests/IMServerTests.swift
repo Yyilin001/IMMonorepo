@@ -535,6 +535,42 @@ struct IMServerTests {
         }
     }
 
+    @Test("IM create conversation endpoint allows duplicate explicit two-member groups")
+    func createTwoMemberGroupConversationDoesNotReuseExistingGroup() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let peerUser = try await makeUser(email: "two-member-group-duplicate@example.com", on: app)
+            var createdConversationIDs: [UUID] = []
+
+            for title in ["Two Member Group A", "Two Member Group B"] {
+                try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                    try req.content.encode(
+                        IMConversationCreateRequest(
+                            kind: IMConversationKind.group.rawValue,
+                            title: title,
+                            memberEmails: [peerUser.email]
+                        )
+                    )
+                }, afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+
+                    let conversation = try res.content.decode(IMConversationResponse.self)
+                    #expect(conversation.title == title)
+                    #expect(conversation.kind == IMConversationKind.group.rawValue)
+                    #expect(conversation.memberCount == 2)
+                    createdConversationIDs.append(conversation.id)
+                })
+            }
+
+            #expect(Set(createdConversationIDs).count == 2)
+
+            let conversations = try await Conversation.query(on: app.db).all()
+            #expect(conversations.count == 2)
+            #expect(conversations.allSatisfy { $0.conversationKind == .group })
+        }
+    }
+
     @Test("IM create conversation endpoint marks untitled two-member conversations as direct")
     func createDirectConversation() async throws {
         try await withApp(configure: configure) { app in
@@ -1267,6 +1303,144 @@ struct IMServerTests {
                 #expect(messages[0].clientMessageID == "client-msg-1")
                 #expect(messages[0].body["text"] == "hello from tcp")
             })
+        }
+    }
+
+    @Test("TCP message persistence is idempotent by sender conversation and client message id")
+    func tcpMessagePersistenceIsIdempotentByClientMessageID() async throws {
+        try await withApp(configure: configure) { app in
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let otherUser = try await makeUser(email: "tcp-idempotent-peer@example.com", on: app)
+            let demoUserID = try demoUser.requireID()
+            let conversation = Conversation(title: "Idempotent Chat", updatedAt: Date(timeIntervalSince1970: 1_700_100_105))
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: demoUserID)
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try otherUser.requireID())
+                .create(on: app.db)
+
+            let first = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                imTCPTextPayload(
+                    conversationID: conversationID,
+                    clientMessageID: "client-idempotent-1",
+                    text: "first body wins"
+                ),
+                senderUserID: demoUserID
+            )
+            let duplicate = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                imTCPTextPayload(
+                    conversationID: conversationID,
+                    clientMessageID: "client-idempotent-1",
+                    text: "changed body should be ignored"
+                ),
+                senderUserID: demoUserID
+            )
+
+            #expect(first.acknowledgement.status == "accepted")
+            #expect(duplicate.acknowledgement.status == "accepted")
+            #expect(duplicate.didCreateMessage == false)
+            #expect(duplicate.acknowledgement.messageID == first.acknowledgement.messageID)
+            #expect(duplicate.message.messageID == first.message.messageID)
+            #expect(duplicate.message.serverSequence == first.message.serverSequence)
+            #expect(duplicate.message.body["text"] == "first body wins")
+
+            let messages = try await ConversationMessage.query(on: app.db)
+                .filter(\.$conversation.$id == conversationID)
+                .all()
+            #expect(messages.count == 1)
+        }
+    }
+
+    @Test("Retrying first stranger direct message with same client id stays accepted")
+    func retryingFirstStrangerDirectMessageIsIdempotentBeforePeerReply() async throws {
+        try await withApp(configure: configure) { app in
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "stranger-idempotent@example.com", on: app)
+            let demoUserID = try demoUser.requireID()
+            let conversation = Conversation(title: nil, kind: .direct, updatedAt: Date(timeIntervalSince1970: 1_700_100_107))
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: demoUserID)
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try peerUser.requireID())
+                .create(on: app.db)
+
+            let first = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                imTCPTextPayload(
+                    conversationID: conversationID,
+                    clientMessageID: "stranger-idempotent-first",
+                    text: "first hello"
+                ),
+                senderUserID: demoUserID
+            )
+            let retry = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                imTCPTextPayload(
+                    conversationID: conversationID,
+                    clientMessageID: "stranger-idempotent-first",
+                    text: "first hello retry"
+                ),
+                senderUserID: demoUserID
+            )
+
+            #expect(first.acknowledgement.status == "accepted")
+            #expect(retry.acknowledgement.status == "accepted")
+            #expect(retry.didCreateMessage == false)
+            #expect(retry.acknowledgement.messageID == first.acknowledgement.messageID)
+
+            do {
+                _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                    imTCPTextPayload(
+                        conversationID: conversationID,
+                        clientMessageID: "stranger-idempotent-second",
+                        text: "second hello"
+                    ),
+                    senderUserID: demoUserID
+                )
+                Issue.record("Expected a new second stranger direct message to remain rejected")
+            } catch let error as IMRealtimeMessageError {
+                #expect(error == .strangerDirectMessageLimitReached)
+            }
+
+            let messages = try await ConversationMessage.query(on: app.db)
+                .filter(\.$conversation.$id == conversationID)
+                .all()
+            #expect(messages.count == 1)
+        }
+    }
+
+    @Test("Null client message ids are not constrained by idempotency index")
+    func nullClientMessageIDsCanStillPersistMultipleMessages() async throws {
+        try await withApp(configure: configure) { app in
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let otherUser = try await makeUser(email: "tcp-null-client-id-peer@example.com", on: app)
+            let demoUserID = try demoUser.requireID()
+            let conversation = Conversation(title: "Null Client ID Chat", updatedAt: Date(timeIntervalSince1970: 1_700_100_108))
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: demoUserID)
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try otherUser.requireID())
+                .create(on: app.db)
+
+            for sequence in 1...2 {
+                try await ConversationMessage(
+                    conversationID: conversationID,
+                    senderUserID: demoUserID,
+                    serverSequence: sequence,
+                    clientMessageID: nil,
+                    kind: "text",
+                    body: ["text": "legacy-\(sequence)"]
+                ).create(on: app.db)
+            }
+
+            let messages = try await ConversationMessage.query(on: app.db)
+                .filter(\.$conversation.$id == conversationID)
+                .all()
+            #expect(messages.count == 2)
         }
     }
 

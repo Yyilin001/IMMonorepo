@@ -14,6 +14,7 @@ final class AuthManager: ObservableObject {
         static let refreshDebounceNanoseconds: UInt64 = 400_000_000
         static let cachePersistDebounceNanoseconds: UInt64 = 300_000_000
         static let minimumRefreshInterval: TimeInterval = 5
+        static let queuedFlushLimit = 20
     }
 
     enum Phase: Equatable {
@@ -54,6 +55,7 @@ final class AuthManager: ObservableObject {
     @Published private(set) var contactRequestsMessage: String?
     @Published private(set) var serverStatus: ServerStatus = .unknown
     @Published private(set) var imConnectionStatus: IMConnectionStatus = .disconnected
+    @Published private(set) var isFlushingQueuedIMTextMessages = false
 
     private let sessionClient: SessionClient
     private let openIMConnection: @Sendable () async throws -> IMTCPConnection
@@ -646,6 +648,19 @@ final class AuthManager: ObservableObject {
             return false
         }
 
+        guard let connection = imConnection else {
+            let didQueue = imConversationStore.queueOutgoingText(
+                text,
+                conversationID: conversationID,
+                senderUserID: user.id
+            )
+            if didQueue {
+                scheduleIMConversationCachePersist()
+                scheduleIMConnectionIfNeeded()
+            }
+            return didQueue
+        }
+
         guard let request = imConversationStore.prepareOutgoingText(
             text,
             conversationID: conversationID,
@@ -655,15 +670,42 @@ final class AuthManager: ObservableObject {
         }
         scheduleIMConversationCachePersist()
 
-        guard let connection = imConnection else {
-            imConversationStore.markOutgoingFailure(
-                requestID: request.requestID,
-                message: "IM 长连接未建立，消息没有发送出去。"
-            )
-            scheduleIMConversationCachePersist()
-            scheduleIMConnectionIfNeeded()
+        let generation = imConnectionGeneration
+
+        do {
+            try await connection.sendMessage(request.payload, requestID: request.requestID)
+            return true
+        } catch {
+            await handleIMConnectionFailure(error, generation: generation)
             return false
         }
+    }
+
+    func retryIMTextMessage(localMessageID: String, in conversationID: String) async -> Bool {
+        guard case .signedIn = phase else {
+            return false
+        }
+
+        guard let connection = imConnection else {
+            let didQueue = imConversationStore.queueRetryableOutgoingMessage(
+                localMessageID: localMessageID,
+                conversationID: conversationID
+            )
+            if didQueue {
+                scheduleIMConversationCachePersist()
+                scheduleIMConnectionIfNeeded()
+            }
+            return didQueue
+        }
+
+        guard let request = imConversationStore.retryOutgoingMessage(
+            localMessageID: localMessageID,
+            conversationID: conversationID
+        ) else {
+            scheduleIMConversationCachePersist()
+            return false
+        }
+        scheduleIMConversationCachePersist()
 
         let generation = imConnectionGeneration
 
@@ -671,14 +713,24 @@ final class AuthManager: ObservableObject {
             try await connection.sendMessage(request.payload, requestID: request.requestID)
             return true
         } catch {
-            imConversationStore.markOutgoingFailure(
-                requestID: request.requestID,
-                message: error.localizedDescription
-            )
-            scheduleIMConversationCachePersist()
             await handleIMConnectionFailure(error, generation: generation)
             return false
         }
+    }
+
+    func cancelQueuedIMTextMessage(localMessageID: String, in conversationID: String) -> Bool {
+        guard case .signedIn = phase else {
+            return false
+        }
+
+        let didCancel = imConversationStore.cancelQueuedOutgoingMessage(
+            localMessageID: localMessageID,
+            conversationID: conversationID
+        )
+        if didCancel {
+            scheduleIMConversationCachePersist()
+        }
+        return didCancel
     }
 
     private func scheduleRestoreSession() {
@@ -858,6 +910,7 @@ final class AuthManager: ObservableObject {
         imConnectionStatus = .connected
         startIMConnectionEventLoop(connection, generation: generation)
         await syncIMConversationGapsAfterConnection()
+        await flushQueuedIMTextMessages(limit: IMHistoryPage.queuedFlushLimit)
         scheduleIMConversationCachePersist()
     }
 
@@ -966,18 +1019,18 @@ final class AuthManager: ObservableObject {
             case .kicked(_, let message):
                 await clearSession(message: message)
             case .connectionClosed:
-                imConversationStore.markAllPendingMessagesFailed(message: "IM 连接已断开。")
+                imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
                 imConnectionStatus = .failed(message: "IM 连接已断开。")
                 scheduleIMConversationCachePersist()
             default:
-                imConversationStore.markAllPendingMessagesFailed(message: tcpError.localizedDescription)
+                imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
                 imConnectionStatus = .failed(message: tcpError.localizedDescription)
                 scheduleIMConversationCachePersist()
             }
             return
         }
 
-        imConversationStore.markAllPendingMessagesFailed(message: error.localizedDescription)
+        imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
         imConnectionStatus = .failed(message: error.localizedDescription)
         scheduleIMConversationCachePersist()
     }
@@ -1231,6 +1284,48 @@ final class AuthManager: ObservableObject {
         }
 
         return [selectedConversationID] + conversationIDs.filter { $0 != selectedConversationID }
+    }
+
+    private func flushQueuedIMTextMessages(limit: Int) async {
+        guard !isFlushingQueuedIMTextMessages else {
+            return
+        }
+
+        guard let connection = imConnection else {
+            return
+        }
+
+        isFlushingQueuedIMTextMessages = true
+        defer {
+            isFlushingQueuedIMTextMessages = false
+        }
+
+        let requests = imConversationStore.queuedOutgoingMessageRequests(limit: limit)
+        guard !requests.isEmpty else {
+            return
+        }
+
+        scheduleIMConversationCachePersist()
+        let generation = imConnectionGeneration
+
+        for (index, request) in requests.enumerated() {
+            do {
+                try await connection.sendMessage(request.payload, requestID: request.requestID)
+            } catch {
+                for unsentRequest in requests.dropFirst(index + 1) {
+                    imConversationStore.markOutgoingQueued(
+                        requestID: unsentRequest.requestID,
+                        message: "等待 IM 长连接恢复后发送。"
+                    )
+                }
+
+                scheduleIMConversationCachePersist()
+                await handleIMConnectionFailure(error, generation: generation)
+                return
+            }
+        }
+
+        scheduleIMConversationCachePersist()
     }
 
     private func markIMConversationReadUpToLatestLoadedSequence(for conversationID: String) async {

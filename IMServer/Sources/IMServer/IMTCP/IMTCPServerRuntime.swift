@@ -313,12 +313,14 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                         result.message,
                         toUserIDs: result.recipientUserIDs
                     )
-                    await IMConversationEventService(app: self.application, db: self.application.db).publish(
-                        eventType: IMTCPConversationEventType.summaryUpdated,
-                        conversationID: result.conversationID,
-                        recipientUserIDs: result.recipientUserIDs,
-                        actorUserID: connection.userID
-                    )
+                    if result.didCreateMessage {
+                        await IMConversationEventService(app: self.application, db: self.application.db).publish(
+                            eventType: IMTCPConversationEventType.summaryUpdated,
+                            conversationID: result.conversationID,
+                            recipientUserIDs: result.recipientUserIDs,
+                            actorUserID: connection.userID
+                        )
+                    }
                 } catch let error as IMRealtimeMessageError {
                     channel.eventLoop.execute {
                         self.writePacket(

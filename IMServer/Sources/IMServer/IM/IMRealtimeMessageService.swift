@@ -7,6 +7,7 @@ struct IMRealtimeMessagePersistenceResult: Sendable {
     let acknowledgement: IMTCPAckPayload
     let message: IMTCPMessagePayload
     let recipientUserIDs: [UUID]
+    let didCreateMessage: Bool
 }
 
 enum IMRealtimeMessageError: Error, LocalizedError, Equatable, Sendable {
@@ -73,6 +74,9 @@ struct IMRealtimeMessageService {
         }
 
         let normalizedBody = ["text": text]
+        let trimmedClientMessageID = payload.clientMessageID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedClientMessageID = trimmedClientMessageID?.isEmpty == false ? trimmedClientMessageID : nil
         let serverTimestamp = Date()
 
         return try await db.transaction { database in
@@ -82,6 +86,20 @@ struct IMRealtimeMessageService {
                 on: database
             )
             let recipientUserIDs = membershipContext.memberUserIDs
+            if let existingMessage = try await existingMessage(
+                conversationID: conversationID,
+                senderUserID: senderUserID,
+                clientMessageID: normalizedClientMessageID,
+                on: database
+            ) {
+                return try makePersistenceResult(
+                    conversationID: conversationID,
+                    message: existingMessage,
+                    recipientUserIDs: recipientUserIDs,
+                    didCreateMessage: false
+                )
+            }
+
             try await enforceStrangerOneToOneMessageLimitIfNeeded(
                 conversationID: conversationID,
                 conversationKind: membershipContext.conversationKind,
@@ -98,7 +116,7 @@ struct IMRealtimeMessageService {
                 conversationID: conversationID,
                 senderUserID: senderUserID,
                 serverSequence: serverSequence,
-                clientMessageID: payload.clientMessageID,
+                clientMessageID: normalizedClientMessageID,
                 kind: payload.kind,
                 body: normalizedBody
             )
@@ -110,28 +128,63 @@ struct IMRealtimeMessageService {
                 on: database
             )
 
-            let messageID = try message.requireID().uuidString
-
-            return IMRealtimeMessagePersistenceResult(
+            return try makePersistenceResult(
                 conversationID: conversationID,
-                acknowledgement: IMTCPAckPayload(
-                    messageID: messageID,
-                    conversationID: conversationID.uuidString,
-                    status: "accepted"
-                ),
-                message: IMTCPMessagePayload(
-                    clientMessageID: payload.clientMessageID,
-                    messageID: messageID,
-                    conversationID: conversationID.uuidString,
-                    senderUserID: senderUserID,
-                    serverSequence: UInt64(serverSequence),
-                    serverTimestamp: message.createdAt ?? serverTimestamp,
-                    kind: payload.kind,
-                    body: normalizedBody
-                ),
-                recipientUserIDs: recipientUserIDs
+                message: message,
+                recipientUserIDs: recipientUserIDs,
+                didCreateMessage: true,
+                fallbackTimestamp: serverTimestamp
             )
         }
+    }
+
+    private func existingMessage(
+        conversationID: UUID,
+        senderUserID: UUID,
+        clientMessageID: String?,
+        on database: any Database
+    ) async throws -> ConversationMessage? {
+        guard let clientMessageID else {
+            return nil
+        }
+
+        return try await ConversationMessage.query(on: database)
+            .filter(\.$conversation.$id == conversationID)
+            .filter(\.$sender.$id == senderUserID)
+            .filter(\.$clientMessageID == clientMessageID)
+            .first()
+    }
+
+    private func makePersistenceResult(
+        conversationID: UUID,
+        message: ConversationMessage,
+        recipientUserIDs: [UUID],
+        didCreateMessage: Bool,
+        fallbackTimestamp: Date = Date()
+    ) throws -> IMRealtimeMessagePersistenceResult {
+        let messageID = try message.requireID().uuidString
+        let body = try message.decodedBody()
+
+        return IMRealtimeMessagePersistenceResult(
+            conversationID: conversationID,
+            acknowledgement: IMTCPAckPayload(
+                messageID: messageID,
+                conversationID: conversationID.uuidString,
+                status: "accepted"
+            ),
+            message: IMTCPMessagePayload(
+                clientMessageID: message.clientMessageID,
+                messageID: messageID,
+                conversationID: conversationID.uuidString,
+                senderUserID: message.$sender.id,
+                serverSequence: UInt64(message.serverSequence),
+                serverTimestamp: message.createdAt ?? fallbackTimestamp,
+                kind: message.kind,
+                body: body
+            ),
+            recipientUserIDs: recipientUserIDs,
+            didCreateMessage: didCreateMessage
+        )
     }
 
     private func requireConversationMembershipContext(

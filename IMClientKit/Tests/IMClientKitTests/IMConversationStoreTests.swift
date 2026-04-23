@@ -52,6 +52,27 @@ struct IMConversationStoreTests {
         )
     }
 
+    private static func cachedQueuedMessage(
+        id: String,
+        conversationID: String,
+        text: String,
+        createdAt: TimeInterval
+    ) -> IMCachedMessageState {
+        IMCachedMessageState(
+            id: id,
+            conversationID: conversationID,
+            clientMessageID: id,
+            serverMessageID: nil,
+            senderUserID: Self.currentUserID,
+            serverSequence: nil,
+            kind: "text",
+            text: text,
+            direction: .outgoing,
+            createdAt: Date(timeIntervalSince1970: createdAt),
+            deliveryState: .queued(message: "等待 IM 长连接恢复后发送。")
+        )
+    }
+
     @Test func replaceConversationSummariesImportsServerPreview() {
         let store = IMConversationStore()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
@@ -915,6 +936,471 @@ struct IMConversationStoreTests {
         #expect(store.selectedConversation?.messages.filter { $0.text == "pending local" }.count == 1)
     }
 
+    @Test func failedNetworkMessageCanBeRetriedWithSameClientMessageID() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        let originalRequest = try #require(
+            store.prepareOutgoingText(
+                "retry me",
+                conversationID: conversationID,
+                senderUserID: Self.currentUserID
+            )
+        )
+        let originalClientMessageID = try #require(originalRequest.payload.clientMessageID)
+
+        store.markOutgoingFailure(
+            requestID: originalRequest.requestID,
+            message: "IM 长连接未建立，消息没有发送出去。"
+        )
+
+        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        #expect(store.isRetryableFailure(failedMessage))
+
+        let retryRequest = try #require(
+            store.retryOutgoingMessage(
+                localMessageID: failedMessage.id,
+                conversationID: conversationID
+            )
+        )
+
+        #expect(retryRequest.localMessageID == failedMessage.id)
+        #expect(retryRequest.payload.clientMessageID == originalClientMessageID)
+        #expect(retryRequest.payload.body["text"] == "retry me")
+        #expect(store.selectedConversation?.messages.count == 1)
+        #expect(store.selectedConversation?.messages.first?.deliveryState == .sending)
+    }
+
+    @Test func restoredUnknownMessageCanBeRetriedWithSameClientMessageID() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        let originalRequest = try #require(
+            store.prepareOutgoingText(
+                "retry after restart",
+                conversationID: conversationID,
+                senderUserID: Self.currentUserID
+            )
+        )
+        let originalClientMessageID = try #require(originalRequest.payload.clientMessageID)
+
+        let snapshot = store.makeCacheSnapshot(lastSummaryRefreshAt: nil)
+        let restoredStore = IMConversationStore()
+        restoredStore.restoreCacheSnapshot(snapshot)
+
+        let restoredMessage = try #require(restoredStore.selectedConversation?.messages.first)
+        #expect(restoredMessage.deliveryState == .unknown(message: "发送状态未确认，请重试。"))
+        #expect(restoredStore.isRetryableFailure(restoredMessage))
+
+        let retryRequest = try #require(
+            restoredStore.retryOutgoingMessage(
+                localMessageID: restoredMessage.id,
+                conversationID: conversationID
+            )
+        )
+
+        #expect(retryRequest.localMessageID == restoredMessage.id)
+        #expect(retryRequest.payload.clientMessageID == originalClientMessageID)
+        #expect(restoredStore.selectedConversation?.messages.first?.deliveryState == .sending)
+    }
+
+    @Test func queuedOutgoingTextFlushesWithSameClientMessageID() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+
+        let didQueue = store.queueOutgoingText(
+            "queued text",
+            conversationID: conversationID,
+            senderUserID: Self.currentUserID
+        )
+
+        #expect(didQueue)
+        let queuedMessage = try #require(store.selectedConversation?.messages.first)
+        let clientMessageID = try #require(queuedMessage.clientMessageID)
+        #expect(queuedMessage.deliveryState == .queued(message: "等待 IM 长连接恢复后发送。"))
+        #expect(store.isRetryableFailure(queuedMessage))
+
+        let requests = store.queuedOutgoingMessageRequests(limit: 1)
+
+        #expect(requests.count == 1)
+        #expect(requests[0].localMessageID == queuedMessage.id)
+        #expect(requests[0].payload.clientMessageID == clientMessageID)
+        #expect(requests[0].payload.body["text"] == "queued text")
+        #expect(store.selectedConversation?.messages.first?.deliveryState == .sending)
+
+        store.applyOutgoingAcknowledgement(
+            requestID: requests[0].requestID,
+            payload: IMTCPAckPayload(
+                messageID: "server-queued-1",
+                conversationID: conversationID,
+                status: "accepted"
+            )
+        )
+
+        #expect(store.selectedConversation?.messages.first?.deliveryState == .sent)
+    }
+
+    @Test func queuedOutgoingMessagesFlushInCreatedOrderWithLimit() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        store.restoreCacheSnapshot(
+            IMConversationCacheSnapshot(
+                metadata: IMCacheMetadataState(selectedConversationID: conversationID, lastSummaryRefreshAt: nil),
+                conversations: [
+                    IMCachedConversationState(
+                        id: conversationID,
+                        title: "Queued",
+                        kind: .direct,
+                        memberCount: 2,
+                        memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                        messages: [
+                            Self.cachedQueuedMessage(id: "queued-2", conversationID: conversationID, text: "second", createdAt: 2),
+                            Self.cachedQueuedMessage(id: "queued-1", conversationID: conversationID, text: "first", createdAt: 1),
+                            Self.cachedQueuedMessage(id: "queued-3", conversationID: conversationID, text: "third", createdAt: 3)
+                        ],
+                        hasLoadedMessages: false,
+                        lastMessagePreviewText: "third",
+                        hasMoreHistory: false,
+                        latestSyncedServerSequence: nil,
+                        oldestLoadedServerSequence: nil,
+                        serverLastReadSequence: 0,
+                        serverUnreadCount: 0,
+                        updatedAt: Date(timeIntervalSince1970: 3)
+                    )
+                ],
+                cursors: []
+            )
+        )
+
+        let requests = store.queuedOutgoingMessageRequests(limit: 2)
+
+        #expect(requests.map { $0.payload.body["text"] } == ["first", "second"])
+        #expect(store.selectedConversation?.messages.map(\.deliveryState) == [
+            .sending,
+            .sending,
+            .queued(message: "等待 IM 长连接恢复后发送。")
+        ])
+    }
+
+    @Test func markAllPendingMessagesUnknownLeavesQueuedMessagesFlushable() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        let inFlightRequest = try #require(store.prepareOutgoingText(
+            "in flight",
+            conversationID: conversationID,
+            senderUserID: Self.currentUserID
+        ))
+        let inFlightClientMessageID = try #require(inFlightRequest.payload.clientMessageID)
+        store.queueOutgoingText("still queued", conversationID: conversationID, senderUserID: Self.currentUserID)
+
+        store.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
+
+        let messagesAfterDisconnect = try #require(store.selectedConversation?.messages)
+        #expect(messagesAfterDisconnect.map(\.deliveryState) == [
+            .unknown(message: "发送状态未确认，请重试。"),
+            .queued(message: "等待 IM 长连接恢复后发送。")
+        ])
+        #expect(store.queueSummary(for: conversationID).queuedCount == 1)
+        #expect(store.queueSummary(for: conversationID).retryableIssueCount == 1)
+
+        let queuedRequests = store.queuedOutgoingMessageRequests(limit: 10)
+        #expect(queuedRequests.count == 1)
+        #expect(queuedRequests.first?.payload.body["text"] == "still queued")
+
+        let retryRequest = try #require(store.retryOutgoingMessage(
+            localMessageID: inFlightRequest.localMessageID,
+            conversationID: conversationID
+        ))
+        #expect(retryRequest.payload.clientMessageID == inFlightClientMessageID)
+        #expect(retryRequest.payload.body["text"] == "in flight")
+    }
+
+    @Test func unknownMessageMergesWithServerGapResultWithoutDuplication() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let request = try #require(store.prepareOutgoingText(
+            "unknown and merged",
+            conversationID: conversationIDString,
+            senderUserID: Self.currentUserID
+        ))
+        let clientMessageID = try #require(request.payload.clientMessageID)
+        store.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
+
+        store.appendMessages(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: clientMessageID,
+                    serverSequence: 7,
+                    kind: "text",
+                    body: ["text": "unknown and merged"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_007)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(store.selectedConversation?.messages.count == 1)
+        #expect(store.selectedConversation?.messages.first?.clientMessageID == clientMessageID)
+        #expect(store.selectedConversation?.messages.first?.serverSequence == 7)
+        #expect(store.selectedConversation?.messages.first?.deliveryState == .sent)
+    }
+
+    @Test func cancelQueuedOutgoingMessageRemovesMessageAndUpdatesSummaryAndPreview() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        store.queueOutgoingText("first queued", conversationID: conversationID, senderUserID: Self.currentUserID)
+        store.queueOutgoingText("second queued", conversationID: conversationID, senderUserID: Self.currentUserID)
+
+        let messages = try #require(store.selectedConversation?.messages)
+        #expect(messages.count == 2)
+        #expect(store.selectedConversation?.lastMessagePreview == "second queued")
+
+        let didCancelLatest = store.cancelQueuedOutgoingMessage(
+            localMessageID: messages[1].id,
+            conversationID: conversationID
+        )
+
+        #expect(didCancelLatest)
+        #expect(store.selectedConversation?.messages.map(\.text) == ["first queued"])
+        #expect(store.selectedConversation?.lastMessagePreview == "first queued")
+        #expect(store.queueSummary(for: conversationID).queuedCount == 1)
+        #expect(store.totalQueueSummary().queuedCount == 1)
+
+        let didCancelRemaining = store.cancelQueuedOutgoingMessage(
+            localMessageID: messages[0].id,
+            conversationID: conversationID
+        )
+
+        #expect(didCancelRemaining)
+        #expect(store.selectedConversation?.messages.isEmpty == true)
+        #expect(store.selectedConversation?.lastMessagePreview == "")
+        #expect(!store.queueSummary(for: conversationID).hasPendingWork)
+        #expect(store.queuedOutgoingMessageRequests(limit: 10).isEmpty)
+
+        let snapshot = store.makeCacheSnapshot(lastSummaryRefreshAt: nil)
+        let restoredStore = IMConversationStore()
+        restoredStore.restoreCacheSnapshot(snapshot)
+        #expect(restoredStore.selectedConversation?.messages.isEmpty == true)
+    }
+
+    @Test func cancelQueuedOutgoingMessageRejectsNonQueuedMessages() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        let sentRequest = try #require(store.prepareOutgoingText(
+            "sent",
+            conversationID: conversationID,
+            senderUserID: Self.currentUserID
+        ))
+        store.applyOutgoingAcknowledgement(
+            requestID: sentRequest.requestID,
+            payload: IMTCPAckPayload(
+                messageID: "server-sent",
+                conversationID: conversationID,
+                status: "accepted"
+            )
+        )
+        let sendingRequest = try #require(store.prepareOutgoingText(
+            "sending",
+            conversationID: conversationID,
+            senderUserID: Self.currentUserID
+        ))
+        store.queueOutgoingText("queued", conversationID: conversationID, senderUserID: Self.currentUserID)
+        let failedRequest = try #require(store.prepareOutgoingText(
+            "failed",
+            conversationID: conversationID,
+            senderUserID: Self.currentUserID
+        ))
+        store.markOutgoingFailure(requestID: failedRequest.requestID, message: "TCP 连接已关闭。")
+
+        let messages = try #require(store.selectedConversation?.messages)
+        let sentMessage = try #require(messages.first(where: { $0.text == "sent" }))
+        let sendingMessage = try #require(messages.first(where: { $0.id == sendingRequest.localMessageID }))
+        let failedMessage = try #require(messages.first(where: { $0.text == "failed" }))
+
+        #expect(!store.cancelQueuedOutgoingMessage(localMessageID: sentMessage.id, conversationID: conversationID))
+        #expect(!store.cancelQueuedOutgoingMessage(localMessageID: sendingMessage.id, conversationID: conversationID))
+        #expect(!store.cancelQueuedOutgoingMessage(localMessageID: failedMessage.id, conversationID: conversationID))
+        #expect(store.selectedConversation?.messages.count == 4)
+    }
+
+    @Test func queuedBusinessRejectedMessageBecomesNonRetryableFailure() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        store.queueOutgoingText(
+            "second stranger message",
+            conversationID: conversationID,
+            senderUserID: Self.currentUserID
+        )
+        let request = try #require(store.queuedOutgoingMessageRequests(limit: 1).first)
+
+        store.applyOutgoingAcknowledgement(
+            requestID: request.requestID,
+            payload: IMTCPAckPayload(
+                messageID: "rejected",
+                conversationID: conversationID,
+                status: "stranger_direct_message_limit_reached"
+            )
+        )
+
+        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        #expect(failedMessage.deliveryState == .failed(
+            message: "你们还不是好友，对方回复前只能发送一条消息。"
+        ))
+        #expect(!store.isRetryableFailure(failedMessage))
+    }
+
+    @Test func queueSummaryCountsPendingWorkAndSkipsBusinessFailures() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        let otherConversationID = "CCCCCCCC-1111-2222-3333-DDDDDDDDDDDD"
+
+        #expect(!store.queueSummary(for: conversationID).hasPendingWork)
+
+        store.queueOutgoingText("sending", conversationID: conversationID, senderUserID: Self.currentUserID)
+        store.queueOutgoingText("business failed", conversationID: conversationID, senderUserID: Self.currentUserID)
+        store.queueOutgoingText("retryable failed", conversationID: conversationID, senderUserID: Self.currentUserID)
+        store.queueOutgoingText("still queued", conversationID: conversationID, senderUserID: Self.currentUserID)
+        let requests = store.queuedOutgoingMessageRequests(limit: 3)
+        #expect(requests.count == 3)
+
+        store.applyOutgoingAcknowledgement(
+            requestID: requests[1].requestID,
+            payload: IMTCPAckPayload(
+                messageID: "business-rejected",
+                conversationID: conversationID,
+                status: "stranger_direct_message_limit_reached"
+            )
+        )
+        store.markOutgoingFailure(requestID: requests[2].requestID, message: "TCP 连接已关闭。")
+
+        let summary = store.queueSummary(for: conversationID)
+        #expect(summary.queuedCount == 1)
+        #expect(summary.sendingCount == 1)
+        #expect(summary.retryableIssueCount == 1)
+        #expect(summary.hasPendingWork)
+
+        store.queueOutgoingText("other queued", conversationID: otherConversationID, senderUserID: Self.currentUserID)
+        let totalSummary = store.totalQueueSummary()
+        #expect(totalSummary.queuedCount == 2)
+        #expect(totalSummary.sendingCount == 1)
+        #expect(totalSummary.retryableIssueCount == 1)
+        #expect(totalSummary.hasPendingWork)
+    }
+
+    @Test func queuedMessageMergesWithServerGapResultWithoutDuplication() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        store.queueOutgoingText(
+            "queued and merged",
+            conversationID: conversationIDString,
+            senderUserID: Self.currentUserID
+        )
+        let queuedMessage = try #require(store.selectedConversation?.messages.first)
+        let clientMessageID = try #require(queuedMessage.clientMessageID)
+
+        store.appendMessages(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: clientMessageID,
+                    serverSequence: 1,
+                    kind: "text",
+                    body: ["text": "queued and merged"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_001)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(store.selectedConversation?.messages.count == 1)
+        #expect(store.selectedConversation?.messages.first?.clientMessageID == clientMessageID)
+        #expect(store.selectedConversation?.messages.first?.serverSequence == 1)
+        #expect(store.selectedConversation?.messages.first?.deliveryState == .sent)
+    }
+
+    @Test func businessRejectedMessageIsNotRetryable() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        let request = try #require(
+            store.prepareOutgoingText(
+                "second stranger message",
+                conversationID: conversationID,
+                senderUserID: Self.currentUserID
+            )
+        )
+
+        store.applyOutgoingAcknowledgement(
+            requestID: request.requestID,
+            payload: IMTCPAckPayload(
+                messageID: "rejected",
+                conversationID: conversationID,
+                status: "stranger_direct_message_limit_reached"
+            )
+        )
+
+        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        #expect(!store.isRetryableFailure(failedMessage))
+        #expect(
+            store.retryOutgoingMessage(
+                localMessageID: failedMessage.id,
+                conversationID: conversationID
+            ) == nil
+        )
+        #expect(store.selectedConversation?.messages.first?.deliveryState == .failed(
+            message: "你们还不是好友，对方回复前只能发送一条消息。"
+        ))
+    }
+
+    @Test func retriedMessageMergesWithServerGapResultWithoutDuplication() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let originalRequest = try #require(
+            store.prepareOutgoingText(
+                "retry and merge",
+                conversationID: conversationIDString,
+                senderUserID: Self.currentUserID
+            )
+        )
+        let clientMessageID = try #require(originalRequest.payload.clientMessageID)
+
+        store.markOutgoingFailure(requestID: originalRequest.requestID, message: "IM 连接已断开。")
+        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        _ = store.retryOutgoingMessage(
+            localMessageID: failedMessage.id,
+            conversationID: conversationIDString
+        )
+
+        store.appendMessages(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: clientMessageID,
+                    serverSequence: 1,
+                    kind: "text",
+                    body: ["text": "retry and merge"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_001)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(store.selectedConversation?.messages.count == 1)
+        #expect(store.selectedConversation?.messages.first?.clientMessageID == clientMessageID)
+        #expect(store.selectedConversation?.messages.first?.serverSequence == 1)
+        #expect(store.selectedConversation?.messages.first?.deliveryState == .sent)
+    }
+
     @Test func latestLoadedServerSequenceHandlesEmptyPendingAndLoadedMessages() {
         let store = IMConversationStore()
         let emptyConversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
@@ -1190,16 +1676,22 @@ struct IMConversationStoreTests {
             conversationID: conversationID,
             senderUserID: Self.currentUserID
         )
+        store.queueOutgoingText(
+            "queued draft",
+            conversationID: conversationID,
+            senderUserID: Self.currentUserID
+        )
 
         let snapshot = store.makeCacheSnapshot(lastSummaryRefreshAt: nil)
         let restoredStore = IMConversationStore()
         restoredStore.restoreCacheSnapshot(snapshot)
         restoredStore.markAllPendingMessagesFailed(message: "should not apply")
 
-        #expect(restoredStore.selectedConversation?.messages.map(\.text) == ["failed draft", "pending draft"])
+        #expect(restoredStore.selectedConversation?.messages.map(\.text) == ["failed draft", "pending draft", "queued draft"])
         #expect(restoredStore.selectedConversation?.messages.map(\.deliveryState) == [
             .failed(message: "send failed"),
-            .sending
+            .unknown(message: "发送状态未确认，请重试。"),
+            .queued(message: "等待 IM 长连接恢复后发送。")
         ])
     }
 }

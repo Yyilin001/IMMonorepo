@@ -140,7 +140,7 @@ struct IMConversationView: View {
     private var connectionMessage: String {
         switch authManager.imConnectionStatus {
         case .disconnected:
-            return "当前只有 HTTP 登录态，实时消息不会到达，发送也会直接失败。"
+            return "当前只有 HTTP 登录态，实时消息不会到达，新发送消息会先进入待发送队列。"
         case .connecting:
             return "正在建立 TCP 握手，连接完成后会进入实时收发状态。"
         case .connected:
@@ -194,6 +194,13 @@ struct IMConversationDetailView: View {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     conversationSummaryCard
 
+                    if queueSummary.hasPendingWork {
+                        IMConversationQueueBanner(
+                            summary: queueSummary,
+                            isFlushing: authManager.isFlushingQueuedIMTextMessages
+                        )
+                    }
+
                     if let message = conversationStore.statusMessage, !message.isEmpty {
                         IMInlineStatusBanner(message: message)
                     }
@@ -220,7 +227,25 @@ struct IMConversationDetailView: View {
                         }
 
                         ForEach(messages) { message in
-                            IMMessageBubble(message: message)
+                            IMMessageBubble(
+                                message: message,
+                                canRetry: conversationStore.isRetryableFailure(message),
+                                canCancel: message.canCancelQueuedSend,
+                                onCancel: {
+                                    _ = authManager.cancelQueuedIMTextMessage(
+                                        localMessageID: message.id,
+                                        in: conversationID
+                                    )
+                                },
+                                onRetry: {
+                                    Task {
+                                        await authManager.retryIMTextMessage(
+                                            localMessageID: message.id,
+                                            in: conversationID
+                                        )
+                                    }
+                                }
+                            )
                                 .id(message.id)
                         }
                     }
@@ -304,6 +329,10 @@ struct IMConversationDetailView: View {
 
     private var shouldShowLoadingState: Bool {
         messages.isEmpty && conversationStore.isLoadingMessages
+    }
+
+    private var queueSummary: IMConversationQueueSummary {
+        conversationStore.queueSummary(for: conversationID)
     }
 
     private var conversationSummaryCard: some View {
@@ -845,8 +874,98 @@ private struct IMInlineStatusBanner: View {
     }
 }
 
+private struct IMConversationQueueBanner: View {
+    let summary: IMConversationQueueSummary
+    let isFlushing: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: iconName)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(tint)
+                .frame(width: 34, height: 34)
+                .background(tint.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+
+                Text(detailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(tint.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var title: String {
+        if isFlushing && (summary.queuedCount > 0 || summary.sendingCount > 0) {
+            return "正在发送待发送消息..."
+        }
+
+        if summary.queuedCount > 0 {
+            return "有 \(summary.queuedCount) 条待发送"
+        }
+
+        if summary.sendingCount > 0 {
+            return "\(summary.sendingCount) 条正在发送"
+        }
+
+        return "\(summary.retryableIssueCount) 条未确认/发送失败"
+    }
+
+    private var detailText: String {
+        var parts: [String] = []
+
+        if summary.queuedCount > 0 {
+            parts.append("连接恢复后自动发送")
+        }
+
+        if summary.sendingCount > 0 {
+            parts.append("\(summary.sendingCount) 条正在发送")
+        }
+
+        if summary.retryableIssueCount > 0 {
+            parts.append("\(summary.retryableIssueCount) 条未确认/发送失败，可点消息重试")
+        }
+
+        return parts.joined(separator: "，")
+    }
+
+    private var iconName: String {
+        if isFlushing && (summary.queuedCount > 0 || summary.sendingCount > 0) {
+            return "paperplane.circle.fill"
+        }
+
+        if summary.retryableIssueCount > 0 && summary.queuedCount == 0 && summary.sendingCount == 0 {
+            return "exclamationmark.triangle.fill"
+        }
+
+        return "tray.and.arrow.up.fill"
+    }
+
+    private var tint: Color {
+        if summary.retryableIssueCount > 0 && summary.queuedCount == 0 && summary.sendingCount == 0 {
+            return .orange
+        }
+
+        return .blue
+    }
+}
+
 private struct IMMessageBubble: View {
     let message: IMConversationMessage
+    let canRetry: Bool
+    let canCancel: Bool
+    let onCancel: () -> Void
+    let onRetry: () -> Void
 
     var body: some View {
         HStack {
@@ -864,6 +983,26 @@ private struct IMMessageBubble: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+                if canCancel {
+                    Button {
+                        onCancel()
+                    } label: {
+                        Label("取消发送", systemImage: "xmark.circle")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else if canRetry {
+                    Button {
+                        onRetry()
+                    } label: {
+                        Label("重试", systemImage: "arrow.clockwise")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
             }
             .padding(12)
             .background(bubbleColor)
@@ -886,14 +1025,32 @@ private struct IMMessageBubble: View {
 
     private var deliveryText: String {
         switch message.deliveryState {
+        case .queued(let message):
+            return "待发送: \(message)"
         case .sending:
             return "发送中"
         case .sent:
             return "已送达"
         case .received:
             return "已接收"
+        case .unknown(let message):
+            return "未确认: \(message)"
         case .failed(let message):
             return "失败: \(message)"
         }
+    }
+}
+
+private extension IMConversationMessage {
+    var canCancelQueuedSend: Bool {
+        guard direction == .outgoing, kind == "text" else {
+            return false
+        }
+
+        if case .queued = deliveryState {
+            return true
+        }
+
+        return false
     }
 }

@@ -49,6 +49,10 @@ cd IMServer
 swift test --no-parallel
 ```
 
+Manual local text IM testing:
+
+- See `docs/LOCAL_TEXT_IM_TESTING.md` for the two-account checklist covering contacts, direct chats, two-member groups, stranger limits, retries, and restart recovery.
+
 ## Architecture Boundary
 
 `IMClientKit` is the reusable client SDK boundary. It should not import SwiftUI and should not depend on app-only constants. App-specific configuration is injected from `IMApp`.
@@ -66,4 +70,3 @@ swift test --no-parallel
   - SDK/network/store tests in `IMClientKit/Tests`.
   - App orchestration/UI-adjacent tests in `IMApp/IMAppTests`.
   - API/service/database tests in `IMServer/Tests`.
-

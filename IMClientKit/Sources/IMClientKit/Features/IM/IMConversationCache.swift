@@ -590,32 +590,42 @@ public actor IMConversationCacheModelActor {
 
     private static func deliveryStateRawValue(from state: IMMessageDeliveryState) -> String {
         switch state {
+        case .queued:
+            return "queued"
         case .sending:
             return "sending"
         case .sent:
             return "sent"
         case .received:
             return "received"
+        case .unknown:
+            return "unknown"
         case .failed:
             return "failed"
         }
     }
 
     private static func deliveryFailureMessage(from state: IMMessageDeliveryState) -> String? {
-        if case .failed(let message) = state {
+        switch state {
+        case .queued(let message), .failed(let message), .unknown(let message):
             return message
+        case .sending, .sent, .received:
+            return nil
         }
-        return nil
     }
 
     private static func deliveryState(rawValue: String, failureMessage: String?) -> IMMessageDeliveryState {
         switch rawValue {
+        case "queued":
+            return .queued(message: failureMessage ?? "等待 IM 长连接恢复后发送。")
         case "sending":
-            return .sending
+            return .unknown(message: failureMessage ?? "发送状态未确认，请重试。")
         case "sent":
             return .sent
         case "received":
             return .received
+        case "unknown":
+            return .unknown(message: failureMessage ?? "发送状态未确认，请重试。")
         case "failed":
             return .failed(message: failureMessage ?? "unknown")
         default:

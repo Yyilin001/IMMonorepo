@@ -12,9 +12,11 @@ public enum IMMessageDirection: String, Equatable, Sendable {
 }
 
 public enum IMMessageDeliveryState: Equatable, Sendable {
+    case queued(message: String)
     case sending
     case sent
     case received
+    case unknown(message: String)
     case failed(message: String)
 }
 
@@ -67,6 +69,22 @@ public struct IMOutgoingMessageRequest: Sendable {
     public let payload: IMTCPMessagePayload
 }
 
+public struct IMConversationQueueSummary: Equatable, Sendable {
+    public let queuedCount: Int
+    public let sendingCount: Int
+    public let retryableIssueCount: Int
+
+    public var hasPendingWork: Bool {
+        queuedCount > 0 || sendingCount > 0 || retryableIssueCount > 0
+    }
+
+    public init(queuedCount: Int, sendingCount: Int, retryableIssueCount: Int) {
+        self.queuedCount = queuedCount
+        self.sendingCount = sendingCount
+        self.retryableIssueCount = retryableIssueCount
+    }
+}
+
 public struct IMConversationEventApplyOutcome: Equatable, Sendable {
     public let shouldReloadMembersForConversationID: String?
 }
@@ -97,6 +115,28 @@ public final class IMConversationStore: ObservableObject {
 
     public var totalUnreadCount: Int {
         conversations.reduce(0) { $0 + $1.unreadCount }
+    }
+
+    public func queueSummary(for conversationID: String) -> IMConversationQueueSummary {
+        let trimmedID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty,
+              let conversation = conversations.first(where: { $0.id == trimmedID })
+        else {
+            return IMConversationQueueSummary(queuedCount: 0, sendingCount: 0, retryableIssueCount: 0)
+        }
+
+        return queueSummary(for: conversation.messages)
+    }
+
+    public func totalQueueSummary() -> IMConversationQueueSummary {
+        conversations.reduce(IMConversationQueueSummary(queuedCount: 0, sendingCount: 0, retryableIssueCount: 0)) {
+            let next = queueSummary(for: $1.messages)
+            return IMConversationQueueSummary(
+                queuedCount: $0.queuedCount + next.queuedCount,
+                sendingCount: $0.sendingCount + next.sendingCount,
+                retryableIssueCount: $0.retryableIssueCount + next.retryableIssueCount
+            )
+        }
     }
 
     public func reset() {
@@ -442,6 +482,38 @@ public final class IMConversationStore: ObservableObject {
         conversationID: String,
         senderUserID: UUID
     ) -> IMOutgoingMessageRequest? {
+        prepareOutgoingText(
+            text,
+            conversationID: conversationID,
+            senderUserID: senderUserID,
+            deliveryState: .sending,
+            shouldRegisterPendingRequest: true
+        )
+    }
+
+    @discardableResult
+    public func queueOutgoingText(
+        _ text: String,
+        conversationID: String,
+        senderUserID: UUID,
+        message: String = "等待 IM 长连接恢复后发送。"
+    ) -> Bool {
+        prepareOutgoingText(
+            text,
+            conversationID: conversationID,
+            senderUserID: senderUserID,
+            deliveryState: .queued(message: message),
+            shouldRegisterPendingRequest: false
+        ) != nil
+    }
+
+    private func prepareOutgoingText(
+        _ text: String,
+        conversationID: String,
+        senderUserID: UUID,
+        deliveryState: IMMessageDeliveryState,
+        shouldRegisterPendingRequest: Bool
+    ) -> IMOutgoingMessageRequest? {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty else {
             statusMessage = "当前没有可用会话。"
@@ -470,7 +542,7 @@ public final class IMConversationStore: ObservableObject {
             text: trimmedText,
             direction: .outgoing,
             createdAt: createdAt,
-            deliveryState: .sending
+            deliveryState: deliveryState
         )
 
         conversations[index].messages.append(message)
@@ -478,7 +550,9 @@ public final class IMConversationStore: ObservableObject {
         conversations[index].updatedAt = createdAt
         resetUnreadState(for: index)
         selectedConversationID = trimmedConversationID
-        pendingOutgoingRequestIDs[requestID] = localMessageID
+        if shouldRegisterPendingRequest {
+            pendingOutgoingRequestIDs[requestID] = localMessageID
+        }
         statusMessage = nil
         sortConversations()
 
@@ -495,6 +569,224 @@ public final class IMConversationStore: ObservableObject {
                 kind: "text",
                 body: ["text": trimmedText]
             )
+        )
+    }
+
+    public func retryOutgoingMessage(
+        localMessageID: String,
+        conversationID: String
+    ) -> IMOutgoingMessageRequest? {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMessageID = localMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedMessageID.isEmpty else {
+            statusMessage = "消息重试失败：会话或消息无效。"
+            return nil
+        }
+
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == trimmedConversationID }),
+              let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == trimmedMessageID })
+        else {
+            statusMessage = "消息重试失败：本地消息不存在。"
+            return nil
+        }
+
+        var message = conversations[conversationIndex].messages[messageIndex]
+        guard message.direction == .outgoing else {
+            statusMessage = "只能重试自己发送的消息。"
+            return nil
+        }
+
+        guard isRetryableFailure(message) else {
+            statusMessage = "该消息失败原因不可重试。"
+            return nil
+        }
+
+        let clientMessageID = message.clientMessageID ?? message.id
+        let requestID = UUID()
+        message.deliveryState = .sending
+        message.serverMessageID = nil
+        message.serverSequence = nil
+        conversations[conversationIndex].messages[messageIndex] = message
+        pendingOutgoingRequestIDs[requestID] = message.id
+        selectedConversationID = trimmedConversationID
+        statusMessage = nil
+        sortConversations()
+
+        return IMOutgoingMessageRequest(
+            requestID: requestID,
+            localMessageID: message.id,
+            payload: IMTCPMessagePayload(
+                clientMessageID: clientMessageID,
+                messageID: nil,
+                conversationID: trimmedConversationID,
+                senderUserID: nil,
+                serverSequence: nil,
+                serverTimestamp: nil,
+                kind: message.kind,
+                body: ["text": message.text]
+            )
+        )
+    }
+
+    @discardableResult
+    public func queueRetryableOutgoingMessage(
+        localMessageID: String,
+        conversationID: String,
+        message queueMessage: String = "等待 IM 长连接恢复后发送。"
+    ) -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMessageID = localMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedMessageID.isEmpty else {
+            statusMessage = "消息排队失败：会话或消息无效。"
+            return false
+        }
+
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == trimmedConversationID }),
+              let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == trimmedMessageID })
+        else {
+            statusMessage = "消息排队失败：本地消息不存在。"
+            return false
+        }
+
+        var message = conversations[conversationIndex].messages[messageIndex]
+        guard isRetryableFailure(message) else {
+            statusMessage = "该消息失败原因不可排队重试。"
+            return false
+        }
+
+        pendingOutgoingRequestIDs = pendingOutgoingRequestIDs.filter { $0.value != message.id }
+        message.deliveryState = .queued(message: queueMessage)
+        message.serverMessageID = nil
+        message.serverSequence = nil
+        conversations[conversationIndex].messages[messageIndex] = message
+        selectedConversationID = trimmedConversationID
+        statusMessage = nil
+        sortConversations()
+        return true
+    }
+
+    @discardableResult
+    public func cancelQueuedOutgoingMessage(
+        localMessageID: String,
+        conversationID: String
+    ) -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMessageID = localMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedMessageID.isEmpty else {
+            statusMessage = "取消发送失败：会话或消息无效。"
+            return false
+        }
+
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == trimmedConversationID }),
+              let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == trimmedMessageID })
+        else {
+            statusMessage = "取消发送失败：本地消息不存在。"
+            return false
+        }
+
+        let message = conversations[conversationIndex].messages[messageIndex]
+        guard message.direction == .outgoing, message.kind == "text", message.isQueued else {
+            statusMessage = "只能取消尚未发送的文本消息。"
+            return false
+        }
+
+        pendingOutgoingRequestIDs = pendingOutgoingRequestIDs.filter { $0.value != message.id }
+        conversations[conversationIndex].messages.remove(at: messageIndex)
+        refreshConversationPresentationAfterLocalMessageRemoval(at: conversationIndex)
+        selectedConversationID = trimmedConversationID
+        statusMessage = nil
+        sortConversations()
+        return true
+    }
+
+    public func queuedOutgoingMessageRequests(limit: Int) -> [IMOutgoingMessageRequest] {
+        let limitedCount = max(0, limit)
+        guard limitedCount > 0 else {
+            return []
+        }
+
+        var queuedMessages: [(conversationID: String, message: IMConversationMessage)] = []
+        for conversation in conversations {
+            for message in conversation.messages
+                where message.direction == .outgoing && message.kind == "text" && message.isQueued {
+                queuedMessages.append((conversation.id, message))
+            }
+        }
+
+        queuedMessages.sort { left, right in
+            if left.message.createdAt == right.message.createdAt {
+                return left.message.id < right.message.id
+            }
+            return left.message.createdAt < right.message.createdAt
+        }
+
+        var requests: [IMOutgoingMessageRequest] = []
+        for (conversationID, queuedMessage) in queuedMessages.prefix(limitedCount) {
+            guard let request = startQueuedOutgoingMessage(
+                localMessageID: queuedMessage.id,
+                conversationID: conversationID
+            ) else {
+                continue
+            }
+            requests.append(request)
+        }
+
+        return requests
+    }
+
+    public func markOutgoingQueued(requestID: UUID, message: String) {
+        guard let localMessageID = pendingOutgoingRequestIDs.removeValue(forKey: requestID) else {
+            return
+        }
+
+        mutateMessage(id: localMessageID) { item in
+            item.deliveryState = .queued(message: message)
+            item.serverMessageID = nil
+            item.serverSequence = nil
+        }
+    }
+
+    public func isRetryableFailure(_ message: IMConversationMessage) -> Bool {
+        guard message.direction == .outgoing else {
+            return false
+        }
+
+        switch message.deliveryState {
+        case .queued, .unknown:
+            return true
+        case .failed(let failureMessage):
+            return !Self.nonRetryableOutgoingFailureMessages.contains(failureMessage)
+        case .sending, .sent, .received:
+            return false
+        }
+    }
+
+    private func queueSummary(for messages: [IMConversationMessage]) -> IMConversationQueueSummary {
+        var queuedCount = 0
+        var sendingCount = 0
+        var retryableIssueCount = 0
+
+        for message in messages where message.direction == .outgoing {
+            switch message.deliveryState {
+            case .queued:
+                queuedCount += 1
+            case .sending:
+                sendingCount += 1
+            case .unknown:
+                retryableIssueCount += 1
+            case .failed:
+                if isRetryableFailure(message) {
+                    retryableIssueCount += 1
+                }
+            case .sent, .received:
+                break
+            }
+        }
+
+        return IMConversationQueueSummary(
+            queuedCount: queuedCount,
+            sendingCount: sendingCount,
+            retryableIssueCount: retryableIssueCount
         )
     }
 
@@ -542,6 +834,21 @@ public final class IMConversationStore: ObservableObject {
         }
     }
 
+    public func markAllPendingMessagesUnknown(message: String) {
+        let pendingMessageIDs = Array(pendingOutgoingRequestIDs.values)
+        pendingOutgoingRequestIDs.removeAll()
+
+        for localMessageID in pendingMessageIDs {
+            mutateMessage(id: localMessageID) { item in
+                item.deliveryState = .unknown(message: message)
+            }
+        }
+
+        if !pendingMessageIDs.isEmpty {
+            statusMessage = message
+        }
+    }
+
     public func receiveIncomingMessage(_ payload: IMTCPMessagePayload, currentUserID: UUID) {
         let index = ensureConversationIndex(for: payload.conversationID)
         let stableMessageID = payload.messageID ?? payload.clientMessageID ?? UUID().uuidString
@@ -553,6 +860,7 @@ public final class IMConversationStore: ObservableObject {
             conversations[index].messages[existingIndex].serverMessageID = payload.messageID
             conversations[index].messages[existingIndex].serverSequence = payload.serverSequence
             conversations[index].messages[existingIndex].createdAt = effectiveTimestamp
+            conversations[index].messages[existingIndex].deliveryState = .sent
             conversations[index].updatedAt = effectiveTimestamp
             conversations[index].lastMessagePreviewText = conversations[index].messages[existingIndex].text
             refreshLatestSyncedCursor(
@@ -807,7 +1115,7 @@ public final class IMConversationStore: ObservableObject {
                         text: cachedMessage.text,
                         direction: cachedMessage.direction,
                         createdAt: cachedMessage.createdAt,
-                        deliveryState: cachedMessage.deliveryState
+                        deliveryState: Self.restoredDeliveryState(cachedMessage.deliveryState)
                     )
                 },
                 lastMessagePreviewText: cachedConversation.lastMessagePreviewText,
@@ -965,6 +1273,19 @@ public final class IMConversationStore: ObservableObject {
         }
     }
 
+    private func refreshConversationPresentationAfterLocalMessageRemoval(at conversationIndex: Int) {
+        guard conversations.indices.contains(conversationIndex) else {
+            return
+        }
+
+        if let latestMessage = conversations[conversationIndex].messages.last {
+            conversations[conversationIndex].lastMessagePreviewText = latestMessage.text
+            conversations[conversationIndex].updatedAt = latestMessage.createdAt
+        } else {
+            conversations[conversationIndex].lastMessagePreviewText = ""
+        }
+    }
+
     private func sortConversations() {
         conversations.sort { left, right in
             if left.updatedAt == right.updatedAt {
@@ -1076,6 +1397,62 @@ public final class IMConversationStore: ObservableObject {
         }
     }
 
+    private static func restoredDeliveryState(_ state: IMMessageDeliveryState) -> IMMessageDeliveryState {
+        if case .sending = state {
+            return .unknown(message: "发送状态未确认，请重试。")
+        }
+
+        return state
+    }
+
+    private func startQueuedOutgoingMessage(
+        localMessageID: String,
+        conversationID: String
+    ) -> IMOutgoingMessageRequest? {
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == conversationID }),
+              let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == localMessageID })
+        else {
+            return nil
+        }
+
+        var message = conversations[conversationIndex].messages[messageIndex]
+        guard message.direction == .outgoing, message.isQueued else {
+            return nil
+        }
+
+        let clientMessageID = message.clientMessageID ?? message.id
+        let requestID = UUID()
+        message.deliveryState = .sending
+        message.serverMessageID = nil
+        message.serverSequence = nil
+        conversations[conversationIndex].messages[messageIndex] = message
+        pendingOutgoingRequestIDs[requestID] = message.id
+        sortConversations()
+
+        return IMOutgoingMessageRequest(
+            requestID: requestID,
+            localMessageID: message.id,
+            payload: IMTCPMessagePayload(
+                clientMessageID: clientMessageID,
+                messageID: nil,
+                conversationID: conversationID,
+                senderUserID: nil,
+                serverSequence: nil,
+                serverTimestamp: nil,
+                kind: message.kind,
+                body: ["text": message.text]
+            )
+        )
+    }
+
+    private static let nonRetryableOutgoingFailureMessages: Set<String> = [
+        "你们还不是好友，对方回复前只能发送一条消息。",
+        "会话 ID 无效。",
+        "会话不存在或你已不在该会话中。",
+        "当前只支持文本消息。",
+        "消息内容不能为空。"
+    ]
+
     private static func matches(_ left: IMConversationMessage, _ right: IMConversationMessage) -> Bool {
         if let leftServerMessageID = left.serverMessageID,
            let rightServerMessageID = right.serverMessageID,
@@ -1119,5 +1496,15 @@ public final class IMConversationStore: ObservableObject {
             }
             return left.createdAt < right.createdAt
         }
+    }
+}
+
+private extension IMConversationMessage {
+    var isQueued: Bool {
+        if case .queued = deliveryState {
+            return true
+        }
+
+        return false
     }
 }
