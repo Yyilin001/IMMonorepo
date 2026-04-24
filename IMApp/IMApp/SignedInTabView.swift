@@ -21,10 +21,7 @@ struct SignedInTabView: View {
 
                 imTab
 
-                ContactsView(onOpenConversation: openConversation)
-                    .tabItem {
-                        Label("通讯录", systemImage: "person.2")
-                    }
+                contactsTab
 
                 FileTransferView(fileTransferManager: authManager.fileTransferManager)
                     .tabItem {
@@ -69,6 +66,24 @@ struct SignedInTabView: View {
             .tabItem {
                 Label("消息", systemImage: "message")
             }
+        }
+    }
+
+    @ViewBuilder
+    private var contactsTab: some View {
+        let pendingCount = authManager.unseenIncomingContactRequestCount
+
+        if pendingCount > 0 {
+            ContactsView(onOpenConversation: openConversation)
+                .tabItem {
+                    Label("通讯录", systemImage: "person.2")
+                }
+                .badge(pendingCount)
+        } else {
+            ContactsView(onOpenConversation: openConversation)
+                .tabItem {
+                    Label("通讯录", systemImage: "person.2")
+                }
         }
     }
 

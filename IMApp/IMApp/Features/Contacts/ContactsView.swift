@@ -7,10 +7,10 @@ struct ContactsView: View {
     let onOpenConversation: (String) -> Void
 
     @State private var isPresentingAddContact = false
+    @State private var isPresentingNewContactRequests = false
     @State private var pendingConversationContactID: UUID?
     @State private var searchText = ""
     @State private var editingContact: ContactResponseBody?
-    @State private var acceptingContactRequest: ContactRequestResponseBody?
 
     var body: some View {
         List {
@@ -22,7 +22,7 @@ struct ContactsView: View {
                 }
             }
 
-            if let message = authManager.contactRequestsMessage, !message.isEmpty {
+            if let message = authManager.contactRequestsLoadMessage, !message.isEmpty {
                 Section {
                     ContactsInlineStatusBanner(message: message)
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -30,45 +30,19 @@ struct ContactsView: View {
                 }
             }
 
-            if !authManager.incomingContactRequests.isEmpty {
-                Section {
-                    ForEach(authManager.incomingContactRequests) { request in
-                        IncomingContactRequestRow(
-                            request: request,
-                            onAccept: {
-                                acceptingContactRequest = request
-                            },
-                            onDecline: {
-                                decline(request)
-                            }
-                        )
-                    }
-                } header: {
-                    HStack {
-                        Text("新的朋友")
-                        Spacer()
-                        Text("\(authManager.incomingContactRequests.count)")
-                    }
-                } footer: {
-                    Text("接受后双方才会出现在通讯录。")
+            Section {
+                Button {
+                    isPresentingNewContactRequests = true
+                } label: {
+                    NewContactRequestsEntryRow(
+                        pendingCount: authManager.totalPendingContactRequestCount,
+                        unseenCount: authManager.unseenIncomingContactRequestCount,
+                        isLoading: authManager.isLoadingContactRequests
+                    )
                 }
-            }
-
-            if !authManager.outgoingContactRequests.isEmpty {
-                Section {
-                    ForEach(authManager.outgoingContactRequests) { request in
-                        OutgoingContactRequestRow(
-                            request: request,
-                            onCancel: {
-                                cancel(request)
-                            }
-                        )
-                    }
-                } header: {
-                    Text("发出的申请")
-                } footer: {
-                    Text("等待对方验证期间不会加入联系人列表。")
-                }
+                .buttonStyle(.plain)
+            } footer: {
+                Text("新的朋友会集中展示收到和发出的好友申请，进入后只清除红点，不会移除待处理申请。")
             }
 
             Section {
@@ -122,7 +96,7 @@ struct ContactsView: View {
             if authManager.contacts.isEmpty {
                 await authManager.reloadContacts()
             }
-            if authManager.incomingContactRequests.isEmpty && authManager.outgoingContactRequests.isEmpty {
+            if !authManager.hasAnyContactRequests {
                 await authManager.reloadContactRequests()
             }
         }
@@ -155,11 +129,11 @@ struct ContactsView: View {
             }
             .presentationDetents([.medium])
         }
-        .sheet(item: $acceptingContactRequest) { request in
+        .sheet(isPresented: $isPresentingNewContactRequests) {
             NavigationStack {
-                AcceptContactRequestSheet(request: request)
+                NewContactRequestsView(onOpenConversation: onOpenConversation)
             }
-            .presentationDetents([.medium])
+            .presentationDetents([.large])
         }
         .sheet(item: $editingContact) { contact in
             NavigationStack {
@@ -197,17 +171,70 @@ struct ContactsView: View {
             _ = await authManager.deleteContact(contact.id)
         }
     }
+}
 
-    private func decline(_ request: ContactRequestResponseBody) {
-        Task {
-            _ = await authManager.declineContactRequest(id: request.id)
+private struct NewContactRequestsEntryRow: View {
+    let pendingCount: Int
+    let unseenCount: Int
+    let isLoading: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            requestAvatar(systemImage: "person.crop.circle.badge.plus", color: .orange)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("新的朋友")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.primary)
+
+                    if unseenCount > 0 {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 8, height: 8)
+                    }
+                }
+
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            if isLoading {
+                ProgressView()
+                    .controlSize(.small)
+            } else if pendingCount > 0 {
+                Text("\(pendingCount)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(unseenCount > 0 ? .red : .secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill((unseenCount > 0 ? Color.red : Color.secondary).opacity(0.12))
+                    )
+            }
+
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
         }
+        .padding(.vertical, 6)
     }
 
-    private func cancel(_ request: ContactRequestResponseBody) {
-        Task {
-            _ = await authManager.cancelContactRequest(id: request.id)
+    private var subtitle: String {
+        if unseenCount > 0 {
+            return "有 \(unseenCount) 条新的好友申请待查看"
         }
+
+        if pendingCount > 0 {
+            return "有 \(pendingCount) 条待处理申请"
+        }
+
+        return "暂时没有新的好友申请"
     }
 }
 
@@ -305,6 +332,8 @@ private struct ContactRow: View {
 
 private struct IncomingContactRequestRow: View {
     let request: ContactRequestResponseBody
+    let isAccepting: Bool
+    let isDeclining: Bool
     let onAccept: () -> Void
     let onDecline: () -> Void
 
@@ -327,25 +356,206 @@ private struct IncomingContactRequestRow: View {
             Spacer()
 
             HStack(spacing: 8) {
-                Button("拒绝") {
-                    onDecline()
+                if isDeclining {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 40)
+                } else {
+                    Button("拒绝") {
+                        onDecline()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(isAccepting)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
 
-                Button("接受") {
-                    onAccept()
+                if isAccepting {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 40)
+                } else {
+                    Button("接受") {
+                        onAccept()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(isDeclining)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
             }
         }
         .padding(.vertical, 6)
     }
 }
 
+private struct NewContactRequestsView: View {
+    @EnvironmentObject private var authManager: AuthManager
+    @Environment(\.dismiss) private var dismiss
+
+    let onOpenConversation: (String) -> Void
+
+    @State private var acceptingContactRequest: ContactRequestResponseBody?
+    @State private var startingConversationRequestID: UUID?
+
+    var body: some View {
+        List {
+            if let message = authManager.contactRequestActionMessage, !message.isEmpty {
+                Section {
+                    ContactsInlineStatusBanner(message: message)
+                        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                        .listRowBackground(Color.clear)
+                }
+            }
+
+            if let message = authManager.contactRequestsLoadMessage, !message.isEmpty {
+                Section {
+                    ContactsInlineStatusBanner(message: message)
+                        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                        .listRowBackground(Color.clear)
+                }
+            }
+
+            Section {
+                if authManager.incomingPendingContactRequests.isEmpty {
+                    NewContactRequestsEmptyState()
+                        .listRowInsets(EdgeInsets(top: 20, leading: 16, bottom: 20, trailing: 16))
+                        .listRowBackground(Color.clear)
+                } else {
+                    ForEach(authManager.incomingPendingContactRequests) { request in
+                        IncomingContactRequestRow(
+                            request: request,
+                            isAccepting: authManager.acceptingRequestIDs.contains(request.id),
+                            isDeclining: authManager.decliningRequestIDs.contains(request.id),
+                            onAccept: {
+                                acceptingContactRequest = request
+                            },
+                            onDecline: {
+                                decline(request)
+                            }
+                        )
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("收到的申请")
+                    Spacer()
+                    if authManager.pendingIncomingContactRequestCount > 0 {
+                        Text("\(authManager.pendingIncomingContactRequestCount)")
+                    }
+                }
+            } footer: {
+                Text("接受后双方才会出现在通讯录。")
+            }
+
+            if !authManager.outgoingPendingContactRequests.isEmpty {
+                Section {
+                    ForEach(authManager.outgoingPendingContactRequests) { request in
+                        OutgoingContactRequestRow(
+                            request: request,
+                            isCancelling: authManager.cancellingRequestIDs.contains(request.id),
+                            onCancel: {
+                                cancel(request)
+                            }
+                        )
+                    }
+                } header: {
+                    Text("发出的申请")
+                } footer: {
+                    Text("等待对方验证期间不会加入联系人列表。")
+                }
+            }
+
+            if !authManager.recentResolvedContactRequests.isEmpty {
+                Section {
+                    ForEach(authManager.recentResolvedContactRequests) { request in
+                        ResolvedContactRequestRow(
+                            request: request,
+                            currentUserID: authManager.currentUser?.id,
+                            isStartingConversation: startingConversationRequestID == request.id,
+                            onStartConversation: request.status == .accepted ? {
+                                startConversation(with: request)
+                            } : nil
+                        )
+                    }
+                } header: {
+                    Text("最近记录")
+                } footer: {
+                    Text("这里只保留最近处理过的好友申请记录。")
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("新的朋友")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            authManager.markIncomingContactRequestsSeen()
+        }
+        .refreshable {
+            await authManager.reloadContactRequests()
+        }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("关闭") {
+                    dismiss()
+                }
+            }
+
+            ToolbarItem(placement: .topBarTrailing) {
+                if authManager.isLoadingContactRequests {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+        }
+        .sheet(item: $acceptingContactRequest) { request in
+            NavigationStack {
+                AcceptContactRequestSheet(request: request)
+            }
+            .presentationDetents([.medium])
+        }
+    }
+
+    private func decline(_ request: ContactRequestResponseBody) {
+        Task {
+            _ = await authManager.declineContactRequest(id: request.id)
+        }
+    }
+
+    private func cancel(_ request: ContactRequestResponseBody) {
+        Task {
+            _ = await authManager.cancelContactRequest(id: request.id)
+        }
+    }
+
+    private func startConversation(with request: ContactRequestResponseBody) {
+        guard let currentUserID = authManager.currentUser?.id else {
+            return
+        }
+
+        let peerEmail: String
+        if request.requester.id == currentUserID {
+            peerEmail = request.addressee.email
+        } else {
+            peerEmail = request.requester.email
+        }
+
+        startingConversationRequestID = request.id
+        Task {
+            let conversationID = await authManager.createDirectIMConversation(memberEmail: peerEmail)
+            startingConversationRequestID = nil
+
+            guard let conversationID else {
+                return
+            }
+
+            dismiss()
+            onOpenConversation(conversationID)
+        }
+    }
+}
+
 private struct OutgoingContactRequestRow: View {
     let request: ContactRequestResponseBody
+    let isCancelling: Bool
     let onCancel: () -> Void
 
     var body: some View {
@@ -365,13 +575,132 @@ private struct OutgoingContactRequestRow: View {
 
             Spacer()
 
-            Button("取消") {
-                onCancel()
+            if isCancelling {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 40)
+            } else {
+                Button("取消") {
+                    onCancel()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .padding(.vertical, 6)
+    }
+}
+
+private struct ResolvedContactRequestRow: View {
+    let request: ContactRequestResponseBody
+    let currentUserID: UUID?
+    let isStartingConversation: Bool
+    let onStartConversation: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            requestAvatar(systemImage: statusIconName, color: statusColor)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(request.peerDisplayName(for: currentUserID))
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Text(statusDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            if let onStartConversation {
+                Button {
+                    onStartConversation()
+                } label: {
+                    if isStartingConversation {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 40)
+                    } else {
+                        Label("发消息", systemImage: "message.fill")
+                            .labelStyle(.titleAndIcon)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(isStartingConversation)
+            } else {
+                Text(statusTitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(statusColor)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(statusColor.opacity(0.12)))
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    private var statusTitle: String {
+        switch request.status {
+        case .accepted:
+            "已接受"
+        case .declined:
+            "已拒绝"
+        case .cancelled:
+            "已取消"
+        case .pending:
+            "处理中"
+        }
+    }
+
+    private var statusDescription: String {
+        let peerName = request.peerDisplayName(for: currentUserID)
+        let base: String
+        switch request.status {
+        case .accepted:
+            base = "你与 \(peerName) 已成为好友。"
+        case .declined:
+            base = "你已拒绝 \(peerName) 的好友申请。"
+        case .cancelled:
+            base = "你已取消发给 \(peerName) 的好友申请。"
+        case .pending:
+            base = "申请处理中。"
+        }
+
+        guard let timestamp = request.respondedAt ?? request.updatedAt else {
+            return base
+        }
+
+        return "\(base) \(timestamp.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    private var statusColor: Color {
+        switch request.status {
+        case .accepted:
+            .green
+        case .declined:
+            .red
+        case .cancelled:
+            .secondary
+        case .pending:
+            .orange
+        }
+    }
+
+    private var statusIconName: String {
+        switch request.status {
+        case .accepted:
+            "checkmark.circle.fill"
+        case .declined:
+            "xmark.circle.fill"
+        case .cancelled:
+            "minus.circle.fill"
+        case .pending:
+            "clock.fill"
+        }
     }
 }
 
@@ -411,6 +740,26 @@ private struct ContactsEmptyState: View {
                 Label("发送好友申请", systemImage: "person.badge.plus")
             }
             .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
+    }
+}
+
+private struct NewContactRequestsEmptyState: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "person.crop.circle.badge.checkmark")
+                .font(.system(size: 38, weight: .semibold))
+                .foregroundStyle(.orange)
+
+            Text("暂时没有新的好友申请")
+                .font(.headline)
+
+            Text("收到新的好友申请时，这里会第一时间显示。")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 20)
@@ -466,7 +815,7 @@ private struct SendContactRequestSheet: View {
                 Text("对方接受后才会成为好友，备注仅自己可见。")
             }
 
-            if let message = authManager.contactRequestsMessage, !message.isEmpty {
+            if let message = authManager.contactRequestActionMessage, !message.isEmpty {
                 Section {
                     Text(message)
                         .font(.footnote)
@@ -534,7 +883,7 @@ private struct AcceptContactRequestSheet: View {
                 Text("接受后会建立双向好友关系，双方都能在通讯录看到对方。")
             }
 
-            if let message = authManager.contactRequestsMessage, !message.isEmpty {
+            if let message = authManager.contactRequestActionMessage, !message.isEmpty {
                 Section {
                     Text(message)
                         .font(.footnote)

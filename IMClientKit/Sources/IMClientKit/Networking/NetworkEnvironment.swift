@@ -7,7 +7,7 @@ public struct NetworkEnvironment: Sendable {
     public let coding: HTTPCodingConfiguration
 
     public init(
-        baseURL: URL = AppConstants.apiBaseURL,
+        baseURL: URL,
         sessionConfiguration: URLSessionConfiguration = .default,
         logger: HTTPLogHandler = .noop,
         coding: HTTPCodingConfiguration = .default
@@ -22,7 +22,7 @@ public struct NetworkEnvironment: Sendable {
     }
 
     public init(
-        baseURL: URL = AppConstants.apiBaseURL,
+        baseURL: URL,
         session: URLSession,
         logger: HTTPLogHandler = .noop,
         coding: HTTPCodingConfiguration = .default

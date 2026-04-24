@@ -6,6 +6,17 @@ enum IMConversationKind: String, Codable, Content, Sendable {
     case group
 }
 
+enum IMDirectMessagingState: String, Codable, Content, Sendable {
+    case active
+    case frozenAfterUnfriend = "frozen_after_unfriend"
+}
+
+enum IMConversationMemberRole: String, Codable, Content, Sendable {
+    case owner
+    case admin
+    case member
+}
+
 final class Conversation: Model, Content, @unchecked Sendable {
     static let schema = "im_conversations"
 
@@ -15,8 +26,17 @@ final class Conversation: Model, Content, @unchecked Sendable {
     @OptionalField(key: "title")
     var title: String?
 
+    @OptionalField(key: "notice")
+    var notice: String?
+
+    @OptionalField(key: "avatar_preset")
+    var avatarPreset: String?
+
     @Field(key: "kind")
     var kind: String
+
+    @Field(key: "direct_messaging_state")
+    var directMessagingState: String
 
     @Field(key: "updated_at")
     var updatedAt: Date
@@ -38,13 +58,19 @@ final class Conversation: Model, Content, @unchecked Sendable {
     init(
         id: UUID? = nil,
         title: String? = nil,
+        notice: String? = nil,
+        avatarPreset: IMConversationAvatarPreset? = nil,
         kind: IMConversationKind = .group,
+        directMessagingState: IMDirectMessagingState = .active,
         updatedAt: Date = Date(),
         lastMessageSequence: Int = 0
     ) {
         self.id = id
         self.title = title
+        self.notice = notice
+        self.avatarPreset = avatarPreset?.rawValue
         self.kind = kind.rawValue
+        self.directMessagingState = directMessagingState.rawValue
         self.updatedAt = updatedAt
         self.lastMessageSequence = lastMessageSequence
     }
@@ -52,6 +78,16 @@ final class Conversation: Model, Content, @unchecked Sendable {
     var conversationKind: IMConversationKind {
         get { IMConversationKind(rawValue: kind) ?? .group }
         set { kind = newValue.rawValue }
+    }
+
+    var directMessagingStateEnum: IMDirectMessagingState {
+        get { IMDirectMessagingState(rawValue: directMessagingState) ?? .active }
+        set { directMessagingState = newValue.rawValue }
+    }
+
+    var avatarPresetEnum: IMConversationAvatarPreset? {
+        get { avatarPreset.flatMap(IMConversationAvatarPreset.init(rawValue:)) }
+        set { avatarPreset = newValue?.rawValue }
     }
 }
 
@@ -67,8 +103,14 @@ final class ConversationMember: Model, Content, @unchecked Sendable {
     @Parent(key: "user_id")
     var user: User
 
+    @Field(key: "role")
+    var role: String
+
     @Field(key: "last_read_sequence")
     var lastReadSequence: Int
+
+    @Field(key: "visible_from_sequence")
+    var visibleFromSequence: Int
 
     @Timestamp(key: "joined_at", on: .create)
     var joinedAt: Date?
@@ -79,12 +121,21 @@ final class ConversationMember: Model, Content, @unchecked Sendable {
         id: UUID? = nil,
         conversationID: UUID,
         userID: UUID,
-        lastReadSequence: Int = 0
+        role: IMConversationMemberRole = .member,
+        lastReadSequence: Int = 0,
+        visibleFromSequence: Int = 0
     ) {
         self.id = id
         self.$conversation.id = conversationID
         self.$user.id = userID
+        self.role = role.rawValue
         self.lastReadSequence = lastReadSequence
+        self.visibleFromSequence = visibleFromSequence
+    }
+
+    var memberRoleEnum: IMConversationMemberRole {
+        get { IMConversationMemberRole(rawValue: role) ?? .member }
+        set { role = newValue.rawValue }
     }
 }
 
@@ -123,28 +174,34 @@ final class ConversationMessage: Model, Content, @unchecked Sendable {
         senderUserID: UUID,
         serverSequence: Int,
         clientMessageID: String? = nil,
-        kind: String,
-        body: [String: String]
+        content: IMMessageContent
     ) throws {
         self.id = id
         self.$conversation.id = conversationID
         self.$sender.id = senderUserID
         self.serverSequence = serverSequence
         self.clientMessageID = clientMessageID
-        self.kind = kind
-        self.bodyJSON = try Self.encodeBody(body)
+        self.kind = content.type.rawValue
+        self.bodyJSON = try Self.encodeContent(content)
     }
 
-    func decodedBody() throws -> [String: String] {
+    func decodedContent() throws -> IMMessageContent {
         guard let data = bodyJSON.data(using: .utf8) else {
             throw Abort(.internalServerError, reason: "消息内容编码无效。")
         }
 
-        return try JSONDecoder().decode([String: String].self, from: data)
+        let decoder = JSONDecoder()
+        return try decoder.decode(IMMessageContent.self, from: data)
     }
 
-    static func encodeBody(_ body: [String: String]) throws -> String {
-        let data = try JSONEncoder().encode(body)
+    func replaceContent(_ content: IMMessageContent) throws {
+        kind = content.type.rawValue
+        bodyJSON = try Self.encodeContent(content)
+    }
+
+    static func encodeContent(_ content: IMMessageContent) throws -> String {
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(content)
         guard let json = String(data: data, encoding: .utf8) else {
             throw Abort(.internalServerError, reason: "消息内容编码失败。")
         }

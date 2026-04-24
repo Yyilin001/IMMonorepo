@@ -69,22 +69,56 @@ struct UserController: RouteCollection {
         let user = try req.auth.require(User.self)
         let ownerUserID = try user.requireID()
         let contactUserID = try contactUserID(from: req)
+        let affectedDirectConversationIDs = try await req.db.transaction { database in
+            guard let contact = try await UserContact.query(on: database)
+                .filter(\.$owner.$id == ownerUserID)
+                .filter(\.$contact.$id == contactUserID)
+                .first()
+            else {
+                throw Abort(.notFound, reason: "联系人不存在。")
+            }
 
-        guard let contact = try await UserContact.query(on: req.db)
-            .filter(\.$owner.$id == ownerUserID)
-            .filter(\.$contact.$id == contactUserID)
-            .first()
-        else {
-            throw Abort(.notFound, reason: "联系人不存在。")
+            try await contact.delete(on: database)
+            if let reverseContact = try await UserContact.query(on: database)
+                .filter(\.$owner.$id == contactUserID)
+                .filter(\.$contact.$id == ownerUserID)
+                .first()
+            {
+                try await reverseContact.delete(on: database)
+            }
+
+            return try await IMDirectConversationStateService().updateExistingDirectConversations(
+                between: ownerUserID,
+                and: contactUserID,
+                to: .frozenAfterUnfriend,
+                on: database
+            )
         }
 
-        try await contact.delete(on: req.db)
-        if let reverseContact = try await UserContact.query(on: req.db)
-            .filter(\.$owner.$id == contactUserID)
-            .filter(\.$contact.$id == ownerUserID)
-            .first()
-        {
-            try await reverseContact.delete(on: req.db)
+        let eventService = IMContactEventService(app: req.application)
+        await eventService.publishContactRemoved(
+            recipientUserID: ownerUserID,
+            contactUserID: contactUserID,
+            actorUserID: ownerUserID
+        )
+        await eventService.publishContactRemoved(
+            recipientUserID: contactUserID,
+            contactUserID: ownerUserID,
+            actorUserID: ownerUserID
+        )
+        let projectionService = IMConversationSummaryProjectionService(db: req.db)
+        let conversationEventService = IMConversationEventService(app: req.application, db: req.db)
+        for conversationID in affectedDirectConversationIDs {
+            try await projectionService.refreshConversationSummaries(
+                conversationID: conversationID,
+                recipientUserIDs: [ownerUserID, contactUserID]
+            )
+            await conversationEventService.publish(
+                eventType: .summaryUpdated,
+                conversationID: conversationID,
+                recipientUserIDs: [ownerUserID, contactUserID],
+                actorUserID: ownerUserID
+            )
         }
         return .ok
     }
@@ -105,42 +139,86 @@ struct UserController: RouteCollection {
     func sendContactRequest(req: Request) async throws -> FriendRequestResponse {
         let user = try req.auth.require(User.self)
         let body = try req.content.decode(ContactRequestCreateRequest.self)
-        return try await friendRequestService.sendRequest(
+        let response = try await friendRequestService.sendRequest(
             from: user,
             email: body.email,
             message: body.message,
             remark: body.remark,
             on: req.db
         )
+        await IMContactEventService(app: req.application).publishRequestEvent(
+            eventType: .friendRequestCreated,
+            request: response,
+            recipientUserIDs: [response.requester.id, response.addressee.id],
+            actorUserID: response.requester.id
+        )
+        return response
     }
 
     func acceptContactRequest(req: Request) async throws -> ContactResponse {
         let user = try req.auth.require(User.self)
         let body = try req.content.decode(ContactRequestAcceptRequest.self)
-        return try await friendRequestService.acceptRequest(
+        let result = try await friendRequestService.acceptRequest(
             id: contactRequestID(from: req),
             addresseeUserID: try user.requireID(),
             remark: body.remark,
             on: req.db
         )
+        await IMContactEventService(app: req.application).publishAccepted(
+            request: result.request,
+            contactByRecipientUserID: [
+                result.request.requester.id: result.requesterContact,
+                result.request.addressee.id: result.addresseeContact
+            ],
+            actorUserID: result.request.addressee.id
+        )
+        let projectionService = IMConversationSummaryProjectionService(db: req.db)
+        let conversationEventService = IMConversationEventService(app: req.application, db: req.db)
+        for conversationID in result.affectedDirectConversationIDs {
+            try await projectionService.refreshConversationSummaries(
+                conversationID: conversationID,
+                recipientUserIDs: [result.request.requester.id, result.request.addressee.id]
+            )
+            await conversationEventService.publish(
+                eventType: .summaryUpdated,
+                conversationID: conversationID,
+                recipientUserIDs: [result.request.requester.id, result.request.addressee.id],
+                actorUserID: result.request.addressee.id
+            )
+        }
+        return result.addresseeContact
     }
 
     func declineContactRequest(req: Request) async throws -> FriendRequestResponse {
         let user = try req.auth.require(User.self)
-        return try await friendRequestService.declineRequest(
+        let response = try await friendRequestService.declineRequest(
             id: contactRequestID(from: req),
             addresseeUserID: try user.requireID(),
             on: req.db
         )
+        await IMContactEventService(app: req.application).publishRequestEvent(
+            eventType: .friendRequestDeclined,
+            request: response,
+            recipientUserIDs: [response.requester.id, response.addressee.id],
+            actorUserID: response.addressee.id
+        )
+        return response
     }
 
     func cancelContactRequest(req: Request) async throws -> FriendRequestResponse {
         let user = try req.auth.require(User.self)
-        return try await friendRequestService.cancelRequest(
+        let response = try await friendRequestService.cancelRequest(
             id: contactRequestID(from: req),
             requesterUserID: try user.requireID(),
             on: req.db
         )
+        await IMContactEventService(app: req.application).publishRequestEvent(
+            eventType: .friendRequestCancelled,
+            request: response,
+            recipientUserIDs: [response.requester.id, response.addressee.id],
+            actorUserID: response.requester.id
+        )
+        return response
     }
 
     private func contactUserID(from req: Request) throws -> UUID {
@@ -183,7 +261,7 @@ struct ContactUpdateRequest: Content {
     let remark: String?
 }
 
-struct ContactResponse: Content, Equatable {
+struct ContactResponse: Content, Equatable, Sendable {
     let id: UUID
     let email: String
     let remark: String?

@@ -54,7 +54,7 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
     }
 }
 
-struct UserResponse: Content, Equatable {
+struct UserResponse: Content, Equatable, Sendable {
     let id: UUID
     let email: String
 }

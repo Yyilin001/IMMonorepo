@@ -12,7 +12,7 @@ This repository contains the iOS client, reusable client SDK package, and Vapor 
 
 ## Local Development
 
-Default local endpoints:
+The app layer owns environment injection through `AppNetworkConfiguration`. The default local values currently used by `IMApp` are:
 
 - HTTP API: `http://127.0.0.1:8080`
 - IM TCP: `127.0.0.1:9000`
@@ -60,6 +60,22 @@ Manual local text IM testing:
 `IMApp` owns UI and application orchestration. Views and `AuthManager` consume public SDK APIs from `IMClientKit`.
 
 `IMServer` remains the protocol and persistence authority. Client package extraction must not change HTTP/TCP protocol semantics unless a backend change is planned in the same phase.
+
+## Protocol Notes
+
+Message payloads now use a typed `content` object instead of `kind` plus arbitrary string dictionaries. The current text shape is:
+
+```json
+{
+  "type": "text",
+  "text": "hello"
+}
+```
+
+Conversation summaries no longer rely on a single full-list endpoint:
+
+- `GET /api/im/conversations?limit=&cursor=` returns `items`, `nextCursor`, `hasMore`, and `snapshotToken`.
+- `GET /api/im/conversations/changes?afterToken=&limit=&cursor=` returns `upserts`, `removedConversationIDs`, `nextCursor`, `hasMore`, and `targetToken`.
 
 ## Monorepo Rules
 

@@ -38,6 +38,13 @@ public struct ContactResponseBody: Codable, Identifiable, Equatable, Sendable, A
     public let remark: String?
     public let createdAt: Date?
 
+    public init(id: UUID, email: String, remark: String?, createdAt: Date?) {
+        self.id = id
+        self.email = email
+        self.remark = remark
+        self.createdAt = createdAt
+    }
+
     public var displayName: String {
         let normalizedRemark = remark?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let normalizedRemark, !normalizedRemark.isEmpty else {
@@ -58,6 +65,30 @@ public struct ContactRequestResponseBody: Codable, Identifiable, Equatable, Send
     public let createdAt: Date?
     public let updatedAt: Date?
     public let respondedAt: Date?
+
+    public init(
+        id: UUID,
+        requester: AuthUser,
+        addressee: AuthUser,
+        status: ContactRequestStatus,
+        message: String?,
+        requesterRemark: String?,
+        addresseeRemark: String?,
+        createdAt: Date?,
+        updatedAt: Date?,
+        respondedAt: Date?
+    ) {
+        self.id = id
+        self.requester = requester
+        self.addressee = addressee
+        self.status = status
+        self.message = message
+        self.requesterRemark = requesterRemark
+        self.addresseeRemark = addresseeRemark
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.respondedAt = respondedAt
+    }
 
     public func peerDisplayName(for currentUserID: UUID?) -> String {
         guard let currentUserID else {

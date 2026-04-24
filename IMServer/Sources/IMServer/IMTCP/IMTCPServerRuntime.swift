@@ -357,7 +357,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         case .ack:
             return
 
-        case .authOK, .authError, .heartbeatAck, .conversationEvent, .kick:
+        case .authOK, .authError, .heartbeatAck, .conversationEvent, .contactEvent, .kick:
             sendKickAndClose(
                 channel: channel,
                 reason: .protocolError,

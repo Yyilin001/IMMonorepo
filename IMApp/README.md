@@ -49,7 +49,7 @@
 ## 目录结构
 
 ```text
-IMApp/App                App 常量与 AppDelegate
+IMApp/App                App 级配置与 AppDelegate
 IMApp/Auth               登录态、token、AuthManager
 IMApp/Networking         HTTP / TCP / 传输封装
 IMApp/Services           API 请求模型
@@ -66,17 +66,19 @@ IMAppUITests             UI 测试入口
 - iOS Simulator
 - 本地已启动 [IMServer](https://github.com/Yyilin001/IMServer)
 
-## 默认服务端配置
+## 环境配置
 
-客户端默认连接地址定义在 [IMApp/App/AppConstants.swift](IMApp/App/AppConstants.swift)：
+客户端不再从 `IMClientKit` 读取默认地址，服务端地址统一由 `IMApp` 在组合根注入。当前本地开发配置定义在 [AppNetworkConfiguration.swift](/Users/yy/Desktop/vaporTest/IMApp/IMApp/App/AppNetworkConfiguration.swift:1)：
 
 ```swift
-static let apiBaseURL = URL(string: "http://127.0.0.1:8080")!
-static let imTCPHost = "127.0.0.1"
-static let imTCPPort: UInt16 = 9000
+static let local = AppNetworkConfiguration(
+    apiBaseURL: URL(string: "http://127.0.0.1:8080")!,
+    imTCPHost: "127.0.0.1",
+    imTCPPort: 9000
+)
 ```
 
-如果你不是本机联调，需要把这几个值改成你的服务端地址。
+应用入口会在 [IMAppApp.swift](/Users/yy/Desktop/vaporTest/IMApp/IMApp/IMAppApp.swift:12) 里显式构造 `NetworkEnvironment` 和 `IMTCPClientConfiguration` 后注入 `AuthManager`。如果你不是本机联调，只需要改这里的配置源。
 
 ## 快速开始
 
@@ -117,9 +119,27 @@ static let imTCPPort: UInt16 = 9000
 ### 数据流拆分
 
 - HTTP
-  负责认证、会话摘要、历史消息、补洞、成员列表、mark read、文件接口
+  负责认证、分页会话摘要、增量摘要变更、历史消息、补洞、成员列表、mark read、文件接口
 - TCP
   负责握手鉴权、实时消息、heartbeat、ack、kick
+
+### 消息协议
+
+消息内容已经从弱类型的 `kind + body` 收紧成强类型 `content`。当前文本消息统一编码为：
+
+```json
+{
+  "type": "text",
+  "text": "hello"
+}
+```
+
+这套结构会同时用于：
+
+- TCP 实时消息
+- 会话历史接口
+- `messages/since` 补洞接口
+- 会话列表里的最后一条消息预览
 
 ## 当前实现重点
 
@@ -131,6 +151,7 @@ static let imTCPPort: UInt16 = 9000
 - 会话页接入真实 `conversationID`
 - 重连后自动做增量补洞
 - 已读采用“最高序号合并后上报”的节流策略，避免实时消息连续到达时每条都请求 `/read`
+- 会话摘要首屏分页拉取与后续增量同步
 
 ## 测试
 

@@ -8,7 +8,7 @@ enum Entrypoint {
     static func main() async throws {
         var env = try Environment.detect()
         try LoggingSystem.bootstrap(from: &env)
-        
+
         let app = try await Application.make(env)
 
         // 这里会尝试将 NIO 安装为 Swift Concurrency 的全局执行器。
@@ -20,6 +20,16 @@ enum Entrypoint {
         
         do {
             try await configure(app)
+            if env.arguments.contains("--rebuild-conversation-summaries") {
+                let rebuiltUserCount = try await IMConversationSummaryProjectionService(db: app.db)
+                    .rebuildAllSummaries()
+                app.logger.notice(
+                    "Conversation summary backfill completed",
+                    metadata: ["rebuilt_user_count": .stringConvertible(rebuiltUserCount)]
+                )
+                try await app.asyncShutdown()
+                return
+            }
             try await app.execute()
         } catch {
             app.logger.report(error: error)

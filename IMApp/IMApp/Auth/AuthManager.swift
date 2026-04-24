@@ -4,17 +4,35 @@ import IMClientKit
 import SwiftUI
 import UIKit
 
+enum DirectPeerRelationshipState: Equatable {
+    case friend
+    case none
+    case outgoingPending
+    case incomingPending
+    case resolving
+    case unavailable
+}
+
+struct DirectPeerRelationshipPresentation: Equatable {
+    let state: DirectPeerRelationshipState
+    let message: String
+    let peerUserID: UUID?
+    let peerEmail: String?
+    let requestID: UUID?
+}
+
+struct IMConversationIdentityPresentation: Equatable {
+    let title: String
+    let detailSummary: String
+    let rowSecondaryLabel: String?
+}
+
 @MainActor
 final class AuthManager: ObservableObject {
     private enum IMHistoryPage {
-        static let latestLimit = 40
-        static let gapSyncLimit = 100
-        static let gapSyncMaxIterations = 10
-        static let readReportDebounceNanoseconds: UInt64 = 250_000_000
         static let refreshDebounceNanoseconds: UInt64 = 400_000_000
         static let cachePersistDebounceNanoseconds: UInt64 = 300_000_000
-        static let minimumRefreshInterval: TimeInterval = 5
-        static let queuedFlushLimit = 20
+        static let resolvedContactRequestHistoryLimit = 50
     }
 
     enum Phase: Equatable {
@@ -49,41 +67,102 @@ final class AuthManager: ObservableObject {
     @Published private(set) var contacts: [ContactResponseBody] = []
     @Published private(set) var isLoadingContacts = false
     @Published private(set) var contactsMessage: String?
-    @Published private(set) var incomingContactRequests: [ContactRequestResponseBody] = []
-    @Published private(set) var outgoingContactRequests: [ContactRequestResponseBody] = []
+    @Published private(set) var contactRequests: [ContactRequestResponseBody] = []
+    @Published private(set) var unseenIncomingContactRequestCount = 0
     @Published private(set) var isLoadingContactRequests = false
-    @Published private(set) var contactRequestsMessage: String?
+    @Published private(set) var contactRequestsLoadMessage: String?
+    @Published private(set) var contactRequestActionMessage: String?
+    @Published private(set) var acceptingRequestIDs: Set<UUID> = []
+    @Published private(set) var decliningRequestIDs: Set<UUID> = []
+    @Published private(set) var cancellingRequestIDs: Set<UUID> = []
+    @Published private(set) var directConversationRelationshipActionMessages: [String: String] = [:]
+    @Published private(set) var sendingDirectConversationFriendRequestConversationIDs: Set<String> = []
     @Published private(set) var serverStatus: ServerStatus = .unknown
     @Published private(set) var imConnectionStatus: IMConnectionStatus = .disconnected
     @Published private(set) var isFlushingQueuedIMTextMessages = false
 
+    var incomingContactRequests: [ContactRequestResponseBody] {
+        incomingPendingContactRequests
+    }
+
+    var outgoingContactRequests: [ContactRequestResponseBody] {
+        outgoingPendingContactRequests
+    }
+
+    var incomingPendingContactRequests: [ContactRequestResponseBody] {
+        guard let currentUserID = currentUser?.id else {
+            return []
+        }
+
+        return contactRequests
+            .filter { $0.status == .pending && $0.addressee.id == currentUserID }
+            .sorted(by: contactsController.sortPendingNewestFirst)
+    }
+
+    var outgoingPendingContactRequests: [ContactRequestResponseBody] {
+        guard let currentUserID = currentUser?.id else {
+            return []
+        }
+
+        return contactRequests
+            .filter { $0.status == .pending && $0.requester.id == currentUserID }
+            .sorted(by: contactsController.sortPendingNewestFirst)
+    }
+
+    var recentResolvedContactRequests: [ContactRequestResponseBody] {
+        Array(
+            contactRequests
+                .filter { $0.status != .pending }
+                .sorted(by: contactsController.sortResolvedNewestFirst)
+                .prefix(IMHistoryPage.resolvedContactRequestHistoryLimit)
+        )
+    }
+
+    var pendingIncomingContactRequestCount: Int {
+        incomingPendingContactRequests.count
+    }
+
+    var totalPendingContactRequestCount: Int {
+        incomingPendingContactRequests.count + outgoingPendingContactRequests.count
+    }
+
+    var hasUnreadIncomingContactRequests: Bool {
+        unseenIncomingContactRequestCount > 0
+    }
+
+    var hasAnyContactRequests: Bool {
+        !contactRequests.isEmpty
+    }
+
     private let sessionClient: SessionClient
+    private let authSessionController: AuthSessionController
+    private let contactsController: ContactsController
     private let openIMConnection: @Sendable () async throws -> IMTCPConnection
     private let imConversationCache: IMConversationCacheHandler
     private var restoreTask: Task<Void, Never>?
     private var restoreGeneration: UInt64 = 0
-    private var imConnection: IMTCPConnection?
-    private var imConnectionConnectTask: Task<Void, Never>?
-    private var imConnectionEventTask: Task<Void, Never>?
-    private var imConnectionGeneration: UInt64 = 0
     private var imConversationListTask: Task<Void, Never>?
-    private var imConversationMembersTask: Task<Void, Never>?
-    private var imConversationMessagesTask: Task<Void, Never>?
-    private var imConversationRefreshTask: Task<Void, Never>?
+    private var contactStateCorrectionTask: Task<Void, Never>?
     private var imConversationCachePersistTask: Task<Void, Never>?
-    private var imConversationReadReportTasks: [String: Task<Void, Never>] = [:]
-    private var pendingIMConversationReadSequences: [String: UInt64] = [:]
+    private var contactStateCachePersistTask: Task<Void, Never>?
     private var lastIMConversationSummaryRefreshAt: Date?
+    private var imConversationSummarySyncToken: String?
+    private var latestIMConversationSummaries: [IMConversationSummaryResponseBody] = []
+    private var lastContactStateRefreshAt: Date?
+    private var lastSeenIncomingContactRequestAt: Date?
     let probeManager: ProbeManager
     let fileTransferManager: FileTransferManager
     let imConversationStore: IMConversationStore
+    private lazy var imController = makeIMController()
 
     convenience init(
-        network: NetworkEnvironment = NetworkEnvironment(),
+        network: NetworkEnvironment,
+        imConnectionConfiguration: IMTCPClientConfiguration,
         tokenStore: KeychainStore = KeychainStore(),
         userCache: UserDefaultsSessionCache = UserDefaultsSessionCache(),
         backgroundTransferMonitor: any BackgroundTransferMonitoring = BackgroundTransferCoordinator.shared,
         imConversationCache: IMConversationCacheHandler = SwiftDataIMConversationCache.makeDefaultHandler(),
+        contactStateCache: ContactStateCacheHandler = SwiftDataContactStateCache.makeDefaultHandler(),
         shouldRestoreSession: Bool = true
     ) {
         let sessionClient = SessionClient(
@@ -94,10 +173,11 @@ final class AuthManager: ObservableObject {
         self.init(
             sessionClient: sessionClient,
             openIMConnection: {
-                try await sessionClient.openIMConnection()
+                try await sessionClient.openIMConnection(configuration: imConnectionConfiguration)
             },
             backgroundTransferMonitor: backgroundTransferMonitor,
             imConversationCache: imConversationCache,
+            contactStateCache: contactStateCache,
             shouldRestoreSession: shouldRestoreSession
         )
     }
@@ -109,6 +189,7 @@ final class AuthManager: ObservableObject {
         openIMConnection: (@Sendable () async throws -> IMTCPConnection)? = nil,
         backgroundTransferMonitor: any BackgroundTransferMonitoring = BackgroundTransferCoordinator.shared,
         imConversationCache: IMConversationCacheHandler = IMConversationCacheHandler(NoopIMConversationCache()),
+        contactStateCache: ContactStateCacheHandler = ContactStateCacheHandler(NoopContactStateCache()),
         shouldRestoreSession: Bool = true
     ) {
         let sessionClient = SessionClient(
@@ -119,10 +200,11 @@ final class AuthManager: ObservableObject {
         self.init(
             sessionClient: sessionClient,
             openIMConnection: openIMConnection ?? {
-                try await sessionClient.openIMConnection()
+                fatalError("Explicit IM connection opener is required when no openIMConnection closure is provided.")
             },
             backgroundTransferMonitor: backgroundTransferMonitor,
             imConversationCache: imConversationCache,
+            contactStateCache: contactStateCache,
             shouldRestoreSession: shouldRestoreSession
         )
     }
@@ -132,9 +214,15 @@ final class AuthManager: ObservableObject {
         openIMConnection: @escaping @Sendable () async throws -> IMTCPConnection,
         backgroundTransferMonitor: any BackgroundTransferMonitoring,
         imConversationCache: IMConversationCacheHandler,
+        contactStateCache: ContactStateCacheHandler,
         shouldRestoreSession: Bool
     ) {
         self.sessionClient = sessionClient
+        self.authSessionController = AuthSessionController(sessionClient: sessionClient)
+        self.contactsController = ContactsController(
+            sessionClient: sessionClient,
+            contactStateCache: contactStateCache
+        )
         self.openIMConnection = openIMConnection
         self.imConversationCache = imConversationCache
         self.probeManager = ProbeManager(sessionClient: sessionClient)
@@ -152,6 +240,74 @@ final class AuthManager: ObservableObject {
         } else {
             phase = .signedOut(message: nil)
         }
+    }
+
+    private func makeIMController() -> IMController {
+        IMController(
+            sessionClient: sessionClient,
+            openIMConnection: openIMConnection,
+            imConversationStore: imConversationStore,
+            currentUserProvider: { [weak self] in
+                self?.currentUser
+            },
+            isSignedInProvider: { [weak self] in
+                guard let self else {
+                    return false
+                }
+                if case .signedIn = self.phase {
+                    return true
+                }
+                return false
+            },
+            latestConversationSummariesProvider: { [weak self] in
+                self?.latestIMConversationSummaries ?? []
+            },
+            setLatestConversationSummaries: { [weak self] summaries in
+                self?.latestIMConversationSummaries = summaries
+            },
+            conversationSummaryRefreshAtProvider: { [weak self] in
+                self?.lastIMConversationSummaryRefreshAt
+            },
+            setConversationSummaryRefreshAt: { [weak self] date in
+                self?.lastIMConversationSummaryRefreshAt = date
+            },
+            conversationSummarySyncTokenProvider: { [weak self] in
+                self?.imConversationSummarySyncToken
+            },
+            setConversationSummarySyncToken: { [weak self] token in
+                self?.imConversationSummarySyncToken = token
+            },
+            markServerOnline: { [weak self] in
+                self?.markServerOnline()
+            },
+            clearSession: { [weak self] message in
+                await self?.clearSession(message: message)
+            },
+            handleIMDataRequestError: { [weak self] error in
+                await self?.handleIMDataRequestError(error)
+            },
+            syncContactStateAfterConnection: { [weak self] in
+                await self?.syncContactStateAfterConnection()
+            },
+            scheduleConversationCachePersist: { [weak self] in
+                self?.scheduleIMConversationCachePersist()
+            },
+            flushConversationCache: { [weak self] in
+                await self?.flushIMConversationCache()
+            },
+            flushContactStateCache: { [weak self] in
+                await self?.flushContactStateCache()
+            },
+            applyContactEvent: { [weak self] payload in
+                self?.applyContactEvent(payload)
+            },
+            setConnectionStatus: { [weak self] status in
+                self?.imConnectionStatus = status
+            },
+            setQueuedFlushActive: { [weak self] isActive in
+                self?.isFlushingQueuedIMTextMessages = isActive
+            }
+        )
     }
 
     func login(email: String, password: String) async {
@@ -176,19 +332,14 @@ final class AuthManager: ObservableObject {
 
     func logout() async {
         invalidateRestoreSession()
-        do {
-            _ = try await sessionClient.logoutCurrent()
-        } catch {
-            // Ignore remote logout failures and clear local state anyway.
-        }
-
+        await authSessionController.logoutCurrentIgnoringFailure()
         await clearSession(message: nil)
     }
 
     func logoutAllSessions() async {
         invalidateRestoreSession()
         do {
-            let result = try await sessionClient.logoutAll()
+            let result = try await authSessionController.logoutAll()
             await clearSession(message: "已退出 \(result.revokedSessions) 台设备。")
         } catch {
             if await shouldPreserveSession(for: error) {
@@ -202,7 +353,7 @@ final class AuthManager: ObservableObject {
     func reloadProfile() async {
         invalidateRestoreSession()
         do {
-            let user = try await sessionClient.fetchMe()
+            let user = try await authSessionController.fetchProfile()
             markServerOnline()
             applySignedInState(user)
         } catch {
@@ -225,7 +376,7 @@ final class AuthManager: ObservableObject {
         defer { isLoadingSessions = false }
 
         do {
-            let response = try await sessionClient.fetchSessions()
+            let response = try await authSessionController.fetchSessions()
             markServerOnline()
             sessions = response
             sessionsMessage = nil
@@ -249,14 +400,16 @@ final class AuthManager: ObservableObject {
         defer { isLoadingContacts = false }
 
         do {
-            let response = try await sessionClient.fetchContacts()
+            let snapshot = try await contactsController.fetchContacts()
             guard currentUser?.id == user.id else {
                 return
             }
 
             markServerOnline()
-            contacts = response.sorted { $0.email < $1.email }
+            contacts = snapshot.contacts
             contactsMessage = nil
+            lastContactStateRefreshAt = snapshot.lastRefreshAt
+            scheduleContactStateCachePersist()
         } catch {
             await handleContactRequestError(error)
         }
@@ -268,8 +421,8 @@ final class AuthManager: ObservableObject {
 
     func reloadContactRequests() async {
         guard let user = currentUser else {
-            incomingContactRequests = []
-            outgoingContactRequests = []
+            contactRequests = []
+            unseenIncomingContactRequestCount = 0
             return
         }
 
@@ -277,97 +430,141 @@ final class AuthManager: ObservableObject {
         defer { isLoadingContactRequests = false }
 
         do {
-            let response = try await sessionClient.fetchContactRequests(box: .all)
+            let snapshot = try await contactsController.fetchContactRequests()
             guard currentUser?.id == user.id else {
                 return
             }
 
             markServerOnline()
-            replaceContactRequests(response, currentUserID: user.id)
-            contactRequestsMessage = nil
+            replaceContactRequests(snapshot.requests, currentUserID: user.id)
+            contactRequestsLoadMessage = nil
+            lastContactStateRefreshAt = snapshot.lastRefreshAt
+            scheduleContactStateCachePersist()
         } catch {
-            await handleContactRequestsError(error)
+            await handleContactRequestsLoadError(error)
         }
     }
 
     func sendContactRequest(email: String, message: String? = nil, remark: String? = nil) async -> Bool {
         let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let normalizedMessage = normalizedContactRequestMessage(message)
-        let normalizedRemark = normalizedContactRemark(remark)
+        let normalizedMessage = contactsController.normalizedRequestMessage(message)
+        let normalizedRemark = contactsController.normalizedRemark(remark)
         guard !normalizedEmail.isEmpty else {
-            contactRequestsMessage = "好友邮箱不能为空。"
+            contactRequestActionMessage = "好友邮箱不能为空。"
             return false
         }
 
+        contactRequestActionMessage = nil
         do {
-            let request = try await sessionClient.sendContactRequest(
+            let request = try await contactsController.sendContactRequest(
                 email: normalizedEmail,
                 message: normalizedMessage,
                 remark: normalizedRemark
             )
             markServerOnline()
             upsertContactRequest(request)
-            contactRequestsMessage = "好友申请已发送。"
+            contactRequestActionMessage = "好友申请已发送。"
+            scheduleContactStateCachePersist()
             return true
         } catch {
-            await handleContactRequestsError(error)
+            await handleContactRequestsActionError(error)
             return false
         }
     }
 
     func acceptContactRequest(id requestID: UUID, remark: String? = nil) async -> Bool {
+        guard !acceptingRequestIDs.contains(requestID) else {
+            return false
+        }
+
+        acceptingRequestIDs.insert(requestID)
+        contactRequestActionMessage = nil
+        defer { acceptingRequestIDs.remove(requestID) }
+
         do {
-            let contact = try await sessionClient.acceptContactRequest(
+            let contact = try await contactsController.acceptContactRequest(
                 id: requestID,
-                remark: normalizedContactRemark(remark)
+                remark: contactsController.normalizedRemark(remark)
             )
             markServerOnline()
             upsertContact(contact)
-            incomingContactRequests.removeAll { $0.id == requestID }
-            contactRequestsMessage = "已添加好友。"
+            updateContactRequestStatus(
+                id: requestID,
+                status: .accepted,
+                respondedAt: Date()
+            )
+            contactRequestActionMessage = "已添加好友。"
+            scheduleContactStateCachePersist()
             await reloadContacts()
             return true
         } catch {
-            await handleContactRequestsError(error)
+            await handleContactRequestsActionError(error)
             return false
         }
     }
 
     func declineContactRequest(id requestID: UUID) async -> Bool {
+        guard !decliningRequestIDs.contains(requestID) else {
+            return false
+        }
+
+        decliningRequestIDs.insert(requestID)
+        contactRequestActionMessage = nil
+        defer { decliningRequestIDs.remove(requestID) }
+
         do {
-            _ = try await sessionClient.declineContactRequest(id: requestID)
+            _ = try await contactsController.declineContactRequest(id: requestID)
             markServerOnline()
-            incomingContactRequests.removeAll { $0.id == requestID }
-            contactRequestsMessage = "已拒绝好友申请。"
+            updateContactRequestStatus(
+                id: requestID,
+                status: .declined,
+                respondedAt: Date()
+            )
+            contactRequestActionMessage = "已拒绝好友申请。"
+            scheduleContactStateCachePersist()
             return true
         } catch {
-            await handleContactRequestsError(error)
+            await handleContactRequestsActionError(error)
             return false
         }
     }
 
     func cancelContactRequest(id requestID: UUID) async -> Bool {
+        guard !cancellingRequestIDs.contains(requestID) else {
+            return false
+        }
+
+        cancellingRequestIDs.insert(requestID)
+        contactRequestActionMessage = nil
+        defer { cancellingRequestIDs.remove(requestID) }
+
         do {
-            _ = try await sessionClient.cancelContactRequest(id: requestID)
+            _ = try await contactsController.cancelContactRequest(id: requestID)
             markServerOnline()
-            outgoingContactRequests.removeAll { $0.id == requestID }
-            contactRequestsMessage = "好友申请已取消。"
+            updateContactRequestStatus(
+                id: requestID,
+                status: .cancelled,
+                respondedAt: Date()
+            )
+            contactRequestActionMessage = "好友申请已取消。"
+            scheduleContactStateCachePersist()
             return true
         } catch {
-            await handleContactRequestsError(error)
+            await handleContactRequestsActionError(error)
             return false
         }
     }
 
     func updateContactRemark(contactUserID: UUID, remark: String) async -> Bool {
         do {
-            let contact = try await sessionClient.updateContact(
+            let contact = try await contactsController.updateContact(
                 contactUserID: contactUserID,
-                remark: normalizedContactRemark(remark)
+                remark: contactsController.normalizedRemark(remark)
             )
             markServerOnline()
             upsertContact(contact)
             contactsMessage = "联系人备注已更新。"
+            scheduleContactStateCachePersist()
             return true
         } catch {
             await handleContactRequestError(error)
@@ -377,10 +574,11 @@ final class AuthManager: ObservableObject {
 
     func deleteContact(_ contactUserID: UUID) async -> Bool {
         do {
-            _ = try await sessionClient.deleteContact(contactUserID: contactUserID)
+            try await contactsController.deleteContact(contactUserID: contactUserID)
             markServerOnline()
             contacts.removeAll { $0.id == contactUserID }
             contactsMessage = "已删除联系人。"
+            scheduleContactStateCachePersist()
             return true
         } catch {
             await handleContactRequestError(error)
@@ -398,7 +596,7 @@ final class AuthManager: ObservableObject {
         defer { isBusy = false }
 
         do {
-            _ = try await sessionClient.logoutCurrent()
+            try await authSessionController.logoutCurrent()
             await clearSession(message: nil)
         } catch {
             if await shouldPreserveSession(for: error) {
@@ -418,7 +616,7 @@ final class AuthManager: ObservableObject {
         defer { isBusy = false }
 
         do {
-            _ = try await sessionClient.logout(sessionID: sessionID)
+            try await authSessionController.logout(sessionID: sessionID)
             markServerOnline()
             if isCurrent {
                 await clearSession(message: nil)
@@ -437,7 +635,7 @@ final class AuthManager: ObservableObject {
     }
 
     func restoreSession() async {
-        switch await sessionClient.restoreSession() {
+        switch await authSessionController.restoreSession() {
         case .signedOut:
             phase = .signedOut(message: nil)
         case .signedIn(let user):
@@ -460,38 +658,23 @@ final class AuthManager: ObservableObject {
     }
 
     func reloadIMConversations(force: Bool = true) async {
-        guard let user = currentUser else {
-            return
-        }
+        await imController.reloadConversations(force: force)
+    }
 
-        let didRefresh = await reconcileIMConversationSummaryReadModel(force: force)
-        guard didRefresh,
-              currentUser?.id == user.id,
-              let selectedConversationID = imConversationStore.selectedConversationID ?? imConversationStore.conversations.first?.id
-        else {
-            return
-        }
-
-        imConversationStore.openConversation(id: selectedConversationID)
-        scheduleIMConversationCachePersist()
-        await loadIMConversationMembers(for: selectedConversationID)
-        await loadIMMessagesIfNeeded(for: selectedConversationID)
-        await markIMConversationReadUpToLatestLoadedSequence(for: selectedConversationID)
+    func loadMoreIMConversationSummariesIfNeeded(anchorConversationID: String?) async {
+        await imController.loadMoreConversationSummariesIfNeeded(anchorConversationID: anchorConversationID)
     }
 
     func openIMConversation(_ conversationID: String) async {
-        guard let user = currentUser else {
+        guard currentUser != nil else {
             return
         }
 
         imConversationStore.openConversation(id: conversationID)
         scheduleIMConversationCachePersist()
-        await loadIMConversationMembers(for: conversationID)
-        await loadIMMessagesIfNeeded(for: conversationID)
-        let didSyncGap = await syncIMConversationGap(for: conversationID, currentUserID: user.id)
-        if didSyncGap {
-            await markIMConversationReadUpToLatestLoadedSequence(for: conversationID)
-        }
+        await imController.loadConversationMembers(for: conversationID)
+        await imController.loadMessagesIfNeeded(for: conversationID)
+        await imController.syncConversationAfterOpen(conversationID)
     }
 
     func createIMConversation(kind: IMConversationKind, title: String, memberEmails: [String]) async -> Bool {
@@ -514,7 +697,7 @@ final class AuthManager: ObservableObject {
                 memberEmails: normalizedEmails
             )
             markServerOnline()
-            applyIMConversationSummaryReadModel([conversation])
+            imController.applyConversationSummaryReadModel([conversation])
             scheduleIMConversationCachePersist()
             await openIMConversation(conversation.id.uuidString)
             return true
@@ -538,7 +721,7 @@ final class AuthManager: ObservableObject {
                 memberEmails: [normalizedEmail]
             )
             markServerOnline()
-            applyIMConversationSummaryReadModel([conversation])
+            imController.applyConversationSummaryReadModel([conversation])
             scheduleIMConversationCachePersist()
             let conversationID = conversation.id.uuidString
             await openIMConversation(conversationID)
@@ -576,8 +759,133 @@ final class AuthManager: ObservableObject {
                 memberEmails: normalizedEmails
             )
             markServerOnline()
-            applyIMConversationSummaryReadModel([conversation])
-            await loadIMConversationMembers(for: trimmedConversationID)
+            imController.applyConversationSummaryReadModel([conversation])
+            await imController.loadConversationMembers(for: trimmedConversationID)
+            scheduleIMConversationCachePersist()
+            return true
+        } catch {
+            scheduleIMConversationSummaryReadModelCorrection(force: true)
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func renameIMConversation(
+        _ conversationID: String,
+        title: String
+    ) async -> Bool {
+        await updateIMConversationMetadata(
+            conversationID,
+            title: title,
+            notice: nil,
+            avatarPreset: nil
+        )
+    }
+
+    func updateIMConversationMetadata(
+        _ conversationID: String,
+        title: String? = nil,
+        notice: String? = nil,
+        avatarPreset: IMConversationAvatarPreset? = nil
+    ) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedConversationID.isEmpty else {
+            imConversationStore.setStatusMessage("会话 ID 无效。")
+            return false
+        }
+
+        do {
+            let conversation = try await sessionClient.updateIMConversationMetadata(
+                conversationID: trimmedConversationID,
+                title: title?.trimmingCharacters(in: .whitespacesAndNewlines),
+                notice: notice?.trimmingCharacters(in: .whitespacesAndNewlines),
+                avatarPreset: avatarPreset
+            )
+            markServerOnline()
+            imController.applyConversationSummaryReadModel([conversation])
+            scheduleIMConversationCachePersist()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func updateIMConversationPreferences(
+        _ conversationID: String,
+        isPinned: Bool? = nil,
+        isMuted: Bool? = nil
+    ) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            imConversationStore.setStatusMessage("会话 ID 无效。")
+            return false
+        }
+
+        do {
+            let conversation = try await sessionClient.updateIMConversationPreferences(
+                conversationID: trimmedConversationID,
+                isPinned: isPinned,
+                isMuted: isMuted
+            )
+            markServerOnline()
+            imController.applyConversationSummaryReadModel([conversation])
+            scheduleIMConversationCachePersist()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func removeIMConversationMember(
+        memberUserID: UUID,
+        from conversationID: String
+    ) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            imConversationStore.setStatusMessage("会话 ID 无效。")
+            return false
+        }
+
+        do {
+            let conversation = try await sessionClient.removeIMConversationMember(
+                conversationID: trimmedConversationID,
+                memberUserID: memberUserID
+            )
+            markServerOnline()
+            imController.applyConversationSummaryReadModel([conversation])
+            await imController.loadConversationMembers(for: trimmedConversationID)
+            scheduleIMConversationCachePersist()
+            return true
+        } catch {
+            scheduleIMConversationSummaryReadModelCorrection(force: true)
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func updateIMConversationMemberRole(
+        memberUserID: UUID,
+        role: IMConversationMemberRole,
+        in conversationID: String
+    ) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            imConversationStore.setStatusMessage("会话 ID 无效。")
+            return false
+        }
+
+        do {
+            let conversation = try await sessionClient.updateIMConversationMemberRole(
+                conversationID: trimmedConversationID,
+                memberUserID: memberUserID,
+                role: role
+            )
+            markServerOnline()
+            imController.applyConversationSummaryReadModel([conversation])
+            await imController.loadConversationMembers(for: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
         } catch {
@@ -597,6 +905,10 @@ final class AuthManager: ObservableObject {
         do {
             _ = try await sessionClient.leaveIMConversation(conversationID: trimmedConversationID)
             markServerOnline()
+            imController.applyLatestConversationSummaryChanges(
+                upserts: [],
+                removedConversationIDs: [UUID(uuidString: trimmedConversationID)].compactMap { $0 }
+            )
             imConversationStore.removeConversation(id: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
@@ -607,24 +919,11 @@ final class AuthManager: ObservableObject {
     }
 
     func refreshIMConversationSummaryReadModelIfNeeded() async {
-        _ = await reconcileIMConversationSummaryReadModel(force: false)
+        await imController.refreshConversationSummaryReadModelIfNeeded()
     }
 
     func loadOlderIMMessages() async {
-        guard let user = currentUser,
-              let conversationID = imConversationStore.selectedConversationID,
-              imConversationStore.canLoadOlderMessages(for: conversationID),
-              let beforeSequence = imConversationStore.oldestLoadedServerSequence(for: conversationID)
-        else {
-            return
-        }
-
-        await loadIMMessagesPage(
-            for: conversationID,
-            currentUserID: user.id,
-            beforeSequence: beforeSequence,
-            mergeMode: .prepend
-        )
+        await imController.loadOlderMessages()
     }
 
     func appDidBecomeActive() async {
@@ -632,53 +931,42 @@ final class AuthManager: ObservableObject {
             return
         }
 
-        if imConnection == nil, imConnectionConnectTask == nil {
-            scheduleIMConnectionIfNeeded()
-        }
-
+        imController.appDidBecomeActive()
         await refreshIMConversationSummaryReadModelIfNeeded()
     }
 
     func appDidEnterBackground() async {
         await flushIMConversationCache()
+        await flushContactStateCache()
+    }
+
+    func markIncomingContactRequestsSeen() {
+        if let latestIncomingContactRequestAt {
+            lastSeenIncomingContactRequestAt = latestIncomingContactRequestAt
+        }
+
+        recomputeIncomingContactRequestUnreadState()
+        scheduleContactStateCachePersist()
     }
 
     func sendIMText(_ text: String, to conversationID: String) async -> Bool {
-        guard case .signedIn(let user) = phase else {
+        guard case .signedIn = phase else {
             return false
         }
 
-        guard let connection = imConnection else {
-            let didQueue = imConversationStore.queueOutgoingText(
-                text,
-                conversationID: conversationID,
-                senderUserID: user.id
-            )
-            if didQueue {
-                scheduleIMConversationCachePersist()
-                scheduleIMConnectionIfNeeded()
-            }
-            return didQueue
-        }
+        return await imController.sendText(text, to: conversationID)
+    }
 
-        guard let request = imConversationStore.prepareOutgoingText(
-            text,
-            conversationID: conversationID,
-            senderUserID: user.id
-        ) else {
+    func sendIMReply(
+        reference: IMReplyReference,
+        text: String,
+        to conversationID: String
+    ) async -> Bool {
+        guard case .signedIn = phase else {
             return false
         }
-        scheduleIMConversationCachePersist()
 
-        let generation = imConnectionGeneration
-
-        do {
-            try await connection.sendMessage(request.payload, requestID: request.requestID)
-            return true
-        } catch {
-            await handleIMConnectionFailure(error, generation: generation)
-            return false
-        }
+        return await imController.sendReply(reference: reference, text: text, to: conversationID)
     }
 
     func retryIMTextMessage(localMessageID: String, in conversationID: String) async -> Bool {
@@ -686,36 +974,10 @@ final class AuthManager: ObservableObject {
             return false
         }
 
-        guard let connection = imConnection else {
-            let didQueue = imConversationStore.queueRetryableOutgoingMessage(
-                localMessageID: localMessageID,
-                conversationID: conversationID
-            )
-            if didQueue {
-                scheduleIMConversationCachePersist()
-                scheduleIMConnectionIfNeeded()
-            }
-            return didQueue
-        }
-
-        guard let request = imConversationStore.retryOutgoingMessage(
+        return await imController.retryTextMessage(
             localMessageID: localMessageID,
-            conversationID: conversationID
-        ) else {
-            scheduleIMConversationCachePersist()
-            return false
-        }
-        scheduleIMConversationCachePersist()
-
-        let generation = imConnectionGeneration
-
-        do {
-            try await connection.sendMessage(request.payload, requestID: request.requestID)
-            return true
-        } catch {
-            await handleIMConnectionFailure(error, generation: generation)
-            return false
-        }
+            in: conversationID
+        )
     }
 
     func cancelQueuedIMTextMessage(localMessageID: String, in conversationID: String) -> Bool {
@@ -733,6 +995,14 @@ final class AuthManager: ObservableObject {
         return didCancel
     }
 
+    func recallIMMessage(messageID: String, in conversationID: String) async -> Bool {
+        guard case .signedIn = phase else {
+            return false
+        }
+
+        return await imController.recallMessage(messageID: messageID, in: conversationID)
+    }
+
     private func scheduleRestoreSession() {
         let generation = restoreGeneration
         restoreTask = Task { [weak self] in
@@ -740,7 +1010,7 @@ final class AuthManager: ObservableObject {
                 return
             }
 
-            let result = await self.sessionClient.restoreSession()
+            let result = await self.authSessionController.restoreSession()
             await self.applyRestoreResult(result, generation: generation)
         }
     }
@@ -775,7 +1045,11 @@ final class AuthManager: ObservableObject {
     }
 
     static var preview: AuthManager {
-        let manager = AuthManager(shouldRestoreSession: false)
+        let manager = AuthManager(
+            network: AppNetworkConfiguration.preview.makeNetworkEnvironment(),
+            imConnectionConfiguration: AppNetworkConfiguration.preview.makeIMTCPConfiguration(),
+            shouldRestoreSession: false
+        )
         manager.phase = .signedOut(message: "Preview mode")
         return manager
     }
@@ -785,6 +1059,262 @@ final class AuthManager: ObservableObject {
             return nil
         }
         return user
+    }
+
+    func conversationIdentityPresentation(
+        for conversationID: String
+    ) -> IMConversationIdentityPresentation? {
+        guard let conversation = imConversationStore.conversations.first(where: { $0.id == conversationID }) else {
+            return nil
+        }
+
+        return conversationIdentityPresentation(for: conversation)
+    }
+
+    func conversationIdentityPresentation(
+        for conversation: IMConversation
+    ) -> IMConversationIdentityPresentation {
+        let fallbackTitle = normalizedConversationTitle(conversation.title, conversationID: conversation.id)
+
+        guard conversation.kind == .direct,
+              let currentUser
+        else {
+            let groupSummary = groupConversationSummary(for: conversation)
+            return IMConversationIdentityPresentation(
+                title: fallbackTitle,
+                detailSummary: groupSummary,
+                rowSecondaryLabel: conversation.members.isEmpty ? nil : groupSummary
+            )
+        }
+
+        guard let peer = directConversationPeer(in: conversation, currentUserID: currentUser.id) else {
+            let fallbackSummary = conversationStoreIsLoadingDirectPeer(for: conversation.id)
+                ? "正在加载对方信息"
+                : "当前还没有成员信息"
+            return IMConversationIdentityPresentation(
+                title: fallbackTitle,
+                detailSummary: fallbackSummary,
+                rowSecondaryLabel: nil
+            )
+        }
+
+        let contact = contacts.first(where: { $0.id == peer.id })
+        let contactTitle = contact?.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedPeerEmail = peer.email.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let title: String
+        if let contactTitle, !contactTitle.isEmpty {
+            title = contactTitle
+        } else if !normalizedPeerEmail.isEmpty {
+            title = normalizedPeerEmail
+        } else {
+            title = fallbackTitle
+        }
+
+        let detailSummary: String
+        if !normalizedPeerEmail.isEmpty {
+            detailSummary = normalizedPeerEmail
+        } else {
+            detailSummary = fallbackSummary(for: conversation)
+        }
+
+        let rowSecondaryLabel: String?
+        if !normalizedPeerEmail.isEmpty && normalizedPeerEmail != title {
+            rowSecondaryLabel = normalizedPeerEmail
+        } else {
+            rowSecondaryLabel = nil
+        }
+
+        return IMConversationIdentityPresentation(
+            title: title,
+            detailSummary: detailSummary,
+            rowSecondaryLabel: rowSecondaryLabel
+        )
+    }
+
+    func directPeerRelationshipPresentation(for conversationID: String) -> DirectPeerRelationshipPresentation? {
+        guard let currentUser,
+              let conversation = imConversationStore.conversations.first(where: { $0.id == conversationID }),
+              conversation.kind == .direct,
+              conversation.isDirectMessagingFrozen
+        else {
+            return nil
+        }
+
+        if sendingDirectConversationFriendRequestConversationIDs.contains(conversationID) {
+            return DirectPeerRelationshipPresentation(
+                state: .resolving,
+                message: "正在发送好友申请…",
+                peerUserID: nil,
+                peerEmail: nil,
+                requestID: nil
+            )
+        }
+
+        guard let peer = directConversationPeer(in: conversation, currentUserID: currentUser.id) else {
+            let message = conversationStoreIsLoadingDirectPeer(for: conversationID)
+                ? "正在加载对方信息…"
+                : "暂时无法识别对方信息。"
+            return DirectPeerRelationshipPresentation(
+                state: .unavailable,
+                message: message,
+                peerUserID: nil,
+                peerEmail: nil,
+                requestID: nil
+            )
+        }
+
+        if contacts.contains(where: { $0.id == peer.id }) {
+            return DirectPeerRelationshipPresentation(
+                state: .friend,
+                message: "好友关系已恢复，等待当前会话状态同步。",
+                peerUserID: peer.id,
+                peerEmail: peer.email,
+                requestID: nil
+            )
+        }
+
+        if let request = incomingPendingContactRequests.first(where: {
+            $0.requester.id == peer.id && $0.addressee.id == currentUser.id
+        }) {
+            if acceptingRequestIDs.contains(request.id) || decliningRequestIDs.contains(request.id) {
+                return DirectPeerRelationshipPresentation(
+                    state: .resolving,
+                    message: "正在处理好友申请…",
+                    peerUserID: peer.id,
+                    peerEmail: peer.email,
+                    requestID: request.id
+                )
+            }
+
+            return DirectPeerRelationshipPresentation(
+                state: .incomingPending,
+                message: "对方向你发来了好友申请。",
+                peerUserID: peer.id,
+                peerEmail: peer.email,
+                requestID: request.id
+            )
+        }
+
+        if let request = outgoingPendingContactRequests.first(where: {
+            $0.requester.id == currentUser.id && $0.addressee.id == peer.id
+        }) {
+            if cancellingRequestIDs.contains(request.id) {
+                return DirectPeerRelationshipPresentation(
+                    state: .resolving,
+                    message: "正在取消好友申请…",
+                    peerUserID: peer.id,
+                    peerEmail: peer.email,
+                    requestID: request.id
+                )
+            }
+
+            return DirectPeerRelationshipPresentation(
+                state: .outgoingPending,
+                message: "已发送好友申请，等待对方处理。",
+                peerUserID: peer.id,
+                peerEmail: peer.email,
+                requestID: request.id
+            )
+        }
+
+        return DirectPeerRelationshipPresentation(
+            state: .none,
+            message: "添加好友后可继续在当前会话发送消息。",
+            peerUserID: peer.id,
+            peerEmail: peer.email,
+            requestID: nil
+        )
+    }
+
+    func directConversationRelationshipActionMessage(for conversationID: String) -> String? {
+        directConversationRelationshipActionMessages[conversationID]
+    }
+
+    func sendDirectConversationFriendRequest(conversationID: String) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return false
+        }
+
+        guard !sendingDirectConversationFriendRequestConversationIDs.contains(trimmedConversationID) else {
+            return false
+        }
+
+        guard let peer = await ensureDirectConversationPeer(for: trimmedConversationID) else {
+            setDirectConversationRelationshipActionMessage("暂时无法识别对方信息。", for: trimmedConversationID)
+            return false
+        }
+
+        sendingDirectConversationFriendRequestConversationIDs.insert(trimmedConversationID)
+        setDirectConversationRelationshipActionMessage(nil, for: trimmedConversationID)
+        contactRequestActionMessage = nil
+        defer {
+            sendingDirectConversationFriendRequestConversationIDs.remove(trimmedConversationID)
+            contactRequestActionMessage = nil
+        }
+
+        let didSend = await sendContactRequest(email: peer.email)
+        let message = contactRequestActionMessage ?? (didSend ? "好友申请已发送。" : "好友申请发送失败。")
+        setDirectConversationRelationshipActionMessage(message, for: trimmedConversationID)
+        return didSend
+    }
+
+    func acceptDirectConversationFriendRequest(conversationID: String, remark: String? = nil) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let relationship = directPeerRelationshipPresentation(for: trimmedConversationID),
+              relationship.state == .incomingPending,
+              let requestID = relationship.requestID
+        else {
+            setDirectConversationRelationshipActionMessage("当前没有可接受的好友申请。", for: trimmedConversationID)
+            return false
+        }
+
+        setDirectConversationRelationshipActionMessage(nil, for: trimmedConversationID)
+        contactRequestActionMessage = nil
+        let didAccept = await acceptContactRequest(id: requestID, remark: remark)
+        let message = contactRequestActionMessage ?? (didAccept ? "已添加好友。" : "好友申请处理失败。")
+        contactRequestActionMessage = nil
+        setDirectConversationRelationshipActionMessage(message, for: trimmedConversationID)
+        return didAccept
+    }
+
+    func declineDirectConversationFriendRequest(conversationID: String) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let relationship = directPeerRelationshipPresentation(for: trimmedConversationID),
+              relationship.state == .incomingPending,
+              let requestID = relationship.requestID
+        else {
+            setDirectConversationRelationshipActionMessage("当前没有可拒绝的好友申请。", for: trimmedConversationID)
+            return false
+        }
+
+        setDirectConversationRelationshipActionMessage(nil, for: trimmedConversationID)
+        contactRequestActionMessage = nil
+        let didDecline = await declineContactRequest(id: requestID)
+        let message = contactRequestActionMessage ?? (didDecline ? "已拒绝好友申请。" : "好友申请处理失败。")
+        contactRequestActionMessage = nil
+        setDirectConversationRelationshipActionMessage(message, for: trimmedConversationID)
+        return didDecline
+    }
+
+    func cancelDirectConversationFriendRequest(conversationID: String) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let relationship = directPeerRelationshipPresentation(for: trimmedConversationID),
+              relationship.state == .outgoingPending,
+              let requestID = relationship.requestID
+        else {
+            setDirectConversationRelationshipActionMessage("当前没有可取消的好友申请。", for: trimmedConversationID)
+            return false
+        }
+
+        setDirectConversationRelationshipActionMessage(nil, for: trimmedConversationID)
+        contactRequestActionMessage = nil
+        let didCancel = await cancelContactRequest(id: requestID)
+        let message = contactRequestActionMessage ?? (didCancel ? "好友申请已取消。" : "好友申请处理失败。")
+        contactRequestActionMessage = nil
+        setDirectConversationRelationshipActionMessage(message, for: trimmedConversationID)
+        return didCancel
     }
 
     private func authenticate(action: AuthAction, email: String, password: String) async {
@@ -797,14 +1327,19 @@ final class AuthManager: ObservableObject {
 
         do {
             let device = Self.deviceMetadata()
-            let user: AuthUser
-
+            let sessionAction: AuthSessionController.Action
             switch action {
             case .login:
-                user = try await sessionClient.login(email: email, password: password, device: device)
+                sessionAction = .login
             case .register:
-                user = try await sessionClient.register(email: email, password: password, device: device)
+                sessionAction = .register
             }
+            let user = try await authSessionController.authenticate(
+                action: sessionAction,
+                email: email,
+                password: password,
+                device: device
+            )
 
             markServerOnline()
             sessionsMessage = nil
@@ -821,28 +1356,27 @@ final class AuthManager: ObservableObject {
         let signedOutUserID = currentUser?.id
         imConversationListTask?.cancel()
         imConversationListTask = nil
-        imConversationMembersTask?.cancel()
-        imConversationMembersTask = nil
-        imConversationMessagesTask?.cancel()
-        imConversationMessagesTask = nil
-        imConversationRefreshTask?.cancel()
-        imConversationRefreshTask = nil
+        contactStateCorrectionTask?.cancel()
+        contactStateCorrectionTask = nil
         imConversationCachePersistTask?.cancel()
         imConversationCachePersistTask = nil
-        for task in imConversationReadReportTasks.values {
-            task.cancel()
-        }
-        imConversationReadReportTasks = [:]
-        pendingIMConversationReadSequences = [:]
+        contactStateCachePersistTask?.cancel()
+        contactStateCachePersistTask = nil
         lastIMConversationSummaryRefreshAt = nil
-        await disconnectIMConnection(flushCache: false)
+        imConversationSummarySyncToken = nil
+        latestIMConversationSummaries = []
+        lastContactStateRefreshAt = nil
+        lastSeenIncomingContactRequestAt = nil
+        await imController.resetForSignedOut(flushCache: false)
         probeManager.stopAllForSignedOut()
         fileTransferManager.stopAllForSignedOut()
-        await sessionClient.clearSession()
+        await authSessionController.clearSession()
         if let signedOutUserID {
             try? await imConversationCache.clearSnapshot(for: signedOutUserID)
+            try? await contactsController.clearSnapshot(for: signedOutUserID)
         } else {
             try? await imConversationCache.clearAll()
+            try? await contactsController.clearAllSnapshots()
         }
         imConversationStore.reset()
         sessions = []
@@ -850,10 +1384,16 @@ final class AuthManager: ObservableObject {
         contacts = []
         contactsMessage = nil
         isLoadingContacts = false
-        incomingContactRequests = []
-        outgoingContactRequests = []
-        contactRequestsMessage = nil
+        contactRequests = []
+        unseenIncomingContactRequestCount = 0
+        contactRequestsLoadMessage = nil
+        contactRequestActionMessage = nil
+        directConversationRelationshipActionMessages = [:]
         isLoadingContactRequests = false
+        acceptingRequestIDs = []
+        decliningRequestIDs = []
+        cancellingRequestIDs = []
+        sendingDirectConversationFriendRequestConversationIDs = []
         serverStatus = .unknown
         imConnectionStatus = .disconnected
         phase = .signedOut(message: message)
@@ -864,200 +1404,18 @@ final class AuthManager: ObservableObject {
         scheduleIMConnectionIfNeeded()
         scheduleIMConversationBootstrap(for: user)
         Task { [weak self] in
+            await self?.restoreContactStateCacheIfAvailable(for: user)
             await self?.reloadContacts()
             await self?.reloadContactRequests()
         }
     }
 
     private func scheduleIMConnectionIfNeeded() {
-        guard case .signedIn = phase else {
-            return
-        }
-
-        guard imConnection == nil, imConnectionConnectTask == nil else {
-            return
-        }
-
-        let generation = imConnectionGeneration
-        imConnectionStatus = .connecting
-        imConnectionConnectTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            do {
-                let connection = try await self.openIMConnection()
-                await self.applyIMConnection(connection, generation: generation)
-            } catch {
-                await self.handleIMConnectionFailure(error, generation: generation)
-            }
-        }
-    }
-
-    private func applyIMConnection(_ connection: IMTCPConnection, generation: UInt64) async {
-        guard generation == imConnectionGeneration else {
-            await connection.disconnect()
-            return
-        }
-
-        guard case .signedIn = phase else {
-            await connection.disconnect()
-            return
-        }
-
-        imConnectionConnectTask = nil
-        imConnection = connection
-        imConnectionStatus = .connected
-        startIMConnectionEventLoop(connection, generation: generation)
-        await syncIMConversationGapsAfterConnection()
-        await flushQueuedIMTextMessages(limit: IMHistoryPage.queuedFlushLimit)
-        scheduleIMConversationCachePersist()
-    }
-
-    private func startIMConnectionEventLoop(_ connection: IMTCPConnection, generation: UInt64) {
-        imConnectionEventTask?.cancel()
-        imConnectionEventTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            do {
-                for try await event in connection.events {
-                    await self.handleIMConnectionEvent(event, generation: generation)
-                }
-
-                await self.handleIMConnectionFailure(
-                    IMTCPClientError.connectionClosed,
-                    generation: generation
-                )
-            } catch {
-                await self.handleIMConnectionFailure(error, generation: generation)
-            }
-        }
-    }
-
-    private func handleIMConnectionEvent(_ event: IMTCPConnectionEvent, generation: UInt64) async {
-        guard generation == imConnectionGeneration else {
-            return
-        }
-
-        switch event {
-        case .heartbeatAck:
-            return
-        case .ack(let requestID, let payload):
-            imConversationStore.applyOutgoingAcknowledgement(requestID: requestID, payload: payload)
-            scheduleIMConversationCachePersist()
-        case .message(let requestID, let payload):
-            guard let currentUserID = currentUser?.id else {
-                return
-            }
-
-            imConversationStore.receiveIncomingMessage(payload, currentUserID: currentUserID)
-            scheduleIMConversationCachePersist()
-
-            if let messageID = payload.messageID, let connection = imConnection {
-                do {
-                    try await connection.sendAcknowledgement(
-                        IMTCPAckPayload(
-                            messageID: messageID,
-                            conversationID: payload.conversationID,
-                            status: "received"
-                        ),
-                        requestID: requestID
-                    )
-                } catch {
-                    await handleIMConnectionFailure(error, generation: generation)
-                    return
-                }
-            }
-
-            guard payload.senderUserID != currentUserID,
-                  payload.conversationID == imConversationStore.selectedConversationID,
-                  let readSequence = payload.serverSequence
-            else {
-                return
-            }
-
-            await markIMConversationRead(
-                conversationID: payload.conversationID,
-                readSequence: readSequence
-            )
-        case .conversationEvent(_, let payload):
-            guard let currentUserID = currentUser?.id else {
-                return
-            }
-
-            let outcome = imConversationStore.applyConversationEvent(payload, currentUserID: currentUserID)
-            if let conversationID = outcome.shouldReloadMembersForConversationID,
-               imConversationStore.conversations.contains(where: { $0.id == conversationID }) {
-                await loadIMConversationMembers(for: conversationID)
-            }
-            scheduleIMConversationCachePersist()
-        case .kick(let payload):
-            await clearSession(message: payload.message)
-        }
-    }
-
-    private func handleIMConnectionFailure(_ error: Error, generation: UInt64) async {
-        guard generation == imConnectionGeneration else {
-            return
-        }
-
-        imConnectionConnectTask = nil
-        imConnectionEventTask = nil
-        imConnection = nil
-
-        if error is CancellationError {
-            imConnectionStatus = .disconnected
-            return
-        }
-
-        if let tcpError = error as? IMTCPClientError {
-            switch tcpError {
-            case .authRejected(_, let message):
-                await clearSession(message: message)
-            case .kicked(_, let message):
-                await clearSession(message: message)
-            case .connectionClosed:
-                imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-                imConnectionStatus = .failed(message: "IM 连接已断开。")
-                scheduleIMConversationCachePersist()
-            default:
-                imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-                imConnectionStatus = .failed(message: tcpError.localizedDescription)
-                scheduleIMConversationCachePersist()
-            }
-            return
-        }
-
-        imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-        imConnectionStatus = .failed(message: error.localizedDescription)
-        scheduleIMConversationCachePersist()
+        imController.scheduleConnectionIfNeeded()
     }
 
     private func disconnectIMConnection(flushCache: Bool = true) async {
-        imConnectionGeneration &+= 1
-
-        let connection = imConnection
-        imConnection = nil
-
-        let connectTask = imConnectionConnectTask
-        imConnectionConnectTask = nil
-        connectTask?.cancel()
-
-        let eventTask = imConnectionEventTask
-        imConnectionEventTask = nil
-        eventTask?.cancel()
-
-        if let connection {
-            await connection.disconnect()
-        }
-
-        imConnectionStatus = .disconnected
-
-        if flushCache {
-            await flushIMConversationCache()
-        }
+        await imController.disconnect(flushCache: flushCache)
     }
 
     private func scheduleIMConversationBootstrap(for user: AuthUser) {
@@ -1074,6 +1432,28 @@ final class AuthManager: ObservableObject {
         }
     }
 
+    private func restoreContactStateCacheIfAvailable(for user: AuthUser) async {
+        do {
+            let snapshot = try await contactsController.loadCacheSnapshot(for: user.id)
+            guard currentUser?.id == user.id else {
+                return
+            }
+
+            contacts = snapshot.contacts.map(\.contact).sorted { $0.email < $1.email }
+            contactRequests = contactsController.normalizeRequests(
+                snapshot.incomingRequests.map(\.request)
+                    + snapshot.outgoingRequests.map(\.request)
+                    + snapshot.resolvedRequests.map(\.request),
+                currentUserID: user.id
+            )
+            lastContactStateRefreshAt = snapshot.lastRefreshAt
+            lastSeenIncomingContactRequestAt = snapshot.lastSeenIncomingContactRequestAt
+            recomputeIncomingContactRequestUnreadState()
+        } catch {
+            // Ignore cache restore failures and fall back to HTTP recovery.
+        }
+    }
+
     private func restoreIMConversationCacheIfAvailable(for user: AuthUser) async {
         do {
             let snapshot = try await imConversationCache.loadSnapshot(for: user.id)
@@ -1087,6 +1467,8 @@ final class AuthManager: ObservableObject {
 
             imConversationStore.restoreCacheSnapshot(snapshot)
             lastIMConversationSummaryRefreshAt = snapshot.lastSummaryRefreshAt
+            imConversationSummarySyncToken = snapshot.metadata.summarySyncToken
+            latestIMConversationSummaries = []
         } catch {
             // Ignore cache restore failures and continue with network bootstrap.
         }
@@ -1123,492 +1505,51 @@ final class AuthManager: ObservableObject {
         }
 
         let snapshot = imConversationStore.makeCacheSnapshot(
-            lastSummaryRefreshAt: lastIMConversationSummaryRefreshAt
+            lastSummaryRefreshAt: lastIMConversationSummaryRefreshAt,
+            summarySyncToken: imConversationSummarySyncToken
         )
         try? await imConversationCache.saveSnapshot(snapshot, for: user.id)
     }
 
-    private func loadIMConversationMembers(for conversationID: String) async {
-        guard let user = currentUser else {
-            return
-        }
-
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
-            return
-        }
-
-        imConversationMembersTask?.cancel()
-        imConversationMembersTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            self.imConversationStore.setLoadingMembers(true)
-            defer {
-                self.imConversationStore.setLoadingMembers(false)
-                self.imConversationMembersTask = nil
-            }
-
-            do {
-                let members = try await self.sessionClient.fetchIMConversationMembers(
-                    conversationID: trimmedConversationID
-                )
-                guard self.currentUser?.id == user.id else {
-                    return
-                }
-
-                self.markServerOnline()
-                self.imConversationStore.replaceMembers(
-                    in: trimmedConversationID,
-                    members: members
-                )
-                self.scheduleIMConversationCachePersist()
-            } catch {
-                await self.handleIMDataRequestError(error)
-            }
-        }
-
-        await imConversationMembersTask?.value
+    private func markIMConversationReadUpToLatestLoadedSequence(for conversationID: String) async {
+        await imController.markConversationReadUpToLatestLoadedSequence(for: conversationID)
     }
 
-    private func loadIMMessagesIfNeeded(for conversationID: String, forceReload: Bool = false) async {
-        guard let user = currentUser else {
-            return
-        }
-
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
-            return
-        }
-
-        guard forceReload || !imConversationStore.hasLoadedMessages(for: trimmedConversationID) else {
-            return
-        }
-
-        await loadIMMessagesPage(
-            for: trimmedConversationID,
-            currentUserID: user.id,
-            beforeSequence: nil,
-            mergeMode: .replace
-        )
-    }
-
-    private func syncIMConversationGap(for conversationID: String, currentUserID: UUID) async -> Bool {
+    private func markIMConversationReadIfSelectedUpToLatestLoadedSequence(for conversationID: String) async {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty,
-              let latestLoadedSequence = imConversationStore.latestLoadedServerSequence(for: trimmedConversationID)
+              imConversationStore.selectedConversationID == trimmedConversationID
         else {
-            return true
-        }
-
-        do {
-            var afterSequence = latestLoadedSequence
-            var iterations = 0
-
-            while iterations < IMHistoryPage.gapSyncMaxIterations {
-                let response = try await sessionClient.fetchIMMessagesSince(
-                    conversationID: trimmedConversationID,
-                    afterSequence: afterSequence,
-                    limit: IMHistoryPage.gapSyncLimit
-                )
-                guard currentUser?.id == currentUserID else {
-                    return false
-                }
-
-                markServerOnline()
-                imConversationStore.appendMessages(
-                    in: trimmedConversationID,
-                    messages: response.messages,
-                    currentUserID: currentUserID
-                )
-                scheduleIMConversationCachePersist()
-
-                guard response.hasMore,
-                      let nextAfterSequence = response.nextAfterSequence,
-                      nextAfterSequence > afterSequence
-                else {
-                    return true
-                }
-
-                afterSequence = UInt64(nextAfterSequence)
-                iterations += 1
-            }
-            return true
-        } catch {
-            await handleIMDataRequestError(error)
-            return false
-        }
-    }
-
-    private func syncIMConversationGapsAfterConnection() async {
-        guard let user = currentUser else {
             return
         }
 
-        guard let summaries = await fetchAndApplyIMConversationSummaries() else {
-            scheduleIMConversationSummaryReadModelCorrection(force: true)
-            return
-        }
-
-        let gapSyncTargets = prioritizedGapSyncTargets(
-            imConversationStore.gapSyncTargets(from: summaries)
-        )
-        var didSyncAllGaps = true
-        var didSyncSelectedConversationGap = false
-
-        for conversationID in gapSyncTargets {
-            let didSyncGap = await syncIMConversationGap(for: conversationID, currentUserID: user.id)
-            didSyncAllGaps = didSyncAllGaps && didSyncGap
-
-            if conversationID == imConversationStore.selectedConversationID {
-                didSyncSelectedConversationGap = didSyncGap
-            }
-        }
-
-        if didSyncSelectedConversationGap,
-           let selectedConversationID = imConversationStore.selectedConversationID {
-            await markIMConversationReadUpToLatestLoadedSequence(for: selectedConversationID)
-        }
-
-        if !didSyncAllGaps {
-            scheduleIMConversationSummaryReadModelCorrection(force: true)
-        }
-    }
-
-    private func prioritizedGapSyncTargets(_ conversationIDs: [String]) -> [String] {
-        guard let selectedConversationID = imConversationStore.selectedConversationID,
-              conversationIDs.contains(selectedConversationID)
-        else {
-            return conversationIDs
-        }
-
-        return [selectedConversationID] + conversationIDs.filter { $0 != selectedConversationID }
-    }
-
-    private func flushQueuedIMTextMessages(limit: Int) async {
-        guard !isFlushingQueuedIMTextMessages else {
-            return
-        }
-
-        guard let connection = imConnection else {
-            return
-        }
-
-        isFlushingQueuedIMTextMessages = true
-        defer {
-            isFlushingQueuedIMTextMessages = false
-        }
-
-        let requests = imConversationStore.queuedOutgoingMessageRequests(limit: limit)
-        guard !requests.isEmpty else {
-            return
-        }
-
-        scheduleIMConversationCachePersist()
-        let generation = imConnectionGeneration
-
-        for (index, request) in requests.enumerated() {
-            do {
-                try await connection.sendMessage(request.payload, requestID: request.requestID)
-            } catch {
-                for unsentRequest in requests.dropFirst(index + 1) {
-                    imConversationStore.markOutgoingQueued(
-                        requestID: unsentRequest.requestID,
-                        message: "等待 IM 长连接恢复后发送。"
-                    )
-                }
-
-                scheduleIMConversationCachePersist()
-                await handleIMConnectionFailure(error, generation: generation)
-                return
-            }
-        }
-
-        scheduleIMConversationCachePersist()
-    }
-
-    private func markIMConversationReadUpToLatestLoadedSequence(for conversationID: String) async {
-        guard let readSequence = imConversationStore.latestLoadedServerSequence(for: conversationID) else {
-            return
-        }
-
-        await markIMConversationRead(
-            conversationID: conversationID,
-            readSequence: readSequence,
-            debounceNanoseconds: 0
-        )
+        await imController.markConversationReadUpToLatestLoadedSequence(for: trimmedConversationID)
     }
 
     private func markIMConversationRead(
         conversationID: String,
         readSequence: UInt64,
-        debounceNanoseconds: UInt64 = IMHistoryPage.readReportDebounceNanoseconds
+        debounceNanoseconds: UInt64 = 250_000_000
     ) async {
-        guard let trimmedConversationID = enqueueIMConversationReadReport(
-            for: conversationID,
+        await imController.markConversationRead(
+            conversationID: conversationID,
             readSequence: readSequence,
             debounceNanoseconds: debounceNanoseconds
-        ) else {
-            return
-        }
-
-        guard debounceNanoseconds == 0 else {
-            return
-        }
-
-        await flushIMConversationReadReport(for: trimmedConversationID)
-    }
-
-    private func enqueueIMConversationReadReport(
-        for conversationID: String,
-        readSequence: UInt64,
-        debounceNanoseconds: UInt64
-    ) -> String? {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
-            return nil
-        }
-
-        let currentServerReadSequence = imConversationStore.serverLastReadSequence(for: trimmedConversationID) ?? 0
-        let nextReadSequence = max(
-            readSequence,
-            pendingIMConversationReadSequences[trimmedConversationID] ?? 0
         )
-        guard nextReadSequence > currentServerReadSequence else {
-            return nil
-        }
-
-        pendingIMConversationReadSequences[trimmedConversationID] = nextReadSequence
-        imConversationReadReportTasks[trimmedConversationID]?.cancel()
-
-        guard debounceNanoseconds > 0 else {
-            imConversationReadReportTasks[trimmedConversationID] = nil
-            return trimmedConversationID
-        }
-
-        imConversationReadReportTasks[trimmedConversationID] = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            try? await Task.sleep(nanoseconds: debounceNanoseconds)
-
-            guard !Task.isCancelled else {
-                return
-            }
-
-            await self.flushIMConversationReadReport(for: trimmedConversationID)
-        }
-
-        return trimmedConversationID
     }
 
-    private func flushIMConversationReadReport(for conversationID: String) async {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
+    private func syncContactStateAfterConnection() async {
+        guard currentUser != nil else {
             return
         }
 
-        imConversationReadReportTasks[trimmedConversationID] = nil
-
-        guard let readSequence = pendingIMConversationReadSequences.removeValue(forKey: trimmedConversationID) else {
-            return
-        }
-
-        do {
-            let response = try await sessionClient.markIMConversationRead(
-                conversationID: trimmedConversationID,
-                readSequence: readSequence
-            )
-            markServerOnline()
-            applyIMConversationExplicitReadResponse(response)
-        } catch {
-            await handleIMDataRequestError(error)
-        }
+        await reloadContacts()
+        await reloadContactRequests()
     }
 
-    private enum IMHistoryMergeMode {
-        case replace
-        case prepend
-    }
-
-    private func loadIMMessagesPage(
-        for conversationID: String,
-        currentUserID: UUID,
-        beforeSequence: UInt64?,
-        mergeMode: IMHistoryMergeMode
-    ) async {
-        imConversationMessagesTask?.cancel()
-        imConversationMessagesTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            self.imConversationStore.setLoadingMessages(true)
-            defer {
-                self.imConversationStore.setLoadingMessages(false)
-                self.imConversationMessagesTask = nil
-            }
-
-            do {
-                let messages = try await self.sessionClient.fetchIMMessages(
-                    conversationID: conversationID,
-                    beforeSequence: beforeSequence,
-                    limit: IMHistoryPage.latestLimit
-                )
-                guard self.currentUser?.id == currentUserID else {
-                    return
-                }
-
-                self.markServerOnline()
-
-                switch mergeMode {
-                case .replace:
-                    self.imConversationStore.replaceMessages(
-                        in: conversationID,
-                        messages: messages,
-                        currentUserID: currentUserID
-                    )
-                case .prepend:
-                    self.imConversationStore.prependMessages(
-                        in: conversationID,
-                        messages: messages,
-                        currentUserID: currentUserID
-                    )
-                }
-                self.scheduleIMConversationCachePersist()
-            } catch {
-                await self.handleIMDataRequestError(error)
-            }
-        }
-
-        await imConversationMessagesTask?.value
-    }
-
-    @discardableResult
-    private func reconcileIMConversationSummaryReadModel(force: Bool = true) async -> Bool {
-        if !force,
-           let lastIMConversationSummaryRefreshAt,
-           !imConversationStore.conversations.isEmpty,
-           Date().timeIntervalSince(lastIMConversationSummaryRefreshAt) < IMHistoryPage.minimumRefreshInterval {
-            return false
-        }
-
-        return await fetchAndApplyIMConversationSummaries() != nil
-    }
-
-    private func fetchAndApplyIMConversationSummaries() async -> [IMConversationSummaryResponseBody]? {
-        guard let user = currentUser else {
-            return nil
-        }
-
-        imConversationStore.setLoadingConversations(true)
-        defer {
-            imConversationStore.setLoadingConversations(false)
-        }
-
-        do {
-            let conversations = try await sessionClient.fetchIMConversations()
-            guard currentUser?.id == user.id else {
-                return nil
-            }
-
-            markServerOnline()
-            lastIMConversationSummaryRefreshAt = Date()
-            applyIMConversationSummaryReadModel(conversations)
-            return conversations
-        } catch {
-            await handleIMDataRequestError(error)
-            return nil
-        }
-    }
-
-    private func applyIMConversationSummaryReadModel(_ conversations: [IMConversationSummaryResponseBody]) {
-        imConversationStore.replaceConversationSummaries(conversations)
-        imConversationStore.applyServerSummaryReadStates(conversations)
-        scheduleIMConversationCachePersist()
-    }
-
-    private func applyIMConversationExplicitReadResponse(_ response: IMConversationReadResponseBody) {
-        imConversationStore.applyServerExplicitReadResponse(response)
-        scheduleIMConversationCachePersist()
-    }
-
-    private func upsertContact(_ contact: ContactResponseBody) {
-        if let index = contacts.firstIndex(where: { $0.id == contact.id }) {
-            contacts[index] = contact
-        } else {
-            contacts.append(contact)
-        }
-        contacts.sort { $0.email < $1.email }
-    }
-
-    private func replaceContactRequests(_ requests: [ContactRequestResponseBody], currentUserID: UUID) {
-        incomingContactRequests = requests
-            .filter { $0.status == .pending && $0.addressee.id == currentUserID }
-            .sorted(by: sortContactRequestsNewestFirst)
-        outgoingContactRequests = requests
-            .filter { $0.status == .pending && $0.requester.id == currentUserID }
-            .sorted(by: sortContactRequestsNewestFirst)
-    }
-
-    private func upsertContactRequest(_ request: ContactRequestResponseBody) {
-        guard let currentUserID = currentUser?.id else {
-            return
-        }
-
-        incomingContactRequests.removeAll { $0.id == request.id }
-        outgoingContactRequests.removeAll { $0.id == request.id }
-
-        guard request.status == .pending else {
-            return
-        }
-
-        if request.addressee.id == currentUserID {
-            incomingContactRequests.append(request)
-            incomingContactRequests.sort(by: sortContactRequestsNewestFirst)
-        } else if request.requester.id == currentUserID {
-            outgoingContactRequests.append(request)
-            outgoingContactRequests.sort(by: sortContactRequestsNewestFirst)
-        }
-    }
-
-    private func sortContactRequestsNewestFirst(
-        _ lhs: ContactRequestResponseBody,
-        _ rhs: ContactRequestResponseBody
-    ) -> Bool {
-        switch (lhs.createdAt, rhs.createdAt) {
-        case let (lhsDate?, rhsDate?):
-            return lhsDate > rhsDate
-        case (_?, nil):
-            return true
-        case (nil, _?):
-            return false
-        case (nil, nil):
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
-    }
-
-    private func normalizedContactRemark(_ remark: String?) -> String? {
-        let normalized = remark?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let normalized, !normalized.isEmpty else {
-            return nil
-        }
-        return String(normalized.prefix(64))
-    }
-
-    private func normalizedContactRequestMessage(_ message: String?) -> String? {
-        let normalized = message?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let normalized, !normalized.isEmpty else {
-            return nil
-        }
-        return String(normalized.prefix(120))
-    }
-
-    private func scheduleIMConversationSummaryReadModelCorrection(force: Bool = false) {
-        imConversationRefreshTask?.cancel()
-        imConversationRefreshTask = Task { [weak self] in
+    private func scheduleContactStateCorrection(force: Bool = false, reason _: String? = nil) {
+        contactStateCorrectionTask?.cancel()
+        contactStateCorrectionTask = Task { [weak self] in
             guard let self else {
                 return
             }
@@ -1621,9 +1562,297 @@ final class AuthManager: ObservableObject {
                 return
             }
 
-            _ = await self.reconcileIMConversationSummaryReadModel(force: force)
-            self.imConversationRefreshTask = nil
+            await self.syncContactStateAfterConnection()
+            self.contactStateCorrectionTask = nil
         }
+    }
+
+    private func setDirectConversationRelationshipActionMessage(_ message: String?, for conversationID: String) {
+        if let message, !message.isEmpty {
+            directConversationRelationshipActionMessages[conversationID] = message
+        } else {
+            directConversationRelationshipActionMessages.removeValue(forKey: conversationID)
+        }
+    }
+
+    private func normalizedConversationTitle(_ title: String, conversationID: String) -> String {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "会话 \(conversationID.prefix(8))"
+        }
+        return trimmed
+    }
+
+    private func fallbackSummary(for conversation: IMConversation) -> String {
+        if !conversation.members.isEmpty {
+            return conversation.members.map(\.email).joined(separator: "、")
+        }
+
+        if conversation.memberCount > 0 {
+            return "\(conversation.memberCount) 位成员"
+        }
+
+        if !conversation.memberUserIDs.isEmpty {
+            return "\(conversation.memberUserIDs.count) 位成员"
+        }
+
+        return "当前还没有成员信息"
+    }
+
+    private func groupConversationSummary(for conversation: IMConversation) -> String {
+        if !conversation.members.isEmpty {
+            return conversation.members.map(\.email).joined(separator: "、")
+        }
+
+        if conversation.memberCount > 0 {
+            return "成员 \(conversation.memberCount) 人"
+        }
+
+        if !conversation.memberUserIDs.isEmpty {
+            return "成员 \(conversation.memberUserIDs.count) 人"
+        }
+
+        return "当前还没有成员信息"
+    }
+
+    private func directConversationPeer(
+        in conversation: IMConversation,
+        currentUserID: UUID
+    ) -> IMDirectPeer? {
+        if let directPeer = conversation.directPeer,
+           directPeer.id != currentUserID {
+            return directPeer
+        }
+
+        guard let member = conversation.members.first(where: { $0.id != currentUserID }) else {
+            return nil
+        }
+
+        return IMDirectPeer(id: member.id, email: member.email)
+    }
+
+    private func conversationStoreIsLoadingDirectPeer(for conversationID: String) -> Bool {
+        imConversationStore.isLoadingMembers && imConversationStore.selectedConversationID == conversationID
+    }
+
+    private func ensureDirectConversationPeer(for conversationID: String) async -> IMDirectPeer? {
+        guard let currentUser,
+              let conversation = imConversationStore.conversations.first(where: { $0.id == conversationID }),
+              conversation.kind == .direct
+        else {
+            return nil
+        }
+
+        if let peer = directConversationPeer(in: conversation, currentUserID: currentUser.id) {
+            return peer
+        }
+
+        await imController.loadConversationMembers(for: conversationID)
+
+        guard let refreshedConversation = imConversationStore.conversations.first(where: { $0.id == conversationID }) else {
+            return nil
+        }
+
+        return directConversationPeer(in: refreshedConversation, currentUserID: currentUser.id)
+    }
+
+    private func upsertContact(_ contact: ContactResponseBody) {
+        if let index = contacts.firstIndex(where: { $0.id == contact.id }) {
+            contacts[index] = contact
+        } else {
+            contacts.append(contact)
+        }
+        contacts.sort { $0.email < $1.email }
+    }
+
+    private func applyContactEvent(_ payload: IMTCPContactEventPayload) {
+        guard let currentUser else {
+            return
+        }
+
+        var didApply = false
+
+        switch payload.eventType {
+        case .friendRequestCreated:
+            guard let request = payload.request,
+                  contactsController.isRequestRelevant(request, to: currentUser.id)
+            else {
+                scheduleContactStateCorrection(reason: "friend_request_created payload is incomplete")
+                return
+            }
+
+            upsertContactRequest(request)
+            didApply = true
+        case .friendRequestAccepted:
+            guard let request = payload.request,
+                  contactsController.isRequestRelevant(request, to: currentUser.id),
+                  let contact = payload.contact
+            else {
+                scheduleContactStateCorrection(reason: "friend_request_accepted payload is incomplete")
+                return
+            }
+
+            upsertContactRequest(request)
+            upsertContact(contact)
+            didApply = true
+        case .friendRequestDeclined, .friendRequestCancelled:
+            guard let request = payload.request,
+                  contactsController.isRequestRelevant(request, to: currentUser.id)
+            else {
+                scheduleContactStateCorrection(reason: "\(payload.eventType.rawValue) payload is incomplete")
+                return
+            }
+
+            upsertContactRequest(request)
+            didApply = true
+        case .contactRemoved:
+            guard let contactUserID = payload.contactUserID else {
+                scheduleContactStateCorrection(reason: "contact_removed payload is incomplete")
+                return
+            }
+
+            contacts.removeAll { $0.id == contactUserID }
+            didApply = true
+        }
+
+        if didApply {
+            scheduleContactStateCachePersist()
+        }
+    }
+
+    private func replaceContactRequests(_ requests: [ContactRequestResponseBody], currentUserID: UUID) {
+        contactRequests = contactsController.normalizeRequests(
+            requests,
+            currentUserID: currentUserID
+        )
+        recomputeIncomingContactRequestUnreadState()
+    }
+
+    private func upsertContactRequest(_ request: ContactRequestResponseBody) {
+        guard let currentUserID = currentUser?.id else {
+            return
+        }
+
+        guard contactsController.isRequestRelevant(request, to: currentUserID) else {
+            return
+        }
+
+        contactRequests.removeAll { $0.id == request.id }
+        contactRequests.append(request)
+        contactRequests = contactsController.normalizeRequests(
+            contactRequests,
+            currentUserID: currentUserID
+        )
+        recomputeIncomingContactRequestUnreadState()
+    }
+
+    private func updateContactRequestStatus(
+        id requestID: UUID,
+        status: ContactRequestStatus,
+        respondedAt: Date
+    ) {
+        guard let currentUserID = currentUser?.id,
+              let index = contactRequests.firstIndex(where: { $0.id == requestID })
+        else {
+            return
+        }
+
+        let current = contactRequests[index]
+        contactRequests[index] = ContactRequestResponseBody(
+            id: current.id,
+            requester: current.requester,
+            addressee: current.addressee,
+            status: status,
+            message: current.message,
+            requesterRemark: current.requesterRemark,
+            addresseeRemark: current.addresseeRemark,
+            createdAt: current.createdAt,
+            updatedAt: respondedAt,
+            respondedAt: respondedAt
+        )
+        contactRequests = contactsController.normalizeRequests(
+            contactRequests,
+            currentUserID: currentUserID
+        )
+        recomputeIncomingContactRequestUnreadState()
+    }
+
+    private func scheduleContactStateCachePersist() {
+        guard currentUser != nil else {
+            return
+        }
+
+        contactStateCachePersistTask?.cancel()
+        contactStateCachePersistTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: IMHistoryPage.cachePersistDebounceNanoseconds)
+            guard !Task.isCancelled else {
+                return
+            }
+            await self?.flushContactStateCache()
+        }
+    }
+
+    private func flushContactStateCache() async {
+        contactStateCachePersistTask?.cancel()
+        contactStateCachePersistTask = nil
+
+        guard let user = currentUser else {
+            return
+        }
+
+        do {
+            try await contactsController.saveCacheSnapshot(
+                makeContactStateCacheSnapshot(),
+                for: user.id
+            )
+        } catch {
+            // Ignore cache persistence failures and keep the in-memory state authoritative.
+        }
+    }
+
+    private func makeContactStateCacheSnapshot() -> ContactStateCacheSnapshot {
+        ContactStateCacheSnapshot(
+            contacts: contacts.map(CachedContactState.init),
+            incomingRequests: incomingPendingContactRequests.map(CachedContactRequestState.init),
+            outgoingRequests: outgoingPendingContactRequests.map(CachedContactRequestState.init),
+            resolvedRequests: recentResolvedContactRequests.map(CachedContactRequestState.init),
+            lastRefreshAt: lastContactStateRefreshAt,
+            lastSeenIncomingContactRequestAt: lastSeenIncomingContactRequestAt
+        )
+    }
+
+    private var latestIncomingContactRequestAt: Date? {
+        incomingPendingContactRequests.compactMap(\.createdAt).max()
+    }
+
+    private func recomputeIncomingContactRequestUnreadState() {
+        let incomingContactRequests = incomingPendingContactRequests
+
+        guard !incomingContactRequests.isEmpty else {
+            unseenIncomingContactRequestCount = 0
+            return
+        }
+
+        if let lastSeenIncomingContactRequestAt {
+            unseenIncomingContactRequestCount = incomingContactRequests.reduce(into: 0) { count, request in
+                guard let createdAt = request.createdAt, createdAt > lastSeenIncomingContactRequestAt else {
+                    return
+                }
+                count += 1
+            }
+            return
+        }
+
+        unseenIncomingContactRequestCount = incomingContactRequests.reduce(into: 0) { count, request in
+            guard request.createdAt != nil else {
+                return
+            }
+            count += 1
+        }
+    }
+
+    private func scheduleIMConversationSummaryReadModelCorrection(force: Bool = false) {
+        imController.scheduleConversationSummaryReadModelCorrection(force: force)
     }
 
     private func handleIMDataRequestError(_ error: Error) async {
@@ -1646,8 +1875,18 @@ final class AuthManager: ObservableObject {
         }
     }
 
-    private func handleContactRequestsError(_ error: Error) async {
-        contactRequestsMessage = error.localizedDescription
+    private func handleContactRequestsLoadError(_ error: Error) async {
+        contactRequestsLoadMessage = error.localizedDescription
+
+        if await shouldPreserveSession(for: error) {
+            await markServerUnavailableIfNeeded(for: error)
+        } else {
+            await clearSession(message: error.localizedDescription)
+        }
+    }
+
+    private func handleContactRequestsActionError(_ error: Error) async {
+        contactRequestActionMessage = error.localizedDescription
 
         if await shouldPreserveSession(for: error) {
             await markServerUnavailableIfNeeded(for: error)
@@ -1657,11 +1896,11 @@ final class AuthManager: ObservableObject {
     }
 
     private func shouldPreserveSession(for error: Error) async -> Bool {
-        await sessionClient.shouldPreserveSession(for: error)
+        await authSessionController.shouldPreserveSession(for: error)
     }
 
     private func markServerUnavailableIfNeeded(for error: Error) async {
-        if await sessionClient.shouldMarkServerOffline(for: error) {
+        if await authSessionController.shouldMarkServerOffline(for: error) {
             markServerOffline(error)
         }
     }

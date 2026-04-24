@@ -13,8 +13,10 @@ struct IMRealtimeMessagePersistenceResult: Sendable {
 enum IMRealtimeMessageError: Error, LocalizedError, Equatable, Sendable {
     case invalidConversationID
     case conversationUnavailable
-    case unsupportedMessageKind
+    case unsupportedMessageContent
     case emptyTextBody
+    case invalidReplyReference
+    case directConversationFrozen
     case strangerDirectMessageLimitReached
 
     var ackStatus: String {
@@ -23,10 +25,14 @@ enum IMRealtimeMessageError: Error, LocalizedError, Equatable, Sendable {
             return "invalid_conversation_id"
         case .conversationUnavailable:
             return "conversation_unavailable"
-        case .unsupportedMessageKind:
-            return "unsupported_message_kind"
+        case .unsupportedMessageContent:
+            return "unsupported_message_content"
         case .emptyTextBody:
             return "empty_text_body"
+        case .invalidReplyReference:
+            return "invalid_reply_reference"
+        case .directConversationFrozen:
+            return "direct_conversation_frozen"
         case .strangerDirectMessageLimitReached:
             return "stranger_direct_message_limit_reached"
         }
@@ -38,10 +44,14 @@ enum IMRealtimeMessageError: Error, LocalizedError, Equatable, Sendable {
             return "会话 ID 无效。"
         case .conversationUnavailable:
             return "会话不存在或当前用户不在该会话中。"
-        case .unsupportedMessageKind:
-            return "当前只支持 text 消息。"
+        case .unsupportedMessageContent:
+            return "当前消息类型不支持发送。"
         case .emptyTextBody:
             return "文本消息不能为空。"
+        case .invalidReplyReference:
+            return "回复引用无效。"
+        case .directConversationFrozen:
+            return "你们已不是好友，当前会话不能继续发送消息。"
         case .strangerDirectMessageLimitReached:
             return "你们还不是好友，对方回复前只能发送一条消息。"
         }
@@ -51,6 +61,7 @@ enum IMRealtimeMessageError: Error, LocalizedError, Equatable, Sendable {
 struct IMRealtimeMessageService {
     private struct ConversationMembershipContext {
         let conversationKind: IMConversationKind
+        let directMessagingState: IMDirectMessagingState
         let memberUserIDs: [UUID]
     }
 
@@ -60,32 +71,29 @@ struct IMRealtimeMessageService {
         _ payload: IMTCPMessagePayload,
         senderUserID: UUID
     ) async throws -> IMRealtimeMessagePersistenceResult {
-        guard payload.kind == "text" else {
-            throw IMRealtimeMessageError.unsupportedMessageKind
-        }
-
         let normalizedConversationID = payload.conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let conversationID = UUID(uuidString: normalizedConversationID) else {
             throw IMRealtimeMessageError.invalidConversationID
         }
 
-        guard let text = payload.body["text"]?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
-            throw IMRealtimeMessageError.emptyTextBody
-        }
-
-        let normalizedBody = ["text": text]
+        let normalizedContent = try normalizedContent(from: payload.content)
         let trimmedClientMessageID = payload.clientMessageID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedClientMessageID = trimmedClientMessageID?.isEmpty == false ? trimmedClientMessageID : nil
         let serverTimestamp = Date()
 
-        return try await db.transaction { database in
+        let result = try await db.transaction { database in
             let membershipContext = try await requireConversationMembershipContext(
                 conversationID: conversationID,
                 senderUserID: senderUserID,
                 on: database
             )
             let recipientUserIDs = membershipContext.memberUserIDs
+            let canonicalContent = try await canonicalizeReplyReferenceIfNeeded(
+                normalizedContent,
+                conversationID: conversationID,
+                on: database
+            )
             if let existingMessage = try await existingMessage(
                 conversationID: conversationID,
                 senderUserID: senderUserID,
@@ -103,6 +111,7 @@ struct IMRealtimeMessageService {
             try await enforceStrangerOneToOneMessageLimitIfNeeded(
                 conversationID: conversationID,
                 conversationKind: membershipContext.conversationKind,
+                directMessagingState: membershipContext.directMessagingState,
                 senderUserID: senderUserID,
                 memberUserIDs: recipientUserIDs,
                 on: database
@@ -117,8 +126,7 @@ struct IMRealtimeMessageService {
                 senderUserID: senderUserID,
                 serverSequence: serverSequence,
                 clientMessageID: normalizedClientMessageID,
-                kind: payload.kind,
-                body: normalizedBody
+                content: canonicalContent
             )
             try await message.create(on: database)
             try await advanceReadSequence(
@@ -136,6 +144,15 @@ struct IMRealtimeMessageService {
                 fallbackTimestamp: serverTimestamp
             )
         }
+
+        if result.didCreateMessage {
+            try await IMConversationSummaryProjectionService(db: db).refreshConversationSummaries(
+                conversationID: conversationID,
+                recipientUserIDs: result.recipientUserIDs
+            )
+        }
+
+        return result
     }
 
     private func existingMessage(
@@ -163,7 +180,7 @@ struct IMRealtimeMessageService {
         fallbackTimestamp: Date = Date()
     ) throws -> IMRealtimeMessagePersistenceResult {
         let messageID = try message.requireID().uuidString
-        let body = try message.decodedBody()
+        let content = try message.decodedContent()
 
         return IMRealtimeMessagePersistenceResult(
             conversationID: conversationID,
@@ -179,12 +196,91 @@ struct IMRealtimeMessageService {
                 senderUserID: message.$sender.id,
                 serverSequence: UInt64(message.serverSequence),
                 serverTimestamp: message.createdAt ?? fallbackTimestamp,
-                kind: message.kind,
-                body: body
+                content: content
             ),
             recipientUserIDs: recipientUserIDs,
             didCreateMessage: didCreateMessage
         )
+    }
+
+    private func normalizedContent(from content: IMMessageContent) throws -> IMMessageContent {
+        switch content {
+        case .text(let rawText):
+            let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                throw IMRealtimeMessageError.emptyTextBody
+            }
+            return .text(text)
+        case .reply(let reference, let rawText):
+            let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let referenceMessageID = reference.messageID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let referencePreview = reference.previewText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                throw IMRealtimeMessageError.emptyTextBody
+            }
+            guard !referenceMessageID.isEmpty, !referencePreview.isEmpty else {
+                throw IMRealtimeMessageError.invalidReplyReference
+            }
+            return .reply(
+                reference: IMReplyReference(
+                    messageID: referenceMessageID,
+                    senderUserID: reference.senderUserID,
+                    previewText: referencePreview
+                ),
+                text: text
+            )
+        case .recalled, .system:
+            throw IMRealtimeMessageError.unsupportedMessageContent
+        }
+    }
+
+    private func canonicalizeReplyReferenceIfNeeded(
+        _ content: IMMessageContent,
+        conversationID: UUID,
+        on database: any Database
+    ) async throws -> IMMessageContent {
+        guard case .reply(let reference, _) = content,
+              let replyMessageID = UUID(uuidString: reference.messageID)
+        else {
+            if case .reply = content {
+                throw IMRealtimeMessageError.invalidReplyReference
+            }
+            return content
+        }
+
+        guard let referencedMessage = try await ConversationMessage.query(on: database)
+            .filter(\.$id == replyMessageID)
+            .filter(\.$conversation.$id == conversationID)
+            .first()
+        else {
+            throw IMRealtimeMessageError.invalidReplyReference
+        }
+
+        let canonicalPreview = try canonicalReplyReferencePreview(
+            for: referencedMessage.decodedContent()
+        )
+        guard case .reply(_, let text) = content else {
+            return content
+        }
+
+        return .reply(
+            reference: IMReplyReference(
+                messageID: replyMessageID.uuidString,
+                senderUserID: referencedMessage.$sender.id,
+                previewText: canonicalPreview
+            ),
+            text: text
+        )
+    }
+
+    private func canonicalReplyReferencePreview(for content: IMMessageContent) throws -> String {
+        switch content {
+        case .recalled:
+            return "原消息已撤回"
+        case .text, .reply, .system:
+            let preview = content.previewText.trimmingCharacters(in: .whitespacesAndNewlines)
+            return preview.isEmpty ? "原消息暂不可用" : preview
+        }
     }
 
     private func requireConversationMembershipContext(
@@ -207,6 +303,7 @@ struct IMRealtimeMessageService {
 
         return ConversationMembershipContext(
             conversationKind: conversation.conversationKind,
+            directMessagingState: conversation.directMessagingStateEnum,
             memberUserIDs: memberUserIDs
         )
     }
@@ -214,12 +311,17 @@ struct IMRealtimeMessageService {
     private func enforceStrangerOneToOneMessageLimitIfNeeded(
         conversationID: UUID,
         conversationKind: IMConversationKind,
+        directMessagingState: IMDirectMessagingState,
         senderUserID: UUID,
         memberUserIDs: [UUID],
         on database: any Database
     ) async throws {
         guard conversationKind == .direct else {
             return
+        }
+
+        guard directMessagingState == .active else {
+            throw IMRealtimeMessageError.directConversationFrozen
         }
 
         guard memberUserIDs.count == 2,
@@ -329,7 +431,9 @@ struct IMRealtimeMessageService {
            let nextSequence = try await sql.update(Conversation.schema)
             .set(
                 "last_message_sequence",
-                to: SQLQueryString("\(ident: "last_message_sequence") + 1")
+                to: SQLQueryString(
+                    "MAX(\(ident: "last_message_sequence"), COALESCE((SELECT MAX(\(ident: "server_sequence")) FROM \(ident: ConversationMessage.schema) WHERE \(ident: "conversation_id") = \(bind: conversationID)), 0)) + 1"
+                )
             )
             .set("updated_at", to: updatedAt)
             .where("id", .equal, conversationID)
@@ -343,7 +447,15 @@ struct IMRealtimeMessageService {
             throw IMRealtimeMessageError.conversationUnavailable
         }
 
-        conversation.lastMessageSequence += 1
+        let latestPersistedMessageSequence = try await ConversationMessage.query(on: database)
+            .filter(\.$conversation.$id == conversationID)
+            .sort(\.$serverSequence, .descending)
+            .first()?
+            .serverSequence ?? 0
+        conversation.lastMessageSequence = max(
+            conversation.lastMessageSequence,
+            latestPersistedMessageSequence
+        ) + 1
         conversation.updatedAt = updatedAt
         try await conversation.update(on: database)
         return conversation.lastMessageSequence

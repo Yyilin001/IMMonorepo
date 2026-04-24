@@ -4,6 +4,23 @@ import SwiftData
 public struct IMCacheMetadataState: Sendable, Equatable {
     public let selectedConversationID: String?
     public let lastSummaryRefreshAt: Date?
+    public let summarySyncToken: String?
+    public let summaryNextCursor: String?
+    public let hasMoreConversationSummaries: Bool
+
+    public init(
+        selectedConversationID: String?,
+        lastSummaryRefreshAt: Date?,
+        summarySyncToken: String? = nil,
+        summaryNextCursor: String? = nil,
+        hasMoreConversationSummaries: Bool = false
+    ) {
+        self.selectedConversationID = selectedConversationID
+        self.lastSummaryRefreshAt = lastSummaryRefreshAt
+        self.summarySyncToken = summarySyncToken
+        self.summaryNextCursor = summaryNextCursor
+        self.hasMoreConversationSummaries = hasMoreConversationSummaries
+    }
 }
 
 public struct IMSyncCursorState: Sendable, Equatable {
@@ -29,7 +46,13 @@ public struct IMConversationCacheSnapshot: Sendable, Equatable {
     }
 
     public static let empty = IMConversationCacheSnapshot(
-        metadata: IMCacheMetadataState(selectedConversationID: nil, lastSummaryRefreshAt: nil),
+        metadata: IMCacheMetadataState(
+            selectedConversationID: nil,
+            lastSummaryRefreshAt: nil,
+            summarySyncToken: nil,
+            summaryNextCursor: nil,
+            hasMoreConversationSummaries: false
+        ),
         conversations: [],
         cursors: []
     )
@@ -47,12 +70,18 @@ public struct IMConversationCacheSnapshot: Sendable, Equatable {
     init(
         conversations: [IMCachedConversationState],
         selectedConversationID: String?,
-        lastSummaryRefreshAt: Date?
+        lastSummaryRefreshAt: Date?,
+        summarySyncToken: String?,
+        summaryNextCursor: String?,
+        hasMoreConversationSummaries: Bool
     ) {
         self.init(
             metadata: IMCacheMetadataState(
                 selectedConversationID: selectedConversationID,
-                lastSummaryRefreshAt: lastSummaryRefreshAt
+                lastSummaryRefreshAt: lastSummaryRefreshAt,
+                summarySyncToken: summarySyncToken,
+                summaryNextCursor: summaryNextCursor,
+                hasMoreConversationSummaries: hasMoreConversationSummaries
             ),
             conversations: conversations,
             cursors: conversations.map { conversation in
@@ -71,6 +100,10 @@ public struct IMCachedConversationState: Identifiable, Sendable, Equatable {
     public let id: String
     public let title: String
     public let kind: IMConversationKind
+    public let directMessagingState: IMDirectMessagingState?
+    public let directPeer: IMDirectPeer?
+    public let notice: String?
+    public let avatarPreset: IMConversationAvatarPreset?
     public let memberCount: Int
     public let memberUserIDs: [UUID]
     public let messages: [IMCachedMessageState]
@@ -81,7 +114,62 @@ public struct IMCachedConversationState: Identifiable, Sendable, Equatable {
     public let oldestLoadedServerSequence: UInt64?
     public let serverLastReadSequence: UInt64
     public let serverUnreadCount: Int
+    public let isPinned: Bool
+    public let pinnedAt: Date?
+    public let isMuted: Bool
+    public let draftText: String
+    public let draftUpdatedAt: Date?
     public let updatedAt: Date
+
+    public init(
+        id: String,
+        title: String,
+        kind: IMConversationKind,
+        directMessagingState: IMDirectMessagingState? = nil,
+        directPeer: IMDirectPeer? = nil,
+        notice: String? = nil,
+        avatarPreset: IMConversationAvatarPreset? = nil,
+        memberCount: Int,
+        memberUserIDs: [UUID],
+        messages: [IMCachedMessageState],
+        hasLoadedMessages: Bool,
+        lastMessagePreviewText: String,
+        hasMoreHistory: Bool,
+        latestSyncedServerSequence: UInt64?,
+        oldestLoadedServerSequence: UInt64?,
+        serverLastReadSequence: UInt64,
+        serverUnreadCount: Int,
+        isPinned: Bool = false,
+        pinnedAt: Date? = nil,
+        isMuted: Bool = false,
+        draftText: String = "",
+        draftUpdatedAt: Date? = nil,
+        updatedAt: Date
+    ) {
+        self.id = id
+        self.title = title
+        self.kind = kind
+        self.directMessagingState = directMessagingState
+        self.directPeer = directPeer
+        self.notice = notice
+        self.avatarPreset = avatarPreset
+        self.memberCount = memberCount
+        self.memberUserIDs = memberUserIDs
+        self.messages = messages
+        self.hasLoadedMessages = hasLoadedMessages
+        self.lastMessagePreviewText = lastMessagePreviewText
+        self.hasMoreHistory = hasMoreHistory
+        self.latestSyncedServerSequence = latestSyncedServerSequence
+        self.oldestLoadedServerSequence = oldestLoadedServerSequence
+        self.serverLastReadSequence = serverLastReadSequence
+        self.serverUnreadCount = serverUnreadCount
+        self.isPinned = isPinned
+        self.pinnedAt = pinnedAt
+        self.isMuted = isMuted
+        self.draftText = draftText
+        self.draftUpdatedAt = draftUpdatedAt
+        self.updatedAt = updatedAt
+    }
 }
 
 public struct IMCachedMessageState: Identifiable, Sendable, Equatable {
@@ -91,11 +179,14 @@ public struct IMCachedMessageState: Identifiable, Sendable, Equatable {
     public let serverMessageID: String?
     public let senderUserID: UUID?
     public let serverSequence: UInt64?
-    public let kind: String
-    public let text: String
+    public let content: IMMessageContent
     public let direction: IMMessageDirection
     public let createdAt: Date
     public let deliveryState: IMMessageDeliveryState
+
+    public var text: String {
+        content.previewText
+    }
 }
 
 public protocol IMConversationCaching: Sendable {
@@ -169,17 +260,26 @@ public final class IMCacheMetadataEntity {
     public var ownerUserID: String
     public var selectedConversationID: String?
     public var lastSummaryRefreshAt: Date?
+    public var summarySyncToken: String?
+    public var summaryNextCursor: String?
+    public var hasMoreConversationSummaries: Bool
 
     init(
         recordID: String,
         ownerUserID: String,
         selectedConversationID: String?,
-        lastSummaryRefreshAt: Date?
+        lastSummaryRefreshAt: Date?,
+        summarySyncToken: String?,
+        summaryNextCursor: String?,
+        hasMoreConversationSummaries: Bool
     ) {
         self.recordID = recordID
         self.ownerUserID = ownerUserID
         self.selectedConversationID = selectedConversationID
         self.lastSummaryRefreshAt = lastSummaryRefreshAt
+        self.summarySyncToken = summarySyncToken
+        self.summaryNextCursor = summaryNextCursor
+        self.hasMoreConversationSummaries = hasMoreConversationSummaries
     }
 }
 
@@ -190,12 +290,22 @@ public final class IMCachedConversationSummaryEntity {
     public var conversationID: String
     public var title: String
     public var kindRawValue: String
+    public var directMessagingStateRawValue: String?
+    public var directPeerUserID: String?
+    public var directPeerEmail: String?
+    public var notice: String?
+    public var avatarPresetRawValue: String?
     public var memberCount: Int
     public var memberUserIDsBlob: String
     public var lastMessagePreviewText: String
     public var updatedAt: Date
     public var serverLastReadSequence: Int
     public var serverUnreadCount: Int
+    public var isPinned: Bool
+    public var pinnedAt: Date?
+    public var isMuted: Bool
+    public var draftText: String
+    public var draftUpdatedAt: Date?
 
     init(
         recordID: String,
@@ -203,24 +313,44 @@ public final class IMCachedConversationSummaryEntity {
         conversationID: String,
         title: String,
         kindRawValue: String,
+        directMessagingStateRawValue: String?,
+        directPeerUserID: String?,
+        directPeerEmail: String?,
+        notice: String?,
+        avatarPresetRawValue: String?,
         memberCount: Int,
         memberUserIDsBlob: String,
         lastMessagePreviewText: String,
         updatedAt: Date,
         serverLastReadSequence: Int,
-        serverUnreadCount: Int
+        serverUnreadCount: Int,
+        isPinned: Bool,
+        pinnedAt: Date?,
+        isMuted: Bool,
+        draftText: String,
+        draftUpdatedAt: Date?
     ) {
         self.recordID = recordID
         self.ownerUserID = ownerUserID
         self.conversationID = conversationID
         self.title = title
         self.kindRawValue = kindRawValue
+        self.directMessagingStateRawValue = directMessagingStateRawValue
+        self.directPeerUserID = directPeerUserID
+        self.directPeerEmail = directPeerEmail
+        self.notice = notice
+        self.avatarPresetRawValue = avatarPresetRawValue
         self.memberCount = memberCount
         self.memberUserIDsBlob = memberUserIDsBlob
         self.lastMessagePreviewText = lastMessagePreviewText
         self.updatedAt = updatedAt
         self.serverLastReadSequence = serverLastReadSequence
         self.serverUnreadCount = serverUnreadCount
+        self.isPinned = isPinned
+        self.pinnedAt = pinnedAt
+        self.isMuted = isMuted
+        self.draftText = draftText
+        self.draftUpdatedAt = draftUpdatedAt
     }
 }
 
@@ -235,6 +365,7 @@ public final class IMCachedMessageEntity {
     public var serverSequence: Int?
     public var kind: String
     public var textPreview: String
+    public var contentJSON: String?
     public var directionRawValue: String
     public var createdAt: Date
     public var deliveryStateRawValue: String
@@ -250,6 +381,7 @@ public final class IMCachedMessageEntity {
         serverSequence: Int?,
         kind: String,
         textPreview: String,
+        contentJSON: String?,
         directionRawValue: String,
         createdAt: Date,
         deliveryStateRawValue: String,
@@ -264,6 +396,7 @@ public final class IMCachedMessageEntity {
         self.serverSequence = serverSequence
         self.kind = kind
         self.textPreview = textPreview
+        self.contentJSON = contentJSON
         self.directionRawValue = directionRawValue
         self.createdAt = createdAt
         self.deliveryStateRawValue = deliveryStateRawValue
@@ -344,6 +477,13 @@ public actor IMConversationCacheModelActor {
                 id: summary.conversationID,
                 title: summary.title,
                 kind: IMConversationKind(rawValue: summary.kindRawValue) ?? .group,
+                directMessagingState: summary.directMessagingStateRawValue.flatMap(IMDirectMessagingState.init(rawValue:)),
+                directPeer: Self.directPeer(
+                    userID: summary.directPeerUserID,
+                    email: summary.directPeerEmail
+                ),
+                notice: summary.notice,
+                avatarPreset: summary.avatarPresetRawValue.flatMap(IMConversationAvatarPreset.init(rawValue:)),
                 memberCount: summary.memberCount,
                 memberUserIDs: Self.decodeUUIDs(from: summary.memberUserIDsBlob),
                 messages: cachedMessages,
@@ -362,10 +502,21 @@ public actor IMConversationCacheModelActor {
                     : nil,
                 serverLastReadSequence: UInt64(max(0, summary.serverLastReadSequence)),
                 serverUnreadCount: max(0, summary.serverUnreadCount),
+                isPinned: summary.isPinned,
+                pinnedAt: summary.pinnedAt,
+                isMuted: summary.isMuted,
+                draftText: summary.draftText,
+                draftUpdatedAt: summary.draftUpdatedAt,
                 updatedAt: summary.updatedAt
             )
         }
         .sorted { left, right in
+            if left.isPinned != right.isPinned {
+                return left.isPinned && !right.isPinned
+            }
+            if left.isPinned && right.isPinned, left.pinnedAt != right.pinnedAt {
+                return (left.pinnedAt ?? .distantPast) > (right.pinnedAt ?? .distantPast)
+            }
             if left.updatedAt == right.updatedAt {
                 return left.id < right.id
             }
@@ -375,7 +526,10 @@ public actor IMConversationCacheModelActor {
         return IMConversationCacheSnapshot(
             metadata: IMCacheMetadataState(
                 selectedConversationID: metadata?.selectedConversationID,
-                lastSummaryRefreshAt: metadata?.lastSummaryRefreshAt
+                lastSummaryRefreshAt: metadata?.lastSummaryRefreshAt,
+                summarySyncToken: metadata?.summarySyncToken,
+                summaryNextCursor: metadata?.summaryNextCursor,
+                hasMoreConversationSummaries: metadata?.hasMoreConversationSummaries ?? false
             ),
             conversations: conversations,
             cursors: cursorStates
@@ -393,7 +547,10 @@ public actor IMConversationCacheModelActor {
                 recordID: Self.metadataRecordID(ownerUserID: ownerUserID),
                 ownerUserID: ownerUserID,
                 selectedConversationID: snapshot.metadata.selectedConversationID,
-                lastSummaryRefreshAt: snapshot.metadata.lastSummaryRefreshAt
+                lastSummaryRefreshAt: snapshot.metadata.lastSummaryRefreshAt,
+                summarySyncToken: snapshot.metadata.summarySyncToken,
+                summaryNextCursor: snapshot.metadata.summaryNextCursor,
+                hasMoreConversationSummaries: snapshot.metadata.hasMoreConversationSummaries
             )
         )
 
@@ -411,12 +568,22 @@ public actor IMConversationCacheModelActor {
                     conversationID: conversation.id,
                     title: conversation.title,
                     kindRawValue: conversation.kind.rawValue,
+                    directMessagingStateRawValue: conversation.directMessagingState?.rawValue,
+                    directPeerUserID: conversation.directPeer?.id.uuidString,
+                    directPeerEmail: conversation.directPeer?.email,
+                    notice: conversation.notice,
+                    avatarPresetRawValue: conversation.avatarPreset?.rawValue,
                     memberCount: conversation.memberCount,
                     memberUserIDsBlob: Self.encodeUUIDs(conversation.memberUserIDs),
                     lastMessagePreviewText: conversation.lastMessagePreviewText,
                     updatedAt: conversation.updatedAt,
                     serverLastReadSequence: Int(min(conversation.serverLastReadSequence, UInt64(Int.max))),
-                    serverUnreadCount: max(0, conversation.serverUnreadCount)
+                    serverUnreadCount: max(0, conversation.serverUnreadCount),
+                    isPinned: conversation.isPinned,
+                    pinnedAt: conversation.pinnedAt,
+                    isMuted: conversation.isMuted,
+                    draftText: conversation.draftText,
+                    draftUpdatedAt: conversation.draftUpdatedAt
                 )
             )
 
@@ -447,8 +614,9 @@ public actor IMConversationCacheModelActor {
                         clientMessageID: message.clientMessageID,
                         senderUserID: message.senderUserID?.uuidString,
                         serverSequence: message.serverSequence.map { Int(min($0, UInt64(Int.max))) },
-                        kind: message.kind,
-                        textPreview: message.text,
+                        kind: Self.cachedMessageKind(from: message.content),
+                        textPreview: Self.cachedMessagePreview(from: message.content),
+                        contentJSON: Self.cachedMessageJSON(from: message.content),
                         directionRawValue: message.direction.rawValue,
                         createdAt: message.createdAt,
                         deliveryStateRawValue: Self.deliveryStateRawValue(from: message.deliveryState),
@@ -529,8 +697,11 @@ public actor IMConversationCacheModelActor {
             serverMessageID: entity.serverSequence == nil ? nil : entity.messageID,
             senderUserID: entity.senderUserID.flatMap(UUID.init(uuidString:)),
             serverSequence: entity.serverSequence.map(UInt64.init),
-            kind: entity.kind,
-            text: entity.textPreview,
+            content: cachedMessageContent(
+                kind: entity.kind,
+                textPreview: entity.textPreview,
+                contentJSON: entity.contentJSON
+            ),
             direction: IMMessageDirection(rawValue: entity.directionRawValue) ?? .incoming,
             createdAt: entity.createdAt,
             deliveryState: deliveryState(
@@ -562,6 +733,48 @@ public actor IMConversationCacheModelActor {
         }
     }
 
+    private static func cachedMessageKind(from content: IMMessageContent) -> String {
+        content.type.rawValue
+    }
+
+    private static func cachedMessagePreview(from content: IMMessageContent) -> String {
+        content.previewText
+    }
+
+    private static func cachedMessageJSON(from content: IMMessageContent) -> String? {
+        let encoder = JSONEncoder()
+        guard let data = try? encoder.encode(content) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func cachedMessageContent(
+        kind: String,
+        textPreview: String,
+        contentJSON: String?
+    ) -> IMMessageContent {
+        if let contentJSON,
+           let data = contentJSON.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(IMMessageContent.self, from: data) {
+            return decoded
+        }
+
+        switch IMMessageContentType(rawValue: kind) ?? .text {
+        case .text:
+            return .text(textPreview)
+        case .reply:
+            return .reply(
+                reference: IMReplyReference(messageID: "", senderUserID: nil, previewText: ""),
+                text: textPreview
+            )
+        case .recalled:
+            return .recalled
+        case .system:
+            return .system(.legacyText(textPreview))
+        }
+    }
+
     private static func summaryRecordID(ownerUserID: String, conversationID: String) -> String {
         "\(ownerUserID)|summary|\(conversationID)"
     }
@@ -586,6 +799,18 @@ public actor IMConversationCacheModelActor {
         blob.split(separator: ",")
             .compactMap { UUID(uuidString: String($0)) }
             .sorted { $0.uuidString < $1.uuidString }
+    }
+
+    private static func directPeer(userID: String?, email: String?) -> IMDirectPeer? {
+        guard let userID,
+              let id = UUID(uuidString: userID),
+              let email,
+              !email.isEmpty
+        else {
+            return nil
+        }
+
+        return IMDirectPeer(id: id, email: email)
     }
 
     private static func deliveryStateRawValue(from state: IMMessageDeliveryState) -> String {

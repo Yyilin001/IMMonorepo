@@ -173,6 +173,42 @@ struct IMTCPClientTests {
         let conversationEvent = try await iterator.next()
         #expect(conversationEvent == .conversationEvent(requestID: conversationRequestID, payload: conversationEventPayload))
 
+        let contactRequestID = UUID(uuidString: "14141414-3434-5656-7878-909090909090")!
+        let contactEventRequestID = UUID(uuidString: "15151515-3434-5656-7878-909090909090")!
+        let contactEventPayload = IMTCPContactEventPayload(
+            eventType: .friendRequestCreated,
+            request: ContactRequestResponseBody(
+                id: contactRequestID,
+                requester: AuthUser(id: Self.userID, email: "sender@example.com"),
+                addressee: AuthUser(
+                    id: UUID(uuidString: "16161616-3434-5656-7878-909090909090")!,
+                    email: "receiver@example.com"
+                ),
+                status: .pending,
+                message: "hi",
+                requesterRemark: "receiver",
+                addresseeRemark: nil,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_103),
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_103),
+                respondedAt: nil
+            ),
+            contact: nil,
+            contactUserID: nil,
+            actorUserID: Self.userID,
+            serverTimestamp: Date(timeIntervalSince1970: 1_700_000_103)
+        )
+
+        await wire.yieldIncoming(
+            try encodeLine(
+                type: .contactEvent,
+                requestID: contactEventRequestID,
+                payload: contactEventPayload
+            )
+        )
+
+        let contactEvent = try await iterator.next()
+        #expect(contactEvent == .contactEvent(requestID: contactEventRequestID, payload: contactEventPayload))
+
         await wire.yieldIncoming(
             try encodeLine(
                 type: .kick,

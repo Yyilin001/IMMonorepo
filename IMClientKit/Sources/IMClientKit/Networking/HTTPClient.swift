@@ -212,7 +212,7 @@ public struct HTTPClient: Sendable {
     private let sendRequest: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
 
     public init(
-        baseURL: URL = AppConstants.apiBaseURL,
+        baseURL: URL,
         transport: URLSessionTransport = URLSessionTransport(),
         logger: HTTPLogHandler = .noop,
         coding: HTTPCodingConfiguration = .default
@@ -237,7 +237,7 @@ public struct HTTPClient: Sendable {
     }
 
     public init<Transport: HTTPTransport>(
-        baseURL: URL = AppConstants.apiBaseURL,
+        baseURL: URL,
         transport: Transport,
         logger: HTTPLogHandler = .noop,
         coding: HTTPCodingConfiguration = .default
@@ -253,7 +253,7 @@ public struct HTTPClient: Sendable {
     }
 
     init<Transport: HTTPTransport, Logger: HTTPClientLogger>(
-        baseURL: URL = AppConstants.apiBaseURL,
+        baseURL: URL,
         transport: Transport,
         logger: Logger,
         coding: HTTPCodingConfiguration = .default

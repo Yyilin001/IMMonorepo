@@ -144,6 +144,255 @@ struct IMConversationStoreTests {
         #expect(store.selectedConversation?.title == "Study Group")
     }
 
+    @Test func replaceConversationSummaryWindowTracksPaginationState() {
+        let store = IMConversationStore()
+        let firstConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let secondConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+
+        store.replaceConversationSummaryWindow(
+            [
+                Self.gapSummary(conversationID: firstConversationID, latestServerSequence: 20),
+                Self.gapSummary(conversationID: secondConversationID, latestServerSequence: 10)
+            ],
+            nextCursor: "cursor-page-2",
+            hasMore: true
+        )
+
+        #expect(store.conversations.map(\.id) == [
+            firstConversationID.uuidString,
+            secondConversationID.uuidString
+        ])
+        #expect(store.selectedConversationID == firstConversationID.uuidString)
+        #expect(store.conversationSummaryNextCursor == "cursor-page-2")
+        #expect(store.hasMoreConversationSummaries == true)
+        #expect(store.conversationSummaryPaginationAnchorID == secondConversationID.uuidString)
+        #expect(store.isLoadingMoreConversationSummaries == false)
+    }
+
+    @Test func appendConversationSummaryWindowAppendsOlderPageAndUpdatesCursor() {
+        let store = IMConversationStore()
+        let newestConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let middleConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+        let oldestConversationID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
+
+        store.replaceConversationSummaryWindow(
+            [
+                Self.gapSummary(conversationID: newestConversationID, latestServerSequence: 30),
+                Self.gapSummary(conversationID: middleConversationID, latestServerSequence: 20)
+            ],
+            nextCursor: "cursor-page-2",
+            hasMore: true
+        )
+        store.setLoadingMoreConversationSummaries(true)
+
+        store.appendConversationSummaryWindow(
+            [Self.gapSummary(conversationID: oldestConversationID, latestServerSequence: 10)],
+            nextCursor: nil,
+            hasMore: false
+        )
+
+        #expect(store.conversations.map(\.id) == [
+            newestConversationID.uuidString,
+            middleConversationID.uuidString,
+            oldestConversationID.uuidString
+        ])
+        #expect(store.conversationSummaryNextCursor == nil)
+        #expect(store.hasMoreConversationSummaries == false)
+        #expect(store.conversationSummaryPaginationAnchorID == oldestConversationID.uuidString)
+        #expect(store.isLoadingMoreConversationSummaries == false)
+    }
+
+    @Test func pinnedMutedSummaryStateAffectsOrderingAndAggregateUnread() {
+        let store = IMConversationStore()
+        let mutedPinnedConversationID = UUID(uuidString: "dddddddd-1111-2222-3333-eeeeeeeeeeee")!
+        let regularConversationID = UUID(uuidString: "eeeeeeee-1111-2222-3333-ffffffffffff")!
+
+        store.replaceConversationSummaryWindow(
+            [
+                IMConversationSummaryResponseBody(
+                    id: regularConversationID,
+                    title: "Regular",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: UUID(),
+                        senderUserID: Self.peerUserID,
+                        serverSequence: 8,
+                        content: .text("regular preview"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_410_100)
+                    ),
+                    lastReadSequence: 5,
+                    unreadCount: 3,
+                    createdAt: Date(timeIntervalSince1970: 1_700_410_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_410_100)
+                ),
+                IMConversationSummaryResponseBody(
+                    id: mutedPinnedConversationID,
+                    title: "Pinned",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: UUID(),
+                        senderUserID: Self.peerUserID,
+                        serverSequence: 4,
+                        content: .text("muted preview"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_410_050)
+                    ),
+                    lastReadSequence: 0,
+                    unreadCount: 4,
+                    isPinned: true,
+                    pinnedAt: Date(timeIntervalSince1970: 1_700_410_200),
+                    isMuted: true,
+                    createdAt: Date(timeIntervalSince1970: 1_700_410_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_410_050)
+                )
+            ],
+            nextCursor: nil,
+            hasMore: false
+        )
+
+        #expect(store.conversations.map(\.id) == [
+            mutedPinnedConversationID.uuidString,
+            regularConversationID.uuidString
+        ])
+        #expect(store.conversations[0].unreadCount == 4)
+        #expect(store.conversations[0].isMuted == true)
+        #expect(store.totalUnreadCount == 3)
+    }
+
+    @Test func draftAndSearchStateStayLocalAndDraftClearsOnSend() {
+        let store = IMConversationStore()
+        let matchingConversationID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let otherConversationID = UUID(uuidString: "66666666-7777-8888-9999-aaaaaaaaaaaa")!
+
+        store.replaceConversationSummaryWindow(
+            [
+                IMConversationSummaryResponseBody(
+                    id: matchingConversationID,
+                    title: "iOS Study Group",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    notice: "Weekly architecture review",
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: UUID(),
+                        senderUserID: Self.peerUserID,
+                        serverSequence: 2,
+                        content: .text("sync notes"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_420_100)
+                    ),
+                    createdAt: Date(timeIntervalSince1970: 1_700_420_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_420_100)
+                ),
+                IMConversationSummaryResponseBody(
+                    id: otherConversationID,
+                    title: "Random Chat",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: UUID(),
+                        senderUserID: Self.peerUserID,
+                        serverSequence: 1,
+                        content: .text("lunch?"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_420_050)
+                    ),
+                    createdAt: Date(timeIntervalSince1970: 1_700_420_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_420_050)
+                )
+            ],
+            nextCursor: nil,
+            hasMore: false
+        )
+
+        store.updateDraft("Need to send agenda", for: matchingConversationID.uuidString)
+        #expect(store.draftText(for: matchingConversationID.uuidString) == "Need to send agenda")
+
+        store.setConversationSearchText("architecture")
+        #expect(store.filteredConversations.map(\.id) == [matchingConversationID.uuidString])
+
+        let request = store.prepareOutgoingText(
+            "Need to send agenda",
+            conversationID: matchingConversationID.uuidString,
+            senderUserID: Self.currentUserID
+        )
+
+        #expect(request != nil)
+        #expect(store.draftText(for: matchingConversationID.uuidString).isEmpty)
+    }
+
+    @Test func replaceConversationSummariesStoresDirectMessagingState() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: nil,
+                    kind: IMConversationKind.direct.rawValue,
+                    directMessagingState: IMDirectMessagingState.frozenAfterUnfriend.rawValue,
+                    directPeer: IMDirectPeerResponseBody(id: Self.peerUserID, email: "peer@example.com"),
+                    memberCount: 2,
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_200_000)
+                )
+            ]
+        )
+
+        #expect(store.selectedConversation?.directMessagingState == .frozenAfterUnfriend)
+        #expect(store.selectedConversation?.directPeer == IMDirectPeer(id: Self.peerUserID, email: "peer@example.com"))
+        #expect(store.selectedConversation?.title == "peer@example.com")
+        #expect(store.selectedConversation?.isDirectMessagingFrozen == true)
+        #expect(store.selectedConversation?.canSendMessages == false)
+        #expect(store.selectedConversation?.directMessagingStatusMessage == "你们已不是好友，当前会话不能继续发送消息。")
+    }
+
+    @Test func directConversationWithoutDirectMessagingStateDefaultsToActive() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: nil,
+                    kind: IMConversationKind.direct.rawValue,
+                    memberCount: 2,
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_200_000)
+                )
+            ]
+        )
+
+        #expect(store.selectedConversation?.directMessagingState == .active)
+        #expect(store.selectedConversation?.canSendMessages == true)
+        #expect(store.selectedConversation?.isDirectMessagingFrozen == false)
+    }
+
+    @Test func groupConversationIgnoresDirectMessagingState() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Group",
+                    kind: IMConversationKind.group.rawValue,
+                    directMessagingState: IMDirectMessagingState.frozenAfterUnfriend.rawValue,
+                    memberCount: 3,
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_200_000)
+                )
+            ]
+        )
+
+        #expect(store.selectedConversation?.directMessagingState == nil)
+        #expect(store.selectedConversation?.canSendMessages == true)
+        #expect(store.selectedConversation?.isDirectMessagingFrozen == false)
+    }
+
     @Test func replaceConversationSummariesPreservesUnreadCounts() {
         let store = IMConversationStore()
         let selectedConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
@@ -273,8 +522,8 @@ struct IMConversationStoreTests {
         #expect(conversation?.title == "after")
         #expect(conversation?.lastMessagePreview == "new preview")
         #expect(conversation?.updatedAt == Date(timeIntervalSince1970: 1_700_300_100))
-        #expect(conversation?.serverLastReadSequence == 8)
-        #expect(conversation?.serverUnreadCount == 2)
+        #expect(conversation?.serverLastReadSequence == 1)
+        #expect(conversation?.serverUnreadCount == 7)
     }
 
     @Test func conversationCreatedEventUpsertsSummaryUsingAuthoritativeReadState() {
@@ -373,6 +622,152 @@ struct IMConversationStoreTests {
         #expect(conversation?.serverUnreadCount == 1)
         #expect(conversation?.localUnreadDelta == 0)
         #expect(conversation?.unreadCount == 1)
+    }
+
+    @Test func messageRecalledEventUsesAuthoritativePreviewAndClearsRealtimeUnreadDelta() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let recalledMessageID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Server Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_200_000)
+                )
+            ]
+        )
+        store.receiveIncomingMessage(
+            IMTCPMessagePayload(
+                clientMessageID: nil,
+                messageID: recalledMessageID.uuidString,
+                conversationID: conversationID.uuidString,
+                senderUserID: Self.peerUserID,
+                serverSequence: 2,
+                serverTimestamp: Date(timeIntervalSince1970: 1_700_300_000),
+                kind: "text",
+                body: ["text": "live unread"]
+            ),
+            currentUserID: Self.currentUserID
+        )
+
+        _ = store.applyConversationEvent(
+            IMTCPConversationEventPayload(
+                eventType: .messageRecalled,
+                conversation: IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Server Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: recalledMessageID,
+                        senderUserID: Self.peerUserID,
+                        serverSequence: 2,
+                        kind: "recalled",
+                        body: [:],
+                        createdAt: Date(timeIntervalSince1970: 1_700_300_000)
+                    ),
+                    lastReadSequence: 0,
+                    unreadCount: 1,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_300_001)
+                ),
+                message: IMConversationMessageResponseBody(
+                    id: recalledMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 2,
+                    kind: "recalled",
+                    body: [:],
+                    createdAt: Date(timeIntervalSince1970: 1_700_300_000)
+                ),
+                actorUserID: Self.peerUserID,
+                serverTimestamp: Date(timeIntervalSince1970: 1_700_300_001)
+            ),
+            currentUserID: Self.currentUserID
+        )
+
+        let conversation = store.selectedConversation
+        #expect(conversation?.lastMessagePreview == "撤回了一条消息")
+        #expect(conversation?.serverUnreadCount == 1)
+        #expect(conversation?.localUnreadDelta == 0)
+        #expect(conversation?.unreadCount == 1)
+        #expect(conversation?.messages.last?.content == .recalled)
+    }
+
+    @Test func summaryChangesPreferAuthoritativeRecalledPreviewOverLoadedStaleMessage() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let recalledMessageID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Server Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: recalledMessageID,
+                        senderUserID: Self.peerUserID,
+                        serverSequence: 2,
+                        kind: "text",
+                        body: ["text": "stale local copy"],
+                        createdAt: Date(timeIntervalSince1970: 1_700_300_000)
+                    ),
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_300_000)
+                )
+            ]
+        )
+        store.openConversation(id: conversationID.uuidString)
+        store.replaceMessages(
+            in: conversationID.uuidString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: recalledMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 2,
+                    kind: "text",
+                    body: ["text": "stale local copy"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_300_000)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        store.applyConversationSummaryChanges(
+            upserts: [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Server Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: recalledMessageID,
+                        senderUserID: Self.peerUserID,
+                        serverSequence: 2,
+                        kind: "recalled",
+                        body: [:],
+                        createdAt: Date(timeIntervalSince1970: 1_700_300_000)
+                    ),
+                    lastReadSequence: 0,
+                    unreadCount: 1,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_300_001)
+                )
+            ],
+            removedConversationIDs: []
+        )
+
+        let conversation = store.selectedConversation
+        #expect(conversation?.lastMessagePreview == "撤回了一条消息")
+        #expect(conversation?.lastMessagePreviewText == "撤回了一条消息")
+        #expect(conversation?.messages.last?.text == "stale local copy")
     }
 
     @Test func conversationRemovedForSelfEventRemovesConversationAndFallsBackSelection() {
@@ -602,6 +997,152 @@ struct IMConversationStoreTests {
         #expect(backgroundConversation?.unreadCount == 3)
     }
 
+    @Test func applyServerSummaryReadStateClearsLocalRealtimeUnreadDeltaOnceServerSummaryCatchesUp() {
+        let store = IMConversationStore()
+        let selectedConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let backgroundConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: selectedConversationID,
+                    title: "selected",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_200_000)
+                ),
+                IMConversationSummaryResponseBody(
+                    id: backgroundConversationID,
+                    title: "background",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    lastReadSequence: 5,
+                    unreadCount: 2,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_001),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_200_001)
+                )
+            ]
+        )
+        store.replaceMessages(
+            in: backgroundConversationID.uuidString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+                    conversationID: backgroundConversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 6,
+                    content: .text("six"),
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_006)
+                ),
+                IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+                    conversationID: backgroundConversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 8,
+                    content: .text("eight"),
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_008)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        store.receiveIncomingMessage(
+            IMTCPMessagePayload(
+                clientMessageID: nil,
+                messageID: "srv-live-9",
+                conversationID: backgroundConversationID.uuidString,
+                senderUserID: Self.peerUserID,
+                serverSequence: 9,
+                serverTimestamp: Date(timeIntervalSince1970: 1_700_200_009),
+                content: .text("live")
+            ),
+            currentUserID: Self.currentUserID
+        )
+
+        store.applyServerSummaryReadState(
+            lastReadSequence: 5,
+            unreadCount: 3,
+            for: backgroundConversationID.uuidString
+        )
+
+        let backgroundConversation = store.conversations.first { $0.id == backgroundConversationID.uuidString }
+        #expect(backgroundConversation?.serverUnreadCount == 3)
+        #expect(backgroundConversation?.localUnreadDelta == 0)
+        #expect(backgroundConversation?.unreadCount == 3)
+    }
+
+    @Test func applyServerSummaryReadStateClearsLocalRealtimeUnreadDeltaWhenAnotherDeviceAdvancesReadSequence() {
+        let store = IMConversationStore()
+        let selectedConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let backgroundConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: selectedConversationID,
+                    title: "selected",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_200_000)
+                ),
+                IMConversationSummaryResponseBody(
+                    id: backgroundConversationID,
+                    title: "background",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    lastReadSequence: 5,
+                    unreadCount: 2,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_001),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_200_001)
+                )
+            ]
+        )
+        store.replaceMessages(
+            in: backgroundConversationID.uuidString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
+                    conversationID: backgroundConversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 8,
+                    content: .text("eight"),
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_008)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        store.receiveIncomingMessage(
+            IMTCPMessagePayload(
+                clientMessageID: nil,
+                messageID: "srv-live-9",
+                conversationID: backgroundConversationID.uuidString,
+                senderUserID: Self.peerUserID,
+                serverSequence: 9,
+                serverTimestamp: Date(timeIntervalSince1970: 1_700_200_009),
+                content: .text("live")
+            ),
+            currentUserID: Self.currentUserID
+        )
+
+        store.applyServerSummaryReadState(
+            lastReadSequence: 9,
+            unreadCount: 0,
+            for: backgroundConversationID.uuidString
+        )
+
+        let backgroundConversation = store.conversations.first { $0.id == backgroundConversationID.uuidString }
+        #expect(backgroundConversation?.serverLastReadSequence == 9)
+        #expect(backgroundConversation?.serverUnreadCount == 0)
+        #expect(backgroundConversation?.localUnreadDelta == 0)
+        #expect(backgroundConversation?.unreadCount == 0)
+    }
+
     @Test func applyServerExplicitReadResponseResetsLocalRealtimeUnreadDelta() {
         let store = IMConversationStore()
         let selectedConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
@@ -764,6 +1305,256 @@ struct IMConversationStoreTests {
         #expect(store.selectedConversation?.messages.count == 2)
         #expect(store.selectedConversation?.messages.map(\.text) == ["from server", "pending local"])
         #expect(store.selectedConversation?.lastMessagePreview == "pending local")
+    }
+
+    @Test func prepareOutgoingReplyAppendsQuotedMessageAndPreview() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+
+        store.openConversation(id: conversationIDString)
+        let request = store.prepareOutgoingReply(
+            reference: IMReplyReference(
+                messageID: "server-message-1",
+                senderUserID: Self.peerUserID,
+                previewText: "quoted source"
+            ),
+            text: "reply body",
+            conversationID: conversationIDString,
+            senderUserID: Self.currentUserID
+        )
+
+        let selectedConversation = try #require(store.selectedConversation)
+        let localMessage = try #require(selectedConversation.messages.last)
+        #expect(request?.payload.content == .reply(
+            reference: IMReplyReference(
+                messageID: "server-message-1",
+                senderUserID: Self.peerUserID,
+                previewText: "quoted source"
+            ),
+            text: "reply body"
+        ))
+        #expect(localMessage.content == .reply(
+            reference: IMReplyReference(
+                messageID: "server-message-1",
+                senderUserID: Self.peerUserID,
+                previewText: "quoted source"
+            ),
+            text: "reply body"
+        ))
+        #expect(localMessage.text == "reply body")
+        #expect(selectedConversation.lastMessagePreview == "reply body")
+    }
+
+    @Test func replyResolutionFallsBackToStoredPreviewWhenReferencedMessageIsUnavailable() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+
+        store.openConversation(id: conversationIDString)
+        store.replaceMessages(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "dddddddd-1111-2222-3333-eeeeeeeeeeee")!,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 10,
+                    kind: "reply",
+                    body: [
+                        "text": "latest reply",
+                        "referenceMessageID": "missing-message-id",
+                        "referenceSenderUserID": Self.currentUserID.uuidString,
+                        "referencePreviewText": "quoted snapshot"
+                    ],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_100)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        let selectedConversation = try #require(store.selectedConversation)
+        let replyMessage = try #require(selectedConversation.messages.last)
+        #expect(replyMessage.resolvedReplyReference(in: selectedConversation.messages) == IMReplyReferenceResolution(
+            state: .unavailable,
+            text: "quoted snapshot"
+        ))
+    }
+
+    @Test func replyResolutionUsesLoadedReferencedMessageFromHistory() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let referencedMessageID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let replyMessageID = UUID(uuidString: "66666666-2222-3333-4444-555555555555")!
+
+        store.openConversation(id: conversationIDString)
+        store.replaceMessages(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: referencedMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 1,
+                    kind: "text",
+                    body: ["text": "referenced from history"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_000)
+                ),
+                IMConversationMessageResponseBody(
+                    id: replyMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: "client-reply-history",
+                    serverSequence: 2,
+                    kind: "reply",
+                    body: [
+                        "text": "reply from history",
+                        "referenceMessageID": referencedMessageID.uuidString,
+                        "referenceSenderUserID": Self.peerUserID.uuidString,
+                        "referencePreviewText": "stale preview"
+                    ],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_100)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        let selectedConversation = try #require(store.selectedConversation)
+        let replyMessage = try #require(selectedConversation.messages.last)
+        #expect(replyMessage.resolvedReplyReference(in: selectedConversation.messages) == IMReplyReferenceResolution(
+            state: .loaded,
+            text: "referenced from history"
+        ))
+    }
+
+    @Test func realtimeRecallUpdatesReplyResolutionToRecalledPlaceholder() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let referencedMessageID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let replyMessageID = UUID(uuidString: "66666666-2222-3333-4444-555555555555")!
+
+        store.openConversation(id: conversationIDString)
+        store.replaceMessages(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: referencedMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 1,
+                    kind: "text",
+                    body: ["text": "will be recalled"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_000)
+                ),
+                IMConversationMessageResponseBody(
+                    id: replyMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: "client-reply-realtime",
+                    serverSequence: 2,
+                    kind: "reply",
+                    body: [
+                        "text": "reply before recall",
+                        "referenceMessageID": referencedMessageID.uuidString,
+                        "referenceSenderUserID": Self.peerUserID.uuidString,
+                        "referencePreviewText": "will be recalled"
+                    ],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_100)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        store.applyRecalledMessage(
+            IMConversationMessageResponseBody(
+                id: referencedMessageID,
+                conversationID: conversationID,
+                senderUserID: Self.peerUserID,
+                clientMessageID: nil,
+                serverSequence: 1,
+                kind: "recalled",
+                body: [:],
+                createdAt: Date(timeIntervalSince1970: 1_700_400_000)
+            ),
+            currentUserID: Self.currentUserID
+        )
+
+        let selectedConversation = try #require(store.selectedConversation)
+        let replyMessage = try #require(selectedConversation.messages.last)
+        #expect(replyMessage.resolvedReplyReference(in: selectedConversation.messages) == IMReplyReferenceResolution(
+            state: .recalled,
+            text: "原消息已撤回"
+        ))
+    }
+
+    @Test func gapSyncRecallUpdateKeepsReplyResolutionConsistent() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let referencedMessageID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let replyMessageID = UUID(uuidString: "66666666-2222-3333-4444-555555555555")!
+
+        store.openConversation(id: conversationIDString)
+        store.replaceMessages(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: referencedMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 1,
+                    kind: "text",
+                    body: ["text": "gap target"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_000)
+                ),
+                IMConversationMessageResponseBody(
+                    id: replyMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: "client-reply-gap",
+                    serverSequence: 2,
+                    kind: "reply",
+                    body: [
+                        "text": "gap reply",
+                        "referenceMessageID": referencedMessageID.uuidString,
+                        "referenceSenderUserID": Self.peerUserID.uuidString,
+                        "referencePreviewText": "gap target"
+                    ],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_100)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        store.appendMessages(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: referencedMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 1,
+                    kind: "recalled",
+                    body: [:],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_000)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        let selectedConversation = try #require(store.selectedConversation)
+        let replyMessage = try #require(selectedConversation.messages.last)
+        #expect(replyMessage.resolvedReplyReference(in: selectedConversation.messages) == IMReplyReferenceResolution(
+            state: .recalled,
+            text: "原消息已撤回"
+        ))
     }
 
     @Test func replaceMessagesUsesClientMessageIDToMergePendingOutgoingMessage() {
@@ -1038,6 +1829,67 @@ struct IMConversationStoreTests {
         #expect(store.selectedConversation?.messages.first?.deliveryState == .sent)
     }
 
+    @Test func duplicateOutgoingAcknowledgementDoesNotMutateSentMessageAgain() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        let request = try #require(
+            store.prepareOutgoingText(
+                "hello duplicate ack",
+                conversationID: conversationID,
+                senderUserID: Self.currentUserID
+            )
+        )
+
+        store.applyOutgoingAcknowledgement(
+            requestID: request.requestID,
+            payload: IMTCPAckPayload(
+                messageID: "server-1",
+                conversationID: conversationID,
+                status: "accepted"
+            )
+        )
+        store.applyOutgoingAcknowledgement(
+            requestID: request.requestID,
+            payload: IMTCPAckPayload(
+                messageID: "server-2",
+                conversationID: conversationID,
+                status: "internal_error"
+            )
+        )
+
+        let message = try #require(store.selectedConversation?.messages.first)
+        #expect(message.serverMessageID == "server-1")
+        #expect(message.deliveryState == .sent)
+        #expect(store.statusMessage == nil)
+    }
+
+    @Test func lateOutgoingAcknowledgementDoesNotReviveMessageAfterFailure() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        let request = try #require(
+            store.prepareOutgoingText(
+                "late ack after failure",
+                conversationID: conversationID,
+                senderUserID: Self.currentUserID
+            )
+        )
+
+        store.markOutgoingFailure(requestID: request.requestID, message: "TCP 连接已关闭。")
+        store.applyOutgoingAcknowledgement(
+            requestID: request.requestID,
+            payload: IMTCPAckPayload(
+                messageID: "server-late",
+                conversationID: conversationID,
+                status: "accepted"
+            )
+        )
+
+        let message = try #require(store.selectedConversation?.messages.first)
+        #expect(message.serverMessageID == nil)
+        #expect(message.deliveryState == .failed(message: "TCP 连接已关闭。"))
+        #expect(store.statusMessage == "TCP 连接已关闭。")
+    }
+
     @Test func queuedOutgoingMessagesFlushInCreatedOrderWithLimit() throws {
         let store = IMConversationStore()
         let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
@@ -1252,6 +2104,32 @@ struct IMConversationStoreTests {
         #expect(!store.isRetryableFailure(failedMessage))
     }
 
+    @Test func frozenDirectAcknowledgementBecomesNonRetryableFailure() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        store.queueOutgoingText(
+            "frozen direct message",
+            conversationID: conversationID,
+            senderUserID: Self.currentUserID
+        )
+        let request = try #require(store.queuedOutgoingMessageRequests(limit: 1).first)
+
+        store.applyOutgoingAcknowledgement(
+            requestID: request.requestID,
+            payload: IMTCPAckPayload(
+                messageID: "frozen",
+                conversationID: conversationID,
+                status: "direct_conversation_frozen"
+            )
+        )
+
+        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        #expect(failedMessage.deliveryState == .failed(
+            message: "你们已不是好友，当前会话不能继续发送消息。"
+        ))
+        #expect(!store.isRetryableFailure(failedMessage))
+    }
+
     @Test func queueSummaryCountsPendingWorkAndSkipsBusinessFailures() throws {
         let store = IMConversationStore()
         let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
@@ -1355,6 +2233,39 @@ struct IMConversationStoreTests {
         )
         #expect(store.selectedConversation?.messages.first?.deliveryState == .failed(
             message: "你们还不是好友，对方回复前只能发送一条消息。"
+        ))
+    }
+
+    @Test func frozenDirectMessageIsNotRetryable() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        let request = try #require(
+            store.prepareOutgoingText(
+                "frozen direct message",
+                conversationID: conversationID,
+                senderUserID: Self.currentUserID
+            )
+        )
+
+        store.applyOutgoingAcknowledgement(
+            requestID: request.requestID,
+            payload: IMTCPAckPayload(
+                messageID: "frozen",
+                conversationID: conversationID,
+                status: "direct_conversation_frozen"
+            )
+        )
+
+        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        #expect(!store.isRetryableFailure(failedMessage))
+        #expect(
+            store.retryOutgoingMessage(
+                localMessageID: failedMessage.id,
+                conversationID: conversationID
+            ) == nil
+        )
+        #expect(store.selectedConversation?.messages.first?.deliveryState == .failed(
+            message: "你们已不是好友，当前会话不能继续发送消息。"
         ))
     }
 
@@ -1559,7 +2470,9 @@ struct IMConversationStoreTests {
                 IMConversationSummaryResponseBody(
                     id: conversationID,
                     title: "Cache Target",
-                    kind: IMConversationKind.group.rawValue,
+                    kind: IMConversationKind.direct.rawValue,
+                    directMessagingState: IMDirectMessagingState.frozenAfterUnfriend.rawValue,
+                    directPeer: IMDirectPeerResponseBody(id: Self.peerUserID, email: "cache-peer@example.com"),
                     memberCount: 2,
                     memberUserIDs: [Self.currentUserID, Self.peerUserID],
                     lastMessage: nil,
@@ -1599,7 +2512,11 @@ struct IMConversationStoreTests {
         #expect(restoredStore.selectedConversationID == conversationIDString)
         #expect(restoredStore.hasLoadedMessages(for: conversationIDString))
         #expect(restoredStore.selectedConversation?.title == "Cache Target")
-        #expect(restoredStore.selectedConversation?.kind == .group)
+        #expect(restoredStore.selectedConversation?.kind == .direct)
+        #expect(restoredStore.selectedConversation?.directMessagingState == .frozenAfterUnfriend)
+        #expect(restoredStore.selectedConversation?.directPeer == IMDirectPeer(id: Self.peerUserID, email: "cache-peer@example.com"))
+        #expect(restoredStore.selectedConversation?.isDirectMessagingFrozen == true)
+        #expect(restoredStore.selectedConversation?.canSendMessages == false)
         #expect(restoredStore.selectedConversation?.serverLastReadSequence == 3)
         #expect(restoredStore.selectedConversation?.serverUnreadCount == 2)
         #expect(restoredStore.selectedConversation?.messages.map(\.text) == ["cached message"])
@@ -1658,6 +2575,27 @@ struct IMConversationStoreTests {
         #expect(cachedConversation.messages.last?.serverSequence == 205)
         #expect(cursor.latestSyncedServerSequence == 205)
         #expect(cursor.oldestLoadedServerSequence == 6)
+    }
+
+    @Test func cacheSnapshotRoundTripsConversationSummaryPaginationMetadata() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+
+        store.replaceConversationSummaryWindow(
+            [Self.gapSummary(conversationID: conversationID, latestServerSequence: 20)],
+            nextCursor: "cursor-page-2",
+            hasMore: true
+        )
+
+        let snapshot = store.makeCacheSnapshot(lastSummaryRefreshAt: Date(timeIntervalSince1970: 1_700_800_000))
+        let restoredStore = IMConversationStore()
+        restoredStore.restoreCacheSnapshot(snapshot)
+
+        #expect(snapshot.metadata.summaryNextCursor == "cursor-page-2")
+        #expect(snapshot.metadata.hasMoreConversationSummaries == true)
+        #expect(restoredStore.conversationSummaryNextCursor == "cursor-page-2")
+        #expect(restoredStore.hasMoreConversationSummaries == true)
+        #expect(restoredStore.isLoadingMoreConversationSummaries == false)
     }
 
     @Test func cacheRestoreKeepsPendingAndFailedMessagesWithoutRestoringPendingQueue() {

@@ -1,5 +1,15 @@
 import Foundation
 
+public enum IMDirectMessagingState: String, Codable, Equatable, Sendable {
+    case active
+    case frozenAfterUnfriend = "frozen_after_unfriend"
+}
+
+public struct IMDirectPeerResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let id: UUID
+    public let email: String
+}
+
 public struct IMConversationCreateRequestBody: Codable, Sendable {
     public let kind: String
     public let title: String?
@@ -10,33 +20,94 @@ public struct IMConversationMemberUpdateRequestBody: Codable, Sendable {
     public let memberEmails: [String]
 }
 
+public struct IMConversationMemberRoleUpdateRequestBody: Codable, Sendable {
+    public let role: IMConversationMemberRole
+}
+
+public struct IMConversationTitleUpdateRequestBody: Codable, Sendable {
+    public let title: String
+}
+
+public struct IMConversationPreferencesUpdateRequestBody: Codable, Sendable {
+    public let isPinned: Bool?
+    public let isMuted: Bool?
+
+    public init(isPinned: Bool? = nil, isMuted: Bool? = nil) {
+        self.isPinned = isPinned
+        self.isMuted = isMuted
+    }
+}
+
+public struct IMConversationMetadataUpdateRequestBody: Codable, Sendable {
+    public let title: String?
+    public let notice: String?
+    public let avatarPreset: IMConversationAvatarPreset?
+
+    public init(
+        title: String? = nil,
+        notice: String? = nil,
+        avatarPreset: IMConversationAvatarPreset? = nil
+    ) {
+        self.title = title
+        self.notice = notice
+        self.avatarPreset = avatarPreset
+    }
+}
+
 public struct IMConversationReadRequestBody: Codable, Sendable {
     public let readSequence: UInt64
+}
+
+public struct IMConversationMessageRecallResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let id: UUID
+    public let conversationID: UUID
+    public let senderUserID: UUID
+    public let clientMessageID: String?
+    public let serverSequence: Int
+    public let content: IMMessageContent
+    public let createdAt: Date?
 }
 
 public struct IMConversationMemberResponseBody: Codable, Equatable, Sendable, APIResponseBody, Identifiable {
     public let id: UUID
     public let email: String
+    public let role: IMConversationMemberRole
+
+    public init(id: UUID, email: String, role: IMConversationMemberRole = .member) {
+        self.id = id
+        self.email = email
+        self.role = role
+    }
 }
 
 public struct IMMessagePreviewResponseBody: Codable, Equatable, Sendable, APIResponseBody {
     public let id: UUID
     public let senderUserID: UUID
     public let serverSequence: Int
-    public let kind: String
-    public let body: [String: String]
+    public let content: IMMessageContent
     public let createdAt: Date?
+
+    public var textValue: String? {
+        content.textValue
+    }
 }
 
 public struct IMConversationSummaryResponseBody: Codable, Equatable, Sendable, APIResponseBody {
     public let id: UUID
     public let title: String?
     public let kind: String
+    public let directMessagingState: String?
+    public let directPeer: IMDirectPeerResponseBody?
     public let memberCount: Int
     public let memberUserIDs: [UUID]
+    public let notice: String?
+    public let avatarPreset: IMConversationAvatarPreset?
     public let lastMessage: IMMessagePreviewResponseBody?
     public let lastReadSequence: Int
     public let unreadCount: Int
+    public let isPinned: Bool
+    public let pinnedAt: Date?
+    public let isMuted: Bool
     public let createdAt: Date?
     public let updatedAt: Date
 
@@ -44,25 +115,54 @@ public struct IMConversationSummaryResponseBody: Codable, Equatable, Sendable, A
         id: UUID,
         title: String?,
         kind: String = IMConversationKind.group.rawValue,
+        directMessagingState: String? = nil,
+        directPeer: IMDirectPeerResponseBody? = nil,
         memberCount: Int? = nil,
         memberUserIDs: [UUID],
+        notice: String? = nil,
+        avatarPreset: IMConversationAvatarPreset? = nil,
         lastMessage: IMMessagePreviewResponseBody?,
         lastReadSequence: Int = 0,
         unreadCount: Int = 0,
+        isPinned: Bool = false,
+        pinnedAt: Date? = nil,
+        isMuted: Bool = false,
         createdAt: Date?,
         updatedAt: Date
     ) {
         self.id = id
         self.title = title
         self.kind = kind
+        self.directMessagingState = directMessagingState
+        self.directPeer = directPeer
         self.memberCount = memberCount ?? memberUserIDs.count
         self.memberUserIDs = memberUserIDs
+        self.notice = notice
+        self.avatarPreset = avatarPreset
         self.lastMessage = lastMessage
         self.lastReadSequence = lastReadSequence
         self.unreadCount = unreadCount
+        self.isPinned = isPinned
+        self.pinnedAt = pinnedAt
+        self.isMuted = isMuted
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
+}
+
+public struct IMConversationSummaryPageResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let items: [IMConversationSummaryResponseBody]
+    public let nextCursor: String?
+    public let hasMore: Bool
+    public let snapshotToken: String
+}
+
+public struct IMConversationSummaryChangesResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let upserts: [IMConversationSummaryResponseBody]
+    public let removedConversationIDs: [UUID]
+    public let nextCursor: String?
+    public let hasMore: Bool
+    public let targetToken: String
 }
 
 public struct IMConversationReadResponseBody: Codable, Equatable, Sendable, APIResponseBody {
@@ -77,9 +177,12 @@ public struct IMConversationMessageResponseBody: Codable, Equatable, Sendable, A
     public let senderUserID: UUID
     public let clientMessageID: String?
     public let serverSequence: Int
-    public let kind: String
-    public let body: [String: String]
+    public let content: IMMessageContent
     public let createdAt: Date?
+
+    public var textValue: String? {
+        content.textValue
+    }
 
     init(
         id: UUID,
@@ -87,8 +190,7 @@ public struct IMConversationMessageResponseBody: Codable, Equatable, Sendable, A
         senderUserID: UUID,
         clientMessageID: String? = nil,
         serverSequence: Int,
-        kind: String,
-        body: [String: String],
+        content: IMMessageContent,
         createdAt: Date?
     ) {
         self.id = id
@@ -96,8 +198,7 @@ public struct IMConversationMessageResponseBody: Codable, Equatable, Sendable, A
         self.senderUserID = senderUserID
         self.clientMessageID = clientMessageID
         self.serverSequence = serverSequence
-        self.kind = kind
-        self.body = body
+        self.content = content
         self.createdAt = createdAt
     }
 }
@@ -134,9 +235,60 @@ enum IMRequest {
     }
 
     public struct Conversations: AuthorizedEndpoint {
-        public typealias Response = [IMConversationSummaryResponseBody]
+        public typealias Response = IMConversationSummaryPageResponseBody
 
-        let baseRequestSpec = HTTPRequestSpec(path: "api/im/conversations")
+        let cursor: String?
+        let limit: Int?
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(
+                path: "api/im/conversations",
+                queryItems: queryItems
+            )
+        }
+
+        private var queryItems: [URLQueryItem] {
+            var items: [URLQueryItem] = []
+
+            if let cursor {
+                items.append(URLQueryItem(name: "cursor", value: cursor))
+            }
+
+            if let limit {
+                items.append(URLQueryItem(name: "limit", value: String(limit)))
+            }
+
+            return items
+        }
+    }
+
+    public struct ConversationChanges: AuthorizedEndpoint {
+        public typealias Response = IMConversationSummaryChangesResponseBody
+
+        let afterToken: String
+        let cursor: String?
+        let limit: Int?
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(
+                path: "api/im/conversations/changes",
+                queryItems: queryItems
+            )
+        }
+
+        private var queryItems: [URLQueryItem] {
+            var items = [URLQueryItem(name: "afterToken", value: afterToken)]
+
+            if let cursor {
+                items.append(URLQueryItem(name: "cursor", value: cursor))
+            }
+
+            if let limit {
+                items.append(URLQueryItem(name: "limit", value: String(limit)))
+            }
+
+            return items
+        }
     }
 
     public struct Members: AuthorizedEndpoint {
@@ -159,6 +311,101 @@ enum IMRequest {
             .init(
                 path: "api/im/conversations/\(conversationID)/members",
                 method: .post
+            )
+        }
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct RemoveMember: AuthorizedEndpoint {
+        public typealias Response = IMConversationSummaryResponseBody
+
+        let conversationID: String
+        let memberUserID: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(
+                path: "api/im/conversations/\(conversationID)/members/\(memberUserID)/remove",
+                method: .post
+            )
+        }
+    }
+
+    public struct UpdateMemberRole: AuthorizedEndpoint {
+        public typealias Response = IMConversationSummaryResponseBody
+
+        let conversationID: String
+        let memberUserID: String
+        let payload: IMConversationMemberRoleUpdateRequestBody
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(
+                path: "api/im/conversations/\(conversationID)/members/\(memberUserID)/role",
+                method: .post
+            )
+        }
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct UpdateTitle: AuthorizedEndpoint {
+        public typealias Response = IMConversationSummaryResponseBody
+
+        let conversationID: String
+        let payload: IMConversationTitleUpdateRequestBody
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(
+                path: "api/im/conversations/\(conversationID)/title",
+                method: .post
+            )
+        }
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct UpdatePreferences: AuthorizedEndpoint {
+        public typealias Response = IMConversationSummaryResponseBody
+
+        let conversationID: String
+        let payload: IMConversationPreferencesUpdateRequestBody
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(
+                path: "api/im/conversations/\(conversationID)/preferences",
+                method: .patch
+            )
+        }
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct UpdateMetadata: AuthorizedEndpoint {
+        public typealias Response = IMConversationSummaryResponseBody
+
+        let conversationID: String
+        let payload: IMConversationMetadataUpdateRequestBody
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(
+                path: "api/im/conversations/\(conversationID)/metadata",
+                method: .patch
             )
         }
 
@@ -243,6 +490,20 @@ enum IMRequest {
         }
     }
 
+    public struct RecallMessage: AuthorizedEndpoint {
+        public typealias Response = IMConversationMessageRecallResponseBody
+
+        let conversationID: String
+        let messageID: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(
+                path: "api/im/conversations/\(conversationID)/messages/\(messageID)/recall",
+                method: .post
+            )
+        }
+    }
+
     public struct LeaveConversation: AuthorizedEndpoint {
         public typealias Response = EmptyResponse
 
@@ -256,7 +517,20 @@ enum IMRequest {
         }
     }
 
-    public static let conversations = Conversations()
+    public static func conversations(
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) -> Conversations {
+        Conversations(cursor: cursor, limit: limit)
+    }
+
+    public static func conversationChanges(
+        afterToken: String,
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) -> ConversationChanges {
+        ConversationChanges(afterToken: afterToken, cursor: cursor, limit: limit)
+    }
 
     public static func createConversation(
         kind: IMConversationKind,
@@ -283,6 +557,65 @@ enum IMRequest {
         AddMembers(
             conversationID: conversationID,
             payload: IMConversationMemberUpdateRequestBody(memberEmails: memberEmails)
+        )
+    }
+
+    public static func removeMember(
+        conversationID: String,
+        memberUserID: String
+    ) -> RemoveMember {
+        RemoveMember(conversationID: conversationID, memberUserID: memberUserID)
+    }
+
+    public static func updateMemberRole(
+        conversationID: String,
+        memberUserID: String,
+        role: IMConversationMemberRole
+    ) -> UpdateMemberRole {
+        UpdateMemberRole(
+            conversationID: conversationID,
+            memberUserID: memberUserID,
+            payload: IMConversationMemberRoleUpdateRequestBody(role: role)
+        )
+    }
+
+    public static func updateTitle(
+        conversationID: String,
+        title: String
+    ) -> UpdateTitle {
+        UpdateTitle(
+            conversationID: conversationID,
+            payload: IMConversationTitleUpdateRequestBody(title: title)
+        )
+    }
+
+    public static func updatePreferences(
+        conversationID: String,
+        isPinned: Bool? = nil,
+        isMuted: Bool? = nil
+    ) -> UpdatePreferences {
+        UpdatePreferences(
+            conversationID: conversationID,
+            payload: IMConversationPreferencesUpdateRequestBody(
+                isPinned: isPinned,
+                isMuted: isMuted
+            )
+        )
+    }
+
+    public static func updateMetadata(
+        conversationID: String,
+        title: String? = nil,
+        notice: String? = nil,
+        avatarPreset: IMConversationAvatarPreset? = nil
+    ) -> UpdateMetadata {
+        UpdateMetadata(
+            conversationID: conversationID,
+            payload: IMConversationMetadataUpdateRequestBody(
+                title: title,
+                notice: notice,
+                avatarPreset: avatarPreset
+            )
         )
     }
 
@@ -322,5 +655,12 @@ enum IMRequest {
 
     public static func leaveConversation(conversationID: String) -> LeaveConversation {
         LeaveConversation(conversationID: conversationID)
+    }
+
+    public static func recallMessage(
+        conversationID: String,
+        messageID: String
+    ) -> RecallMessage {
+        RecallMessage(conversationID: conversationID, messageID: messageID)
     }
 }

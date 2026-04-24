@@ -8,6 +8,7 @@ enum IMTCPPacketType: String, Codable, Sendable {
     case heartbeatAck = "heartbeat_ack"
     case message
     case conversationEvent = "conversation_event"
+    case contactEvent = "contact_event"
     case ack
     case kick
 }
@@ -162,21 +163,40 @@ struct IMTCPMessagePayload: Codable, Sendable {
     let senderUserID: UUID?
     let serverSequence: UInt64?
     let serverTimestamp: Date?
-    let kind: String
-    let body: [String: String]
+    let content: IMMessageContent
 }
 
 enum IMTCPConversationEventType: String, Codable, Sendable {
     case conversationCreated = "conversation_created"
     case membersAdded = "members_added"
     case memberLeft = "member_left"
+    case membersUpdated = "members_updated"
     case conversationRemovedForSelf = "conversation_removed_for_self"
     case summaryUpdated = "summary_updated"
+    case messageRecalled = "message_recalled"
 }
 
 struct IMTCPConversationEventPayload: Codable, Sendable {
     let eventType: IMTCPConversationEventType
     let conversation: IMConversationResponse
+    let message: IMMessageResponse?
+    let actorUserID: UUID?
+    let serverTimestamp: Date
+}
+
+enum IMTCPContactEventType: String, Codable, Sendable {
+    case friendRequestCreated = "friend_request_created"
+    case friendRequestAccepted = "friend_request_accepted"
+    case friendRequestDeclined = "friend_request_declined"
+    case friendRequestCancelled = "friend_request_cancelled"
+    case contactRemoved = "contact_removed"
+}
+
+struct IMTCPContactEventPayload: Codable, Sendable {
+    let eventType: IMTCPContactEventType
+    let request: FriendRequestResponse?
+    let contact: ContactResponse?
+    let contactUserID: UUID?
     let actorUserID: UUID?
     let serverTimestamp: Date
 }

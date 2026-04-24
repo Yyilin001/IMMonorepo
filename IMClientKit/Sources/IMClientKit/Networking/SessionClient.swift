@@ -7,7 +7,7 @@ public actor SessionClient {
     private let executor: AuthorizedRequestExecutor
 
     public init(
-        network: NetworkEnvironment = NetworkEnvironment(),
+        network: NetworkEnvironment,
         tokenStore: KeychainStore = KeychainStore(),
         userCache: UserDefaultsSessionCache = UserDefaultsSessionCache()
     ) {
@@ -35,7 +35,7 @@ public actor SessionClient {
     }
 
     public init(
-        httpClient: HTTPClient = HTTPClient(),
+        httpClient: HTTPClient,
         fileTransferClient: FileTransferClient? = nil,
         streamingClient: StreamingClient? = nil,
         tokenStore: KeychainStore = KeychainStore(),
@@ -173,8 +173,30 @@ public actor SessionClient {
         try await executor.execute(AuthRequest.sessions)
     }
 
-    public func fetchIMConversations() async throws -> [IMConversationSummaryResponseBody] {
-        try await executor.execute(IMRequest.conversations)
+    public func fetchIMConversationSummaries(
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) async throws -> IMConversationSummaryPageResponseBody {
+        try await executor.execute(
+            IMRequest.conversations(
+                cursor: cursor,
+                limit: limit
+            )
+        )
+    }
+
+    public func fetchIMConversationSummaryChanges(
+        afterToken: String,
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) async throws -> IMConversationSummaryChangesResponseBody {
+        try await executor.execute(
+            IMRequest.conversationChanges(
+                afterToken: afterToken,
+                cursor: cursor,
+                limit: limit
+            )
+        )
     }
 
     public func createIMConversation(
@@ -205,6 +227,74 @@ public actor SessionClient {
             IMRequest.addMembers(
                 conversationID: conversationID,
                 memberEmails: memberEmails
+            )
+        )
+    }
+
+    public func removeIMConversationMember(
+        conversationID: String,
+        memberUserID: UUID
+    ) async throws -> IMConversationSummaryResponseBody {
+        try await executor.execute(
+            IMRequest.removeMember(
+                conversationID: conversationID,
+                memberUserID: memberUserID.uuidString
+            )
+        )
+    }
+
+    public func updateIMConversationMemberRole(
+        conversationID: String,
+        memberUserID: UUID,
+        role: IMConversationMemberRole
+    ) async throws -> IMConversationSummaryResponseBody {
+        try await executor.execute(
+            IMRequest.updateMemberRole(
+                conversationID: conversationID,
+                memberUserID: memberUserID.uuidString,
+                role: role
+            )
+        )
+    }
+
+    public func updateIMConversationTitle(
+        conversationID: String,
+        title: String
+    ) async throws -> IMConversationSummaryResponseBody {
+        try await executor.execute(
+            IMRequest.updateTitle(
+                conversationID: conversationID,
+                title: title
+            )
+        )
+    }
+
+    public func updateIMConversationPreferences(
+        conversationID: String,
+        isPinned: Bool? = nil,
+        isMuted: Bool? = nil
+    ) async throws -> IMConversationSummaryResponseBody {
+        try await executor.execute(
+            IMRequest.updatePreferences(
+                conversationID: conversationID,
+                isPinned: isPinned,
+                isMuted: isMuted
+            )
+        )
+    }
+
+    public func updateIMConversationMetadata(
+        conversationID: String,
+        title: String? = nil,
+        notice: String? = nil,
+        avatarPreset: IMConversationAvatarPreset? = nil
+    ) async throws -> IMConversationSummaryResponseBody {
+        try await executor.execute(
+            IMRequest.updateMetadata(
+                conversationID: conversationID,
+                title: title,
+                notice: notice,
+                avatarPreset: avatarPreset
             )
         )
     }
@@ -255,6 +345,24 @@ public actor SessionClient {
         try await executor.execute(IMRequest.leaveConversation(conversationID: conversationID))
     }
 
+    public func recallIMMessage(
+        conversationID: String,
+        messageID: String
+    ) async throws -> IMConversationMessageResponseBody {
+        let response = try await executor.execute(
+            IMRequest.recallMessage(conversationID: conversationID, messageID: messageID)
+        )
+        return IMConversationMessageResponseBody(
+            id: response.id,
+            conversationID: response.conversationID,
+            senderUserID: response.senderUserID,
+            clientMessageID: response.clientMessageID,
+            serverSequence: response.serverSequence,
+            content: response.content,
+            createdAt: response.createdAt
+        )
+    }
+
     public func logoutCurrent() async throws -> EmptyResponse {
         try await executor.execute(AuthRequest.logoutCurrent)
     }
@@ -302,13 +410,13 @@ public actor SessionClient {
     }
 
     public func openIMConnection(
-        configuration: IMTCPClientConfiguration = IMTCPClientConfiguration()
+        configuration: IMTCPClientConfiguration
     ) async throws -> IMTCPConnection {
         try await openIMConnection(configuration: configuration, transport: NWIMTCPTransport())
     }
 
     public func openIMConnection<Transport: IMTCPTransport>(
-        configuration: IMTCPClientConfiguration = IMTCPClientConfiguration(),
+        configuration: IMTCPClientConfiguration,
         transport: Transport
     ) async throws -> IMTCPConnection {
         let coordinator = self.coordinator

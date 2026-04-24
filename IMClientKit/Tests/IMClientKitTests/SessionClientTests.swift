@@ -455,6 +455,55 @@ struct SessionClientTests {
         #expect(conversations[0].lastMessage?.body["text"] == "hello")
     }
 
+    @Test func fetchIMConversationSummaryChangesUsesAuthorizedEndpoint() async throws {
+        let tokenStore = InMemoryTokenStore()
+        let userCache = InMemoryUserSessionCache()
+
+        let transport = MockHTTPTransport { request in
+            switch (
+                request.httpMethod,
+                request.url?.path,
+                request.url?.query,
+                request.value(forHTTPHeaderField: "Authorization")
+            ) {
+            case ("POST", "/api/auth/login", _, _):
+                let body = try Self.authResponseBody(accessToken: "access-1", refreshToken: "refresh-1")
+                return HTTPFixtures.response(statusCode: 200, body: body)
+            case (
+                "GET",
+                "/api/im/conversations/changes",
+                "afterToken=token-1&cursor=cursor-1&limit=25",
+                "Bearer access-1"
+            ):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationChangesBody())
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+
+        let client = SessionClient(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: transport),
+            tokenStore: tokenStore,
+            userCache: userCache
+        )
+
+        let noDevice: DeviceMetadataPayload? = nil
+        _ = try await client.login(email: Self.userEmail, password: "password123", device: noDevice)
+        let changes = try await client.fetchIMConversationSummaryChanges(
+            afterToken: "token-1",
+            cursor: "cursor-1",
+            limit: 25
+        )
+
+        #expect(changes.upserts.count == 1)
+        #expect(changes.upserts[0].title == "Demo Chat")
+        #expect(changes.removedConversationIDs == [UUID(uuidString: "ffffffff-1111-2222-3333-eeeeeeeeeeee")!])
+        #expect(changes.nextCursor == "cursor-2")
+        #expect(changes.hasMore == true)
+        #expect(changes.targetToken == "token-2")
+    }
+
     @Test func createIMConversationUsesAuthorizedEndpoint() async throws {
         let tokenStore = InMemoryTokenStore()
         let userCache = InMemoryUserSessionCache()
@@ -950,16 +999,35 @@ struct SessionClientTests {
 
     private static func imConversationsBody() throws -> Data {
         try HTTPFixtures.jsonBody(
-            [
-                imConversation(
-                    id: UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
-                )
-            ]
+            IMConversationSummaryPageResponseBody(
+                items: [
+                    imConversation(
+                        id: UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+                    )
+                ],
+                nextCursor: nil,
+                hasMore: false,
+                snapshotToken: "token-1"
+            )
         )
     }
 
     private static func imConversationBody(conversationID: UUID) throws -> Data {
         try HTTPFixtures.jsonBody(imConversation(id: conversationID))
+    }
+
+    private static func imConversationChangesBody() throws -> Data {
+        try HTTPFixtures.jsonBody(
+            IMConversationSummaryChangesResponseBody(
+                upserts: [
+                    imConversation(id: UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!)
+                ],
+                removedConversationIDs: [UUID(uuidString: "ffffffff-1111-2222-3333-eeeeeeeeeeee")!],
+                nextCursor: "cursor-2",
+                hasMore: true,
+                targetToken: "token-2"
+            )
+        )
     }
 
     private static func imMessagesBody(conversationID: UUID) throws -> Data {

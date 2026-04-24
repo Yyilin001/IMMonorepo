@@ -1,10 +1,21 @@
 import Fluent
+import SQLKit
 import Vapor
 
 struct IMConversationService {
     private struct ConversationReadState {
         let lastReadSequence: Int
         let unreadCount: Int
+    }
+
+    private struct ConversationSummaryPreferences {
+        let isPinned: Bool
+        let pinnedAt: Date?
+        let isMuted: Bool
+    }
+
+    private enum RecallPolicy {
+        static let window: TimeInterval = 2 * 60
     }
 
     private enum CreationError: LocalizedError {
@@ -31,8 +42,14 @@ struct IMConversationService {
         case emptyParticipants
         case directConversationImmutable
         case noNewMembers
+        case insufficientPrivilegeToAddMembers
+        case insufficientPrivilegeToRemoveMembers
+        case cannotRemoveSelf
+        case cannotRemoveOwner
+        case cannotRemoveAdministrator
         case cannotLeaveDirectConversation
         case minimumGroupSizeViolation
+        case ownerMustTransferBeforeLeaving
 
         var errorDescription: String? {
             switch self {
@@ -42,10 +59,105 @@ struct IMConversationService {
                 return "私聊会话不支持新增成员。"
             case .noNewMembers:
                 return "没有可新增的成员。"
+            case .insufficientPrivilegeToAddMembers:
+                return "只有群主或管理员可以添加成员。"
+            case .insufficientPrivilegeToRemoveMembers:
+                return "当前角色没有移除该成员的权限。"
+            case .cannotRemoveSelf:
+                return "不能通过移除成员操作移除自己，请使用退出会话。"
+            case .cannotRemoveOwner:
+                return "不能移除群主。"
+            case .cannotRemoveAdministrator:
+                return "管理员不能移除其他管理员。"
             case .cannotLeaveDirectConversation:
                 return "私聊会话不支持主动退出。"
             case .minimumGroupSizeViolation:
                 return "退出后会话成员不能少于 2 人。"
+            case .ownerMustTransferBeforeLeaving:
+                return "群主退出前请先转让群主。"
+            }
+        }
+    }
+
+    private enum GroupRoleUpdateError: LocalizedError {
+        case directConversationImmutable
+        case insufficientPrivilege
+        case memberNotFound
+        case cannotUpdateSelf
+
+        var errorDescription: String? {
+            switch self {
+            case .directConversationImmutable:
+                return "私聊会话不支持成员角色管理。"
+            case .insufficientPrivilege:
+                return "只有群主可以调整成员角色。"
+            case .memberNotFound:
+                return "群成员不存在。"
+            case .cannotUpdateSelf:
+                return "不能直接修改自己的群角色。"
+            }
+        }
+    }
+
+    private enum GroupTitleUpdateError: LocalizedError {
+        case directConversationImmutable
+        case emptyTitle
+        case insufficientPrivilege
+
+        var errorDescription: String? {
+            switch self {
+            case .directConversationImmutable:
+                return "私聊会话不支持修改标题。"
+            case .emptyTitle:
+                return "群聊名称不能为空。"
+            case .insufficientPrivilege:
+                return "只有群主或管理员可以修改群名称。"
+            }
+        }
+    }
+
+    private enum GroupMetadataUpdateError: LocalizedError {
+        case directConversationImmutable
+        case insufficientPrivilege
+        case emptyUpdate
+        case emptyTitle
+        case invalidNotice
+
+        var errorDescription: String? {
+            switch self {
+            case .directConversationImmutable:
+                return "私聊会话不支持修改群资料。"
+            case .insufficientPrivilege:
+                return "只有群主或管理员可以修改群资料。"
+            case .emptyUpdate:
+                return "至少需要更新一项群资料。"
+            case .emptyTitle:
+                return "群聊名称不能为空。"
+            case .invalidNotice:
+                return "群公告不能为空。"
+            }
+        }
+    }
+
+    private enum RecallError: LocalizedError {
+        case messageNotFound
+        case notMessageSender
+        case recallWindowExpired
+        case unsupportedMessageKind
+        case alreadyRecalled
+
+        var errorDescription: String? {
+            switch self {
+            case .messageNotFound:
+                return "消息不存在。"
+            case .notMessageSender:
+                return "只能撤回自己发送的消息。"
+            case .recallWindowExpired:
+                return "消息发送超过 2 分钟后不能撤回。"
+            case .unsupportedMessageKind:
+                return "当前消息不支持撤回。"
+            case .alreadyRecalled:
+                return "该消息已经撤回。"
             }
         }
     }
@@ -61,6 +173,12 @@ struct IMConversationService {
     }
 
     let db: any Database
+
+    struct MemberRemovalResult {
+        let requesterConversation: IMConversationResponse
+        let removedConversation: IMConversationResponse
+        let remainingUserIDs: [UUID]
+    }
 
     func createConversation(
         kind: String?,
@@ -100,7 +218,7 @@ struct IMConversationService {
         )
         let persistedTitle = conversationKind == .direct ? nil : normalizedTitle
 
-        return try await db.transaction { database in
+        let response = try await db.transaction { database in
             if conversationKind == .direct,
                let existingConversationID = try await existingDirectConversationID(
                 for: memberUserIDs,
@@ -128,12 +246,47 @@ struct IMConversationService {
             for userID in memberUserIDs {
                 try await ConversationMember(
                     conversationID: conversationID,
-                    userID: userID
+                    userID: userID,
+                    role: conversationKind == .group && userID == creatorUserID ? .owner : .member
                 ).create(on: database)
+            }
+
+            if conversationKind == .group {
+                let sequence = try await allocateNextServerSequence(
+                    conversationID: conversationID,
+                    updatedAt: Date(),
+                    on: database
+                )
+                let systemMessage = try ConversationMessage(
+                    conversationID: conversationID,
+                    senderUserID: creatorUserID,
+                    serverSequence: sequence,
+                    content: .system(
+                        IMSystemEvent(
+                            type: .groupCreated,
+                            actorUserID: creatorUserID,
+                            actorEmail: creator.email
+                        )
+                    )
+                )
+                try await systemMessage.create(on: database)
+                try await advanceReadSequenceIfMember(
+                    conversationID: conversationID,
+                    userID: creatorUserID,
+                    readSequence: sequence,
+                    on: database
+                )
             }
 
             return try await conversationResponse(conversationID: conversationID, for: creatorUserID, on: database)
         }
+
+        try await IMConversationSummaryProjectionService(db: db).refreshConversationSummaries(
+            conversationID: response.id,
+            recipientUserIDs: response.memberUserIDs
+        )
+
+        return response
     }
 
     private func normalizedConversationKind(
@@ -249,6 +402,14 @@ struct IMConversationService {
         guard conversation.conversationKind == .group else {
             throw Abort(.badRequest, reason: MembershipUpdateError.directConversationImmutable.localizedDescription)
         }
+        let requesterMembership = try await requireMembershipRecord(
+            conversationID: conversationID,
+            userID: requesterUserID
+        )
+        guard requesterMembership.memberRoleEnum.canAddMembers else {
+            throw Abort(.forbidden, reason: MembershipUpdateError.insufficientPrivilegeToAddMembers.localizedDescription)
+        }
+        let requester = try await requireUser(id: requesterUserID)
 
         let users = try await User.query(on: db)
             .filter(\.$email ~~ normalizedEmails)
@@ -271,31 +432,74 @@ struct IMConversationService {
             throw Abort(.badRequest, reason: MembershipUpdateError.noNewMembers.localizedDescription)
         }
 
-        return try await db.transaction { database in
+        let response = try await db.transaction { database in
+            let sequence = try await allocateNextServerSequence(
+                conversationID: conversationID,
+                updatedAt: Date(),
+                on: database
+            )
             for user in newUsers {
                 try await ConversationMember(
                     conversationID: conversationID,
-                    userID: try user.requireID()
+                    userID: try user.requireID(),
+                    visibleFromSequence: sequence
                 ).create(on: database)
             }
+
+            let systemMessage = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: requesterUserID,
+                serverSequence: sequence,
+                content: .system(
+                    IMSystemEvent(
+                        type: .membersAdded,
+                        actorUserID: requesterUserID,
+                        actorEmail: requester.email,
+                        memberEmails: newUsers.map(\.email).sorted()
+                    )
+                )
+            )
+            try await systemMessage.create(on: database)
+            try await advanceReadSequenceIfMember(
+                conversationID: conversationID,
+                userID: requesterUserID,
+                readSequence: sequence,
+                on: database
+            )
+
             return try await conversationResponse(
                 conversationID: conversationID,
                 for: requesterUserID,
                 on: database
             )
         }
+
+        try await IMConversationSummaryProjectionService(db: db).refreshConversationSummaries(
+            conversationID: conversationID,
+            recipientUserIDs: response.memberUserIDs
+        )
+
+        return response
     }
 
     func leaveConversation(
         in conversationID: UUID,
         requesterUserID: UUID
     ) async throws {
+        let requester = try await requireUser(id: requesterUserID)
         let conversation = try await requireConversationAndMembership(
             conversationID: conversationID,
             userID: requesterUserID
         )
         guard conversation.conversationKind == .group else {
             throw Abort(.badRequest, reason: MembershipUpdateError.cannotLeaveDirectConversation.localizedDescription)
+        }
+        let requesterMembership = try await requireMembershipRecord(
+            conversationID: conversationID,
+            userID: requesterUserID
+        )
+        guard requesterMembership.memberRoleEnum != .owner else {
+            throw Abort(.badRequest, reason: MembershipUpdateError.ownerMustTransferBeforeLeaving.localizedDescription)
         }
 
         let memberships = try await ConversationMember.query(on: db)
@@ -309,79 +513,542 @@ struct IMConversationService {
             throw Abort(.notFound, reason: "会话不存在。")
         }
 
+        let remainingUserIDs = memberships
+            .map(\.$user.id)
+            .filter { $0 != requesterUserID }
         try await db.transaction { database in
             try await membership.delete(on: database)
+            let sequence = try await allocateNextServerSequence(
+                conversationID: conversationID,
+                updatedAt: Date(),
+                on: database
+            )
+            let systemMessage = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: requesterUserID,
+                serverSequence: sequence,
+                content: .system(
+                    IMSystemEvent(
+                        type: .memberLeft,
+                        actorUserID: requesterUserID,
+                        actorEmail: requester.email
+                    )
+                )
+            )
+            try await systemMessage.create(on: database)
         }
+
+        let projectionService = IMConversationSummaryProjectionService(db: db)
+        try await projectionService.markConversationRemoved(
+            conversationID: conversationID,
+            recipientUserID: requesterUserID
+        )
+        try await projectionService.refreshConversationSummaries(
+            conversationID: conversationID,
+            recipientUserIDs: remainingUserIDs
+        )
     }
 
-    func listConversations(for userID: UUID) async throws -> [IMConversationResponse] {
-        let memberships = try await ConversationMember.query(on: db)
-            .filter(\.$user.$id == userID)
-            .all()
-        let conversationIDs = memberships.map(\.$conversation.id)
-
-        guard !conversationIDs.isEmpty else {
-            return []
+    func removeMember(
+        in conversationID: UUID,
+        memberUserID: UUID,
+        requesterUserID: UUID
+    ) async throws -> MemberRemovalResult {
+        let conversation = try await requireConversationAndMembership(
+            conversationID: conversationID,
+            userID: requesterUserID
+        )
+        guard conversation.conversationKind == .group else {
+            throw Abort(.badRequest, reason: MembershipUpdateError.directConversationImmutable.localizedDescription)
+        }
+        guard memberUserID != requesterUserID else {
+            throw Abort(.badRequest, reason: MembershipUpdateError.cannotRemoveSelf.localizedDescription)
         }
 
-        let conversations = try await Conversation.query(on: db)
-            .filter(\.$id ~~ conversationIDs)
-            .all()
-        let allMembers = try await ConversationMember.query(on: db)
-            .filter(\.$conversation.$id ~~ conversationIDs)
-            .all()
-        let allMessages = try await ConversationMessage.query(on: db)
-            .filter(\.$conversation.$id ~~ conversationIDs)
-            .sort(\.$serverSequence, .descending)
-            .all()
-
-        let memberUserIDsByConversation = Dictionary(grouping: allMembers, by: \.$conversation.id)
-            .mapValues { members in
-                members.map(\.$user.id).sorted { $0.uuidString < $1.uuidString }
-            }
-        let lastReadSequenceByConversation = Dictionary(
-            uniqueKeysWithValues: memberships.map { ($0.$conversation.id, $0.lastReadSequence) }
+        let requesterMembership = try await requireMembershipRecord(
+            conversationID: conversationID,
+            userID: requesterUserID
+        )
+        let targetMembership = try await requireMembershipRecord(
+            conversationID: conversationID,
+            userID: memberUserID
+        )
+        try validateMemberRemovalPrivilege(
+            requesterRole: requesterMembership.memberRoleEnum,
+            targetRole: targetMembership.memberRoleEnum
         )
 
-        var lastMessageByConversation: [UUID: IMMessagePreviewResponse] = [:]
-        for message in allMessages {
-            let conversationID = message.$conversation.id
-            guard lastMessageByConversation[conversationID] == nil else {
-                continue
-            }
-            lastMessageByConversation[conversationID] = try makePreview(from: message)
+        let memberships = try await ConversationMember.query(on: db)
+            .filter(\.$conversation.$id == conversationID)
+            .all()
+        guard memberships.count - 1 >= 2 else {
+            throw Abort(.badRequest, reason: MembershipUpdateError.minimumGroupSizeViolation.localizedDescription)
         }
 
-        let responses = try conversations.map { conversation in
-            let conversationID = try conversation.requireID()
-            let lastMessage = lastMessageByConversation[conversationID]
-            let updatedAt = lastMessage?.createdAt ?? conversation.updatedAt
-            let latestSequence = max(conversation.lastMessageSequence, lastMessage?.serverSequence ?? 0)
-            let unreadCount = max(0, latestSequence - (lastReadSequenceByConversation[conversationID] ?? 0))
+        let requester = try await requireUser(id: requesterUserID)
+        let targetUser = try await requireUser(id: memberUserID)
+        let removedConversation = try await conversationResponse(
+            conversationID: conversationID,
+            for: memberUserID,
+            on: db
+        )
 
-            return IMConversationResponse(
-                id: conversationID,
-                title: conversation.title,
-                kind: conversation.kind,
-                memberCount: memberUserIDsByConversation[conversationID]?.count ?? 0,
-                memberUserIDs: memberUserIDsByConversation[conversationID] ?? [],
-                lastMessage: lastMessage,
-                lastReadSequence: lastReadSequenceByConversation[conversationID] ?? 0,
-                unreadCount: unreadCount,
-                createdAt: conversation.createdAt,
-                updatedAt: updatedAt
+        let requesterConversation = try await db.transaction { database in
+            try await targetMembership.delete(on: database)
+
+            let sequence = try await allocateNextServerSequence(
+                conversationID: conversationID,
+                updatedAt: Date(),
+                on: database
+            )
+            let systemMessage = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: requesterUserID,
+                serverSequence: sequence,
+                content: .system(
+                    IMSystemEvent(
+                        type: .memberRemoved,
+                        actorUserID: requesterUserID,
+                        actorEmail: requester.email,
+                        targetUserID: memberUserID,
+                        targetEmail: targetUser.email
+                    )
+                )
+            )
+            try await systemMessage.create(on: database)
+            try await advanceReadSequenceIfMember(
+                conversationID: conversationID,
+                userID: requesterUserID,
+                readSequence: sequence,
+                on: database
+            )
+
+            return try await conversationResponse(
+                conversationID: conversationID,
+                for: requesterUserID,
+                on: database
             )
         }
 
-        return responses.sorted { left, right in
-            if left.updatedAt == right.updatedAt {
-                return left.id.uuidString < right.id.uuidString
-            }
-            return left.updatedAt > right.updatedAt
-        }
+        let remainingUserIDs = requesterConversation.memberUserIDs
+        let projectionService = IMConversationSummaryProjectionService(db: db)
+        try await projectionService.markConversationRemoved(
+            conversationID: conversationID,
+            recipientUserID: memberUserID
+        )
+        try await projectionService.refreshConversationSummaries(
+            conversationID: conversationID,
+            recipientUserIDs: remainingUserIDs
+        )
+
+        return MemberRemovalResult(
+            requesterConversation: requesterConversation,
+            removedConversation: removedConversation,
+            remainingUserIDs: remainingUserIDs
+        )
     }
 
-    func listMembers(in conversationID: UUID, for userID: UUID) async throws -> [UserResponse] {
+    func updateMemberRole(
+        in conversationID: UUID,
+        memberUserID: UUID,
+        role: IMConversationMemberRole,
+        requesterUserID: UUID
+    ) async throws -> IMConversationResponse {
+        let conversation = try await requireConversationAndMembership(
+            conversationID: conversationID,
+            userID: requesterUserID
+        )
+        guard conversation.conversationKind == .group else {
+            throw Abort(.badRequest, reason: GroupRoleUpdateError.directConversationImmutable.localizedDescription)
+        }
+        guard memberUserID != requesterUserID else {
+            throw Abort(.badRequest, reason: GroupRoleUpdateError.cannotUpdateSelf.localizedDescription)
+        }
+
+        let requesterMembership = try await requireMembershipRecord(
+            conversationID: conversationID,
+            userID: requesterUserID
+        )
+        guard requesterMembership.memberRoleEnum == .owner else {
+            throw Abort(.forbidden, reason: GroupRoleUpdateError.insufficientPrivilege.localizedDescription)
+        }
+
+        let targetMembership = try await requireMembershipRecord(
+            conversationID: conversationID,
+            userID: memberUserID
+        )
+        let requester = try await requireUser(id: requesterUserID)
+        let targetUser = try await requireUser(id: memberUserID)
+        let previousRole = targetMembership.memberRoleEnum
+
+        guard previousRole != role else {
+            return try await conversationResponse(
+                conversationID: conversationID,
+                for: requesterUserID,
+                on: db
+            )
+        }
+
+        let response = try await db.transaction { database in
+            switch role {
+            case .owner:
+                requesterMembership.memberRoleEnum = .admin
+                targetMembership.memberRoleEnum = .owner
+                try await requesterMembership.update(on: database)
+                try await targetMembership.update(on: database)
+            case .admin, .member:
+                targetMembership.memberRoleEnum = role
+                try await targetMembership.update(on: database)
+            }
+
+            let sequence = try await allocateNextServerSequence(
+                conversationID: conversationID,
+                updatedAt: Date(),
+                on: database
+            )
+            let systemMessage = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: requesterUserID,
+                serverSequence: sequence,
+                content: .system(
+                    IMSystemEvent(
+                        type: role == .owner ? .ownershipTransferred : .roleUpdated,
+                        actorUserID: requesterUserID,
+                        actorEmail: requester.email,
+                        targetUserID: memberUserID,
+                        targetEmail: targetUser.email,
+                        previousRole: previousRole,
+                        newRole: role
+                    )
+                )
+            )
+            try await systemMessage.create(on: database)
+            try await advanceReadSequenceIfMember(
+                conversationID: conversationID,
+                userID: requesterUserID,
+                readSequence: sequence,
+                on: database
+            )
+
+            return try await conversationResponse(
+                conversationID: conversationID,
+                for: requesterUserID,
+                on: database
+            )
+        }
+
+        try await IMConversationSummaryProjectionService(db: db).refreshConversationSummaries(
+            conversationID: conversationID,
+            recipientUserIDs: response.memberUserIDs
+        )
+        return response
+    }
+
+    func updateConversationTitle(
+        in conversationID: UUID,
+        title: String,
+        requesterUserID: UUID
+    ) async throws -> IMConversationResponse {
+        let conversation = try await requireConversationAndMembership(
+            conversationID: conversationID,
+            userID: requesterUserID
+        )
+        guard conversation.conversationKind == .group else {
+            throw Abort(.badRequest, reason: GroupTitleUpdateError.directConversationImmutable.localizedDescription)
+        }
+        let requesterMembership = try await requireMembershipRecord(
+            conversationID: conversationID,
+            userID: requesterUserID
+        )
+        guard requesterMembership.memberRoleEnum.canRenameConversation else {
+            throw Abort(.forbidden, reason: GroupTitleUpdateError.insufficientPrivilege.localizedDescription)
+        }
+
+        guard let normalizedTitle = normalizedConversationTitle(title) else {
+            throw Abort(.badRequest, reason: GroupTitleUpdateError.emptyTitle.localizedDescription)
+        }
+        let requester = try await requireUser(id: requesterUserID)
+
+        if conversation.title == normalizedTitle {
+            return try await conversationResponse(
+                conversationID: conversationID,
+                for: requesterUserID,
+                on: db
+            )
+        }
+
+        let response = try await db.transaction { database in
+            guard let persistedConversation = try await Conversation.find(conversationID, on: database) else {
+                throw Abort(.notFound, reason: "会话不存在。")
+            }
+
+            persistedConversation.title = normalizedTitle
+            try await persistedConversation.update(on: database)
+
+            let sequence = try await allocateNextServerSequence(
+                conversationID: conversationID,
+                updatedAt: Date(),
+                on: database
+            )
+            let systemMessage = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: requesterUserID,
+                serverSequence: sequence,
+                content: .system(
+                    IMSystemEvent(
+                        type: .metadataUpdated,
+                        actorUserID: requesterUserID,
+                        actorEmail: requester.email,
+                        updatedFields: [.title],
+                        title: normalizedTitle
+                    )
+                )
+            )
+            try await systemMessage.create(on: database)
+            try await advanceReadSequenceIfMember(
+                conversationID: conversationID,
+                userID: requesterUserID,
+                readSequence: sequence,
+                on: database
+            )
+
+            return try await conversationResponse(
+                conversationID: conversationID,
+                for: requesterUserID,
+                on: database
+            )
+        }
+
+        try await IMConversationSummaryProjectionService(db: db).refreshConversationSummaries(
+            conversationID: conversationID,
+            recipientUserIDs: response.memberUserIDs
+        )
+        return response
+    }
+
+    func updateConversationMetadata(
+        in conversationID: UUID,
+        title: String?,
+        notice: String?,
+        avatarPreset: IMConversationAvatarPreset?,
+        requesterUserID: UUID
+    ) async throws -> IMConversationResponse {
+        let conversation = try await requireConversationAndMembership(
+            conversationID: conversationID,
+            userID: requesterUserID
+        )
+        guard conversation.conversationKind == .group else {
+            throw Abort(.badRequest, reason: GroupMetadataUpdateError.directConversationImmutable.localizedDescription)
+        }
+        let requesterMembership = try await requireMembershipRecord(
+            conversationID: conversationID,
+            userID: requesterUserID
+        )
+        guard requesterMembership.memberRoleEnum.canRenameConversation else {
+            throw Abort(.forbidden, reason: GroupMetadataUpdateError.insufficientPrivilege.localizedDescription)
+        }
+
+        let normalizedTitle = title.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if let normalizedTitle, title != nil, normalizedTitle.isEmpty {
+            throw Abort(.badRequest, reason: GroupMetadataUpdateError.emptyTitle.localizedDescription)
+        }
+        let normalizedNotice = notice.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if let normalizedNotice, notice != nil, normalizedNotice.isEmpty {
+            throw Abort(.badRequest, reason: GroupMetadataUpdateError.invalidNotice.localizedDescription)
+        }
+        guard title != nil || notice != nil || avatarPreset != nil else {
+            throw Abort(.badRequest, reason: GroupMetadataUpdateError.emptyUpdate.localizedDescription)
+        }
+
+        let requester = try await requireUser(id: requesterUserID)
+        let response = try await db.transaction { database in
+            guard let persistedConversation = try await Conversation.find(conversationID, on: database) else {
+                throw Abort(.notFound, reason: "会话不存在。")
+            }
+
+            var updatedFields: [IMConversationMetadataField] = []
+            if title != nil, persistedConversation.title != normalizedTitle {
+                persistedConversation.title = normalizedTitle
+                updatedFields.append(.title)
+            }
+            if notice != nil, persistedConversation.notice != normalizedNotice {
+                persistedConversation.notice = normalizedNotice
+                updatedFields.append(.notice)
+            }
+            if let avatarPreset, persistedConversation.avatarPresetEnum != avatarPreset {
+                persistedConversation.avatarPresetEnum = avatarPreset
+                updatedFields.append(.avatarPreset)
+            }
+
+            if updatedFields.isEmpty {
+                return try await conversationResponse(
+                    conversationID: conversationID,
+                    for: requesterUserID,
+                    on: database
+                )
+            }
+
+            try await persistedConversation.update(on: database)
+            let sequence = try await allocateNextServerSequence(
+                conversationID: conversationID,
+                updatedAt: Date(),
+                on: database
+            )
+            let systemMessage = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: requesterUserID,
+                serverSequence: sequence,
+                content: .system(
+                    IMSystemEvent(
+                        type: .metadataUpdated,
+                        actorUserID: requesterUserID,
+                        actorEmail: requester.email,
+                        updatedFields: updatedFields,
+                        title: persistedConversation.title,
+                        notice: persistedConversation.notice,
+                        avatarPreset: persistedConversation.avatarPresetEnum
+                    )
+                )
+            )
+            try await systemMessage.create(on: database)
+            try await advanceReadSequenceIfMember(
+                conversationID: conversationID,
+                userID: requesterUserID,
+                readSequence: sequence,
+                on: database
+            )
+
+            return try await conversationResponse(
+                conversationID: conversationID,
+                for: requesterUserID,
+                on: database
+            )
+        }
+
+        try await IMConversationSummaryProjectionService(db: db).refreshConversationSummaries(
+            conversationID: conversationID,
+            recipientUserIDs: response.memberUserIDs
+        )
+        return response
+    }
+
+    func updateConversationPreferences(
+        in conversationID: UUID,
+        isPinned: Bool?,
+        isMuted: Bool?,
+        requesterUserID: UUID
+    ) async throws -> IMConversationResponse {
+        _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
+        let recordID = ConversationUserSummary.recordID(ownerUserID: requesterUserID, conversationID: conversationID)
+
+        try await IMConversationSummaryProjectionService(db: db).refreshConversationSummaries(
+            conversationID: conversationID,
+            recipientUserIDs: [requesterUserID]
+        )
+
+        guard let summary = try await ConversationUserSummary.find(recordID, on: db) else {
+            throw Abort(.notFound, reason: "会话不存在。")
+        }
+
+        if let isPinned {
+            summary.isPinned = isPinned
+            summary.pinnedAt = isPinned ? Date() : nil
+        }
+        if let isMuted {
+            summary.isMuted = isMuted
+        }
+        summary.updatedAt = Date()
+        try await summary.update(on: db)
+
+        return try await conversationResponse(
+            conversationID: conversationID,
+            for: requesterUserID,
+            on: db
+        )
+    }
+
+    func recallMessage(
+        in conversationID: UUID,
+        messageID: UUID,
+        requesterUserID: UUID
+    ) async throws -> IMMessageResponse {
+        _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
+
+        let recalledMessage = try await db.transaction { database in
+            guard let message = try await ConversationMessage.query(on: database)
+                .filter(\.$id == messageID)
+                .filter(\.$conversation.$id == conversationID)
+                .first()
+            else {
+                throw Abort(.notFound, reason: RecallError.messageNotFound.localizedDescription)
+            }
+
+            guard message.$sender.id == requesterUserID else {
+                throw Abort(.forbidden, reason: RecallError.notMessageSender.localizedDescription)
+            }
+
+            let messageCreatedAt = message.createdAt ?? .distantPast
+            guard Date().timeIntervalSince(messageCreatedAt) <= RecallPolicy.window else {
+                throw Abort(.badRequest, reason: RecallError.recallWindowExpired.localizedDescription)
+            }
+
+            switch try message.decodedContent() {
+            case .text, .reply:
+                try message.replaceContent(.recalled)
+                try await message.update(on: database)
+                return message
+            case .recalled:
+                throw Abort(.badRequest, reason: RecallError.alreadyRecalled.localizedDescription)
+            case .system:
+                throw Abort(.badRequest, reason: RecallError.unsupportedMessageKind.localizedDescription)
+            }
+        }
+
+        let recipientUserIDs = try await listMembers(in: conversationID, for: requesterUserID).map(\.id)
+        try await IMConversationSummaryProjectionService(db: db).refreshConversationSummaries(
+            conversationID: conversationID,
+            recipientUserIDs: recipientUserIDs
+        )
+        return try messageResponse(from: recalledMessage, conversationID: conversationID)
+    }
+
+    func latestMessage(in conversationID: UUID) async throws -> IMMessageResponse? {
+        guard let message = try await ConversationMessage.query(on: db)
+            .filter(\.$conversation.$id == conversationID)
+            .sort(\.$serverSequence, .descending)
+            .first()
+        else {
+            return nil
+        }
+
+        return try messageResponse(from: message, conversationID: conversationID)
+    }
+
+    func listConversations(
+        for userID: UUID,
+        cursor: String?,
+        limit: Int?
+    ) async throws -> IMConversationPageResponse {
+        try await IMConversationSummaryProjectionService(db: db)
+            .listConversations(for: userID, cursor: cursor, limit: limit)
+    }
+
+    func listConversationChanges(
+        for userID: UUID,
+        afterToken: String,
+        cursor: String?,
+        limit: Int?
+    ) async throws -> IMConversationChangesResponse {
+        try await IMConversationSummaryProjectionService(db: db)
+            .listConversationChanges(
+                for: userID,
+                afterToken: afterToken,
+                cursor: cursor,
+                limit: limit
+            )
+    }
+
+    func listMembers(in conversationID: UUID, for userID: UUID) async throws -> [IMConversationMemberResponse] {
         try await requireMembership(conversationID: conversationID, userID: userID)
 
         let memberships = try await ConversationMember.query(on: db)
@@ -390,14 +1057,17 @@ struct IMConversationService {
             .all()
 
         return try memberships
-            .map(\.$user.value)
-            .map { user -> UserResponse in
-                guard let user else {
+            .map { membership -> IMConversationMemberResponse in
+                guard let user = membership.$user.value else {
                     throw Abort(.internalServerError, reason: "会话成员数据不完整。")
                 }
-                return try user.asResponse()
+                return IMConversationMemberResponse(
+                    id: try user.requireID(),
+                    email: user.email,
+                    role: membership.memberRoleEnum.rawValue
+                )
             }
-            .sorted { $0.email < $1.email }
+            .sorted(by: sortConversationMembers)
     }
 
     func listMessages(
@@ -406,11 +1076,15 @@ struct IMConversationService {
         beforeSequence: Int? = nil,
         limit requestedLimit: Int? = nil
     ) async throws -> [IMMessageResponse] {
-        try await requireMembership(conversationID: conversationID, userID: userID)
+        let membership = try await requireMembershipRecord(
+            conversationID: conversationID,
+            userID: userID
+        )
         let limit = try normalizedHistoryLimit(requestedLimit)
 
         let builder = ConversationMessage.query(on: db)
             .filter(\.$conversation.$id == conversationID)
+            .filter(\.$serverSequence >= membership.visibleFromSequence)
         if let beforeSequence {
             guard beforeSequence > 0 else {
                 throw Abort(.badRequest, reason: "分页游标无效。")
@@ -433,7 +1107,10 @@ struct IMConversationService {
         afterSequence: Int,
         limit requestedLimit: Int? = nil
     ) async throws -> IMMessageSinceResponse {
-        try await requireMembership(conversationID: conversationID, userID: userID)
+        let membership = try await requireMembershipRecord(
+            conversationID: conversationID,
+            userID: userID
+        )
 
         guard afterSequence >= 0 else {
             throw Abort(.badRequest, reason: "增量游标无效。")
@@ -442,7 +1119,7 @@ struct IMConversationService {
         let limit = try normalizedIncrementalLimit(requestedLimit)
         var rows = try await ConversationMessage.query(on: db)
             .filter(\.$conversation.$id == conversationID)
-            .filter(\.$serverSequence > afterSequence)
+            .filter(\.$serverSequence > max(afterSequence, membership.visibleFromSequence - 1))
             .sort(\.$serverSequence, .ascending)
             .limit(limit + 1)
             .all()
@@ -480,6 +1157,10 @@ struct IMConversationService {
             userID: userID,
             on: db
         )
+        try await IMConversationSummaryProjectionService(db: db).refreshConversationSummaries(
+            conversationID: conversationID,
+            recipientUserIDs: [userID]
+        )
         return IMConversationReadResponse(
             conversationID: conversationID,
             lastReadSequence: readState.lastReadSequence,
@@ -500,6 +1181,23 @@ struct IMConversationService {
 
     private func requireMembership(conversationID: UUID, userID: UUID) async throws {
         _ = try await requireConversationAndMembership(conversationID: conversationID, userID: userID)
+    }
+
+    private func requireMembershipRecord(
+        conversationID: UUID,
+        userID: UUID,
+        on database: (any Database)? = nil
+    ) async throws -> ConversationMember {
+        let database = database ?? db
+        guard let membership = try await ConversationMember.query(on: database)
+            .filter(\.$conversation.$id == conversationID)
+            .filter(\.$user.$id == userID)
+            .first()
+        else {
+            throw Abort(.notFound, reason: "会话不存在。")
+        }
+
+        return membership
     }
 
     private func requireConversationAndMembership(
@@ -536,8 +1234,9 @@ struct IMConversationService {
             throw Abort(.notFound, reason: "会话不存在。")
         }
 
-        let targetSequence = try await latestConversationSequence(
+        let targetSequence = try await latestVisibleConversationSequence(
             conversationID: conversationID,
+            visibleFromSequence: membership.visibleFromSequence,
             on: database
         )
         let effectiveReadSequence = min(requestedReadSequence, targetSequence)
@@ -567,18 +1266,28 @@ struct IMConversationService {
 
         let memberships = try await ConversationMember.query(on: database)
             .filter(\.$conversation.$id == conversationID)
+            .with(\.$user)
             .all()
         let memberUserIDs = memberships.map(\.$user.id).sorted { $0.uuidString < $1.uuidString }
         guard memberUserIDs.contains(userID) else {
             throw Abort(.notFound, reason: "会话不存在。")
         }
+        guard let membership = memberships.first(where: { $0.$user.id == userID }) else {
+            throw Abort(.notFound, reason: "会话不存在。")
+        }
 
         let lastMessage = try await ConversationMessage.query(on: database)
             .filter(\.$conversation.$id == conversationID)
+            .filter(\.$serverSequence >= membership.visibleFromSequence)
             .sort(\.$serverSequence, .descending)
             .first()
             .map(makePreview)
         let readState = try await conversationReadState(
+            conversationID: conversationID,
+            userID: userID,
+            on: database
+        )
+        let preferences = try await membershipSummaryPreferences(
             conversationID: conversationID,
             userID: userID,
             on: database
@@ -588,11 +1297,18 @@ struct IMConversationService {
             id: conversationID,
             title: conversation.title,
             kind: conversation.kind,
+            directMessagingState: directMessagingState(for: conversation),
+            directPeer: directPeer(from: memberships, currentUserID: userID),
+            notice: conversation.notice,
+            avatarPreset: conversation.avatarPresetEnum,
             memberCount: memberUserIDs.count,
             memberUserIDs: memberUserIDs,
             lastMessage: lastMessage,
             lastReadSequence: readState.lastReadSequence,
             unreadCount: readState.unreadCount,
+            isPinned: preferences.isPinned,
+            pinnedAt: preferences.pinnedAt,
+            isMuted: preferences.isMuted,
             createdAt: conversation.createdAt,
             updatedAt: lastMessage?.createdAt ?? conversation.updatedAt
         )
@@ -611,28 +1327,95 @@ struct IMConversationService {
             throw Abort(.notFound, reason: "会话不存在。")
         }
 
-        let latestSequence = try await latestConversationSequence(
+        let effectiveLastReadSequence = max(
+            membership.lastReadSequence,
+            max(0, membership.visibleFromSequence - 1)
+        )
+        let latestSequence = try await latestVisibleConversationSequence(
             conversationID: conversationID,
+            visibleFromSequence: membership.visibleFromSequence,
             on: database
         )
         return ConversationReadState(
-            lastReadSequence: membership.lastReadSequence,
-            unreadCount: max(0, latestSequence - membership.lastReadSequence)
+            lastReadSequence: effectiveLastReadSequence,
+            unreadCount: max(0, latestSequence - effectiveLastReadSequence)
         )
     }
 
-    private func latestConversationSequence(
+    private func latestVisibleConversationSequence(
         conversationID: UUID,
+        visibleFromSequence: Int,
         on database: any Database
     ) async throws -> Int {
-        let conversation = try await Conversation.find(conversationID, on: database)
         let latestMessageSequence = try await ConversationMessage.query(on: database)
             .filter(\.$conversation.$id == conversationID)
+            .filter(\.$serverSequence >= visibleFromSequence)
             .sort(\.$serverSequence, .descending)
             .first()?
             .serverSequence ?? 0
 
-        return max(conversation?.lastMessageSequence ?? 0, latestMessageSequence)
+        return max(latestMessageSequence, max(0, visibleFromSequence - 1))
+    }
+
+    private func allocateNextServerSequence(
+        conversationID: UUID,
+        updatedAt: Date,
+        on database: any Database
+    ) async throws -> Int {
+        if let sql = database as? any SQLDatabase,
+           let nextSequence = try await sql.update(Conversation.schema)
+            .set(
+                "last_message_sequence",
+                to: SQLQueryString(
+                    "MAX(\(ident: "last_message_sequence"), COALESCE((SELECT MAX(\(ident: "server_sequence")) FROM \(ident: ConversationMessage.schema) WHERE \(ident: "conversation_id") = \(bind: conversationID)), 0)) + 1"
+                )
+            )
+            .set("updated_at", to: updatedAt)
+            .where("id", .equal, conversationID)
+            .returning("last_message_sequence")
+            .first(decodingColumn: "last_message_sequence", as: Int.self)
+        {
+            return nextSequence
+        }
+
+        guard let conversation = try await Conversation.find(conversationID, on: database) else {
+            throw Abort(.notFound, reason: "会话不存在。")
+        }
+
+        let latestPersistedMessageSequence = try await ConversationMessage.query(on: database)
+            .filter(\.$conversation.$id == conversationID)
+            .sort(\.$serverSequence, .descending)
+            .first()?
+            .serverSequence ?? 0
+        conversation.lastMessageSequence = max(
+            conversation.lastMessageSequence,
+            latestPersistedMessageSequence
+        ) + 1
+        conversation.updatedAt = updatedAt
+        try await conversation.update(on: database)
+        return conversation.lastMessageSequence
+    }
+
+    private func advanceReadSequenceIfMember(
+        conversationID: UUID,
+        userID: UUID,
+        readSequence: Int,
+        on database: any Database
+    ) async throws {
+        guard let membership = try await ConversationMember.query(on: database)
+            .filter(\.$conversation.$id == conversationID)
+            .filter(\.$user.$id == userID)
+            .first()
+        else {
+            return
+        }
+
+        guard membership.lastReadSequence < readSequence else {
+            return
+        }
+
+        membership.lastReadSequence = max(readSequence, max(0, membership.visibleFromSequence - 1))
+        try await membership.update(on: database)
     }
 
     private func makePreview(from message: ConversationMessage) throws -> IMMessagePreviewResponse {
@@ -640,9 +1423,25 @@ struct IMConversationService {
             id: try message.requireID(),
             senderUserID: message.$sender.id,
             serverSequence: message.serverSequence,
-            kind: message.kind,
-            body: try message.decodedBody(),
+            content: try message.decodedContent(),
             createdAt: message.createdAt
+        )
+    }
+
+    private func membershipSummaryPreferences(
+        conversationID: UUID,
+        userID: UUID,
+        on database: any Database
+    ) async throws -> ConversationSummaryPreferences {
+        let recordID = ConversationUserSummary.recordID(ownerUserID: userID, conversationID: conversationID)
+        guard let summary = try await ConversationUserSummary.find(recordID, on: database) else {
+            return ConversationSummaryPreferences(isPinned: false, pinnedAt: nil, isMuted: false)
+        }
+
+        return ConversationSummaryPreferences(
+            isPinned: summary.isPinned,
+            pinnedAt: summary.pinnedAt,
+            isMuted: summary.isMuted
         )
     }
 
@@ -656,8 +1455,7 @@ struct IMConversationService {
             senderUserID: message.$sender.id,
             clientMessageID: message.clientMessageID,
             serverSequence: message.serverSequence,
-            kind: message.kind,
-            body: try message.decodedBody(),
+            content: try message.decodedContent(),
             createdAt: message.createdAt
         )
     }
@@ -689,5 +1487,107 @@ struct IMConversationService {
     private func normalizedConversationTitle(_ title: String?) -> String? {
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmedTitle.isEmpty ? nil : trimmedTitle
+    }
+
+    private func validateMemberRemovalPrivilege(
+        requesterRole: IMConversationMemberRole,
+        targetRole: IMConversationMemberRole
+    ) throws {
+        switch requesterRole {
+        case .owner:
+            if targetRole == .owner {
+                throw Abort(.badRequest, reason: MembershipUpdateError.cannotRemoveOwner.localizedDescription)
+            }
+        case .admin:
+            switch targetRole {
+            case .owner:
+                throw Abort(.forbidden, reason: MembershipUpdateError.cannotRemoveOwner.localizedDescription)
+            case .admin:
+                throw Abort(.forbidden, reason: MembershipUpdateError.cannotRemoveAdministrator.localizedDescription)
+            case .member:
+                return
+            }
+        case .member:
+            throw Abort(.forbidden, reason: MembershipUpdateError.insufficientPrivilegeToRemoveMembers.localizedDescription)
+        }
+    }
+
+    private func memberRoleUpdateSystemMessage(
+        requesterEmail: String,
+        targetEmail: String,
+        previousRole: IMConversationMemberRole,
+        newRole: IMConversationMemberRole
+    ) -> String {
+        switch newRole {
+        case .owner:
+            return "\(requesterEmail) 已将群主转让给 \(targetEmail)"
+        case .admin:
+            return "\(requesterEmail) 将 \(targetEmail) 设为管理员"
+        case .member:
+            if previousRole == .admin {
+                return "\(requesterEmail) 取消了 \(targetEmail) 的管理员身份"
+            }
+            return "\(requesterEmail) 更新了 \(targetEmail) 的群角色"
+        }
+    }
+
+    private func sortConversationMembers(
+        lhs: IMConversationMemberResponse,
+        rhs: IMConversationMemberResponse
+    ) -> Bool {
+        let lhsRole = IMConversationMemberRole(rawValue: lhs.role) ?? .member
+        let rhsRole = IMConversationMemberRole(rawValue: rhs.role) ?? .member
+        let lhsPriority = memberRolePriority(lhsRole)
+        let rhsPriority = memberRolePriority(rhsRole)
+        if lhsPriority != rhsPriority {
+            return lhsPriority < rhsPriority
+        }
+
+        return lhs.email < rhs.email
+    }
+
+    private func memberRolePriority(_ role: IMConversationMemberRole) -> Int {
+        switch role {
+        case .owner:
+            return 0
+        case .admin:
+            return 1
+        case .member:
+            return 2
+        }
+    }
+
+    private func directMessagingState(for conversation: Conversation) -> String? {
+        guard conversation.conversationKind == .direct else {
+            return nil
+        }
+
+        return conversation.directMessagingState
+    }
+
+    private func directPeer(
+        from memberships: [ConversationMember],
+        currentUserID: UUID
+    ) -> IMDirectPeerResponse? {
+        guard let peerMembership = memberships.first(where: { $0.$user.id != currentUserID }),
+              let peerUser = peerMembership.$user.value
+        else {
+            return nil
+        }
+
+        return IMDirectPeerResponse(
+            id: peerMembership.$user.id,
+            email: peerUser.email
+        )
+    }
+}
+
+private extension IMConversationMemberRole {
+    var canAddMembers: Bool {
+        self == .owner || self == .admin
+    }
+
+    var canRenameConversation: Bool {
+        self == .owner || self == .admin
     }
 }

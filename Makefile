@@ -1,7 +1,7 @@
 .PHONY: test-client build-app test-server test-all
 
 test-client:
-	cd IMClientKit && swift test
+	cd IMClientKit && swift test --no-parallel
 
 build-app:
 	xcodebuild \
@@ -15,4 +15,3 @@ test-server:
 	cd IMServer && swift test --no-parallel
 
 test-all: test-client build-app test-server
-

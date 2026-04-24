@@ -15,7 +15,7 @@ public struct FileTransferClient: Sendable {
     private let backgroundDownloadRequest: @Sendable (URLRequest, URL, BackgroundTransferConfiguration) async throws -> (URL, HTTPURLResponse)
 
     public init(
-        baseURL: URL = AppConstants.apiBaseURL,
+        baseURL: URL,
         transport: URLSessionFileTransferTransport = URLSessionFileTransferTransport(),
         logger: HTTPLogHandler = .noop,
         coding: HTTPCodingConfiguration = .default
@@ -69,7 +69,7 @@ public struct FileTransferClient: Sendable {
     }
 
     init<Transport: FileTransferTransport>(
-        baseURL: URL = AppConstants.apiBaseURL,
+        baseURL: URL,
         transport: Transport,
         backgroundUploadRequest: @escaping @Sendable (URLRequest, UploadBody, BackgroundTransferConfiguration) async throws -> (Data, HTTPURLResponse) = { request, uploadBody, configuration in
             try await BackgroundTransferCoordinator.shared.upload(
@@ -116,7 +116,7 @@ public struct FileTransferClient: Sendable {
     }
 
     init<Transport: FileTransferTransport, Logger: HTTPClientLogger>(
-        baseURL: URL = AppConstants.apiBaseURL,
+        baseURL: URL,
         transport: Transport,
         logger: Logger,
         coding: HTTPCodingConfiguration = .default

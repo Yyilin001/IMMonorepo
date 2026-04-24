@@ -11,7 +11,17 @@ import SwiftUI
 struct IMAppApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @UIApplicationDelegateAdaptor(IMAppDelegate.self) private var appDelegate
-    @StateObject private var authManager = AuthManager()
+    @StateObject private var authManager: AuthManager
+
+    init() {
+        let configuration = AppNetworkConfiguration.local
+        _authManager = StateObject(
+            wrappedValue: AuthManager(
+                network: configuration.makeNetworkEnvironment(),
+                imConnectionConfiguration: configuration.makeIMTCPConfiguration()
+            )
+        )
+    }
 
     var body: some Scene {
         WindowGroup {

@@ -10,6 +10,7 @@ struct IMConversationEventService {
         eventType: IMTCPConversationEventType,
         conversationID: UUID,
         recipientUserIDs: [UUID],
+        message: IMMessageResponse? = nil,
         actorUserID: UUID? = nil
     ) async {
         let uniqueRecipientUserIDs = Array(Set(recipientUserIDs)).sorted { $0.uuidString < $1.uuidString }
@@ -30,6 +31,7 @@ struct IMConversationEventService {
                     IMTCPConversationEventPayload(
                         eventType: eventType,
                         conversation: conversation,
+                        message: message,
                         actorUserID: actorUserID,
                         serverTimestamp: timestamp
                     ),
@@ -60,6 +62,7 @@ struct IMConversationEventService {
             IMTCPConversationEventPayload(
                 eventType: .conversationRemovedForSelf,
                 conversation: conversation,
+                message: nil,
                 actorUserID: actorUserID,
                 serverTimestamp: Date()
             ),

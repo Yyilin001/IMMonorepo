@@ -416,23 +416,194 @@ struct IMServerTests {
                 kind: "text",
                 body: ["text": "hello from history"]
             ).create(on: app.db)
+            try await IMConversationSummaryProjectionService(db: app.db)
+                .rebuildSummaries(for: try demoUser.requireID())
 
             try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let conversations = try res.content.decode([IMConversationResponse].self)
+                let conversations = try res.content.decode(IMConversationPageResponse.self).items
                 #expect(conversations.count == 1)
                 #expect(conversations[0].id == conversationID)
                 #expect(conversations[0].title == "Demo Chat")
                 #expect(conversations[0].kind == IMConversationKind.group.rawValue)
+                #expect(conversations[0].directMessagingState == nil)
                 #expect(conversations[0].memberCount == 2)
                 #expect(conversations[0].memberUserIDs.count == 2)
                 #expect(conversations[0].lastMessage?.serverSequence == 1)
                 #expect(conversations[0].lastMessage?.body["text"] == "hello from history")
                 #expect(conversations[0].lastReadSequence == 0)
                 #expect(conversations[0].unreadCount == 1)
+            })
+        }
+    }
+
+    @Test("IM conversations read path does not auto rebuild missing summaries")
+    func imConversationsReadPathDoesNotAutoRebuildMissingSummaries() async throws {
+        try await withApp(configure: configure) { app in
+            let owner = try await makeUser(email: "projection-owner@example.com", on: app)
+            let peer = try await makeUser(email: "projection-peer@example.com", on: app)
+            let ownerID = try owner.requireID()
+            let peerID = try peer.requireID()
+            let accessToken = try await loginAccessToken(
+                email: owner.email,
+                password: "password1234",
+                deviceID: "projection-owner-device",
+                on: app
+            )
+
+            let conversation = Conversation(
+                title: "Needs Backfill",
+                updatedAt: Date(timeIntervalSince1970: 1_700_120_000)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: ownerID)
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: peerID)
+                .create(on: app.db)
+            try await ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: peerID,
+                serverSequence: 1,
+                kind: "text",
+                body: ["text": "needs rebuild"]
+            ).create(on: app.db)
+
+            try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                let page = try res.content.decode(IMConversationPageResponse.self)
+                #expect(page.items.isEmpty)
+            })
+
+            try await IMConversationSummaryProjectionService(db: app.db)
+                .rebuildSummaries(for: ownerID)
+
+            try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                let page = try res.content.decode(IMConversationPageResponse.self)
+                #expect(page.items.count == 1)
+                #expect(page.items.first?.id == conversationID)
+                #expect(page.items.first?.lastMessage?.content.previewText == "needs rebuild")
+            })
+        }
+    }
+
+    @Test("IM conversation summary endpoints page from projection records")
+    func imConversationSummaryEndpointsPageFromProjectionRecords() async throws {
+        try await withApp(configure: configure) { app in
+            let owner = try await makeUser(email: "summary-owner@example.com", on: app)
+            let peer = try await makeUser(email: "summary-peer@example.com", on: app)
+            let ownerID = try owner.requireID()
+            let peerID = try peer.requireID()
+            let accessToken = try await loginAccessToken(
+                email: owner.email,
+                password: "password1234",
+                deviceID: "summary-owner-device",
+                on: app
+            )
+
+            var baselineToken = ""
+            try await app.testing().test(.GET, "api/im/conversations?limit=2", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                let page = try res.content.decode(IMConversationPageResponse.self)
+                #expect(page.items.isEmpty)
+                baselineToken = page.snapshotToken
+            })
+
+            let firstConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+            let secondConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+            let thirdConversationID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
+
+            for summary in try [
+                makeConversationSummaryProjection(
+                    ownerUserID: ownerID,
+                    conversationID: firstConversationID,
+                    peerUserID: peerID,
+                    title: "Newest",
+                    serverSequence: 3,
+                    lastActivityAt: Date(timeIntervalSince1970: 1_700_220_300),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_220_300)
+                ),
+                makeConversationSummaryProjection(
+                    ownerUserID: ownerID,
+                    conversationID: secondConversationID,
+                    peerUserID: peerID,
+                    title: "Middle",
+                    serverSequence: 2,
+                    lastActivityAt: Date(timeIntervalSince1970: 1_700_220_200),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_220_200)
+                ),
+                makeConversationSummaryProjection(
+                    ownerUserID: ownerID,
+                    conversationID: thirdConversationID,
+                    peerUserID: peerID,
+                    title: "Oldest",
+                    serverSequence: 1,
+                    lastActivityAt: Date(timeIntervalSince1970: 1_700_220_100),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_220_100)
+                )
+            ] {
+                try await summary.create(on: app.db)
+            }
+
+            var pageCursor = ""
+            try await app.testing().test(.GET, queryPath("api/im/conversations", items: [
+                URLQueryItem(name: "limit", value: "2")
+            ]), beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                let page = try res.content.decode(IMConversationPageResponse.self)
+                #expect(page.items.map(\.id) == [firstConversationID, secondConversationID])
+                #expect(page.hasMore == true)
+                pageCursor = try #require(page.nextCursor)
+            })
+
+            try await app.testing().test(.GET, queryPath("api/im/conversations", items: [
+                URLQueryItem(name: "limit", value: "2"),
+                URLQueryItem(name: "cursor", value: pageCursor)
+            ]), beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                let page = try res.content.decode(IMConversationPageResponse.self)
+                #expect(page.items.map(\.id) == [thirdConversationID])
+                #expect(page.hasMore == false)
+                #expect(page.nextCursor == nil)
+            })
+
+            var changesCursor = ""
+            try await app.testing().test(.GET, queryPath("api/im/conversations/changes", items: [
+                URLQueryItem(name: "afterToken", value: baselineToken),
+                URLQueryItem(name: "limit", value: "2")
+            ]), beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                let changes = try res.content.decode(IMConversationChangesResponse.self)
+                #expect(changes.upserts.map(\.id) == [thirdConversationID, secondConversationID])
+                #expect(changes.removedConversationIDs.isEmpty)
+                #expect(changes.hasMore == true)
+                changesCursor = try #require(changes.nextCursor)
+                #expect(changes.targetToken != baselineToken)
+            })
+
+            try await app.testing().test(.GET, queryPath("api/im/conversations/changes", items: [
+                URLQueryItem(name: "afterToken", value: baselineToken),
+                URLQueryItem(name: "limit", value: "2"),
+                URLQueryItem(name: "cursor", value: changesCursor)
+            ]), beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                let changes = try res.content.decode(IMConversationChangesResponse.self)
+                #expect(changes.upserts.map(\.id) == [firstConversationID])
+                #expect(changes.removedConversationIDs.isEmpty)
+                #expect(changes.hasMore == false)
+                #expect(changes.nextCursor == nil)
             })
         }
     }
@@ -459,6 +630,8 @@ struct IMServerTests {
                 let conversation = try res.content.decode(IMConversationResponse.self)
                 #expect(conversation.title == nil)
                 #expect(conversation.kind == IMConversationKind.direct.rawValue)
+                #expect(conversation.directMessagingState == IMDirectMessagingState.active.rawValue)
+                #expect(conversation.directPeer == IMDirectPeerResponse(id: try peerUser.requireID(), email: peerUser.email))
                 #expect(conversation.memberCount == 2)
                 #expect(conversation.lastMessage == nil)
                 #expect(conversation.lastReadSequence == 0)
@@ -500,6 +673,48 @@ struct IMServerTests {
                     try firstPeer.requireID(),
                     try secondPeer.requireID()
                 ].sorted { $0.uuidString < $1.uuidString })
+            })
+        }
+    }
+
+    @Test("IM group creation writes a system message into summary and history")
+    func createGroupConversationPersistsSystemMessage() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let firstPeer = try await makeUser(email: "group-system-first@example.com", on: app)
+            let secondPeer = try await makeUser(email: "group-system-second@example.com", on: app)
+            var createdConversationID: UUID?
+
+            try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                try req.content.encode(
+                    IMConversationCreateRequest(
+                        kind: IMConversationKind.group.rawValue,
+                        title: "System Group",
+                        memberEmails: [firstPeer.email, secondPeer.email]
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let conversation = try res.content.decode(IMConversationResponse.self)
+                createdConversationID = conversation.id
+                #expect(conversation.lastMessage?.content.previewText == "\(demoUser.email) 创建了群聊")
+                #expect(conversation.lastReadSequence == 1)
+                #expect(conversation.unreadCount == 0)
+            })
+
+            let conversationID = try #require(createdConversationID)
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let messages = try res.content.decode([IMMessageResponse].self)
+                #expect(messages.count == 1)
+                #expect(messages[0].content.previewText == "\(demoUser.email) 创建了群聊")
+                #expect(messages[0].serverSequence == 1)
             })
         }
     }
@@ -643,6 +858,55 @@ struct IMServerTests {
         }
     }
 
+    @Test("IM create conversation endpoint reuses frozen direct conversation")
+    func createDirectConversationReusesFrozenConversation() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "direct-frozen-reuse@example.com", on: app)
+            let demoUserID = try demoUser.requireID()
+            let peerUserID = try peerUser.requireID()
+
+            let existingConversation = Conversation(
+                title: nil,
+                kind: .direct,
+                directMessagingState: .frozenAfterUnfriend,
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_900)
+            )
+            try await existingConversation.create(on: app.db)
+            let existingConversationID = try existingConversation.requireID()
+
+            try await ConversationMember(conversationID: existingConversationID, userID: demoUserID)
+                .create(on: app.db)
+            try await ConversationMember(conversationID: existingConversationID, userID: peerUserID)
+                .create(on: app.db)
+
+            try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                try req.content.encode(
+                    IMConversationCreateRequest(
+                        kind: IMConversationKind.direct.rawValue,
+                        title: "Should Reuse Frozen",
+                        memberEmails: [peerUser.email]
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let conversation = try res.content.decode(IMConversationResponse.self)
+                #expect(conversation.id == existingConversationID)
+                #expect(conversation.kind == IMConversationKind.direct.rawValue)
+                #expect(conversation.title == nil)
+                #expect(conversation.directMessagingState == IMDirectMessagingState.frozenAfterUnfriend.rawValue)
+                #expect(conversation.directPeer == IMDirectPeerResponse(id: peerUserID, email: peerUser.email))
+            })
+
+            let conversations = try await Conversation.query(on: app.db).all()
+            #expect(conversations.count == 1)
+            #expect(conversations.first?.directMessagingStateEnum == .frozenAfterUnfriend)
+        }
+    }
+
     @Test("IM add members endpoint rejects direct conversations")
     func imAddMembersRejectsDirectConversation() async throws {
         try await withApp(configure: configure) { app in
@@ -690,7 +954,11 @@ struct IMServerTests {
             try await conversation.create(on: app.db)
             let conversationID = try conversation.requireID()
 
-            try await ConversationMember(conversationID: conversationID, userID: try demoUser.requireID())
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try demoUser.requireID(),
+                role: .owner
+            )
                 .create(on: app.db)
             try await ConversationMember(conversationID: conversationID, userID: try existingUser.requireID())
                 .create(on: app.db)
@@ -737,7 +1005,11 @@ struct IMServerTests {
             try await conversation.create(on: app.db)
             let conversationID = try conversation.requireID()
 
-            try await ConversationMember(conversationID: conversationID, userID: try demoUser.requireID())
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try demoUser.requireID(),
+                role: .owner
+            )
                 .create(on: app.db)
             try await ConversationMember(conversationID: conversationID, userID: try existingUser.requireID())
                 .create(on: app.db)
@@ -750,6 +1022,295 @@ struct IMServerTests {
             }, afterResponse: { res async in
                 #expect(res.status == .badRequest)
                 #expect(res.body.string.contains("没有可新增的成员"))
+            })
+        }
+    }
+
+    @Test("IM add members endpoint rejects plain group members")
+    func imAddMembersRejectsPlainMember() async throws {
+        try await withApp(configure: configure) { app in
+            let owner = try await user(email: "demo@example.com", on: app)
+            let memberUser = try await makeUser(email: "group-member@example.com", on: app)
+            let newUser = try await makeUser(email: "group-member-new@example.com", on: app)
+            let memberAccessToken = try await loginAccessToken(
+                email: memberUser.email,
+                password: "password1234",
+                deviceID: "group-member-device",
+                on: app
+            )
+            let conversation = Conversation(
+                title: "Privilege Group",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_006)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try owner.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try memberUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/members", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: memberAccessToken)
+                try req.content.encode(
+                    IMConversationMemberUpdateRequest(memberEmails: [newUser.email])
+                )
+            }, afterResponse: { res async in
+                #expect(res.status == .forbidden)
+                #expect(res.body.string.contains("只有群主或管理员可以添加成员"))
+            })
+        }
+    }
+
+    @Test("IM owner can promote admin and admin can remove member")
+    func imOwnerPromotesAdminAndAdminRemovesMember() async throws {
+        try await withApp(configure: configure) { app in
+            let ownerAccessToken = try await loginAccessToken(using: app)
+            let owner = try await user(email: "demo@example.com", on: app)
+            let adminCandidate = try await makeUser(email: "admin-candidate@example.com", on: app)
+            let removableMember = try await makeUser(email: "removable-member@example.com", on: app)
+            let adminCandidateID = try adminCandidate.requireID()
+            let removableMemberID = try removableMember.requireID()
+            let adminAccessToken = try await loginAccessToken(
+                email: adminCandidate.email,
+                password: "password1234",
+                deviceID: "admin-candidate-device",
+                on: app
+            )
+            let conversation = Conversation(
+                title: "Ops Group",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_006)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try owner.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: adminCandidateID,
+                role: .member
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: removableMemberID,
+                role: .member
+            ).create(on: app.db)
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/members/\(adminCandidateID.uuidString)/role", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: ownerAccessToken)
+                try req.content.encode(
+                    IMConversationMemberRoleUpdateRequest(role: IMConversationMemberRole.admin.rawValue)
+                )
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/members/\(removableMemberID.uuidString)/remove", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: adminAccessToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let response = try res.content.decode(IMConversationResponse.self)
+                #expect(response.memberCount == 2)
+            })
+
+            let memberships = try await ConversationMember.query(on: app.db)
+                .filter(\.$conversation.$id == conversationID)
+                .all()
+            #expect(memberships.count == 2)
+            #expect(
+                memberships.first(where: { $0.$user.id == adminCandidateID })?.memberRoleEnum == .admin
+            )
+        }
+    }
+
+    @Test("IM admin cannot update another member's group role")
+    func imAdminCannotUpdateMemberRole() async throws {
+        try await withApp(configure: configure) { app in
+            let owner = try await user(email: "demo@example.com", on: app)
+            let adminUser = try await makeUser(email: "role-admin@example.com", on: app)
+            let targetUser = try await makeUser(email: "role-target@example.com", on: app)
+            let adminAccessToken = try await loginAccessToken(
+                email: adminUser.email,
+                password: "password1234",
+                deviceID: "role-admin-device",
+                on: app
+            )
+            let conversation = Conversation(
+                title: "Role Boundaries",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_006)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try owner.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try adminUser.requireID(),
+                role: .admin
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try targetUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/members/\(try targetUser.requireID().uuidString)/role", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: adminAccessToken)
+                try req.content.encode(
+                    IMConversationMemberRoleUpdateRequest(role: IMConversationMemberRole.admin.rawValue)
+                )
+            }, afterResponse: { res async in
+                #expect(res.status == .forbidden)
+                #expect(res.body.string.contains("只有群主可以调整成员角色"))
+            })
+        }
+    }
+
+    @Test("IM member cannot rename group conversation")
+    func imMemberCannotRenameGroupConversation() async throws {
+        try await withApp(configure: configure) { app in
+            let owner = try await user(email: "demo@example.com", on: app)
+            let memberUser = try await makeUser(email: "rename-member@example.com", on: app)
+            let memberAccessToken = try await loginAccessToken(
+                email: memberUser.email,
+                password: "password1234",
+                deviceID: "rename-member-device",
+                on: app
+            )
+            let conversation = Conversation(
+                title: "Rename Boundaries",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_006)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try owner.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try memberUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/title", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: memberAccessToken)
+                try req.content.encode(IMConversationTitleUpdateRequest(title: "Illegal Rename"))
+            }, afterResponse: { res async in
+                #expect(res.status == .forbidden)
+                #expect(res.body.string.contains("只有群主或管理员可以修改群名称"))
+            })
+        }
+    }
+
+    @Test("IM removed member can no longer manage the conversation")
+    func imRemovedMemberCannotManageConversation() async throws {
+        try await withApp(configure: configure) { app in
+            let ownerAccessToken = try await loginAccessToken(using: app)
+            let owner = try await user(email: "demo@example.com", on: app)
+            let removedUser = try await makeUser(email: "removed-manager@example.com", on: app)
+            let removedAccessToken = try await loginAccessToken(
+                email: removedUser.email,
+                password: "password1234",
+                deviceID: "removed-manager-device",
+                on: app
+            )
+            let conversation = Conversation(
+                title: "Removal Boundaries",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_006)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try owner.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try removedUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+            let extraUser = try await makeUser(email: "removed-extra@example.com", on: app)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try extraUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/members/\(try removedUser.requireID().uuidString)/remove", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: ownerAccessToken)
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/title", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: removedAccessToken)
+                try req.content.encode(IMConversationTitleUpdateRequest(title: "Should Not Work"))
+            }, afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+        }
+    }
+
+    @Test("IM owner must transfer ownership before leaving group")
+    func imOwnerMustTransferBeforeLeaving() async throws {
+        try await withApp(configure: configure) { app in
+            let ownerAccessToken = try await loginAccessToken(using: app)
+            let owner = try await user(email: "demo@example.com", on: app)
+            let secondUser = try await makeUser(email: "owner-transfer-second@example.com", on: app)
+            let thirdUser = try await makeUser(email: "owner-transfer-third@example.com", on: app)
+            let conversation = Conversation(
+                title: "Transfer Group",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_006)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try owner.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try secondUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try thirdUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/leave", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: ownerAccessToken)
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("群主退出前请先转让群主"))
             })
         }
     }
@@ -854,37 +1415,53 @@ struct IMServerTests {
             try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: demoAccessToken)
             }, afterResponse: { res async throws in
-                let conversations = try res.content.decode([IMConversationResponse].self)
+                let conversations = try res.content.decode(IMConversationPageResponse.self).items
                 #expect(conversations.isEmpty)
             })
 
             try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: otherAccessToken)
             }, afterResponse: { res async throws in
-                let conversations = try res.content.decode([IMConversationResponse].self)
+                let conversations = try res.content.decode(IMConversationPageResponse.self).items
                 #expect(conversations.count == 1)
                 #expect(conversations[0].id == conversationID)
                 #expect(conversations[0].kind == IMConversationKind.group.rawValue)
                 #expect(conversations[0].memberCount == 2)
                 #expect(conversations[0].lastReadSequence == 0)
-                #expect(conversations[0].unreadCount == 1)
+                #expect(conversations[0].unreadCount == 2)
+                #expect(conversations[0].lastMessage?.content.previewText == "\(demoUser.email) 退出了群聊")
             })
         }
     }
 
-    @Test("IM members endpoint returns sorted conversation members for members only")
+    @Test("IM members endpoint returns role-aware sorted members for members only")
     func imConversationMembers() async throws {
         try await withApp(configure: configure) { app in
             let accessToken = try await loginAccessToken(using: app)
             let demoUser = try await user(email: "demo@example.com", on: app)
             let otherUser = try await makeUser(email: "members-peer@example.com", on: app)
+            let adminUser = try await makeUser(email: "members-admin@example.com", on: app)
             let conversation = Conversation(title: "Members Chat", updatedAt: Date(timeIntervalSince1970: 1_700_100_030))
             try await conversation.create(on: app.db)
             let conversationID = try conversation.requireID()
 
-            try await ConversationMember(conversationID: conversationID, userID: try demoUser.requireID())
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try demoUser.requireID(),
+                role: .owner
+            )
                 .create(on: app.db)
-            try await ConversationMember(conversationID: conversationID, userID: try otherUser.requireID())
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try adminUser.requireID(),
+                role: .admin
+            )
+                .create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try otherUser.requireID(),
+                role: .member
+            )
                 .create(on: app.db)
 
             try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/members", beforeRequest: { req in
@@ -892,8 +1469,17 @@ struct IMServerTests {
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let members = try res.content.decode([UserResponse].self)
-                #expect(members.map(\.email) == ["demo@example.com", "members-peer@example.com"])
+                let members = try res.content.decode([IMConversationMemberResponse].self)
+                #expect(members.map(\.email) == [
+                    "demo@example.com",
+                    "members-admin@example.com",
+                    "members-peer@example.com"
+                ])
+                #expect(members.map(\.role) == [
+                    IMConversationMemberRole.owner.rawValue,
+                    IMConversationMemberRole.admin.rawValue,
+                    IMConversationMemberRole.member.rawValue
+                ])
             })
         }
     }
@@ -928,6 +1514,8 @@ struct IMServerTests {
                 kind: "text",
                 body: ["text": "second"]
             ).create(on: app.db)
+            try await IMConversationSummaryProjectionService(db: app.db)
+                .rebuildSummaries(for: try demoUser.requireID())
 
             try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
@@ -945,7 +1533,7 @@ struct IMServerTests {
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let conversations = try res.content.decode([IMConversationResponse].self)
+                let conversations = try res.content.decode(IMConversationPageResponse.self).items
                 #expect(conversations.first?.id == conversationID)
                 #expect(conversations.first?.unreadCount == 2)
             })
@@ -963,6 +1551,112 @@ struct IMServerTests {
                 req.headers.bearerAuthorization = .init(token: strangerAccessToken)
             }, afterResponse: { res async in
                 #expect(res.status == .notFound)
+            })
+        }
+    }
+
+    @Test("IM recall endpoint replaces message content and refreshes summaries")
+    func imRecallMessage() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "recall-peer@example.com", on: app)
+
+            let conversation = Conversation(
+                title: nil,
+                kind: .direct,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_060),
+                lastMessageSequence: 1
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: try demoUser.requireID())
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try peerUser.requireID())
+                .create(on: app.db)
+
+            let message = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try demoUser.requireID(),
+                serverSequence: 1,
+                content: .text("hello recall")
+            )
+            try await message.create(on: app.db)
+            let messageID = try message.requireID()
+
+            try await IMConversationSummaryProjectionService(db: app.db).refreshConversationSummaries(
+                conversationID: conversationID,
+                recipientUserIDs: [try demoUser.requireID(), try peerUser.requireID()]
+            )
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/messages/\(messageID.uuidString)/recall", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let recalled = try res.content.decode(IMMessageResponse.self)
+                #expect(recalled.id == messageID)
+                #expect(recalled.content == .recalled)
+            })
+
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                let messages = try res.content.decode([IMMessageResponse].self)
+                #expect(messages.count == 1)
+                #expect(messages[0].id == messageID)
+                #expect(messages[0].content == .recalled)
+            })
+
+            try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                let conversations = try res.content.decode(IMConversationPageResponse.self).items
+                #expect(conversations.count == 1)
+                #expect(conversations[0].id == conversationID)
+                #expect(conversations[0].lastMessage?.content == .recalled)
+            })
+        }
+    }
+
+    @Test("IM recall endpoint rejects messages outside the recall window")
+    func imRecallMessageRejectsExpiredWindow() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "recall-expired-peer@example.com", on: app)
+
+            let conversation = Conversation(
+                title: nil,
+                kind: .direct,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_061),
+                lastMessageSequence: 1
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: try demoUser.requireID())
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try peerUser.requireID())
+                .create(on: app.db)
+
+            let message = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try demoUser.requireID(),
+                serverSequence: 1,
+                content: .text("expired recall")
+            )
+            try await message.create(on: app.db)
+            message.createdAt = Date().addingTimeInterval(-(3 * 60))
+            try await message.update(on: app.db)
+            let messageID = try message.requireID()
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/messages/\(messageID.uuidString)/recall", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async in
+                #expect(res.status == .badRequest)
+                #expect(res.body.string.contains("消息发送超过 2 分钟后不能撤回"))
             })
         }
     }
@@ -1008,7 +1702,7 @@ struct IMServerTests {
             try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
-                let conversations = try res.content.decode([IMConversationResponse].self)
+                let conversations = try res.content.decode(IMConversationPageResponse.self).items
                 #expect(conversations.first?.id == conversationID)
                 #expect(conversations.first?.unreadCount == 1)
             })
@@ -1028,7 +1722,7 @@ struct IMServerTests {
             try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
-                let conversations = try res.content.decode([IMConversationResponse].self)
+                let conversations = try res.content.decode(IMConversationPageResponse.self).items
                 #expect(conversations.first?.id == conversationID)
                 #expect(conversations.first?.unreadCount == 0)
             })
@@ -1046,6 +1740,324 @@ struct IMServerTests {
                 try req.content.encode(IMConversationReadRequest(readSequence: 2))
             }, afterResponse: { res async in
                 #expect(res.status == .notFound)
+            })
+        }
+    }
+
+    @Test("IM summary changes reflect read updates across devices for the same user")
+    func imConversationChangesReflectCrossDeviceReadProgress() async throws {
+        try await withApp(configure: configure) { app in
+            let firstDeviceToken = try await loginAccessToken(
+                email: "demo@example.com",
+                password: "password1234",
+                deviceID: "read-device-1",
+                on: app
+            )
+            let secondDeviceToken = try await loginAccessToken(
+                email: "demo@example.com",
+                password: "password1234",
+                deviceID: "read-device-2",
+                on: app
+            )
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let otherUser = try await makeUser(email: "changes-read-peer@example.com", on: app)
+            let conversation = Conversation(
+                title: "Cross Device Read",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_012)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try demoUser.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try otherUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            for sequence in 1...2 {
+                try await ConversationMessage(
+                    conversationID: conversationID,
+                    senderUserID: try otherUser.requireID(),
+                    serverSequence: sequence,
+                    clientMessageID: "client-cross-read-\(sequence)",
+                    content: .text("cross-read-\(sequence)")
+                ).create(on: app.db)
+            }
+            try await IMConversationSummaryProjectionService(db: app.db).refreshConversationSummaries(
+                conversationID: conversationID,
+                recipientUserIDs: [try demoUser.requireID()]
+            )
+
+            var baselineToken = ""
+            try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: secondDeviceToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let page = try res.content.decode(IMConversationPageResponse.self)
+                #expect(page.items.first?.id == conversationID)
+                #expect(page.items.first?.lastReadSequence == 0)
+                #expect(page.items.first?.unreadCount == 2)
+                baselineToken = page.snapshotToken
+            })
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/read", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: firstDeviceToken)
+                try req.content.encode(IMConversationReadRequest(readSequence: 2))
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let response = try res.content.decode(IMConversationReadResponse.self)
+                #expect(response.lastReadSequence == 2)
+                #expect(response.unreadCount == 0)
+            })
+
+            try await app.testing().test(.GET, queryPath("api/im/conversations/changes", items: [
+                URLQueryItem(name: "afterToken", value: baselineToken)
+            ]), beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: secondDeviceToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let changes = try res.content.decode(IMConversationChangesResponse.self)
+                #expect(changes.upserts.count == 1)
+                #expect(changes.upserts.first?.id == conversationID)
+                #expect(changes.upserts.first?.lastReadSequence == 2)
+                #expect(changes.upserts.first?.unreadCount == 0)
+                #expect(changes.removedConversationIDs.isEmpty)
+            })
+        }
+    }
+
+    @Test("IM conversation preference changes sync across devices")
+    func imConversationPreferenceChangesSyncAcrossDevices() async throws {
+        try await withApp(configure: configure) { app in
+            let firstDeviceToken = try await loginAccessToken(
+                email: "demo@example.com",
+                password: "password1234",
+                deviceID: "preferences-device-1",
+                on: app
+            )
+            let secondDeviceToken = try await loginAccessToken(
+                email: "demo@example.com",
+                password: "password1234",
+                deviceID: "preferences-device-2",
+                on: app
+            )
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "preferences-peer@example.com", on: app)
+            let conversation = Conversation(
+                title: "Preferences",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_500_100)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try demoUser.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try peerUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            try await IMConversationSummaryProjectionService(db: app.db).refreshConversationSummaries(
+                conversationID: conversationID,
+                recipientUserIDs: [try demoUser.requireID()]
+            )
+
+            var baselineToken = ""
+            try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: secondDeviceToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let page = try res.content.decode(IMConversationPageResponse.self)
+                #expect(page.items.count == 1)
+                #expect(page.items[0].isPinned == false)
+                #expect(page.items[0].isMuted == false)
+                baselineToken = page.snapshotToken
+            })
+
+            try await app.testing().test(.PATCH, "api/im/conversations/\(conversationID.uuidString)/preferences", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: firstDeviceToken)
+                try req.content.encode(
+                    IMConversationPreferencesUpdateRequest(isPinned: true, isMuted: true)
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let response = try res.content.decode(IMConversationResponse.self)
+                #expect(response.isPinned == true)
+                #expect(response.pinnedAt != nil)
+                #expect(response.isMuted == true)
+            })
+
+            try await app.testing().test(.GET, queryPath("api/im/conversations/changes", items: [
+                URLQueryItem(name: "afterToken", value: baselineToken)
+            ]), beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: secondDeviceToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let changes = try res.content.decode(IMConversationChangesResponse.self)
+                #expect(changes.upserts.count == 1)
+                #expect(changes.upserts[0].id == conversationID)
+                #expect(changes.upserts[0].isPinned == true)
+                #expect(changes.upserts[0].pinnedAt != nil)
+                #expect(changes.upserts[0].isMuted == true)
+            })
+        }
+    }
+
+    @Test("IM metadata update persists fields and emits a structured system message")
+    func imConversationMetadataUpdatePersistsAndEmitsStructuredSystemMessage() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let demoUserID = try demoUser.requireID()
+            let peerUser = try await makeUser(email: "metadata-peer@example.com", on: app)
+            let conversation = Conversation(
+                title: "Original Title",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_500_200)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try demoUser.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try peerUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            try await app.testing().test(.PATCH, "api/im/conversations/\(conversationID.uuidString)/metadata", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                try req.content.encode(
+                    IMConversationMetadataUpdateRequest(
+                        title: "Updated Title",
+                        notice: "Ship checklist at 18:00",
+                        avatarPreset: .forest
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let response = try res.content.decode(IMConversationResponse.self)
+                #expect(response.title == "Updated Title")
+                #expect(response.notice == "Ship checklist at 18:00")
+                #expect(response.avatarPreset == .forest)
+            })
+
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let messages = try res.content.decode([IMMessageResponse].self)
+                #expect(messages.count == 1)
+                guard case .system(let event) = messages[0].content else {
+                    Issue.record("Expected metadata update to emit a system message")
+                    return
+                }
+
+                #expect(event.type == .metadataUpdated)
+                #expect(event.actorUserID == demoUserID)
+                #expect(event.actorEmail == "demo@example.com")
+                #expect(event.updatedFields == [.title, .notice, .avatarPreset])
+                #expect(event.title == "Updated Title")
+                #expect(event.notice == "Ship checklist at 18:00")
+                #expect(event.avatarPreset == .forest)
+            })
+        }
+    }
+
+    @Test("IM new members only see messages from their visible history window")
+    func imConversationHistoryRespectsVisibleFromSequenceForNewMembers() async throws {
+        try await withApp(configure: configure) { app in
+            let ownerToken = try await loginAccessToken(using: app)
+            let ownerUser = try await user(email: "demo@example.com", on: app)
+            let existingUser = try await makeUser(email: "visible-existing@example.com", on: app)
+            let newUser = try await makeUser(email: "visible-new@example.com", on: app)
+            let newUserToken = try await loginAccessToken(
+                email: newUser.email,
+                password: "password1234",
+                deviceID: "visible-new-device",
+                on: app
+            )
+
+            let conversation = Conversation(
+                title: "Visible Window",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_500_300)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try ownerUser.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try existingUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                imTCPTextPayload(
+                    conversationID: conversationID,
+                    clientMessageID: "visible-before-join",
+                    text: "before join"
+                ),
+                senderUserID: try ownerUser.requireID()
+            )
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/members", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: ownerToken)
+                try req.content.encode(
+                    IMConversationMemberUpdateRequest(memberEmails: [newUser.email])
+                )
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+
+            _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                imTCPTextPayload(
+                    conversationID: conversationID,
+                    clientMessageID: "visible-after-join",
+                    text: "after join"
+                ),
+                senderUserID: try ownerUser.requireID()
+            )
+
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: newUserToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let messages = try res.content.decode([IMMessageResponse].self)
+                #expect(messages.map(\.serverSequence) == [2, 3])
+                #expect(messages.map(\.content.previewText) == [
+                    "demo@example.com 添加了 visible-new@example.com",
+                    "after join"
+                ])
+            })
+
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=0", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: newUserToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let payload = try res.content.decode(IMMessageSinceResponse.self)
+                #expect(payload.messages.map(\.serverSequence) == [2, 3])
+                #expect(payload.nextAfterSequence == 3)
             })
         }
     }
@@ -1284,7 +2296,7 @@ struct IMServerTests {
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let conversations = try res.content.decode([IMConversationResponse].self)
+                let conversations = try res.content.decode(IMConversationPageResponse.self).items
                 #expect(conversations.count == 1)
                 #expect(conversations[0].id == conversationID)
                 #expect(conversations[0].lastMessage?.serverSequence == 1)
@@ -1303,6 +2315,61 @@ struct IMServerTests {
                 #expect(messages[0].clientMessageID == "client-msg-1")
                 #expect(messages[0].body["text"] == "hello from tcp")
             })
+        }
+    }
+
+    @Test("TCP reply persistence canonicalizes the referenced preview and sender")
+    func tcpReplyPersistenceCanonicalizesReference() async throws {
+        try await withApp(configure: configure) { app in
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let otherUser = try await makeUser(email: "tcp-reply-peer@example.com", on: app)
+            let conversation = Conversation(title: "TCP Reply Chat", updatedAt: Date(timeIntervalSince1970: 1_700_100_101))
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: try demoUser.requireID())
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try otherUser.requireID())
+                .create(on: app.db)
+
+            let referencedMessage = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try otherUser.requireID(),
+                serverSequence: 1,
+                content: .text("canonical source")
+            )
+            try await referencedMessage.create(on: app.db)
+            let referencedMessageID = try referencedMessage.requireID()
+
+            let result = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                IMTCPMessagePayload(
+                    clientMessageID: "client-reply-1",
+                    messageID: nil,
+                    conversationID: conversationID.uuidString,
+                    senderUserID: nil,
+                    serverSequence: nil,
+                    serverTimestamp: nil,
+                    content: .reply(
+                        reference: IMReplyReference(
+                            messageID: referencedMessageID.uuidString,
+                            senderUserID: UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+                            previewText: "stale preview"
+                        ),
+                        text: "reply body"
+                    )
+                ),
+                senderUserID: try demoUser.requireID()
+            )
+
+            #expect(result.acknowledgement.status == "accepted")
+            #expect(result.message.content == .reply(
+                reference: IMReplyReference(
+                    messageID: referencedMessageID.uuidString,
+                    senderUserID: try otherUser.requireID(),
+                    previewText: "canonical source"
+                ),
+                text: "reply body"
+            ))
         }
     }
 
@@ -1549,6 +2616,45 @@ struct IMServerTests {
                 senderUserID: demoUserID
             )
             #expect(thirdMessage.acknowledgement.status == "accepted")
+        }
+    }
+
+    @Test("Frozen direct conversations reject new messages")
+    func frozenDirectConversationRejectsNewMessages() async throws {
+        try await withApp(configure: configure) { app in
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "frozen-direct-peer@example.com", on: app)
+            let demoUserID = try demoUser.requireID()
+            let peerUserID = try peerUser.requireID()
+            let conversation = Conversation(
+                title: nil,
+                kind: .direct,
+                directMessagingState: .frozenAfterUnfriend,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_121)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: demoUserID)
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: peerUserID)
+                .create(on: app.db)
+
+            do {
+                _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                    imTCPTextPayload(
+                        conversationID: conversationID,
+                        clientMessageID: "frozen-direct-message",
+                        text: "still there?"
+                    ),
+                    senderUserID: demoUserID
+                )
+                Issue.record("Expected frozen direct conversation to reject sending")
+            } catch let error as IMRealtimeMessageError {
+                #expect(error == .directConversationFrozen)
+                #expect(error.ackStatus == "direct_conversation_frozen")
+                #expect(error.errorDescription == "你们已不是好友，当前会话不能继续发送消息。")
+            }
         }
     }
 
@@ -2089,6 +3195,84 @@ struct IMServerTests {
         }
     }
 
+    @Test("Accepting a friend request reactivates an existing frozen direct conversation")
+    func friendRequestAcceptReactivatesFrozenDirectConversation() async throws {
+        try await withApp(configure: configure) { app in
+            let requester = try await user(email: "demo@example.com", on: app)
+            let requesterID = try requester.requireID()
+            let requesterToken = try await loginAccessToken(using: app)
+            let addressee = try await makeUser(email: "friend-reactivate@example.com", on: app)
+            let addresseeID = try addressee.requireID()
+            let addresseeToken = try await loginAccessToken(
+                email: addressee.email,
+                password: "password1234",
+                deviceID: "friend-reactivate-device",
+                on: app
+            )
+            let directConversation = Conversation(
+                title: nil,
+                kind: .direct,
+                directMessagingState: .frozenAfterUnfriend,
+                updatedAt: Date(timeIntervalSince1970: 1_700_200_100)
+            )
+            try await directConversation.create(on: app.db)
+            let directConversationID = try directConversation.requireID()
+
+            try await ConversationMember(conversationID: directConversationID, userID: requesterID)
+                .create(on: app.db)
+            try await ConversationMember(conversationID: directConversationID, userID: addresseeID)
+                .create(on: app.db)
+
+            var requestID: UUID?
+            try await app.testing().test(.POST, "api/contact-requests", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: requesterToken)
+                try req.content.encode(
+                    ContactRequestCreateRequest(
+                        email: addressee.email,
+                        message: "重新加好友",
+                        remark: "再次备注"
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                requestID = try res.content.decode(FriendRequestResponse.self).id
+            })
+
+            let acceptedRequestID = try #require(requestID)
+            try await app.testing().test(.POST, "api/contact-requests/\(acceptedRequestID.uuidString)/accept", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: addresseeToken)
+                try req.content.encode(ContactRequestAcceptRequest(remark: "回来吧"))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+
+            let reloadedConversation = try await Conversation.find(directConversationID, on: app.db)
+            #expect(reloadedConversation?.directMessagingStateEnum == .active)
+
+            try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: requesterToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let conversations = try res.content.decode(IMConversationPageResponse.self).items
+                #expect(conversations.first?.id == directConversationID)
+                #expect(conversations.first?.directMessagingState == IMDirectMessagingState.active.rawValue)
+                #expect(conversations.first?.directPeer == IMDirectPeerResponse(id: addresseeID, email: addressee.email))
+            })
+
+            let requesterContact = try await UserContact.query(on: app.db)
+                .filter(\.$owner.$id == requesterID)
+                .filter(\.$contact.$id == addresseeID)
+                .first()
+            let addresseeContact = try await UserContact.query(on: app.db)
+                .filter(\.$owner.$id == addresseeID)
+                .filter(\.$contact.$id == requesterID)
+                .first()
+            #expect(requesterContact != nil)
+            #expect(addresseeContact != nil)
+        }
+    }
+
     @Test("Friend request rejects invalid transitions")
     func friendRequestRejectsInvalidTransitions() async throws {
         try await withApp(configure: configure) { app in
@@ -2174,6 +3358,17 @@ struct IMServerTests {
                 .create(on: app.db)
             try await UserContact(ownerUserID: contactID, contactUserID: ownerID, remark: "owner")
                 .create(on: app.db)
+            let directConversation = Conversation(
+                title: nil,
+                kind: .direct,
+                updatedAt: Date(timeIntervalSince1970: 1_700_300_100)
+            )
+            try await directConversation.create(on: app.db)
+            let directConversationID = try directConversation.requireID()
+            try await ConversationMember(conversationID: directConversationID, userID: ownerID)
+                .create(on: app.db)
+            try await ConversationMember(conversationID: directConversationID, userID: contactID)
+                .create(on: app.db)
 
             try await app.testing().test(.DELETE, "api/contacts/\(contactID.uuidString)", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
@@ -2183,6 +3378,20 @@ struct IMServerTests {
 
             let remainingContacts = try await UserContact.query(on: app.db).all()
             #expect(remainingContacts.isEmpty)
+            let reloadedConversation = try await Conversation.find(directConversationID, on: app.db)
+            #expect(reloadedConversation != nil)
+            #expect(reloadedConversation?.directMessagingStateEnum == .frozenAfterUnfriend)
+
+            try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let conversations = try res.content.decode(IMConversationPageResponse.self).items
+                #expect(conversations.first?.id == directConversationID)
+                #expect(conversations.first?.directMessagingState == IMDirectMessagingState.frozenAfterUnfriend.rawValue)
+                #expect(conversations.first?.directPeer == IMDirectPeerResponse(id: contactID, email: contact.email))
+            })
         }
     }
 
@@ -2282,6 +3491,50 @@ struct IMServerTests {
             serverTimestamp: nil,
             kind: "text",
             body: ["text": text]
+        )
+    }
+
+    private func queryPath(_ base: String, items: [URLQueryItem]) -> String {
+        var components = URLComponents()
+        components.path = base
+        components.queryItems = items
+        guard let query = components.percentEncodedQuery, !query.isEmpty else {
+            return base
+        }
+        return "\(base)?\(query)"
+    }
+
+    private func makeConversationSummaryProjection(
+        ownerUserID: UUID,
+        conversationID: UUID,
+        peerUserID: UUID,
+        title: String,
+        serverSequence: Int,
+        lastActivityAt: Date,
+        updatedAt: Date,
+        isRemoved: Bool = false
+    ) throws -> ConversationUserSummary {
+        try ConversationUserSummary(
+            ownerUserID: ownerUserID,
+            conversationID: conversationID,
+            title: title,
+            kind: IMConversationKind.group.rawValue,
+            directMessagingState: nil,
+            directPeerUserID: nil,
+            directPeerEmail: nil,
+            memberUserIDs: [ownerUserID, peerUserID],
+            lastMessage: IMMessagePreviewResponse(
+                id: UUID(),
+                senderUserID: peerUserID,
+                serverSequence: serverSequence,
+                content: .text(title),
+                createdAt: lastActivityAt
+            ),
+            lastReadSequence: 0,
+            unreadCount: serverSequence,
+            lastActivityAt: lastActivityAt,
+            updatedAt: updatedAt,
+            isRemoved: isRemoved
         )
     }
 

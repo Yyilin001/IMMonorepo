@@ -8,6 +8,7 @@ public enum IMTCPPacketType: String, Codable, Sendable {
     case heartbeatAck = "heartbeat_ack"
     case message
     case conversationEvent = "conversation_event"
+    case contactEvent = "contact_event"
     case ack
     case kick
 }
@@ -156,8 +157,11 @@ public struct IMTCPMessagePayload: Codable, Equatable, Sendable {
     public let senderUserID: UUID?
     public let serverSequence: UInt64?
     public let serverTimestamp: Date?
-    public let kind: String
-    public let body: [String: String]
+    public let content: IMMessageContent
+
+    public var textValue: String? {
+        content.textValue
+    }
 
     public init(
         clientMessageID: String?,
@@ -166,8 +170,7 @@ public struct IMTCPMessagePayload: Codable, Equatable, Sendable {
         senderUserID: UUID?,
         serverSequence: UInt64?,
         serverTimestamp: Date?,
-        kind: String,
-        body: [String: String]
+        content: IMMessageContent
     ) {
         self.clientMessageID = clientMessageID
         self.messageID = messageID
@@ -175,8 +178,7 @@ public struct IMTCPMessagePayload: Codable, Equatable, Sendable {
         self.senderUserID = senderUserID
         self.serverSequence = serverSequence
         self.serverTimestamp = serverTimestamp
-        self.kind = kind
-        self.body = body
+        self.content = content
     }
 }
 
@@ -184,24 +186,62 @@ public enum IMTCPConversationEventType: String, Codable, Equatable, Sendable {
     case conversationCreated = "conversation_created"
     case membersAdded = "members_added"
     case memberLeft = "member_left"
+    case membersUpdated = "members_updated"
     case conversationRemovedForSelf = "conversation_removed_for_self"
     case summaryUpdated = "summary_updated"
+    case messageRecalled = "message_recalled"
 }
 
 public struct IMTCPConversationEventPayload: Codable, Equatable, Sendable {
     public let eventType: IMTCPConversationEventType
     public let conversation: IMConversationSummaryResponseBody
+    public let message: IMConversationMessageResponseBody?
     public let actorUserID: UUID?
     public let serverTimestamp: Date
 
     public init(
         eventType: IMTCPConversationEventType,
         conversation: IMConversationSummaryResponseBody,
+        message: IMConversationMessageResponseBody? = nil,
         actorUserID: UUID?,
         serverTimestamp: Date
     ) {
         self.eventType = eventType
         self.conversation = conversation
+        self.message = message
+        self.actorUserID = actorUserID
+        self.serverTimestamp = serverTimestamp
+    }
+}
+
+public enum IMTCPContactEventType: String, Codable, Equatable, Sendable {
+    case friendRequestCreated = "friend_request_created"
+    case friendRequestAccepted = "friend_request_accepted"
+    case friendRequestDeclined = "friend_request_declined"
+    case friendRequestCancelled = "friend_request_cancelled"
+    case contactRemoved = "contact_removed"
+}
+
+public struct IMTCPContactEventPayload: Codable, Equatable, Sendable {
+    public let eventType: IMTCPContactEventType
+    public let request: ContactRequestResponseBody?
+    public let contact: ContactResponseBody?
+    public let contactUserID: UUID?
+    public let actorUserID: UUID?
+    public let serverTimestamp: Date
+
+    public init(
+        eventType: IMTCPContactEventType,
+        request: ContactRequestResponseBody?,
+        contact: ContactResponseBody?,
+        contactUserID: UUID?,
+        actorUserID: UUID?,
+        serverTimestamp: Date
+    ) {
+        self.eventType = eventType
+        self.request = request
+        self.contact = contact
+        self.contactUserID = contactUserID
         self.actorUserID = actorUserID
         self.serverTimestamp = serverTimestamp
     }
@@ -236,8 +276,8 @@ public struct IMTCPClientConfiguration: Equatable, Sendable {
     public let appVersion: String?
 
     public init(
-        host: String = AppConstants.imTCPHost,
-        port: UInt16 = AppConstants.imTCPPort,
+        host: String,
+        port: UInt16,
         protocolVersion: Int = 1,
         deviceID: String? = nil,
         deviceName: String? = nil,
@@ -259,6 +299,7 @@ public enum IMTCPConnectionEvent: Equatable, Sendable {
     case ack(requestID: UUID?, payload: IMTCPAckPayload)
     case message(requestID: UUID?, payload: IMTCPMessagePayload)
     case conversationEvent(requestID: UUID?, payload: IMTCPConversationEventPayload)
+    case contactEvent(requestID: UUID?, payload: IMTCPContactEventPayload)
     case kick(IMTCPKickPayload)
 }
 
@@ -346,7 +387,7 @@ public struct IMTCPClient: Sendable {
     private let accessTokenProvider: @Sendable () async throws -> String
 
     init(
-        configuration: IMTCPClientConfiguration = IMTCPClientConfiguration(),
+        configuration: IMTCPClientConfiguration,
         transport: NWIMTCPTransport = NWIMTCPTransport(),
         accessTokenProvider: @escaping @Sendable () async throws -> String
     ) {
@@ -360,7 +401,7 @@ public struct IMTCPClient: Sendable {
     }
 
     init<Transport: IMTCPTransport>(
-        configuration: IMTCPClientConfiguration = IMTCPClientConfiguration(),
+        configuration: IMTCPClientConfiguration,
         transport: Transport,
         accessTokenProvider: @escaping @Sendable () async throws -> String
     ) {
@@ -587,6 +628,14 @@ private actor IMTCPEventRouter {
                 continuation.yield(.conversationEvent(requestID: packet.requestID, payload: payload))
             } catch {
                 finish(with: IMTCPClientError.invalidPayload(.conversationEvent))
+            }
+
+        case .contactEvent:
+            do {
+                let payload = try packet.payload.decodePayload(IMTCPContactEventPayload.self)
+                continuation.yield(.contactEvent(requestID: packet.requestID, payload: payload))
+            } catch {
+                finish(with: IMTCPClientError.invalidPayload(.contactEvent))
             }
 
         case .kick:

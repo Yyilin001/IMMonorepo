@@ -8,7 +8,7 @@ public struct StreamingClient: Sendable {
     private let openRequest: @Sendable (URLRequest) async throws -> (HTTPByteStream, HTTPURLResponse)
 
     public init(
-        baseURL: URL = AppConstants.apiBaseURL,
+        baseURL: URL,
         transport: URLSessionStreamingTransport = URLSessionStreamingTransport(),
         logger: HTTPLogHandler = .noop,
         coding: HTTPCodingConfiguration = .default
@@ -33,7 +33,7 @@ public struct StreamingClient: Sendable {
     }
 
     init<Transport: StreamingTransport>(
-        baseURL: URL = AppConstants.apiBaseURL,
+        baseURL: URL,
         transport: Transport,
         logger: HTTPLogHandler = .noop,
         coding: HTTPCodingConfiguration = .default
@@ -49,7 +49,7 @@ public struct StreamingClient: Sendable {
     }
 
     init<Transport: StreamingTransport, Logger: HTTPClientLogger>(
-        baseURL: URL = AppConstants.apiBaseURL,
+        baseURL: URL,
         transport: Transport,
         logger: Logger,
         coding: HTTPCodingConfiguration = .default
