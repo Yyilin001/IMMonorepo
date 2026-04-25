@@ -6,6 +6,9 @@ enum IMMessageContentType: String, Codable, Content, Sendable {
     case reply
     case recalled
     case system
+    case image
+    case audio
+    case file
 }
 
 enum IMConversationAvatarPreset: String, Codable, Content, Sendable, CaseIterable {
@@ -19,6 +22,24 @@ struct IMReplyReference: Codable, Equatable, Content, Sendable {
     let messageID: String
     let senderUserID: UUID?
     let previewText: String
+}
+
+enum IMMediaAssetKind: String, Codable, Content, Sendable {
+    case image
+    case audio
+    case file
+}
+
+struct IMMediaAsset: Codable, Equatable, Content, Sendable {
+    let assetID: String
+    let kind: IMMediaAssetKind
+    let mimeType: String
+    let byteSize: Int64
+    let filename: String
+    let width: Int?
+    let height: Int?
+    let durationMillis: Int?
+    let previewAssetID: String?
 }
 
 enum IMSystemEventType: String, Codable, Content, Sendable {
@@ -147,6 +168,9 @@ enum IMMessageContent: Equatable, Sendable {
     case reply(reference: IMReplyReference, text: String)
     case recalled
     case system(IMSystemEvent)
+    case image(IMMediaAsset)
+    case audio(IMMediaAsset)
+    case file(IMMediaAsset)
 
     var type: IMMessageContentType {
         switch self {
@@ -158,20 +182,21 @@ enum IMMessageContent: Equatable, Sendable {
             return .recalled
         case .system:
             return .system
+        case .image:
+            return .image
+        case .audio:
+            return .audio
+        case .file:
+            return .file
         }
     }
 
     var previewText: String {
-        switch self {
-        case .text(let text):
-            return text
-        case .reply(_, let text):
-            return text
-        case .recalled:
-            return "撤回了一条消息"
-        case .system(let event):
-            return event.displayText
-        }
+        presentation.previewText
+    }
+
+    var mediaAsset: IMMediaAsset? {
+        presentation.mediaAsset
     }
 }
 
@@ -181,6 +206,7 @@ extension IMMessageContent: Codable {
         case text
         case reference
         case event
+        case asset
     }
 
     init(from decoder: any Decoder) throws {
@@ -204,6 +230,12 @@ extension IMMessageContent: Codable {
                 let text = try container.decode(String.self, forKey: .text)
                 self = .system(.legacyText(text))
             }
+        case .image:
+            self = .image(try container.decode(IMMediaAsset.self, forKey: .asset))
+        case .audio:
+            self = .audio(try container.decode(IMMediaAsset.self, forKey: .asset))
+        case .file:
+            self = .file(try container.decode(IMMediaAsset.self, forKey: .asset))
         }
     }
 
@@ -221,6 +253,8 @@ extension IMMessageContent: Codable {
             return
         case .system(let event):
             try container.encode(event, forKey: .event)
+        case .image(let asset), .audio(let asset), .file(let asset):
+            try container.encode(asset, forKey: .asset)
         }
     }
 }

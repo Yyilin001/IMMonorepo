@@ -363,6 +363,88 @@ struct IMServerTests {
         }
     }
 
+    @Test("Media upload supports create, chunk upload, and completion")
+    func mediaUploadCreateChunkAndComplete() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let payloadData = Data("fake-image-data".utf8)
+
+            struct CreateUploadBody: Content {
+                let kind: IMMediaAssetKind
+                let mimeType: String
+                let byteSize: Int64
+                let filename: String
+                let width: Int?
+                let height: Int?
+                let durationMillis: Int?
+                let previewAssetID: String?
+            }
+
+            struct UploadSessionBody: Content {
+                let uploadID: String
+                let uploadPath: String
+                let completePath: String
+                let expiresAt: Date
+            }
+
+            var uploadID = ""
+
+            try await app.testing().test(.POST, "api/media/uploads", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                try req.content.encode(
+                    CreateUploadBody(
+                        kind: .image,
+                        mimeType: "image/png",
+                        byteSize: Int64(payloadData.count),
+                        filename: "photo.png",
+                        width: 120,
+                        height: 90,
+                        durationMillis: nil,
+                        previewAssetID: nil
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let body = try res.content.decode(UploadSessionBody.self)
+                #expect(body.uploadPath == "/api/media/uploads/\(body.uploadID)/chunk")
+                #expect(body.completePath == "/api/media/uploads/\(body.uploadID)/complete")
+                #expect(body.expiresAt > Date())
+                uploadID = body.uploadID
+            })
+
+            try await app.testing().test(.PUT, "api/media/uploads/\(uploadID)/chunk", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                req.headers.contentType = .binary
+                req.body = .init(data: payloadData)
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+
+            try await app.testing().test(.POST, "api/media/uploads/\(uploadID)/complete", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let asset = try res.content.decode(IMMediaAsset.self)
+                #expect(asset.assetID == uploadID)
+                #expect(asset.kind == .image)
+                #expect(asset.mimeType == "image/png")
+                #expect(asset.byteSize == Int64(payloadData.count))
+                #expect(asset.filename == "photo.png")
+                #expect(asset.width == 120)
+                #expect(asset.height == 90)
+            })
+
+            try await app.testing().test(.GET, "api/media/assets/\(uploadID)", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+                #expect(res.headers.first(name: .acceptRanges) == "bytes")
+                #expect(res.headers.first(name: .eTag) != nil)
+                #expect(Data(res.body.readableBytesView) == payloadData)
+            })
+        }
+    }
+
     @Test("Register creates a user and returns tokens")
     func register() async throws {
         try await withApp(configure: configure) { app in
@@ -1582,6 +1664,205 @@ struct IMServerTests {
         }
     }
 
+    @Test("IM conversation search matches text, reply, system, and file content with stable pagination")
+    func imConversationSearchMatchesStructuredContentAndPaginates() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "search-peer@example.com", on: app)
+            let conversation = Conversation(
+                title: "Search Chat",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_040)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try demoUser.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try peerUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            try await ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try peerUser.requireID(),
+                serverSequence: 1,
+                content: .text("alpha release notes")
+            ).create(on: app.db)
+            try await ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try demoUser.requireID(),
+                serverSequence: 2,
+                content: .reply(
+                    reference: IMReplyReference(
+                        messageID: UUID().uuidString,
+                        senderUserID: try peerUser.requireID(),
+                        previewText: "alpha sprint preview"
+                    ),
+                    text: "beta reply"
+                )
+            ).create(on: app.db)
+            try await ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try demoUser.requireID(),
+                serverSequence: 3,
+                content: .system(
+                    IMSystemEvent(
+                        type: .metadataUpdated,
+                        actorUserID: try demoUser.requireID(),
+                        actorEmail: demoUser.email,
+                        updatedFields: [.title]
+                    )
+                )
+            ).create(on: app.db)
+            try await ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try peerUser.requireID(),
+                serverSequence: 4,
+                content: .file(
+                    IMMediaAsset(
+                        assetID: "asset-plan",
+                        kind: .file,
+                        mimeType: "application/pdf",
+                        byteSize: 2_048,
+                        filename: "alpha-plan.pdf",
+                        width: nil,
+                        height: nil,
+                        durationMillis: nil,
+                        previewAssetID: nil
+                    )
+                )
+            ).create(on: app.db)
+
+            try await app.testing().test(
+                .GET,
+                queryPath("api/im/conversations/\(conversationID.uuidString)/search", items: [
+                    URLQueryItem(name: "q", value: "alpha"),
+                    URLQueryItem(name: "limit", value: "2")
+                ]),
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let page = try res.content.decode(IMConversationMessageSearchPageResponse.self)
+                    #expect(page.items.map(\.serverSequence) == [4, 2])
+                    #expect(page.items.map(\.snippet) == ["alpha-plan.pdf", "alpha sprint preview"])
+                    #expect(page.hasMore == true)
+                    #expect(page.nextCursor == "2")
+                }
+            )
+
+            try await app.testing().test(
+                .GET,
+                queryPath("api/im/conversations/\(conversationID.uuidString)/search", items: [
+                    URLQueryItem(name: "q", value: "alpha"),
+                    URLQueryItem(name: "cursor", value: "2")
+                ]),
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let page = try res.content.decode(IMConversationMessageSearchPageResponse.self)
+                    #expect(page.items.map(\.serverSequence) == [1])
+                    #expect(page.items.map(\.snippet) == ["alpha release notes"])
+                    #expect(page.hasMore == false)
+                    #expect(page.nextCursor == nil)
+                }
+            )
+
+            try await app.testing().test(
+                .GET,
+                queryPath("api/im/conversations/\(conversationID.uuidString)/search", items: [
+                    URLQueryItem(name: "q", value: "群名称")
+                ]),
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let page = try res.content.decode(IMConversationMessageSearchPageResponse.self)
+                    #expect(page.items.map(\.serverSequence) == [3])
+                    #expect(page.items.first?.content.previewText == "\(demoUser.email) 更新了群名称")
+                }
+            )
+        }
+    }
+
+    @Test("IM conversation search respects visibleFromSequence for rejoined members")
+    func imConversationSearchRespectsVisibleFromSequence() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "search-visible-peer@example.com", on: app)
+            let conversation = Conversation(
+                title: "Visible Search",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_041)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            let membership = ConversationMember(
+                conversationID: conversationID,
+                userID: try demoUser.requireID(),
+                role: .owner
+            )
+            try await membership.create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try peerUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            try await ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try peerUser.requireID(),
+                serverSequence: 1,
+                content: .text("visible archive before rejoin")
+            ).create(on: app.db)
+            try await ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try peerUser.requireID(),
+                serverSequence: 2,
+                content: .text("visible archive still old")
+            ).create(on: app.db)
+            try await ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try peerUser.requireID(),
+                serverSequence: 3,
+                content: .text("visible timeline after rejoin")
+            ).create(on: app.db)
+
+            membership.visibleFromSequence = 3
+            membership.lastReadSequence = 2
+            try await membership.update(on: app.db)
+
+            try await app.testing().test(
+                .GET,
+                queryPath("api/im/conversations/\(conversationID.uuidString)/search", items: [
+                    URLQueryItem(name: "q", value: "visible")
+                ]),
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let page = try res.content.decode(IMConversationMessageSearchPageResponse.self)
+                    #expect(page.items.map(\.serverSequence) == [3])
+                    #expect(page.items.first?.snippet == "visible timeline after rejoin")
+                }
+            )
+        }
+    }
+
     @Test("IM recall endpoint replaces message content and refreshes summaries")
     func imRecallMessage() async throws {
         try await withApp(configure: configure) { app in
@@ -2100,6 +2381,66 @@ struct IMServerTests {
         }
     }
 
+    @Test("IM metadata update only records changed fields")
+    func imConversationMetadataUpdateOnlyRecordsChangedFields() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "metadata-notice-peer@example.com", on: app)
+            let conversation = Conversation(
+                title: "Original Title",
+                notice: "Old notice",
+                avatarPreset: .ocean,
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_500_220)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try demoUser.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try peerUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            try await app.testing().test(.PATCH, "api/im/conversations/\(conversationID.uuidString)/metadata", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                try req.content.encode(
+                    IMConversationMetadataUpdateRequest(
+                        title: "Original Title",
+                        notice: "Only notice changed",
+                        avatarPreset: .ocean
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+            })
+
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let messages = try res.content.decode([IMMessageResponse].self)
+                #expect(messages.count == 1)
+                guard case .system(let event) = messages[0].content else {
+                    Issue.record("Expected metadata update to emit a system message")
+                    return
+                }
+
+                #expect(event.type == .metadataUpdated)
+                #expect(event.updatedFields == [.notice])
+                #expect(event.notice == "Only notice changed")
+                #expect(event.title == "Original Title")
+                #expect(event.avatarPreset == .ocean)
+            })
+        }
+    }
+
     @Test("IM new members only see messages from their visible history window")
     func imConversationHistoryRespectsVisibleFromSequenceForNewMembers() async throws {
         try await withApp(configure: configure) { app in
@@ -2180,6 +2521,94 @@ struct IMServerTests {
                 #expect(payload.messages.map(\.serverSequence) == [2, 3])
                 #expect(payload.nextAfterSequence == 3)
             })
+        }
+    }
+
+    @Test("Conversation summary verify reports stale and mismatched projections")
+    func conversationSummaryVerifyReportsProjectionDrift() async throws {
+        try await withApp(configure: configure) { app in
+            let owner = try await user(email: "demo@example.com", on: app)
+            let ownerUserID = try owner.requireID()
+            let peer = try await makeUser(email: "verify-peer@example.com", on: app)
+            let peerUserID = try peer.requireID()
+            let liveConversation = Conversation(
+                title: "Verify Live",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_950_000)
+            )
+            try await liveConversation.create(on: app.db)
+            let liveConversationID = try liveConversation.requireID()
+
+            try await ConversationMember(
+                conversationID: liveConversationID,
+                userID: ownerUserID,
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: liveConversationID,
+                userID: peerUserID,
+                role: .member
+            ).create(on: app.db)
+
+            _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                imTCPTextPayload(
+                    conversationID: liveConversationID,
+                    clientMessageID: "verify-live-message",
+                    text: "verify message"
+                ),
+                senderUserID: ownerUserID
+            )
+
+            guard let mismatchedSummary = try await ConversationUserSummary.find(
+                ConversationUserSummary.recordID(
+                    ownerUserID: ownerUserID,
+                    conversationID: liveConversationID
+                ),
+                on: app.db
+            ) else {
+                Issue.record("Expected refreshConversationSummaries to create a live summary")
+                return
+            }
+            mismatchedSummary.lastMessage = nil
+            mismatchedSummary.lastReadSequence = 0
+            mismatchedSummary.unreadCount = 0
+            try await mismatchedSummary.update(on: app.db)
+
+            let staleConversationID = UUID()
+            let staleSummary = try makeConversationSummaryProjection(
+                ownerUserID: ownerUserID,
+                conversationID: staleConversationID,
+                peerUserID: peerUserID,
+                title: "Stale Active",
+                serverSequence: 2,
+                lastActivityAt: Date(timeIntervalSince1970: 1_700_950_100),
+                updatedAt: Date(timeIntervalSince1970: 1_700_950_100),
+                isRemoved: false
+            )
+            try await staleSummary.create(on: app.db)
+
+            let tombstonedConversationID = UUID()
+            let tombstonedSummary = try makeConversationSummaryProjection(
+                ownerUserID: ownerUserID,
+                conversationID: tombstonedConversationID,
+                peerUserID: peerUserID,
+                title: "Tombstoned",
+                serverSequence: 1,
+                lastActivityAt: Date(timeIntervalSince1970: 1_700_950_200),
+                updatedAt: Date(timeIntervalSince1970: 1_700_950_200),
+                isRemoved: true
+            )
+            try await tombstonedSummary.create(on: app.db)
+
+            let verification = try await IMConversationSummaryProjectionService(db: app.db)
+                .verifySummaries(for: ownerUserID)
+
+            #expect(verification.ownerUserCount == 1)
+            #expect(verification.tombstoneSummaryCount == 1)
+            #expect(verification.missingSummaryCount == 0)
+            #expect(verification.staleActiveSummaryCount == 1)
+            #expect(verification.latestVisibleMessageMismatchCount == 1)
+            #expect(verification.unreadMismatchCount == 1)
         }
     }
 

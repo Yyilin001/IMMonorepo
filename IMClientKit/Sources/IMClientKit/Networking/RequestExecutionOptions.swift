@@ -60,7 +60,7 @@ public struct BackgroundTransferConfiguration: Sendable, Equatable {
     public let isDiscretionary: Bool
     public let waitsForConnectivity: Bool
 
-    init(
+    public init(
         identifier: String? = nil,
         isDiscretionary: Bool = true,
         waitsForConnectivity: Bool = true

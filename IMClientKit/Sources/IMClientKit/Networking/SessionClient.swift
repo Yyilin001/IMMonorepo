@@ -355,6 +355,92 @@ public actor SessionClient {
         )
     }
 
+    public func searchIMConversationMessages(
+        conversationID: String,
+        query: String,
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) async throws -> IMConversationMessageSearchPageResponseBody {
+        try await executor.execute(
+            IMRequest.searchMessages(
+                conversationID: conversationID,
+                query: query,
+                cursor: cursor,
+                limit: limit
+            )
+        )
+    }
+
+    public func createMediaUploadSession(
+        kind: IMMediaAssetKind,
+        mimeType: String,
+        byteSize: Int64,
+        filename: String,
+        width: Int? = nil,
+        height: Int? = nil,
+        durationMillis: Int? = nil,
+        previewAssetID: String? = nil
+    ) async throws -> MediaUploadSessionResponseBody {
+        try await executor.execute(
+            MediaRequest.CreateUploadSession(
+                payload: MediaUploadCreateRequestBody(
+                    kind: kind,
+                    mimeType: mimeType,
+                    byteSize: byteSize,
+                    filename: filename,
+                    width: width,
+                    height: height,
+                    durationMillis: durationMillis,
+                    previewAssetID: previewAssetID
+                )
+            )
+        )
+    }
+
+    public func uploadMediaChunk(
+        uploadID: String,
+        uploadBody: UploadBody,
+        backgroundTransfer: BackgroundTransferConfiguration? = nil
+    ) async throws {
+        _ = try await executor.upload(
+            MediaRequest.UploadChunk(
+                uploadID: uploadID,
+                uploadBody: uploadBody,
+                backgroundTransfer: backgroundTransfer
+            )
+        ) as EmptyResponse
+    }
+
+    public func completeMediaUpload(uploadID: String) async throws -> IMMediaAsset {
+        try await executor.execute(MediaRequest.CompleteUpload(uploadID: uploadID))
+    }
+
+    public func downloadMediaAsset(
+        assetID: String,
+        to destinationURL: URL,
+        backgroundTransfer: BackgroundTransferConfiguration? = nil
+    ) async throws -> URL {
+        try await executor.download(
+            MediaRequest.DownloadAsset(
+                assetID: assetID,
+                backgroundTransfer: backgroundTransfer
+            ),
+            to: destinationURL
+        )
+    }
+
+    public func downloadMediaAssetWithProgress(
+        assetID: String,
+        to destinationURL: URL,
+        resumeIfPossible: Bool = true
+    ) async throws -> FileTransferOperation<DownloadTransferEvent> {
+        try await executor.downloadWithProgress(
+            MediaRequest.DownloadAsset(assetID: assetID),
+            to: destinationURL,
+            resumeIfPossible: resumeIfPossible
+        )
+    }
+
     public func leaveIMConversation(
         conversationID: String
     ) async throws -> EmptyResponse {

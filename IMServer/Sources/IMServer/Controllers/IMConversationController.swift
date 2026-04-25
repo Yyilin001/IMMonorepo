@@ -19,6 +19,7 @@ struct IMConversationController: RouteCollection {
         protected.patch("conversations", ":conversationID", "preferences", use: updatePreferences)
         protected.patch("conversations", ":conversationID", "metadata", use: updateMetadata)
         protected.get("conversations", ":conversationID", "messages", use: messages)
+        protected.get("conversations", ":conversationID", "search", use: searchMessages)
         protected.get("conversations", ":conversationID", "messages", "since", use: messagesSince)
         protected.post("conversations", ":conversationID", "messages", ":messageID", "recall", use: recallMessage)
         protected.post("conversations", ":conversationID", "read", use: markRead)
@@ -96,6 +97,21 @@ struct IMConversationController: RouteCollection {
                 in: conversationID,
                 for: try user.requireID(),
                 beforeSequence: query.beforeSequence,
+                limit: query.limit
+            )
+    }
+
+    func searchMessages(req: Request) async throws -> IMConversationMessageSearchPageResponse {
+        let user = try req.auth.require(User.self)
+        let conversationID = try conversationID(from: req)
+        let query = try req.query.decode(IMMessageSearchQuery.self)
+
+        return try await IMConversationService(db: req.db)
+            .searchMessages(
+                in: conversationID,
+                for: try user.requireID(),
+                query: query.q,
+                cursor: query.cursor,
                 limit: query.limit
             )
     }
@@ -447,6 +463,12 @@ struct IMMessageHistoryQuery: Content {
     let limit: Int?
 }
 
+struct IMMessageSearchQuery: Content {
+    let q: String
+    let cursor: String?
+    let limit: Int?
+}
+
 struct IMConversationPageQuery: Content {
     let cursor: String?
     let limit: Int?
@@ -630,4 +652,19 @@ struct IMMessageSinceResponse: Content, Equatable {
     let messages: [IMMessageResponse]
     let hasMore: Bool
     let nextAfterSequence: Int?
+}
+
+struct IMConversationMessageSearchHitResponse: Content, Equatable {
+    let messageID: UUID
+    let senderUserID: UUID
+    let serverSequence: Int
+    let content: IMMessageContent
+    let snippet: String
+    let createdAt: Date?
+}
+
+struct IMConversationMessageSearchPageResponse: Content, Equatable {
+    let items: [IMConversationMessageSearchHitResponse]
+    let nextCursor: String?
+    let hasMore: Bool
 }

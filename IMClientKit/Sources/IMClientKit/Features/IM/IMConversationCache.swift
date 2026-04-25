@@ -183,9 +183,39 @@ public struct IMCachedMessageState: Identifiable, Sendable, Equatable {
     public let direction: IMMessageDirection
     public let createdAt: Date
     public let deliveryState: IMMessageDeliveryState
+    public let localTransferState: IMMessageLocalTransferState?
+    public let localDownloadState: IMMessageLocalDownloadState?
 
     public var text: String {
         content.previewText
+    }
+
+    public init(
+        id: String,
+        conversationID: String,
+        clientMessageID: String?,
+        serverMessageID: String?,
+        senderUserID: UUID?,
+        serverSequence: UInt64?,
+        content: IMMessageContent,
+        direction: IMMessageDirection,
+        createdAt: Date,
+        deliveryState: IMMessageDeliveryState,
+        localTransferState: IMMessageLocalTransferState? = nil,
+        localDownloadState: IMMessageLocalDownloadState? = nil
+    ) {
+        self.id = id
+        self.conversationID = conversationID
+        self.clientMessageID = clientMessageID
+        self.serverMessageID = serverMessageID
+        self.senderUserID = senderUserID
+        self.serverSequence = serverSequence
+        self.content = content
+        self.direction = direction
+        self.createdAt = createdAt
+        self.deliveryState = deliveryState
+        self.localTransferState = localTransferState
+        self.localDownloadState = localDownloadState
     }
 }
 
@@ -376,6 +406,8 @@ public final class IMCachedMessageEntity {
     public var createdAt: Date
     public var deliveryStateRawValue: String
     public var deliveryFailureMessage: String?
+    public var localTransferStateJSON: String?
+    public var localDownloadStateJSON: String?
 
     init(
         recordID: String,
@@ -391,7 +423,9 @@ public final class IMCachedMessageEntity {
         directionRawValue: String,
         createdAt: Date,
         deliveryStateRawValue: String,
-        deliveryFailureMessage: String?
+        deliveryFailureMessage: String?,
+        localTransferStateJSON: String?,
+        localDownloadStateJSON: String?
     ) {
         self.recordID = recordID
         self.ownerUserID = ownerUserID
@@ -407,6 +441,8 @@ public final class IMCachedMessageEntity {
         self.createdAt = createdAt
         self.deliveryStateRawValue = deliveryStateRawValue
         self.deliveryFailureMessage = deliveryFailureMessage
+        self.localTransferStateJSON = localTransferStateJSON
+        self.localDownloadStateJSON = localDownloadStateJSON
     }
 }
 
@@ -630,7 +666,9 @@ public actor IMConversationCacheModelActor {
                         directionRawValue: message.direction.rawValue,
                         createdAt: message.createdAt,
                         deliveryStateRawValue: Self.deliveryStateRawValue(from: message.deliveryState),
-                        deliveryFailureMessage: Self.deliveryFailureMessage(from: message.deliveryState)
+                        deliveryFailureMessage: Self.deliveryFailureMessage(from: message.deliveryState),
+                        localTransferStateJSON: Self.cachedLocalTransferStateJSON(from: message.localTransferState),
+                        localDownloadStateJSON: Self.cachedLocalDownloadStateJSON(from: message.localDownloadState)
                     )
                 )
             }
@@ -717,7 +755,9 @@ public actor IMConversationCacheModelActor {
             deliveryState: deliveryState(
                 rawValue: entity.deliveryStateRawValue,
                 failureMessage: entity.deliveryFailureMessage
-            )
+            ),
+            localTransferState: cachedLocalTransferState(from: entity.localTransferStateJSON),
+            localDownloadState: cachedLocalDownloadState(from: entity.localDownloadStateJSON)
         )
     }
 
@@ -759,6 +799,46 @@ public actor IMConversationCacheModelActor {
         return String(data: data, encoding: .utf8)
     }
 
+    private static func cachedLocalTransferStateJSON(from state: IMMessageLocalTransferState?) -> String? {
+        guard let state else {
+            return nil
+        }
+        let encoder = JSONEncoder()
+        guard let data = try? encoder.encode(state) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func cachedLocalTransferState(from json: String?) -> IMMessageLocalTransferState? {
+        guard let json,
+              let data = json.data(using: .utf8) else {
+            return nil
+        }
+
+        return try? JSONDecoder().decode(IMMessageLocalTransferState.self, from: data)
+    }
+
+    private static func cachedLocalDownloadStateJSON(from state: IMMessageLocalDownloadState?) -> String? {
+        guard let state else {
+            return nil
+        }
+        let encoder = JSONEncoder()
+        guard let data = try? encoder.encode(state) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func cachedLocalDownloadState(from json: String?) -> IMMessageLocalDownloadState? {
+        guard let json,
+              let data = json.data(using: .utf8) else {
+            return nil
+        }
+
+        return try? JSONDecoder().decode(IMMessageLocalDownloadState.self, from: data)
+    }
+
     private static func cachedMessageContent(
         kind: String,
         textPreview: String,
@@ -782,6 +862,36 @@ public actor IMConversationCacheModelActor {
             return .recalled
         case .system:
             return .system(.legacyText(textPreview))
+        case .image:
+            return .image(
+                IMMediaAsset(
+                    assetID: "",
+                    kind: .image,
+                    mimeType: "image/*",
+                    byteSize: 0,
+                    filename: textPreview.isEmpty ? "image" : textPreview
+                )
+            )
+        case .audio:
+            return .audio(
+                IMMediaAsset(
+                    assetID: "",
+                    kind: .audio,
+                    mimeType: "audio/*",
+                    byteSize: 0,
+                    filename: textPreview.isEmpty ? "audio" : textPreview
+                )
+            )
+        case .file:
+            return .file(
+                IMMediaAsset(
+                    assetID: "",
+                    kind: .file,
+                    mimeType: "application/octet-stream",
+                    byteSize: 0,
+                    filename: textPreview.isEmpty ? "file" : textPreview
+                )
+            )
         }
     }
 
@@ -835,6 +945,12 @@ public actor IMConversationCacheModelActor {
 
     private static func deliveryStateRawValue(from state: IMMessageDeliveryState) -> String {
         switch state {
+        case .preparing:
+            return "preparing"
+        case .uploading:
+            return "uploading"
+        case .uploaded:
+            return "uploaded"
         case .queued:
             return "queued"
         case .sending:
@@ -852,15 +968,21 @@ public actor IMConversationCacheModelActor {
 
     private static func deliveryFailureMessage(from state: IMMessageDeliveryState) -> String? {
         switch state {
-        case .queued(let message), .failed(let message), .unknown(let message):
+        case .preparing(let message), .uploading(let message), .queued(let message), .failed(let message), .unknown(let message):
             return message
-        case .sending, .sent, .received:
+        case .uploaded, .sending, .sent, .received:
             return nil
         }
     }
 
     private static func deliveryState(rawValue: String, failureMessage: String?) -> IMMessageDeliveryState {
         switch rawValue {
+        case "preparing":
+            return .preparing(message: failureMessage ?? "正在准备上传附件。")
+        case "uploading":
+            return .uploading(message: failureMessage ?? "正在上传附件。")
+        case "uploaded":
+            return .uploaded
         case "queued":
             return .queued(message: failureMessage ?? "等待 IM 长连接恢复后发送。")
         case "sending":

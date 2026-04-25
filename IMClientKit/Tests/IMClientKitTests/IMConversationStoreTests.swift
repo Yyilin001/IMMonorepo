@@ -1557,6 +1557,90 @@ struct IMConversationStoreTests {
         ))
     }
 
+    @Test func replyJumpStateResolvesLoadedReferencedMessageID() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-9999-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let referencedMessageID = UUID(uuidString: "11111111-9999-3333-4444-555555555555")!
+        let replyMessageID = UUID(uuidString: "66666666-9999-3333-4444-555555555555")!
+
+        store.openConversation(id: conversationIDString)
+        store.replaceMessages(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: referencedMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 2,
+                    content: .recalled,
+                    createdAt: Date(timeIntervalSince1970: 1_700_450_000)
+                ),
+                IMConversationMessageResponseBody(
+                    id: replyMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: "client-reply-jump",
+                    serverSequence: 3,
+                    content: .reply(
+                        reference: IMReplyReference(
+                            messageID: referencedMessageID.uuidString,
+                            senderUserID: Self.peerUserID,
+                            previewText: "quoted snapshot"
+                        ),
+                        text: "jump reply"
+                    ),
+                    createdAt: Date(timeIntervalSince1970: 1_700_450_100)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        let matchedMessageID = try #require(
+            store.localMessageID(
+                matchingReferencedMessageID: referencedMessageID.uuidString,
+                in: conversationIDString
+            )
+        )
+        store.beginReplyJump(to: referencedMessageID.uuidString, in: conversationIDString)
+        store.resolveReplyJump(matchedMessageID: matchedMessageID, in: conversationIDString)
+
+        #expect(store.replyJumpConversationID == conversationIDString)
+        #expect(store.replyJumpTargetMessageID == referencedMessageID.uuidString)
+        #expect(store.replyJumpMatchedMessageID == referencedMessageID.uuidString)
+        #expect(store.replyJumpState == .found)
+    }
+
+    @Test func replyJumpStateClearsWhenConversationIsRemoved() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-aaaa-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Jump conversation",
+                    kind: IMConversationKind.group.rawValue,
+                    memberCount: 2,
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_450_200),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_450_200)
+                )
+            ]
+        )
+
+        store.beginReplyJump(to: "missing-target", in: conversationIDString)
+        store.removeConversation(id: conversationIDString)
+
+        #expect(store.replyJumpConversationID == nil)
+        #expect(store.replyJumpTargetMessageID == nil)
+        #expect(store.replyJumpMatchedMessageID == nil)
+        #expect(store.replyJumpState == .idle)
+    }
+
     @Test func replaceMessagesUsesClientMessageIDToMergePendingOutgoingMessage() {
         let store = IMConversationStore()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
@@ -2631,5 +2715,113 @@ struct IMConversationStoreTests {
             .unknown(message: "发送状态未确认，请重试。"),
             .queued(message: "等待 IM 长连接恢复后发送。")
         ])
+    }
+
+    @Test func cacheRestorePreservesRecoverableOutgoingMediaUploadState() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        let sourceFileURL = FileManager.default.temporaryDirectory.appending(path: "cache-media-\(UUID().uuidString).png")
+        let asset = IMMediaAsset(
+            assetID: "local-cache-asset",
+            kind: .image,
+            mimeType: "image/png",
+            byteSize: 12,
+            filename: "cache.png",
+            width: 48,
+            height: 48
+        )
+
+        _ = store.stageOutgoingMediaUpload(
+            asset: asset,
+            conversationID: conversationID,
+            senderUserID: Self.currentUserID,
+            sourceFileURL: sourceFileURL
+        )
+        let localMessageID = try #require(store.selectedConversation?.messages.first?.id)
+        store.markOutgoingUploading(
+            localMessageID: localMessageID,
+            message: "正在上传附件。",
+            uploadID: "upload-cache-1"
+        )
+
+        let snapshot = store.makeCacheSnapshot(lastSummaryRefreshAt: nil)
+        let restoredStore = IMConversationStore()
+        restoredStore.restoreCacheSnapshot(snapshot)
+
+        let restoredMessage = try #require(restoredStore.selectedConversation?.messages.first)
+        #expect(restoredMessage.deliveryState == .uploading(message: "正在上传附件。"))
+        #expect(restoredMessage.localTransferState?.sourceFilePath == sourceFileURL.path)
+        #expect(restoredMessage.localTransferState?.uploadID == "upload-cache-1")
+        #expect(restoredStore.recoverableOutgoingMediaUploads().map(\.localMessageID) == [localMessageID])
+    }
+
+    @Test func cacheRestorePreservesLocalMediaDownloadState() throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+        let asset = IMMediaAsset(
+            assetID: "download-cache-asset",
+            kind: .file,
+            mimeType: "application/pdf",
+            byteSize: 128,
+            filename: "cached.pdf"
+        )
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: UUID(uuidString: conversationID)!,
+                    title: "cached media",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+                )
+            ]
+        )
+        store.replaceMessages(
+            in: conversationID,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
+                    conversationID: UUID(uuidString: conversationID)!,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 1,
+                    content: .file(asset),
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_001)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        let messageID = try #require(store.selectedConversation?.messages.first?.id)
+        let destinationURL = FileManager.default.temporaryDirectory.appending(path: "cached-download-\(UUID().uuidString).pdf")
+        store.updateLocalDownloadState(
+            messageID: messageID,
+            state: IMMessageLocalDownloadState(
+                destinationFilePath: destinationURL.path,
+                status: .paused(
+                    progress: IMMessageLocalDownloadProgressSnapshot(
+                        transferredBytes: 64,
+                        totalBytes: 128,
+                        resumedBytes: 32
+                    )
+                )
+            )
+        )
+
+        let snapshot = store.makeCacheSnapshot(lastSummaryRefreshAt: nil)
+        let restoredStore = IMConversationStore()
+        restoredStore.restoreCacheSnapshot(snapshot)
+
+        let restoredMessage = try #require(restoredStore.selectedConversation?.messages.first)
+        #expect(restoredMessage.localDownloadState?.destinationFilePath == destinationURL.path)
+        #expect(restoredMessage.localDownloadState?.status == .paused(
+            progress: IMMessageLocalDownloadProgressSnapshot(
+                transferredBytes: 64,
+                totalBytes: 128,
+                resumedBytes: 32
+            )
+        ))
     }
 }

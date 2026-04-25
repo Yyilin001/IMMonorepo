@@ -18,9 +18,29 @@ func testMessageContent(kind: String, body: [String: String]) -> IMMessageConten
         return .recalled
     case IMMessageContentType.system.rawValue:
         return .system(.legacyText(body["text"] ?? ""))
+    case IMMessageContentType.image.rawValue:
+        return .image(testMediaAsset(kind: .image, body: body))
+    case IMMessageContentType.audio.rawValue:
+        return .audio(testMediaAsset(kind: .audio, body: body))
+    case IMMessageContentType.file.rawValue:
+        return .file(testMediaAsset(kind: .file, body: body))
     default:
         return .text(body["text"] ?? "")
     }
+}
+
+private func testMediaAsset(kind: IMMediaAssetKind, body: [String: String]) -> IMMediaAsset {
+    IMMediaAsset(
+        assetID: body["assetID"] ?? "",
+        kind: kind,
+        mimeType: body["mimeType"] ?? "application/octet-stream",
+        byteSize: Int64(body["byteSize"] ?? "") ?? 0,
+        filename: body["filename"] ?? "",
+        width: Int(body["width"] ?? ""),
+        height: Int(body["height"] ?? ""),
+        durationMillis: Int(body["durationMillis"] ?? ""),
+        previewAssetID: body["previewAssetID"]
+    )
 }
 
 extension IMTCPMessagePayload {
@@ -60,6 +80,8 @@ extension IMTCPMessagePayload {
             return [:]
         case .system(let event):
             return ["text": event.displayText]
+        case .image(let asset), .audio(let asset), .file(let asset):
+            return mediaBody(asset)
         }
     }
 
@@ -101,6 +123,8 @@ extension IMMessagePreviewResponseBody {
             return [:]
         case .system(let event):
             return ["text": event.displayText]
+        case .image(let asset), .audio(let asset), .file(let asset):
+            return mediaBody(asset)
         }
     }
 
@@ -146,12 +170,36 @@ extension IMConversationMessageResponseBody {
             return [:]
         case .system(let event):
             return ["text": event.displayText]
+        case .image(let asset), .audio(let asset), .file(let asset):
+            return mediaBody(asset)
         }
     }
 
     var kind: String {
         content.type.rawValue
     }
+}
+
+private func mediaBody(_ asset: IMMediaAsset) -> [String: String] {
+    var body: [String: String] = [
+        "assetID": asset.assetID,
+        "mimeType": asset.mimeType,
+        "byteSize": String(asset.byteSize),
+        "filename": asset.filename
+    ]
+    if let width = asset.width {
+        body["width"] = String(width)
+    }
+    if let height = asset.height {
+        body["height"] = String(height)
+    }
+    if let durationMillis = asset.durationMillis {
+        body["durationMillis"] = String(durationMillis)
+    }
+    if let previewAssetID = asset.previewAssetID {
+        body["previewAssetID"] = previewAssetID
+    }
+    return body
 }
 
 extension IMCachedMessageState {

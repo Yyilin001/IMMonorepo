@@ -256,6 +256,79 @@ struct SessionClientTests {
         #expect(authorizations == ["Bearer stale-token", "Bearer fresh-token"])
     }
 
+    @Test func downloadMediaAssetWithProgressUsesAuthorizedMediaEndpoint() async throws {
+        let tokenStore = InMemoryTokenStore()
+        let userCache = InMemoryUserSessionCache()
+        let assetID = "asset-download-1"
+
+        let httpTransport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                let body = try Self.authResponseBody(accessToken: "access-1", refreshToken: "refresh-1")
+                return HTTPFixtures.response(statusCode: 200, body: body)
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+
+        let expectedData = Data("media-download".utf8)
+        let fileTransport = MockFileTransferTransport(
+            streamDownloadHandler: { request in
+                #expect(request.url?.path == "/api/media/assets/\(assetID)")
+                #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-1")
+
+                return (
+                    HTTPByteStream(
+                        bytes: AsyncThrowingStream { continuation in
+                            for byte in expectedData {
+                                continuation.yield(byte)
+                            }
+                            continuation.finish()
+                        }
+                    ),
+                    HTTPURLResponse(
+                        url: HTTPFixtures.baseURL.appending(path: "api/media/assets/\(assetID)"),
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: [
+                            "Content-Length": String(expectedData.count),
+                            "ETag": "\"asset-download-v1\""
+                        ]
+                    )!
+                )
+            }
+        )
+
+        let client = SessionClient(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: httpTransport),
+            fileTransferClient: FileTransferClient(baseURL: HTTPFixtures.baseURL, transport: fileTransport),
+            tokenStore: tokenStore,
+            userCache: userCache
+        )
+
+        let noDevice: DeviceMetadataPayload? = nil
+        _ = try await client.login(email: Self.userEmail, password: "password123", device: noDevice)
+
+        let destinationURL = FileManager.default.temporaryDirectory.appending(path: "media-download-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: destinationURL) }
+
+        let operation = try await client.downloadMediaAssetWithProgress(
+            assetID: assetID,
+            to: destinationURL
+        )
+
+        var completedURL: URL?
+        for try await event in operation.events {
+            if case .completed(let url) = event {
+                completedURL = url
+            }
+        }
+
+        #expect(completedURL == destinationURL)
+        #expect(try Data(contentsOf: destinationURL) == expectedData)
+    }
+
     @Test func fileAPIHonorsExplicitNeverRetryPolicyForAuthorizedUpload() async throws {
         let tokenStore = InMemoryTokenStore()
         let userCache = InMemoryUserSessionCache()

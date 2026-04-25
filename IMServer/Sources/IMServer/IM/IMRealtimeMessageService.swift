@@ -229,7 +229,48 @@ struct IMRealtimeMessageService {
                 ),
                 text: text
             )
+        case .image(let asset), .audio(let asset), .file(let asset):
+            return try normalizedMediaContent(content.type, asset: asset)
         case .recalled, .system:
+            throw IMRealtimeMessageError.unsupportedMessageContent
+        }
+    }
+
+    private func normalizedMediaContent(
+        _ type: IMMessageContentType,
+        asset: IMMediaAsset
+    ) throws -> IMMessageContent {
+        let normalizedAssetID = asset.assetID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedMimeType = asset.mimeType.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedFilename = asset.filename.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedAssetID.isEmpty,
+              !normalizedMimeType.isEmpty,
+              !normalizedFilename.isEmpty,
+              asset.byteSize >= 0
+        else {
+            throw IMRealtimeMessageError.unsupportedMessageContent
+        }
+
+        let normalizedAsset = IMMediaAsset(
+            assetID: normalizedAssetID,
+            kind: asset.kind,
+            mimeType: normalizedMimeType,
+            byteSize: asset.byteSize,
+            filename: normalizedFilename,
+            width: asset.width,
+            height: asset.height,
+            durationMillis: asset.durationMillis,
+            previewAssetID: asset.previewAssetID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+
+        switch type {
+        case .image:
+            return .image(normalizedAsset)
+        case .audio:
+            return .audio(normalizedAsset)
+        case .file:
+            return .file(normalizedAsset)
+        case .text, .reply, .recalled, .system:
             throw IMRealtimeMessageError.unsupportedMessageContent
         }
     }
@@ -277,7 +318,7 @@ struct IMRealtimeMessageService {
         switch content {
         case .recalled:
             return "原消息已撤回"
-        case .text, .reply, .system:
+        case .text, .reply, .system, .image, .audio, .file:
             let preview = content.previewText.trimmingCharacters(in: .whitespacesAndNewlines)
             return preview.isEmpty ? "原消息暂不可用" : preview
         }

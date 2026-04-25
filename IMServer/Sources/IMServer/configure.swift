@@ -54,6 +54,7 @@ public func configure(_ app: Application) async throws {
     app.migrations.add(AddConversationUserSummaryDirectPeerProfileFields())
     app.migrations.add(AddConversationUserSummaryIndexes())
     try await app.autoMigrate()
+    try MediaStorageService(app: app).prepareStorage()
     try FileStorageService(app: app).prepareStorage()
     try await seedDevelopmentUserIfNeeded(in: app)
 

@@ -58,7 +58,9 @@ enum ConversationCacheSnapshotMapper {
                         content: message.content,
                         direction: message.direction,
                         createdAt: message.createdAt,
-                        deliveryState: message.deliveryState
+                        deliveryState: message.deliveryState,
+                        localTransferState: message.localTransferState,
+                        localDownloadState: message.localDownloadState
                     )
                 },
                 hasLoadedMessages: hasLoadedMessages,
@@ -121,7 +123,9 @@ enum ConversationCacheSnapshotMapper {
                         content: cachedMessage.content,
                         direction: cachedMessage.direction,
                         createdAt: cachedMessage.createdAt,
-                        deliveryState: restoreDeliveryState(cachedMessage.deliveryState)
+                        deliveryState: restoreDeliveryState(cachedMessage.deliveryState),
+                        localTransferState: cachedMessage.localTransferState,
+                        localDownloadState: cachedMessage.localDownloadState
                     )
                 },
                 lastMessagePreviewText: cachedConversation.lastMessagePreviewText,

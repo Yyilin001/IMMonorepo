@@ -3,21 +3,6 @@ import SQLKit
 import Vapor
 
 struct IMConversationService {
-    private struct ConversationReadState {
-        let lastReadSequence: Int
-        let unreadCount: Int
-    }
-
-    private struct ConversationSummaryPreferences {
-        let isPinned: Bool
-        let pinnedAt: Date?
-        let isMuted: Bool
-    }
-
-    private enum RecallPolicy {
-        static let window: TimeInterval = 2 * 60
-    }
-
     private enum CreationError: LocalizedError {
         case emptyParticipants
         case invalidKind
@@ -174,6 +159,26 @@ struct IMConversationService {
 
     let db: any Database
 
+    private var membershipService: ConversationMembershipService {
+        ConversationMembershipService(db: db)
+    }
+
+    private var readStateService: ConversationReadStateService {
+        ConversationReadStateService(db: db)
+    }
+
+    private var messageService: ConversationMessageService {
+        ConversationMessageService(db: db)
+    }
+
+    private var searchService: ConversationSearchService {
+        ConversationSearchService(db: db)
+    }
+
+    private var governanceService: ConversationGovernanceService {
+        ConversationGovernanceService()
+    }
+
     struct MemberRemovalResult {
         let requesterConversation: IMConversationResponse
         let removedConversation: IMConversationResponse
@@ -270,7 +275,7 @@ struct IMConversationService {
                     )
                 )
                 try await systemMessage.create(on: database)
-                try await advanceReadSequenceIfMember(
+                try await readStateService.advanceReadSequenceIfMember(
                     conversationID: conversationID,
                     userID: creatorUserID,
                     readSequence: sequence,
@@ -460,7 +465,7 @@ struct IMConversationService {
                 )
             )
             try await systemMessage.create(on: database)
-            try await advanceReadSequenceIfMember(
+            try await readStateService.advanceReadSequenceIfMember(
                 conversationID: conversationID,
                 userID: requesterUserID,
                 readSequence: sequence,
@@ -573,7 +578,7 @@ struct IMConversationService {
             conversationID: conversationID,
             userID: memberUserID
         )
-        try validateMemberRemovalPrivilege(
+        try governanceService.validateMemberRemovalPrivilege(
             requesterRole: requesterMembership.memberRoleEnum,
             targetRole: targetMembership.memberRoleEnum
         )
@@ -616,7 +621,7 @@ struct IMConversationService {
                 )
             )
             try await systemMessage.create(on: database)
-            try await advanceReadSequenceIfMember(
+            try await readStateService.advanceReadSequenceIfMember(
                 conversationID: conversationID,
                 userID: requesterUserID,
                 readSequence: sequence,
@@ -723,7 +728,7 @@ struct IMConversationService {
                 )
             )
             try await systemMessage.create(on: database)
-            try await advanceReadSequenceIfMember(
+            try await readStateService.advanceReadSequenceIfMember(
                 conversationID: conversationID,
                 userID: requesterUserID,
                 readSequence: sequence,
@@ -805,7 +810,7 @@ struct IMConversationService {
                 )
             )
             try await systemMessage.create(on: database)
-            try await advanceReadSequenceIfMember(
+            try await readStateService.advanceReadSequenceIfMember(
                 conversationID: conversationID,
                 userID: requesterUserID,
                 readSequence: sequence,
@@ -848,17 +853,11 @@ struct IMConversationService {
             throw Abort(.forbidden, reason: GroupMetadataUpdateError.insufficientPrivilege.localizedDescription)
         }
 
-        let normalizedTitle = title.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        if let normalizedTitle, title != nil, normalizedTitle.isEmpty {
-            throw Abort(.badRequest, reason: GroupMetadataUpdateError.emptyTitle.localizedDescription)
-        }
-        let normalizedNotice = notice.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        if let normalizedNotice, notice != nil, normalizedNotice.isEmpty {
-            throw Abort(.badRequest, reason: GroupMetadataUpdateError.invalidNotice.localizedDescription)
-        }
-        guard title != nil || notice != nil || avatarPreset != nil else {
-            throw Abort(.badRequest, reason: GroupMetadataUpdateError.emptyUpdate.localizedDescription)
-        }
+        let changeSet = try governanceService.makeMetadataChangeSet(
+            title: title,
+            notice: notice,
+            avatarPreset: avatarPreset
+        )
 
         let requester = try await requireUser(id: requesterUserID)
         let response = try await db.transaction { database in
@@ -866,19 +865,7 @@ struct IMConversationService {
                 throw Abort(.notFound, reason: "会话不存在。")
             }
 
-            var updatedFields: [IMConversationMetadataField] = []
-            if title != nil, persistedConversation.title != normalizedTitle {
-                persistedConversation.title = normalizedTitle
-                updatedFields.append(.title)
-            }
-            if notice != nil, persistedConversation.notice != normalizedNotice {
-                persistedConversation.notice = normalizedNotice
-                updatedFields.append(.notice)
-            }
-            if let avatarPreset, persistedConversation.avatarPresetEnum != avatarPreset {
-                persistedConversation.avatarPresetEnum = avatarPreset
-                updatedFields.append(.avatarPreset)
-            }
+            let updatedFields = governanceService.apply(changeSet, to: persistedConversation)
 
             if updatedFields.isEmpty {
                 return try await conversationResponse(
@@ -911,7 +898,7 @@ struct IMConversationService {
                 )
             )
             try await systemMessage.create(on: database)
-            try await advanceReadSequenceIfMember(
+            try await readStateService.advanceReadSequenceIfMember(
                 conversationID: conversationID,
                 userID: requesterUserID,
                 readSequence: sequence,
@@ -975,33 +962,12 @@ struct IMConversationService {
         _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
 
         let recalledMessage = try await db.transaction { database in
-            guard let message = try await ConversationMessage.query(on: database)
-                .filter(\.$id == messageID)
-                .filter(\.$conversation.$id == conversationID)
-                .first()
-            else {
-                throw Abort(.notFound, reason: RecallError.messageNotFound.localizedDescription)
-            }
-
-            guard message.$sender.id == requesterUserID else {
-                throw Abort(.forbidden, reason: RecallError.notMessageSender.localizedDescription)
-            }
-
-            let messageCreatedAt = message.createdAt ?? .distantPast
-            guard Date().timeIntervalSince(messageCreatedAt) <= RecallPolicy.window else {
-                throw Abort(.badRequest, reason: RecallError.recallWindowExpired.localizedDescription)
-            }
-
-            switch try message.decodedContent() {
-            case .text, .reply:
-                try message.replaceContent(.recalled)
-                try await message.update(on: database)
-                return message
-            case .recalled:
-                throw Abort(.badRequest, reason: RecallError.alreadyRecalled.localizedDescription)
-            case .system:
-                throw Abort(.badRequest, reason: RecallError.unsupportedMessageKind.localizedDescription)
-            }
+            try await messageService.recallMessage(
+                in: conversationID,
+                messageID: messageID,
+                requesterUserID: requesterUserID,
+                on: database
+            )
         }
 
         let recipientUserIDs = try await listMembers(in: conversationID, for: requesterUserID).map(\.id)
@@ -1021,7 +987,7 @@ struct IMConversationService {
             return nil
         }
 
-        return try messageResponse(from: message, conversationID: conversationID)
+        return try messageService.messageResponse(from: message, conversationID: conversationID)
     }
 
     func listConversations(
@@ -1049,25 +1015,7 @@ struct IMConversationService {
     }
 
     func listMembers(in conversationID: UUID, for userID: UUID) async throws -> [IMConversationMemberResponse] {
-        try await requireMembership(conversationID: conversationID, userID: userID)
-
-        let memberships = try await ConversationMember.query(on: db)
-            .filter(\.$conversation.$id == conversationID)
-            .with(\.$user)
-            .all()
-
-        return try memberships
-            .map { membership -> IMConversationMemberResponse in
-                guard let user = membership.$user.value else {
-                    throw Abort(.internalServerError, reason: "会话成员数据不完整。")
-                }
-                return IMConversationMemberResponse(
-                    id: try user.requireID(),
-                    email: user.email,
-                    role: membership.memberRoleEnum.rawValue
-                )
-            }
-            .sorted(by: sortConversationMembers)
+        try await membershipService.listMemberResponses(in: conversationID, for: userID)
     }
 
     func listMessages(
@@ -1076,7 +1024,7 @@ struct IMConversationService {
         beforeSequence: Int? = nil,
         limit requestedLimit: Int? = nil
     ) async throws -> [IMMessageResponse] {
-        let membership = try await requireMembershipRecord(
+        let membership = try await membershipService.requireMembershipRecord(
             conversationID: conversationID,
             userID: userID
         )
@@ -1098,7 +1046,7 @@ struct IMConversationService {
             .all()
             .reversed()
 
-        return try messages.map { try messageResponse(from: $0, conversationID: conversationID) }
+        return try messages.map { try messageService.messageResponse(from: $0, conversationID: conversationID) }
     }
 
     func listMessagesSince(
@@ -1107,7 +1055,7 @@ struct IMConversationService {
         afterSequence: Int,
         limit requestedLimit: Int? = nil
     ) async throws -> IMMessageSinceResponse {
-        let membership = try await requireMembershipRecord(
+        let membership = try await membershipService.requireMembershipRecord(
             conversationID: conversationID,
             userID: userID
         )
@@ -1128,11 +1076,31 @@ struct IMConversationService {
             rows.removeLast()
         }
 
-        let messages = try rows.map { try messageResponse(from: $0, conversationID: conversationID) }
+        let messages = try rows.map { try messageService.messageResponse(from: $0, conversationID: conversationID) }
         return IMMessageSinceResponse(
             messages: messages,
             hasMore: hasMore,
             nextAfterSequence: messages.last?.serverSequence
+        )
+    }
+
+    func searchMessages(
+        in conversationID: UUID,
+        for userID: UUID,
+        query rawQuery: String,
+        cursor rawCursor: String?,
+        limit requestedLimit: Int? = nil
+    ) async throws -> IMConversationMessageSearchPageResponse {
+        let membership = try await membershipService.requireMembershipRecord(
+            conversationID: conversationID,
+            userID: userID
+        )
+        return try await searchService.searchMessages(
+            in: conversationID,
+            membership: membership,
+            query: rawQuery,
+            cursor: rawCursor,
+            limit: requestedLimit
         )
     }
 
@@ -1145,14 +1113,14 @@ struct IMConversationService {
             throw Abort(.badRequest, reason: "已读游标无效。")
         }
 
-        try await advanceConversationRead(
+        try await readStateService.advanceConversationRead(
             conversationID: conversationID,
             userID: userID,
             requestedReadSequence: requestedReadSequence,
             on: db
         )
 
-        let readState = try await conversationReadState(
+        let readState = try await readStateService.conversationReadState(
             conversationID: conversationID,
             userID: userID,
             on: db
@@ -1180,7 +1148,10 @@ struct IMConversationService {
     }
 
     private func requireMembership(conversationID: UUID, userID: UUID) async throws {
-        _ = try await requireConversationAndMembership(conversationID: conversationID, userID: userID)
+        _ = try await membershipService.requireConversationAndMembership(
+            conversationID: conversationID,
+            userID: userID
+        )
     }
 
     private func requireMembershipRecord(
@@ -1188,36 +1159,21 @@ struct IMConversationService {
         userID: UUID,
         on database: (any Database)? = nil
     ) async throws -> ConversationMember {
-        let database = database ?? db
-        guard let membership = try await ConversationMember.query(on: database)
-            .filter(\.$conversation.$id == conversationID)
-            .filter(\.$user.$id == userID)
-            .first()
-        else {
-            throw Abort(.notFound, reason: "会话不存在。")
-        }
-
-        return membership
+        try await membershipService.requireMembershipRecord(
+            conversationID: conversationID,
+            userID: userID,
+            on: database
+        )
     }
 
     private func requireConversationAndMembership(
         conversationID: UUID,
         userID: UUID
     ) async throws -> Conversation {
-        guard let conversation = try await Conversation.find(conversationID, on: db) else {
-            throw Abort(.notFound, reason: "会话不存在。")
-        }
-
-        let membership = try await ConversationMember.query(on: db)
-            .filter(\.$conversation.$id == conversationID)
-            .filter(\.$user.$id == userID)
-            .first()
-
-        guard membership != nil else {
-            throw Abort(.notFound, reason: "会话不存在。")
-        }
-
-        return conversation
+        try await membershipService.requireConversationAndMembership(
+            conversationID: conversationID,
+            userID: userID
+        )
     }
 
     private func advanceConversationRead(
@@ -1226,26 +1182,12 @@ struct IMConversationService {
         requestedReadSequence: Int,
         on database: any Database
     ) async throws {
-        guard let membership = try await ConversationMember.query(on: database)
-            .filter(\.$conversation.$id == conversationID)
-            .filter(\.$user.$id == userID)
-            .first()
-        else {
-            throw Abort(.notFound, reason: "会话不存在。")
-        }
-
-        let targetSequence = try await latestVisibleConversationSequence(
+        try await readStateService.advanceConversationRead(
             conversationID: conversationID,
-            visibleFromSequence: membership.visibleFromSequence,
+            userID: userID,
+            requestedReadSequence: requestedReadSequence,
             on: database
         )
-        let effectiveReadSequence = min(requestedReadSequence, targetSequence)
-        guard membership.lastReadSequence < effectiveReadSequence else {
-            return
-        }
-
-        membership.lastReadSequence = effectiveReadSequence
-        try await membership.update(on: database)
     }
 
     private func requireUser(id userID: UUID) async throws -> User {
@@ -1281,13 +1223,13 @@ struct IMConversationService {
             .filter(\.$serverSequence >= membership.visibleFromSequence)
             .sort(\.$serverSequence, .descending)
             .first()
-            .map(makePreview)
-        let readState = try await conversationReadState(
+            .map(messageService.makePreview)
+        let readState = try await readStateService.conversationReadState(
             conversationID: conversationID,
             userID: userID,
             on: database
         )
-        let preferences = try await membershipSummaryPreferences(
+        let preferences = try await readStateService.membershipSummaryPreferences(
             conversationID: conversationID,
             userID: userID,
             on: database
@@ -1319,26 +1261,10 @@ struct IMConversationService {
         userID: UUID,
         on database: any Database
     ) async throws -> ConversationReadState {
-        guard let membership = try await ConversationMember.query(on: database)
-            .filter(\.$conversation.$id == conversationID)
-            .filter(\.$user.$id == userID)
-            .first()
-        else {
-            throw Abort(.notFound, reason: "会话不存在。")
-        }
-
-        let effectiveLastReadSequence = max(
-            membership.lastReadSequence,
-            max(0, membership.visibleFromSequence - 1)
-        )
-        let latestSequence = try await latestVisibleConversationSequence(
+        try await readStateService.conversationReadState(
             conversationID: conversationID,
-            visibleFromSequence: membership.visibleFromSequence,
+            userID: userID,
             on: database
-        )
-        return ConversationReadState(
-            lastReadSequence: effectiveLastReadSequence,
-            unreadCount: max(0, latestSequence - effectiveLastReadSequence)
         )
     }
 
@@ -1347,14 +1273,11 @@ struct IMConversationService {
         visibleFromSequence: Int,
         on database: any Database
     ) async throws -> Int {
-        let latestMessageSequence = try await ConversationMessage.query(on: database)
-            .filter(\.$conversation.$id == conversationID)
-            .filter(\.$serverSequence >= visibleFromSequence)
-            .sort(\.$serverSequence, .descending)
-            .first()?
-            .serverSequence ?? 0
-
-        return max(latestMessageSequence, max(0, visibleFromSequence - 1))
+        try await readStateService.latestVisibleConversationSequence(
+            conversationID: conversationID,
+            visibleFromSequence: visibleFromSequence,
+            on: database
+        )
     }
 
     private func allocateNextServerSequence(
@@ -1402,30 +1325,16 @@ struct IMConversationService {
         readSequence: Int,
         on database: any Database
     ) async throws {
-        guard let membership = try await ConversationMember.query(on: database)
-            .filter(\.$conversation.$id == conversationID)
-            .filter(\.$user.$id == userID)
-            .first()
-        else {
-            return
-        }
-
-        guard membership.lastReadSequence < readSequence else {
-            return
-        }
-
-        membership.lastReadSequence = max(readSequence, max(0, membership.visibleFromSequence - 1))
-        try await membership.update(on: database)
+        try await readStateService.advanceReadSequenceIfMember(
+            conversationID: conversationID,
+            userID: userID,
+            readSequence: readSequence,
+            on: database
+        )
     }
 
     private func makePreview(from message: ConversationMessage) throws -> IMMessagePreviewResponse {
-        IMMessagePreviewResponse(
-            id: try message.requireID(),
-            senderUserID: message.$sender.id,
-            serverSequence: message.serverSequence,
-            content: try message.decodedContent(),
-            createdAt: message.createdAt
-        )
+        try messageService.makePreview(from: message)
     }
 
     private func membershipSummaryPreferences(
@@ -1433,15 +1342,10 @@ struct IMConversationService {
         userID: UUID,
         on database: any Database
     ) async throws -> ConversationSummaryPreferences {
-        let recordID = ConversationUserSummary.recordID(ownerUserID: userID, conversationID: conversationID)
-        guard let summary = try await ConversationUserSummary.find(recordID, on: database) else {
-            return ConversationSummaryPreferences(isPinned: false, pinnedAt: nil, isMuted: false)
-        }
-
-        return ConversationSummaryPreferences(
-            isPinned: summary.isPinned,
-            pinnedAt: summary.pinnedAt,
-            isMuted: summary.isMuted
+        try await readStateService.membershipSummaryPreferences(
+            conversationID: conversationID,
+            userID: userID,
+            on: database
         )
     }
 
@@ -1449,15 +1353,7 @@ struct IMConversationService {
         from message: ConversationMessage,
         conversationID: UUID
     ) throws -> IMMessageResponse {
-        IMMessageResponse(
-            id: try message.requireID(),
-            conversationID: conversationID,
-            senderUserID: message.$sender.id,
-            clientMessageID: message.clientMessageID,
-            serverSequence: message.serverSequence,
-            content: try message.decodedContent(),
-            createdAt: message.createdAt
-        )
+        try messageService.messageResponse(from: message, conversationID: conversationID)
     }
 
     private func normalizedHistoryLimit(_ requestedLimit: Int?) throws -> Int {
@@ -1484,6 +1380,17 @@ struct IMConversationService {
         return min(requestedLimit, IncrementalPage.maxLimit)
     }
 
+    private func searchSnippet(
+        for rawQuery: String,
+        content: IMMessageContent
+    ) -> String? {
+        searchService.searchSnippet(for: rawQuery, content: content)
+    }
+
+    private func searchableTexts(for content: IMMessageContent) -> [String] {
+        content.presentation.searchableTexts
+    }
+
     private func normalizedConversationTitle(_ title: String?) -> String? {
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmedTitle.isEmpty ? nil : trimmedTitle
@@ -1493,23 +1400,10 @@ struct IMConversationService {
         requesterRole: IMConversationMemberRole,
         targetRole: IMConversationMemberRole
     ) throws {
-        switch requesterRole {
-        case .owner:
-            if targetRole == .owner {
-                throw Abort(.badRequest, reason: MembershipUpdateError.cannotRemoveOwner.localizedDescription)
-            }
-        case .admin:
-            switch targetRole {
-            case .owner:
-                throw Abort(.forbidden, reason: MembershipUpdateError.cannotRemoveOwner.localizedDescription)
-            case .admin:
-                throw Abort(.forbidden, reason: MembershipUpdateError.cannotRemoveAdministrator.localizedDescription)
-            case .member:
-                return
-            }
-        case .member:
-            throw Abort(.forbidden, reason: MembershipUpdateError.insufficientPrivilegeToRemoveMembers.localizedDescription)
-        }
+        try governanceService.validateMemberRemovalPrivilege(
+            requesterRole: requesterRole,
+            targetRole: targetRole
+        )
     }
 
     private func memberRoleUpdateSystemMessage(

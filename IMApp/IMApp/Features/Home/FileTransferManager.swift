@@ -32,14 +32,16 @@ final class FileTransferManager: ObservableObject {
     private let fileAPI: FileAPI
     private let sessionClient: SessionClient
     private let backgroundTransferMonitor: any BackgroundTransferMonitoring
+    private let transferProjectionState = TransferProjectionState()
 
     private var uploadTask: Task<Void, Never>?
     private var downloadTask: Task<Void, Never>?
     private var uploadOperation: FileTransferOperation<UploadTransferEvent<EmptyResponse>>?
     private var downloadOperation: FileTransferOperation<DownloadTransferEvent>?
     private var backgroundTransferUpdatesTask: Task<Void, Never>?
-    private var trackedBackgroundUpload: BackgroundTransferSnapshot?
-    private var trackedBackgroundDownload: BackgroundTransferSnapshot?
+    private var transferStore = IMTransferStore()
+    private var trackedBackgroundUpload: IMTransferSnapshot?
+    private var trackedBackgroundDownload: IMTransferSnapshot?
 
     init(
         fileAPI: FileAPI,
@@ -157,10 +159,10 @@ final class FileTransferManager: ObservableObject {
             if resetStatus {
                 uploadStatus = "正在取消后台上传..."
             }
-            Task { [backgroundTransferMonitor] in
+           Task { [backgroundTransferMonitor] in
                 await backgroundTransferMonitor.cancelTransfer(
-                    sessionIdentifier: snapshot.sessionIdentifier,
-                    taskIdentifier: snapshot.taskIdentifier
+                    sessionIdentifier: snapshot.taskID.sessionIdentifier,
+                    taskIdentifier: snapshot.taskID.taskIdentifier
                 )
             }
             return
@@ -263,8 +265,8 @@ final class FileTransferManager: ObservableObject {
             }
             Task { [backgroundTransferMonitor] in
                 await backgroundTransferMonitor.cancelTransfer(
-                    sessionIdentifier: snapshot.sessionIdentifier,
-                    taskIdentifier: snapshot.taskIdentifier
+                    sessionIdentifier: snapshot.taskID.sessionIdentifier,
+                    taskIdentifier: snapshot.taskID.taskIdentifier
                 )
             }
             return
@@ -340,35 +342,44 @@ final class FileTransferManager: ObservableObject {
     }
 
     private func applyRecoveredBackgroundTransfers(_ snapshots: [BackgroundTransferSnapshot]) {
+        transferStore.replace(with: snapshots)
+
         if uploadTask == nil, uploadOperation == nil {
-            trackedBackgroundUpload = snapshots.first(where: { $0.kind == .upload })
+            trackedBackgroundUpload = transferStore.snapshots(kind: .upload).first
             if let snapshot = trackedBackgroundUpload {
                 isUploading = true
-                uploadProgress = snapshot.progress
-                uploadStatus = Self.backgroundStatusMessage(for: snapshot, verb: "上传")
+                uploadProgress = snapshot.imBackgroundProgress
+                uploadStatus = transferProjectionState.backgroundStatusMessage(
+                    for: snapshot,
+                    verb: "上传"
+                )
             }
         }
 
         if downloadTask == nil, downloadOperation == nil {
-            trackedBackgroundDownload = snapshots.first(where: { $0.kind == .download })
+            trackedBackgroundDownload = transferStore.snapshots(kind: .download).first
             if let snapshot = trackedBackgroundDownload {
                 isDownloading = true
-                downloadProgress = snapshot.progress
-                downloadStatus = Self.backgroundStatusMessage(for: snapshot, verb: "下载")
+                downloadProgress = snapshot.imBackgroundProgress
+                downloadStatus = transferProjectionState.backgroundStatusMessage(
+                    for: snapshot,
+                    verb: "下载"
+                )
             }
         }
     }
 
     private func applyBackgroundTransferUpdate(_ snapshot: BackgroundTransferSnapshot) async {
-        switch snapshot.kind {
+        let transferSnapshot = transferStore.apply(snapshot)
+        switch transferSnapshot.kind {
         case .upload:
-            await applyUploadBackgroundSnapshot(snapshot)
+            await applyUploadBackgroundSnapshot(transferSnapshot)
         case .download:
-            await applyDownloadBackgroundSnapshot(snapshot)
+            await applyDownloadBackgroundSnapshot(transferSnapshot)
         }
     }
 
-    private func applyUploadBackgroundSnapshot(_ snapshot: BackgroundTransferSnapshot) async {
+    private func applyUploadBackgroundSnapshot(_ snapshot: IMTransferSnapshot) async {
         if uploadTask != nil || uploadOperation != nil {
             return
         }
@@ -377,10 +388,13 @@ final class FileTransferManager: ObservableObject {
         case .running, .waitingForConnectivity:
             trackedBackgroundUpload = snapshot
             isUploading = true
-            uploadProgress = snapshot.progress
-            uploadStatus = Self.backgroundStatusMessage(for: snapshot, verb: "上传")
+            uploadProgress = snapshot.imBackgroundProgress
+            uploadStatus = transferProjectionState.backgroundStatusMessage(
+                for: snapshot,
+                verb: "上传"
+            )
         case .completed:
-            guard trackedBackgroundUpload?.id == snapshot.id else {
+            guard trackedBackgroundUpload?.taskID == snapshot.taskID else {
                 return
             }
             trackedBackgroundUpload = nil
@@ -390,7 +404,7 @@ final class FileTransferManager: ObservableObject {
             delegate?.fileTransferManagerDidSucceed()
             applyRecoveredBackgroundTransfers(backgroundTransferMonitor.currentSnapshots())
         case .cancelled:
-            guard trackedBackgroundUpload?.id == snapshot.id else {
+            guard trackedBackgroundUpload?.taskID == snapshot.taskID else {
                 return
             }
             trackedBackgroundUpload = nil
@@ -398,26 +412,26 @@ final class FileTransferManager: ObservableObject {
             uploadProgress = nil
             uploadStatus = "后台上传已取消。"
             applyRecoveredBackgroundTransfers(backgroundTransferMonitor.currentSnapshots())
-        case .failed(let message):
-            guard trackedBackgroundUpload?.id == snapshot.id else {
+        case .failed(let message, let shouldPreserveSession, let shouldMarkServerOffline):
+            guard trackedBackgroundUpload?.taskID == snapshot.taskID else {
                 return
             }
             trackedBackgroundUpload = nil
             isUploading = false
             uploadProgress = nil
-            uploadStatus = message.message
+            uploadStatus = message
             await delegate?.fileTransferManagerDidReceiveFailure(
                 ProbeFailureContext(
-                    message: message.message,
-                    shouldPreserveSession: message.shouldPreserveSession,
-                    shouldMarkServerOffline: message.shouldMarkServerOffline
+                    message: message,
+                    shouldPreserveSession: shouldPreserveSession,
+                    shouldMarkServerOffline: shouldMarkServerOffline
                 )
             )
             applyRecoveredBackgroundTransfers(backgroundTransferMonitor.currentSnapshots())
         }
     }
 
-    private func applyDownloadBackgroundSnapshot(_ snapshot: BackgroundTransferSnapshot) async {
+    private func applyDownloadBackgroundSnapshot(_ snapshot: IMTransferSnapshot) async {
         if downloadTask != nil || downloadOperation != nil {
             return
         }
@@ -426,10 +440,13 @@ final class FileTransferManager: ObservableObject {
         case .running, .waitingForConnectivity:
             trackedBackgroundDownload = snapshot
             isDownloading = true
-            downloadProgress = snapshot.progress
-            downloadStatus = Self.backgroundStatusMessage(for: snapshot, verb: "下载")
+            downloadProgress = snapshot.imBackgroundProgress
+            downloadStatus = transferProjectionState.backgroundStatusMessage(
+                for: snapshot,
+                verb: "下载"
+            )
         case .completed:
-            guard trackedBackgroundDownload?.id == snapshot.id else {
+            guard trackedBackgroundDownload?.taskID == snapshot.taskID else {
                 return
             }
             trackedBackgroundDownload = nil
@@ -440,7 +457,7 @@ final class FileTransferManager: ObservableObject {
             delegate?.fileTransferManagerDidSucceed()
             applyRecoveredBackgroundTransfers(backgroundTransferMonitor.currentSnapshots())
         case .cancelled:
-            guard trackedBackgroundDownload?.id == snapshot.id else {
+            guard trackedBackgroundDownload?.taskID == snapshot.taskID else {
                 return
             }
             trackedBackgroundDownload = nil
@@ -448,43 +465,33 @@ final class FileTransferManager: ObservableObject {
             downloadProgress = nil
             downloadStatus = "后台下载已取消。"
             applyRecoveredBackgroundTransfers(backgroundTransferMonitor.currentSnapshots())
-        case .failed(let message):
-            guard trackedBackgroundDownload?.id == snapshot.id else {
+        case .failed(let message, let shouldPreserveSession, let shouldMarkServerOffline):
+            guard trackedBackgroundDownload?.taskID == snapshot.taskID else {
                 return
             }
             trackedBackgroundDownload = nil
             isDownloading = false
             downloadProgress = nil
-            downloadStatus = message.message
+            downloadStatus = message
             await delegate?.fileTransferManagerDidReceiveFailure(
                 ProbeFailureContext(
-                    message: message.message,
-                    shouldPreserveSession: message.shouldPreserveSession,
-                    shouldMarkServerOffline: message.shouldMarkServerOffline
+                    message: message,
+                    shouldPreserveSession: shouldPreserveSession,
+                    shouldMarkServerOffline: shouldMarkServerOffline
                 )
             )
             applyRecoveredBackgroundTransfers(backgroundTransferMonitor.currentSnapshots())
         }
     }
+}
 
-    private static func backgroundStatusMessage(for snapshot: BackgroundTransferSnapshot, verb: String) -> String {
-        switch snapshot.state {
-        case .running:
-            if let progress = snapshot.progress {
-                return progressMessage(prefix: "后台\(verb)中", progress: progress)
-            }
-            return "后台\(verb)恢复中..."
-        case .waitingForConnectivity:
-            if let progress = snapshot.progress {
-                return progressMessage(prefix: "后台\(verb)等待网络", progress: progress)
-            }
-            return "后台\(verb)等待网络..."
-        case .completed:
-            return "后台\(verb)完成。"
-        case .cancelled:
-            return "后台\(verb)已取消。"
-        case .failed(let failure):
-            return failure.message
+private extension IMTransferSnapshot {
+    var imBackgroundProgress: FileTransferProgress? {
+        switch state {
+        case .running(let progress), .waitingForConnectivity(let progress), .cancelled(let progress):
+            return progress?.progress
+        case .completed, .failed:
+            return nil
         }
     }
 }

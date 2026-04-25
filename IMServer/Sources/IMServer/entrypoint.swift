@@ -20,12 +20,34 @@ enum Entrypoint {
         
         do {
             try await configure(app)
-            if env.arguments.contains("--rebuild-conversation-summaries") {
-                let rebuiltUserCount = try await IMConversationSummaryProjectionService(db: app.db)
-                    .rebuildAllSummaries()
+            let projectionService = IMConversationSummaryProjectionService(db: app.db)
+            let shouldRebuildConversationSummaries = env.arguments.contains("--rebuild-conversation-summaries")
+            let shouldVerifyConversationSummaries = env.arguments.contains("--verify-conversation-summaries")
+
+            if shouldRebuildConversationSummaries {
+                let rebuiltUserCount = try await projectionService.rebuildAllSummaries()
                 app.logger.notice(
                     "Conversation summary backfill completed",
                     metadata: ["rebuilt_user_count": .stringConvertible(rebuiltUserCount)]
+                )
+                if !shouldVerifyConversationSummaries {
+                    try await app.asyncShutdown()
+                    return
+                }
+            }
+
+            if shouldVerifyConversationSummaries {
+                let verificationResult = try await projectionService.verifyAllSummaries()
+                app.logger.notice(
+                    "Conversation summary verification completed",
+                    metadata: [
+                        "owner_user_count": .stringConvertible(verificationResult.ownerUserCount),
+                        "tombstone_summary_count": .stringConvertible(verificationResult.tombstoneSummaryCount),
+                        "missing_summary_count": .stringConvertible(verificationResult.missingSummaryCount),
+                        "stale_active_summary_count": .stringConvertible(verificationResult.staleActiveSummaryCount),
+                        "latest_visible_message_mismatch_count": .stringConvertible(verificationResult.latestVisibleMessageMismatchCount),
+                        "unread_mismatch_count": .stringConvertible(verificationResult.unreadMismatchCount)
+                    ]
                 )
                 try await app.asyncShutdown()
                 return

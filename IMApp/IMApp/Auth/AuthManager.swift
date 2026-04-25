@@ -140,6 +140,7 @@ final class AuthManager: ObservableObject {
     private let authSessionController: AuthSessionController
     private let contactsController: ContactsController
     private let openIMConnection: @Sendable () async throws -> IMTCPConnection
+    private let backgroundTransferMonitor: any BackgroundTransferMonitoring
     private let imConversationCache: IMConversationCacheHandler
     private var restoreTask: Task<Void, Never>?
     private var restoreGeneration: UInt64 = 0
@@ -186,6 +187,7 @@ final class AuthManager: ObservableObject {
 
     convenience init<TokenStoreType: TokenStore, UserCacheType: UserSessionCache>(
         httpClient: HTTPClient,
+        fileTransferClient: FileTransferClient? = nil,
         tokenStore: TokenStoreType,
         userCache: UserCacheType,
         openIMConnection: (@Sendable () async throws -> IMTCPConnection)? = nil,
@@ -196,6 +198,7 @@ final class AuthManager: ObservableObject {
     ) {
         let sessionClient = SessionClient(
             httpClient: httpClient,
+            fileTransferClient: fileTransferClient,
             tokenStore: tokenStore,
             userCache: userCache
         )
@@ -226,6 +229,7 @@ final class AuthManager: ObservableObject {
             contactStateCache: contactStateCache
         )
         self.openIMConnection = openIMConnection
+        self.backgroundTransferMonitor = backgroundTransferMonitor
         self.imConversationCache = imConversationCache
         self.probeManager = ProbeManager(sessionClient: sessionClient)
         self.fileTransferManager = FileTransferManager(
@@ -308,7 +312,8 @@ final class AuthManager: ObservableObject {
             },
             setQueuedFlushActive: { [weak self] isActive in
                 self?.isFlushingQueuedIMTextMessages = isActive
-            }
+            },
+            backgroundTransferMonitor: backgroundTransferMonitor
         )
     }
 
@@ -698,6 +703,65 @@ final class AuthManager: ObservableObject {
         await imController.loadMoreConversationSummariesIfNeeded(anchorConversationID: anchorConversationID)
     }
 
+    func jumpToReferencedIMMessage(_ messageID: String, in conversationID: String) async {
+        await imController.jumpToReferencedMessage(messageID, in: conversationID)
+    }
+
+    func jumpToIMMessage(_ messageID: String, in conversationID: String) async {
+        await imController.jumpToReferencedMessage(messageID, in: conversationID)
+    }
+
+    func searchIMConversationMessages(
+        in conversationID: String,
+        query: String,
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) async -> IMConversationMessageSearchPageResponseBody? {
+        await imController.searchConversationMessages(
+            in: conversationID,
+            query: query,
+            cursor: cursor,
+            limit: limit
+        )
+    }
+
+    func downloadIMMedia(
+        _ asset: IMMediaAsset,
+        to destinationURL: URL,
+        resumeIfPossible: Bool = true
+    ) async throws -> FileTransferOperation<DownloadTransferEvent> {
+        try await imController.downloadMedia(
+            asset,
+            to: destinationURL,
+            resumeIfPossible: resumeIfPossible
+        )
+    }
+
+    func downloadIMMediaToFile(
+        _ asset: IMMediaAsset,
+        to destinationURL: URL,
+        resumeIfPossible: Bool = true
+    ) async throws -> URL {
+        try await imController.downloadMediaToFile(
+            asset,
+            to: destinationURL,
+            resumeIfPossible: resumeIfPossible
+        )
+    }
+
+    func startBackgroundIMMediaDownload(
+        _ asset: IMMediaAsset,
+        to destinationURL: URL
+    ) async throws {
+        try await imController.startBackgroundMediaDownload(asset, to: destinationURL)
+    }
+
+    func cancelBackgroundIMMediaDownload(
+        _ reference: IMMessageBackgroundTransferReference
+    ) async {
+        await imController.cancelBackgroundMediaDownload(reference)
+    }
+
     func openIMConversation(_ conversationID: String) async {
         guard currentUser != nil else {
             return
@@ -1000,6 +1064,36 @@ final class AuthManager: ObservableObject {
         }
 
         return await imController.sendReply(reference: reference, text: text, to: conversationID)
+    }
+
+    func sendIMMedia(
+        fileURL: URL,
+        kind: IMMediaAssetKind,
+        mimeType: String,
+        filename: String? = nil,
+        byteSize: Int64? = nil,
+        width: Int? = nil,
+        height: Int? = nil,
+        durationMillis: Int? = nil,
+        previewAssetID: String? = nil,
+        to conversationID: String
+    ) async -> Bool {
+        guard case .signedIn = phase else {
+            return false
+        }
+
+        return await imController.sendMedia(
+            fileURL: fileURL,
+            kind: kind,
+            mimeType: mimeType,
+            filename: filename,
+            byteSize: byteSize,
+            width: width,
+            height: height,
+            durationMillis: durationMillis,
+            previewAssetID: previewAssetID,
+            to: conversationID
+        )
     }
 
     func retryIMTextMessage(localMessageID: String, in conversationID: String) async -> Bool {
@@ -1506,6 +1600,8 @@ final class AuthManager: ObservableObject {
             }
 
             imConversationStore.restoreCacheSnapshot(snapshot)
+            imController.resumeRecoverableMediaUploadsIfNeeded()
+            imController.reconcileBackgroundMediaDownloadSnapshots()
             lastIMConversationSummaryRefreshAt = snapshot.lastSummaryRefreshAt
             imConversationSummarySyncToken = snapshot.metadata.summarySyncToken
             latestIMConversationSummaries = []
@@ -1533,6 +1629,10 @@ final class AuthManager: ObservableObject {
 
             await self.flushIMConversationCache()
         }
+    }
+
+    func persistIMConversationCacheSoon() {
+        scheduleIMConversationCachePersist()
     }
 
     private func flushIMConversationCache() async {

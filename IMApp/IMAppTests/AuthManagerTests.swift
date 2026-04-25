@@ -1454,6 +1454,394 @@ struct AuthManagerTests {
         #expect(manager.imConversationStore.queueSummary(for: "conv-local").retryableIssueCount == 1)
     }
 
+    @Test func sendIMMediaUploadsAssetThenWritesTCPPacket() async throws {
+        let harness = IMConnectionTestHarness()
+        let uploadID = "upload-media-1"
+        let mediaTransport = MockFileTransferTransport()
+        let fileTransferClient = FileTransferClient(
+            baseURL: HTTPFixtures.baseURL,
+            transport: mediaTransport
+        )
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("POST", "/api/media/uploads"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        MediaUploadSessionResponseBody(
+                            uploadID: uploadID,
+                            uploadPath: "/api/media/uploads/\(uploadID)/chunk",
+                            completePath: "/api/media/uploads/\(uploadID)/complete",
+                            expiresAt: Date().addingTimeInterval(300)
+                        )
+                    )
+                )
+            case ("POST", "/api/media/uploads/\(uploadID)/complete"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        IMMediaAsset(
+                            assetID: uploadID,
+                            kind: .image,
+                            mimeType: "image/png",
+                            byteSize: 15,
+                            filename: "photo.png",
+                            width: 120,
+                            height: 90,
+                            durationMillis: nil,
+                            previewAssetID: nil
+                        )
+                    )
+                )
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+        let manager = makeManager(
+            transport: transport,
+            fileTransferClient: fileTransferClient,
+            openIMConnection: {
+                await harness.makeConnection()
+            }
+        )
+
+        let fileURL = FileManager.default.temporaryDirectory.appending(path: "media-\(UUID().uuidString).png")
+        try Data("fake-image-data".utf8).write(to: fileURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run { manager.imConnectionStatus == .connected }
+        }
+
+        let didSend = await manager.sendIMMedia(
+            fileURL: fileURL,
+            kind: .image,
+            mimeType: "image/png",
+            width: 120,
+            height: 90,
+            to: "conv-local"
+        )
+
+        #expect(didSend)
+        let uploadRequests = await mediaTransport.requests()
+        #expect(uploadRequests.count == 1)
+        #expect(uploadRequests.first?.url?.path == "/api/media/uploads/\(uploadID)/chunk")
+
+        let messageLine = try await Self.requireRecordedLine(at: 0, from: harness)
+        let messagePacket = try Self.decode(IMTCPPacketEnvelope<IMTCPMessagePayload>.self, from: messageLine)
+        #expect(messagePacket.type == .message)
+        #expect(messagePacket.payload.conversationID == "conv-local")
+        #expect(messagePacket.payload.content == .image(
+            IMMediaAsset(
+                assetID: uploadID,
+                kind: .image,
+                mimeType: "image/png",
+                byteSize: 15,
+                filename: "photo.png",
+                width: 120,
+                height: 90,
+                durationMillis: nil,
+                previewAssetID: nil
+            )
+        ))
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.first?.deliveryState == .sending
+            }
+        }
+    }
+
+    @Test func restoredPendingIMMediaUploadResumesAndWritesTCPPacket() async throws {
+        let harness = IMConnectionTestHarness()
+        let uploadID = "upload-media-recovery-1"
+        let mediaTransport = MockFileTransferTransport()
+        let fileTransferClient = FileTransferClient(
+            baseURL: HTTPFixtures.baseURL,
+            transport: mediaTransport
+        )
+        let conversationID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+        let sourceFileURL = FileManager.default.temporaryDirectory.appending(path: "recover-media-\(UUID().uuidString).png")
+        try Data("recoverable-image-data".utf8).write(to: sourceFileURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: sourceFileURL) }
+
+        let cache = InMemoryIMConversationCache()
+        await cache.seed(
+            IMConversationCacheSnapshot(
+                conversations: [
+                    IMCachedConversationState(
+                        id: conversationID,
+                        title: "Recovered Media",
+                        kind: .direct,
+                        memberCount: 2,
+                        memberUserIDs: [Self.user.id],
+                        messages: [
+                            IMCachedMessageState(
+                                id: "media-local-1",
+                                conversationID: conversationID,
+                                clientMessageID: "media-local-1",
+                                serverMessageID: nil,
+                                senderUserID: Self.user.id,
+                                serverSequence: nil,
+                                content: .image(
+                                    IMMediaAsset(
+                                        assetID: "local-recover-asset",
+                                        kind: .image,
+                                        mimeType: "image/png",
+                                        byteSize: 22,
+                                        filename: "recover.png",
+                                        width: 120,
+                                        height: 90
+                                    )
+                                ),
+                                direction: .outgoing,
+                                createdAt: Date(timeIntervalSince1970: 1_700_900_000),
+                                deliveryState: .uploading(message: "正在上传附件。"),
+                                localTransferState: IMMessageLocalTransferState(
+                                    sourceFilePath: sourceFileURL.path
+                                )
+                            )
+                        ],
+                        hasLoadedMessages: true,
+                        lastMessagePreviewText: "recover.png",
+                        hasMoreHistory: false,
+                        latestSyncedServerSequence: nil,
+                        oldestLoadedServerSequence: nil,
+                        serverLastReadSequence: 0,
+                        serverUnreadCount: 0,
+                        updatedAt: Date(timeIntervalSince1970: 1_700_900_000)
+                    )
+                ],
+                selectedConversationID: conversationID,
+                lastSummaryRefreshAt: nil
+            ),
+            for: Self.user.id
+        )
+
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        IMConversationSummaryPageResponseBody(
+                            items: [
+                                IMConversationSummaryResponseBody(
+                                    id: UUID(uuidString: conversationID)!,
+                                    title: nil,
+                                    kind: IMConversationKind.direct.rawValue,
+                                    memberCount: 2,
+                                    memberUserIDs: [Self.user.id],
+                                    lastMessage: nil,
+                                    createdAt: Date(timeIntervalSince1970: 1_700_900_000),
+                                    updatedAt: Date(timeIntervalSince1970: 1_700_900_000)
+                                )
+                            ],
+                            nextCursor: nil,
+                            hasMore: false,
+                            snapshotToken: "token-1"
+                        )
+                    )
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyConversationChangesBody())
+            case ("POST", "/api/media/uploads"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        MediaUploadSessionResponseBody(
+                            uploadID: uploadID,
+                            uploadPath: "/api/media/uploads/\(uploadID)/chunk",
+                            completePath: "/api/media/uploads/\(uploadID)/complete",
+                            expiresAt: Date().addingTimeInterval(300)
+                        )
+                    )
+                )
+            case ("POST", "/api/media/uploads/\(uploadID)/complete"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        IMMediaAsset(
+                            assetID: uploadID,
+                            kind: .image,
+                            mimeType: "image/png",
+                            byteSize: 22,
+                            filename: "recover.png",
+                            width: 120,
+                            height: 90,
+                            durationMillis: nil,
+                            previewAssetID: nil
+                        )
+                    )
+                )
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+        let manager = makeManager(
+            transport: transport,
+            fileTransferClient: fileTransferClient,
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            imConversationCache: IMConversationCacheHandler(cache),
+            wrapDefaultIMResponses: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+
+        let messageLine = try await Self.requireRecordedLine(at: 0, from: harness)
+        let messagePacket = try Self.decode(IMTCPPacketEnvelope<IMTCPMessagePayload>.self, from: messageLine)
+        #expect(messagePacket.type == .message)
+        #expect(messagePacket.payload.content == .image(
+            IMMediaAsset(
+                assetID: uploadID,
+                kind: .image,
+                mimeType: "image/png",
+                byteSize: 22,
+                filename: "recover.png",
+                width: 120,
+                height: 90,
+                durationMillis: nil,
+                previewAssetID: nil
+            )
+        ))
+
+        let uploadRequests = await mediaTransport.requests()
+        #expect(uploadRequests.contains(where: { $0.url?.path == "/api/media/uploads/\(uploadID)/chunk" }))
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                guard let message = manager.imConversationStore.selectedConversation?.messages.first else {
+                    return false
+                }
+                return message.deliveryState == .sending && message.localTransferState == nil
+            }
+        }
+    }
+
+    @Test func restoredBackgroundMediaDownloadSnapshotReattachesToCachedMessageState() async throws {
+        let conversationID = "downloaded-conversation-1"
+        let asset = IMMediaAsset(
+            assetID: "asset-background-download-1",
+            kind: .file,
+            mimeType: "application/pdf",
+            byteSize: 128,
+            filename: "guide.pdf"
+        )
+        let destinationURL = FileManager.default.temporaryDirectory
+            .appending(path: "im-background-download-\(UUID().uuidString).pdf")
+        let cache = InMemoryIMConversationCache()
+        await cache.seed(
+            IMConversationCacheSnapshot(
+                conversations: [
+                    IMCachedConversationState(
+                        id: conversationID,
+                        title: "Background Download",
+                        kind: .direct,
+                        memberCount: 2,
+                        memberUserIDs: [Self.user.id],
+                        messages: [
+                            IMCachedMessageState(
+                                id: "download-message-1",
+                                conversationID: conversationID,
+                                clientMessageID: nil,
+                                serverMessageID: UUID().uuidString,
+                                senderUserID: Self.user.id,
+                                serverSequence: 9,
+                                content: .file(asset),
+                                direction: .incoming,
+                                createdAt: Date(timeIntervalSince1970: 1_701_000_000),
+                                deliveryState: .received,
+                                localDownloadState: IMMessageLocalDownloadState(
+                                    destinationFilePath: destinationURL.path,
+                                    status: .paused(progress: nil)
+                                )
+                            )
+                        ],
+                        hasLoadedMessages: true,
+                        lastMessagePreviewText: asset.filename,
+                        hasMoreHistory: false,
+                        latestSyncedServerSequence: 9,
+                        oldestLoadedServerSequence: 9,
+                        serverLastReadSequence: 9,
+                        serverUnreadCount: 0,
+                        updatedAt: Date(timeIntervalSince1970: 1_701_000_010)
+                    )
+                ],
+                selectedConversationID: conversationID,
+                lastSummaryRefreshAt: Date(timeIntervalSince1970: 1_701_000_010),
+                summarySyncToken: "snapshot-download",
+                summaryNextCursor: nil,
+                hasMoreConversationSummaries: false
+            ),
+            for: Self.user.id
+        )
+        let snapshot = BackgroundTransferSnapshot(
+            sessionIdentifier: "tests.im.background.download",
+            taskIdentifier: 41,
+            kind: .download,
+            state: .running,
+            progress: FileTransferProgress(
+                transferredBytes: 32,
+                totalBytes: 128,
+                resumedBytes: 0
+            ),
+            destinationURL: destinationURL
+        )
+        let monitor = AuthManagerBackgroundTransferMonitor(initialSnapshots: [snapshot])
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+        let manager = makeManager(
+            transport: transport,
+            backgroundTransferMonitor: monitor,
+            imConversationCache: IMConversationCacheHandler(cache)
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                guard
+                    let message = manager.imConversationStore.conversations.first?.messages.first,
+                    let localDownloadState = message.localDownloadState
+                else {
+                    return false
+                }
+
+                switch localDownloadState.status {
+                case .downloading(let progress, let transfer):
+                    return progress?.transferredBytes == 32
+                        && progress?.totalBytes == 128
+                        && transfer == IMMessageBackgroundTransferReference(
+                            sessionIdentifier: snapshot.sessionIdentifier,
+                            taskIdentifier: snapshot.taskIdentifier
+                        )
+                case .waitingForConnectivity, .paused, .downloaded, .failed:
+                    return false
+                }
+            }
+        }
+    }
+
     @Test func cancelQueuedIMTextMessageRemovesOfflineQueuedMessage() async throws {
         let transport = MockHTTPTransport { request in
             switch (request.httpMethod, request.url?.path) {
@@ -4424,6 +4812,272 @@ struct AuthManagerTests {
         #expect(await requestCounter.count(for: "fallbackGapSync") > fallbackGapRequestsBeforeReconnect)
     }
 
+    @Test func rejoinedConversationDoesNotReuseCachedHistoryFromBeforeVisibleWindowReset() async throws {
+        let rejoinedConversationID = UUID(uuidString: "aaaaaaaa-1212-3434-5656-bbbbbbbbbbbb")!
+        let fallbackConversationID = UUID(uuidString: "bbbbbbbb-1212-3434-5656-cccccccccccc")!
+        let rejoinedConversationIDString = rejoinedConversationID.uuidString
+        let fallbackConversationIDString = fallbackConversationID.uuidString
+        let peerUserID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        let cache = InMemoryIMConversationCache()
+
+        await cache.seed(
+            IMConversationCacheSnapshot(
+                conversations: [
+                    IMCachedConversationState(
+                        id: rejoinedConversationIDString,
+                        title: "旧群聊缓存",
+                        kind: .group,
+                        memberCount: 2,
+                        memberUserIDs: [Self.user.id, peerUserID],
+                        messages: [
+                            IMCachedMessageState(
+                                id: "rejoined-cached-1",
+                                conversationID: rejoinedConversationIDString,
+                                clientMessageID: nil,
+                                serverMessageID: "rejoined-server-1",
+                                senderUserID: peerUserID,
+                                serverSequence: 1,
+                                content: .text("重新加入前的旧历史 1"),
+                                direction: .incoming,
+                                createdAt: Date(timeIntervalSince1970: 1_700_970_000),
+                                deliveryState: .received
+                            ),
+                            IMCachedMessageState(
+                                id: "rejoined-cached-2",
+                                conversationID: rejoinedConversationIDString,
+                                clientMessageID: nil,
+                                serverMessageID: "rejoined-server-2",
+                                senderUserID: peerUserID,
+                                serverSequence: 2,
+                                content: .text("重新加入前的旧历史 2"),
+                                direction: .incoming,
+                                createdAt: Date(timeIntervalSince1970: 1_700_970_010),
+                                deliveryState: .received
+                            )
+                        ],
+                        hasLoadedMessages: true,
+                        lastMessagePreviewText: "重新加入前的旧历史 2",
+                        hasMoreHistory: false,
+                        latestSyncedServerSequence: 2,
+                        oldestLoadedServerSequence: 1,
+                        serverLastReadSequence: 2,
+                        serverUnreadCount: 0,
+                        updatedAt: Date(timeIntervalSince1970: 1_700_970_010)
+                    ),
+                    IMCachedConversationState(
+                        id: fallbackConversationIDString,
+                        title: "备用会话",
+                        kind: .group,
+                        memberCount: 2,
+                        memberUserIDs: [Self.user.id, peerUserID],
+                        messages: [
+                            IMCachedMessageState(
+                                id: "fallback-cached-1",
+                                conversationID: fallbackConversationIDString,
+                                clientMessageID: nil,
+                                serverMessageID: "fallback-server-1",
+                                senderUserID: peerUserID,
+                                serverSequence: 1,
+                                content: .text("备用历史 1"),
+                                direction: .incoming,
+                                createdAt: Date(timeIntervalSince1970: 1_700_970_020),
+                                deliveryState: .received
+                            )
+                        ],
+                        hasLoadedMessages: true,
+                        lastMessagePreviewText: "备用历史 1",
+                        hasMoreHistory: false,
+                        latestSyncedServerSequence: 1,
+                        oldestLoadedServerSequence: 1,
+                        serverLastReadSequence: 1,
+                        serverUnreadCount: 0,
+                        updatedAt: Date(timeIntervalSince1970: 1_700_970_020)
+                    )
+                ],
+                selectedConversationID: rejoinedConversationIDString,
+                lastSummaryRefreshAt: Date(timeIntervalSince1970: 1_700_970_030)
+            ),
+            for: Self.user.id
+        )
+
+        let state = IMCrossDeviceConversationListState(
+            conversations: [
+                IMConversationSummaryResponseBody(
+                    id: fallbackConversationID,
+                    title: "服务端备用会话",
+                    kind: IMConversationKind.group.rawValue,
+                    memberCount: 2,
+                    memberUserIDs: [Self.user.id, peerUserID],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: UUID(uuidString: "11111111-1212-3434-5656-aaaaaaaaaaaa")!,
+                        senderUserID: peerUserID,
+                        serverSequence: 1,
+                        content: .text("备用历史 1"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_970_020)
+                    ),
+                    lastReadSequence: 1,
+                    unreadCount: 0,
+                    createdAt: Date(timeIntervalSince1970: 1_700_969_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_970_020)
+                )
+            ],
+            messagesByConversationID: [
+                fallbackConversationID: [
+                    IMConversationMessageResponseBody(
+                        id: UUID(uuidString: "11111111-1212-3434-5656-aaaaaaaaaaaa")!,
+                        conversationID: fallbackConversationID,
+                        senderUserID: peerUserID,
+                        clientMessageID: nil,
+                        serverSequence: 1,
+                        content: .text("备用历史 1"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_970_020)
+                    )
+                ]
+            ]
+        )
+        let requestCounter = IMRequestCounter()
+        let loginCounter = IMRequestCounter()
+
+        let transport = MockHTTPTransport { request in
+            let path = request.url?.path
+            switch (request.httpMethod, path) {
+            case ("POST", "/api/auth/login"):
+                await loginCounter.increment("login")
+                let loginIndex = await loginCounter.count(for: "login")
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.authResponseBody(
+                        user: Self.user,
+                        accessToken: "access-rejoin-\(loginIndex)",
+                        refreshToken: "refresh-rejoin-\(loginIndex)"
+                    )
+                )
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.pageResponse())
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                await requestCounter.increment("changes")
+                let afterToken = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "afterToken" })?
+                    .value
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.changesResponse(afterToken: afterToken))
+                )
+            case ("GET", "/api/im/conversations/\(fallbackConversationID.uuidString)/members"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
+            case ("GET", "/api/im/conversations/\(fallbackConversationID.uuidString)/messages"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: fallbackConversationID))
+                )
+            case ("GET", "/api/im/conversations/\(rejoinedConversationID.uuidString)/members"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
+            case ("GET", "/api/im/conversations/\(rejoinedConversationID.uuidString)/messages"):
+                await requestCounter.increment("messagesRejoined")
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: rejoinedConversationID))
+                )
+            case ("GET", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/messages/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("POST", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/read"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+
+        let manager = makeManager(
+            transport: transport,
+            openIMConnection: nil,
+            imConversationCache: IMConversationCacheHandler(cache),
+            wrapDefaultIMResponses: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.conversations.map(\.id) == [fallbackConversationIDString]
+                    && manager.imConversationStore.selectedConversationID == fallbackConversationIDString
+            }
+        }
+
+        await state.upsertSummary(
+            IMConversationSummaryResponseBody(
+                id: rejoinedConversationID,
+                title: "重新加入后的群聊",
+                kind: IMConversationKind.group.rawValue,
+                memberCount: 2,
+                memberUserIDs: [Self.user.id, peerUserID],
+                lastMessage: IMMessagePreviewResponseBody(
+                    id: UUID(uuidString: "22222222-1212-3434-5656-aaaaaaaaaaaa")!,
+                    senderUserID: peerUserID,
+                    serverSequence: 5,
+                    content: .text("重新加入后的可见消息"),
+                    createdAt: Date(timeIntervalSince1970: 1_700_970_200)
+                ),
+                lastReadSequence: 5,
+                unreadCount: 0,
+                createdAt: Date(timeIntervalSince1970: 1_700_970_100),
+                updatedAt: Date(timeIntervalSince1970: 1_700_970_200)
+            )
+        )
+        await state.appendMessage(
+            IMConversationMessageResponseBody(
+                id: UUID(uuidString: "22222222-1212-3434-5656-aaaaaaaaaaaa")!,
+                conversationID: rejoinedConversationID,
+                senderUserID: peerUserID,
+                clientMessageID: nil,
+                serverSequence: 5,
+                content: .text("重新加入后的可见消息"),
+                createdAt: Date(timeIntervalSince1970: 1_700_970_200)
+            ),
+            unreadCount: 0,
+            lastReadSequence: 5
+        )
+
+        try await Task.sleep(for: .seconds(5.2))
+        await manager.refreshIMConversationSummaryReadModelIfNeeded()
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.conversations.contains(where: { $0.id == rejoinedConversationIDString })
+            }
+        }
+
+        let rejoinedSummary = try #require(
+            manager.imConversationStore.conversations.first(where: { $0.id == rejoinedConversationIDString })
+        )
+        #expect(rejoinedSummary.messages.isEmpty)
+        #expect(rejoinedSummary.lastMessagePreview == "重新加入后的可见消息")
+
+        await manager.openIMConversation(rejoinedConversationIDString)
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversationID == rejoinedConversationIDString
+                    && manager.imConversationStore.selectedConversation?.messages.map(\.text) == ["重新加入后的可见消息"]
+            }
+        }
+
+        #expect(await requestCounter.count(for: "changes") >= 1)
+        #expect(await requestCounter.count(for: "messagesRejoined") == 1)
+        #expect(manager.imConversationStore.selectedConversation?.messages.map(\.text) == ["重新加入后的可见消息"])
+        #expect(manager.imConversationStore.selectedConversation?.messages.contains(where: {
+            $0.text == "重新加入前的旧历史 1" || $0.text == "重新加入前的旧历史 2"
+        }) == false)
+    }
+
     @Test func conversationMemberRoleUpdatedOnAnotherDeviceConvergesSummaryAndMembersAfterRefreshAndOpen() async throws {
         let conversationID = UUID(uuidString: "aaaaaaaa-8888-9999-0000-bbbbbbbbbbbb")!
         let peerUserID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
@@ -6002,6 +6656,185 @@ struct AuthManagerTests {
         #expect(await requestCounter.count(for: "messagesBackgroundUnexpected") == 0)
     }
 
+    @Test func jumpToReferencedIMMessageLoadsOlderPagesUntilTargetIsFound() async throws {
+        let requestCounter = IMRequestCounter()
+        let conversationID = UUID(uuidString: "aaaaaaaa-4444-5555-6666-bbbbbbbbbbbb")!
+        let targetMessageID = UUID(uuidString: "11111111-4444-5555-6666-aaaaaaaaaaaa")!
+        let intermediateMessageID = UUID(uuidString: "22222222-4444-5555-6666-aaaaaaaaaaaa")!
+        let replyMessageID = UUID(uuidString: "33333333-4444-5555-6666-aaaaaaaaaaaa")!
+        let peerUserID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+
+        let transport = MockHTTPTransport { request in
+            let path = request.url?.path
+            let components = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)
+            let queryItems = components?.queryItems ?? []
+            let beforeSequence = queryItems.first(where: { $0.name == "beforeSequence" })?.value.flatMap(UInt64.init)
+
+            switch (request.httpMethod, path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.authResponseBody(
+                        user: Self.user,
+                        accessToken: "access-jump-1",
+                        refreshToken: "refresh-jump-1"
+                    )
+                )
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        IMConversationSummaryPageResponseBody(
+                            items: [
+                                IMConversationSummaryResponseBody(
+                                    id: conversationID,
+                                    title: "Reply Jump",
+                                    kind: IMConversationKind.group.rawValue,
+                                    memberCount: 2,
+                                    memberUserIDs: [Self.user.id, peerUserID],
+                                    lastMessage: IMMessagePreviewResponseBody(
+                                        id: replyMessageID,
+                                        senderUserID: peerUserID,
+                                        serverSequence: 4,
+                                        content: .reply(
+                                            reference: IMReplyReference(
+                                                messageID: targetMessageID.uuidString,
+                                                senderUserID: peerUserID,
+                                                previewText: "更早的引用目标"
+                                            ),
+                                            text: "reply body"
+                                        ),
+                                        createdAt: Date(timeIntervalSince1970: 1_700_960_400)
+                                    ),
+                                    lastReadSequence: 4,
+                                    unreadCount: 0,
+                                    createdAt: Date(timeIntervalSince1970: 1_700_960_000),
+                                    updatedAt: Date(timeIntervalSince1970: 1_700_960_400)
+                                )
+                            ],
+                            nextCursor: nil,
+                            hasMore: false,
+                            snapshotToken: "snapshot-jump"
+                        )
+                    )
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyConversationChangesBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
+                switch beforeSequence {
+                case nil:
+                    return HTTPFixtures.response(
+                        statusCode: 200,
+                        body: try HTTPFixtures.jsonBody([
+                            IMConversationMessageResponseBody(
+                                id: replyMessageID,
+                                conversationID: conversationID,
+                                senderUserID: peerUserID,
+                                clientMessageID: nil,
+                                serverSequence: 4,
+                                content: .reply(
+                                    reference: IMReplyReference(
+                                        messageID: targetMessageID.uuidString,
+                                        senderUserID: peerUserID,
+                                        previewText: "更早的引用目标"
+                                    ),
+                                    text: "reply body"
+                                ),
+                                createdAt: Date(timeIntervalSince1970: 1_700_960_400)
+                            )
+                        ])
+                    )
+                case 4:
+                    await requestCounter.increment("loadOlder")
+                    return HTTPFixtures.response(
+                        statusCode: 200,
+                        body: try HTTPFixtures.jsonBody([
+                            IMConversationMessageResponseBody(
+                                id: intermediateMessageID,
+                                conversationID: conversationID,
+                                senderUserID: peerUserID,
+                                clientMessageID: nil,
+                                serverSequence: 3,
+                                content: .text("中间历史消息"),
+                                createdAt: Date(timeIntervalSince1970: 1_700_960_300)
+                            )
+                        ])
+                    )
+                case 3:
+                    await requestCounter.increment("loadOlder")
+                    return HTTPFixtures.response(
+                        statusCode: 200,
+                        body: try HTTPFixtures.jsonBody([
+                            IMConversationMessageResponseBody(
+                                id: targetMessageID,
+                                conversationID: conversationID,
+                                senderUserID: peerUserID,
+                                clientMessageID: nil,
+                                serverSequence: 2,
+                                content: .recalled,
+                                createdAt: Date(timeIntervalSince1970: 1_700_960_200)
+                            )
+                        ])
+                    )
+                default:
+                    Issue.record("收到未预期的 reply jump 历史补页 beforeSequence：\(beforeSequence.map(String.init) ?? "nil")")
+                    return HTTPFixtures.response(statusCode: 500)
+                }
+            case ("GET", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/messages/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("POST", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/read"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+
+        let manager = makeManager(
+            transport: transport,
+            openIMConnection: nil,
+            wrapDefaultIMResponses: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        await manager.openIMConversation(conversationID.uuidString)
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.map(\.text) == ["reply body"]
+            }
+        }
+
+        await manager.jumpToReferencedIMMessage(targetMessageID.uuidString, in: conversationID.uuidString)
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                let selectedConversation = manager.imConversationStore.selectedConversation
+                return manager.imConversationStore.replyJumpState == .found
+                    && manager.imConversationStore.replyJumpMatchedMessageID == targetMessageID.uuidString
+                    && selectedConversation?.messages.map(\.text) == [
+                        "撤回了一条消息",
+                        "中间历史消息",
+                        "reply body"
+                    ]
+                    && selectedConversation?.messages.last?.resolvedReplyReference(
+                        in: selectedConversation?.messages ?? []
+                    ) == IMReplyReferenceResolution(
+                        state: .recalled,
+                        text: "原消息已撤回"
+                    )
+            }
+        }
+
+        #expect(await requestCounter.count(for: "loadOlder") == 2)
+    }
+
     @Test func addIMConversationMembersRefreshesSummaryAndMembers() async throws {
         let mutationState = IMConversationMutationState()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
@@ -7367,7 +8200,9 @@ struct AuthManagerTests {
 
     private func makeManager(
         transport: MockHTTPTransport,
+        fileTransferClient: FileTransferClient? = nil,
         openIMConnection: (@Sendable () async throws -> IMTCPConnection)? = nil,
+        backgroundTransferMonitor: any BackgroundTransferMonitoring = BackgroundTransferCoordinator.shared,
         imConversationCache: IMConversationCacheHandler = IMConversationCacheHandler(NoopIMConversationCache()),
         contactStateCache: ContactStateCacheHandler = ContactStateCacheHandler(NoopContactStateCache()),
         wrapDefaultIMResponses: Bool = true
@@ -7377,9 +8212,11 @@ struct AuthManagerTests {
                 baseURL: HTTPFixtures.baseURL,
                 transport: wrapDefaultIMResponses ? wrapWithDefaultIMResponses(transport) : transport
             ),
+            fileTransferClient: fileTransferClient,
             tokenStore: InMemoryTokenStore(),
             userCache: InMemoryUserSessionCache(),
             openIMConnection: openIMConnection,
+            backgroundTransferMonitor: backgroundTransferMonitor,
             imConversationCache: imConversationCache,
             contactStateCache: contactStateCache,
             shouldRestoreSession: false

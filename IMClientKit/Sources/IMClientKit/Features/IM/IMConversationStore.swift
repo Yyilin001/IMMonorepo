@@ -41,12 +41,149 @@ public enum IMMessageDirection: String, Equatable, Sendable {
 }
 
 public enum IMMessageDeliveryState: Equatable, Sendable {
+    case preparing(message: String)
+    case uploading(message: String)
+    case uploaded
     case queued(message: String)
     case sending
     case sent
     case received
     case unknown(message: String)
     case failed(message: String)
+}
+
+public struct IMMessageLocalTransferState: Codable, Equatable, Sendable {
+    public let sourceFilePath: String
+    public let uploadID: String?
+    public let taskID: IMTransferTaskID?
+
+    public init(
+        sourceFilePath: String,
+        uploadID: String? = nil,
+        taskID: IMTransferTaskID? = nil
+    ) {
+        self.sourceFilePath = sourceFilePath
+        self.uploadID = uploadID
+        self.taskID = taskID
+    }
+
+    public var sourceFileURL: URL {
+        URL(fileURLWithPath: sourceFilePath)
+    }
+
+    public func withUploadID(_ uploadID: String?) -> IMMessageLocalTransferState {
+        IMMessageLocalTransferState(
+            sourceFilePath: sourceFilePath,
+            uploadID: uploadID,
+            taskID: taskID
+        )
+    }
+
+    public func withTaskID(_ taskID: IMTransferTaskID?) -> IMMessageLocalTransferState {
+        IMMessageLocalTransferState(
+            sourceFilePath: sourceFilePath,
+            uploadID: uploadID,
+            taskID: taskID
+        )
+    }
+}
+
+public struct IMMessageLocalDownloadProgressSnapshot: Codable, Equatable, Sendable {
+    public let transferredBytes: Int64
+    public let totalBytes: Int64?
+    public let resumedBytes: Int64
+
+    public init(
+        transferredBytes: Int64,
+        totalBytes: Int64?,
+        resumedBytes: Int64 = 0
+    ) {
+        self.transferredBytes = transferredBytes
+        self.totalBytes = totalBytes
+        self.resumedBytes = resumedBytes
+    }
+
+    public init(_ progress: FileTransferProgress) {
+        self.init(
+            transferredBytes: progress.transferredBytes,
+            totalBytes: progress.totalBytes,
+            resumedBytes: progress.resumedBytes
+        )
+    }
+
+    public var progress: FileTransferProgress {
+        FileTransferProgress(
+            transferredBytes: transferredBytes,
+            totalBytes: totalBytes,
+            resumedBytes: resumedBytes
+        )
+    }
+}
+
+public struct IMMessageBackgroundTransferReference: Codable, Equatable, Sendable {
+    public let sessionIdentifier: String
+    public let taskIdentifier: Int
+
+    public init(sessionIdentifier: String, taskIdentifier: Int) {
+        self.sessionIdentifier = sessionIdentifier
+        self.taskIdentifier = taskIdentifier
+    }
+}
+
+public enum IMMessageLocalDownloadStatus: Codable, Equatable, Sendable {
+    case downloading(
+        progress: IMMessageLocalDownloadProgressSnapshot?,
+        backgroundTransfer: IMMessageBackgroundTransferReference?
+    )
+    case waitingForConnectivity(
+        progress: IMMessageLocalDownloadProgressSnapshot?,
+        backgroundTransfer: IMMessageBackgroundTransferReference?
+    )
+    case paused(progress: IMMessageLocalDownloadProgressSnapshot?)
+    case downloaded
+    case failed(message: String)
+}
+
+public struct IMMessageLocalDownloadState: Codable, Equatable, Sendable {
+    public let destinationFilePath: String
+    public let status: IMMessageLocalDownloadStatus
+    public let taskID: IMTransferTaskID?
+
+    public init(
+        destinationFilePath: String,
+        status: IMMessageLocalDownloadStatus,
+        taskID: IMTransferTaskID? = nil
+    ) {
+        self.destinationFilePath = destinationFilePath
+        self.status = status
+        self.taskID = taskID
+    }
+
+    public var destinationFileURL: URL {
+        URL(fileURLWithPath: destinationFilePath)
+    }
+}
+
+public struct IMRecoverableOutgoingMediaUpload: Equatable, Sendable {
+    public let localMessageID: String
+    public let conversationID: String
+    public let asset: IMMediaAsset
+    public let transferState: IMMessageLocalTransferState
+    public let deliveryState: IMMessageDeliveryState
+
+    public init(
+        localMessageID: String,
+        conversationID: String,
+        asset: IMMediaAsset,
+        transferState: IMMessageLocalTransferState,
+        deliveryState: IMMessageDeliveryState
+    ) {
+        self.localMessageID = localMessageID
+        self.conversationID = conversationID
+        self.asset = asset
+        self.transferState = transferState
+        self.deliveryState = deliveryState
+    }
 }
 
 public struct IMConversationMessage: Identifiable, Equatable, Sendable {
@@ -60,9 +197,59 @@ public struct IMConversationMessage: Identifiable, Equatable, Sendable {
     public let direction: IMMessageDirection
     public var createdAt: Date
     public var deliveryState: IMMessageDeliveryState
+    public var localTransferState: IMMessageLocalTransferState?
+    public var localDownloadState: IMMessageLocalDownloadState?
 
     public var text: String {
         content.previewText
+    }
+
+    public var mediaAsset: IMMediaAsset? {
+        content.presentation.mediaAsset
+    }
+
+    public var isRecoverableOutgoingMediaUpload: Bool {
+        guard direction == .outgoing,
+              localTransferState != nil,
+              mediaAsset != nil
+        else {
+            return false
+        }
+
+        switch deliveryState {
+        case .preparing, .uploading, .uploaded:
+            return true
+        case .queued, .sending, .sent, .received, .unknown, .failed:
+            return false
+        }
+    }
+
+    public init(
+        id: String,
+        conversationID: String,
+        clientMessageID: String?,
+        serverMessageID: String?,
+        senderUserID: UUID?,
+        serverSequence: UInt64?,
+        content: IMMessageContent,
+        direction: IMMessageDirection,
+        createdAt: Date,
+        deliveryState: IMMessageDeliveryState,
+        localTransferState: IMMessageLocalTransferState? = nil,
+        localDownloadState: IMMessageLocalDownloadState? = nil
+    ) {
+        self.id = id
+        self.conversationID = conversationID
+        self.clientMessageID = clientMessageID
+        self.serverMessageID = serverMessageID
+        self.senderUserID = senderUserID
+        self.serverSequence = serverSequence
+        self.content = content
+        self.direction = direction
+        self.createdAt = createdAt
+        self.deliveryState = deliveryState
+        self.localTransferState = localTransferState
+        self.localDownloadState = localDownloadState
     }
 }
 
@@ -84,33 +271,7 @@ public struct IMReplyReferenceResolution: Equatable, Sendable {
 
 public extension IMConversationMessage {
     func resolvedReplyReference(in messages: [IMConversationMessage]) -> IMReplyReferenceResolution? {
-        guard case .reply(let reference, _) = content else {
-            return nil
-        }
-
-        if let referencedMessage = messages.first(where: {
-            $0.serverMessageID == reference.messageID || $0.id == reference.messageID
-        }) {
-            switch referencedMessage.content {
-            case .recalled:
-                return IMReplyReferenceResolution(
-                    state: .recalled,
-                    text: "原消息已撤回"
-                )
-            case .text, .reply, .system:
-                let preview = referencedMessage.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                return IMReplyReferenceResolution(
-                    state: .loaded,
-                    text: preview.isEmpty ? "原消息暂不可用" : preview
-                )
-            }
-        }
-
-        let fallback = reference.previewText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return IMReplyReferenceResolution(
-            state: .unavailable,
-            text: fallback.isEmpty ? "原消息暂不可用" : fallback
-        )
+        MessageDerivedStateReducer().resolveReplyReference(for: self, in: messages)
     }
 }
 
@@ -242,6 +403,11 @@ public struct IMOutgoingMessageRequest: Sendable {
     public let payload: IMTCPMessagePayload
 }
 
+public struct IMOutgoingMediaPlaceholder: Sendable {
+    public let localMessageID: String
+    public let clientMessageID: String
+}
+
 public struct IMConversationQueueSummary: Equatable, Sendable {
     public let queuedCount: Int
     public let sendingCount: Int
@@ -274,10 +440,17 @@ public final class IMConversationStore: ObservableObject {
     @Published public private(set) var isLoadingMembers = false
     @Published public private(set) var isLoadingMessages = false
     @Published public private(set) var searchText = ""
+    @Published public private(set) var replyJumpConversationID: String?
+    @Published public private(set) var replyJumpTargetMessageID: String?
+    @Published public private(set) var replyJumpMatchedMessageID: String?
+    @Published public private(set) var replyJumpState: IMReplyJumpState = .idle
 
     private let listReadModel = ConversationListReadModel()
     private var detailState = ConversationDetailState()
     private var outgoingQueueState = OutgoingQueueState()
+    private var conversationSearchState = ConversationSearchState()
+    private let messageTimelineState = MessageTimelineState()
+    private let messageDerivedStateReducer = MessageDerivedStateReducer()
 
     public var selectedConversation: IMConversation? {
         listReadModel.selectedConversation(
@@ -323,29 +496,18 @@ public final class IMConversationStore: ObservableObject {
         outgoingQueueState.reset()
         isLoadingMembers = detailState.isLoadingMembers
         isLoadingMessages = detailState.isLoadingMessages
-        searchText = ""
+        conversationSearchState.reset()
+        searchText = conversationSearchState.text
+        syncReplyJumpState()
     }
 
     public func setConversationSearchText(_ value: String) {
-        searchText = value
+        conversationSearchState.setText(value)
+        searchText = conversationSearchState.text
     }
 
     public var filteredConversations: [IMConversation] {
-        let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedQuery.isEmpty else {
-            return conversations
-        }
-
-        let normalizedQuery = trimmedQuery.lowercased()
-        return conversations.filter { conversation in
-            let fields = [
-                conversation.title,
-                conversation.directPeer?.email ?? "",
-                conversation.lastMessagePreview,
-                conversation.notice ?? ""
-            ]
-            return fields.contains { $0.lowercased().contains(normalizedQuery) }
-        }
+        conversationSearchState.filteredConversations(from: conversations)
     }
 
     public func openConversation(id: String) {
@@ -453,7 +615,7 @@ public final class IMConversationStore: ObservableObject {
             let existing = existingByID[conversationID]
             let conversationKind = IMConversationKind(rawValue: response.kind) ?? .group
             let directPeer = directPeer(from: response, conversationKind: conversationKind)
-            let previewText = mergedSummaryPreviewText(
+            let previewText = messageDerivedStateReducer.mergedSummaryPreviewText(
                 existing: existing,
                 responseLastMessage: response.lastMessage
             )
@@ -527,6 +689,8 @@ public final class IMConversationStore: ObservableObject {
         } else {
             selectedConversationID = conversations.first?.id
         }
+
+        syncReplyJumpState()
     }
 
     public func markConversationRead(id: String) {
@@ -916,73 +1080,139 @@ public final class IMConversationStore: ObservableObject {
         ) != nil
     }
 
-    private func prepareOutgoingMessage(
-        _ content: IMMessageContent,
+    public func stageOutgoingMediaUpload(
+        asset: IMMediaAsset,
         conversationID: String,
         senderUserID: UUID,
-        deliveryState: IMMessageDeliveryState,
-        shouldRegisterPendingRequest: Bool
-    ) -> IMOutgoingMessageRequest? {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
-            statusMessage = "当前没有可用会话。"
-            return nil
-        }
-
+        sourceFileURL: URL
+    ) -> IMOutgoingMediaPlaceholder? {
+        let content = mediaContent(for: asset)
         guard content.isUserComposable else {
             statusMessage = "当前消息类型不支持发送。"
             return nil
         }
 
-        guard !content.previewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            statusMessage = "消息内容不能为空。"
-            return nil
-        }
-
-        let requestID = UUID()
-        let clientMessageID = UUID().uuidString
-        let localMessageID = clientMessageID
-        let createdAt = Date()
-        let index = ensureConversationIndex(for: trimmedConversationID)
-        let message = IMConversationMessage(
-            id: localMessageID,
-            conversationID: trimmedConversationID,
-            clientMessageID: clientMessageID,
-            serverMessageID: nil,
+        return appendOutgoingMessage(
+            content,
+            conversationID: conversationID,
             senderUserID: senderUserID,
-            serverSequence: nil,
-            content: content,
-            direction: .outgoing,
-            createdAt: createdAt,
-            deliveryState: deliveryState
-        )
+            deliveryState: .preparing(message: "正在准备上传附件。"),
+            shouldRegisterPendingRequest: false,
+            localTransferState: IMMessageLocalTransferState(sourceFilePath: sourceFileURL.path)
+        ).placeholder
+    }
 
-        conversations[index].messages.append(message)
-        conversations[index].lastMessagePreviewText = content.previewText
-        conversations[index].updatedAt = createdAt
-        conversations[index].draftText = ""
-        conversations[index].draftUpdatedAt = nil
-        resetUnreadState(for: index)
-        selectedConversationID = trimmedConversationID
-        if shouldRegisterPendingRequest {
-            outgoingQueueState.registerPendingRequest(requestID, localMessageID: localMessageID)
+    public func markOutgoingPreparing(localMessageID: String, message: String, uploadID: String? = nil) {
+        mutateMessage(id: localMessageID) { item in
+            item.deliveryState = .preparing(message: message)
+            if let uploadID, let transferState = item.localTransferState {
+                item.localTransferState = transferState.withUploadID(uploadID)
+            }
         }
-        statusMessage = nil
-        sortConversations()
+    }
 
-        return IMOutgoingMessageRequest(
-            requestID: requestID,
+    public func markOutgoingUploading(localMessageID: String, message: String, uploadID: String? = nil) {
+        mutateMessage(id: localMessageID) { item in
+            item.deliveryState = .uploading(message: message)
+            if let uploadID, let transferState = item.localTransferState {
+                item.localTransferState = transferState.withUploadID(uploadID)
+            }
+        }
+    }
+
+    public func markOutgoingUploadFailed(localMessageID: String, message: String) {
+        mutateMessage(id: localMessageID) { item in
+            item.deliveryState = .failed(message: message)
+        }
+        statusMessage = message
+    }
+
+    public func abandonRecoverableOutgoingMediaUpload(localMessageID: String, message: String) {
+        mutateMessage(id: localMessageID) { item in
+            item.deliveryState = .failed(message: message)
+            item.localTransferState = nil
+        }
+        statusMessage = message
+    }
+
+    public func updateLocalDownloadState(
+        messageID: String,
+        state: IMMessageLocalDownloadState?
+    ) {
+        mutateMessage(id: messageID) { item in
+            item.localDownloadState = state
+        }
+    }
+
+    public func prepareUploadedOutgoingMedia(
+        asset: IMMediaAsset,
+        localMessageID: String,
+        conversationID: String
+    ) -> IMOutgoingMessageRequest? {
+        updateUploadedOutgoingMedia(
+            asset: asset,
             localMessageID: localMessageID,
-            payload: IMTCPMessagePayload(
-                clientMessageID: clientMessageID,
-                messageID: nil,
-                conversationID: trimmedConversationID,
-                senderUserID: nil,
-                serverSequence: nil,
-                serverTimestamp: nil,
-                content: content
-            )
+            conversationID: conversationID,
+            deliveryState: .sending,
+            shouldRegisterPendingRequest: true
         )
+    }
+
+    @discardableResult
+    public func queueUploadedOutgoingMedia(
+        asset: IMMediaAsset,
+        localMessageID: String,
+        conversationID: String,
+        message: String = "等待 IM 长连接恢复后发送。"
+    ) -> Bool {
+        updateUploadedOutgoingMedia(
+            asset: asset,
+            localMessageID: localMessageID,
+            conversationID: conversationID,
+            deliveryState: .queued(message: message),
+            shouldRegisterPendingRequest: false
+        ) != nil
+    }
+
+    public func recoverableOutgoingMediaUploads() -> [IMRecoverableOutgoingMediaUpload] {
+        conversations.flatMap { conversation in
+            conversation.messages.compactMap { message in
+                guard let transferState = message.localTransferState,
+                      let asset = message.mediaAsset,
+                      message.isRecoverableOutgoingMediaUpload,
+                      message.serverMessageID == nil,
+                      message.serverSequence == nil
+                else {
+                    return nil
+                }
+
+                return IMRecoverableOutgoingMediaUpload(
+                    localMessageID: message.id,
+                    conversationID: conversation.id,
+                    asset: asset,
+                    transferState: transferState,
+                    deliveryState: message.deliveryState
+                )
+            }
+        }
+    }
+
+    private func prepareOutgoingMessage(
+        _ content: IMMessageContent,
+        conversationID: String,
+        senderUserID: UUID,
+        deliveryState: IMMessageDeliveryState,
+        shouldRegisterPendingRequest: Bool,
+        localTransferState: IMMessageLocalTransferState? = nil
+    ) -> IMOutgoingMessageRequest? {
+        appendOutgoingMessage(
+            content,
+            conversationID: conversationID,
+            senderUserID: senderUserID,
+            deliveryState: deliveryState,
+            shouldRegisterPendingRequest: shouldRegisterPendingRequest,
+            localTransferState: localTransferState
+        ).request
     }
 
     private func prepareOutgoingText(
@@ -1186,6 +1416,8 @@ public final class IMConversationStore: ObservableObject {
         }
 
         switch message.deliveryState {
+        case .preparing, .uploading, .uploaded:
+            return false
         case .queued, .unknown:
             return true
         case .failed(let failureMessage):
@@ -1202,6 +1434,8 @@ public final class IMConversationStore: ObservableObject {
 
         for message in messages where message.direction == .outgoing {
             switch message.deliveryState {
+            case .preparing, .uploading, .uploaded:
+                sendingCount += 1
             case .queued:
                 queuedCount += 1
             case .sending:
@@ -1483,6 +1717,75 @@ public final class IMConversationStore: ObservableObject {
         statusMessage = message
     }
 
+    public func containsConversation(id conversationID: String) -> Bool {
+        conversations.contains { $0.id == conversationID }
+    }
+
+    public func localMessageID(
+        matchingReferencedMessageID targetMessageID: String,
+        in conversationID: String
+    ) -> String? {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTargetMessageID = targetMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedTargetMessageID.isEmpty,
+              let conversation = conversations.first(where: { $0.id == trimmedConversationID })
+        else {
+            return nil
+        }
+
+        return messageTimelineState.localMessageID(
+            matchingReferencedMessageID: trimmedTargetMessageID,
+            in: conversation.messages
+        )
+    }
+
+    public func beginReplyJump(
+        to targetMessageID: String,
+        in conversationID: String
+    ) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTargetMessageID = targetMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedTargetMessageID.isEmpty else {
+            return
+        }
+
+        detailState.startReplyJump(in: trimmedConversationID, targetMessageID: trimmedTargetMessageID)
+        syncReplyJumpState()
+    }
+
+    public func resolveReplyJump(
+        matchedMessageID: String,
+        in conversationID: String
+    ) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMatchedMessageID = matchedMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedMatchedMessageID.isEmpty else {
+            return
+        }
+
+        detailState.resolveReplyJump(matchedMessageID: trimmedMatchedMessageID, in: trimmedConversationID)
+        syncReplyJumpState()
+    }
+
+    public func exhaustReplyJump(
+        to targetMessageID: String,
+        in conversationID: String
+    ) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTargetMessageID = targetMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedTargetMessageID.isEmpty else {
+            return
+        }
+
+        detailState.exhaustReplyJump(in: trimmedConversationID, targetMessageID: trimmedTargetMessageID)
+        syncReplyJumpState()
+    }
+
+    public func clearReplyJump() {
+        detailState.clearReplyJump()
+        syncReplyJumpState()
+    }
+
     public func makeCacheSnapshot(
         lastSummaryRefreshAt: Date?,
         summarySyncToken: String? = nil
@@ -1516,6 +1819,7 @@ public final class IMConversationStore: ObservableObject {
         isLoadingMessages = detailState.isLoadingMessages
 
         statusMessage = nil
+        syncReplyJumpState()
         sortConversations()
     }
 
@@ -1571,7 +1875,7 @@ public final class IMConversationStore: ObservableObject {
         let conversationID = response.id.uuidString
         let conversationKind = IMConversationKind(rawValue: response.kind) ?? .group
         let directPeer = directPeer(from: response, conversationKind: conversationKind)
-        let previewText = mergedSummaryPreviewText(
+        let previewText = messageDerivedStateReducer.mergedSummaryPreviewText(
             existing: existing,
             responseLastMessage: response.lastMessage
         )
@@ -1608,43 +1912,6 @@ public final class IMConversationStore: ObservableObject {
             draftUpdatedAt: existing?.draftUpdatedAt,
             updatedAt: response.updatedAt
         )
-    }
-
-    private func mergedSummaryPreviewText(
-        existing: IMConversation?,
-        responseLastMessage: IMMessagePreviewResponseBody?
-    ) -> String {
-        let latestLoadedMessage = existing?.messages.last
-
-        guard let responseLastMessage else {
-            return latestLoadedMessage?.text
-                ?? existing?.lastMessagePreviewText
-                ?? "暂无消息"
-        }
-
-        guard let latestLoadedMessage else {
-            return responseLastMessage.content.previewText
-        }
-
-        if latestLoadedMessage.serverSequence == nil {
-            return latestLoadedMessage.text
-        }
-
-        let responseMessageID = responseLastMessage.id.uuidString
-        let responseServerSequence = UInt64(responseLastMessage.serverSequence)
-
-        if latestLoadedMessage.serverMessageID == responseMessageID
-            || latestLoadedMessage.id == responseMessageID
-            || latestLoadedMessage.serverSequence == responseServerSequence {
-            return responseLastMessage.content.previewText
-        }
-
-        if let latestLoadedServerSequence = latestLoadedMessage.serverSequence,
-           latestLoadedServerSequence > responseServerSequence {
-            return latestLoadedMessage.text
-        }
-
-        return responseLastMessage.content.previewText
     }
 
     private func applyIncomingMessageUnreadState(for conversationID: String) {
@@ -1685,6 +1952,13 @@ public final class IMConversationStore: ObservableObject {
         conversations[conversationIndex].localUnreadDelta = 0
     }
 
+    private func syncReplyJumpState() {
+        replyJumpConversationID = detailState.replyJumpConversationID
+        replyJumpTargetMessageID = detailState.replyJumpTargetMessageID
+        replyJumpMatchedMessageID = detailState.replyJumpMatchedMessageID
+        replyJumpState = detailState.replyJumpState
+    }
+
     private func reconciledLocalUnreadDelta(
         for conversationID: String,
         previousServerLastReadSequence: UInt64,
@@ -1721,9 +1995,14 @@ public final class IMConversationStore: ObservableObject {
             }
 
             update(&conversations[conversationIndex].messages[messageIndex])
-            conversations[conversationIndex].updatedAt = conversations[conversationIndex].messages[messageIndex].createdAt
-            conversations[conversationIndex].lastMessagePreviewText = conversations[conversationIndex].messages.last?.text
-                ?? conversations[conversationIndex].lastMessagePreviewText
+            conversations[conversationIndex].updatedAt = messageTimelineState.latestUpdatedAt(
+                in: conversations[conversationIndex].messages,
+                fallback: conversations[conversationIndex].messages[messageIndex].createdAt
+            )
+            conversations[conversationIndex].lastMessagePreviewText = messageTimelineState.latestPreviewText(
+                in: conversations[conversationIndex].messages,
+                fallback: conversations[conversationIndex].lastMessagePreviewText
+            )
             sortConversations()
             return
         }
@@ -1735,8 +2014,14 @@ public final class IMConversationStore: ObservableObject {
         }
 
         if let latestMessage = conversations[conversationIndex].messages.last {
-            conversations[conversationIndex].lastMessagePreviewText = latestMessage.text
-            conversations[conversationIndex].updatedAt = latestMessage.createdAt
+            conversations[conversationIndex].lastMessagePreviewText = messageTimelineState.latestPreviewText(
+                in: conversations[conversationIndex].messages,
+                fallback: latestMessage.text
+            )
+            conversations[conversationIndex].updatedAt = messageTimelineState.latestUpdatedAt(
+                in: conversations[conversationIndex].messages,
+                fallback: latestMessage.createdAt
+            )
         } else {
             conversations[conversationIndex].lastMessagePreviewText = ""
         }
@@ -1918,11 +2203,14 @@ public final class IMConversationStore: ObservableObject {
     }
 
     private static func restoredDeliveryState(_ state: IMMessageDeliveryState) -> IMMessageDeliveryState {
-        if case .sending = state {
+        switch state {
+        case .sending:
             return .unknown(message: "发送状态未确认，请重试。")
+        case .preparing, .uploading, .uploaded:
+            return state
+        case .queued, .sent, .received, .unknown, .failed:
+            return state
         }
-
-        return state
     }
 
     private func startQueuedOutgoingMessage(
@@ -1970,8 +2258,159 @@ public final class IMConversationStore: ObservableObject {
         "会话 ID 无效。",
         "会话不存在或你已不在该会话中。",
         "当前消息类型不支持发送。",
-        "消息内容不能为空。"
+        "消息内容不能为空。",
+        "附件上传失败，请稍后重试。"
     ]
+
+    private func appendOutgoingMessage(
+        _ content: IMMessageContent,
+        conversationID: String,
+        senderUserID: UUID,
+        deliveryState: IMMessageDeliveryState,
+        shouldRegisterPendingRequest: Bool,
+        localTransferState: IMMessageLocalTransferState? = nil
+    ) -> (placeholder: IMOutgoingMediaPlaceholder?, request: IMOutgoingMessageRequest?) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            statusMessage = "当前没有可用会话。"
+            return (nil, nil)
+        }
+
+        guard content.isUserComposable else {
+            statusMessage = "当前消息类型不支持发送。"
+            return (nil, nil)
+        }
+
+        guard !content.previewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            statusMessage = "消息内容不能为空。"
+            return (nil, nil)
+        }
+
+        let requestID = UUID()
+        let clientMessageID = UUID().uuidString
+        let localMessageID = clientMessageID
+        let createdAt = Date()
+        let index = ensureConversationIndex(for: trimmedConversationID)
+        let message = IMConversationMessage(
+            id: localMessageID,
+            conversationID: trimmedConversationID,
+            clientMessageID: clientMessageID,
+            serverMessageID: nil,
+            senderUserID: senderUserID,
+            serverSequence: nil,
+            content: content,
+            direction: .outgoing,
+            createdAt: createdAt,
+            deliveryState: deliveryState,
+            localTransferState: localTransferState
+        )
+
+        conversations[index].messages.append(message)
+        conversations[index].lastMessagePreviewText = content.previewText
+        conversations[index].updatedAt = createdAt
+        conversations[index].draftText = ""
+        conversations[index].draftUpdatedAt = nil
+        resetUnreadState(for: index)
+        selectedConversationID = trimmedConversationID
+        if shouldRegisterPendingRequest {
+            outgoingQueueState.registerPendingRequest(requestID, localMessageID: localMessageID)
+        }
+        statusMessage = nil
+        sortConversations()
+
+        let payload = IMTCPMessagePayload(
+            clientMessageID: clientMessageID,
+            messageID: nil,
+            conversationID: trimmedConversationID,
+            senderUserID: nil,
+            serverSequence: nil,
+            serverTimestamp: nil,
+            content: content
+        )
+        let request = shouldRegisterPendingRequest
+            ? IMOutgoingMessageRequest(
+                requestID: requestID,
+                localMessageID: localMessageID,
+                payload: payload
+            )
+            : nil
+        return (
+            IMOutgoingMediaPlaceholder(localMessageID: localMessageID, clientMessageID: clientMessageID),
+            request
+        )
+    }
+
+    private func updateUploadedOutgoingMedia(
+        asset: IMMediaAsset,
+        localMessageID: String,
+        conversationID: String,
+        deliveryState: IMMessageDeliveryState,
+        shouldRegisterPendingRequest: Bool
+    ) -> IMOutgoingMessageRequest? {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedLocalMessageID = localMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedLocalMessageID.isEmpty else {
+            return nil
+        }
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == trimmedConversationID }),
+              let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == trimmedLocalMessageID })
+        else {
+            statusMessage = "附件消息不存在。"
+            return nil
+        }
+
+        let content = mediaContent(for: asset)
+        guard content.isUserComposable else {
+            statusMessage = "当前消息类型不支持发送。"
+            return nil
+        }
+
+        let requestID = UUID()
+        var message = conversations[conversationIndex].messages[messageIndex]
+        message.content = content
+        message.deliveryState = deliveryState
+        message.serverMessageID = nil
+        message.serverSequence = nil
+        message.localTransferState = nil
+        conversations[conversationIndex].messages[messageIndex] = message
+        conversations[conversationIndex].lastMessagePreviewText = content.previewText
+        conversations[conversationIndex].updatedAt = message.createdAt
+        selectedConversationID = trimmedConversationID
+        if shouldRegisterPendingRequest {
+            outgoingQueueState.registerPendingRequest(requestID, localMessageID: message.id)
+        }
+        statusMessage = nil
+        sortConversations()
+
+        guard shouldRegisterPendingRequest else {
+            return nil
+        }
+
+        return IMOutgoingMessageRequest(
+            requestID: requestID,
+            localMessageID: message.id,
+            payload: IMTCPMessagePayload(
+                clientMessageID: message.clientMessageID ?? message.id,
+                messageID: nil,
+                conversationID: trimmedConversationID,
+                senderUserID: nil,
+                serverSequence: nil,
+                serverTimestamp: nil,
+                content: content
+            )
+        )
+    }
+
+    private func mediaContent(for asset: IMMediaAsset) -> IMMessageContent {
+        switch asset.kind {
+        case .image:
+            return .image(asset)
+        case .audio:
+            return .audio(asset)
+        case .file:
+            return .file(asset)
+        }
+    }
 
     private static func matches(_ left: IMConversationMessage, _ right: IMConversationMessage) -> Bool {
         if let leftServerMessageID = left.serverMessageID,

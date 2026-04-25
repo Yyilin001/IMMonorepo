@@ -233,6 +233,21 @@ public struct IMConversationMessagesSinceResponseBody: Codable, Equatable, Senda
     }
 }
 
+public struct IMConversationMessageSearchHitResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let messageID: UUID
+    public let senderUserID: UUID
+    public let serverSequence: Int
+    public let content: IMMessageContent
+    public let snippet: String
+    public let createdAt: Date?
+}
+
+public struct IMConversationMessageSearchPageResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let items: [IMConversationMessageSearchHitResponseBody]
+    public let nextCursor: String?
+    public let hasMore: Bool
+}
+
 enum IMRequest {
     public struct CreateConversation: AuthorizedEndpoint {
         public typealias Response = IMConversationSummaryResponseBody
@@ -504,6 +519,33 @@ enum IMRequest {
         }
     }
 
+    public struct SearchMessages: AuthorizedEndpoint {
+        public typealias Response = IMConversationMessageSearchPageResponseBody
+
+        let conversationID: String
+        let query: String
+        let cursor: String?
+        let limit: Int?
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(
+                path: "api/im/conversations/\(conversationID)/search",
+                queryItems: queryItems
+            )
+        }
+
+        private var queryItems: [URLQueryItem] {
+            var items = [URLQueryItem(name: "q", value: query)]
+            if let cursor {
+                items.append(URLQueryItem(name: "cursor", value: cursor))
+            }
+            if let limit {
+                items.append(URLQueryItem(name: "limit", value: String(limit)))
+            }
+            return items
+        }
+    }
+
     public struct RecallMessage: AuthorizedEndpoint {
         public typealias Response = IMConversationMessageRecallResponseBody
 
@@ -664,6 +706,20 @@ enum IMRequest {
         MarkRead(
             conversationID: conversationID,
             payload: IMConversationReadRequestBody(readSequence: readSequence)
+        )
+    }
+
+    public static func searchMessages(
+        conversationID: String,
+        query: String,
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) -> SearchMessages {
+        SearchMessages(
+            conversationID: conversationID,
+            query: query,
+            cursor: cursor,
+            limit: limit
         )
     }
 

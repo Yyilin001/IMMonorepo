@@ -2,6 +2,24 @@ import Fluent
 import Foundation
 import Vapor
 
+struct ConversationSummaryVerificationResult: Equatable, Sendable {
+    var ownerUserCount: Int = 0
+    var tombstoneSummaryCount: Int = 0
+    var missingSummaryCount: Int = 0
+    var staleActiveSummaryCount: Int = 0
+    var latestVisibleMessageMismatchCount: Int = 0
+    var unreadMismatchCount: Int = 0
+
+    mutating func accumulate(_ other: ConversationSummaryVerificationResult) {
+        ownerUserCount += other.ownerUserCount
+        tombstoneSummaryCount += other.tombstoneSummaryCount
+        missingSummaryCount += other.missingSummaryCount
+        staleActiveSummaryCount += other.staleActiveSummaryCount
+        latestVisibleMessageMismatchCount += other.latestVisibleMessageMismatchCount
+        unreadMismatchCount += other.unreadMismatchCount
+    }
+}
+
 struct IMConversationSummaryProjectionService {
     private struct PageCursor: Codable {
         let isPinned: Bool
@@ -148,6 +166,84 @@ struct IMConversationSummaryProjectionService {
         }
 
         return ownerUserIDs.count
+    }
+
+    func verifySummaries(for userID: UUID) async throws -> ConversationSummaryVerificationResult {
+        let memberships = try await ConversationMember.query(on: db)
+            .filter(\.$user.$id == userID)
+            .all()
+        let summaries = try await ConversationUserSummary.query(on: db)
+            .filter(\.$ownerUserID == userID)
+            .all()
+
+        let activeMembershipsByConversationID = Dictionary(
+            uniqueKeysWithValues: memberships.map { ($0.$conversation.id, $0) }
+        )
+        let summariesByConversationID = Dictionary(
+            uniqueKeysWithValues: summaries.map { ($0.conversationID, $0) }
+        )
+
+        var result = ConversationSummaryVerificationResult(ownerUserCount: 1)
+        result.tombstoneSummaryCount = summaries.filter(\.isRemoved).count
+
+        for membership in memberships {
+            let conversationID = membership.$conversation.id
+            guard let summary = summariesByConversationID[conversationID],
+                  !summary.isRemoved
+            else {
+                result.missingSummaryCount += 1
+                continue
+            }
+
+            let lastVisibleMessage = try await ConversationMessage.query(on: db)
+                .filter(\.$conversation.$id == conversationID)
+                .filter(\.$serverSequence >= membership.visibleFromSequence)
+                .sort(\.$serverSequence, .descending)
+                .first()
+            let expectedLastVisibleMessage = try lastVisibleMessage.map(makePreview)
+
+            if summary.lastMessage != expectedLastVisibleMessage {
+                result.latestVisibleMessageMismatchCount += 1
+            }
+
+            let latestVisibleSequence = max(
+                lastVisibleMessage?.serverSequence ?? 0,
+                max(0, membership.visibleFromSequence - 1)
+            )
+            let effectiveLastReadSequence = max(
+                membership.lastReadSequence,
+                max(0, membership.visibleFromSequence - 1)
+            )
+            let expectedUnreadCount = max(0, latestVisibleSequence - effectiveLastReadSequence)
+            if summary.lastReadSequence != effectiveLastReadSequence
+                || summary.unreadCount != expectedUnreadCount {
+                result.unreadMismatchCount += 1
+            }
+        }
+
+        for summary in summaries where activeMembershipsByConversationID[summary.conversationID] == nil && !summary.isRemoved {
+            result.staleActiveSummaryCount += 1
+        }
+
+        return result
+    }
+
+    func verifyAllSummaries() async throws -> ConversationSummaryVerificationResult {
+        let membershipOwnerUserIDs = try await ConversationMember.query(on: db)
+            .all()
+            .map(\.$user.id)
+        let summaryOwnerUserIDs = try await ConversationUserSummary.query(on: db)
+            .all()
+            .map(\.ownerUserID)
+        let ownerUserIDs = Array(Set(membershipOwnerUserIDs + summaryOwnerUserIDs))
+            .sorted { $0.uuidString < $1.uuidString }
+
+        var result = ConversationSummaryVerificationResult()
+        for ownerUserID in ownerUserIDs {
+            let ownerResult = try await verifySummaries(for: ownerUserID)
+            result.accumulate(ownerResult)
+        }
+        return result
     }
 
     func listConversations(

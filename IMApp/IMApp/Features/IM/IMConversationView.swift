@@ -1,6 +1,8 @@
 import SwiftUI
 import IMClientKit
 import Combine
+import QuickLook
+import UniformTypeIdentifiers
 
 enum IMNavigationRoute: Hashable {
     case conversation(String)
@@ -221,158 +223,273 @@ struct IMConversationDetailView: View {
     @State private var isPresentingLeaveConfirmation = false
     @State private var isPresentingRenameGroup = false
     @State private var isPresentingEditMetadata = false
+    @State private var isPresentingSearch = false
+    @State private var isPresentingMediaImporter = false
     @State private var replyTarget: IMConversationMessage?
+    @State private var highlightedMessageID: String?
+    @State private var mediaDownloadStates: [String: IMMediaDownloadState] = [:]
+    @State private var mediaDownloadTasks: [String: Task<Void, Never>] = [:]
+    @State private var previewedMediaItem: IMDownloadedMediaPreviewItem?
 
     var body: some View {
+        detailContent
+    }
+
+    private var detailContent: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    conversationSummaryCard
+            decoratedDetailView(proxy: proxy)
+        }
+    }
 
-                    if queueSummary.hasPendingWork {
-                        IMConversationQueueBanner(
-                            summary: queueSummary,
-                            isFlushing: authManager.isFlushingQueuedIMTextMessages
-                        )
-                    }
+    private func decoratedDetailView(proxy: ScrollViewProxy) -> some View {
+        applyingDraftStateHandlers(
+            to: applyingPresentationModifiers(
+                to: applyingScrollStateHandlers(
+                    to: detailBaseView,
+                    proxy: proxy
+                )
+            )
+        )
+    }
 
-                    if let message = conversationStore.statusMessage, !message.isEmpty {
-                        IMInlineStatusBanner(message: message)
-                    }
-
-                    if shouldShowLoadingState {
-                        ProgressView("正在拉取消息…")
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.vertical, 40)
-                    } else if messages.isEmpty {
-                        IMDetailEmptyState()
-                    } else {
-                        if conversation?.hasMoreHistory == true {
-                            Button {
-                                conversationStore.openConversation(id: conversationID)
-                                Task {
-                                    await authManager.loadOlderIMMessages()
-                                }
-                            } label: {
-                                Label("加载更早消息", systemImage: "clock.arrow.circlepath")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(conversationStore.isLoadingMessages)
-                        }
-
-                        ForEach(messages) { message in
-                            IMMessageBubble(
-                                message: message,
-                                replyReference: message.resolvedReplyReference(in: messages),
-                                canRetry: conversationStore.isRetryableFailure(message),
-                                canCancel: message.canCancelQueuedSend,
-                                canReply: message.canReply,
-                                canRecall: message.canRecall,
-                                onCancel: {
-                                    _ = authManager.cancelQueuedIMTextMessage(
-                                        localMessageID: message.id,
-                                        in: conversationID
-                                    )
-                                },
-                                onReply: {
-                                    replyTarget = message
-                                },
-                                onRecall: {
-                                    Task {
-                                        let didRecall = await authManager.recallIMMessage(
-                                            messageID: message.serverMessageID ?? message.id,
-                                            in: conversationID
-                                        )
-                                        if didRecall, replyTarget?.id == message.id {
-                                            replyTarget = nil
-                                        }
-                                    }
-                                },
-                                onRetry: {
-                                    Task {
-                                        await authManager.retryIMTextMessage(
-                                            localMessageID: message.id,
-                                            in: conversationID
-                                        )
-                                    }
-                                }
-                            )
-                                .id(message.id)
-                        }
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 20)
-                .padding(.bottom, 20)
-            }
-            .background(Color(.systemGroupedBackground))
+    private var detailBaseView: some View {
+        detailScrollView
             .navigationTitle(conversationIdentity.title)
             .navigationBarTitleDisplayMode(.inline)
             .task(id: conversationID) {
                 await authManager.openIMConversation(conversationID)
             }
+            .onDisappear {
+                pauseAllMediaDownloads()
+            }
             .toolbar {
-                if conversation?.kind == .group {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Menu {
-                            if canRenameConversation {
-                                Button("修改群名") {
-                                    isPresentingRenameGroup = true
-                                }
-                            }
+                detailToolbarContent
+            }
+            .safeAreaInset(edge: .bottom) {
+                composerBar
+            }
+    }
 
-                            if canRenameConversation {
-                                Button("编辑群资料") {
-                                    isPresentingEditMetadata = true
-                                }
-                            }
+    private var detailScrollView: some View {
+        ScrollView {
+            detailMessageStack
+        }
+        .background(Color(.systemGroupedBackground))
+    }
 
-                            if canAddMembers {
-                                Button("添加成员") {
-                                    isPresentingAddMembers = true
-                                }
-                            }
+    private var detailMessageStack: some View {
+        LazyVStack(alignment: .leading, spacing: 14) {
+            conversationSummaryCard
 
-                            if canManageMembers {
-                                Button("管理成员") {
-                                    isPresentingManageMembers = true
-                                }
-                            }
+            if queueSummary.hasPendingWork {
+                IMConversationQueueBanner(
+                    summary: queueSummary,
+                    isFlushing: authManager.isFlushingQueuedIMTextMessages
+                )
+            }
 
-                            Button("退出会话", role: .destructive) {
-                                isPresentingLeaveConfirmation = true
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                        }
+            if let message = conversationStore.statusMessage, !message.isEmpty {
+                IMInlineStatusBanner(message: message)
+            }
+
+            detailMessagesContent
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 20)
+        .padding(.bottom, 20)
+    }
+
+    @ViewBuilder
+    private var detailMessagesContent: some View {
+        if shouldShowLoadingState {
+            ProgressView("正在拉取消息…")
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 40)
+        } else if messages.isEmpty {
+            IMDetailEmptyState()
+        } else {
+            if conversation?.hasMoreHistory == true {
+                Button {
+                    conversationStore.openConversation(id: conversationID)
+                    Task {
+                        await authManager.loadOlderIMMessages()
                     }
+                } label: {
+                    Label("加载更早消息", systemImage: "clock.arrow.circlepath")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(conversationStore.isLoadingMessages)
+            }
+
+            ForEach(messages) { message in
+                detailMessageRow(message)
+                    .id(message.id)
+            }
+        }
+    }
+
+    private func detailMessageRow(_ message: IMConversationMessage) -> some View {
+        let mediaAsset = message.mediaAsset
+        return IMMessageBubble(
+            message: message,
+            replyReference: message.resolvedReplyReference(in: messages),
+            isHighlighted: highlightedMessageID == message.id,
+            canRetry: conversationStore.isRetryableFailure(message),
+            canCancel: message.canCancelQueuedSend,
+            canReply: message.canReply,
+            canRecall: message.canRecall,
+            mediaDownloadState: resolvedMediaDownloadState(for: message),
+            onJumpToReplyReference: {
+                guard case .reply(let reference, _) = message.content else {
+                    return
                 }
 
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button(conversation?.isPinned == true ? "取消置顶" : "置顶会话") {
-                            Task {
-                                _ = await authManager.updateIMConversationPreferences(
-                                    conversationID,
-                                    isPinned: !(conversation?.isPinned ?? false)
-                                )
-                            }
-                        }
-
-                        Button(conversation?.isMuted == true ? "取消免打扰" : "免打扰") {
-                            Task {
-                                _ = await authManager.updateIMConversationPreferences(
-                                    conversationID,
-                                    isMuted: !(conversation?.isMuted ?? false)
-                                )
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "bell.slash.circle")
+                Task {
+                    await authManager.jumpToReferencedIMMessage(
+                        reference.messageID,
+                        in: conversationID
+                    )
+                }
+            },
+            onCancel: {
+                _ = authManager.cancelQueuedIMTextMessage(
+                    localMessageID: message.id,
+                    in: conversationID
+                )
+            },
+            onReply: {
+                replyTarget = message
+            },
+            onRecall: {
+                Task {
+                    let didRecall = await authManager.recallIMMessage(
+                        messageID: message.serverMessageID ?? message.id,
+                        in: conversationID
+                    )
+                    if didRecall, replyTarget?.id == message.id {
+                        replyTarget = nil
                     }
+                }
+            },
+            onRetry: {
+                Task {
+                    await authManager.retryIMTextMessage(
+                        localMessageID: message.id,
+                        in: conversationID
+                    )
+                }
+            },
+            onDownloadMedia: {
+                guard let mediaAsset else {
+                    return
+                }
+                startMediaDownload(mediaAsset)
+            },
+            onCancelMediaDownload: {
+                guard let assetID = mediaAsset?.assetID else {
+                    return
+                }
+                pauseMediaDownload(for: assetID)
+            },
+            onRetryMediaDownload: {
+                guard let mediaAsset else {
+                    return
+                }
+                startMediaDownload(mediaAsset)
+            },
+            onOpenDownloadedMedia: { fileURL in
+                previewedMediaItem = IMDownloadedMediaPreviewItem(
+                    url: fileURL,
+                    title: mediaAsset?.filename ?? fileURL.lastPathComponent
+                )
+            },
+            onDeleteDownloadedMedia: {
+                guard let mediaAsset else {
+                    return
+                }
+                deleteDownloadedMedia(mediaAsset)
+            }
+        )
+    }
+
+    @ToolbarContentBuilder
+    private var detailToolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                isPresentingSearch = true
+            } label: {
+                Image(systemName: "magnifyingglass")
+            }
+            .accessibilityLabel("搜索会话内消息")
+        }
+
+        if conversation?.kind == .group {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    if canRenameConversation {
+                        Button("修改群名") {
+                            isPresentingRenameGroup = true
+                        }
+                    }
+
+                    if canRenameConversation {
+                        Button("编辑群资料") {
+                            isPresentingEditMetadata = true
+                        }
+                    }
+
+                    if canAddMembers {
+                        Button("添加成员") {
+                            isPresentingAddMembers = true
+                        }
+                    }
+
+                    if canManageMembers {
+                        Button("管理成员") {
+                            isPresentingManageMembers = true
+                        }
+                    }
+
+                    Button("退出会话", role: .destructive) {
+                        isPresentingLeaveConfirmation = true
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
             }
+        }
+
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Button(conversation?.isPinned == true ? "取消置顶" : "置顶会话") {
+                    Task {
+                        _ = await authManager.updateIMConversationPreferences(
+                            conversationID,
+                            isPinned: !(conversation?.isPinned ?? false)
+                        )
+                    }
+                }
+
+                Button(conversation?.isMuted == true ? "取消免打扰" : "免打扰") {
+                    Task {
+                        _ = await authManager.updateIMConversationPreferences(
+                            conversationID,
+                            isMuted: !(conversation?.isMuted ?? false)
+                        )
+                    }
+                }
+            } label: {
+                Image(systemName: "bell.slash.circle")
+            }
+        }
+    }
+
+    private func applyingScrollStateHandlers<Content: View>(
+        to content: Content,
+        proxy: ScrollViewProxy
+    ) -> some View {
+        content
             .onChange(of: latestMessageID) { _ in
                 guard latestMessageID != nil else {
                     return
@@ -382,9 +499,29 @@ struct IMConversationDetailView: View {
                     proxy.scrollTo(latestMessageID, anchor: .bottom)
                 }
             }
-            .safeAreaInset(edge: .bottom) {
-                composerBar
+            .onChange(of: conversationStore.replyJumpMatchedMessageID) { _, matchedMessageID in
+                guard conversationStore.replyJumpConversationID == conversationID,
+                      let matchedMessageID
+                else {
+                    return
+                }
+
+                highlightedMessageID = matchedMessageID
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(matchedMessageID, anchor: .center)
+                }
+
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 1_200_000_000)
+                    if highlightedMessageID == matchedMessageID {
+                        highlightedMessageID = nil
+                    }
+                }
             }
+    }
+
+    private func applyingPresentationModifiers<Content: View>(to content: Content) -> some View {
+        content
             .sheet(isPresented: $isPresentingAddMembers) {
                 NavigationStack {
                     IMAddConversationMembersSheet(
@@ -393,6 +530,23 @@ struct IMConversationDetailView: View {
                     )
                 }
                 .presentationDetents([.medium])
+            }
+            .sheet(isPresented: $isPresentingSearch) {
+                NavigationStack {
+                    IMConversationMessageSearchSheet(
+                        conversationID: conversationID,
+                        onSelect: { messageID in
+                            Task {
+                                await authManager.jumpToIMMessage(messageID, in: conversationID)
+                            }
+                        }
+                    )
+                    .environmentObject(authManager)
+                }
+                .presentationDetents([.medium, .large])
+            }
+            .sheet(item: $previewedMediaItem) { item in
+                IMDownloadedMediaQuickLookSheet(item: item)
             }
             .sheet(isPresented: $isPresentingRenameGroup) {
                 NavigationStack {
@@ -460,6 +614,13 @@ struct IMConversationDetailView: View {
                 }
                 .presentationDetents([.medium, .large])
             }
+            .fileImporter(
+                isPresented: $isPresentingMediaImporter,
+                allowedContentTypes: [.data],
+                allowsMultipleSelection: false
+            ) { result in
+                handleMediaImport(result)
+            }
             .confirmationDialog(
                 "退出会话后将不再出现在你的列表中。",
                 isPresented: $isPresentingLeaveConfirmation,
@@ -474,13 +635,16 @@ struct IMConversationDetailView: View {
                     }
                 }
             }
+    }
+
+    private func applyingDraftStateHandlers<Content: View>(to content: Content) -> some View {
+        content
             .task(id: conversationID) {
                 composerText = conversationStore.draftText(for: conversationID)
             }
             .onChange(of: composerText) { _, newValue in
                 conversationStore.updateDraft(newValue, for: conversationID)
             }
-        }
     }
 
     private var conversation: IMConversation? {
@@ -631,6 +795,16 @@ struct IMConversationDetailView: View {
             Divider()
 
             HStack(alignment: .bottom, spacing: 12) {
+                Button {
+                    isPresentingMediaImporter = true
+                } label: {
+                    Image(systemName: "paperclip.circle.fill")
+                        .font(.system(size: 26))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(canSendMessages ? Color.accentColor : .secondary)
+                .disabled(!canSendMessages)
+
                 VStack(alignment: .leading, spacing: 8) {
                     if let replyTarget {
                         HStack(alignment: .top, spacing: 10) {
@@ -699,6 +873,343 @@ struct IMConversationDetailView: View {
             .padding(.bottom, 12)
         }
         .background(.thinMaterial)
+    }
+
+    private func handleMediaImport(_ result: Result<[URL], Error>) {
+        guard canSendMessages else {
+            return
+        }
+
+        switch result {
+        case .success(let fileURLs):
+            guard let fileURL = fileURLs.first else {
+                authManager.imConversationStore.setStatusMessage("未选择任何附件。")
+                return
+            }
+            Task {
+                await sendImportedMedia(from: fileURL)
+            }
+        case .failure:
+            authManager.imConversationStore.setStatusMessage("选择附件失败，请重试。")
+        }
+    }
+
+    private func sendImportedMedia(from fileURL: URL) async {
+        let didStartAccessing = fileURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccessing {
+                fileURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let metadata = inferredMediaMetadata(for: fileURL)
+        let didSend = await authManager.sendIMMedia(
+            fileURL: fileURL,
+            kind: metadata.kind,
+            mimeType: metadata.mimeType,
+            filename: metadata.filename,
+            byteSize: metadata.byteSize,
+            to: conversationID
+        )
+
+        if didSend {
+            replyTarget = nil
+        }
+    }
+
+    private func startMediaDownload(_ asset: IMMediaAsset) {
+        let assetID = asset.assetID
+        let destinationURL: URL
+
+        do {
+            destinationURL = try Self.mediaDownloadDestinationURL(for: asset)
+        } catch {
+            mediaDownloadStates[assetID] = .failed("无法准备下载目录。")
+            return
+        }
+
+        cancelMediaDownload(for: assetID, nextState: nil)
+        if let messageID = messageID(for: assetID) {
+            conversationStore.updateLocalDownloadState(
+                messageID: messageID,
+                state: IMMessageLocalDownloadState(
+                    destinationFilePath: destinationURL.path,
+                    status: .downloading(
+                        progress: nil,
+                        backgroundTransfer: nil
+                    )
+                )
+            )
+            authManager.persistIMConversationCacheSoon()
+        } else {
+            mediaDownloadStates[assetID] = .downloading(progress: nil)
+        }
+
+        mediaDownloadTasks[assetID] = Task {
+            do {
+                try await authManager.startBackgroundIMMediaDownload(asset, to: destinationURL)
+                await MainActor.run {
+                    mediaDownloadTasks[assetID] = nil
+                    mediaDownloadStates.removeValue(forKey: assetID)
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    mediaDownloadTasks[assetID] = nil
+                }
+            } catch {
+                await MainActor.run {
+                    mediaDownloadTasks[assetID] = nil
+                    let failureMessage = mediaDownloadFailureMessage(for: asset, error: error)
+                    if let messageID = messageID(for: assetID) {
+                        conversationStore.updateLocalDownloadState(
+                            messageID: messageID,
+                            state: IMMessageLocalDownloadState(
+                                destinationFilePath: destinationURL.path,
+                                status: .failed(message: failureMessage)
+                            )
+                        )
+                        authManager.persistIMConversationCacheSoon()
+                    } else {
+                        mediaDownloadStates[assetID] = .failed(failureMessage)
+                    }
+                }
+            }
+        }
+    }
+
+    private func pauseMediaDownload(for assetID: String) {
+        let message = messages.first { $0.mediaAsset?.assetID == assetID }
+        let progress: FileTransferProgress?
+        let backgroundTransfer: IMMessageBackgroundTransferReference?
+
+        if let localDownloadState = message?.localDownloadState {
+            switch localDownloadState.status {
+            case .downloading(let snapshot, let reference),
+                 .waitingForConnectivity(let snapshot, let reference):
+                progress = snapshot?.progress
+                backgroundTransfer = reference
+            case .paused(let snapshot):
+                progress = snapshot?.progress
+                backgroundTransfer = nil
+            case .downloaded, .failed:
+                progress = nil
+                backgroundTransfer = nil
+            }
+        } else if case .downloading(let currentProgress) = mediaDownloadStates[assetID] {
+            progress = currentProgress
+            backgroundTransfer = nil
+        } else {
+            progress = nil
+            backgroundTransfer = nil
+        }
+
+        if let messageID = messageID(for: assetID),
+           let asset = mediaAsset(for: assetID),
+           let destinationURL = try? Self.mediaDownloadDestinationURL(for: asset) {
+            conversationStore.updateLocalDownloadState(
+                messageID: messageID,
+                state: IMMessageLocalDownloadState(
+                    destinationFilePath: destinationURL.path,
+                    status: .paused(progress: progress.map(IMMessageLocalDownloadProgressSnapshot.init))
+                )
+            )
+            authManager.persistIMConversationCacheSoon()
+        }
+
+        cancelMediaDownload(for: assetID, nextState: .paused(progress: progress))
+        if let backgroundTransfer {
+            Task {
+                await authManager.cancelBackgroundIMMediaDownload(backgroundTransfer)
+            }
+        }
+    }
+
+    private func deleteDownloadedMedia(_ asset: IMMediaAsset) {
+        let assetID = asset.assetID
+        cancelMediaDownload(for: assetID, nextState: nil)
+
+        do {
+            let destinationURL = try Self.mediaDownloadDestinationURL(for: asset)
+            let metadataURL = Self.downloadMetadataURL(for: destinationURL)
+            try? FileManager.default.removeItem(at: destinationURL)
+            try? FileManager.default.removeItem(at: metadataURL)
+            if let messageID = messageID(for: assetID) {
+                conversationStore.updateLocalDownloadState(messageID: messageID, state: nil)
+                authManager.persistIMConversationCacheSoon()
+            }
+            mediaDownloadStates[assetID] = .idle
+        } catch {
+            mediaDownloadStates[assetID] = .failed("无法删除已下载文件。")
+        }
+    }
+
+    private func cancelMediaDownload(for assetID: String, nextState: IMMediaDownloadState?) {
+        mediaDownloadTasks[assetID]?.cancel()
+        mediaDownloadTasks[assetID] = nil
+        if let nextState {
+            mediaDownloadStates[assetID] = nextState
+        }
+    }
+
+    private func pauseAllMediaDownloads() {
+        for assetID in Set(mediaDownloadTasks.keys).union(
+            messages.compactMap { message in
+                switch message.localDownloadState?.status {
+                case .downloading, .waitingForConnectivity:
+                    return message.mediaAsset?.assetID
+                case .paused, .downloaded, .failed, .none:
+                    return nil
+                }
+            }
+        ) {
+            pauseMediaDownload(for: assetID)
+        }
+    }
+
+    private static func mediaDownloadDestinationURL(for asset: IMMediaAsset) throws -> URL {
+        let fileManager = FileManager.default
+        let baseDirectory = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        let downloadsDirectory = baseDirectory
+            .appending(path: "IMMediaDownloads", directoryHint: .isDirectory)
+        try fileManager.createDirectory(
+            at: downloadsDirectory,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        let preferredFilename = sanitizedDownloadFilename(
+            asset.filename.trimmingCharacters(in: .whitespacesAndNewlines),
+            fallbackAssetID: asset.assetID
+        )
+        return downloadsDirectory.appending(path: preferredFilename)
+    }
+
+    private static func downloadMetadataURL(for destinationURL: URL) -> URL {
+        destinationURL.appendingPathExtension("resume.json")
+    }
+
+    private static func sanitizedDownloadFilename(_ filename: String?, fallbackAssetID: String) -> String {
+        let rawFilename = filename?.isEmpty == false ? filename! : fallbackAssetID
+        let invalidCharacters = CharacterSet(charactersIn: "/:\\?%*|\"<>")
+        let components = rawFilename.components(separatedBy: invalidCharacters)
+        let sanitized = components.joined(separator: "-")
+        return sanitized.isEmpty ? fallbackAssetID : sanitized
+    }
+
+    private func resolvedMediaDownloadState(for message: IMConversationMessage) -> IMMediaDownloadState? {
+        guard let asset = message.mediaAsset else {
+            return nil
+        }
+
+        if let localDownloadState = message.localDownloadState {
+            switch localDownloadState.status {
+            case .downloading(let progress, _), .waitingForConnectivity(let progress, _):
+                return .downloading(progress: progress?.progress)
+            case .paused(let progress):
+                return .paused(progress: progress?.progress)
+            case .downloaded:
+                if FileManager.default.fileExists(atPath: localDownloadState.destinationFilePath) {
+                    return .downloaded(localDownloadState.destinationFileURL)
+                }
+            case .failed(let message):
+                return .failed(message)
+            }
+        }
+
+        if let state = mediaDownloadStates[asset.assetID] {
+            return state
+        }
+
+        guard let destinationURL = try? Self.mediaDownloadDestinationURL(for: asset),
+              FileManager.default.fileExists(atPath: destinationURL.path)
+        else {
+            return .idle
+        }
+
+        return .downloaded(destinationURL)
+    }
+
+    private func messageID(for assetID: String) -> String? {
+        messages.first { $0.mediaAsset?.assetID == assetID }?.id
+    }
+
+    private func mediaAsset(for assetID: String) -> IMMediaAsset? {
+        messages.first { $0.mediaAsset?.assetID == assetID }?.mediaAsset
+    }
+
+    private func mediaDownloadFailureMessage(for asset: IMMediaAsset, error: Error) -> String {
+        let prefix = "\(asset.kind.displayName)下载失败"
+
+        if let apiError = error as? APIError {
+            switch apiError {
+            case .forbidden, .unauthorized:
+                return "\(prefix)：你当前无权访问这个附件。"
+            case .connectivity:
+                return "\(prefix)：当前无法连接服务器。"
+            case .timeout:
+                return "\(prefix)：请求超时，请重试。"
+            case .server(let statusCode, _):
+                if statusCode == 404 {
+                    return "\(prefix)：附件已不可用。"
+                }
+                return "\(prefix)：\(apiError.localizedDescription)"
+            default:
+                return "\(prefix)：\(apiError.localizedDescription)"
+            }
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain, nsError.code == NSFileWriteOutOfSpaceError {
+            return "\(prefix)：设备存储空间不足。"
+        }
+
+        if nsError.domain == NSURLErrorDomain {
+            switch nsError.code {
+            case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost:
+                return "\(prefix)：网络连接已中断。"
+            case NSURLErrorTimedOut:
+                return "\(prefix)：请求超时，请重试。"
+            default:
+                break
+            }
+        }
+
+        return "\(prefix)：\(error.localizedDescription)"
+    }
+
+    private func inferredMediaMetadata(for fileURL: URL) -> (
+        kind: IMMediaAssetKind,
+        mimeType: String,
+        filename: String,
+        byteSize: Int64?
+    ) {
+        let filename = fileURL.lastPathComponent
+        let mimeType = preferredMimeType(for: fileURL)
+        let kind: IMMediaAssetKind
+        if let type = UTType(filenameExtension: fileURL.pathExtension.lowercased()) {
+            if type.conforms(to: .image) {
+                kind = .image
+            } else if type.conforms(to: .audio) {
+                kind = .audio
+            } else {
+                kind = .file
+            }
+        } else {
+            kind = .file
+        }
+
+        let byteSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+        return (kind, mimeType, filename, byteSize)
+    }
+
+    private func preferredMimeType(for fileURL: URL) -> String {
+        guard let type = UTType(filenameExtension: fileURL.pathExtension.lowercased()),
+              let mimeType = type.preferredMIMEType
+        else {
+            return "application/octet-stream"
+        }
+        return mimeType
     }
 
     private var conversationIdentity: IMConversationIdentityPresentation {
@@ -831,10 +1342,149 @@ struct IMConversationDetailView: View {
         switch message.content {
         case .recalled:
             return "原消息已撤回"
-        case .text, .reply, .system:
+        case .text, .reply, .system, .image, .audio, .file:
             let preview = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
             return preview.isEmpty ? "原消息暂不可用" : preview
         }
+    }
+}
+
+private struct IMConversationMessageSearchSheet: View {
+    @EnvironmentObject private var authManager: AuthManager
+    @Environment(\.dismiss) private var dismiss
+
+    let conversationID: String
+    let onSelect: (String) -> Void
+
+    @State private var query = ""
+    @State private var results: [IMConversationMessageSearchHitResponseBody] = []
+    @State private var nextCursor: String?
+    @State private var isSearching = false
+    @State private var statusMessage: String?
+
+    var body: some View {
+        List {
+            if let statusMessage, !statusMessage.isEmpty {
+                Section {
+                    Text(statusMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if results.isEmpty, !isSearching {
+                Section {
+                    ContentUnavailableView(
+                        query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "输入关键字开始搜索" : "没有找到匹配消息",
+                        systemImage: "magnifyingglass",
+                        description: Text("支持搜索文本消息、引用预览、系统消息文案和文件名。")
+                    )
+                }
+            } else {
+                Section("搜索结果") {
+                    ForEach(results, id: \.messageID) { hit in
+                        Button {
+                            dismiss()
+                            onSelect(hit.messageID.uuidString)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(hit.snippet)
+                                    .font(.body)
+                                    .foregroundStyle(.primary)
+                                    .multilineTextAlignment(.leading)
+                                Text(hit.content.previewText)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if isSearching {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                            Spacer()
+                        }
+                    } else if nextCursor != nil {
+                        Button("加载更多结果") {
+                            Task {
+                                await runSearch(reset: false)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                }
+            }
+        }
+        .navigationTitle("搜索消息")
+        .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $query, prompt: "搜索消息内容、系统消息、文件名")
+        .onSubmit(of: .search) {
+            Task {
+                await runSearch(reset: true)
+            }
+        }
+        .onChange(of: query) { _, newValue in
+            if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                results = []
+                nextCursor = nil
+                statusMessage = nil
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("关闭") {
+                    dismiss()
+                }
+            }
+
+            ToolbarItem(placement: .confirmationAction) {
+                Button("搜索") {
+                    Task {
+                        await runSearch(reset: true)
+                    }
+                }
+                .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSearching)
+            }
+        }
+    }
+
+    private func runSearch(reset: Bool) async {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            results = []
+            nextCursor = nil
+            statusMessage = nil
+            return
+        }
+
+        isSearching = true
+        defer { isSearching = false }
+
+        let cursor = reset ? nil : nextCursor
+        guard let page = await authManager.searchIMConversationMessages(
+            in: conversationID,
+            query: trimmedQuery,
+            cursor: cursor,
+            limit: 20
+        ) else {
+            if reset {
+                results = []
+            }
+            statusMessage = "搜索失败，请稍后重试。"
+            return
+        }
+
+        if reset {
+            results = page.items
+        } else {
+            results.append(contentsOf: page.items)
+        }
+        nextCursor = page.nextCursor
+        statusMessage = results.isEmpty ? "没有找到匹配消息。" : nil
     }
 }
 
@@ -1634,6 +2284,74 @@ private struct IMConversationEmptyState: View {
     }
 }
 
+private enum IMMediaDownloadState: Equatable {
+    case idle
+    case downloading(progress: FileTransferProgress?)
+    case paused(progress: FileTransferProgress?)
+    case downloaded(URL)
+    case failed(String)
+}
+
+private extension IMMediaAssetKind {
+    var displayName: String {
+        switch self {
+        case .image:
+            return "图片"
+        case .audio:
+            return "音频"
+        case .file:
+            return "文件"
+        }
+    }
+}
+
+private struct IMDownloadedMediaPreviewItem: Identifiable, Equatable {
+    let url: URL
+    let title: String
+
+    var id: String { url.absoluteString }
+}
+
+private struct IMDownloadedMediaQuickLookSheet: UIViewControllerRepresentable {
+    let item: IMDownloadedMediaPreviewItem
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(item: item)
+    }
+
+    func makeUIViewController(context: Context) -> QLPreviewController {
+        let controller = QLPreviewController()
+        controller.dataSource = context.coordinator
+        controller.title = item.title
+        return controller
+    }
+
+    func updateUIViewController(_ controller: QLPreviewController, context: Context) {
+        context.coordinator.item = item
+        controller.title = item.title
+        controller.reloadData()
+    }
+
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        var item: IMDownloadedMediaPreviewItem
+
+        init(item: IMDownloadedMediaPreviewItem) {
+            self.item = item
+        }
+
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+            1
+        }
+
+        func previewController(
+            _ controller: QLPreviewController,
+            previewItemAt index: Int
+        ) -> QLPreviewItem {
+            item.url as NSURL
+        }
+    }
+}
+
 private struct IMDetailEmptyState: View {
     var body: some View {
         VStack(spacing: 12) {
@@ -1789,14 +2507,22 @@ private struct IMConversationQueueBanner: View {
 private struct IMMessageBubble: View {
     let message: IMConversationMessage
     let replyReference: IMReplyReferenceResolution?
+    let isHighlighted: Bool
     let canRetry: Bool
     let canCancel: Bool
     let canReply: Bool
     let canRecall: Bool
+    let mediaDownloadState: IMMediaDownloadState?
+    let onJumpToReplyReference: () -> Void
     let onCancel: () -> Void
     let onReply: () -> Void
     let onRecall: () -> Void
     let onRetry: () -> Void
+    let onDownloadMedia: () -> Void
+    let onCancelMediaDownload: () -> Void
+    let onRetryMediaDownload: () -> Void
+    let onOpenDownloadedMedia: (URL) -> Void
+    let onDeleteDownloadedMedia: () -> Void
 
     var body: some View {
         if case .system(let event) = message.content {
@@ -1852,6 +2578,12 @@ private struct IMMessageBubble: View {
             }
             .padding(12)
             .background(bubbleColor)
+            .overlay {
+                if isHighlighted {
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.accentColor.opacity(0.45), lineWidth: 2)
+                }
+            }
             .clipShape(RoundedRectangle(cornerRadius: 16))
             .contextMenu {
                 if canReply {
@@ -1885,6 +2617,12 @@ private struct IMMessageBubble: View {
 
     private var deliveryText: String {
         switch message.deliveryState {
+        case .preparing(let message):
+            return "准备中: \(message)"
+        case .uploading(let message):
+            return "上传中: \(message)"
+        case .uploaded:
+            return "上传完成"
         case .queued(let message):
             return "待发送: \(message)"
         case .sending:
@@ -1908,30 +2646,58 @@ private struct IMMessageBubble: View {
                 .font(.body)
         case .reply(_, let text):
             VStack(alignment: .leading, spacing: 8) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("回复")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    if replyReference?.state == .recalled {
-                        Text(replyReference?.text ?? "原消息暂不可用")
-                            .font(.caption)
+                Button(action: onJumpToReplyReference) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("回复")
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
-                            .italic()
-                            .lineLimit(2)
-                    } else {
-                        Text(replyReference?.text ?? "原消息暂不可用")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                        if replyReference?.state == .recalled {
+                            Text(replyReference?.text ?? "原消息暂不可用")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .italic()
+                                .lineLimit(2)
+                        } else {
+                            Text(replyReference?.text ?? "原消息暂不可用")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color(.tertiarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(Color(.tertiarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .buttonStyle(.plain)
 
                 Text(text)
                     .font(.body)
+            }
+        case .image(let asset):
+            mediaBubble(
+                title: asset.filename,
+                subtitle: mediaSubtitle(for: asset)
+            ) {
+                Label("图片", systemImage: "photo")
+                    .font(.headline)
+            }
+        case .audio(let asset):
+            mediaBubble(
+                title: asset.filename,
+                subtitle: mediaSubtitle(for: asset)
+            ) {
+                Label("语音", systemImage: "waveform")
+                    .font(.headline)
+            }
+        case .file(let asset):
+            mediaBubble(
+                title: asset.filename,
+                subtitle: mediaSubtitle(for: asset)
+            ) {
+                Label("文件", systemImage: "doc")
+                    .font(.headline)
             }
         case .recalled:
             Text(message.direction == .outgoing ? "你撤回了一条消息" : "对方撤回了一条消息")
@@ -1941,6 +2707,197 @@ private struct IMMessageBubble: View {
         case .system:
             EmptyView()
         }
+    }
+
+    @ViewBuilder
+    private func mediaBubble<Header: View>(
+        title: String,
+        subtitle: String,
+        @ViewBuilder header: () -> Header
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            header()
+            Text(title)
+                .font(.body.weight(.medium))
+                .lineLimit(2)
+            if !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            mediaDownloadControls
+        }
+    }
+
+    @ViewBuilder
+    private var mediaDownloadControls: some View {
+        switch mediaDownloadState ?? .idle {
+        case .idle:
+            Button {
+                onDownloadMedia()
+            } label: {
+                Label("下载附件", systemImage: "arrow.down.circle")
+                    .font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        case .downloading(let progress):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    if let fractionCompleted = progress?.fractionCompleted {
+                        ProgressView(value: fractionCompleted)
+                            .controlSize(.small)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(downloadStatusText(for: progress))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Button {
+                    onCancelMediaDownload()
+                } label: {
+                    Label("暂停下载", systemImage: "pause.circle")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        case .paused(let progress):
+            VStack(alignment: .leading, spacing: 6) {
+                Text(pausedStatusText(for: progress))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    Button {
+                        onDownloadMedia()
+                    } label: {
+                        Label("继续下载", systemImage: "arrow.clockwise.circle")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button {
+                        onDeleteDownloadedMedia()
+                    } label: {
+                        Label("重新开始", systemImage: "trash")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+        case .downloaded(let fileURL):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Label("已下载", systemImage: "checkmark.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+
+                    Text(fileURL.lastPathComponent)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                HStack(spacing: 8) {
+                    Button {
+                        onOpenDownloadedMedia(fileURL)
+                    } label: {
+                        Label("打开预览", systemImage: "eye")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    ShareLink(item: fileURL) {
+                        Label("分享", systemImage: "square.and.arrow.up")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button {
+                        onDeleteDownloadedMedia()
+                    } label: {
+                        Label("删除", systemImage: "trash")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+        case .failed(let message):
+            VStack(alignment: .leading, spacing: 6) {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button {
+                    onRetryMediaDownload()
+                } label: {
+                    Label("重试下载", systemImage: "arrow.clockwise")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private func downloadStatusText(for progress: FileTransferProgress?) -> String {
+        guard let progress else {
+            return "正在下载…"
+        }
+
+        if let fractionCompleted = progress.fractionCompleted {
+            let percentage = Int((fractionCompleted * 100).rounded())
+            return "下载中 \(percentage)%"
+        }
+
+        return "已接收 \(ByteCountFormatter.string(fromByteCount: progress.transferredBytes, countStyle: .file))"
+    }
+
+    private func pausedStatusText(for progress: FileTransferProgress?) -> String {
+        guard let progress else {
+            return "下载已暂停"
+        }
+
+        if let fractionCompleted = progress.fractionCompleted {
+            let percentage = Int((fractionCompleted * 100).rounded())
+            return "下载已暂停 \(percentage)%"
+        }
+
+        return "已暂停，已接收 \(ByteCountFormatter.string(fromByteCount: progress.transferredBytes, countStyle: .file))"
+    }
+
+    private func mediaSubtitle(for asset: IMMediaAsset) -> String {
+        var parts: [String] = []
+        if asset.byteSize > 0 {
+            let formatter = ByteCountFormatter()
+            formatter.countStyle = .file
+            parts.append(formatter.string(fromByteCount: asset.byteSize))
+        }
+        if let width = asset.width, let height = asset.height {
+            parts.append("\(width)×\(height)")
+        }
+        if let durationMillis = asset.durationMillis, durationMillis > 0 {
+            parts.append(formatDuration(durationMillis))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func formatDuration(_ durationMillis: Int) -> String {
+        let totalSeconds = max(0, durationMillis / 1000)
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
     }
 }
 
@@ -1967,7 +2924,7 @@ private extension IMConversationMessage {
         }
 
         switch content {
-        case .text, .reply:
+        case .text, .reply, .image, .audio, .file:
             return true
         case .recalled, .system:
             return false
@@ -1983,7 +2940,7 @@ private extension IMConversationMessage {
         }
 
         switch content {
-        case .text, .reply:
+        case .text, .reply, .image, .audio, .file:
             return true
         case .recalled, .system:
             return false
