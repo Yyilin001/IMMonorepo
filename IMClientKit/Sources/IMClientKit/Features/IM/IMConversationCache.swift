@@ -293,6 +293,8 @@ public final class IMCachedConversationSummaryEntity {
     public var directMessagingStateRawValue: String?
     public var directPeerUserID: String?
     public var directPeerEmail: String?
+    public var directPeerDisplayName: String?
+    public var directPeerAvatarPresetRawValue: String?
     public var notice: String?
     public var avatarPresetRawValue: String?
     public var memberCount: Int
@@ -316,6 +318,8 @@ public final class IMCachedConversationSummaryEntity {
         directMessagingStateRawValue: String?,
         directPeerUserID: String?,
         directPeerEmail: String?,
+        directPeerDisplayName: String?,
+        directPeerAvatarPresetRawValue: String?,
         notice: String?,
         avatarPresetRawValue: String?,
         memberCount: Int,
@@ -338,6 +342,8 @@ public final class IMCachedConversationSummaryEntity {
         self.directMessagingStateRawValue = directMessagingStateRawValue
         self.directPeerUserID = directPeerUserID
         self.directPeerEmail = directPeerEmail
+        self.directPeerDisplayName = directPeerDisplayName
+        self.directPeerAvatarPresetRawValue = directPeerAvatarPresetRawValue
         self.notice = notice
         self.avatarPresetRawValue = avatarPresetRawValue
         self.memberCount = memberCount
@@ -480,7 +486,9 @@ public actor IMConversationCacheModelActor {
                 directMessagingState: summary.directMessagingStateRawValue.flatMap(IMDirectMessagingState.init(rawValue:)),
                 directPeer: Self.directPeer(
                     userID: summary.directPeerUserID,
-                    email: summary.directPeerEmail
+                    email: summary.directPeerEmail,
+                    displayName: summary.directPeerDisplayName,
+                    avatarPresetRawValue: summary.directPeerAvatarPresetRawValue
                 ),
                 notice: summary.notice,
                 avatarPreset: summary.avatarPresetRawValue.flatMap(IMConversationAvatarPreset.init(rawValue:)),
@@ -571,6 +579,8 @@ public actor IMConversationCacheModelActor {
                     directMessagingStateRawValue: conversation.directMessagingState?.rawValue,
                     directPeerUserID: conversation.directPeer?.id.uuidString,
                     directPeerEmail: conversation.directPeer?.email,
+                    directPeerDisplayName: conversation.directPeer?.displayName,
+                    directPeerAvatarPresetRawValue: conversation.directPeer?.avatarPreset?.rawValue,
                     notice: conversation.notice,
                     avatarPresetRawValue: conversation.avatarPreset?.rawValue,
                     memberCount: conversation.memberCount,
@@ -801,7 +811,12 @@ public actor IMConversationCacheModelActor {
             .sorted { $0.uuidString < $1.uuidString }
     }
 
-    private static func directPeer(userID: String?, email: String?) -> IMDirectPeer? {
+    private static func directPeer(
+        userID: String?,
+        email: String?,
+        displayName: String?,
+        avatarPresetRawValue: String?
+    ) -> IMDirectPeer? {
         guard let userID,
               let id = UUID(uuidString: userID),
               let email,
@@ -810,7 +825,12 @@ public actor IMConversationCacheModelActor {
             return nil
         }
 
-        return IMDirectPeer(id: id, email: email)
+        return IMDirectPeer(
+            id: id,
+            email: email,
+            displayName: displayName,
+            avatarPreset: avatarPresetRawValue.flatMap(UserAvatarPreset.init(rawValue:))
+        )
     }
 
     private static func deliveryStateRawValue(from state: IMMessageDeliveryState) -> String {

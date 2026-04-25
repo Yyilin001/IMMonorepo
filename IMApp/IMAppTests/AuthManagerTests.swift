@@ -150,6 +150,10 @@ private actor IMCrossDeviceConversationSummaryState {
         )
     }
 
+    func currentSummary() -> IMConversationSummaryResponseBody {
+        summary
+    }
+
     func updatePreferences(
         isPinned: Bool?,
         isMuted: Bool?
@@ -357,6 +361,7 @@ private actor IMCrossDeviceConversationListState {
     private var orderedConversationIDs: [UUID]
     private var summariesByID: [UUID: IMConversationSummaryResponseBody]
     private var messagesByConversationID: [UUID: [IMConversationMessageResponseBody]]
+    private var removedConversationIDs: [UUID]
     private var version: Int
 
     init(
@@ -367,6 +372,7 @@ private actor IMCrossDeviceConversationListState {
         self.orderedConversationIDs = conversations.map(\.id)
         self.summariesByID = Dictionary(uniqueKeysWithValues: conversations.map { ($0.id, $0) })
         self.messagesByConversationID = messagesByConversationID
+        self.removedConversationIDs = []
         self.version = version
     }
 
@@ -381,16 +387,36 @@ private actor IMCrossDeviceConversationListState {
 
     func changesResponse(afterToken: String?) -> IMConversationSummaryChangesResponseBody {
         let currentToken = snapshotToken
-        let upserts = afterToken == currentToken
-            ? []
-            : orderedConversationIDs.compactMap { summariesByID[$0] }
+        let shouldEmitChanges = afterToken != currentToken
+        let upserts = shouldEmitChanges
+            ? orderedConversationIDs.compactMap { summariesByID[$0] }
+            : []
         return IMConversationSummaryChangesResponseBody(
             upserts: upserts,
-            removedConversationIDs: [],
+            removedConversationIDs: shouldEmitChanges ? removedConversationIDs : [],
             nextCursor: nil,
             hasMore: false,
             targetToken: currentToken
         )
+    }
+
+    func upsertSummary(_ summary: IMConversationSummaryResponseBody) {
+        version += 1
+        summariesByID[summary.id] = summary
+        removedConversationIDs.removeAll { $0 == summary.id }
+        if !orderedConversationIDs.contains(summary.id) {
+            orderedConversationIDs.append(summary.id)
+        }
+    }
+
+    func removeConversation(id conversationID: UUID) {
+        version += 1
+        summariesByID.removeValue(forKey: conversationID)
+        messagesByConversationID.removeValue(forKey: conversationID)
+        orderedConversationIDs.removeAll { $0 == conversationID }
+        if !removedConversationIDs.contains(conversationID) {
+            removedConversationIDs.append(conversationID)
+        }
     }
 
     func messagesResponse(for conversationID: UUID) -> [IMConversationMessageResponseBody] {
@@ -632,6 +658,37 @@ private actor IMCrossDeviceConversationListState {
 
     private var snapshotToken: String {
         "snapshot-\(version)"
+    }
+}
+
+private actor IMCrossDeviceConversationMembersState {
+    private var membersByConversationID: [UUID: [IMConversationMemberResponseBody]]
+
+    init(membersByConversationID: [UUID: [IMConversationMemberResponseBody]]) {
+        self.membersByConversationID = membersByConversationID
+    }
+
+    func membersResponse(for conversationID: UUID) -> [IMConversationMemberResponseBody] {
+        membersByConversationID[conversationID, default: []]
+    }
+
+    func updateRole(
+        in conversationID: UUID,
+        memberUserID: UUID,
+        role: IMConversationMemberRole
+    ) {
+        guard var members = membersByConversationID[conversationID],
+              let memberIndex = members.firstIndex(where: { $0.id == memberUserID })
+        else {
+            return
+        }
+
+        members[memberIndex] = IMConversationMemberResponseBody(
+            id: members[memberIndex].id,
+            email: members[memberIndex].email,
+            role: role
+        )
+        membersByConversationID[conversationID] = members
     }
 }
 
@@ -3938,6 +3995,597 @@ struct AuthManagerTests {
         #expect(secondManager.imConversationStore.selectedConversation?.title == "新群资料")
         #expect(secondManager.imConversationStore.selectedConversation?.notice == "新的群公告")
         #expect(secondManager.imConversationStore.selectedConversation?.avatarPreset == .forest)
+    }
+
+    @Test func conversationRemovedForSelfOnAnotherDeviceFallsBackSelectionViaSummaryChanges() async throws {
+        let removedConversationID = UUID(uuidString: "aaaaaaaa-7777-8888-9999-bbbbbbbbbbbb")!
+        let fallbackConversationID = UUID(uuidString: "bbbbbbbb-7777-8888-9999-cccccccccccc")!
+        let state = IMCrossDeviceConversationListState(
+            conversations: [
+                IMConversationSummaryResponseBody(
+                    id: removedConversationID,
+                    title: "将被移除的群聊",
+                    kind: IMConversationKind.group.rawValue,
+                    memberCount: 2,
+                    memberUserIDs: [Self.user.id],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: UUID(uuidString: "11111111-7777-8888-9999-aaaaaaaaaaaa")!,
+                        senderUserID: Self.user.id,
+                        serverSequence: 1,
+                        content: .text("当前选中的会话"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_900_000)
+                    ),
+                    lastReadSequence: 1,
+                    unreadCount: 0,
+                    createdAt: Date(timeIntervalSince1970: 1_700_899_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_900_000)
+                ),
+                IMConversationSummaryResponseBody(
+                    id: fallbackConversationID,
+                    title: "回退会话",
+                    kind: IMConversationKind.group.rawValue,
+                    memberCount: 2,
+                    memberUserIDs: [Self.user.id],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: UUID(uuidString: "22222222-7777-8888-9999-aaaaaaaaaaaa")!,
+                        senderUserID: Self.user.id,
+                        serverSequence: 1,
+                        content: .text("备用摘要"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_899_900)
+                    ),
+                    lastReadSequence: 1,
+                    unreadCount: 0,
+                    createdAt: Date(timeIntervalSince1970: 1_700_898_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_899_900)
+                )
+            ],
+            messagesByConversationID: [
+                removedConversationID: [
+                    IMConversationMessageResponseBody(
+                        id: UUID(uuidString: "11111111-7777-8888-9999-aaaaaaaaaaaa")!,
+                        conversationID: removedConversationID,
+                        senderUserID: Self.user.id,
+                        clientMessageID: nil,
+                        serverSequence: 1,
+                        content: .text("当前选中的会话"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_900_000)
+                    )
+                ]
+            ]
+        )
+        let requestCounter = IMRequestCounter()
+        let loginCounter = IMRequestCounter()
+
+        let transport = MockHTTPTransport { request in
+            let path = request.url?.path
+            switch (request.httpMethod, path) {
+            case ("POST", "/api/auth/login"):
+                await loginCounter.increment("login")
+                let loginIndex = await loginCounter.count(for: "login")
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.authResponseBody(
+                        user: Self.user,
+                        accessToken: "access-remove-\(loginIndex)",
+                        refreshToken: "refresh-remove-\(loginIndex)"
+                    )
+                )
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.pageResponse())
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                await requestCounter.increment("changes")
+                let afterToken = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "afterToken" })?
+                    .value
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.changesResponse(afterToken: afterToken))
+                )
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            case ("GET", "/api/im/conversations/\(removedConversationID.uuidString)/members"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
+            case ("GET", "/api/im/conversations/\(removedConversationID.uuidString)/messages"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: removedConversationID))
+                )
+            case ("GET", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/messages/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("POST", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/read"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+
+        let manager = makeManager(
+            transport: transport,
+            openIMConnection: nil,
+            wrapDefaultIMResponses: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversationID == removedConversationID.uuidString
+                    && manager.imConversationStore.conversations.count == 2
+                    && manager.imConversationStore.selectedConversation?.title == "将被移除的群聊"
+            }
+        }
+
+        await state.removeConversation(id: removedConversationID)
+
+        try await Task.sleep(for: .seconds(5.2))
+        await manager.refreshIMConversationSummaryReadModelIfNeeded()
+
+        #expect(await requestCounter.count(for: "changes") >= 1)
+        #expect(manager.imConversationStore.conversations.map(\.id) == [fallbackConversationID.uuidString])
+        #expect(manager.imConversationStore.selectedConversationID == fallbackConversationID.uuidString)
+        #expect(manager.imConversationStore.selectedConversation?.title == "回退会话")
+    }
+
+    @Test func removedConversationWithCachedHistoryDoesNotReappearAfterRefreshAndReconnectGapSync() async throws {
+        let harness = IMConnectionTestHarness()
+        let removedConversationID = UUID(uuidString: "aaaaaaaa-6666-7777-8888-bbbbbbbbbbbb")!
+        let fallbackConversationID = UUID(uuidString: "bbbbbbbb-6666-7777-8888-cccccccccccc")!
+        let removedConversationIDString = removedConversationID.uuidString
+        let fallbackConversationIDString = fallbackConversationID.uuidString
+        let cache = InMemoryIMConversationCache()
+        await cache.seed(
+            IMConversationCacheSnapshot(
+                conversations: [
+                    IMCachedConversationState(
+                        id: removedConversationIDString,
+                        title: "缓存中的旧群聊",
+                        kind: .group,
+                        memberCount: 2,
+                        memberUserIDs: [Self.user.id],
+                        messages: [
+                            IMCachedMessageState(
+                                id: "removed-cached-1",
+                                conversationID: removedConversationIDString,
+                                clientMessageID: nil,
+                                serverMessageID: "removed-server-1",
+                                senderUserID: Self.user.id,
+                                serverSequence: 1,
+                                kind: "text",
+                                text: "缓存旧历史 1",
+                                direction: .incoming,
+                                createdAt: Date(timeIntervalSince1970: 1_700_920_000),
+                                deliveryState: .sent
+                            ),
+                            IMCachedMessageState(
+                                id: "removed-cached-2",
+                                conversationID: removedConversationIDString,
+                                clientMessageID: nil,
+                                serverMessageID: "removed-server-2",
+                                senderUserID: Self.user.id,
+                                serverSequence: 2,
+                                kind: "text",
+                                text: "缓存旧历史 2",
+                                direction: .incoming,
+                                createdAt: Date(timeIntervalSince1970: 1_700_920_010),
+                                deliveryState: .sent
+                            )
+                        ],
+                        hasLoadedMessages: true,
+                        lastMessagePreviewText: "缓存旧历史 2",
+                        hasMoreHistory: false,
+                        latestSyncedServerSequence: 2,
+                        oldestLoadedServerSequence: 1,
+                        serverLastReadSequence: 2,
+                        serverUnreadCount: 0,
+                        updatedAt: Date(timeIntervalSince1970: 1_700_920_010)
+                    ),
+                    IMCachedConversationState(
+                        id: fallbackConversationIDString,
+                        title: "缓存中的回退会话",
+                        kind: .group,
+                        memberCount: 2,
+                        memberUserIDs: [Self.user.id],
+                        messages: [
+                            IMCachedMessageState(
+                                id: "fallback-cached-1",
+                                conversationID: fallbackConversationIDString,
+                                clientMessageID: nil,
+                                serverMessageID: "fallback-server-1",
+                                senderUserID: Self.user.id,
+                                serverSequence: 1,
+                                kind: "text",
+                                text: "回退历史 1",
+                                direction: .incoming,
+                                createdAt: Date(timeIntervalSince1970: 1_700_920_020),
+                                deliveryState: .sent
+                            )
+                        ],
+                        hasLoadedMessages: true,
+                        lastMessagePreviewText: "回退历史 1",
+                        hasMoreHistory: true,
+                        latestSyncedServerSequence: 1,
+                        oldestLoadedServerSequence: 1,
+                        serverLastReadSequence: 1,
+                        serverUnreadCount: 0,
+                        updatedAt: Date(timeIntervalSince1970: 1_700_920_020)
+                    )
+                ],
+                selectedConversationID: removedConversationIDString,
+                lastSummaryRefreshAt: Date(timeIntervalSince1970: 1_700_920_030)
+            ),
+            for: Self.user.id
+        )
+
+        let state = IMCrossDeviceConversationListState(
+            conversations: [
+                IMConversationSummaryResponseBody(
+                    id: removedConversationID,
+                    title: "服务端旧群聊",
+                    kind: IMConversationKind.group.rawValue,
+                    memberCount: 2,
+                    memberUserIDs: [Self.user.id],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: UUID(uuidString: "11111111-6666-7777-8888-aaaaaaaaaaaa")!,
+                        senderUserID: Self.user.id,
+                        serverSequence: 2,
+                        content: .text("缓存旧历史 2"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_920_010)
+                    ),
+                    lastReadSequence: 2,
+                    unreadCount: 0,
+                    createdAt: Date(timeIntervalSince1970: 1_700_919_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_920_010)
+                ),
+                IMConversationSummaryResponseBody(
+                    id: fallbackConversationID,
+                    title: "服务端回退会话",
+                    kind: IMConversationKind.group.rawValue,
+                    memberCount: 2,
+                    memberUserIDs: [Self.user.id],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: UUID(uuidString: "22222222-6666-7777-8888-aaaaaaaaaaaa")!,
+                        senderUserID: Self.user.id,
+                        serverSequence: 2,
+                        content: .text("回退历史 2"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_920_040)
+                    ),
+                    lastReadSequence: 1,
+                    unreadCount: 1,
+                    createdAt: Date(timeIntervalSince1970: 1_700_919_100),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_920_040)
+                )
+            ],
+            messagesByConversationID: [
+                removedConversationID: [
+                    IMConversationMessageResponseBody(
+                        id: UUID(uuidString: "11111111-6666-7777-8888-aaaaaaaaaaaa")!,
+                        conversationID: removedConversationID,
+                        senderUserID: Self.user.id,
+                        clientMessageID: nil,
+                        serverSequence: 2,
+                        content: .text("缓存旧历史 2"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_920_010)
+                    )
+                ],
+                fallbackConversationID: [
+                    IMConversationMessageResponseBody(
+                        id: UUID(uuidString: "33333333-6666-7777-8888-aaaaaaaaaaaa")!,
+                        conversationID: fallbackConversationID,
+                        senderUserID: Self.user.id,
+                        clientMessageID: nil,
+                        serverSequence: 1,
+                        content: .text("回退历史 1"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_920_020)
+                    ),
+                    IMConversationMessageResponseBody(
+                        id: UUID(uuidString: "22222222-6666-7777-8888-aaaaaaaaaaaa")!,
+                        conversationID: fallbackConversationID,
+                        senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
+                        clientMessageID: nil,
+                        serverSequence: 2,
+                        content: .text("回退历史 2"),
+                        createdAt: Date(timeIntervalSince1970: 1_700_920_040)
+                    )
+                ]
+            ]
+        )
+        let requestCounter = IMRequestCounter()
+        let loginCounter = IMRequestCounter()
+
+        let transport = MockHTTPTransport { request in
+            let path = request.url?.path
+            let query = request.url?.query
+            switch (request.httpMethod, path, query) {
+            case ("POST", "/api/auth/login", _):
+                await loginCounter.increment("login")
+                let loginIndex = await loginCounter.count(for: "login")
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.authResponseBody(
+                        user: Self.user,
+                        accessToken: "access-removed-cache-\(loginIndex)",
+                        refreshToken: "refresh-removed-cache-\(loginIndex)"
+                    )
+                )
+            case ("GET", "/api/im/conversations", _):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.pageResponse())
+                )
+            case ("GET", "/api/im/conversations/changes", _):
+                await requestCounter.increment("changes")
+                let afterToken = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "afterToken" })?
+                    .value
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.changesResponse(afterToken: afterToken))
+                )
+            case ("GET", "/api/contacts", _):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests", _):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            case ("GET", "/api/im/conversations/\(removedConversationIDString)/members", _):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
+            case ("GET", "/api/im/conversations/\(fallbackConversationIDString)/members", _):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
+            case ("GET", "/api/im/conversations/\(removedConversationIDString)/messages", _):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: removedConversationID))
+                )
+            case ("GET", "/api/im/conversations/\(fallbackConversationIDString)/messages", _):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: fallbackConversationID))
+                )
+            case ("GET", "/api/im/conversations/\(removedConversationIDString)/messages/since", _):
+                await requestCounter.increment("removedGapSync")
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", "/api/im/conversations/\(fallbackConversationIDString)/messages/since", _):
+                await requestCounter.increment("fallbackGapSync")
+                let afterSequence = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "afterSequence" })?
+                    .value
+                    .flatMap(UInt64.init)
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        await state.messagesSinceResponse(for: fallbackConversationID, afterSequence: afterSequence)
+                    )
+                )
+            case ("POST", "/api/im/conversations/\(removedConversationIDString)/read", _):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
+            case ("POST", "/api/im/conversations/\(fallbackConversationIDString)/read", _):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+
+        let manager = makeManager(
+            transport: transport,
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            imConversationCache: IMConversationCacheHandler(cache),
+            wrapDefaultIMResponses: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversationID == removedConversationIDString
+                    && manager.imConversationStore.selectedConversation?.messages.map(\.text) == ["缓存旧历史 1", "缓存旧历史 2"]
+                    && manager.imConnectionStatus == .connected
+            }
+        }
+
+        await state.removeConversation(id: removedConversationID)
+
+        try await Task.sleep(for: .seconds(5.2))
+        await manager.refreshIMConversationSummaryReadModelIfNeeded()
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversationID == fallbackConversationIDString
+                    && manager.imConversationStore.conversations.map(\.id) == [fallbackConversationIDString]
+                    && manager.imConversationStore.selectedConversation?.messages.map(\.text) == ["回退历史 1"]
+            }
+        }
+
+        let removedGapRequestsBeforeReconnect = await requestCounter.count(for: "removedGapSync")
+        let fallbackGapRequestsBeforeReconnect = await requestCounter.count(for: "fallbackGapSync")
+        await manager.reconnectIMConnection()
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversationID == fallbackConversationIDString
+                    && manager.imConversationStore.conversations.map(\.id) == [fallbackConversationIDString]
+                    && manager.imConversationStore.selectedConversation?.messages.map(\.text) == ["回退历史 1", "回退历史 2"]
+                    && manager.imConversationStore.selectedConversation?.lastMessagePreview == "回退历史 2"
+                    && manager.imConversationStore.selectedConversation?.serverUnreadCount == 1
+            }
+        }
+
+        #expect(await requestCounter.count(for: "changes") >= 1)
+        #expect(await requestCounter.count(for: "removedGapSync") == removedGapRequestsBeforeReconnect)
+        #expect(await requestCounter.count(for: "fallbackGapSync") > fallbackGapRequestsBeforeReconnect)
+    }
+
+    @Test func conversationMemberRoleUpdatedOnAnotherDeviceConvergesSummaryAndMembersAfterRefreshAndOpen() async throws {
+        let conversationID = UUID(uuidString: "aaaaaaaa-8888-9999-0000-bbbbbbbbbbbb")!
+        let peerUserID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        let roleUpdatedMessageID = UUID(uuidString: "11111111-8888-9999-0000-aaaaaaaaaaaa")!
+        let summaryState = IMCrossDeviceConversationSummaryState(
+            summary: IMConversationSummaryResponseBody(
+                id: conversationID,
+                title: "群角色同步",
+                kind: IMConversationKind.group.rawValue,
+                memberCount: 2,
+                memberUserIDs: [Self.user.id, peerUserID],
+                lastMessage: IMMessagePreviewResponseBody(
+                    id: UUID(uuidString: "22222222-8888-9999-0000-aaaaaaaaaaaa")!,
+                    senderUserID: Self.user.id,
+                    serverSequence: 1,
+                    content: .system(.legacyText("manager@example.com 创建了群聊")),
+                    createdAt: Date(timeIntervalSince1970: 1_700_910_000)
+                ),
+                lastReadSequence: 1,
+                unreadCount: 0,
+                createdAt: Date(timeIntervalSince1970: 1_700_909_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_910_000)
+            )
+        )
+        let membersState = IMCrossDeviceConversationMembersState(
+            membersByConversationID: [
+                conversationID: [
+                    IMConversationMemberResponseBody(id: Self.user.id, email: Self.user.email, role: .owner),
+                    IMConversationMemberResponseBody(id: peerUserID, email: "peer@example.com", role: .member)
+                ]
+            ]
+        )
+        let requestCounter = IMRequestCounter()
+        let loginCounter = IMRequestCounter()
+
+        let transport = MockHTTPTransport { request in
+            let path = request.url?.path
+            switch (request.httpMethod, path) {
+            case ("POST", "/api/auth/login"):
+                await loginCounter.increment("login")
+                let loginIndex = await loginCounter.count(for: "login")
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.authResponseBody(
+                        user: Self.user,
+                        accessToken: "access-role-\(loginIndex)",
+                        refreshToken: "refresh-role-\(loginIndex)"
+                    )
+                )
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await summaryState.pageResponse())
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                await requestCounter.increment("changes")
+                let afterToken = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "afterToken" })?
+                    .value
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await summaryState.changesResponse(afterToken: afterToken))
+                )
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
+                await requestCounter.increment("members")
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await membersState.membersResponse(for: conversationID))
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/members/\(peerUserID.uuidString)/role"):
+                let payload = try JSONDecoder().decode(
+                    IMConversationMemberRoleUpdateRequestBody.self,
+                    from: request.httpBody ?? Data()
+                )
+                #expect(payload.role == .admin)
+                await membersState.updateRole(in: conversationID, memberUserID: peerUserID, role: .admin)
+                await summaryState.appendMessage(
+                    IMConversationMessageResponseBody(
+                        id: roleUpdatedMessageID,
+                        conversationID: conversationID,
+                        senderUserID: Self.user.id,
+                        clientMessageID: nil,
+                        serverSequence: 2,
+                        content: .system(
+                            IMSystemEvent(
+                                type: .roleUpdated,
+                                actorUserID: Self.user.id,
+                                actorEmail: Self.user.email,
+                                targetUserID: peerUserID,
+                                targetEmail: "peer@example.com",
+                                previousRole: .member,
+                                newRole: .admin
+                            )
+                        ),
+                        createdAt: Date(timeIntervalSince1970: 1_700_910_100)
+                    ),
+                    unreadCount: 1,
+                    lastReadSequence: 1
+                )
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await summaryState.currentSummary())
+                )
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+
+        let firstManager = makeManager(
+            transport: transport,
+            openIMConnection: nil,
+            wrapDefaultIMResponses: false
+        )
+        let secondManager = makeManager(
+            transport: transport,
+            openIMConnection: nil,
+            wrapDefaultIMResponses: false
+        )
+
+        await firstManager.login(email: Self.user.email, password: "password123")
+        await secondManager.login(email: Self.user.email, password: "password123")
+        await secondManager.openIMConversation(conversationID.uuidString)
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                secondManager.imConversationStore.selectedConversation?.members.first(where: { $0.id == peerUserID })?.role == .member
+            }
+        }
+
+        let didUpdateRole = await firstManager.updateIMConversationMemberRole(
+            memberUserID: peerUserID,
+            role: .admin,
+            in: conversationID.uuidString
+        )
+        #expect(didUpdateRole)
+
+        try await Task.sleep(for: .seconds(5.2))
+        await secondManager.refreshIMConversationSummaryReadModelIfNeeded()
+        await secondManager.openIMConversation(conversationID.uuidString)
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                secondManager.imConversationStore.selectedConversation?.lastMessagePreview == "manager@example.com 将 peer@example.com 设为管理员"
+                    && secondManager.imConversationStore.selectedConversation?.serverUnreadCount == 1
+                    && secondManager.imConversationStore.selectedConversation?.members.first(where: { $0.id == peerUserID })?.role == .admin
+            }
+        }
+
+        #expect(await requestCounter.count(for: "changes") >= 1)
+        #expect(await requestCounter.count(for: "members") >= 2)
     }
 
     @Test func conversationDraftRemainsLocalAcrossDevices() async throws {

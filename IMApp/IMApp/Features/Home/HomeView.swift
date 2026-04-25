@@ -7,11 +7,65 @@ struct HomeView: View {
 
     let user: AuthUser
 
+    @State private var isPresentingEditProfile = false
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Text("已登录")
                     .font(.largeTitle.bold())
+
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 14) {
+                        UserAvatarView(
+                            displayName: activeUser.preferredDisplayName,
+                            email: activeUser.email,
+                            avatarPreset: activeUser.avatarPreset,
+                            size: 60
+                        )
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(activeUser.preferredDisplayName)
+                                .font(.title3.weight(.semibold))
+
+                            Text(activeUser.email)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+                    }
+
+                    if let message = authManager.profileMessage, !message.isEmpty {
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                    }
+
+                    HStack(spacing: 12) {
+                        Button("编辑资料") {
+                            isPresentingEditProfile = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(authManager.isUpdatingProfile)
+
+                        Button("刷新资料") {
+                            Task {
+                                await authManager.reloadProfile()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(authManager.isUpdatingProfile)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .background(Color(.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 18))
 
                 HStack(spacing: 10) {
                     Image(systemName: serverStatusIcon)
@@ -57,7 +111,7 @@ struct HomeView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18))
 
                 VStack(alignment: .leading, spacing: 12) {
-                    Label(user.email, systemImage: "person.crop.circle.fill")
+                    Label(activeUser.email, systemImage: "person.crop.circle.fill")
                     Label("受保护接口：GET /api/me", systemImage: "lock.shield")
                     Label("访问令牌会自动续期", systemImage: "arrow.trianglehead.clockwise")
                     Label("登录后会自动建立 TCP IM 连接", systemImage: "bolt.horizontal.circle")
@@ -66,13 +120,6 @@ struct HomeView: View {
                 .foregroundStyle(.secondary)
 
                 HStack(spacing: 12) {
-                    Button("刷新资料") {
-                        Task {
-                            await authManager.reloadProfile()
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-
                     Button(probeManager.isTrafficTestRunning ? "停止测试" : "开始测试") {
                         probeManager.toggleTrafficTest()
                     }
@@ -179,6 +226,21 @@ struct HomeView: View {
         }
         .background(Color(.systemGroupedBackground))
         .navigationTitle("首页")
+        .sheet(isPresented: $isPresentingEditProfile) {
+            EditProfileSheet(
+                initialEmail: activeUser.email,
+                initialDisplayName: activeUser.displayName,
+                initialAvatarPreset: activeUser.avatarPreset,
+                isSubmitting: authManager.isUpdatingProfile,
+                message: authManager.profileMessage,
+                onSubmit: { displayName, avatarPreset in
+                    await authManager.updateProfile(
+                        displayName: displayName,
+                        avatarPreset: avatarPreset
+                    )
+                }
+            )
+        }
     }
 
     private func quickEntryRow(title: String, systemImage: String, tint: Color) -> some View {
@@ -221,6 +283,10 @@ struct HomeView: View {
         }
 
         return lastRequestAt.formatted(date: .omitted, time: .standard)
+    }
+
+    private var activeUser: AuthUser {
+        authManager.currentUser ?? user
     }
 
     private var serverStatusTitle: String {

@@ -61,6 +61,8 @@ struct IMConversationSummaryProjectionService {
             let directPeer = directPeer(from: memberships, currentUserID: recipientUserID)
             summary.directPeerUserID = directPeer?.id
             summary.directPeerEmail = directPeer?.email
+            summary.directPeerDisplayName = directPeer?.displayName
+            summary.directPeerAvatarPresetEnum = directPeer?.avatarPreset
             summary.notice = conversation.notice
             summary.avatarPresetEnum = conversation.avatarPresetEnum
             summary.memberUserIDs = memberUserIDs
@@ -297,6 +299,8 @@ struct IMConversationSummaryProjectionService {
             directMessagingState: nil,
             directPeerUserID: nil,
             directPeerEmail: nil,
+            directPeerDisplayName: nil,
+            directPeerAvatarPreset: nil,
             notice: nil,
             avatarPreset: nil,
             memberUserIDs: [],
@@ -317,6 +321,33 @@ struct IMConversationSummaryProjectionService {
             try await summary.create(on: database)
         } else {
             try await summary.update(on: database)
+        }
+    }
+
+    func refreshDirectPeerProfiles(for userID: UUID) async throws -> [UUID: [UUID]] {
+        let summaries = try await ConversationUserSummary.query(on: db)
+            .filter(\.$directPeerUserID == userID)
+            .all()
+        guard !summaries.isEmpty else {
+            return [:]
+        }
+
+        guard let user = try await User.find(userID, on: db) else {
+            return [:]
+        }
+
+        var recipientUserIDsByConversationID: [UUID: [UUID]] = [:]
+        for summary in summaries {
+            summary.directPeerEmail = user.email
+            summary.directPeerDisplayName = user.displayName
+            summary.directPeerAvatarPresetEnum = user.avatarPresetEnum
+            summary.updatedAt = Date()
+            try await save(summary, on: db)
+            recipientUserIDsByConversationID[summary.conversationID, default: []].append(summary.ownerUserID)
+        }
+
+        return recipientUserIDsByConversationID.mapValues { ownerUserIDs in
+            Array(Set(ownerUserIDs)).sorted { $0.uuidString < $1.uuidString }
         }
     }
 
@@ -352,7 +383,9 @@ struct IMConversationSummaryProjectionService {
             directPeer: row.directPeerUserID.map { directPeerUserID in
                 IMDirectPeerResponse(
                     id: directPeerUserID,
-                    email: row.directPeerEmail ?? ""
+                    email: row.directPeerEmail ?? "",
+                    displayName: row.directPeerDisplayName,
+                    avatarPreset: row.directPeerAvatarPresetEnum
                 )
             },
             notice: row.notice,
@@ -380,7 +413,12 @@ struct IMConversationSummaryProjectionService {
             return nil
         }
 
-        return IMDirectPeerResponse(id: peerMembership.$user.id, email: peer.email)
+        return IMDirectPeerResponse(
+            id: peerMembership.$user.id,
+            email: peer.email,
+            displayName: peer.displayName,
+            avatarPreset: peer.avatarPresetEnum
+        )
     }
 
     private func makePreview(from message: ConversationMessage) throws -> IMMessagePreviewResponse {

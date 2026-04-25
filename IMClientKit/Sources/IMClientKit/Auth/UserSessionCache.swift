@@ -39,18 +39,26 @@ public struct UserSessionCacheHandler: Sendable {
 public struct UserDefaultsSessionCache: UserSessionCache {
     private let userIDKey: String
     private let userEmailKey: String
+    private let userDisplayNameKey: String
+    private let userAvatarPresetKey: String
 
     public init(
         userIDKey: String = "cached_auth_user_id",
-        userEmailKey: String = "cached_auth_user_email"
+        userEmailKey: String = "cached_auth_user_email",
+        userDisplayNameKey: String = "cached_auth_user_display_name",
+        userAvatarPresetKey: String = "cached_auth_user_avatar_preset"
     ) {
         self.userIDKey = userIDKey
         self.userEmailKey = userEmailKey
+        self.userDisplayNameKey = userDisplayNameKey
+        self.userAvatarPresetKey = userAvatarPresetKey
     }
 
     public func save(_ user: AuthUser) {
         UserDefaults.standard.set(user.id.uuidString, forKey: userIDKey)
         UserDefaults.standard.set(user.email, forKey: userEmailKey)
+        UserDefaults.standard.set(user.displayName, forKey: userDisplayNameKey)
+        UserDefaults.standard.set(user.avatarPreset?.rawValue, forKey: userAvatarPresetKey)
     }
 
     public func readUser() -> AuthUser? {
@@ -61,11 +69,19 @@ public struct UserDefaultsSessionCache: UserSessionCache {
             return nil
         }
 
-        return AuthUser(id: id, email: email)
+        return AuthUser(
+            id: id,
+            email: email,
+            displayName: UserDefaults.standard.string(forKey: userDisplayNameKey),
+            avatarPreset: UserDefaults.standard.string(forKey: userAvatarPresetKey)
+                .flatMap(UserAvatarPreset.init(rawValue:))
+        )
     }
 
     public func clear() {
         UserDefaults.standard.removeObject(forKey: userIDKey)
         UserDefaults.standard.removeObject(forKey: userEmailKey)
+        UserDefaults.standard.removeObject(forKey: userDisplayNameKey)
+        UserDefaults.standard.removeObject(forKey: userAvatarPresetKey)
     }
 }

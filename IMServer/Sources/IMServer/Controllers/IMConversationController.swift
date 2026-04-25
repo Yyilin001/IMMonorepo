@@ -586,6 +586,20 @@ struct IMConversationChangesResponse: Content, Equatable {
 struct IMDirectPeerResponse: Content, Equatable, Sendable {
     let id: UUID
     let email: String
+    let displayName: String?
+    let avatarPreset: UserAvatarPreset?
+
+    init(
+        id: UUID,
+        email: String,
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil
+    ) {
+        self.id = id
+        self.email = email
+        self.displayName = displayName
+        self.avatarPreset = avatarPreset
+    }
 }
 
 struct IMConversationReadResponse: Content, Equatable {

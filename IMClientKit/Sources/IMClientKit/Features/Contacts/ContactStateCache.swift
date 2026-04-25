@@ -4,12 +4,23 @@ import SwiftData
 public struct CachedContactState: Identifiable, Sendable, Equatable {
     public let id: UUID
     public let email: String
+    public let displayName: String?
+    public let avatarPreset: UserAvatarPreset?
     public let remark: String?
     public let createdAt: Date?
 
-    public init(id: UUID, email: String, remark: String?, createdAt: Date?) {
+    public init(
+        id: UUID,
+        email: String,
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil,
+        remark: String?,
+        createdAt: Date?
+    ) {
         self.id = id
         self.email = email
+        self.displayName = displayName
+        self.avatarPreset = avatarPreset
         self.remark = remark
         self.createdAt = createdAt
     }
@@ -18,6 +29,8 @@ public struct CachedContactState: Identifiable, Sendable, Equatable {
         self.init(
             id: contact.id,
             email: contact.email,
+            displayName: contact.profileDisplayName,
+            avatarPreset: contact.avatarPreset,
             remark: contact.remark,
             createdAt: contact.createdAt
         )
@@ -27,6 +40,8 @@ public struct CachedContactState: Identifiable, Sendable, Equatable {
         ContactResponseBody(
             id: id,
             email: email,
+            displayName: displayName,
+            avatarPreset: avatarPreset,
             remark: remark,
             createdAt: createdAt
         )
@@ -225,6 +240,8 @@ public final class CachedContactEntity {
     public var ownerUserID: String
     public var contactUserID: String
     public var email: String
+    public var displayName: String?
+    public var avatarPresetRawValue: String?
     public var remark: String?
     public var createdAt: Date?
 
@@ -233,6 +250,8 @@ public final class CachedContactEntity {
         ownerUserID: String,
         contactUserID: String,
         email: String,
+        displayName: String?,
+        avatarPresetRawValue: String?,
         remark: String?,
         createdAt: Date?
     ) {
@@ -240,6 +259,8 @@ public final class CachedContactEntity {
         self.ownerUserID = ownerUserID
         self.contactUserID = contactUserID
         self.email = email
+        self.displayName = displayName
+        self.avatarPresetRawValue = avatarPresetRawValue
         self.remark = remark
         self.createdAt = createdAt
     }
@@ -253,8 +274,12 @@ public final class CachedContactRequestEntity {
     public var boxRawValue: String
     public var requesterUserID: String
     public var requesterEmail: String
+    public var requesterDisplayName: String?
+    public var requesterAvatarPresetRawValue: String?
     public var addresseeUserID: String
     public var addresseeEmail: String
+    public var addresseeDisplayName: String?
+    public var addresseeAvatarPresetRawValue: String?
     public var statusRawValue: String
     public var message: String?
     public var requesterRemark: String?
@@ -270,8 +295,12 @@ public final class CachedContactRequestEntity {
         boxRawValue: String,
         requesterUserID: String,
         requesterEmail: String,
+        requesterDisplayName: String?,
+        requesterAvatarPresetRawValue: String?,
         addresseeUserID: String,
         addresseeEmail: String,
+        addresseeDisplayName: String?,
+        addresseeAvatarPresetRawValue: String?,
         statusRawValue: String,
         message: String?,
         requesterRemark: String?,
@@ -286,8 +315,12 @@ public final class CachedContactRequestEntity {
         self.boxRawValue = boxRawValue
         self.requesterUserID = requesterUserID
         self.requesterEmail = requesterEmail
+        self.requesterDisplayName = requesterDisplayName
+        self.requesterAvatarPresetRawValue = requesterAvatarPresetRawValue
         self.addresseeUserID = addresseeUserID
         self.addresseeEmail = addresseeEmail
+        self.addresseeDisplayName = addresseeDisplayName
+        self.addresseeAvatarPresetRawValue = addresseeAvatarPresetRawValue
         self.statusRawValue = statusRawValue
         self.message = message
         self.requesterRemark = requesterRemark
@@ -369,6 +402,8 @@ public actor ContactStateCacheModelActor {
                     ownerUserID: ownerUserID,
                     contactUserID: contact.id.uuidString,
                     email: contact.email,
+                    displayName: contact.displayName,
+                    avatarPresetRawValue: contact.avatarPreset?.rawValue,
                     remark: contact.remark,
                     createdAt: contact.createdAt
                 )
@@ -445,6 +480,8 @@ public actor ContactStateCacheModelActor {
         return CachedContactState(
             id: id,
             email: entity.email,
+            displayName: entity.displayName,
+            avatarPreset: entity.avatarPresetRawValue.flatMap(UserAvatarPreset.init(rawValue:)),
             remark: entity.remark,
             createdAt: entity.createdAt
         )
@@ -465,8 +502,18 @@ public actor ContactStateCacheModelActor {
             entity,
             CachedContactRequestState(
                 id: requestID,
-                requester: AuthUser(id: requesterID, email: entity.requesterEmail),
-                addressee: AuthUser(id: addresseeID, email: entity.addresseeEmail),
+                requester: AuthUser(
+                    id: requesterID,
+                    email: entity.requesterEmail,
+                    displayName: entity.requesterDisplayName,
+                    avatarPreset: entity.requesterAvatarPresetRawValue.flatMap(UserAvatarPreset.init(rawValue:))
+                ),
+                addressee: AuthUser(
+                    id: addresseeID,
+                    email: entity.addresseeEmail,
+                    displayName: entity.addresseeDisplayName,
+                    avatarPreset: entity.addresseeAvatarPresetRawValue.flatMap(UserAvatarPreset.init(rawValue:))
+                ),
                 status: status,
                 message: entity.message,
                 requesterRemark: entity.requesterRemark,
@@ -494,8 +541,12 @@ public actor ContactStateCacheModelActor {
             boxRawValue: bucket.rawValue,
             requesterUserID: request.requester.id.uuidString,
             requesterEmail: request.requester.email,
+            requesterDisplayName: request.requester.displayName,
+            requesterAvatarPresetRawValue: request.requester.avatarPreset?.rawValue,
             addresseeUserID: request.addressee.id.uuidString,
             addresseeEmail: request.addressee.email,
+            addresseeDisplayName: request.addressee.displayName,
+            addresseeAvatarPresetRawValue: request.addressee.avatarPreset?.rawValue,
             statusRawValue: request.status.rawValue,
             message: request.message,
             requesterRemark: request.requesterRemark,

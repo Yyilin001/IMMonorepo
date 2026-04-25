@@ -36,6 +36,16 @@ final class AuthSessionController {
         try await sessionClient.fetchMe()
     }
 
+    func updateProfile(
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil
+    ) async throws -> AuthUser {
+        try await sessionClient.updateMyProfile(
+            displayName: displayName,
+            avatarPreset: avatarPreset
+        )
+    }
+
     func fetchSessions() async throws -> [SessionSnapshot] {
         try await sessionClient.fetchSessions()
     }

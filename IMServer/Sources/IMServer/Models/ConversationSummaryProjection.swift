@@ -28,6 +28,12 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
     @OptionalField(key: "direct_peer_email")
     var directPeerEmail: String?
 
+    @OptionalField(key: "direct_peer_display_name")
+    var directPeerDisplayName: String?
+
+    @OptionalField(key: "direct_peer_avatar_preset")
+    var directPeerAvatarPreset: String?
+
     @OptionalField(key: "notice")
     var notice: String?
 
@@ -77,6 +83,8 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
         directMessagingState: String?,
         directPeerUserID: UUID?,
         directPeerEmail: String?,
+        directPeerDisplayName: String? = nil,
+        directPeerAvatarPreset: UserAvatarPreset? = nil,
         notice: String? = nil,
         avatarPreset: IMConversationAvatarPreset? = nil,
         memberUserIDs: [UUID],
@@ -98,6 +106,8 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
         self.directMessagingState = directMessagingState
         self.directPeerUserID = directPeerUserID
         self.directPeerEmail = directPeerEmail
+        self.directPeerDisplayName = directPeerDisplayName
+        self.directPeerAvatarPreset = directPeerAvatarPreset?.rawValue
         self.notice = notice
         self.avatarPreset = avatarPreset?.rawValue
         memberCount = memberUserIDs.count
@@ -136,6 +146,11 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
     var avatarPresetEnum: IMConversationAvatarPreset? {
         get { avatarPreset.flatMap(IMConversationAvatarPreset.init(rawValue:)) }
         set { avatarPreset = newValue?.rawValue }
+    }
+
+    var directPeerAvatarPresetEnum: UserAvatarPreset? {
+        get { directPeerAvatarPreset.flatMap(UserAvatarPreset.init(rawValue:)) }
+        set { directPeerAvatarPreset = newValue?.rawValue }
     }
 
     static func recordID(ownerUserID: UUID, conversationID: UUID) -> String {

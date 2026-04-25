@@ -506,11 +506,7 @@ struct IMConversationDetailView: View {
     private var conversationSummaryCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Text(conversationInitials)
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 42, height: 42)
-                    .background(Circle().fill(Color.accentColor))
+                conversationAvatar(size: 42)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(conversationIdentity.title)
@@ -567,6 +563,24 @@ struct IMConversationDetailView: View {
         .padding(16)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 18))
+    }
+
+    @ViewBuilder
+    private func conversationAvatar(size: CGFloat) -> some View {
+        if conversation?.kind == .direct {
+            UserAvatarView(
+                displayName: conversationIdentity.title,
+                email: conversation?.directPeer?.email,
+                avatarPreset: conversation?.directPeer?.avatarPreset,
+                size: size
+            )
+        } else {
+            Text(conversationInitials)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(width: size, height: size)
+                .background(Circle().fill(Color.accentColor))
+        }
     }
 
     private var composerBar: some View {
@@ -1452,11 +1466,20 @@ private struct IMConversationRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text(avatarText)
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(.white)
-                .frame(width: 48, height: 48)
-                .background(Circle().fill(avatarColor))
+            if conversation.kind == .direct {
+                UserAvatarView(
+                    displayName: identity.title,
+                    email: conversation.directPeer?.email,
+                    avatarPreset: conversation.directPeer?.avatarPreset,
+                    size: 48
+                )
+            } else {
+                Text(avatarText)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 48, height: 48)
+                    .background(Circle().fill(avatarColor))
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {

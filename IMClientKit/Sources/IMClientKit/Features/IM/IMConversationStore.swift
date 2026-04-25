@@ -123,10 +123,19 @@ public struct IMConversationMember: Identifiable, Equatable, Sendable {
 public struct IMDirectPeer: Equatable, Sendable {
     public let id: UUID
     public let email: String
+    public let displayName: String?
+    public let avatarPreset: UserAvatarPreset?
 
-    public init(id: UUID, email: String) {
+    public init(
+        id: UUID,
+        email: String,
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil
+    ) {
         self.id = id
         self.email = email
+        self.displayName = displayName
+        self.avatarPreset = avatarPreset
     }
 }
 
@@ -1879,7 +1888,12 @@ public final class IMConversationStore: ObservableObject {
             return nil
         }
 
-        return IMDirectPeer(id: directPeer.id, email: directPeer.email)
+        return IMDirectPeer(
+            id: directPeer.id,
+            email: directPeer.email,
+            displayName: directPeer.displayName,
+            avatarPreset: directPeer.avatarPreset
+        )
     }
 
     private func outgoingAcknowledgementFailureMessage(for status: String) -> String {

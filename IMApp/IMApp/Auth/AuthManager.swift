@@ -72,6 +72,8 @@ final class AuthManager: ObservableObject {
     @Published private(set) var isLoadingContactRequests = false
     @Published private(set) var contactRequestsLoadMessage: String?
     @Published private(set) var contactRequestActionMessage: String?
+    @Published private(set) var isUpdatingProfile = false
+    @Published private(set) var profileMessage: String?
     @Published private(set) var acceptingRequestIDs: Set<UUID> = []
     @Published private(set) var decliningRequestIDs: Set<UUID> = []
     @Published private(set) var cancellingRequestIDs: Set<UUID> = []
@@ -355,13 +357,44 @@ final class AuthManager: ObservableObject {
         do {
             let user = try await authSessionController.fetchProfile()
             markServerOnline()
-            applySignedInState(user)
+            replaceSignedInUser(user)
+            profileMessage = nil
         } catch {
+            profileMessage = error.localizedDescription
             if await shouldPreserveSession(for: error) {
                 await markServerUnavailableIfNeeded(for: error)
             } else {
                 await clearSession(message: error.localizedDescription)
             }
+        }
+    }
+
+    @discardableResult
+    func updateProfile(
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil
+    ) async -> Bool {
+        invalidateRestoreSession()
+        isUpdatingProfile = true
+        defer { isUpdatingProfile = false }
+
+        do {
+            let user = try await authSessionController.updateProfile(
+                displayName: displayName,
+                avatarPreset: avatarPreset
+            )
+            markServerOnline()
+            replaceSignedInUser(user)
+            profileMessage = "资料已更新。"
+            return true
+        } catch {
+            profileMessage = error.localizedDescription
+            if await shouldPreserveSession(for: error) {
+                await markServerUnavailableIfNeeded(for: error)
+            } else {
+                await clearSession(message: error.localizedDescription)
+            }
+            return false
         }
     }
 
@@ -1388,6 +1421,8 @@ final class AuthManager: ObservableObject {
         unseenIncomingContactRequestCount = 0
         contactRequestsLoadMessage = nil
         contactRequestActionMessage = nil
+        isUpdatingProfile = false
+        profileMessage = nil
         directConversationRelationshipActionMessages = [:]
         isLoadingContactRequests = false
         acceptingRequestIDs = []
@@ -1400,7 +1435,8 @@ final class AuthManager: ObservableObject {
     }
 
     private func applySignedInState(_ user: AuthUser) {
-        phase = .signedIn(user)
+        profileMessage = nil
+        replaceSignedInUser(user)
         scheduleIMConnectionIfNeeded()
         scheduleIMConversationBootstrap(for: user)
         Task { [weak self] in
@@ -1408,6 +1444,10 @@ final class AuthManager: ObservableObject {
             await self?.reloadContacts()
             await self?.reloadContactRequests()
         }
+    }
+
+    private func replaceSignedInUser(_ user: AuthUser) {
+        phase = .signedIn(user)
     }
 
     private func scheduleIMConnectionIfNeeded() {

@@ -35,22 +35,56 @@ public struct ContactRequestAcceptRequestBody: Codable, Sendable {
 public struct ContactResponseBody: Codable, Identifiable, Equatable, Sendable, APIResponseBody {
     public let id: UUID
     public let email: String
+    public let profileDisplayName: String?
+    public let avatarPreset: UserAvatarPreset?
     public let remark: String?
     public let createdAt: Date?
 
-    public init(id: UUID, email: String, remark: String?, createdAt: Date?) {
+    public init(
+        id: UUID,
+        email: String,
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil,
+        remark: String?,
+        createdAt: Date?
+    ) {
         self.id = id
         self.email = email
+        self.profileDisplayName = displayName
+        self.avatarPreset = avatarPreset
         self.remark = remark
         self.createdAt = createdAt
     }
 
     public var displayName: String {
+        let normalizedUserDisplayName = profileDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedRemark = remark?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let normalizedRemark, !normalizedRemark.isEmpty else {
-            return email
+            guard let normalizedUserDisplayName, !normalizedUserDisplayName.isEmpty else {
+                return email
+            }
+            return normalizedUserDisplayName
         }
         return normalizedRemark
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case email
+        case profileDisplayName = "displayName"
+        case avatarPreset
+        case remark
+        case createdAt
+    }
+}
+
+public struct UserProfileUpdateRequestBody: Encodable, Sendable {
+    public let displayName: String?
+    public let avatarPreset: UserAvatarPreset?
+
+    public init(displayName: String? = nil, avatarPreset: UserAvatarPreset? = nil) {
+        self.displayName = displayName
+        self.avatarPreset = avatarPreset
     }
 }
 
@@ -90,16 +124,24 @@ public struct ContactRequestResponseBody: Codable, Identifiable, Equatable, Send
         self.respondedAt = respondedAt
     }
 
-    public func peerDisplayName(for currentUserID: UUID?) -> String {
+    public func peerUser(for currentUserID: UUID?) -> AuthUser {
         guard let currentUserID else {
-            return requester.email
+            return requester
         }
 
         if requester.id == currentUserID {
-            return addressee.email
+            return addressee
         }
 
-        return requester.email
+        return requester
+    }
+
+    public func peerDisplayName(for currentUserID: UUID?) -> String {
+        peerUser(for: currentUserID).preferredDisplayName
+    }
+
+    public func peerAvatarPreset(for currentUserID: UUID?) -> UserAvatarPreset? {
+        peerUser(for: currentUserID).avatarPreset
     }
 }
 
@@ -114,6 +156,20 @@ enum UserRequest {
         public typealias Response = [ContactResponseBody]
 
         let baseRequestSpec = HTTPRequestSpec(path: "api/contacts")
+    }
+
+    public struct UpdateProfile: AuthorizedEndpoint {
+        public typealias Response = AuthUser
+
+        let payload: UserProfileUpdateRequestBody
+
+        let baseRequestSpec = HTTPRequestSpec(path: "api/me/profile", method: .patch)
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
     }
 
     public struct AddContact: AuthorizedEndpoint {
@@ -223,6 +279,18 @@ enum UserRequest {
 
     public static let me = Me()
     public static let contacts = Contacts()
+
+    public static func updateProfile(
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil
+    ) -> UpdateProfile {
+        UpdateProfile(
+            payload: UserProfileUpdateRequestBody(
+                displayName: displayName,
+                avatarPreset: avatarPreset
+            )
+        )
+    }
 
     public static func addContact(email: String, remark: String? = nil) -> AddContact {
         AddContact(payload: ContactCreateRequestBody(email: email, remark: remark))

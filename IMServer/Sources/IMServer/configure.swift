@@ -31,6 +31,7 @@ public func configure(_ app: Application) async throws {
 
     // 认证链路依赖 users + auth_sessions 两张表，以及后续的索引/约束迁移。
     app.migrations.add(CreateUser())
+    app.migrations.add(AddUserProfileFields())
     app.migrations.add(CreateUserContact())
     app.migrations.add(AddUserContactRemark())
     app.migrations.add(BackfillReciprocalUserContacts())
@@ -50,6 +51,7 @@ public func configure(_ app: Application) async throws {
     app.migrations.add(AddConversationMessageClientMessageID())
     app.migrations.add(AddConversationMessageClientMessageIDUniqueIndex())
     app.migrations.add(CreateConversationUserSummary())
+    app.migrations.add(AddConversationUserSummaryDirectPeerProfileFields())
     app.migrations.add(AddConversationUserSummaryIndexes())
     try await app.autoMigrate()
     try FileStorageService(app: app).prepareStorage()

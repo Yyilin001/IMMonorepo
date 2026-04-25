@@ -260,20 +260,12 @@ private struct ContactRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Circle()
-                .fill(
-                    LinearGradient(
-                        colors: [Color.teal.opacity(0.85), Color.blue.opacity(0.8)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: 42, height: 42)
-                .overlay {
-                    Text(initial)
-                        .font(.headline.weight(.semibold))
-                        .foregroundStyle(.white)
-                }
+            UserAvatarView(
+                displayName: contact.displayName,
+                email: contact.email,
+                avatarPreset: contact.avatarPreset,
+                size: 42
+            )
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(contact.displayName)
@@ -321,10 +313,6 @@ private struct ContactRow: View {
         }
     }
 
-    private var initial: String {
-        contact.displayName.first.map { String($0).uppercased() } ?? "#"
-    }
-
     private var subtitle: String {
         contact.displayName == contact.email ? "联系人 ID \(contact.id.uuidString.prefix(8))" : contact.email
     }
@@ -339,10 +327,15 @@ private struct IncomingContactRequestRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            requestAvatar(systemImage: "person.crop.circle.badge.plus", color: .orange)
+            UserAvatarView(
+                displayName: request.requester.preferredDisplayName,
+                email: request.requester.email,
+                avatarPreset: request.requester.avatarPreset,
+                size: 42
+            )
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(request.requester.email)
+                Text(request.requester.preferredDisplayName)
                     .font(.body.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
@@ -560,10 +553,15 @@ private struct OutgoingContactRequestRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            requestAvatar(systemImage: "paperplane.fill", color: .blue)
+            UserAvatarView(
+                displayName: request.addressee.preferredDisplayName,
+                email: request.addressee.email,
+                avatarPreset: request.addressee.avatarPreset,
+                size: 42
+            )
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(request.addressee.email)
+                Text(request.addressee.preferredDisplayName)
                     .font(.body.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
@@ -599,7 +597,12 @@ private struct ResolvedContactRequestRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            requestAvatar(systemImage: statusIconName, color: statusColor)
+            UserAvatarView(
+                displayName: request.peerDisplayName(for: currentUserID),
+                email: request.peerUser(for: currentUserID).email,
+                avatarPreset: request.peerAvatarPreset(for: currentUserID),
+                size: 42
+            )
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(request.peerDisplayName(for: currentUserID))

@@ -13,6 +13,7 @@ struct UserController: RouteCollection {
         )
 
         protected.get("me", use: me)
+        protected.patch("me", "profile", use: updateProfile)
         protected.get("contacts", use: contacts)
         protected.post("contacts", use: addContact)
         protected.patch("contacts", ":contactUserID", use: updateContact)
@@ -26,6 +27,31 @@ struct UserController: RouteCollection {
 
     func me(req: Request) async throws -> UserResponse {
         try req.auth.require(User.self).asResponse()
+    }
+
+    func updateProfile(req: Request) async throws -> UserResponse {
+        let user = try req.auth.require(User.self)
+        let userID = try user.requireID()
+        let body = try req.content.decode(UserProfileUpdateRequest.self)
+
+        user.displayName = normalizedDisplayName(body.displayName)
+        user.avatarPresetEnum = body.avatarPreset
+        try await user.update(on: req.db)
+
+        let affectedConversationRecipientUserIDs = try await IMConversationSummaryProjectionService(db: req.db)
+            .refreshDirectPeerProfiles(for: userID)
+
+        let conversationEventService = IMConversationEventService(app: req.application, db: req.db)
+        for (conversationID, recipientUserIDs) in affectedConversationRecipientUserIDs {
+            await conversationEventService.publish(
+                eventType: .summaryUpdated,
+                conversationID: conversationID,
+                recipientUserIDs: recipientUserIDs,
+                actorUserID: userID
+            )
+        }
+
+        return try user.asResponse()
     }
 
     func contacts(req: Request) async throws -> [ContactResponse] {
@@ -250,6 +276,14 @@ struct UserController: RouteCollection {
         }
         return String(normalized.prefix(64))
     }
+
+    private func normalizedDisplayName(_ displayName: String?) -> String? {
+        let normalized = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let normalized, !normalized.isEmpty else {
+            return nil
+        }
+        return String(normalized.prefix(40))
+    }
 }
 
 struct ContactCreateRequest: Content {
@@ -261,15 +295,24 @@ struct ContactUpdateRequest: Content {
     let remark: String?
 }
 
+struct UserProfileUpdateRequest: Content {
+    let displayName: String?
+    let avatarPreset: UserAvatarPreset?
+}
+
 struct ContactResponse: Content, Equatable, Sendable {
     let id: UUID
     let email: String
+    let displayName: String?
+    let avatarPreset: UserAvatarPreset?
     let remark: String?
     let createdAt: Date?
 
     init(contact: UserContact) throws {
         self.id = try contact.contact.requireID()
         self.email = contact.contact.email
+        self.displayName = contact.contact.displayName
+        self.avatarPreset = contact.contact.avatarPresetEnum
         self.remark = contact.remark
         self.createdAt = contact.createdAt
     }

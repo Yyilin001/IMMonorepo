@@ -336,6 +336,33 @@ struct IMServerTests {
         }
     }
 
+    @Test("Profile update persists display name and avatar preset")
+    func updateProfile() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+
+            try await app.testing().test(.PATCH, "api/me/profile", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                try req.content.encode(
+                    UserProfileUpdateRequest(
+                        displayName: "Demo User",
+                        avatarPreset: .forest
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let profile = try res.content.decode(UserResponse.self)
+                #expect(profile.email == "demo@example.com")
+                #expect(profile.displayName == "Demo User")
+                #expect(profile.avatarPreset == .forest)
+            })
+
+            let storedUser = try await user(email: "demo@example.com", on: app)
+            #expect(storedUser.displayName == "Demo User")
+            #expect(storedUser.avatarPresetEnum == .forest)
+        }
+    }
+
     @Test("Register creates a user and returns tokens")
     func register() async throws {
         try await withApp(configure: configure) { app in
@@ -1910,6 +1937,100 @@ struct IMServerTests {
                 #expect(changes.upserts[0].isPinned == true)
                 #expect(changes.upserts[0].pinnedAt != nil)
                 #expect(changes.upserts[0].isMuted == true)
+            })
+        }
+    }
+
+    @Test("Profile update refreshes direct peer in summary changes")
+    func profileUpdateRefreshesDirectPeerInSummaryChanges() async throws {
+        try await withApp(configure: configure) { app in
+            let ownerToken = try await loginAccessToken(
+                email: "demo@example.com",
+                password: "password1234",
+                deviceID: "profile-owner-device",
+                on: app
+            )
+            let peer = User(
+                email: User.normalize("profile-peer@example.com"),
+                passwordHash: try Bcrypt.hash("password1234"),
+                status: .active
+            )
+            try await peer.create(on: app.db)
+            let peerToken = try await loginAccessToken(
+                email: peer.email,
+                password: "password1234",
+                deviceID: "profile-peer-device",
+                on: app
+            )
+            let ownerUser = try await user(email: "demo@example.com", on: app)
+            let conversation = Conversation(
+                title: nil,
+                kind: .direct,
+                updatedAt: Date(timeIntervalSince1970: 1_700_510_000)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+            let peerUserID = try peer.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try ownerUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: peerUserID,
+                role: .member
+            ).create(on: app.db)
+
+            try await IMConversationSummaryProjectionService(db: app.db).refreshConversationSummaries(
+                conversationID: conversationID,
+                recipientUserIDs: [try ownerUser.requireID()]
+            )
+
+            var baselineToken = ""
+            try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: ownerToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let page = try res.content.decode(IMConversationPageResponse.self)
+                #expect(page.items.count == 1)
+                #expect(page.items[0].directPeer == IMDirectPeerResponse(
+                    id: peerUserID,
+                    email: peer.email,
+                    displayName: nil,
+                    avatarPreset: nil
+                ))
+                baselineToken = page.snapshotToken
+            })
+
+            try await app.testing().test(.PATCH, "api/me/profile", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: peerToken)
+                try req.content.encode(
+                    UserProfileUpdateRequest(
+                        displayName: "Peer Display",
+                        avatarPreset: .rose
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+            })
+
+            try await app.testing().test(.GET, queryPath("api/im/conversations/changes", items: [
+                URLQueryItem(name: "afterToken", value: baselineToken)
+            ]), beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: ownerToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let changes = try res.content.decode(IMConversationChangesResponse.self)
+                #expect(changes.upserts.count == 1)
+                #expect(changes.upserts[0].id == conversationID)
+                #expect(changes.upserts[0].directPeer == IMDirectPeerResponse(
+                    id: peerUserID,
+                    email: peer.email,
+                    displayName: "Peer Display",
+                    avatarPreset: .rose
+                ))
             })
         }
     }

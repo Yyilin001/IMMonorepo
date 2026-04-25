@@ -113,7 +113,23 @@ public actor SessionClient {
     }
 
     public func fetchMe() async throws -> AuthUser {
-        try await executor.execute(UserRequest.me)
+        let user = try await executor.execute(UserRequest.me)
+        await coordinator.cacheUser(user)
+        return user
+    }
+
+    public func updateMyProfile(
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil
+    ) async throws -> AuthUser {
+        let user = try await executor.execute(
+            UserRequest.updateProfile(
+                displayName: displayName,
+                avatarPreset: avatarPreset
+            )
+        )
+        await coordinator.cacheUser(user)
+        return user
     }
 
     public func fetchContacts() async throws -> [ContactResponseBody] {

@@ -75,6 +75,10 @@ public actor AuthSessionCoordinator {
         userCache.clear()
     }
 
+    public func cacheUser(_ user: AuthUser) {
+        userCache.save(user)
+    }
+
     public func validAccessToken(forceRefresh: Bool) async throws -> String {
         if !forceRefresh,
            let accessToken,

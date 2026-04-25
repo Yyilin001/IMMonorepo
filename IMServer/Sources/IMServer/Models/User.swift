@@ -22,6 +22,12 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
     @Field(key: "status")
     var status: String
 
+    @OptionalField(key: "display_name")
+    var displayName: String?
+
+    @OptionalField(key: "avatar_preset")
+    var avatarPreset: String?
+
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
 
@@ -33,11 +39,20 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
 
     init() { }
 
-    init(id: UUID? = nil, email: String, passwordHash: String, status: UserStatus) {
+    init(
+        id: UUID? = nil,
+        email: String,
+        passwordHash: String,
+        status: UserStatus,
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil
+    ) {
         self.id = id
         self.email = email
         self.passwordHash = passwordHash
         self.status = status.rawValue
+        self.displayName = displayName
+        self.avatarPreset = avatarPreset?.rawValue
     }
 
     var statusEnum: UserStatus {
@@ -45,7 +60,17 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
     }
 
     func asResponse() throws -> UserResponse {
-        UserResponse(id: try requireID(), email: email)
+        UserResponse(
+            id: try requireID(),
+            email: email,
+            displayName: displayName,
+            avatarPreset: avatarPresetEnum
+        )
+    }
+
+    var avatarPresetEnum: UserAvatarPreset? {
+        get { avatarPreset.flatMap(UserAvatarPreset.init(rawValue:)) }
+        set { avatarPreset = newValue?.rawValue }
     }
 
     static func normalize(_ email: String) -> String {
@@ -57,4 +82,6 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
 struct UserResponse: Content, Equatable, Sendable {
     let id: UUID
     let email: String
+    let displayName: String?
+    let avatarPreset: UserAvatarPreset?
 }

@@ -8,6 +8,20 @@ public enum IMDirectMessagingState: String, Codable, Equatable, Sendable {
 public struct IMDirectPeerResponseBody: Codable, Equatable, Sendable, APIResponseBody {
     public let id: UUID
     public let email: String
+    public let displayName: String?
+    public let avatarPreset: UserAvatarPreset?
+
+    public init(
+        id: UUID,
+        email: String,
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil
+    ) {
+        self.id = id
+        self.email = email
+        self.displayName = displayName
+        self.avatarPreset = avatarPreset
+    }
 }
 
 public struct IMConversationCreateRequestBody: Codable, Sendable {

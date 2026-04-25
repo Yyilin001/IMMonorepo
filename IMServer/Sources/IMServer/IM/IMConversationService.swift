@@ -1577,7 +1577,9 @@ struct IMConversationService {
 
         return IMDirectPeerResponse(
             id: peerMembership.$user.id,
-            email: peerUser.email
+            email: peerUser.email,
+            displayName: peerUser.displayName,
+            avatarPreset: peerUser.avatarPresetEnum
         )
     }
 }
