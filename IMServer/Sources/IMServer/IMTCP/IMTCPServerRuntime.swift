@@ -113,7 +113,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
 
         if case .authenticated(let connection) = state {
             Task {
-                await self.application.imConnectionRegistry.remove(connectionID: connection.connectionID)
+                await self.application.connectionRoutingService.remove(connectionID: connection.connectionID)
             }
         }
     }
@@ -225,7 +225,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 let control = IMConnectionControl(connectionID: connection.connectionID, channel: channel)
 
-                await application.imConnectionRegistry.bind(connection, control: control)
+                try await application.connectionRoutingService.bind(connection, control: control)
 
                 channel.eventLoop.execute {
                     self.authTimeoutTask?.cancel()
@@ -291,7 +291,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
             }
 
             let requestID = packet.requestID
-            let service = IMRealtimeMessageService(db: application.db)
+            let service = IMRealtimeMessageService(app: application)
 
             Task {
                 do {
@@ -309,12 +309,14 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                         )
                     }
 
-                    await self.application.imConnectionRegistry.sendMessage(
+                    try? await self.application.processConversationOutboxForTesting()
+
+                    await self.application.connectionRoutingService.sendMessage(
                         result.message,
                         toUserIDs: result.recipientUserIDs
                     )
                     if result.didCreateMessage {
-                        await IMConversationEventService(app: self.application, db: self.application.db).publish(
+                        await IMConversationEventService(app: self.application).publish(
                             eventType: IMTCPConversationEventType.summaryUpdated,
                             conversationID: result.conversationID,
                             recipientUserIDs: result.recipientUserIDs,
@@ -337,7 +339,13 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                 } catch {
                     self.application.logger.error(
                         "IM TCP message persistence failed",
-                        metadata: ["error": .string(String(describing: error))]
+                        metadata: [
+                            "error": .string(String(describing: error)),
+                            "debugError": .string(String(reflecting: error)),
+                            "conversationID": .string(payload.conversationID),
+                            "clientMessageID": .string(payload.clientMessageID ?? ""),
+                            "senderUserID": .string(connection.userID.uuidString)
+                        ]
                     )
                     channel.eventLoop.execute {
                         self.writePacket(

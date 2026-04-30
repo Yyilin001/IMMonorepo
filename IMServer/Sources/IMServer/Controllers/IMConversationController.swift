@@ -2,6 +2,11 @@ import Vapor
 
 struct IMConversationController: RouteCollection {
     func boot(routes: any RoutesBuilder) throws {
+        try registerCommandRoutes(on: routes)
+        try registerQueryRoutes(on: routes)
+    }
+
+    func registerCommandRoutes(on routes: any RoutesBuilder) throws {
         let protected = routes.grouped("api", "im")
             .grouped(
                 AccessTokenAuthenticator(),
@@ -9,35 +14,48 @@ struct IMConversationController: RouteCollection {
             )
 
         protected.post("conversations", use: createConversation)
-        protected.get("conversations", use: conversations)
-        protected.get("conversations", "changes", use: conversationChanges)
-        protected.get("conversations", ":conversationID", "members", use: members)
         protected.post("conversations", ":conversationID", "members", use: addMembers)
         protected.post("conversations", ":conversationID", "members", ":memberUserID", "remove", use: removeMember)
         protected.post("conversations", ":conversationID", "members", ":memberUserID", "role", use: updateMemberRole)
         protected.post("conversations", ":conversationID", "title", use: updateTitle)
         protected.patch("conversations", ":conversationID", "preferences", use: updatePreferences)
         protected.patch("conversations", ":conversationID", "metadata", use: updateMetadata)
-        protected.get("conversations", ":conversationID", "messages", use: messages)
-        protected.get("conversations", ":conversationID", "search", use: searchMessages)
-        protected.get("conversations", ":conversationID", "messages", "since", use: messagesSince)
+        protected.post("conversations", ":conversationID", "messages", ":messageID", "edit", use: editMessage)
+        protected.post("conversations", ":conversationID", "messages", ":messageID", "reactions", use: toggleReaction)
         protected.post("conversations", ":conversationID", "messages", ":messageID", "recall", use: recallMessage)
         protected.post("conversations", ":conversationID", "read", use: markRead)
         protected.post("conversations", ":conversationID", "leave", use: leaveConversation)
+    }
+
+    func registerQueryRoutes(on routes: any RoutesBuilder) throws {
+        let protected = routes.grouped("api", "im")
+            .grouped(
+                AccessTokenAuthenticator(),
+                User.guardMiddleware(throwing: Abort(.unauthorized, reason: "用户未登录。"))
+            )
+
+        protected.get("conversations", use: conversations)
+        protected.get("conversations", "changes", use: conversationChanges)
+        protected.get("conversations", ":conversationID", "members", use: members)
+        protected.get("conversations", ":conversationID", "messages", use: messages)
+        protected.get("conversations", ":conversationID", "search", use: searchMessages)
+        protected.get("conversations", ":conversationID", "messages", "since", use: messagesSince)
     }
 
     func createConversation(req: Request) async throws -> IMConversationResponse {
         let user = try req.auth.require(User.self)
         let body = try req.content.decode(IMConversationCreateRequest.self)
         let creatorUserID = try user.requireID()
+        let commandService = IMConversationService.command(app: req.application)
 
-        let response = try await IMConversationService(db: req.db).createConversation(
+        let response = try await commandService.createConversation(
             kind: body.kind,
             title: body.title,
             memberEmails: body.memberEmails,
             creatorUserID: creatorUserID
         )
-        await IMConversationEventService(app: req.application, db: req.db).publish(
+        try await req.application.processConversationOutboxForTesting()
+        await IMConversationEventService(app: req.application).publish(
             eventType: IMTCPConversationEventType.conversationCreated,
             conversationID: response.id,
             recipientUserIDs: response.memberUserIDs,
@@ -54,7 +72,7 @@ struct IMConversationController: RouteCollection {
     func conversations(req: Request) async throws -> IMConversationPageResponse {
         let user = try req.auth.require(User.self)
         let query = try req.query.decode(IMConversationPageQuery.self)
-        return try await IMConversationService(db: req.db)
+        return try await QueryReadModelFacade(app: req.application)
             .listConversations(
                 for: try user.requireID(),
                 cursor: query.cursor,
@@ -65,7 +83,7 @@ struct IMConversationController: RouteCollection {
     func conversationChanges(req: Request) async throws -> IMConversationChangesResponse {
         let user = try req.auth.require(User.self)
         let query = try req.query.decode(IMConversationChangesQuery.self)
-        return try await IMConversationService(db: req.db)
+        return try await QueryReadModelFacade(app: req.application)
             .listConversationChanges(
                 for: try user.requireID(),
                 afterToken: query.afterToken,
@@ -83,7 +101,7 @@ struct IMConversationController: RouteCollection {
             throw Abort(.badRequest, reason: "会话 ID 无效。")
         }
 
-        return try await IMConversationService(db: req.db)
+        return try await QueryReadModelFacade(app: req.application)
             .listMembers(in: conversationID, for: try user.requireID())
     }
 
@@ -92,7 +110,7 @@ struct IMConversationController: RouteCollection {
         let conversationID = try conversationID(from: req)
         let query = try req.query.decode(IMMessageHistoryQuery.self)
 
-        return try await IMConversationService(db: req.db)
+        return try await QueryReadModelFacade(app: req.application)
             .listMessages(
                 in: conversationID,
                 for: try user.requireID(),
@@ -106,7 +124,7 @@ struct IMConversationController: RouteCollection {
         let conversationID = try conversationID(from: req)
         let query = try req.query.decode(IMMessageSearchQuery.self)
 
-        return try await IMConversationService(db: req.db)
+        return try await QueryReadModelFacade(app: req.application)
             .searchMessages(
                 in: conversationID,
                 for: try user.requireID(),
@@ -121,20 +139,22 @@ struct IMConversationController: RouteCollection {
         let conversationID = try conversationID(from: req)
         let body = try req.content.decode(IMConversationMemberUpdateRequest.self)
         let requesterUserID = try user.requireID()
-        let service = IMConversationService(db: req.db)
-        let previousMembers = try await service.listMembers(in: conversationID, for: requesterUserID)
+        let commandService = IMConversationService.command(app: req.application)
+        let readService = QueryReadModelFacade(app: req.application)
+        let previousMembers = try await readService.listMembers(in: conversationID, for: requesterUserID)
         let previousUserIDs = Set(previousMembers.map(\.id))
 
-        let response = try await service.addMembers(
+        let response = try await commandService.addMembers(
             in: conversationID,
             memberEmails: body.memberEmails,
             requesterUserID: requesterUserID
         )
+        try await req.application.processConversationOutboxForTesting()
         let updatedUserIDs = Set(response.memberUserIDs)
         let addedUserIDs = Array(updatedUserIDs.subtracting(previousUserIDs))
             .sorted { $0.uuidString < $1.uuidString }
         let existingUserIDs = Array(previousUserIDs).sorted { $0.uuidString < $1.uuidString }
-        let eventService = IMConversationEventService(app: req.application, db: req.db)
+        let eventService = IMConversationEventService(app: req.application)
 
         await eventService.publish(
             eventType: IMTCPConversationEventType.membersAdded,
@@ -161,13 +181,14 @@ struct IMConversationController: RouteCollection {
         let conversationID = try conversationID(from: req)
         let memberUserID = try memberUserID(from: req)
         let requesterUserID = try user.requireID()
-        let service = IMConversationService(db: req.db)
-        let result = try await service.removeMember(
+        let commandService = IMConversationService.command(app: req.application)
+        let result = try await commandService.removeMember(
             in: conversationID,
             memberUserID: memberUserID,
             requesterUserID: requesterUserID
         )
-        let eventService = IMConversationEventService(app: req.application, db: req.db)
+        try await req.application.processConversationOutboxForTesting()
+        let eventService = IMConversationEventService(app: req.application)
 
         await eventService.publish(
             eventType: .membersUpdated,
@@ -195,15 +216,16 @@ struct IMConversationController: RouteCollection {
         let body = try req.content.decode(IMConversationMemberRoleUpdateRequest.self)
         let requesterUserID = try user.requireID()
         let role = try body.normalizedRole()
-        let service = IMConversationService(db: req.db)
-        let response = try await service.updateMemberRole(
+        let commandService = IMConversationService.command(app: req.application)
+        let response = try await commandService.updateMemberRole(
             in: conversationID,
             memberUserID: memberUserID,
             role: role,
             requesterUserID: requesterUserID
         )
+        try await req.application.processConversationOutboxForTesting()
 
-        await IMConversationEventService(app: req.application, db: req.db).publish(
+        await IMConversationEventService(app: req.application).publish(
             eventType: .membersUpdated,
             conversationID: conversationID,
             recipientUserIDs: response.memberUserIDs,
@@ -222,13 +244,15 @@ struct IMConversationController: RouteCollection {
         let conversationID = try conversationID(from: req)
         let body = try req.content.decode(IMConversationTitleUpdateRequest.self)
         let requesterUserID = try user.requireID()
-        let response = try await IMConversationService(db: req.db).updateConversationTitle(
+        let commandService = IMConversationService.command(app: req.application)
+        let response = try await commandService.updateConversationTitle(
             in: conversationID,
             title: body.title,
             requesterUserID: requesterUserID
         )
+        try await req.application.processConversationOutboxForTesting()
 
-        await IMConversationEventService(app: req.application, db: req.db).publish(
+        await IMConversationEventService(app: req.application).publish(
             eventType: .summaryUpdated,
             conversationID: conversationID,
             recipientUserIDs: response.memberUserIDs,
@@ -247,15 +271,16 @@ struct IMConversationController: RouteCollection {
         let conversationID = try conversationID(from: req)
         let body = try req.content.decode(IMConversationPreferencesUpdateRequest.self)
         let requesterUserID = try user.requireID()
+        let commandService = IMConversationService.command(app: req.application)
 
-        let response = try await IMConversationService(db: req.db).updateConversationPreferences(
+        let response = try await commandService.updateConversationPreferences(
             in: conversationID,
             isPinned: body.isPinned,
             isMuted: body.isMuted,
             requesterUserID: requesterUserID
         )
 
-        await IMConversationEventService(app: req.application, db: req.db).publish(
+        await IMConversationEventService(app: req.application).publish(
             eventType: .summaryUpdated,
             conversationID: conversationID,
             recipientUserIDs: [requesterUserID],
@@ -269,15 +294,17 @@ struct IMConversationController: RouteCollection {
         let conversationID = try conversationID(from: req)
         let body = try req.content.decode(IMConversationMetadataUpdateRequest.self)
         let requesterUserID = try user.requireID()
-        let response = try await IMConversationService(db: req.db).updateConversationMetadata(
+        let commandService = IMConversationService.command(app: req.application)
+        let response = try await commandService.updateConversationMetadata(
             in: conversationID,
             title: body.title,
             notice: body.notice,
             avatarPreset: body.avatarPreset,
             requesterUserID: requesterUserID
         )
+        try await req.application.processConversationOutboxForTesting()
 
-        await IMConversationEventService(app: req.application, db: req.db).publish(
+        await IMConversationEventService(app: req.application).publish(
             eventType: .summaryUpdated,
             conversationID: conversationID,
             recipientUserIDs: response.memberUserIDs,
@@ -296,7 +323,7 @@ struct IMConversationController: RouteCollection {
         let conversationID = try conversationID(from: req)
         let query = try req.query.decode(IMMessageSinceQuery.self)
 
-        return try await IMConversationService(db: req.db)
+        return try await QueryReadModelFacade(app: req.application)
             .listMessagesSince(
                 in: conversationID,
                 for: try user.requireID(),
@@ -310,13 +337,15 @@ struct IMConversationController: RouteCollection {
         let conversationID = try conversationID(from: req)
         let body = try req.content.decode(IMConversationReadRequest.self)
         let userID = try user.requireID()
+        let commandService = IMConversationService.command(app: req.application)
 
-        let response = try await IMConversationService(db: req.db).markConversationRead(
+        let response = try await commandService.markConversationRead(
             in: conversationID,
             for: userID,
             readSequence: body.readSequence
         )
-        await IMConversationEventService(app: req.application, db: req.db).publish(
+        try await req.application.processConversationOutboxForTesting()
+        await IMConversationEventService(app: req.application).publish(
             eventType: IMTCPConversationEventType.summaryUpdated,
             conversationID: conversationID,
             recipientUserIDs: [userID],
@@ -336,22 +365,96 @@ struct IMConversationController: RouteCollection {
         }
 
         let userID = try user.requireID()
-        let service = IMConversationService(db: req.db)
-        let message = try await service.recallMessage(
+        let commandService = IMConversationService.command(app: req.application)
+        let strongReadService = QueryReadModelFacade(app: req.application)
+        let message = try await commandService.recallMessage(
             in: conversationID,
             messageID: messageID,
             requesterUserID: userID
         )
-        let conversation = try await service.conversationSummary(
+        try await req.application.processConversationOutboxForTesting()
+        let conversation = try await strongReadService.conversationSummary(
             conversationID: conversationID,
             for: userID
         )
         let recipientUserIDs = conversation.memberUserIDs
 
-        await IMConversationEventService(app: req.application, db: req.db).publish(
+        await IMConversationEventService(app: req.application).publish(
             eventType: .messageRecalled,
             conversationID: conversationID,
             recipientUserIDs: recipientUserIDs,
+            message: message,
+            actorUserID: userID
+        )
+        return message
+    }
+
+    func editMessage(req: Request) async throws -> IMMessageResponse {
+        let user = try req.auth.require(User.self)
+        let conversationID = try conversationID(from: req)
+        guard
+            let rawMessageID = req.parameters.get("messageID"),
+            let messageID = UUID(uuidString: rawMessageID)
+        else {
+            throw Abort(.badRequest, reason: "消息 ID 无效。")
+        }
+
+        let body = try req.content.decode(IMConversationMessageEditRequest.self)
+        let userID = try user.requireID()
+        let commandService = IMConversationService.command(app: req.application)
+        let strongReadService = QueryReadModelFacade(app: req.application)
+        let message = try await commandService.editMessage(
+            in: conversationID,
+            messageID: messageID,
+            text: body.text,
+            requesterUserID: userID
+        )
+        try await req.application.processConversationOutboxForTesting()
+        let conversation = try await strongReadService.conversationSummary(
+            conversationID: conversationID,
+            for: userID
+        )
+
+        await IMConversationEventService(app: req.application).publish(
+            eventType: .messageUpdated,
+            conversationID: conversationID,
+            recipientUserIDs: conversation.memberUserIDs,
+            message: message,
+            actorUserID: userID
+        )
+        return message
+    }
+
+    func toggleReaction(req: Request) async throws -> IMMessageResponse {
+        let user = try req.auth.require(User.self)
+        let conversationID = try conversationID(from: req)
+        guard
+            let rawMessageID = req.parameters.get("messageID"),
+            let messageID = UUID(uuidString: rawMessageID)
+        else {
+            throw Abort(.badRequest, reason: "消息 ID 无效。")
+        }
+
+        let body = try req.content.decode(IMConversationMessageReactionRequest.self)
+        let userID = try user.requireID()
+        let commandService = IMConversationService.command(app: req.application)
+        let strongReadService = QueryReadModelFacade(app: req.application)
+        let message = try await commandService.toggleReaction(
+            in: conversationID,
+            messageID: messageID,
+            emoji: body.emoji,
+            requesterUserID: userID
+        )
+        try await req.application.processConversationOutboxForTesting()
+        let conversation = try await strongReadService.conversationSummary(
+            conversationID: conversationID,
+            for: userID
+        )
+
+        await IMConversationEventService(app: req.application).publish(
+            eventType: .messageUpdated,
+            conversationID: conversationID,
+            recipientUserIDs: conversation.memberUserIDs,
             message: message,
             actorUserID: userID
         )
@@ -362,19 +465,21 @@ struct IMConversationController: RouteCollection {
         let user = try req.auth.require(User.self)
         let conversationID = try conversationID(from: req)
         let requesterUserID = try user.requireID()
-        let service = IMConversationService(db: req.db)
-        let removedConversation = try await service.conversationSummary(
+        let commandService = IMConversationService.command(app: req.application)
+        let strongReadService = QueryReadModelFacade(app: req.application)
+        let removedConversation = try await strongReadService.conversationSummary(
             conversationID: conversationID,
             for: requesterUserID
         )
         let remainingUserIDs = removedConversation.memberUserIDs
             .filter { $0 != requesterUserID }
 
-        try await service.leaveConversation(
+        try await commandService.leaveConversation(
             in: conversationID,
             requesterUserID: requesterUserID
         )
-        let eventService = IMConversationEventService(app: req.application, db: req.db)
+        try await req.application.processConversationOutboxForTesting()
+        let eventService = IMConversationEventService(app: req.application)
         await eventService.publish(
             eventType: IMTCPConversationEventType.memberLeft,
             conversationID: conversationID,
@@ -404,7 +509,7 @@ struct IMConversationController: RouteCollection {
         }
 
         do {
-            guard let latestMessage = try await IMConversationService(db: app.db).latestMessage(in: conversationID) else {
+            guard let latestMessage = try await QueryReadModelFacade(app: app).latestMessage(in: conversationID) else {
                 return
             }
 
@@ -412,7 +517,7 @@ struct IMConversationController: RouteCollection {
                 return
             }
 
-            await app.imConnectionRegistry.sendMessage(
+            await app.gatewaySessionService.sendMessage(
                 IMTCPMessagePayload(
                     clientMessageID: latestMessage.clientMessageID,
                     messageID: latestMessage.id.uuidString,
@@ -420,7 +525,8 @@ struct IMConversationController: RouteCollection {
                     senderUserID: latestMessage.senderUserID,
                     serverSequence: UInt64(latestMessage.serverSequence),
                     serverTimestamp: latestMessage.createdAt,
-                    content: latestMessage.content
+                    content: latestMessage.content,
+                    derivedState: latestMessage.content.aggregate.derivedState
                 ),
                 toUserIDs: recipientUserIDs
             )
@@ -483,6 +589,14 @@ struct IMConversationChangesQuery: Content {
 struct IMMessageSinceQuery: Content {
     let afterSequence: Int
     let limit: Int?
+}
+
+struct IMConversationMessageEditRequest: Content {
+    let text: String
+}
+
+struct IMConversationMessageReactionRequest: Content {
+    let emoji: String
 }
 
 struct IMConversationCreateRequest: Content {
@@ -635,7 +749,24 @@ struct IMMessagePreviewResponse: Content, Equatable {
     let senderUserID: UUID
     let serverSequence: Int
     let content: IMMessageContent
+    let derivedState: IMMessageDerivedState
     let createdAt: Date?
+
+    init(
+        id: UUID,
+        senderUserID: UUID,
+        serverSequence: Int,
+        content: IMMessageContent,
+        derivedState: IMMessageDerivedState = IMMessageDerivedState(),
+        createdAt: Date?
+    ) {
+        self.id = id
+        self.senderUserID = senderUserID
+        self.serverSequence = serverSequence
+        self.content = content
+        self.derivedState = derivedState
+        self.createdAt = createdAt
+    }
 }
 
 struct IMMessageResponse: Content, Equatable {
@@ -645,7 +776,28 @@ struct IMMessageResponse: Content, Equatable {
     let clientMessageID: String?
     let serverSequence: Int
     let content: IMMessageContent
+    let derivedState: IMMessageDerivedState
     let createdAt: Date?
+
+    init(
+        id: UUID,
+        conversationID: UUID,
+        senderUserID: UUID,
+        clientMessageID: String? = nil,
+        serverSequence: Int,
+        content: IMMessageContent,
+        derivedState: IMMessageDerivedState = IMMessageDerivedState(),
+        createdAt: Date?
+    ) {
+        self.id = id
+        self.conversationID = conversationID
+        self.senderUserID = senderUserID
+        self.clientMessageID = clientMessageID
+        self.serverSequence = serverSequence
+        self.content = content
+        self.derivedState = derivedState
+        self.createdAt = createdAt
+    }
 }
 
 struct IMMessageSinceResponse: Content, Equatable {
@@ -659,6 +811,7 @@ struct IMConversationMessageSearchHitResponse: Content, Equatable {
     let senderUserID: UUID
     let serverSequence: Int
     let content: IMMessageContent
+    let derivedState: IMMessageDerivedState
     let snippet: String
     let createdAt: Date?
 }

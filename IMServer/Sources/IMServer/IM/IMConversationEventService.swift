@@ -1,10 +1,14 @@
-import Fluent
 import Foundation
 import Vapor
 
 struct IMConversationEventService {
     let app: Application
-    let db: any Database
+    let strongReadService: ConversationStrongReadService
+
+    init(app: Application, strongReadService: ConversationStrongReadService? = nil) {
+        self.app = app
+        self.strongReadService = strongReadService ?? IMConversationService.strongRead(app: app)
+    }
 
     func publish(
         eventType: IMTCPConversationEventType,
@@ -19,15 +23,14 @@ struct IMConversationEventService {
         }
 
         let timestamp = Date()
-        let service = IMConversationService(db: db)
 
         for recipientUserID in uniqueRecipientUserIDs {
             do {
-                let conversation = try await service.conversationSummary(
+                let conversation = try await strongReadService.conversationSummary(
                     conversationID: conversationID,
                     for: recipientUserID
                 )
-                await app.imConnectionRegistry.sendConversationEvent(
+                await app.gatewaySessionService.sendConversationEvent(
                     IMTCPConversationEventPayload(
                         eventType: eventType,
                         conversation: conversation,
@@ -58,7 +61,7 @@ struct IMConversationEventService {
         recipientUserID: UUID,
         actorUserID: UUID? = nil
     ) async {
-        await app.imConnectionRegistry.sendConversationEvent(
+        await app.gatewaySessionService.sendConversationEvent(
             IMTCPConversationEventPayload(
                 eventType: .conversationRemovedForSelf,
                 conversation: conversation,

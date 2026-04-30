@@ -65,7 +65,18 @@ struct IMRealtimeMessageService {
         let memberUserIDs: [UUID]
     }
 
-    let db: any Database
+    private let app: Application?
+    private let fixedDatabase: (any Database)?
+
+    init(app: Application) {
+        self.app = app
+        self.fixedDatabase = nil
+    }
+
+    init(db: any Database) {
+        self.app = nil
+        self.fixedDatabase = db
+    }
 
     func persistIncomingMessage(
         _ payload: IMTCPMessagePayload,
@@ -81,8 +92,9 @@ struct IMRealtimeMessageService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedClientMessageID = trimmedClientMessageID?.isEmpty == false ? trimmedClientMessageID : nil
         let serverTimestamp = Date()
+        let routedDatabase = try await database(forConversationID: conversationID)
 
-        let result = try await db.transaction { database in
+        let result = try await routedDatabase.transaction { database in
             let membershipContext = try await requireConversationMembershipContext(
                 conversationID: conversationID,
                 senderUserID: senderUserID,
@@ -145,14 +157,30 @@ struct IMRealtimeMessageService {
             )
         }
 
-        if result.didCreateMessage {
-            try await IMConversationSummaryProjectionService(db: db).refreshConversationSummaries(
+        if result.didCreateMessage,
+           let rawMessageID = result.message.messageID,
+           let messageID = UUID(uuidString: rawMessageID) {
+            try await ConversationOutboxService(db: routedDatabase).enqueue(
+                type: .messageCreated,
                 conversationID: conversationID,
-                recipientUserIDs: result.recipientUserIDs
+                payload: ConversationDomainEventPayload(
+                    recipientUserIDs: result.recipientUserIDs,
+                    messageID: messageID
+                )
             )
         }
 
         return result
+    }
+
+    private func database(forConversationID conversationID: UUID) async throws -> any Database {
+        if let fixedDatabase {
+            return fixedDatabase
+        }
+        guard let app else {
+            fatalError("IMRealtimeMessageService missing both app and database.")
+        }
+        return try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
     }
 
     private func existingMessage(
@@ -196,7 +224,8 @@ struct IMRealtimeMessageService {
                 senderUserID: message.$sender.id,
                 serverSequence: UInt64(message.serverSequence),
                 serverTimestamp: message.createdAt ?? fallbackTimestamp,
-                content: content
+                content: content,
+                derivedState: content.aggregate.derivedState
             ),
             recipientUserIDs: recipientUserIDs,
             didCreateMessage: didCreateMessage
@@ -473,7 +502,7 @@ struct IMRealtimeMessageService {
             .set(
                 "last_message_sequence",
                 to: SQLQueryString(
-                    "MAX(\(ident: "last_message_sequence"), COALESCE((SELECT MAX(\(ident: "server_sequence")) FROM \(ident: ConversationMessage.schema) WHERE \(ident: "conversation_id") = \(bind: conversationID)), 0)) + 1"
+                    "GREATEST(\(ident: "last_message_sequence"), COALESCE((SELECT MAX(\(ident: "server_sequence")) FROM \(ident: ConversationMessage.schema) WHERE \(ident: "conversation_id") = \(bind: conversationID)), 0)) + 1"
                 )
             )
             .set("updated_at", to: updatedAt)

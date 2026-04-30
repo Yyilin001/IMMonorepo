@@ -14,6 +14,8 @@ let package = Package(
         .package(url: "https://github.com/vapor/fluent-sqlite-driver.git", from: "4.7.0"),
         .package(url: "https://github.com/vapor/jwt-kit.git", from: "5.0.0"),
         .package(url: "https://github.com/vapor/sql-kit.git", from: "3.35.0"),
+        .package(url: "https://github.com/swift-server/RediStack.git", from: "1.6.0"),
+        .package(url: "https://github.com/swift-server/swift-kafka-client.git", exact: "1.0.0-alpha.9"),
         // 🔵 面向 Swift 的非阻塞、事件驱动网络库，用于自定义执行器
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
     ],
@@ -27,6 +29,8 @@ let package = Package(
                 .product(name: "FluentSQLiteDriver", package: "fluent-sqlite-driver"),
                 .product(name: "JWTKit", package: "jwt-kit"),
                 .product(name: "SQLKit", package: "sql-kit"),
+                .product(name: "RediStack", package: "RediStack"),
+                .product(name: "Kafka", package: "swift-kafka-client"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],

@@ -1,10 +1,41 @@
 import Foundation
 
-struct IMMessageDerivedState: Equatable, Sendable {
-    let isRecalled: Bool
+struct MessageDerivedState: Codable, Equatable, Sendable {
+    let recallState: MessageRecallState
+    let edits: [MessageEdit]
+    let reactions: [MessageReaction]
+
+    init(
+        recallState: MessageRecallState = .active,
+        edits: [MessageEdit] = [],
+        reactions: [MessageReaction] = []
+    ) {
+        self.recallState = recallState
+        self.edits = edits
+        self.reactions = reactions
+    }
+
+    var isRecalled: Bool {
+        recallState != .active
+    }
 }
 
-enum IMMessagePrimaryContent: Equatable, Sendable {
+enum MessageRecallState: Codable, Equatable, Sendable {
+    case active
+    case recalled
+}
+
+struct MessageEdit: Codable, Equatable, Sendable {
+    let editedAt: Date?
+    let text: String
+}
+
+struct MessageReaction: Codable, Equatable, Sendable {
+    let emoji: String
+    let actorUserIDs: [UUID]
+}
+
+enum MessagePrimaryContent: Equatable, Sendable {
     case text(String)
     case reply(reference: IMReplyReference, text: String)
     case system(IMSystemEvent)
@@ -13,9 +44,19 @@ enum IMMessagePrimaryContent: Equatable, Sendable {
     case file(IMMediaAsset)
 }
 
-struct IMMessagePresentation: Equatable, Sendable {
-    let primaryContent: IMMessagePrimaryContent?
-    let derivedState: IMMessageDerivedState
+struct MessageAggregate: Equatable, Sendable {
+    let primaryContent: MessagePrimaryContent?
+    let derivedState: MessageDerivedState
+}
+
+struct MessagePresentation: Equatable, Sendable {
+    let primaryContent: MessagePrimaryContent?
+    let derivedState: MessageDerivedState
+
+    init(aggregate: MessageAggregate) {
+        self.primaryContent = aggregate.primaryContent
+        self.derivedState = aggregate.derivedState
+    }
 
     var previewText: String {
         guard !derivedState.isRecalled else {
@@ -24,9 +65,9 @@ struct IMMessagePresentation: Equatable, Sendable {
 
         switch primaryContent {
         case .text(let text):
-            return text
+            return effectiveText(fallback: text)
         case .reply(_, let text):
-            return text
+            return effectiveText(fallback: text)
         case .system(let event):
             return event.displayText
         case .image(let asset):
@@ -56,9 +97,9 @@ struct IMMessagePresentation: Equatable, Sendable {
 
         switch primaryContent {
         case .text(let text):
-            return [text]
+            return [effectiveText(fallback: text)]
         case .reply(let reference, let text):
-            return [text, reference.previewText]
+            return [effectiveText(fallback: text), reference.previewText]
         case .system(let event):
             return [event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
@@ -67,10 +108,26 @@ struct IMMessagePresentation: Equatable, Sendable {
             return [previewText]
         }
     }
+
+    private func effectiveText(fallback: String) -> String {
+        let latestEditedText = derivedState.edits.last?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let latestEditedText, !latestEditedText.isEmpty else {
+            return fallback
+        }
+        return latestEditedText
+    }
 }
 
+typealias IMMessageDerivedState = MessageDerivedState
+typealias IMMessageRecallState = MessageRecallState
+typealias IMMessageEdit = MessageEdit
+typealias IMMessageReaction = MessageReaction
+typealias IMMessagePrimaryContent = MessagePrimaryContent
+typealias IMMessageAggregate = MessageAggregate
+typealias IMMessagePresentation = MessagePresentation
+
 extension IMMessageContent {
-    var primaryContent: IMMessagePrimaryContent? {
+    var primaryContent: MessagePrimaryContent? {
         switch self {
         case .text(let text):
             return .text(text)
@@ -89,11 +146,35 @@ extension IMMessageContent {
         }
     }
 
-    var derivedState: IMMessageDerivedState {
-        IMMessageDerivedState(isRecalled: self == .recalled)
+    var derivedState: MessageDerivedState {
+        MessageDerivedState(recallState: self == .recalled ? .recalled : .active)
     }
 
-    var presentation: IMMessagePresentation {
-        IMMessagePresentation(primaryContent: primaryContent, derivedState: derivedState)
+    func aggregate(derivedState override: MessageDerivedState? = nil) -> MessageAggregate {
+        MessageAggregate(
+            primaryContent: primaryContent,
+            derivedState: normalizedDerivedState(override: override)
+        )
+    }
+
+    var aggregate: MessageAggregate {
+        aggregate(derivedState: nil)
+    }
+
+    var presentation: MessagePresentation {
+        MessagePresentation(aggregate: aggregate)
+    }
+
+    private func normalizedDerivedState(override: MessageDerivedState?) -> MessageDerivedState {
+        let base = derivedState
+        guard let override else {
+            return base
+        }
+
+        return MessageDerivedState(
+            recallState: base.isRecalled ? .recalled : override.recallState,
+            edits: override.edits,
+            reactions: override.reactions
+        )
     }
 }

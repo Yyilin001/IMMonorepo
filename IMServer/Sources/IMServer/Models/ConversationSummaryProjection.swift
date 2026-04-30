@@ -195,3 +195,75 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
 enum ConversationProjectionCodingError: Error {
     case invalidJSON
 }
+
+final class ConversationChangesLogEntry: Model, @unchecked Sendable {
+    static let schema = "conversation_changes_log"
+
+    @ID(custom: .id, generatedBy: .user)
+    var id: String?
+
+    @Field(key: "owner_user_id")
+    var ownerUserID: UUID
+
+    @Field(key: "conversation_id")
+    var conversationID: UUID
+
+    @Field(key: "summary_record_id")
+    var summaryRecordID: String
+
+    @Field(key: "updated_at")
+    var updatedAt: Date
+
+    @Field(key: "is_removed")
+    var isRemoved: Bool
+
+    init() {}
+
+    init(
+        ownerUserID: UUID,
+        conversationID: UUID,
+        summaryRecordID: String,
+        updatedAt: Date,
+        isRemoved: Bool
+    ) {
+        self.id = Self.recordID(ownerUserID: ownerUserID, conversationID: conversationID)
+        self.ownerUserID = ownerUserID
+        self.conversationID = conversationID
+        self.summaryRecordID = summaryRecordID
+        self.updatedAt = updatedAt
+        self.isRemoved = isRemoved
+    }
+
+    static func recordID(ownerUserID: UUID, conversationID: UUID) -> String {
+        ConversationUserSummary.recordID(ownerUserID: ownerUserID, conversationID: conversationID)
+    }
+}
+
+final class ConversationReadModelToken: Model, @unchecked Sendable {
+    static let schema = "conversation_read_model_tokens"
+
+    @ID(custom: .id, generatedBy: .user)
+    var id: String?
+
+    @Field(key: "owner_user_id")
+    var ownerUserID: UUID
+
+    @Field(key: "target_token")
+    var targetToken: String
+
+    @Field(key: "updated_at")
+    var updatedAt: Date
+
+    init() {}
+
+    init(ownerUserID: UUID, targetToken: String, updatedAt: Date) {
+        self.id = Self.recordID(ownerUserID: ownerUserID)
+        self.ownerUserID = ownerUserID
+        self.targetToken = targetToken
+        self.updatedAt = updatedAt
+    }
+
+    static func recordID(ownerUserID: UUID) -> String {
+        ownerUserID.uuidString.lowercased()
+    }
+}

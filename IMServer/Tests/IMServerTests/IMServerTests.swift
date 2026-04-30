@@ -1,6 +1,7 @@
 @testable import IMServer
 import Fluent
 import NIOCore
+import SQLKit
 import Vapor
 import VaporTesting
 import Testing
@@ -113,6 +114,522 @@ struct IMServerTests {
         } catch AuthConfigurationError.missingJWTSecret {
         } catch {
             Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("Production requires Redis-backed routing")
+    func productionRequiresRedisRouting() async throws {
+        let app = try await Application.make(.production)
+        app.imRedisRoutingConfigurationOverride = IMRedisRoutingConfiguration(
+            url: nil,
+            mode: .local,
+            maximumConnectionCount: 2
+        )
+
+        do {
+            try await app.configureConnectionRoutingServiceIfNeeded()
+            Issue.record("Expected production routing configuration to require Redis")
+        } catch RedisRoutingError.redisRequiredInProduction {
+        } catch {
+            Issue.record("Unexpected routing error: \(error)")
+        }
+
+        try? await app.asyncShutdown()
+    }
+
+    @Test("Testing environment uses local routing by default")
+    func testingUsesLocalRoutingBackendByDefault() async throws {
+        try await withApp(configure: configure) { app in
+            #expect(app.connectionRoutingService.routeBackendName == "local")
+        }
+    }
+
+    @Test("Testing environment falls back to local routing when Redis backend is unavailable")
+    func testingFallsBackToLocalRoutingWhenRedisBackendUnavailable() async throws {
+        try await withApp(configure: { app in
+            app.imRedisRoutingConfigurationOverride = IMRedisRoutingConfiguration(
+                url: "://bad-redis-url",
+                mode: .redis,
+                maximumConnectionCount: 2
+            )
+            try await configure(app)
+        }) { app in
+            #expect(app.connectionRoutingService.routeBackendName == "local")
+        }
+    }
+
+    @Test("Kafka event stream configuration supports broker cluster producer settings")
+    func kafkaEventStreamConfigurationBuildsClusterProducerConfiguration() throws {
+        let originalValues = [
+            "IM_KAFKA_BROKERS": Environment.get("IM_KAFKA_BROKERS"),
+            "IM_KAFKA_CLIENT_ID": Environment.get("IM_KAFKA_CLIENT_ID"),
+            "IM_KAFKA_REQUIRED_ACKS": Environment.get("IM_KAFKA_REQUIRED_ACKS"),
+            "IM_KAFKA_COMPRESSION": Environment.get("IM_KAFKA_COMPRESSION"),
+            "IM_KAFKA_LINGER_MS": Environment.get("IM_KAFKA_LINGER_MS"),
+            "IM_KAFKA_REQUEST_TIMEOUT_MS": Environment.get("IM_KAFKA_REQUEST_TIMEOUT_MS"),
+            "IM_KAFKA_MESSAGE_TIMEOUT_MS": Environment.get("IM_KAFKA_MESSAGE_TIMEOUT_MS"),
+            "IM_KAFKA_AUTO_CREATE_TOPICS": Environment.get("IM_KAFKA_AUTO_CREATE_TOPICS"),
+            "IM_KAFKA_SECURITY_PROTOCOL": Environment.get("IM_KAFKA_SECURITY_PROTOCOL"),
+            "IM_KAFKA_SASL_MECHANISM": Environment.get("IM_KAFKA_SASL_MECHANISM"),
+            "IM_KAFKA_SASL_USERNAME": Environment.get("IM_KAFKA_SASL_USERNAME"),
+            "IM_KAFKA_SASL_PASSWORD": Environment.get("IM_KAFKA_SASL_PASSWORD"),
+            "IM_KAFKA_TLS_CA_FILE": Environment.get("IM_KAFKA_TLS_CA_FILE")
+        ]
+        defer {
+            for (key, value) in originalValues {
+                restoreEnvironment(key, to: value)
+            }
+        }
+
+        setenv("IM_KAFKA_BROKERS", "kafka-a:9092,kafka-b:9093", 1)
+        setenv("IM_KAFKA_CLIENT_ID", "im-command", 1)
+        setenv("IM_KAFKA_REQUIRED_ACKS", "1", 1)
+        setenv("IM_KAFKA_COMPRESSION", "gzip", 1)
+        setenv("IM_KAFKA_LINGER_MS", "25", 1)
+        setenv("IM_KAFKA_REQUEST_TIMEOUT_MS", "45000", 1)
+        setenv("IM_KAFKA_MESSAGE_TIMEOUT_MS", "120000", 1)
+        setenv("IM_KAFKA_AUTO_CREATE_TOPICS", "false", 1)
+        setenv("IM_KAFKA_SECURITY_PROTOCOL", "sasl_tls", 1)
+        setenv("IM_KAFKA_SASL_MECHANISM", "scram-sha-512", 1)
+        setenv("IM_KAFKA_SASL_USERNAME", "im-user", 1)
+        setenv("IM_KAFKA_SASL_PASSWORD", "im-password", 1)
+        setenv("IM_KAFKA_TLS_CA_FILE", "/tmp/im-ca.pem", 1)
+
+        let configuration = IMEventStreamConfiguration.load(from: .development)
+        let producerConfiguration = try configuration.makeProducerConfiguration(nodeID: "node-1")
+        let consumerConfiguration = try configuration.makeConsumerConfiguration(
+            consumerGroupID: "summary-projection-consumer",
+            clientSuffix: "summary"
+        )
+
+        #expect(configuration.brokers.count == 2)
+        #expect(producerConfiguration.identifier == "im-command-node-1")
+        #expect(producerConfiguration.bootstrapBrokerAddresses.count == 2)
+        #expect(producerConfiguration.queue.maximumMessageQueueTime == .milliseconds(25))
+        #expect(producerConfiguration.topicConfiguration.requestTimeout == .milliseconds(45_000))
+        #expect(producerConfiguration.topicConfiguration.messageTimeout == .timeout(.milliseconds(120_000)))
+        #expect(producerConfiguration.topicConfiguration.requiredAcknowledgements == .atLeast(1))
+        #expect(producerConfiguration.topicConfiguration.compression.codec == .gzip(compressionLevel: .codecDependent))
+        #expect(producerConfiguration.isAutoCreateTopicsEnabled == false)
+        #expect(consumerConfiguration.identifier == "im-command-summary")
+        #expect(consumerConfiguration.isAutoCommitEnabled == false)
+        #expect(consumerConfiguration.bootstrapBrokerAddresses.count == 2)
+    }
+
+    @Test("Summary shard router routes by owner user ID")
+    func summaryShardRouterRoutesByOwnerUserID() async throws {
+        try await withApp(configure: configure) { app in
+            app.summaryStoreConfiguration = IMSummaryStoreConfiguration(shardIDs: ["summary-a", "summary-b"])
+            app.summaryShardDatabaseIDs = [
+                "summary-a": .imSummary,
+                "summary-b": .imSummary
+            ]
+
+            let router = app.summaryShardRouter
+            let userID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+            let routedShard = router.shardID(forOwnerUserID: userID)
+
+            #expect(router.shardIDs == ["summary-a", "summary-b"])
+            #expect(routedShard == router.shardID(forOwnerUserID: userID))
+            #expect(router.shardIDs.contains(routedShard))
+        }
+    }
+
+    @Test("Projection worker role does not register API routes")
+    func projectionWorkerRoleDoesNotRegisterAPIRoutes() async throws {
+        try await withApp(configure: { app in
+            app.imRuntimeRole = .projectionWorker
+            try await configure(app)
+        }) { app in
+            try await app.testing().test(.GET, "hello", afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+        }
+    }
+
+    @Test("Ops role does not register API routes")
+    func opsRoleDoesNotRegisterAPIRoutes() async throws {
+        try await withApp(configure: { app in
+            app.imRuntimeRole = .ops
+            try await configure(app)
+        }) { app in
+            try await app.testing().test(.GET, "hello", afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+        }
+    }
+
+    @Test("Outbox relay role does not register API routes")
+    func outboxRelayRoleDoesNotRegisterAPIRoutes() async throws {
+        try await withApp(configure: { app in
+            app.imRuntimeRole = .outboxRelay
+            try await configure(app)
+        }) { app in
+            try await app.testing().test(.GET, "hello", afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+        }
+    }
+
+    @Test("Stream consumer role does not register API routes")
+    func streamConsumerRoleDoesNotRegisterAPIRoutes() async throws {
+        try await withApp(configure: { app in
+            app.imRuntimeRole = .streamConsumer
+            try await configure(app)
+        }) { app in
+            try await app.testing().test(.GET, "hello", afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+        }
+    }
+
+    @Test("Gateway role registers auth routes but not IM HTTP routes")
+    func gatewayRoleRegistersAuthRoutesButNotIMRoutes() async throws {
+        try await withApp(configure: { app in
+            app.imRuntimeRole = .gateway
+            try await configure(app)
+        }) { app in
+            try await app.testing().test(.POST, "api/auth/login", beforeRequest: { req in
+                try req.content.encode(loginRequest)
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+
+            try await app.testing().test(.GET, "api/im/conversations", afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+        }
+    }
+
+    @Test("Command API role registers IM mutate routes but not IM query or auth routes")
+    func commandAPIRoleSeparatesRoutes() async throws {
+        try await withApp(configure: { app in
+            app.imRuntimeRole = .commandAPI
+            try await configure(app)
+        }) { app in
+            try await app.testing().test(.POST, "api/auth/login", beforeRequest: { req in
+                try req.content.encode(loginRequest)
+            }, afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+
+            try await app.testing().test(.GET, "api/im/conversations", afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+
+            try await app.testing().test(.POST, "api/im/conversations", afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+
+            #expect(app.hasConnectionRoutingServiceConfigured == false)
+        }
+    }
+
+    @Test("Query API role registers IM query routes but not IM mutate or auth routes")
+    func queryAPIRoleSeparatesRoutes() async throws {
+        try await withApp(configure: { app in
+            app.imRuntimeRole = .queryAPI
+            try await configure(app)
+        }) { app in
+            try await app.testing().test(.POST, "api/auth/login", beforeRequest: { req in
+                try req.content.encode(loginRequest)
+            }, afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+
+            try await app.testing().test(.GET, "api/im/conversations", afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+
+            try await app.testing().test(.POST, "api/im/conversations", afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+        }
+    }
+
+    @Test("Reset IM schema rebuilds testing database cleanly")
+    func resetIMSchemaRebuildsTestingDatabase() async throws {
+        try await withApp(configure: { app in
+            app.shouldResetIMSchema = true
+            try await configure(app)
+        }) { app in
+            try await app.testing().test(.POST, "api/auth/login", beforeRequest: { req in
+                try req.content.encode(loginRequest)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let payload = try res.content.decode(AuthResponse.self)
+                #expect(payload.user.email == "demo@example.com")
+            })
+        }
+    }
+
+    @Test("Outbox failure increments retry count")
+    func conversationOutboxFailureIncrementsRetryCount() async throws {
+        try await withApp(configure: configure) { app in
+            guard let sql = app.db as? any SQLDatabase else {
+                Issue.record("Expected SQL database")
+                return
+            }
+
+            let event = try ConversationDomainEvent(
+                conversationID: UUID(),
+                eventType: .metadataUpdated,
+                payload: .init()
+            )
+            try await event.create(on: app.db)
+            guard let eventID = event.id else {
+                Issue.record("Missing outbox event ID")
+                return
+            }
+
+            try await sql.raw("""
+                UPDATE conversation_domain_events
+                SET payload_json = '{"malformed":'
+                WHERE id = \(bind: eventID)
+                """).run()
+
+            _ = try await ConversationOutboxService(db: app.db).processPendingBatch(
+                app: app,
+                configuration: .init(batchSize: 10, pollIntervalNanoseconds: 100_000_000, maxRetries: 2)
+            )
+
+            guard let reloaded = try await ConversationDomainEvent.find(eventID, on: app.db) else {
+                Issue.record("Missing reloaded outbox event")
+                return
+            }
+
+            #expect(reloaded.statusEnum == .failed)
+            #expect(reloaded.retryCount == 1)
+            #expect(reloaded.errorMessage?.isEmpty == false)
+        }
+    }
+
+    @Test("Failed outbox events can be requeued")
+    func failedConversationOutboxEventsCanBeRequeued() async throws {
+        try await withApp(configure: configure) { app in
+            let event = try ConversationDomainEvent(
+                conversationID: UUID(),
+                eventType: .metadataUpdated,
+                payload: .init(),
+                status: .failed
+            )
+            event.retryCount = 3
+            event.processingStartedAt = Date()
+            event.errorMessage = "boom"
+            try await event.create(on: app.imWriteDB)
+
+            let requeuedCount = try await ConversationOutboxService(db: app.imWriteDB).requeueFailedEvents(maxRetryCount: 5)
+            #expect(requeuedCount == 1)
+
+            guard let eventID = event.id,
+                  let reloaded = try await ConversationDomainEvent.find(eventID, on: app.imWriteDB)
+            else {
+                Issue.record("Missing reloaded outbox event")
+                return
+            }
+
+            #expect(reloaded.statusEnum == .pending)
+            #expect(reloaded.retryCount == 0)
+            #expect(reloaded.processingStartedAt == nil)
+            #expect(reloaded.processedAt == nil)
+            #expect(reloaded.errorMessage == nil)
+        }
+    }
+
+    @Test("Outbox relay marks stream publication once per event")
+    func conversationOutboxRelayMarksPublishedEvents() async throws {
+        try await withApp(configure: configure) { app in
+            let event = try ConversationDomainEvent(
+                conversationID: UUID(),
+                eventType: .metadataUpdated,
+                payload: .init(recipientUserIDs: [UUID()])
+            )
+            try await event.create(on: app.imWriteDB)
+
+            let relayedCount = try await ConversationOutboxRelay(app: app).relayPendingEvents(limit: 10)
+            #expect(relayedCount == 1)
+
+            guard let eventID = event.id,
+                  let reloaded = try await ConversationDomainEvent.find(eventID, on: app.imWriteDB)
+            else {
+                Issue.record("Missing reloaded outbox event")
+                return
+            }
+
+            #expect(reloaded.streamPublishedAt != nil)
+            #expect(reloaded.streamPublishError == nil)
+
+            let secondRelayCount = try await ConversationOutboxRelay(app: app).relayPendingEvents(limit: 10)
+            #expect(secondRelayCount == 0)
+        }
+    }
+
+    @Test("Query read model facade uses injected summary read model store")
+    func queryReadModelFacadeUsesInjectedSummaryStore() async throws {
+        struct StubSummaryReadModelStore: SummaryReadModelStore {
+            let response: IMConversationResponse
+            let page: IMConversationPageResponse
+            let changes: IMConversationChangesResponse
+
+            func conversationSummary(conversationID: UUID, for userID: UUID) async throws -> IMConversationResponse {
+                response
+            }
+
+            func listConversations(
+                for userID: UUID,
+                cursor: String?,
+                limit: Int?
+            ) async throws -> IMConversationPageResponse {
+                page
+            }
+
+            func listConversationChanges(
+                for userID: UUID,
+                afterToken: String,
+                cursor: String?,
+                limit: Int?
+            ) async throws -> IMConversationChangesResponse {
+                changes
+            }
+        }
+
+        try await withApp(configure: configure) { app in
+            let conversationID = UUID()
+            let userID = UUID()
+            let summary = IMConversationResponse(
+                id: conversationID,
+                title: "summary-store",
+                kind: IMConversationKind.group.rawValue,
+                directMessagingState: nil,
+                directPeer: nil,
+                notice: "notice",
+                avatarPreset: .forest,
+                memberCount: 2,
+                memberUserIDs: [userID],
+                lastMessage: nil,
+                lastReadSequence: 7,
+                unreadCount: 3,
+                isPinned: false,
+                pinnedAt: nil,
+                isMuted: true,
+                createdAt: nil,
+                updatedAt: Date(timeIntervalSince1970: 123)
+            )
+            let page = IMConversationPageResponse(
+                items: [summary],
+                nextCursor: "cursor",
+                hasMore: true,
+                snapshotToken: "snapshot"
+            )
+            let changes = IMConversationChangesResponse(
+                upserts: [summary],
+                removedConversationIDs: [],
+                nextCursor: nil,
+                hasMore: false,
+                targetToken: "target"
+            )
+            app.summaryReadModelStore = StubSummaryReadModelStore(
+                response: summary,
+                page: page,
+                changes: changes
+            )
+
+            let facade = QueryReadModelFacade(app: app)
+            let summaryResponse = try await facade.conversationSummary(conversationID: conversationID, for: userID)
+            let pageResponse = try await facade.listConversations(for: userID, cursor: nil, limit: nil)
+            let changesResponse = try await facade.listConversationChanges(
+                for: userID,
+                afterToken: "since",
+                cursor: nil,
+                limit: nil
+            )
+
+            #expect(summaryResponse.title == "summary-store")
+            #expect(pageResponse.items.first?.title == "summary-store")
+            #expect(changesResponse.upserts.first?.title == "summary-store")
+        }
+    }
+
+    @Test("Summary read model store respects configured query read source")
+    func summaryReadModelStoreRespectsConfiguredReadSource() async throws {
+        try await withApp(configure: configure) { app in
+            app.summaryReadModelConfiguration = IMSummaryReadModelConfiguration(
+                projectionWriteMode: .dualWrite,
+                queryReadSource: .legacy
+            )
+            app.summaryReadModelStore = DatabaseSummaryReadModelStore(summaryDB: app.imSummaryDB)
+            #expect(String(reflecting: type(of: app.summaryReadModelStore)).contains("DatabaseSummaryReadModelStore"))
+
+            app.summaryReadModelConfiguration = IMSummaryReadModelConfiguration(
+                projectionWriteMode: .dualWrite,
+                queryReadSource: .sharded
+            )
+            app.summaryReadModelStore = OwnerShardedSummaryReadModelStore(app: app, router: app.summaryShardRouter)
+            #expect(String(reflecting: type(of: app.summaryReadModelStore)).contains("OwnerShardedSummaryReadModelStore"))
+        }
+    }
+
+    @Test("Notification consumer writes owner-scoped notification entries")
+    func notificationConsumerWritesOwnerScopedEntries() async throws {
+        try await withApp(configure: configure) { app in
+            let recipientUserID = UUID()
+            let event = try ConversationDomainEvent(
+                id: UUID(),
+                conversationID: UUID(),
+                eventType: .messageUpdated,
+                payload: .init(recipientUserIDs: [recipientUserID]),
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+            let envelope = ConversationEventEnvelope(event: event, payload: try event.decodedPayload(), deliveryContext: nil)
+
+            try await ConversationNotificationConsumer(app: app).consume(envelope)
+
+            let recordID = ConversationNotificationEntry.recordID(ownerUserID: recipientUserID, eventID: try #require(event.id))
+            let stored = try await ConversationNotificationEntry.find(recordID, on: app.imSummaryDB)
+            #expect(stored?.ownerUserID == recipientUserID)
+            #expect(stored?.conversationID == event.conversationID)
+            #expect(stored?.eventType == ConversationDomainEventType.messageUpdated.rawValue)
+        }
+    }
+
+    @Test("Repair replay consumer stores dead-letter envelopes for later replay")
+    func repairReplayConsumerStoresDeadLetterEnvelopes() async throws {
+        try await withApp(configure: configure) { app in
+            let eventID = UUID()
+            let conversationID = UUID()
+            let envelope = ConversationEventEnvelope(
+                event: try ConversationDomainEvent(
+                    id: eventID,
+                    conversationID: conversationID,
+                    eventType: .metadataUpdated,
+                    payload: .init(recipientUserIDs: [UUID()]),
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_100)
+                ),
+                payload: .init(recipientUserIDs: [UUID()]),
+                deliveryContext: .init(
+                    sourceTopic: "conversation-domain-events-dead-letter",
+                    consumerGroupID: "repair-replay-consumer",
+                    producerShard: "shard-0",
+                    deadLetterError: "projection failed"
+                )
+            )
+
+            try await RepairReplayConsumer(
+                db: app.imWriteDB,
+                consumerGroupID: "repair-replay-consumer"
+            ).consume(envelope)
+
+            let recordID = ConversationReplayRecord.recordID(
+                consumerGroupID: "repair-replay-consumer",
+                eventID: eventID
+            )
+            let stored = try await ConversationReplayRecord.find(recordID, on: app.imWriteDB)
+            #expect(stored?.conversationID == conversationID)
+            #expect(stored?.sourceTopic == "conversation-domain-events-dead-letter")
+            #expect(stored?.producerShard == "shard-0")
+            #expect(stored?.lastError == "projection failed")
+            #expect(stored?.statusEnum == .pending)
         }
     }
 
@@ -723,6 +1240,7 @@ struct IMServerTests {
             let accessToken = try await loginAccessToken(using: app)
             let demoUser = try await user(email: "demo@example.com", on: app)
             let peerUser = try await makeUser(email: "create-peer@example.com", on: app)
+            var createdConversationID: UUID?
 
             try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
@@ -737,6 +1255,7 @@ struct IMServerTests {
                 #expect(res.status == .ok)
 
                 let conversation = try res.content.decode(IMConversationResponse.self)
+                createdConversationID = conversation.id
                 #expect(conversation.title == nil)
                 #expect(conversation.kind == IMConversationKind.direct.rawValue)
                 #expect(conversation.directMessagingState == IMDirectMessagingState.active.rawValue)
@@ -750,6 +1269,17 @@ struct IMServerTests {
                     try peerUser.requireID()
                 ].sorted { $0.uuidString < $1.uuidString })
             })
+
+            let conversationID = try #require(createdConversationID)
+            let directoryEntry = try await ConversationDirectoryEntry.find(conversationID, on: app.db)
+            #expect(directoryEntry?.shardID == SingleShardConversationShardRouter.defaultShardID)
+
+            let pairHash = [try demoUser.requireID(), try peerUser.requireID()]
+                .map(\.uuidString)
+                .sorted()
+                .joined(separator: ":")
+            let directIndexEntry = try await DirectConversationIndexEntry.find(pairHash, on: app.db)
+            #expect(directIndexEntry?.conversationID == conversationID)
         }
     }
 
@@ -1013,6 +1543,13 @@ struct IMServerTests {
             let conversations = try await Conversation.query(on: app.db).all()
             #expect(conversations.count == 1)
             #expect(conversations.first?.directMessagingStateEnum == .frozenAfterUnfriend)
+
+            let pairHash = [demoUserID, peerUserID]
+                .map(\.uuidString)
+                .sorted()
+                .joined(separator: ":")
+            let directIndexEntry = try await DirectConversationIndexEntry.find(pairHash, on: app.db)
+            #expect(directIndexEntry?.conversationID == existingConversationID)
         }
     }
 
@@ -1863,6 +2400,148 @@ struct IMServerTests {
         }
     }
 
+    @Test("Conversation outbox worker refreshes summary and search index for created messages")
+    func conversationOutboxProcessesMessageCreatedIntoSummaryAndSearchIndex() async throws {
+        try await withApp(configure: configure) { app in
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "outbox-peer@example.com", on: app)
+            let conversation = Conversation(
+                title: "Outbox Chat",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_042),
+                lastMessageSequence: 1
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try demoUser.requireID(),
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try peerUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            let message = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try peerUser.requireID(),
+                serverSequence: 1,
+                content: .file(
+                    IMMediaAsset(
+                        assetID: "asset-outbox",
+                        kind: .file,
+                        mimeType: "application/pdf",
+                        byteSize: 1_024,
+                        filename: "capacity-plan.pdf",
+                        width: nil,
+                        height: nil,
+                        durationMillis: nil,
+                        previewAssetID: nil
+                    )
+                )
+            )
+            try await message.create(on: app.db)
+            let messageID = try message.requireID()
+
+            try await ConversationOutboxService(db: app.db).enqueue(
+                type: .messageCreated,
+                conversationID: conversationID,
+                payload: ConversationDomainEventPayload(
+                    recipientUserIDs: [try demoUser.requireID(), try peerUser.requireID()],
+                    messageID: messageID
+                )
+            )
+
+            let processedCount = try await ConversationOutboxService(db: app.db)
+                .processPendingBatch(
+                    app: app,
+                    configuration: .init(batchSize: 50, pollIntervalNanoseconds: 100_000_000, maxRetries: 5)
+                )
+            #expect(processedCount == 1)
+
+            let summaryRecordID = ConversationUserSummary.recordID(
+                ownerUserID: try demoUser.requireID(),
+                conversationID: conversationID
+            )
+            let ownerSummary = try await ConversationUserSummary.find(summaryRecordID, on: app.db)
+            #expect(ownerSummary?.lastMessage?.serverSequence == 1)
+            #expect(ownerSummary?.lastMessage?.content.previewText == "[文件] capacity-plan.pdf")
+
+            let searchIndex = try await ConversationMessageSearchIndex.find(
+                ConversationMessageSearchIndex.recordID(messageID: messageID),
+                on: app.db
+            )
+            #expect(searchIndex?.conversationID == conversationID)
+            #expect(searchIndex?.serverSequence == 1)
+            #expect(searchIndex?.searchableText.contains("capacity-plan.pdf") == true)
+        }
+    }
+
+    @Test("Conversation outbox worker removes search index rows when source message disappears")
+    func conversationOutboxRemovesSearchIndexForDeletedMessage() async throws {
+        try await withApp(configure: configure) { app in
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "outbox-delete-peer@example.com", on: app)
+            let conversation = Conversation(
+                title: "Outbox Delete",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_043),
+                lastMessageSequence: 1
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: try demoUser.requireID())
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try peerUser.requireID())
+                .create(on: app.db)
+
+            let message = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try peerUser.requireID(),
+                serverSequence: 1,
+                content: .text("delete this index row")
+            )
+            try await message.create(on: app.db)
+            let messageID = try message.requireID()
+
+            try await ConversationSearchIndexWorker(db: app.db).reindexMessage(messageID: messageID, on: app.db)
+            #expect(
+                try await ConversationMessageSearchIndex.find(
+                    ConversationMessageSearchIndex.recordID(messageID: messageID),
+                    on: app.db
+                ) != nil
+            )
+
+            try await message.delete(on: app.db)
+
+            try await ConversationOutboxService(db: app.db).enqueue(
+                type: .messageUpdated,
+                conversationID: conversationID,
+                payload: ConversationDomainEventPayload(
+                    recipientUserIDs: [try demoUser.requireID(), try peerUser.requireID()],
+                    messageID: messageID
+                )
+            )
+
+            let processedCount = try await ConversationOutboxService(db: app.db)
+                .processPendingBatch(
+                    app: app,
+                    configuration: .init(batchSize: 50, pollIntervalNanoseconds: 100_000_000, maxRetries: 5)
+                )
+            #expect(processedCount == 1)
+            #expect(
+                try await ConversationMessageSearchIndex.find(
+                    ConversationMessageSearchIndex.recordID(messageID: messageID),
+                    on: app.db
+                ) == nil
+            )
+        }
+    }
+
     @Test("IM recall endpoint replaces message content and refreshes summaries")
     func imRecallMessage() async throws {
         try await withApp(configure: configure) { app in
@@ -1966,6 +2645,154 @@ struct IMServerTests {
                 #expect(res.status == .badRequest)
                 #expect(res.body.string.contains("消息发送超过 2 分钟后不能撤回"))
             })
+        }
+    }
+
+    @Test("IM edit endpoint appends derived edit state and refreshes summary preview")
+    func imEditMessageUpdatesDerivedStateAndSummaryPreview() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "edit-peer@example.com", on: app)
+
+            let conversation = Conversation(
+                title: nil,
+                kind: .direct,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_062),
+                lastMessageSequence: 1
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: try demoUser.requireID())
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try peerUser.requireID())
+                .create(on: app.db)
+
+            let message = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try demoUser.requireID(),
+                serverSequence: 1,
+                content: .text("before edit")
+            )
+            try await message.create(on: app.db)
+            let messageID = try message.requireID()
+
+            try await IMConversationSummaryProjectionService(db: app.db).refreshConversationSummaries(
+                conversationID: conversationID,
+                recipientUserIDs: [try demoUser.requireID(), try peerUser.requireID()]
+            )
+
+            try await app.testing().test(
+                .POST,
+                "api/im/conversations/\(conversationID.uuidString)/messages/\(messageID.uuidString)/edit",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                    try req.content.encode(IMConversationMessageEditRequest(text: "after edit"))
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let edited = try res.content.decode(IMMessageResponse.self)
+                    #expect(edited.content == .text("before edit"))
+                    #expect(edited.derivedState.edits.last?.text == "after edit")
+                }
+            )
+
+            try await app.testing().test(
+                .GET,
+                "api/im/conversations/\(conversationID.uuidString)/messages",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                },
+                afterResponse: { res async throws in
+                    let messages = try res.content.decode([IMMessageResponse].self)
+                    #expect(messages.count == 1)
+                    #expect(messages[0].content == .text("before edit"))
+                    #expect(messages[0].derivedState.edits.last?.text == "after edit")
+                }
+            )
+
+            try await app.testing().test(
+                .GET,
+                "api/im/conversations",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                },
+                afterResponse: { res async throws in
+                    let conversations = try res.content.decode(IMConversationPageResponse.self).items
+                    #expect(conversations.count == 1)
+                    #expect(
+                        conversations[0].lastMessage.map {
+                            MessagePresentation(
+                                aggregate: $0.content.aggregate(derivedState: $0.derivedState)
+                            ).previewText
+                        } == "after edit"
+                    )
+                    #expect(conversations[0].lastMessage?.derivedState.edits.last?.text == "after edit")
+                }
+            )
+        }
+    }
+
+    @Test("IM reaction endpoint toggles derived reaction state")
+    func imToggleReactionUpdatesDerivedState() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "reaction-peer@example.com", on: app)
+
+            let conversation = Conversation(
+                title: nil,
+                kind: .direct,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_063),
+                lastMessageSequence: 1
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: try demoUser.requireID())
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try peerUser.requireID())
+                .create(on: app.db)
+
+            let message = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: try peerUser.requireID(),
+                serverSequence: 1,
+                content: .text("react here")
+            )
+            try await message.create(on: app.db)
+            let messageID = try message.requireID()
+
+            try await app.testing().test(
+                .POST,
+                "api/im/conversations/\(conversationID.uuidString)/messages/\(messageID.uuidString)/reactions",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                    try req.content.encode(IMConversationMessageReactionRequest(emoji: "👍"))
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let updated = try res.content.decode(IMMessageResponse.self)
+                    #expect(updated.derivedState.reactions == [
+                        IMMessageReaction(emoji: "👍", actorUserIDs: [try demoUser.requireID()])
+                    ])
+                }
+            )
+
+            try await app.testing().test(
+                .POST,
+                "api/im/conversations/\(conversationID.uuidString)/messages/\(messageID.uuidString)/reactions",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                    try req.content.encode(IMConversationMessageReactionRequest(emoji: "👍"))
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let updated = try res.content.decode(IMMessageResponse.self)
+                    #expect(updated.derivedState.reactions.isEmpty)
+                }
+            )
         }
     }
 

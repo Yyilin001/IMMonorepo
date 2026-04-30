@@ -38,10 +38,16 @@ struct UserController: RouteCollection {
         user.avatarPresetEnum = body.avatarPreset
         try await user.update(on: req.db)
 
-        let affectedConversationRecipientUserIDs = try await IMConversationSummaryProjectionService(db: req.db)
-            .refreshDirectPeerProfiles(for: userID)
+        var affectedConversationRecipientUserIDs: [UUID: [UUID]] = [:]
+        for readModelDB in summaryReadModelDatabases(for: req.application) {
+            let refreshed = try await IMConversationSummaryProjectionService(
+                sourceDB: req.application.imWriteDB,
+                readModelDB: readModelDB
+            ).refreshDirectPeerProfiles(for: userID)
+            mergeRecipientUserIDs(refreshed, into: &affectedConversationRecipientUserIDs)
+        }
 
-        let conversationEventService = IMConversationEventService(app: req.application, db: req.db)
+        let conversationEventService = IMConversationEventService(app: req.application)
         for (conversationID, recipientUserIDs) in affectedConversationRecipientUserIDs {
             await conversationEventService.publish(
                 eventType: .summaryUpdated,
@@ -132,13 +138,17 @@ struct UserController: RouteCollection {
             contactUserID: ownerUserID,
             actorUserID: ownerUserID
         )
-        let projectionService = IMConversationSummaryProjectionService(db: req.db)
-        let conversationEventService = IMConversationEventService(app: req.application, db: req.db)
+        let conversationEventService = IMConversationEventService(app: req.application)
         for conversationID in affectedDirectConversationIDs {
-            try await projectionService.refreshConversationSummaries(
-                conversationID: conversationID,
-                recipientUserIDs: [ownerUserID, contactUserID]
+            let conversationDB = try await req.application.conversationShardRouter.commandDatabase(
+                forConversationID: conversationID
             )
+            try await ConversationOutboxService(db: conversationDB).enqueue(
+                type: .directPeerUpdated,
+                conversationID: conversationID,
+                payload: ConversationDomainEventPayload(recipientUserIDs: [ownerUserID, contactUserID])
+            )
+            try await req.application.processConversationOutboxForTesting()
             await conversationEventService.publish(
                 eventType: .summaryUpdated,
                 conversationID: conversationID,
@@ -198,13 +208,19 @@ struct UserController: RouteCollection {
             ],
             actorUserID: result.request.addressee.id
         )
-        let projectionService = IMConversationSummaryProjectionService(db: req.db)
-        let conversationEventService = IMConversationEventService(app: req.application, db: req.db)
+        let conversationEventService = IMConversationEventService(app: req.application)
         for conversationID in result.affectedDirectConversationIDs {
-            try await projectionService.refreshConversationSummaries(
-                conversationID: conversationID,
-                recipientUserIDs: [result.request.requester.id, result.request.addressee.id]
+            let conversationDB = try await req.application.conversationShardRouter.commandDatabase(
+                forConversationID: conversationID
             )
+            try await ConversationOutboxService(db: conversationDB).enqueue(
+                type: .directPeerUpdated,
+                conversationID: conversationID,
+                payload: ConversationDomainEventPayload(
+                    recipientUserIDs: [result.request.requester.id, result.request.addressee.id]
+                )
+            )
+            try await req.application.processConversationOutboxForTesting()
             await conversationEventService.publish(
                 eventType: .summaryUpdated,
                 conversationID: conversationID,
@@ -283,6 +299,30 @@ struct UserController: RouteCollection {
             return nil
         }
         return String(normalized.prefix(40))
+    }
+
+    private func summaryReadModelDatabases(for app: Application) -> [any Database] {
+        switch app.summaryReadModelConfiguration.projectionWriteMode {
+        case .legacy:
+            return [app.imSummaryDB]
+        case .sharded:
+            return app.summaryShardRouter.shardIDs.map { app.summaryShardRouter.database(forShardID: $0) }
+        case .dualWrite:
+            return [app.imSummaryDB] + app.summaryShardRouter.shardIDs.map {
+                app.summaryShardRouter.database(forShardID: $0)
+            }
+        }
+    }
+
+    private func mergeRecipientUserIDs(
+        _ source: [UUID: [UUID]],
+        into destination: inout [UUID: [UUID]]
+    ) {
+        for (conversationID, userIDs) in source {
+            destination[conversationID, default: []].append(contentsOf: userIDs)
+            destination[conversationID] = Array(Set(destination[conversationID] ?? []))
+                .sorted { $0.uuidString < $1.uuidString }
+        }
     }
 }
 

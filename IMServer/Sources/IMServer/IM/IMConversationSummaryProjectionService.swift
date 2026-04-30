@@ -33,14 +33,26 @@ struct IMConversationSummaryProjectionService {
         let recordID: String
     }
 
-    let db: any Database
+    let sourceDB: any Database
+    let readModelDB: any Database
+
+    init(db: any Database) {
+        self.init(sourceDB: db, readModelDB: db)
+    }
+
+    init(sourceDB: any Database, readModelDB: any Database) {
+        self.sourceDB = sourceDB
+        self.readModelDB = readModelDB
+    }
 
     func refreshConversationSummaries(
         conversationID: UUID,
         recipientUserIDs: [UUID],
-        on database: (any Database)? = nil
+        on database: (any Database)? = nil,
+        writeChangeLog: Bool = true
     ) async throws {
-        let database = database ?? db
+        let database = database ?? sourceDB
+        let readModelDatabase = readModelDB
         let uniqueUserIDs = Array(Set(recipientUserIDs)).sorted { $0.uuidString < $1.uuidString }
         guard !uniqueUserIDs.isEmpty else {
             return
@@ -69,7 +81,7 @@ struct IMConversationSummaryProjectionService {
             let summary = try await findOrCreateSummary(
                 ownerUserID: recipientUserID,
                 conversationID: conversationID,
-                on: database
+                on: readModelDatabase
             )
             summary.ownerUserID = recipientUserID
             summary.conversationID = conversationID
@@ -104,30 +116,107 @@ struct IMConversationSummaryProjectionService {
             summary.lastActivityAt = preview?.createdAt ?? conversation.updatedAt
             summary.updatedAt = updatedAt
             summary.isRemoved = false
-            try await save(summary, on: database)
+            try await save(summary, on: readModelDatabase)
+            if writeChangeLog {
+                try await upsertChangeLog(
+                    ownerUserID: recipientUserID,
+                    conversationID: conversationID,
+                    summaryRecordID: summary.id ?? ConversationUserSummary.recordID(
+                        ownerUserID: recipientUserID,
+                        conversationID: conversationID
+                    ),
+                    updatedAt: updatedAt,
+                    isRemoved: false,
+                    on: readModelDatabase
+                )
+            }
         }
     }
 
     func markConversationRemoved(
         conversationID: UUID,
         recipientUserID: UUID,
-        on database: (any Database)? = nil
+        on database: (any Database)? = nil,
+        writeChangeLog: Bool = true
     ) async throws {
-        let database = database ?? db
+        _ = database ?? sourceDB
+        let readModelDatabase = readModelDB
         let summary = try await findOrCreateSummary(
             ownerUserID: recipientUserID,
             conversationID: conversationID,
-            on: database
+            on: readModelDatabase
         )
         summary.ownerUserID = recipientUserID
         summary.conversationID = conversationID
         summary.isRemoved = true
         summary.updatedAt = Date()
-        try await save(summary, on: database)
+        try await save(summary, on: readModelDatabase)
+        if writeChangeLog {
+            try await upsertChangeLog(
+                ownerUserID: recipientUserID,
+                conversationID: conversationID,
+                summaryRecordID: summary.id ?? ConversationUserSummary.recordID(
+                    ownerUserID: recipientUserID,
+                    conversationID: conversationID
+                ),
+                updatedAt: summary.updatedAt,
+                isRemoved: true,
+                on: readModelDatabase
+            )
+        }
+    }
+
+    func recordConversationSummaryChanges(
+        conversationID: UUID,
+        recipientUserIDs: [UUID]
+    ) async throws {
+        let uniqueUserIDs = Array(Set(recipientUserIDs)).sorted { $0.uuidString < $1.uuidString }
+        guard !uniqueUserIDs.isEmpty else {
+            return
+        }
+
+        for recipientUserID in uniqueUserIDs {
+            let summaryRecordID = ConversationUserSummary.recordID(
+                ownerUserID: recipientUserID,
+                conversationID: conversationID
+            )
+            guard let summary = try await ConversationUserSummary.find(summaryRecordID, on: readModelDB) else {
+                continue
+            }
+            try await upsertChangeLog(
+                ownerUserID: recipientUserID,
+                conversationID: conversationID,
+                summaryRecordID: summaryRecordID,
+                updatedAt: summary.updatedAt,
+                isRemoved: summary.isRemoved,
+                on: readModelDB
+            )
+        }
+    }
+
+    func recordConversationRemovedChange(
+        conversationID: UUID,
+        recipientUserID: UUID
+    ) async throws {
+        let summaryRecordID = ConversationUserSummary.recordID(
+            ownerUserID: recipientUserID,
+            conversationID: conversationID
+        )
+        guard let summary = try await ConversationUserSummary.find(summaryRecordID, on: readModelDB) else {
+            return
+        }
+        try await upsertChangeLog(
+            ownerUserID: recipientUserID,
+            conversationID: conversationID,
+            summaryRecordID: summaryRecordID,
+            updatedAt: summary.updatedAt,
+            isRemoved: true,
+            on: readModelDB
+        )
     }
 
     func rebuildSummaries(for userID: UUID) async throws {
-        let memberships = try await ConversationMember.query(on: db)
+        let memberships = try await ConversationMember.query(on: sourceDB)
             .filter(\.$user.$id == userID)
             .all()
         let activeConversationIDs = memberships.map(\.$conversation.id)
@@ -136,26 +225,35 @@ struct IMConversationSummaryProjectionService {
             try await refreshConversationSummaries(
                 conversationID: conversationID,
                 recipientUserIDs: [userID],
-                on: db
+                on: sourceDB,
+                writeChangeLog: true
             )
         }
 
-        let existing = try await ConversationUserSummary.query(on: db)
+        let existing = try await ConversationUserSummary.query(on: readModelDB)
             .filter(\.$ownerUserID == userID)
             .all()
         let activeSet = Set(activeConversationIDs)
         for summary in existing where !activeSet.contains(summary.conversationID) && !summary.isRemoved {
             summary.isRemoved = true
             summary.updatedAt = Date()
-            try await save(summary, on: db)
+            try await save(summary, on: readModelDB)
+            try await upsertChangeLog(
+                ownerUserID: userID,
+                conversationID: summary.conversationID,
+                summaryRecordID: summary.id ?? ConversationUserSummary.recordID(ownerUserID: userID, conversationID: summary.conversationID),
+                updatedAt: summary.updatedAt,
+                isRemoved: true,
+                on: readModelDB
+            )
         }
     }
 
     func rebuildAllSummaries() async throws -> Int {
-        let membershipOwnerUserIDs = try await ConversationMember.query(on: db)
+        let membershipOwnerUserIDs = try await ConversationMember.query(on: sourceDB)
             .all()
             .map(\.$user.id)
-        let summaryOwnerUserIDs = try await ConversationUserSummary.query(on: db)
+        let summaryOwnerUserIDs = try await ConversationUserSummary.query(on: readModelDB)
             .all()
             .map(\.ownerUserID)
         let ownerUserIDs = Array(Set(membershipOwnerUserIDs + summaryOwnerUserIDs))
@@ -169,10 +267,10 @@ struct IMConversationSummaryProjectionService {
     }
 
     func verifySummaries(for userID: UUID) async throws -> ConversationSummaryVerificationResult {
-        let memberships = try await ConversationMember.query(on: db)
+        let memberships = try await ConversationMember.query(on: sourceDB)
             .filter(\.$user.$id == userID)
             .all()
-        let summaries = try await ConversationUserSummary.query(on: db)
+        let summaries = try await ConversationUserSummary.query(on: readModelDB)
             .filter(\.$ownerUserID == userID)
             .all()
 
@@ -195,7 +293,7 @@ struct IMConversationSummaryProjectionService {
                 continue
             }
 
-            let lastVisibleMessage = try await ConversationMessage.query(on: db)
+            let lastVisibleMessage = try await ConversationMessage.query(on: sourceDB)
                 .filter(\.$conversation.$id == conversationID)
                 .filter(\.$serverSequence >= membership.visibleFromSequence)
                 .sort(\.$serverSequence, .descending)
@@ -229,10 +327,10 @@ struct IMConversationSummaryProjectionService {
     }
 
     func verifyAllSummaries() async throws -> ConversationSummaryVerificationResult {
-        let membershipOwnerUserIDs = try await ConversationMember.query(on: db)
+        let membershipOwnerUserIDs = try await ConversationMember.query(on: sourceDB)
             .all()
             .map(\.$user.id)
-        let summaryOwnerUserIDs = try await ConversationUserSummary.query(on: db)
+        let summaryOwnerUserIDs = try await ConversationUserSummary.query(on: readModelDB)
             .all()
             .map(\.ownerUserID)
         let ownerUserIDs = Array(Set(membershipOwnerUserIDs + summaryOwnerUserIDs))
@@ -253,7 +351,7 @@ struct IMConversationSummaryProjectionService {
     ) async throws -> IMConversationPageResponse {
         let limit = normalizedPageLimit(requestedLimit)
         let cursor = try rawCursor.map(Self.decodePageCursor)
-        let query = ConversationUserSummary.query(on: db)
+        let query = ConversationUserSummary.query(on: readModelDB)
             .filter(\.$ownerUserID == userID)
             .filter(\.$isRemoved == false)
             .sort(\.$isPinned, .descending)
@@ -328,7 +426,7 @@ struct IMConversationSummaryProjectionService {
         let pageCursor = try rawCursor.map(Self.decodeChangeToken)
         let limit = normalizedPageLimit(requestedLimit)
 
-        let query = ConversationUserSummary.query(on: db)
+        let query = ConversationChangesLogEntry.query(on: readModelDB)
             .filter(\.$ownerUserID == userID)
             .sort(\.$updatedAt, .ascending)
             .sort(\.$id, .ascending)
@@ -356,9 +454,24 @@ struct IMConversationSummaryProjectionService {
             .all()
         let hasMore = rows.count > limit
         let pageRows = Array(rows.prefix(limit))
-        let upserts = pageRows
+        let summaryRecordIDs = pageRows
             .filter { !$0.isRemoved }
-            .map(makeConversationResponse)
+            .map(\.summaryRecordID)
+        let summaries = try await ConversationUserSummary.query(on: readModelDB)
+            .filter(\.$id ~~ summaryRecordIDs)
+            .all()
+        let summariesByRecordID: [String: ConversationUserSummary] = Dictionary(uniqueKeysWithValues: summaries.compactMap { summary in
+            guard let recordID = summary.id else {
+                return nil
+            }
+            return (recordID, summary)
+        })
+        let upserts = pageRows.compactMap { row -> IMConversationResponse? in
+            guard !row.isRemoved, let summary = summariesByRecordID[row.summaryRecordID] else {
+                return nil
+            }
+            return makeConversationResponse(from: summary)
+        }
         let removedConversationIDs = pageRows
             .filter(\.isRemoved)
             .map(\.conversationID)
@@ -421,14 +534,14 @@ struct IMConversationSummaryProjectionService {
     }
 
     func refreshDirectPeerProfiles(for userID: UUID) async throws -> [UUID: [UUID]] {
-        let summaries = try await ConversationUserSummary.query(on: db)
+        let summaries = try await ConversationUserSummary.query(on: readModelDB)
             .filter(\.$directPeerUserID == userID)
             .all()
         guard !summaries.isEmpty else {
             return [:]
         }
 
-        guard let user = try await User.find(userID, on: db) else {
+        guard let user = try await User.find(userID, on: sourceDB) else {
             return [:]
         }
 
@@ -438,7 +551,18 @@ struct IMConversationSummaryProjectionService {
             summary.directPeerDisplayName = user.displayName
             summary.directPeerAvatarPresetEnum = user.avatarPresetEnum
             summary.updatedAt = Date()
-            try await save(summary, on: db)
+            try await save(summary, on: readModelDB)
+            try await upsertChangeLog(
+                ownerUserID: summary.ownerUserID,
+                conversationID: summary.conversationID,
+                summaryRecordID: summary.id ?? ConversationUserSummary.recordID(
+                    ownerUserID: summary.ownerUserID,
+                    conversationID: summary.conversationID
+                ),
+                updatedAt: summary.updatedAt,
+                isRemoved: summary.isRemoved,
+                on: readModelDB
+            )
             recipientUserIDsByConversationID[summary.conversationID, default: []].append(summary.ownerUserID)
         }
 
@@ -448,7 +572,14 @@ struct IMConversationSummaryProjectionService {
     }
 
     private func latestToken(for userID: UUID) async throws -> String? {
-        guard let latest = try await ConversationUserSummary.query(on: db)
+        if let token = try await ConversationReadModelToken.find(
+            ConversationReadModelToken.recordID(ownerUserID: userID),
+            on: readModelDB
+        ) {
+            return token.targetToken
+        }
+
+        guard let latest = try await ConversationChangesLogEntry.query(on: readModelDB)
             .filter(\.$ownerUserID == userID)
             .sort(\.$updatedAt, .descending)
             .sort(\.$id, .descending)
@@ -457,12 +588,52 @@ struct IMConversationSummaryProjectionService {
             return nil
         }
 
-        return Self.encodeChangeToken(
-            ChangeToken(
-                updatedAt: latest.updatedAt,
-                recordID: latest.id ?? ""
+        return Self.encodeChangeToken(ChangeToken(updatedAt: latest.updatedAt, recordID: latest.id ?? ""))
+    }
+
+    private func upsertChangeLog(
+        ownerUserID: UUID,
+        conversationID: UUID,
+        summaryRecordID: String,
+        updatedAt: Date,
+        isRemoved: Bool,
+        on database: any Database
+    ) async throws {
+        let recordID = ConversationChangesLogEntry.recordID(ownerUserID: ownerUserID, conversationID: conversationID)
+        let entry = try await ConversationChangesLogEntry.find(recordID, on: database)
+            ?? ConversationChangesLogEntry(
+                ownerUserID: ownerUserID,
+                conversationID: conversationID,
+                summaryRecordID: summaryRecordID,
+                updatedAt: updatedAt,
+                isRemoved: isRemoved
             )
+        entry.ownerUserID = ownerUserID
+        entry.conversationID = conversationID
+        entry.summaryRecordID = summaryRecordID
+        entry.updatedAt = updatedAt
+        entry.isRemoved = isRemoved
+
+        if try await ConversationChangesLogEntry.find(recordID, on: database) == nil {
+            try await entry.create(on: database)
+        } else {
+            try await entry.update(on: database)
+        }
+
+        let targetToken = Self.encodeChangeToken(
+            ChangeToken(updatedAt: updatedAt, recordID: recordID)
         )
+        let tokenRecordID = ConversationReadModelToken.recordID(ownerUserID: ownerUserID)
+        let token = try await ConversationReadModelToken.find(tokenRecordID, on: database)
+            ?? ConversationReadModelToken(ownerUserID: ownerUserID, targetToken: targetToken, updatedAt: updatedAt)
+        token.ownerUserID = ownerUserID
+        token.targetToken = targetToken
+        token.updatedAt = updatedAt
+        if try await ConversationReadModelToken.find(tokenRecordID, on: database) == nil {
+            try await token.create(on: database)
+        } else {
+            try await token.update(on: database)
+        }
     }
 
     private func normalizedPageLimit(_ requestedLimit: Int?) -> Int {
@@ -518,11 +689,14 @@ struct IMConversationSummaryProjectionService {
     }
 
     private func makePreview(from message: ConversationMessage) throws -> IMMessagePreviewResponse {
-        IMMessagePreviewResponse(
+        let content = try message.decodedContent()
+        let derivedState = try message.decodedDerivedState()
+        return IMMessagePreviewResponse(
             id: try message.requireID(),
             senderUserID: message.$sender.id,
             serverSequence: message.serverSequence,
-            content: try message.decodedContent(),
+            content: content,
+            derivedState: derivedState,
             createdAt: message.createdAt
         )
     }

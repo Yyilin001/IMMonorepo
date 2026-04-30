@@ -51,7 +51,7 @@ struct AuthController: RouteCollection {
     func logout(req: Request) async throws -> HTTPStatus {
         let session = try req.auth.require(SessionContext.self)
         try await AuthService(app: req.application, db: req.db).logout(sessionID: session.sessionID)
-        await req.application.imConnectionRegistry.kickConnections(
+        await req.application.gatewaySessionService.kickConnections(
             forSessionID: session.sessionID,
             reason: .logoutCurrent,
             message: "You have signed out from this device."
@@ -68,7 +68,7 @@ struct AuthController: RouteCollection {
         let userID = try user.requireID()
         let response = try await AuthService(app: req.application, db: req.db)
             .logoutAll(userID: userID)
-        await req.application.imConnectionRegistry.kickConnections(
+        await req.application.gatewaySessionService.kickConnections(
             forUserID: userID,
             reason: .logoutAll,
             message: "You have signed out from all devices."
@@ -86,7 +86,7 @@ struct AuthController: RouteCollection {
 
         try await AuthService(app: req.application, db: req.db)
             .logout(sessionID: sessionID, for: try user.requireID())
-        await req.application.imConnectionRegistry.kickConnections(
+        await req.application.gatewaySessionService.kickConnections(
             forSessionID: sessionID,
             reason: .sessionRevoked,
             message: "This session has been revoked."

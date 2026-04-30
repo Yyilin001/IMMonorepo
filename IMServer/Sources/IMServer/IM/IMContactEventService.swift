@@ -14,7 +14,7 @@ struct IMContactEventService {
         let timestamp = Date()
 
         for recipientUserID in uniqueRecipientUserIDs {
-            await app.imConnectionRegistry.sendContactEvent(
+            await app.gatewaySessionService.sendContactEvent(
                 IMTCPContactEventPayload(
                     eventType: eventType,
                     request: request,
@@ -36,7 +36,7 @@ struct IMContactEventService {
         let timestamp = Date()
 
         for recipientUserID in contactByRecipientUserID.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
-            await app.imConnectionRegistry.sendContactEvent(
+            await app.gatewaySessionService.sendContactEvent(
                 IMTCPContactEventPayload(
                     eventType: .friendRequestAccepted,
                     request: request,
@@ -55,7 +55,7 @@ struct IMContactEventService {
         contactUserID: UUID,
         actorUserID: UUID? = nil
     ) async {
-        await app.imConnectionRegistry.sendContactEvent(
+        await app.gatewaySessionService.sendContactEvent(
             IMTCPContactEventPayload(
                 eventType: .contactRemoved,
                 request: nil,

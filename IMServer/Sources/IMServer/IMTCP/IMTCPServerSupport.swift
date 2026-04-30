@@ -101,9 +101,10 @@ actor IMConnectionRegistry {
         connectionIDsByUserID[connection.userID, default: []].insert(connection.connectionID)
     }
 
-    func remove(connectionID: UUID) {
+    @discardableResult
+    func remove(connectionID: UUID) -> IMAuthenticatedConnection? {
         guard let removed = connectionsByID.removeValue(forKey: connectionID) else {
-            return
+            return nil
         }
 
         connectionIDsBySessionID[removed.connection.sessionID]?.remove(connectionID)
@@ -115,6 +116,8 @@ actor IMConnectionRegistry {
         if connectionIDsByUserID[removed.connection.userID]?.isEmpty == true {
             connectionIDsByUserID.removeValue(forKey: removed.connection.userID)
         }
+
+        return removed.connection
     }
 
     func connectionIDs(forSessionID sessionID: UUID) -> [UUID] {
@@ -127,6 +130,14 @@ actor IMConnectionRegistry {
 
     func authenticatedConnection(for connectionID: UUID) -> IMAuthenticatedConnection? {
         connectionsByID[connectionID]?.connection
+    }
+
+    func localConnectionCount(forUserID userID: UUID) -> Int {
+        connectionIDsByUserID[userID]?.count ?? 0
+    }
+
+    func totalConnectionCount() -> Int {
+        connectionsByID.count
     }
 
     func kickConnections(

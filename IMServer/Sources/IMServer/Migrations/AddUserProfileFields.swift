@@ -1,7 +1,20 @@
 import Fluent
+import SQLKit
 
 struct AddUserProfileFields: AsyncMigration {
     func prepare(on database: any Database) async throws {
+        if let sql = database as? any SQLDatabase, sql.dialect.name == "postgresql" {
+            try await sql.raw("""
+                ALTER TABLE IF EXISTS \(unsafeRaw: User.schema)
+                ADD COLUMN IF NOT EXISTS display_name TEXT
+                """).run()
+            try await sql.raw("""
+                ALTER TABLE IF EXISTS \(unsafeRaw: User.schema)
+                ADD COLUMN IF NOT EXISTS avatar_preset TEXT
+                """).run()
+            return
+        }
+
         try await database.schema(User.schema)
             .field("display_name", .string)
             .update()

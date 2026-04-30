@@ -20,7 +20,7 @@ struct MediaController: RouteCollection {
     func createUploadSession(req: Request) async throws -> MediaUploadSessionResponse {
         let user = try req.auth.require(User.self)
         let body = try req.content.decode(MediaUploadCreateRequest.self)
-        let session = try MediaStorageService(app: req.application).createUploadSession(
+        let session = try await MediaStorageService(app: req.application).createUploadSession(
             for: try user.requireID(),
             kind: body.kind,
             mimeType: body.mimeType,
@@ -49,7 +49,7 @@ struct MediaController: RouteCollection {
             throw Abort(.badRequest, reason: "上传内容不能为空。")
         }
 
-        try MediaStorageService(app: req.application).writeUploadChunk(
+        try await MediaStorageService(app: req.application).writeUploadChunk(
             uploadID: uploadID,
             for: try user.requireID(),
             body: Data(body.readableBytesView)
@@ -60,7 +60,7 @@ struct MediaController: RouteCollection {
     func completeUpload(req: Request) async throws -> IMMediaAsset {
         let user = try req.auth.require(User.self)
         let uploadID = try uploadID(from: req)
-        return try MediaStorageService(app: req.application).completeUpload(
+        return try await MediaStorageService(app: req.application).completeUpload(
             uploadID: uploadID,
             for: try user.requireID()
         )
@@ -141,44 +141,48 @@ struct MediaController: RouteCollection {
         on req: Request
     ) async throws -> MediaStorageService.StoredAssetFile {
         let storage = MediaStorageService(app: req.application)
-        if storage.assetExists(ownerUserID: userID, assetID: assetID) {
-            return try storage.storedAssetFile(ownerUserID: userID, assetID: assetID)
+        if await storage.assetExists(ownerUserID: userID, assetID: assetID) {
+            return try await storage.storedAssetFile(ownerUserID: userID, assetID: assetID)
         }
 
-        let memberships = try await ConversationMember.query(on: req.db)
-            .filter(\.$user.$id == userID)
-            .all()
-        let visibleMembershipsByConversationID = Dictionary(
-            uniqueKeysWithValues: memberships.map { ($0.$conversation.id, $0) }
-        )
-        let conversationIDs = Array(visibleMembershipsByConversationID.keys)
-        guard !conversationIDs.isEmpty else {
-            throw Abort(.notFound, reason: "附件不存在。")
-        }
-
-        let mediaMessages = try await ConversationMessage.query(on: req.db)
-            .group(.or) { group in
-                group.filter(\.$kind == IMMessageContentType.image.rawValue)
-                group.filter(\.$kind == IMMessageContentType.audio.rawValue)
-                group.filter(\.$kind == IMMessageContentType.file.rawValue)
-            }
-            .filter(\.$conversation.$id ~~ conversationIDs)
-            .sort(\.$serverSequence, .descending)
-            .all()
-
-        for message in mediaMessages {
-            guard let membership = visibleMembershipsByConversationID[message.$conversation.id],
-                  message.serverSequence >= membership.visibleFromSequence,
-                  let mediaAsset = try? message.decodedContent().mediaAsset,
-                  mediaAsset.assetID == assetID
-            else {
+        for shardID in req.application.conversationShardRouter.shardIDs {
+            let shardDB = req.application.conversationShardRouter.eventualReadDatabase(forShardID: shardID)
+            let memberships = try await ConversationMember.query(on: shardDB)
+                .filter(\.$user.$id == userID)
+                .all()
+            guard !memberships.isEmpty else {
                 continue
             }
 
-            return try storage.storedAssetFile(
-                ownerUserID: message.$sender.id,
-                assetID: assetID
+            let visibleMembershipsByConversationID = Dictionary(
+                uniqueKeysWithValues: memberships.map { ($0.$conversation.id, $0) }
             )
+            let conversationIDs = Array(visibleMembershipsByConversationID.keys)
+
+            let mediaMessages = try await ConversationMessage.query(on: shardDB)
+                .group(.or) { group in
+                    group.filter(\.$kind == IMMessageContentType.image.rawValue)
+                    group.filter(\.$kind == IMMessageContentType.audio.rawValue)
+                    group.filter(\.$kind == IMMessageContentType.file.rawValue)
+                }
+                .filter(\.$conversation.$id ~~ conversationIDs)
+                .sort(\.$serverSequence, .descending)
+                .all()
+
+            for message in mediaMessages {
+                guard let membership = visibleMembershipsByConversationID[message.$conversation.id],
+                      message.serverSequence >= membership.visibleFromSequence,
+                      let mediaAsset = try? message.decodedContent().mediaAsset,
+                      mediaAsset.assetID == assetID
+                else {
+                    continue
+                }
+
+                return try await storage.storedAssetFile(
+                    ownerUserID: message.$sender.id,
+                    assetID: assetID
+                )
+            }
         }
 
         throw Abort(.notFound, reason: "附件不存在。")

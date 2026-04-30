@@ -6,6 +6,10 @@ struct ConversationMessageService {
         static let window: TimeInterval = 2 * 60
     }
 
+    private enum EditPolicy {
+        static let window: TimeInterval = 15 * 60
+    }
+
     let db: any Database
 
     func recallMessage(
@@ -34,6 +38,7 @@ struct ConversationMessageService {
         switch try message.decodedContent() {
         case .text, .reply, .image, .audio, .file:
             try message.replaceContent(.recalled)
+            try message.replaceDerivedState(.init(recallState: .recalled))
             try await message.update(on: database)
             return message
         case .recalled:
@@ -43,12 +48,136 @@ struct ConversationMessageService {
         }
     }
 
+    func editMessage(
+        in conversationID: UUID,
+        messageID: UUID,
+        text rawText: String,
+        requesterUserID: UUID,
+        on database: any Database
+    ) async throws -> ConversationMessage {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            throw Abort(.badRequest, reason: "编辑后的消息不能为空。")
+        }
+
+        guard let message = try await ConversationMessage.query(on: database)
+            .filter(\.$id == messageID)
+            .filter(\.$conversation.$id == conversationID)
+            .first()
+        else {
+            throw Abort(.notFound, reason: "消息不存在。")
+        }
+
+        guard message.$sender.id == requesterUserID else {
+            throw Abort(.forbidden, reason: "只能编辑自己发送的消息。")
+        }
+
+        let createdAt = message.createdAt ?? .distantPast
+        guard Date().timeIntervalSince(createdAt) <= EditPolicy.window else {
+            throw Abort(.badRequest, reason: "消息发送超过 15 分钟后不能编辑。")
+        }
+
+        let content = try message.decodedContent()
+        var derivedState = try message.decodedDerivedState()
+        guard !derivedState.isRecalled else {
+            throw Abort(.badRequest, reason: "已撤回的消息不能编辑。")
+        }
+
+        switch content {
+        case .text(let originalText):
+            guard originalText != text else {
+                return message
+            }
+        case .reply(_, let originalText):
+            guard originalText != text else {
+                return message
+            }
+        case .image, .audio, .file, .recalled, .system:
+            throw Abort(.badRequest, reason: "当前消息不支持编辑。")
+        }
+
+        derivedState = IMMessageDerivedState(
+            recallState: derivedState.recallState,
+            edits: derivedState.edits + [.init(editedAt: Date(), text: text)],
+            reactions: derivedState.reactions
+        )
+        try message.replaceDerivedState(derivedState)
+        try await message.update(on: database)
+        return message
+    }
+
+    func toggleReaction(
+        in conversationID: UUID,
+        messageID: UUID,
+        emoji rawEmoji: String,
+        requesterUserID: UUID,
+        on database: any Database
+    ) async throws -> ConversationMessage {
+        let emoji = rawEmoji.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !emoji.isEmpty else {
+            throw Abort(.badRequest, reason: "表情不能为空。")
+        }
+
+        guard let message = try await ConversationMessage.query(on: database)
+            .filter(\.$id == messageID)
+            .filter(\.$conversation.$id == conversationID)
+            .first()
+        else {
+            throw Abort(.notFound, reason: "消息不存在。")
+        }
+
+        let content = try message.decodedContent()
+        var derivedState = try message.decodedDerivedState()
+        guard !derivedState.isRecalled else {
+            throw Abort(.badRequest, reason: "已撤回的消息不能添加表情。")
+        }
+
+        switch content {
+        case .text, .reply, .image, .audio, .file:
+            break
+        case .recalled, .system:
+            throw Abort(.badRequest, reason: "当前消息不支持添加表情。")
+        }
+
+        var reactions = derivedState.reactions
+        if let index = reactions.firstIndex(where: { $0.emoji == emoji }) {
+            var actorUserIDs = reactions[index].actorUserIDs
+            if let existingIndex = actorUserIDs.firstIndex(of: requesterUserID) {
+                actorUserIDs.remove(at: existingIndex)
+            } else {
+                actorUserIDs.append(requesterUserID)
+                actorUserIDs.sort { $0.uuidString < $1.uuidString }
+            }
+
+            if actorUserIDs.isEmpty {
+                reactions.remove(at: index)
+            } else {
+                reactions[index] = .init(emoji: emoji, actorUserIDs: actorUserIDs)
+            }
+        } else {
+            reactions.append(.init(emoji: emoji, actorUserIDs: [requesterUserID]))
+            reactions.sort { $0.emoji < $1.emoji }
+        }
+
+        derivedState = IMMessageDerivedState(
+            recallState: derivedState.recallState,
+            edits: derivedState.edits,
+            reactions: reactions
+        )
+        try message.replaceDerivedState(derivedState)
+        try await message.update(on: database)
+        return message
+    }
+
     func makePreview(from message: ConversationMessage) throws -> IMMessagePreviewResponse {
-        IMMessagePreviewResponse(
+        let content = try message.decodedContent()
+        let derivedState = try message.decodedDerivedState()
+        return IMMessagePreviewResponse(
             id: try message.requireID(),
             senderUserID: message.$sender.id,
             serverSequence: message.serverSequence,
-            content: try message.decodedContent(),
+            content: content,
+            derivedState: derivedState,
             createdAt: message.createdAt
         )
     }
@@ -57,13 +186,16 @@ struct ConversationMessageService {
         from message: ConversationMessage,
         conversationID: UUID
     ) throws -> IMMessageResponse {
-        IMMessageResponse(
+        let content = try message.decodedContent()
+        let derivedState = try message.decodedDerivedState()
+        return IMMessageResponse(
             id: try message.requireID(),
             conversationID: conversationID,
             senderUserID: message.$sender.id,
             clientMessageID: message.clientMessageID,
             serverSequence: message.serverSequence,
-            content: try message.decodedContent(),
+            content: content,
+            derivedState: derivedState,
             createdAt: message.createdAt
         )
     }

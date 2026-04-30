@@ -164,6 +164,27 @@ struct IMTCPMessagePayload: Codable, Sendable {
     let serverSequence: UInt64?
     let serverTimestamp: Date?
     let content: IMMessageContent
+    let derivedState: IMMessageDerivedState
+
+    init(
+        clientMessageID: String?,
+        messageID: String?,
+        conversationID: String,
+        senderUserID: UUID?,
+        serverSequence: UInt64?,
+        serverTimestamp: Date?,
+        content: IMMessageContent,
+        derivedState: IMMessageDerivedState = IMMessageDerivedState()
+    ) {
+        self.clientMessageID = clientMessageID
+        self.messageID = messageID
+        self.conversationID = conversationID
+        self.senderUserID = senderUserID
+        self.serverSequence = serverSequence
+        self.serverTimestamp = serverTimestamp
+        self.content = content
+        self.derivedState = derivedState
+    }
 }
 
 enum IMTCPConversationEventType: String, Codable, Sendable {
@@ -173,6 +194,7 @@ enum IMTCPConversationEventType: String, Codable, Sendable {
     case membersUpdated = "members_updated"
     case conversationRemovedForSelf = "conversation_removed_for_self"
     case summaryUpdated = "summary_updated"
+    case messageUpdated = "message_updated"
     case messageRecalled = "message_recalled"
 }
 

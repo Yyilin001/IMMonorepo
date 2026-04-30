@@ -1,5 +1,5 @@
 {
-  "originHash" : "d7e15150f505c8953a44756d37bc200f265f335a011e476504a04f28f26ddbd8",
+  "originHash" : "1ebcaf5872a819af51e68f271c41daae9c9528b25c5f838568baca4a51820db5",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -98,6 +98,15 @@
       "state" : {
         "revision" : "a5c85d2bdc704f64aa2800a32e60ff697ec49a3f",
         "version" : "1.32.1"
+      }
+    },
+    {
+      "identity" : "redistack",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swift-server/RediStack.git",
+      "state" : {
+        "revision" : "8c4ce10883e405cdbde52855f97f1ec9468c889b",
+        "version" : "1.6.3"
       }
     },
     {
@@ -236,6 +245,15 @@
       }
     },
     {
+      "identity" : "swift-kafka-client",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swift-server/swift-kafka-client.git",
+      "state" : {
+        "revision" : "434af114fda74d87e344980917d196f957dab1ec",
+        "version" : "1.0.0-alpha.9"
+      }
+    },
+    {
       "identity" : "swift-log",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-log.git",
@@ -350,6 +368,15 @@
       "state" : {
         "revision" : "8666c92dbbb3c8eefc8008c9c8dcf50bfd302167",
         "version" : "2.16.1"
+      }
+    },
+    {
+      "identity" : "zstd",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/facebook/zstd.git",
+      "state" : {
+        "revision" : "f8745da6ff1ad1e7bab384bd1f9d742439278e99",
+        "version" : "1.5.7"
       }
     }
   ],

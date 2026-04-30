@@ -1,0 +1,64 @@
+import Foundation
+import NIOCore
+import Vapor
+
+struct GatewayCommandBridgeController: RouteCollection {
+    func boot(routes: any RoutesBuilder) throws {
+        let protected = routes.grouped("api", "im")
+            .grouped(
+                AccessTokenAuthenticator(),
+                User.guardMiddleware(throwing: Abort(.unauthorized, reason: "用户未登录。"))
+            )
+
+        protected.post("conversations", use: proxyCommand)
+        protected.post("conversations", ":conversationID", "members", use: proxyCommand)
+        protected.post("conversations", ":conversationID", "members", ":memberUserID", "remove", use: proxyCommand)
+        protected.post("conversations", ":conversationID", "members", ":memberUserID", "role", use: proxyCommand)
+        protected.post("conversations", ":conversationID", "title", use: proxyCommand)
+        protected.patch("conversations", ":conversationID", "preferences", use: proxyCommand)
+        protected.patch("conversations", ":conversationID", "metadata", use: proxyCommand)
+        protected.post("conversations", ":conversationID", "messages", ":messageID", "edit", use: proxyCommand)
+        protected.post("conversations", ":conversationID", "messages", ":messageID", "reactions", use: proxyCommand)
+        protected.post("conversations", ":conversationID", "messages", ":messageID", "recall", use: proxyCommand)
+        protected.post("conversations", ":conversationID", "read", use: proxyCommand)
+        protected.post("conversations", ":conversationID", "leave", use: proxyCommand)
+    }
+
+    private func proxyCommand(req: Request) async throws -> Response {
+        let configuration = req.application.commandAPIIngressConfiguration
+        guard let baseURL = configuration.baseURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !baseURL.isEmpty
+        else {
+            throw Abort(.serviceUnavailable, reason: "Command API ingress bridge is not configured.")
+        }
+
+        let querySuffix = req.url.query.map { "?\($0)" } ?? ""
+        let target = URI(string: "\(baseURL)\(req.url.path)\(querySuffix)")
+        let proxied = try await req.application.client.send(req.method, headers: forwardedHeaders(from: req, sharedSecret: configuration.sharedSecret), to: target) { outgoing in
+            if var bodyData = req.body.data {
+                outgoing.body = .init(buffer: bodyData)
+            }
+        }
+
+        let response = Response(
+            status: proxied.status,
+            headers: proxied.headers,
+            body: proxied.body.map { Response.Body(data: Data(buffer: $0)) } ?? .empty
+        )
+        return response
+    }
+
+    private func forwardedHeaders(from req: Request, sharedSecret: String?) -> HTTPHeaders {
+        var headers = HTTPHeaders()
+        if let authorization = req.headers.first(name: .authorization) {
+            headers.replaceOrAdd(name: .authorization, value: authorization)
+        }
+        if let contentType = req.headers.first(name: .contentType) {
+            headers.replaceOrAdd(name: .contentType, value: contentType)
+        }
+        if let sharedSecret, !sharedSecret.isEmpty {
+            headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: sharedSecret)
+        }
+        return headers
+    }
+}

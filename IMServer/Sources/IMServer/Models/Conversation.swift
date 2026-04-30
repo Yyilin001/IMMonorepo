@@ -160,6 +160,9 @@ final class ConversationMessage: Model, Content, @unchecked Sendable {
     @Field(key: "body_json")
     private var bodyJSON: String
 
+    @OptionalField(key: "derived_state_json")
+    private var derivedStateJSON: String?
+
     @OptionalField(key: "client_message_id")
     var clientMessageID: String?
 
@@ -174,7 +177,8 @@ final class ConversationMessage: Model, Content, @unchecked Sendable {
         senderUserID: UUID,
         serverSequence: Int,
         clientMessageID: String? = nil,
-        content: IMMessageContent
+        content: IMMessageContent,
+        derivedState: IMMessageDerivedState? = nil
     ) throws {
         self.id = id
         self.$conversation.id = conversationID
@@ -183,6 +187,7 @@ final class ConversationMessage: Model, Content, @unchecked Sendable {
         self.clientMessageID = clientMessageID
         self.kind = content.type.rawValue
         self.bodyJSON = try Self.encodeContent(content)
+        self.derivedStateJSON = try Self.encodeDerivedState(derivedState ?? content.derivedState)
     }
 
     func decodedContent() throws -> IMMessageContent {
@@ -199,11 +204,39 @@ final class ConversationMessage: Model, Content, @unchecked Sendable {
         bodyJSON = try Self.encodeContent(content)
     }
 
+    func decodedDerivedState() throws -> IMMessageDerivedState {
+        guard let derivedStateJSON, let data = derivedStateJSON.data(using: .utf8) else {
+            return try decodedContent().derivedState
+        }
+
+        let decoder = JSONDecoder()
+        return try decoder.decode(IMMessageDerivedState.self, from: data)
+    }
+
+    func replaceDerivedState(_ derivedState: IMMessageDerivedState) throws {
+        derivedStateJSON = try Self.encodeDerivedState(derivedState)
+    }
+
+    func decodedAggregate() throws -> IMMessageAggregate {
+        let content = try decodedContent()
+        let derivedState = try decodedDerivedState()
+        return content.aggregate(derivedState: derivedState)
+    }
+
     static func encodeContent(_ content: IMMessageContent) throws -> String {
         let encoder = JSONEncoder()
         let data = try encoder.encode(content)
         guard let json = String(data: data, encoding: .utf8) else {
             throw Abort(.internalServerError, reason: "消息内容编码失败。")
+        }
+        return json
+    }
+
+    static func encodeDerivedState(_ derivedState: IMMessageDerivedState) throws -> String {
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(derivedState)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw Abort(.internalServerError, reason: "消息派生状态编码失败。")
         }
         return json
     }
