@@ -136,6 +136,7 @@ struct IMStreamConsumerCommand: AsyncCommand {
                     consumerFactory: { shardID in
                         [
                             ConversationSearchIndexConsumer(
+                                app: app,
                                 db: app.conversationShardRouter.commandDatabase(forShardID: shardID)
                             )
                         ]

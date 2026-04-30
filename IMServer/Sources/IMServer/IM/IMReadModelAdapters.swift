@@ -358,14 +358,21 @@ extension Application {
                 return store
             }
             let store: any SummaryReadModelStore
-            switch summaryReadModelConfiguration.queryReadSource {
-            case .legacy:
-                store = DatabaseSummaryReadModelStore(summaryDB: imSummaryDB)
-            case .sharded:
+            if environment == .production {
                 store = OwnerShardedSummaryReadModelStore(
                     app: self,
                     router: summaryShardRouter
                 )
+            } else {
+                switch summaryReadModelConfiguration.queryReadSource {
+                case .legacy:
+                    store = DatabaseSummaryReadModelStore(summaryDB: imSummaryDB)
+                case .sharded:
+                    store = OwnerShardedSummaryReadModelStore(
+                        app: self,
+                        router: summaryShardRouter
+                    )
+                }
             }
             storage[SummaryReadModelStoreStorageKey.self] = store
             return store
@@ -380,22 +387,29 @@ extension Application {
             }
 
             let adapter: any ConversationSearchAdapter
-            switch searchIndexConfiguration.driver {
-            case .database:
-                adapter = DatabaseConversationSearchAdapter(app: self)
-            case .openSearch:
-                if let endpoint = searchIndexConfiguration.endpoint, !endpoint.isEmpty {
-                    let fallbackAdapter: DatabaseConversationSearchAdapter? = environment == .production
-                        ? nil
-                        : DatabaseConversationSearchAdapter(app: self)
-                    adapter = OpenSearchConversationSearchAdapter(
-                        app: self,
-                        endpoint: endpoint,
-                        indexName: searchIndexConfiguration.indexName,
-                        fallback: fallbackAdapter
-                    )
-                } else {
+            if environment == .production {
+                let endpoint = searchIndexConfiguration.endpoint ?? ""
+                adapter = OpenSearchConversationSearchAdapter(
+                    app: self,
+                    endpoint: endpoint,
+                    indexName: searchIndexConfiguration.indexName,
+                    fallback: nil
+                )
+            } else {
+                switch searchIndexConfiguration.driver {
+                case .database:
                     adapter = DatabaseConversationSearchAdapter(app: self)
+                case .openSearch:
+                    if let endpoint = searchIndexConfiguration.endpoint, !endpoint.isEmpty {
+                        adapter = OpenSearchConversationSearchAdapter(
+                            app: self,
+                            endpoint: endpoint,
+                            indexName: searchIndexConfiguration.indexName,
+                            fallback: DatabaseConversationSearchAdapter(app: self)
+                        )
+                    } else {
+                        adapter = DatabaseConversationSearchAdapter(app: self)
+                    }
                 }
             }
 

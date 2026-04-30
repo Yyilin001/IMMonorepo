@@ -13,7 +13,7 @@ The rollout keeps the client protocol unchanged and uses:
 
 - Kafka with `SASL/TLS + SCRAM-SHA-512`
 - summary read models sharded by `ownerUserID`
-- `backfill + dual-write + query cutover`
+- `backfill + sharded query cutover`
 
 ## 1. Role Responsibilities
 
@@ -33,7 +33,8 @@ The rollout keeps the client protocol unchanged and uses:
 ### `query-api`
 
 - serves `conversations`, `conversations/changes`, `messages`, `messages/since`, `search`
-- reads summary / changes from the configured read-model source
+- reads summary / changes from sharded summary stores
+- reads search from OpenSearch and returns shard-backed message aggregates
 
 ### `outbox-relay`
 
@@ -45,6 +46,7 @@ The rollout keeps the client protocol unchanged and uses:
 
 - consumes Kafka topics
 - updates summary, changes, search, notification, replay stores
+- should be deployed as one consumer group per process in production
 
 ### `ops`
 
@@ -131,16 +133,21 @@ Required internal ingress wiring:
 
 Keep:
 
-- `IM_SUMMARY_PROJECTION_WRITE_MODE=legacy`
-- `IM_SUMMARY_QUERY_READ_SOURCE=legacy`
-- `IM_SEARCH_DRIVER=database`
+- `IM_SUMMARY_PROJECTION_WRITE_MODE=sharded`
+- `IM_SUMMARY_QUERY_READ_SOURCE=sharded`
+- `IM_SEARCH_DRIVER=opensearch`
 
 ### Stage B: Kafka Event Path
 
 Deploy:
 
 - `outbox-relay`
-- `stream-consumer`
+- `stream-consumer` with one group per deployment:
+  - `summary-projection-consumer`
+  - `changes-log-consumer`
+  - `search-index-consumer`
+  - `notification-consumer`
+  - `repair-replay-consumer`
 
 Verify:
 
@@ -152,8 +159,8 @@ Verify:
 
 1. create summary shard databases
 2. run migrations against every shard
-3. set `IM_SUMMARY_PROJECTION_WRITE_MODE=dual-write`
-4. keep `IM_SUMMARY_QUERY_READ_SOURCE=legacy`
+3. keep `IM_SUMMARY_PROJECTION_WRITE_MODE=sharded`
+4. keep `IM_SUMMARY_QUERY_READ_SOURCE=sharded`
 5. run:
 
 ```bash
@@ -161,13 +168,15 @@ IMServer serve --role ops --rebuild-conversation-summaries
 IMServer serve --role ops --verify-conversation-summaries
 ```
 
-6. after verification, cut query traffic to shards:
+6. only if you are finishing a pre-existing migration window, temporarily enable:
 
 ```env
-IM_SUMMARY_QUERY_READ_SOURCE=sharded
+IM_ALLOW_TRANSITIONAL_READ_MODELS=true
+IM_SUMMARY_PROJECTION_WRITE_MODE=dual-write
+IM_SUMMARY_QUERY_READ_SOURCE=legacy
 ```
 
-7. keep `dual-write` for a stabilization window
+7. once verification passes, remove the transitional override and return to sharded-only mode
 
 ### Stage D: Search Cutover
 
@@ -176,7 +185,7 @@ IM_SUMMARY_QUERY_READ_SOURCE=sharded
 3. set `IM_OPENSEARCH_ENDPOINT`
 4. set `IM_OPENSEARCH_INDEX`
 5. let `search-index-consumer` build the new index
-6. cut query-api search reads to OpenSearch
+6. do not keep database search fallback enabled in production
 
 ### Stage E: Conversation Shards
 
@@ -195,13 +204,15 @@ Do this last.
 - do not run `projection-worker` in production; it is a development/testing fallback only
 - do not let `command-api` use local gateway relay in production
 - do not let `gateway` proxy IM mutate traffic without `IM_COMMAND_API_INTERNAL_BASE_URL`
-- do not let `query-api` read `sharded` summary source unless all summary shard DBs are configured
-- do not let `stream-consumer` dual-write summary projections unless both legacy summary DB and shard DBs are configured
+- do not let production `query-api` use `legacy` summary reads
+- do not let production `stream-consumer` use `legacy` or `dual-write` summary projection modes unless `ops` is explicitly running a temporary migration override
+- do not let production `query-api` use database search fallback
+- do not let production `stream-consumer` run multiple consumer groups in one process unless `IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP=true` is set for a temporary transition
 - do not let any production role bypass `IM_CONVERSATION_SHARD_IDS` once conversation router topology is enabled
 
 ## 6. Production Verification Checklist
 
-Before cutting summary reads to shards, confirm:
+Before enabling production traffic, confirm:
 
 - `gateway` does not expose IM query/mutate routes
 - `command-api` does not initialize local routing
@@ -210,7 +221,8 @@ Before cutting summary reads to shards, confirm:
 - `stream-consumer` does not start HTTP/TCP
 - Kafka producer connects with `SASL/TLS`
 - dead-letter events can be replayed through `ops --replay-conversation-dead-letter-events`
-- `conversations` and `conversations/changes` match between legacy and sharded stores during `dual-write`
+- `conversations` and `conversations/changes` come from sharded summary stores
+- `search` resolves through OpenSearch and still returns shard-backed message aggregates
 - `visibleFromSequence` does not regress during projection lag or reconnect
 
 ## 7. Role Templates

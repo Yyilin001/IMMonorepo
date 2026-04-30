@@ -290,7 +290,7 @@ struct IMSummaryReadModelConfiguration: Sendable {
         IMSummaryReadModelConfiguration(
             projectionWriteMode: Environment.get("IM_SUMMARY_PROJECTION_WRITE_MODE")
                 .flatMap(ProjectionWriteMode.init(rawValue:))
-                ?? .dualWrite,
+                ?? .sharded,
             queryReadSource: Environment.get("IM_SUMMARY_QUERY_READ_SOURCE")
                 .flatMap(QueryReadSource.init(rawValue:))
                 ?? .sharded
@@ -329,6 +329,7 @@ struct IMStreamConsumerConfiguration: Sendable {
     ]
 
     let enabledGroups: Set<String>
+    let preservesGroupedDeploymentsInProduction: Bool
 
     static func load(from environment: Environment) -> IMStreamConsumerConfiguration {
         let configured = (Environment.get("IM_STREAM_CONSUMER_GROUPS") ?? "")
@@ -336,12 +337,19 @@ struct IMStreamConsumerConfiguration: Sendable {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         return IMStreamConsumerConfiguration(
-            enabledGroups: Set(configured.isEmpty ? defaultGroups : configured)
+            enabledGroups: Set(configured.isEmpty ? defaultGroups : configured),
+            preservesGroupedDeploymentsInProduction: Environment.get("IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP")
+                .map { ["1", "true", "yes"].contains($0.lowercased()) }
+                ?? false
         )
     }
 
     func isEnabled(_ groupID: String) -> Bool {
         enabledGroups.contains(groupID)
+    }
+
+    var orderedEnabledGroups: [String] {
+        enabledGroups.sorted()
     }
 }
 

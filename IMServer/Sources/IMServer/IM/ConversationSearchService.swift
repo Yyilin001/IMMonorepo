@@ -35,6 +35,9 @@ struct ConversationSearchService {
         }
 
         guard let sql = db as? any SQLDatabase else {
+            guard allowLegacyFallback else {
+                throw Abort(.serviceUnavailable, reason: "搜索索引不可用。")
+            }
             return try await legacySearchMessages(
                 in: conversationID,
                 membership: membership,

@@ -163,6 +163,7 @@ private func validateProductionInfrastructureConfiguration(_ app: Application) t
     case .streamConsumer:
         try validateConversationShardConfiguration(app)
         try validateKafkaConsumerConfiguration(app)
+        try validateStreamConsumerDeploymentIsolation(app)
         try validateSummaryReadModelWriteConfiguration(app)
         try validateSearchConfiguration(app)
     case .ops:
@@ -170,12 +171,8 @@ private func validateProductionInfrastructureConfiguration(_ app: Application) t
         if app.eventStreamConfiguration.driver == .kafka {
             try validateKafkaProducerConfiguration(app)
         }
-        if app.summaryReadModelConfiguration.projectionWriteMode != .legacy {
-            try validateSummaryReadModelWriteConfiguration(app)
-        }
-        if app.summaryReadModelConfiguration.queryReadSource == .sharded {
-            try validateSummaryReadModelReadConfiguration(app)
-        }
+        try validateSummaryReadModelWriteConfiguration(app)
+        try validateSummaryReadModelReadConfiguration(app)
     case .projectionWorker:
         throw Abort(.internalServerError, reason: "projection-worker is a development/testing fallback only; use stream-consumer in production.")
     case .combined:
@@ -192,7 +189,7 @@ private func validateGatewayCommandIngressConfiguration(_ app: Application) thro
 private func validateConversationShardConfiguration(_ app: Application) throws {
     let configuredShardIDs = app.shardTopologyConfiguration.shardIDs
     let missingPrimaryShardIDs = configuredShardIDs.filter {
-        $0 != SingleShardConversationShardRouter.defaultShardID && app.conversationShardDatabaseIDs[$0] == nil
+        app.conversationShardDatabaseIDs[$0] == nil
     }
     guard missingPrimaryShardIDs.isEmpty else {
         let missing = missingPrimaryShardIDs.joined(separator: ", ")
@@ -230,7 +227,27 @@ private func validateKafkaConsumerConfiguration(_ app: Application) throws {
     )
 }
 
+private func productionTransitionalReadModelsAllowed(_ app: Application) -> Bool {
+    guard app.environment == .production, app.imRuntimeRole == .ops else {
+        return false
+    }
+    let configuredValue = Environment.get("IM_ALLOW_TRANSITIONAL_READ_MODELS")?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    return configuredValue == "1" || configuredValue == "true" || configuredValue == "yes"
+}
+
 private func validateSummaryReadModelReadConfiguration(_ app: Application) throws {
+    if app.environment == .production,
+       app.summaryReadModelConfiguration.queryReadSource != .sharded,
+       !productionTransitionalReadModelsAllowed(app)
+    {
+        throw Abort(
+            .internalServerError,
+            reason: "Production summary query reads must use IM_SUMMARY_QUERY_READ_SOURCE=sharded. Temporary legacy reads are only allowed for ops with IM_ALLOW_TRANSITIONAL_READ_MODELS=true."
+        )
+    }
+
     switch app.summaryReadModelConfiguration.queryReadSource {
     case .legacy:
         guard app.imSummaryDatabaseEnabled else {
@@ -242,6 +259,16 @@ private func validateSummaryReadModelReadConfiguration(_ app: Application) throw
 }
 
 private func validateSummaryReadModelWriteConfiguration(_ app: Application) throws {
+    if app.environment == .production,
+       app.summaryReadModelConfiguration.projectionWriteMode != .sharded,
+       !productionTransitionalReadModelsAllowed(app)
+    {
+        throw Abort(
+            .internalServerError,
+            reason: "Production summary projection writes must use IM_SUMMARY_PROJECTION_WRITE_MODE=sharded. Temporary legacy or dual-write modes are only allowed for ops with IM_ALLOW_TRANSITIONAL_READ_MODELS=true."
+        )
+    }
+
     switch app.summaryReadModelConfiguration.projectionWriteMode {
     case .legacy:
         guard app.imSummaryDatabaseEnabled else {
@@ -270,6 +297,23 @@ private func validateSummaryShardDatabasesConfigured(_ app: Application) throws 
 }
 
 private func validateSearchConfiguration(_ app: Application) throws {
+    if app.environment == .production {
+        switch app.imRuntimeRole {
+        case .queryAPI:
+            guard app.searchIndexConfiguration.driver == .openSearch else {
+                throw Abort(.internalServerError, reason: "Production query-api requires IM_SEARCH_DRIVER=opensearch.")
+            }
+        case .streamConsumer:
+            if app.streamConsumerConfiguration.isEnabled("search-index-consumer") {
+                guard app.searchIndexConfiguration.driver == .openSearch else {
+                    throw Abort(.internalServerError, reason: "Production search-index-consumer requires IM_SEARCH_DRIVER=opensearch.")
+                }
+            }
+        default:
+            break
+        }
+    }
+
     guard app.searchIndexConfiguration.driver == .openSearch else {
         return
     }
@@ -277,6 +321,18 @@ private func validateSearchConfiguration(_ app: Application) throws {
           !endpoint.isEmpty
     else {
         throw Abort(.internalServerError, reason: "IM_SEARCH_DRIVER=opensearch requires IM_OPENSEARCH_ENDPOINT in production.")
+    }
+}
+
+private func validateStreamConsumerDeploymentIsolation(_ app: Application) throws {
+    guard app.environment == .production, app.imRuntimeRole == .streamConsumer else {
+        return
+    }
+    guard app.streamConsumerConfiguration.enabledGroups.count == 1 || app.streamConsumerConfiguration.preservesGroupedDeploymentsInProduction else {
+        throw Abort(
+            .internalServerError,
+            reason: "Production stream-consumer deployments must run exactly one IM_STREAM_CONSUMER_GROUPS entry per process. Set IM_STREAM_CONSUMER_GROUPS to a single group or explicitly opt in with IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP=true for temporary transitions."
+        )
     }
 }
 

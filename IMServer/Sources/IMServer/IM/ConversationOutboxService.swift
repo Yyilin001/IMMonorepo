@@ -261,6 +261,7 @@ struct RepairReplayConsumer: ConversationEventConsumer {
 }
 
 struct ConversationSearchIndexConsumer: ConversationEventConsumer {
+    let app: Application
     let db: any Database
 
     var supportedEventTypes: Set<ConversationDomainEventType> {
@@ -274,7 +275,7 @@ struct ConversationSearchIndexConsumer: ConversationEventConsumer {
 
         switch envelope.eventType {
         case .messageCreated, .messageUpdated, .messageRecalled:
-            try await ConversationSearchIndexWorker(db: db).reindexMessage(messageID: messageID, on: db)
+            try await app.conversationSearchIndexWriter.reindexMessage(messageID: messageID, on: db)
         case .readAdvanced,
              .metadataUpdated,
              .membershipAdded,
@@ -343,7 +344,7 @@ struct ConversationOutboxService {
         let registry = ConversationEventConsumerRegistry(consumers: [
             ConversationProjectionConsumer(app: app, sourceDB: db),
             ChangesLogConsumer(app: app, sourceDB: db),
-            ConversationSearchIndexConsumer(db: db),
+            ConversationSearchIndexConsumer(app: app, db: db),
             ConversationNotificationConsumer(app: app)
         ])
         var processedCount = 0
