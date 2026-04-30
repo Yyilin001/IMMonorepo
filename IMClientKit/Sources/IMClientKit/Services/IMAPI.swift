@@ -72,6 +72,22 @@ public struct IMConversationReadRequestBody: Codable, Sendable {
     public let readSequence: UInt64
 }
 
+public struct IMConversationMessageEditRequestBody: Codable, Sendable {
+    public let text: String
+
+    public init(text: String) {
+        self.text = text
+    }
+}
+
+public struct IMConversationMessageReactionRequestBody: Codable, Sendable {
+    public let emoji: String
+
+    public init(emoji: String) {
+        self.emoji = emoji
+    }
+}
+
 public struct IMConversationMessageRecallResponseBody: Codable, Equatable, Sendable, APIResponseBody {
     public let id: UUID
     public let conversationID: UUID
@@ -79,7 +95,28 @@ public struct IMConversationMessageRecallResponseBody: Codable, Equatable, Senda
     public let clientMessageID: String?
     public let serverSequence: Int
     public let content: IMMessageContent
+    public let derivedState: IMMessageDerivedState
     public let createdAt: Date?
+
+    public init(
+        id: UUID,
+        conversationID: UUID,
+        senderUserID: UUID,
+        clientMessageID: String? = nil,
+        serverSequence: Int,
+        content: IMMessageContent,
+        derivedState: IMMessageDerivedState = IMMessageDerivedState(),
+        createdAt: Date?
+    ) {
+        self.id = id
+        self.conversationID = conversationID
+        self.senderUserID = senderUserID
+        self.clientMessageID = clientMessageID
+        self.serverSequence = serverSequence
+        self.content = content
+        self.derivedState = derivedState
+        self.createdAt = createdAt
+    }
 }
 
 public struct IMConversationMemberResponseBody: Codable, Equatable, Sendable, APIResponseBody, Identifiable {
@@ -99,10 +136,31 @@ public struct IMMessagePreviewResponseBody: Codable, Equatable, Sendable, APIRes
     public let senderUserID: UUID
     public let serverSequence: Int
     public let content: IMMessageContent
+    public let derivedState: IMMessageDerivedState
     public let createdAt: Date?
 
+    public init(
+        id: UUID,
+        senderUserID: UUID,
+        serverSequence: Int,
+        content: IMMessageContent,
+        derivedState: IMMessageDerivedState = IMMessageDerivedState(),
+        createdAt: Date?
+    ) {
+        self.id = id
+        self.senderUserID = senderUserID
+        self.serverSequence = serverSequence
+        self.content = content
+        self.derivedState = derivedState
+        self.createdAt = createdAt
+    }
+
     public var textValue: String? {
-        content.textValue
+        content.presentation(derivedState: derivedState).textValue
+    }
+
+    public var previewText: String {
+        content.presentation(derivedState: derivedState).previewText
     }
 }
 
@@ -192,10 +250,15 @@ public struct IMConversationMessageResponseBody: Codable, Equatable, Sendable, A
     public let clientMessageID: String?
     public let serverSequence: Int
     public let content: IMMessageContent
+    public let derivedState: IMMessageDerivedState
     public let createdAt: Date?
 
     public var textValue: String? {
-        content.textValue
+        content.presentation(derivedState: derivedState).textValue
+    }
+
+    public var previewText: String {
+        content.presentation(derivedState: derivedState).previewText
     }
 
     init(
@@ -205,6 +268,7 @@ public struct IMConversationMessageResponseBody: Codable, Equatable, Sendable, A
         clientMessageID: String? = nil,
         serverSequence: Int,
         content: IMMessageContent,
+        derivedState: IMMessageDerivedState = IMMessageDerivedState(),
         createdAt: Date?
     ) {
         self.id = id
@@ -213,6 +277,7 @@ public struct IMConversationMessageResponseBody: Codable, Equatable, Sendable, A
         self.clientMessageID = clientMessageID
         self.serverSequence = serverSequence
         self.content = content
+        self.derivedState = derivedState
         self.createdAt = createdAt
     }
 }
@@ -238,8 +303,31 @@ public struct IMConversationMessageSearchHitResponseBody: Codable, Equatable, Se
     public let senderUserID: UUID
     public let serverSequence: Int
     public let content: IMMessageContent
+    public let derivedState: IMMessageDerivedState
     public let snippet: String
     public let createdAt: Date?
+
+    public var previewText: String {
+        content.presentation(derivedState: derivedState).previewText
+    }
+
+    public init(
+        messageID: UUID,
+        senderUserID: UUID,
+        serverSequence: Int,
+        content: IMMessageContent,
+        derivedState: IMMessageDerivedState = IMMessageDerivedState(),
+        snippet: String,
+        createdAt: Date?
+    ) {
+        self.messageID = messageID
+        self.senderUserID = senderUserID
+        self.serverSequence = serverSequence
+        self.content = content
+        self.derivedState = derivedState
+        self.snippet = snippet
+        self.createdAt = createdAt
+    }
 }
 
 public struct IMConversationMessageSearchPageResponseBody: Codable, Equatable, Sendable, APIResponseBody {
@@ -560,6 +648,42 @@ enum IMRequest {
         }
     }
 
+    public struct EditMessage: AuthorizedEndpoint {
+        public typealias RequestBody = IMConversationMessageEditRequestBody
+        public typealias Response = IMConversationMessageResponseBody
+
+        let conversationID: String
+        let messageID: String
+        let payload: IMConversationMessageEditRequestBody
+
+        public var body: IMConversationMessageEditRequestBody? { payload }
+
+        public var baseRequestSpec: HTTPRequestSpec {
+            .init(
+                path: "api/im/conversations/\(conversationID)/messages/\(messageID)/edit",
+                method: .post
+            )
+        }
+    }
+
+    public struct ToggleMessageReaction: AuthorizedEndpoint {
+        public typealias RequestBody = IMConversationMessageReactionRequestBody
+        public typealias Response = IMConversationMessageResponseBody
+
+        let conversationID: String
+        let messageID: String
+        let payload: IMConversationMessageReactionRequestBody
+
+        public var body: IMConversationMessageReactionRequestBody? { payload }
+
+        public var baseRequestSpec: HTTPRequestSpec {
+            .init(
+                path: "api/im/conversations/\(conversationID)/messages/\(messageID)/reactions",
+                method: .post
+            )
+        }
+    }
+
     public struct LeaveConversation: AuthorizedEndpoint {
         public typealias Response = EmptyResponse
 
@@ -732,5 +856,29 @@ enum IMRequest {
         messageID: String
     ) -> RecallMessage {
         RecallMessage(conversationID: conversationID, messageID: messageID)
+    }
+
+    public static func editMessage(
+        conversationID: String,
+        messageID: String,
+        text: String
+    ) -> EditMessage {
+        EditMessage(
+            conversationID: conversationID,
+            messageID: messageID,
+            payload: IMConversationMessageEditRequestBody(text: text)
+        )
+    }
+
+    public static func toggleMessageReaction(
+        conversationID: String,
+        messageID: String,
+        emoji: String
+    ) -> ToggleMessageReaction {
+        ToggleMessageReaction(
+            conversationID: conversationID,
+            messageID: messageID,
+            payload: IMConversationMessageReactionRequestBody(emoji: emoji)
+        )
     }
 }

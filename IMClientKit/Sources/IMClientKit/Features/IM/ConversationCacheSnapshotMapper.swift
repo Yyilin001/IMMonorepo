@@ -15,6 +15,7 @@ enum ConversationCacheSnapshotMapper {
         summarySyncToken: String? = nil,
         summaryNextCursor: String? = nil,
         hasMoreConversationSummaries: Bool = false,
+        transferSnapshots: [IMTransferSnapshot] = [],
         trimMessages: ([IMConversationMessage], Int) -> [IMConversationMessage]
     ) -> IMConversationCacheSnapshot {
         var cursorStates: [IMSyncCursorState] = []
@@ -56,9 +57,11 @@ enum ConversationCacheSnapshotMapper {
                         senderUserID: message.senderUserID,
                         serverSequence: message.serverSequence,
                         content: message.content,
+                        derivedState: message.derivedState,
                         direction: message.direction,
                         createdAt: message.createdAt,
                         deliveryState: message.deliveryState,
+                        transferTaskID: message.resolvedTransferTaskID,
                         localTransferState: message.localTransferState,
                         localDownloadState: message.localDownloadState
                     )
@@ -88,7 +91,8 @@ enum ConversationCacheSnapshotMapper {
                 hasMoreConversationSummaries: hasMoreConversationSummaries
             ),
             conversations: cachedConversations,
-            cursors: cursorStates
+            cursors: cursorStates,
+            transferSnapshots: transferSnapshots
         )
     }
 
@@ -121,9 +125,11 @@ enum ConversationCacheSnapshotMapper {
                         senderUserID: cachedMessage.senderUserID,
                         serverSequence: cachedMessage.serverSequence,
                         content: cachedMessage.content,
+                        derivedState: cachedMessage.derivedState,
                         direction: cachedMessage.direction,
                         createdAt: cachedMessage.createdAt,
                         deliveryState: restoreDeliveryState(cachedMessage.deliveryState),
+                        transferTaskID: cachedMessage.transferTaskID,
                         localTransferState: cachedMessage.localTransferState,
                         localDownloadState: cachedMessage.localDownloadState
                     )

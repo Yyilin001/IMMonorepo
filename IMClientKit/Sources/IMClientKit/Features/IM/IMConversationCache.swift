@@ -36,6 +36,7 @@ public struct IMConversationCacheSnapshot: Sendable, Equatable {
     public let metadata: IMCacheMetadataState
     public let conversations: [IMCachedConversationState]
     public let cursors: [IMSyncCursorState]
+    public let transferSnapshots: [IMTransferSnapshot]
 
     public var selectedConversationID: String? {
         metadata.selectedConversationID
@@ -54,17 +55,20 @@ public struct IMConversationCacheSnapshot: Sendable, Equatable {
             hasMoreConversationSummaries: false
         ),
         conversations: [],
-        cursors: []
+        cursors: [],
+        transferSnapshots: []
     )
 
     init(
         metadata: IMCacheMetadataState,
         conversations: [IMCachedConversationState],
-        cursors: [IMSyncCursorState]
+        cursors: [IMSyncCursorState],
+        transferSnapshots: [IMTransferSnapshot] = []
     ) {
         self.metadata = metadata
         self.conversations = conversations
         self.cursors = cursors
+        self.transferSnapshots = transferSnapshots
     }
 
     init(
@@ -73,7 +77,8 @@ public struct IMConversationCacheSnapshot: Sendable, Equatable {
         lastSummaryRefreshAt: Date?,
         summarySyncToken: String?,
         summaryNextCursor: String?,
-        hasMoreConversationSummaries: Bool
+        hasMoreConversationSummaries: Bool,
+        transferSnapshots: [IMTransferSnapshot] = []
     ) {
         self.init(
             metadata: IMCacheMetadataState(
@@ -91,7 +96,8 @@ public struct IMConversationCacheSnapshot: Sendable, Equatable {
                     latestSyncedServerSequence: conversation.latestSyncedServerSequence,
                     oldestLoadedServerSequence: conversation.oldestLoadedServerSequence
                 )
-            }
+            },
+            transferSnapshots: transferSnapshots
         )
     }
 }
@@ -180,14 +186,16 @@ public struct IMCachedMessageState: Identifiable, Sendable, Equatable {
     public let senderUserID: UUID?
     public let serverSequence: UInt64?
     public let content: IMMessageContent
+    public let derivedState: MessageDerivedState
     public let direction: IMMessageDirection
     public let createdAt: Date
     public let deliveryState: IMMessageDeliveryState
+    public let transferTaskID: TransferTaskID?
     public let localTransferState: IMMessageLocalTransferState?
     public let localDownloadState: IMMessageLocalDownloadState?
 
     public var text: String {
-        content.previewText
+        content.presentation(derivedState: derivedState).previewText
     }
 
     public init(
@@ -198,9 +206,11 @@ public struct IMCachedMessageState: Identifiable, Sendable, Equatable {
         senderUserID: UUID?,
         serverSequence: UInt64?,
         content: IMMessageContent,
+        derivedState: MessageDerivedState = MessageDerivedState(),
         direction: IMMessageDirection,
         createdAt: Date,
         deliveryState: IMMessageDeliveryState,
+        transferTaskID: TransferTaskID? = nil,
         localTransferState: IMMessageLocalTransferState? = nil,
         localDownloadState: IMMessageLocalDownloadState? = nil
     ) {
@@ -211,9 +221,11 @@ public struct IMCachedMessageState: Identifiable, Sendable, Equatable {
         self.senderUserID = senderUserID
         self.serverSequence = serverSequence
         self.content = content
+        self.derivedState = content.derivedState.isRecalled ? content.derivedState : derivedState
         self.direction = direction
         self.createdAt = createdAt
         self.deliveryState = deliveryState
+        self.transferTaskID = transferTaskID
         self.localTransferState = localTransferState
         self.localDownloadState = localDownloadState
     }
@@ -406,6 +418,9 @@ public final class IMCachedMessageEntity {
     public var createdAt: Date
     public var deliveryStateRawValue: String
     public var deliveryFailureMessage: String?
+    public var transferTaskSessionIdentifier: String?
+    public var transferTaskIdentifier: Int?
+    public var derivedStateJSON: String?
     public var localTransferStateJSON: String?
     public var localDownloadStateJSON: String?
 
@@ -424,6 +439,9 @@ public final class IMCachedMessageEntity {
         createdAt: Date,
         deliveryStateRawValue: String,
         deliveryFailureMessage: String?,
+        transferTaskSessionIdentifier: String?,
+        transferTaskIdentifier: Int?,
+        derivedStateJSON: String?,
         localTransferStateJSON: String?,
         localDownloadStateJSON: String?
     ) {
@@ -441,6 +459,9 @@ public final class IMCachedMessageEntity {
         self.createdAt = createdAt
         self.deliveryStateRawValue = deliveryStateRawValue
         self.deliveryFailureMessage = deliveryFailureMessage
+        self.transferTaskSessionIdentifier = transferTaskSessionIdentifier
+        self.transferTaskIdentifier = transferTaskIdentifier
+        self.derivedStateJSON = derivedStateJSON
         self.localTransferStateJSON = localTransferStateJSON
         self.localDownloadStateJSON = localDownloadStateJSON
     }
@@ -472,6 +493,29 @@ public final class IMSyncCursorEntity {
     }
 }
 
+@Model
+public final class IMCachedTransferSnapshotEntity {
+    @Attribute(.unique) var recordID: String
+    public var ownerUserID: String
+    public var taskSessionIdentifier: String
+    public var taskIdentifier: Int
+    public var snapshotJSON: String
+
+    init(
+        recordID: String,
+        ownerUserID: String,
+        taskSessionIdentifier: String,
+        taskIdentifier: Int,
+        snapshotJSON: String
+    ) {
+        self.recordID = recordID
+        self.ownerUserID = ownerUserID
+        self.taskSessionIdentifier = taskSessionIdentifier
+        self.taskIdentifier = taskIdentifier
+        self.snapshotJSON = snapshotJSON
+    }
+}
+
 @ModelActor
 public actor IMConversationCacheModelActor {
     public func loadSnapshot(for ownerUserID: String) throws -> IMConversationCacheSnapshot {
@@ -487,11 +531,22 @@ public actor IMConversationCacheModelActor {
         let cursorDescriptor = FetchDescriptor<IMSyncCursorEntity>(
             predicate: #Predicate { $0.ownerUserID == ownerUserID }
         )
+        let transferDescriptor = FetchDescriptor<IMCachedTransferSnapshotEntity>(
+            predicate: #Predicate { $0.ownerUserID == ownerUserID }
+        )
 
         let metadata = try modelContext.fetch(metadataDescriptor).first
         let summaries = try modelContext.fetch(summaryDescriptor)
         let messages = try modelContext.fetch(messageDescriptor)
         let cursors = try modelContext.fetch(cursorDescriptor)
+        let transferSnapshots = try modelContext.fetch(transferDescriptor)
+            .compactMap(Self.transferSnapshot(from:))
+            .sorted {
+                if $0.taskID.sessionIdentifier == $1.taskID.sessionIdentifier {
+                    return $0.taskID.taskIdentifier < $1.taskID.taskIdentifier
+                }
+                return $0.taskID.sessionIdentifier < $1.taskID.sessionIdentifier
+            }
 
         let messagesByConversationID = Dictionary(grouping: messages, by: \.conversationID)
         let cursorsByConversationID = Dictionary(uniqueKeysWithValues: cursors.map { ($0.conversationID, $0) })
@@ -576,7 +631,8 @@ public actor IMConversationCacheModelActor {
                 hasMoreConversationSummaries: metadata?.hasMoreConversationSummaries ?? false
             ),
             conversations: conversations,
-            cursors: cursorStates
+            cursors: cursorStates,
+            transferSnapshots: transferSnapshots
         )
     }
 
@@ -585,6 +641,7 @@ public actor IMConversationCacheModelActor {
         try deleteEntities(for: ownerUserID, summaries: true)
         try deleteEntities(for: ownerUserID, summaries: false)
         try deleteCursors(for: ownerUserID)
+        try deleteTransferSnapshots(for: ownerUserID)
 
         modelContext.insert(
             IMCacheMetadataEntity(
@@ -661,17 +718,46 @@ public actor IMConversationCacheModelActor {
                         senderUserID: message.senderUserID?.uuidString,
                         serverSequence: message.serverSequence.map { Int(min($0, UInt64(Int.max))) },
                         kind: Self.cachedMessageKind(from: message.content),
-                        textPreview: Self.cachedMessagePreview(from: message.content),
+                        textPreview: Self.cachedMessagePreview(
+                            from: message.content,
+                            derivedState: message.derivedState
+                        ),
                         contentJSON: Self.cachedMessageJSON(from: message.content),
                         directionRawValue: message.direction.rawValue,
                         createdAt: message.createdAt,
                         deliveryStateRawValue: Self.deliveryStateRawValue(from: message.deliveryState),
                         deliveryFailureMessage: Self.deliveryFailureMessage(from: message.deliveryState),
+                        transferTaskSessionIdentifier: message.transferTaskID?.sessionIdentifier
+                            ?? message.localTransferState?.taskID?.sessionIdentifier
+                            ?? message.localDownloadState?.taskID?.sessionIdentifier,
+                        transferTaskIdentifier: message.transferTaskID?.taskIdentifier
+                            ?? message.localTransferState?.taskID?.taskIdentifier
+                            ?? message.localDownloadState?.taskID?.taskIdentifier,
+                        derivedStateJSON: Self.cachedDerivedStateJSON(from: message.derivedState),
                         localTransferStateJSON: Self.cachedLocalTransferStateJSON(from: message.localTransferState),
                         localDownloadStateJSON: Self.cachedLocalDownloadStateJSON(from: message.localDownloadState)
                     )
                 )
             }
+        }
+
+        for transferSnapshot in snapshot.transferSnapshots {
+            guard let snapshotJSON = Self.cachedTransferSnapshotJSON(from: transferSnapshot) else {
+                continue
+            }
+
+            modelContext.insert(
+                IMCachedTransferSnapshotEntity(
+                    recordID: Self.transferRecordID(
+                        ownerUserID: ownerUserID,
+                        taskID: transferSnapshot.taskID
+                    ),
+                    ownerUserID: ownerUserID,
+                    taskSessionIdentifier: transferSnapshot.taskID.sessionIdentifier,
+                    taskIdentifier: transferSnapshot.taskID.taskIdentifier,
+                    snapshotJSON: snapshotJSON
+                )
+            )
         }
 
         try modelContext.save()
@@ -682,6 +768,7 @@ public actor IMConversationCacheModelActor {
         try deleteEntities(for: ownerUserID, summaries: true)
         try deleteEntities(for: ownerUserID, summaries: false)
         try deleteCursors(for: ownerUserID)
+        try deleteTransferSnapshots(for: ownerUserID)
         try modelContext.save()
     }
 
@@ -690,6 +777,7 @@ public actor IMConversationCacheModelActor {
         try deleteAllSummaries()
         try deleteAllMessages()
         try deleteAllCursors()
+        try deleteAllTransferSnapshots()
         try modelContext.save()
     }
 
@@ -721,6 +809,13 @@ public actor IMConversationCacheModelActor {
         try modelContext.fetch(descriptor).forEach(modelContext.delete)
     }
 
+    private func deleteTransferSnapshots(for ownerUserID: String) throws {
+        let descriptor = FetchDescriptor<IMCachedTransferSnapshotEntity>(
+            predicate: #Predicate { $0.ownerUserID == ownerUserID }
+        )
+        try modelContext.fetch(descriptor).forEach(modelContext.delete)
+    }
+
     private func deleteAllMetadata() throws {
         try modelContext.fetch(FetchDescriptor<IMCacheMetadataEntity>()).forEach(modelContext.delete)
     }
@@ -737,6 +832,10 @@ public actor IMConversationCacheModelActor {
         try modelContext.fetch(FetchDescriptor<IMSyncCursorEntity>()).forEach(modelContext.delete)
     }
 
+    private func deleteAllTransferSnapshots() throws {
+        try modelContext.fetch(FetchDescriptor<IMCachedTransferSnapshotEntity>()).forEach(modelContext.delete)
+    }
+
     private static func cachedMessageState(from entity: IMCachedMessageEntity) -> IMCachedMessageState {
         IMCachedMessageState(
             id: entity.messageID,
@@ -750,11 +849,16 @@ public actor IMConversationCacheModelActor {
                 textPreview: entity.textPreview,
                 contentJSON: entity.contentJSON
             ),
+            derivedState: cachedDerivedState(from: entity.derivedStateJSON),
             direction: IMMessageDirection(rawValue: entity.directionRawValue) ?? .incoming,
             createdAt: entity.createdAt,
             deliveryState: deliveryState(
                 rawValue: entity.deliveryStateRawValue,
                 failureMessage: entity.deliveryFailureMessage
+            ),
+            transferTaskID: cachedTransferTaskID(
+                sessionIdentifier: entity.transferTaskSessionIdentifier,
+                taskIdentifier: entity.transferTaskIdentifier
             ),
             localTransferState: cachedLocalTransferState(from: entity.localTransferStateJSON),
             localDownloadState: cachedLocalDownloadState(from: entity.localDownloadStateJSON)
@@ -783,12 +887,31 @@ public actor IMConversationCacheModelActor {
         }
     }
 
+    private static func cachedTransferTaskID(
+        sessionIdentifier: String?,
+        taskIdentifier: Int?
+    ) -> TransferTaskID? {
+        guard let sessionIdentifier,
+              let taskIdentifier
+        else {
+            return nil
+        }
+
+        return TransferTaskID(
+            sessionIdentifier: sessionIdentifier,
+            taskIdentifier: taskIdentifier
+        )
+    }
+
     private static func cachedMessageKind(from content: IMMessageContent) -> String {
         content.type.rawValue
     }
 
-    private static func cachedMessagePreview(from content: IMMessageContent) -> String {
-        content.previewText
+    private static func cachedMessagePreview(
+        from content: IMMessageContent,
+        derivedState: MessageDerivedState
+    ) -> String {
+        content.presentation(derivedState: derivedState).previewText
     }
 
     private static func cachedMessageJSON(from content: IMMessageContent) -> String? {
@@ -797,6 +920,24 @@ public actor IMConversationCacheModelActor {
             return nil
         }
         return String(data: data, encoding: .utf8)
+    }
+
+    private static func cachedDerivedStateJSON(from derivedState: MessageDerivedState) -> String? {
+        let encoder = JSONEncoder()
+        guard let data = try? encoder.encode(derivedState) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func cachedDerivedState(from json: String?) -> MessageDerivedState {
+        guard let json,
+              let data = json.data(using: .utf8),
+              let derivedState = try? JSONDecoder().decode(MessageDerivedState.self, from: data)
+        else {
+            return MessageDerivedState()
+        }
+        return derivedState
     }
 
     private static func cachedLocalTransferStateJSON(from state: IMMessageLocalTransferState?) -> String? {
@@ -1010,6 +1151,28 @@ public actor IMConversationCacheModelActor {
 
         return fallback
     }
+
+    private static func cachedTransferSnapshotJSON(from snapshot: IMTransferSnapshot) -> String? {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(snapshot) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func transferSnapshot(from entity: IMCachedTransferSnapshotEntity) -> IMTransferSnapshot? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let data = entity.snapshotJSON.data(using: .utf8) else {
+            return nil
+        }
+        return try? decoder.decode(IMTransferSnapshot.self, from: data)
+    }
+
+    private static func transferRecordID(ownerUserID: String, taskID: IMTransferTaskID) -> String {
+        "\(ownerUserID)#transfer#\(taskID.sessionIdentifier)#\(taskID.taskIdentifier)"
+    }
 }
 
 public final class SwiftDataIMConversationCache: IMConversationCaching, @unchecked Sendable {
@@ -1041,7 +1204,8 @@ public final class SwiftDataIMConversationCache: IMConversationCaching, @uncheck
                 for: IMCacheMetadataEntity.self,
                 IMCachedConversationSummaryEntity.self,
                 IMCachedMessageEntity.self,
-                IMSyncCursorEntity.self
+                IMSyncCursorEntity.self,
+                IMCachedTransferSnapshotEntity.self
             )
             return IMConversationCacheHandler(
                 SwiftDataIMConversationCache(modelContainer: container)

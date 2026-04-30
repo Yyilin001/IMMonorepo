@@ -226,6 +226,7 @@ struct IMConversationDetailView: View {
     @State private var isPresentingSearch = false
     @State private var isPresentingMediaImporter = false
     @State private var replyTarget: IMConversationMessage?
+    @State private var editingTarget: IMConversationMessage?
     @State private var highlightedMessageID: String?
     @State private var mediaDownloadStates: [String: IMMediaDownloadState] = [:]
     @State private var mediaDownloadTasks: [String: Task<Void, Never>] = [:]
@@ -339,7 +340,10 @@ struct IMConversationDetailView: View {
             canCancel: message.canCancelQueuedSend,
             canReply: message.canReply,
             canRecall: message.canRecall,
+            canEdit: message.canEdit,
+            canReact: message.canReact,
             mediaDownloadState: resolvedMediaDownloadState(for: message),
+            currentUserID: authManager.currentUser?.id,
             onJumpToReplyReference: {
                 guard case .reply(let reference, _) = message.content else {
                     return
@@ -359,7 +363,13 @@ struct IMConversationDetailView: View {
                 )
             },
             onReply: {
+                editingTarget = nil
                 replyTarget = message
+            },
+            onEdit: {
+                replyTarget = nil
+                editingTarget = message
+                composerText = MessagePresentation(aggregate: message.aggregate).textValue ?? ""
             },
             onRecall: {
                 Task {
@@ -376,6 +386,15 @@ struct IMConversationDetailView: View {
                 Task {
                     await authManager.retryIMTextMessage(
                         localMessageID: message.id,
+                        in: conversationID
+                    )
+                }
+            },
+            onToggleReaction: { emoji in
+                Task {
+                    _ = await authManager.toggleIMMessageReaction(
+                        messageID: message.serverMessageID ?? message.id,
+                        emoji: emoji,
                         in: conversationID
                     )
                 }
@@ -806,7 +825,32 @@ struct IMConversationDetailView: View {
                 .disabled(!canSendMessages)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    if let replyTarget {
+                    if let editingTarget {
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("编辑消息")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Text(MessagePresentation(aggregate: editingTarget.aggregate).textValue ?? "消息内容不可编辑")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+
+                            Spacer(minLength: 0)
+
+                            Button {
+                                self.editingTarget = nil
+                                self.composerText = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.top, 12)
+                    } else if let replyTarget {
                         HStack(alignment: .top, spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("回复消息")
@@ -838,7 +882,7 @@ struct IMConversationDetailView: View {
                         .disabled(!canSendMessages)
                         .padding(.horizontal, 14)
                         .padding(.bottom, 12)
-                        .padding(.top, replyTarget == nil ? 12 : 0)
+                        .padding(.top, (replyTarget == nil && editingTarget == nil) ? 12 : 0)
                 }
                 .background(Color(.secondarySystemGroupedBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 18))
@@ -846,7 +890,13 @@ struct IMConversationDetailView: View {
                 Button {
                     Task {
                         let didSend: Bool
-                        if let replyTarget,
+                        if let editingTarget {
+                            didSend = await authManager.editIMMessage(
+                                messageID: editingTarget.serverMessageID ?? editingTarget.id,
+                                text: composerText,
+                                in: conversationID
+                            )
+                        } else if let replyTarget,
                            let reference = replyReference(from: replyTarget) {
                             didSend = await authManager.sendIMReply(
                                 reference: reference,
@@ -859,10 +909,11 @@ struct IMConversationDetailView: View {
                         if didSend {
                             composerText = ""
                             replyTarget = nil
+                            editingTarget = nil
                         }
                     }
                 } label: {
-                    Image(systemName: "paperplane.fill")
+                    Image(systemName: editingTarget == nil ? "paperplane.fill" : "square.and.arrow.down.fill")
                         .font(.headline)
                         .frame(width: 44, height: 44)
                 }
@@ -914,6 +965,7 @@ struct IMConversationDetailView: View {
 
         if didSend {
             replyTarget = nil
+            editingTarget = nil
         }
     }
 
@@ -2505,6 +2557,8 @@ private struct IMConversationQueueBanner: View {
 }
 
 private struct IMMessageBubble: View {
+    private static let reactionEmojiOptions = ["👍", "❤️", "😂", "😮", "👎"]
+
     let message: IMConversationMessage
     let replyReference: IMReplyReferenceResolution?
     let isHighlighted: Bool
@@ -2512,12 +2566,17 @@ private struct IMMessageBubble: View {
     let canCancel: Bool
     let canReply: Bool
     let canRecall: Bool
+    let canEdit: Bool
+    let canReact: Bool
     let mediaDownloadState: IMMediaDownloadState?
+    let currentUserID: UUID?
     let onJumpToReplyReference: () -> Void
     let onCancel: () -> Void
     let onReply: () -> Void
+    let onEdit: () -> Void
     let onRecall: () -> Void
     let onRetry: () -> Void
+    let onToggleReaction: (String) -> Void
     let onDownloadMedia: () -> Void
     let onCancelMediaDownload: () -> Void
     let onRetryMediaDownload: () -> Void
@@ -2540,9 +2599,16 @@ private struct IMMessageBubble: View {
             VStack(alignment: .leading, spacing: 6) {
                 messageBody
 
+                if !message.derivedState.reactions.isEmpty {
+                    reactionRow
+                }
+
                 HStack(spacing: 8) {
                     Text(message.createdAt.formatted(date: .omitted, time: .shortened))
                     Text(deliveryText)
+                    if !message.derivedState.edits.isEmpty {
+                        Text("已编辑")
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -2589,6 +2655,20 @@ private struct IMMessageBubble: View {
                 if canReply {
                     Button("回复", systemImage: "arrowshape.turn.up.left") {
                         onReply()
+                    }
+                }
+
+                if canEdit {
+                    Button("编辑", systemImage: "square.and.pencil") {
+                        onEdit()
+                    }
+                }
+
+                if canReact {
+                    ForEach(Self.reactionEmojiOptions, id: \.self) { emoji in
+                        Button(emoji) {
+                            onToggleReaction(emoji)
+                        }
                     }
                 }
 
@@ -2640,11 +2720,14 @@ private struct IMMessageBubble: View {
 
     @ViewBuilder
     private var messageBody: some View {
-        switch message.content {
-        case .text(let text):
-            Text(text)
+        let aggregate = message.aggregate
+        let presentation = MessagePresentation(aggregate: aggregate)
+
+        switch aggregate.primaryContent {
+        case .text:
+            Text(presentation.textValue ?? message.text)
                 .font(.body)
-        case .reply(_, let text):
+        case .reply:
             VStack(alignment: .leading, spacing: 8) {
                 Button(action: onJumpToReplyReference) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -2672,7 +2755,7 @@ private struct IMMessageBubble: View {
                 }
                 .buttonStyle(.plain)
 
-                Text(text)
+                Text(presentation.textValue ?? message.text)
                     .font(.body)
             }
         case .image(let asset):
@@ -2699,13 +2782,34 @@ private struct IMMessageBubble: View {
                 Label("文件", systemImage: "doc")
                     .font(.headline)
             }
-        case .recalled:
+        case nil:
             Text(message.direction == .outgoing ? "你撤回了一条消息" : "对方撤回了一条消息")
                 .font(.body)
                 .italic()
                 .foregroundStyle(.secondary)
         case .system:
             EmptyView()
+        }
+    }
+
+    private var reactionRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(message.derivedState.reactions, id: \.emoji) { reaction in
+                    let didReact = currentUserID.map(reaction.actorUserIDs.contains) ?? false
+                    HStack(spacing: 4) {
+                        Text(reaction.emoji)
+                        Text("\(reaction.actorUserIDs.count)")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(didReact ? Color.accentColor.opacity(0.18) : Color(.tertiarySystemGroupedBackground))
+                    )
+                }
+            }
         }
     }
 
@@ -2936,6 +3040,35 @@ private extension IMConversationMessage {
               serverMessageID != nil || serverSequence != nil,
               Date().timeIntervalSince(createdAt) <= RecallRule.window
         else {
+            return false
+        }
+
+        switch content {
+        case .text, .reply, .image, .audio, .file:
+            return true
+        case .recalled, .system:
+            return false
+        }
+    }
+
+    var canEdit: Bool {
+        guard direction == .outgoing,
+              serverMessageID != nil || serverSequence != nil,
+              !derivedState.isRecalled
+        else {
+            return false
+        }
+
+        switch content {
+        case .text, .reply:
+            return true
+        case .image, .audio, .file, .recalled, .system:
+            return false
+        }
+    }
+
+    var canReact: Bool {
+        guard serverMessageID != nil || serverSequence != nil, !derivedState.isRecalled else {
             return false
         }
 

@@ -194,18 +194,24 @@ public struct IMConversationMessage: Identifiable, Equatable, Sendable {
     public var senderUserID: UUID?
     public var serverSequence: UInt64?
     public var content: IMMessageContent
+    public var derivedState: MessageDerivedState
     public let direction: IMMessageDirection
     public var createdAt: Date
     public var deliveryState: IMMessageDeliveryState
+    public var transferTaskID: TransferTaskID?
     public var localTransferState: IMMessageLocalTransferState?
     public var localDownloadState: IMMessageLocalDownloadState?
 
     public var text: String {
-        content.previewText
+        MessagePresentation(aggregate: aggregate).previewText
+    }
+
+    public var aggregate: MessageAggregate {
+        content.aggregate(derivedState: derivedState)
     }
 
     public var mediaAsset: IMMediaAsset? {
-        content.presentation.mediaAsset
+        MessagePresentation(aggregate: aggregate).mediaAsset
     }
 
     public var isRecoverableOutgoingMediaUpload: Bool {
@@ -232,9 +238,11 @@ public struct IMConversationMessage: Identifiable, Equatable, Sendable {
         senderUserID: UUID?,
         serverSequence: UInt64?,
         content: IMMessageContent,
+        derivedState: MessageDerivedState = MessageDerivedState(),
         direction: IMMessageDirection,
         createdAt: Date,
         deliveryState: IMMessageDeliveryState,
+        transferTaskID: TransferTaskID? = nil,
         localTransferState: IMMessageLocalTransferState? = nil,
         localDownloadState: IMMessageLocalDownloadState? = nil
     ) {
@@ -245,9 +253,11 @@ public struct IMConversationMessage: Identifiable, Equatable, Sendable {
         self.senderUserID = senderUserID
         self.serverSequence = serverSequence
         self.content = content
+        self.derivedState = content.derivedState.isRecalled ? content.derivedState : derivedState
         self.direction = direction
         self.createdAt = createdAt
         self.deliveryState = deliveryState
+        self.transferTaskID = transferTaskID
         self.localTransferState = localTransferState
         self.localDownloadState = localDownloadState
     }
@@ -272,6 +282,10 @@ public struct IMReplyReferenceResolution: Equatable, Sendable {
 public extension IMConversationMessage {
     func resolvedReplyReference(in messages: [IMConversationMessage]) -> IMReplyReferenceResolution? {
         MessageDerivedStateReducer().resolveReplyReference(for: self, in: messages)
+    }
+
+    var resolvedTransferTaskID: TransferTaskID? {
+        transferTaskID ?? localTransferState?.taskID ?? localDownloadState?.taskID
     }
 }
 
@@ -446,10 +460,12 @@ public final class IMConversationStore: ObservableObject {
     @Published public private(set) var replyJumpState: IMReplyJumpState = .idle
 
     private let listReadModel = ConversationListReadModel()
+    private let conversationListStore = ConversationListStore()
     private var detailState = ConversationDetailState()
     private var outgoingQueueState = OutgoingQueueState()
     private var conversationSearchState = ConversationSearchState()
     private let messageTimelineState = MessageTimelineState()
+    private let conversationTimelineStore = ConversationTimelineStore()
     private let messageDerivedStateReducer = MessageDerivedStateReducer()
 
     public var selectedConversation: IMConversation? {
@@ -537,13 +553,22 @@ public final class IMConversationStore: ObservableObject {
         upserts: [IMConversationSummaryResponseBody],
         removedConversationIDs: [UUID]
     ) {
-        for response in upserts {
-            upsertConversationSummaryContent(response)
+        conversationListStore.applySummaryChanges(
+            upserts: upserts,
+            removedConversationIDs: removedConversationIDs,
+            conversations: &conversations,
+            selectedConversationID: &selectedConversationID
+        ) { response, conversations in
+            upsertConversationSummaryContent(response, conversations: &conversations)
         }
-
-        for conversationID in removedConversationIDs {
-            removeConversation(id: conversationID.uuidString)
+        let remainingConversationIDs = Set(conversations.map(\.id))
+        for removedConversationID in removedConversationIDs.map(\.uuidString)
+            where !remainingConversationIDs.contains(removedConversationID) {
+            detailState.removeConversation(id: removedConversationID)
         }
+        syncReplyJumpState()
+        statusMessage = nil
+        sortConversations()
     }
 
     public func replaceConversationSummaryWindow(
@@ -551,28 +576,19 @@ public final class IMConversationStore: ObservableObject {
         nextCursor: String?,
         hasMore: Bool
     ) {
-        let existingByID = Dictionary(uniqueKeysWithValues: conversations.map { ($0.id, $0) })
-        let previousSelectedConversationID = selectedConversationID
-
-        conversations = responses.map { response in
-            let conversationID = response.id.uuidString
-            return conversationSummary(
-                from: response,
-                existing: existingByID[conversationID]
-            )
+        let pagination = conversationListStore.replaceSummaryWindow(
+            responses,
+            conversations: &conversations,
+            selectedConversationID: &selectedConversationID,
+            nextCursor: nextCursor,
+            hasMore: hasMore
+        ) { response, existing in
+            conversationSummary(from: response, existing: existing)
         }
 
-        conversationSummaryNextCursor = nextCursor
-        hasMoreConversationSummaries = hasMore
+        conversationSummaryNextCursor = pagination.nextCursor
+        hasMoreConversationSummaries = pagination.hasMore
         isLoadingMoreConversationSummaries = false
-
-        if let previousSelectedConversationID,
-           conversations.contains(where: { $0.id == previousSelectedConversationID }) {
-            selectedConversationID = previousSelectedConversationID
-        } else {
-            selectedConversationID = conversations.first?.id
-        }
-
         statusMessage = nil
         sortConversations()
     }
@@ -582,13 +598,20 @@ public final class IMConversationStore: ObservableObject {
         nextCursor: String?,
         hasMore: Bool
     ) {
-        for response in responses {
-            upsertConversationSummaryContent(response)
+        let pagination = conversationListStore.appendSummaryWindow(
+            responses,
+            conversations: &conversations,
+            nextCursor: nextCursor,
+            hasMore: hasMore
+        ) { response, conversations in
+            upsertConversationSummaryContent(response, conversations: &conversations)
         }
 
-        conversationSummaryNextCursor = nextCursor
-        hasMoreConversationSummaries = hasMore
+        conversationSummaryNextCursor = pagination.nextCursor
+        hasMoreConversationSummaries = pagination.hasMore
         isLoadingMoreConversationSummaries = false
+        statusMessage = nil
+        sortConversations()
     }
 
     public func removeConversationSummaries(notIn conversationIDs: Set<String>) {
@@ -673,24 +696,18 @@ public final class IMConversationStore: ObservableObject {
     }
 
     public func removeConversation(id: String) {
-        let trimmedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedID.isEmpty else {
-            return
+        let previousConversationIDs = Set(conversations.map(\.id))
+        conversationListStore.removeConversation(
+            id: id,
+            conversations: &conversations,
+            selectedConversationID: &selectedConversationID
+        )
+        let removedConversationIDs = previousConversationIDs.subtracting(Set(conversations.map(\.id)))
+        for removedConversationID in removedConversationIDs {
+            detailState.removeConversation(id: removedConversationID)
         }
-
-        conversations.removeAll { $0.id == trimmedID }
-        detailState.removeConversation(id: trimmedID)
-
-        if selectedConversationID == trimmedID {
-            selectedConversationID = conversations.first?.id
-        } else if selectedConversationID != nil,
-                  conversations.contains(where: { $0.id == selectedConversationID }) {
-            // Preserve current selection when removing another conversation.
-        } else {
-            selectedConversationID = conversations.first?.id
-        }
-
         syncReplyJumpState()
+        sortConversations()
     }
 
     public func markConversationRead(id: String) {
@@ -712,26 +729,21 @@ public final class IMConversationStore: ObservableObject {
         unreadCount: Int,
         for conversationID: String
     ) {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty,
-              let index = conversations.firstIndex(where: { $0.id == trimmedConversationID })
-        else {
-            return
+        conversationListStore.applyServerSummaryReadState(
+            lastReadSequence: lastReadSequence,
+            unreadCount: unreadCount,
+            for: conversationID,
+            conversations: &conversations
+        ) { conversationID, previousLastRead, previousUnread, previousDelta, updatedLastRead, updatedUnread in
+            reconciledLocalUnreadDelta(
+                for: conversationID,
+                previousServerLastReadSequence: previousLastRead,
+                previousServerUnreadCount: previousUnread,
+                previousLocalUnreadDelta: previousDelta,
+                updatedServerLastReadSequence: updatedLastRead,
+                updatedServerUnreadCount: updatedUnread
+            )
         }
-
-        let previousServerLastReadSequence = conversations[index].serverLastReadSequence
-        let previousServerUnreadCount = conversations[index].serverUnreadCount
-        let previousLocalUnreadDelta = conversations[index].localUnreadDelta
-        conversations[index].serverLastReadSequence = lastReadSequence
-        conversations[index].serverUnreadCount = max(0, unreadCount)
-        conversations[index].localUnreadDelta = reconciledLocalUnreadDelta(
-            for: trimmedConversationID,
-            previousServerLastReadSequence: previousServerLastReadSequence,
-            previousServerUnreadCount: previousServerUnreadCount,
-            previousLocalUnreadDelta: previousLocalUnreadDelta,
-            updatedServerLastReadSequence: lastReadSequence,
-            updatedServerUnreadCount: max(0, unreadCount)
-        )
     }
 
     public func applyServerSummaryReadStates(_ responses: [IMConversationSummaryResponseBody]) {
@@ -774,19 +786,13 @@ public final class IMConversationStore: ObservableObject {
     }
 
     public func applyRealtimeUnreadIncrement(for conversationID: String) {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty,
-              let index = conversations.firstIndex(where: { $0.id == trimmedConversationID })
-        else {
-            return
+        conversationListStore.applyRealtimeUnreadIncrement(
+            for: conversationID,
+            conversations: &conversations,
+            selectedConversationID: selectedConversationID
+        ) { index, conversations in
+            resetUnreadState(for: index, conversations: &conversations)
         }
-
-        guard selectedConversationID != trimmedConversationID else {
-            resetUnreadState(for: index)
-            return
-        }
-
-        conversations[index].localUnreadDelta += 1
     }
 
     public func applyServerUnreadCount(_ unreadCount: Int, for conversationID: String) {
@@ -827,8 +833,17 @@ public final class IMConversationStore: ObservableObject {
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .summaryUpdated:
+            // summary 与 timeline 允许短暂错位；这里只收敛列表权威字段，不假设消息窗口同步刷新。
             applyConversationSummaryContent(payload.conversation)
             applyServerSummaryReadState(payload.conversation)
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
+        case .messageUpdated:
+            applyConversationSummaryContent(payload.conversation)
+            applyServerSummaryReadState(payload.conversation)
+            if let message = payload.message {
+                applyUpdatedMessage(message, currentUserID: currentUserID)
+            }
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .messageRecalled:
@@ -846,25 +861,16 @@ public final class IMConversationStore: ObservableObject {
         messages responses: [IMConversationMessageResponseBody],
         currentUserID: UUID
     ) {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
-            return
-        }
-
-        let index = ensureConversationIndex(for: trimmedConversationID)
-        let serverMessages = makeMessages(from: responses, currentUserID: currentUserID)
-        let mergedMessages = mergeMessages(
-            existing: conversations[index].messages,
-            serverMessages: serverMessages,
-            preserveExistingServerMessages: false
-        )
-        conversations[index].messages = mergedMessages
-        conversations[index].lastMessagePreviewText = mergedMessages.last?.text ?? conversations[index].lastMessagePreviewText
-        conversations[index].updatedAt = mergedMessages.last?.createdAt ?? conversations[index].updatedAt
-        conversations[index].hasMoreHistory = hasOlderHistory(in: serverMessages)
-        refreshLoadedMessageCursors(
-            for: trimmedConversationID,
-            messages: mergedMessages
+        conversationTimelineStore.replaceMessages(
+            in: conversationID,
+            messages: responses,
+            currentUserID: currentUserID,
+            conversations: &conversations,
+            ensureConversationIndex: ensureConversationIndex,
+            makeMessages: makeMessages,
+            mergeMessages: mergeMessages,
+            hasOlderHistory: hasOlderHistory,
+            refreshLoadedMessageCursors: refreshLoadedMessageCursors
         )
         statusMessage = nil
         sortConversations()
@@ -875,25 +881,15 @@ public final class IMConversationStore: ObservableObject {
         messages responses: [IMConversationMessageResponseBody],
         currentUserID: UUID
     ) {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
-            return
-        }
-
-        let index = ensureConversationIndex(for: trimmedConversationID)
-        let serverMessages = makeMessages(from: responses, currentUserID: currentUserID)
-        let mergedMessages = mergeMessages(
-            existing: conversations[index].messages,
-            serverMessages: serverMessages,
-            preserveExistingServerMessages: true
-        )
-
-        conversations[index].messages = mergedMessages
-        conversations[index].lastMessagePreviewText = mergedMessages.last?.text ?? conversations[index].lastMessagePreviewText
-        conversations[index].updatedAt = mergedMessages.last?.createdAt ?? conversations[index].updatedAt
-        refreshLatestSyncedCursor(
-            for: trimmedConversationID,
-            messages: mergedMessages
+        conversationTimelineStore.appendMessages(
+            in: conversationID,
+            messages: responses,
+            currentUserID: currentUserID,
+            conversations: &conversations,
+            ensureConversationIndex: ensureConversationIndex,
+            makeMessages: makeMessages,
+            mergeMessages: mergeMessages,
+            refreshLatestSyncedCursor: refreshLatestSyncedCursor
         )
         statusMessage = nil
         sortConversations()
@@ -947,16 +943,13 @@ public final class IMConversationStore: ObservableObject {
         pinnedAt: Date?,
         isMuted: Bool
     ) {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty,
-              let index = conversations.firstIndex(where: { $0.id == trimmedConversationID })
-        else {
-            return
-        }
-
-        conversations[index].isPinned = isPinned
-        conversations[index].pinnedAt = pinnedAt
-        conversations[index].isMuted = isMuted
+        conversationListStore.applyConversationPreferences(
+            conversationID: conversationID,
+            isPinned: isPinned,
+            pinnedAt: pinnedAt,
+            isMuted: isMuted,
+            conversations: &conversations
+        )
         sortConversations()
     }
 
@@ -966,19 +959,13 @@ public final class IMConversationStore: ObservableObject {
         notice: String?,
         avatarPreset: IMConversationAvatarPreset?
     ) {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty,
-              let index = conversations.firstIndex(where: { $0.id == trimmedConversationID })
-        else {
-            return
-        }
-
-        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmedTitle, !trimmedTitle.isEmpty {
-            conversations[index].title = trimmedTitle
-        }
-        conversations[index].notice = notice?.trimmingCharacters(in: .whitespacesAndNewlines)
-        conversations[index].avatarPreset = avatarPreset
+        conversationListStore.applyConversationMetadata(
+            conversationID: conversationID,
+            title: title,
+            notice: notice,
+            avatarPreset: avatarPreset,
+            conversations: &conversations
+        )
         sortConversations()
     }
 
@@ -987,26 +974,16 @@ public final class IMConversationStore: ObservableObject {
         messages responses: [IMConversationMessageResponseBody],
         currentUserID: UUID
     ) {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
-            return
-        }
-
-        let index = ensureConversationIndex(for: trimmedConversationID)
-        let serverMessages = makeMessages(from: responses, currentUserID: currentUserID)
-        let mergedMessages = mergeMessages(
-            existing: conversations[index].messages,
-            serverMessages: serverMessages,
-            preserveExistingServerMessages: true
-        )
-
-        conversations[index].messages = mergedMessages
-        conversations[index].lastMessagePreviewText = mergedMessages.last?.text ?? conversations[index].lastMessagePreviewText
-        conversations[index].updatedAt = mergedMessages.last?.createdAt ?? conversations[index].updatedAt
-        conversations[index].hasMoreHistory = hasOlderHistory(in: serverMessages)
-        refreshLoadedMessageCursors(
-            for: trimmedConversationID,
-            messages: mergedMessages
+        conversationTimelineStore.prependMessages(
+            in: conversationID,
+            messages: responses,
+            currentUserID: currentUserID,
+            conversations: &conversations,
+            ensureConversationIndex: ensureConversationIndex,
+            makeMessages: makeMessages,
+            mergeMessages: mergeMessages,
+            hasOlderHistory: hasOlderHistory,
+            refreshLoadedMessageCursors: refreshLoadedMessageCursors
         )
         statusMessage = nil
         sortConversations()
@@ -1141,6 +1118,9 @@ public final class IMConversationStore: ObservableObject {
     ) {
         mutateMessage(id: messageID) { item in
             item.localDownloadState = state
+            if let taskID = state?.taskID {
+                item.transferTaskID = taskID
+            }
         }
     }
 
@@ -1554,6 +1534,7 @@ public final class IMConversationStore: ObservableObject {
             senderUserID: payload.senderUserID,
             serverSequence: payload.serverSequence,
             content: payload.content,
+            derivedState: payload.derivedState,
             direction: payload.senderUserID == currentUserID ? .outgoing : .incoming,
             createdAt: effectiveTimestamp,
             deliveryState: payload.senderUserID == currentUserID ? .sent : .received
@@ -1577,6 +1558,13 @@ public final class IMConversationStore: ObservableObject {
         _ response: IMConversationMessageResponseBody,
         currentUserID: UUID
     ) {
+        applyUpdatedMessage(response, currentUserID: currentUserID)
+    }
+
+    public func applyUpdatedMessage(
+        _ response: IMConversationMessageResponseBody,
+        currentUserID: UUID
+    ) {
         let conversationID = response.conversationID.uuidString
         let stableMessageID = response.id.uuidString
         let effectiveTimestamp = response.createdAt ?? Date()
@@ -1589,6 +1577,7 @@ public final class IMConversationStore: ObservableObject {
             conversations[index].messages[messageIndex].serverSequence = UInt64(response.serverSequence)
             conversations[index].messages[messageIndex].senderUserID = response.senderUserID
             conversations[index].messages[messageIndex].content = response.content
+            conversations[index].messages[messageIndex].derivedState = response.derivedState
             conversations[index].messages[messageIndex].createdAt = effectiveTimestamp
             conversations[index].messages[messageIndex].deliveryState =
                 conversations[index].messages[messageIndex].direction == .outgoing ? .sent : .received
@@ -1602,6 +1591,7 @@ public final class IMConversationStore: ObservableObject {
                     senderUserID: response.senderUserID,
                     serverSequence: UInt64(response.serverSequence),
                     content: response.content,
+                    derivedState: response.derivedState,
                     direction: response.senderUserID == currentUserID ? .outgoing : .incoming,
                     createdAt: effectiveTimestamp,
                     deliveryState: response.senderUserID == currentUserID ? .sent : .received
@@ -1609,6 +1599,7 @@ public final class IMConversationStore: ObservableObject {
             )
         }
 
+        conversations[index].messages.sort(by: Self.messageComparator)
         conversations[index].lastMessagePreviewText = conversations[index].messages.last?.text
             ?? conversations[index].lastMessagePreviewText
         conversations[index].updatedAt = max(conversations[index].updatedAt, effectiveTimestamp)
@@ -1725,17 +1716,11 @@ public final class IMConversationStore: ObservableObject {
         matchingReferencedMessageID targetMessageID: String,
         in conversationID: String
     ) -> String? {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedTargetMessageID = targetMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty, !trimmedTargetMessageID.isEmpty,
-              let conversation = conversations.first(where: { $0.id == trimmedConversationID })
-        else {
-            return nil
-        }
-
-        return messageTimelineState.localMessageID(
-            matchingReferencedMessageID: trimmedTargetMessageID,
-            in: conversation.messages
+        conversationTimelineStore.localMessageID(
+            matchingReferencedMessageID: targetMessageID,
+            in: conversationID,
+            conversations: conversations,
+            readModel: messageTimelineState
         )
     }
 
@@ -1788,7 +1773,8 @@ public final class IMConversationStore: ObservableObject {
 
     public func makeCacheSnapshot(
         lastSummaryRefreshAt: Date?,
-        summarySyncToken: String? = nil
+        summarySyncToken: String? = nil,
+        transferSnapshots: [IMTransferSnapshot] = []
     ) -> IMConversationCacheSnapshot {
         ConversationCacheSnapshotMapper.makeSnapshot(
             conversations: conversations,
@@ -1798,6 +1784,7 @@ public final class IMConversationStore: ObservableObject {
             summarySyncToken: summarySyncToken,
             summaryNextCursor: conversationSummaryNextCursor,
             hasMoreConversationSummaries: hasMoreConversationSummaries,
+            transferSnapshots: transferSnapshots,
             trimMessages: { messages, limit in
                 trimmedCachedMessages(messages, limit: limit)
             }
@@ -1824,6 +1811,13 @@ public final class IMConversationStore: ObservableObject {
     }
 
     private func ensureConversationIndex(for conversationID: String) -> Int {
+        ensureConversationIndex(for: conversationID, conversations: &conversations)
+    }
+
+    private func ensureConversationIndex(
+        for conversationID: String,
+        conversations: inout [IMConversation]
+    ) -> Int {
         if let index = conversations.firstIndex(where: { $0.id == conversationID }) {
             return index
         }
@@ -1857,15 +1851,21 @@ public final class IMConversationStore: ObservableObject {
     }
 
     private func upsertConversationSummaryContent(_ response: IMConversationSummaryResponseBody) {
+        upsertConversationSummaryContent(response, conversations: &conversations)
+        statusMessage = nil
+        sortConversations()
+    }
+
+    private func upsertConversationSummaryContent(
+        _ response: IMConversationSummaryResponseBody,
+        conversations: inout [IMConversation]
+    ) {
         let conversationID = response.id.uuidString
-        let index = ensureConversationIndex(for: conversationID)
+        let index = ensureConversationIndex(for: conversationID, conversations: &conversations)
         conversations[index] = conversationSummary(
             from: response,
             existing: conversations[index]
         )
-
-        statusMessage = nil
-        sortConversations()
     }
 
     private func conversationSummary(
@@ -1948,6 +1948,13 @@ public final class IMConversationStore: ObservableObject {
     }
 
     private func resetUnreadState(for conversationIndex: Int) {
+        resetUnreadState(for: conversationIndex, conversations: &conversations)
+    }
+
+    private func resetUnreadState(
+        for conversationIndex: Int,
+        conversations: inout [IMConversation]
+    ) {
         conversations[conversationIndex].serverUnreadCount = 0
         conversations[conversationIndex].localUnreadDelta = 0
     }
@@ -2084,6 +2091,7 @@ public final class IMConversationStore: ObservableObject {
                 senderUserID: response.senderUserID,
                 serverSequence: UInt64(response.serverSequence),
                 content: response.content,
+                derivedState: response.derivedState,
                 direction: response.senderUserID == currentUserID ? .outgoing : .incoming,
                 createdAt: response.createdAt ?? .distantPast,
                 deliveryState: response.senderUserID == currentUserID ? .sent : .received

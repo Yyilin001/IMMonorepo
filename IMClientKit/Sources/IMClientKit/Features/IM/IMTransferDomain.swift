@@ -1,6 +1,6 @@
 import Foundation
 
-public struct IMTransferTaskID: Codable, Equatable, Hashable, Sendable {
+public struct TransferTaskID: Codable, Equatable, Hashable, Sendable {
     public let sessionIdentifier: String
     public let taskIdentifier: Int
 
@@ -17,12 +17,25 @@ public struct IMTransferTaskID: Codable, Equatable, Hashable, Sendable {
     }
 }
 
-public enum IMTransferKind: String, Codable, Equatable, Sendable {
+public enum TransferKind: String, Codable, Equatable, Sendable {
     case upload
     case download
 }
 
-public enum IMTransferState: Codable, Equatable, Sendable {
+public enum TransferIntent: String, Codable, Equatable, Sendable {
+    case messageMediaUpload
+    case messageMediaDownload
+    case demoFileTransfer
+}
+
+public extension TransferIntent {
+    static let mediaUpload = Self.messageMediaUpload
+    static let mediaDownload = Self.messageMediaDownload
+    static let fileDemoUpload = Self.demoFileTransfer
+    static let fileDemoDownload = Self.demoFileTransfer
+}
+
+public enum TransferState: Codable, Equatable, Sendable {
     case running(progress: IMMessageLocalDownloadProgressSnapshot?)
     case waitingForConnectivity(progress: IMMessageLocalDownloadProgressSnapshot?)
     case completed
@@ -34,47 +47,64 @@ public enum IMTransferState: Codable, Equatable, Sendable {
     )
 }
 
-public struct IMTransferSnapshot: Codable, Equatable, Sendable {
-    public let taskID: IMTransferTaskID
-    public let kind: IMTransferKind
-    public let state: IMTransferState
+public struct TransferSnapshot: Codable, Equatable, Sendable {
+    public let taskID: TransferTaskID
+    public let kind: TransferKind
+    public let intent: TransferIntent
+    public let state: TransferState
     public let destinationURL: URL?
+    public let sourceFilePath: String?
+    public let uploadID: String?
 
     public init(
-        taskID: IMTransferTaskID,
-        kind: IMTransferKind,
-        state: IMTransferState,
-        destinationURL: URL?
+        taskID: TransferTaskID,
+        kind: TransferKind,
+        intent: TransferIntent,
+        state: TransferState,
+        destinationURL: URL?,
+        sourceFilePath: String? = nil,
+        uploadID: String? = nil
     ) {
         self.taskID = taskID
         self.kind = kind
+        self.intent = intent
         self.state = state
         self.destinationURL = destinationURL
+        self.sourceFilePath = sourceFilePath
+        self.uploadID = uploadID
     }
 }
 
-public struct IMTransferStore: Sendable {
-    private var snapshotsByTaskID: [IMTransferTaskID: IMTransferSnapshot] = [:]
+public struct TransferStore: Sendable {
+    private var snapshotsByTaskID: [TransferTaskID: TransferSnapshot] = [:]
 
     public init() { }
 
-    public mutating func replace(with backgroundSnapshots: [BackgroundTransferSnapshot]) {
+    public mutating func replace(with snapshots: [TransferSnapshot]) {
         snapshotsByTaskID = Dictionary(
-            uniqueKeysWithValues: backgroundSnapshots.map {
-                let snapshot = $0.imTransferSnapshot
-                return (snapshot.taskID, snapshot)
-            }
+            uniqueKeysWithValues: snapshots.map { ($0.taskID, $0) }
         )
     }
 
+    public mutating func replace(with backgroundSnapshots: [BackgroundTransferSnapshot]) {
+        merge(backgroundSnapshots)
+    }
+
     @discardableResult
-    public mutating func apply(_ backgroundSnapshot: BackgroundTransferSnapshot) -> IMTransferSnapshot {
+    public mutating func apply(_ backgroundSnapshot: BackgroundTransferSnapshot) -> TransferSnapshot {
         let snapshot = backgroundSnapshot.imTransferSnapshot
         snapshotsByTaskID[snapshot.taskID] = snapshot
         return snapshot
     }
 
-    public func snapshots(kind: IMTransferKind? = nil) -> [IMTransferSnapshot] {
+    public mutating func merge(_ backgroundSnapshots: [BackgroundTransferSnapshot]) {
+        for snapshot in backgroundSnapshots {
+            let transferSnapshot = snapshot.imTransferSnapshot
+            snapshotsByTaskID[transferSnapshot.taskID] = transferSnapshot
+        }
+    }
+
+    public func snapshots(kind: TransferKind? = nil) -> [TransferSnapshot] {
         snapshotsByTaskID.values
             .filter { kind == nil || $0.kind == kind }
             .sorted {
@@ -85,22 +115,36 @@ public struct IMTransferStore: Sendable {
             }
     }
 
-    public func snapshot(for taskID: IMTransferTaskID) -> IMTransferSnapshot? {
+    public func snapshot(for taskID: TransferTaskID) -> TransferSnapshot? {
         snapshotsByTaskID[taskID]
     }
 }
 
+public typealias IMTransferTaskID = TransferTaskID
+public typealias IMTransferKind = TransferKind
+public typealias IMTransferIntent = TransferIntent
+public typealias IMTransferState = TransferState
+public typealias IMTransferSnapshot = TransferSnapshot
+public typealias IMTransferStore = TransferStore
+
 public extension BackgroundTransferSnapshot {
-    var imTransferSnapshot: IMTransferSnapshot {
-        let kind: IMTransferKind = switch kind {
+    var imTransferSnapshot: TransferSnapshot {
+        let transferKind: TransferKind = switch kind {
         case .upload:
             .upload
         case .download:
             .download
         }
+        let intent: TransferIntent
+        switch transferKind {
+        case .upload:
+            intent = .messageMediaUpload
+        case .download:
+            intent = .messageMediaDownload
+        }
 
         let progressSnapshot = progress.map(IMMessageLocalDownloadProgressSnapshot.init)
-        let state: IMTransferState = switch state {
+        let transferState: TransferState = switch state {
         case .running:
             .running(progress: progressSnapshot)
         case .waitingForConnectivity:
@@ -117,13 +161,14 @@ public extension BackgroundTransferSnapshot {
             )
         }
 
-        return IMTransferSnapshot(
-            taskID: IMTransferTaskID(
+        return TransferSnapshot(
+            taskID: TransferTaskID(
                 sessionIdentifier: sessionIdentifier,
                 taskIdentifier: taskIdentifier
             ),
-            kind: kind,
-            state: state,
+            kind: transferKind,
+            intent: intent,
+            state: transferState,
             destinationURL: destinationURL
         )
     }

@@ -461,7 +461,32 @@ public actor SessionClient {
             clientMessageID: response.clientMessageID,
             serverSequence: response.serverSequence,
             content: response.content,
+            derivedState: response.derivedState,
             createdAt: response.createdAt
+        )
+    }
+
+    public func editIMMessage(
+        conversationID: String,
+        messageID: String,
+        text: String
+    ) async throws -> IMConversationMessageResponseBody {
+        try await executor.execute(
+            IMRequest.editMessage(conversationID: conversationID, messageID: messageID, text: text)
+        )
+    }
+
+    public func toggleIMMessageReaction(
+        conversationID: String,
+        messageID: String,
+        emoji: String
+    ) async throws -> IMConversationMessageResponseBody {
+        try await executor.execute(
+            IMRequest.toggleMessageReaction(
+                conversationID: conversationID,
+                messageID: messageID,
+                emoji: emoji
+            )
         )
     }
 

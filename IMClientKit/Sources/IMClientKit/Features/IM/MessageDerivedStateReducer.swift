@@ -5,14 +5,15 @@ struct MessageDerivedStateReducer {
         for message: IMConversationMessage,
         in messages: [IMConversationMessage]
     ) -> IMReplyReferenceResolution? {
-        guard let reference = message.content.presentation.replyReference else {
+        let aggregate = message.aggregate
+        guard case .reply(let reference, _) = aggregate.primaryContent else {
             return nil
         }
 
         if let referencedMessage = messages.first(where: {
             $0.serverMessageID == reference.messageID || $0.id == reference.messageID
         }) {
-            if referencedMessage.content.presentation.derivedState.isRecalled {
+            if referencedMessage.aggregate.derivedState.isRecalled {
                 return IMReplyReferenceResolution(
                     state: .recalled,
                     text: "原消息已撤回"
@@ -45,8 +46,12 @@ struct MessageDerivedStateReducer {
                 ?? "暂无消息"
         }
 
+        let responsePreview = responseLastMessage.content
+            .presentation(derivedState: responseLastMessage.derivedState)
+            .previewText
+
         guard let latestLoadedMessage else {
-            return responseLastMessage.content.previewText
+            return responsePreview
         }
 
         if latestLoadedMessage.serverSequence == nil {
@@ -59,7 +64,7 @@ struct MessageDerivedStateReducer {
         if latestLoadedMessage.serverMessageID == responseMessageID
             || latestLoadedMessage.id == responseMessageID
             || latestLoadedMessage.serverSequence == responseServerSequence {
-            return responseLastMessage.content.previewText
+            return responsePreview
         }
 
         if let latestLoadedServerSequence = latestLoadedMessage.serverSequence,
@@ -67,6 +72,6 @@ struct MessageDerivedStateReducer {
             return latestLoadedMessage.text
         }
 
-        return responseLastMessage.content.previewText
+        return responsePreview
     }
 }

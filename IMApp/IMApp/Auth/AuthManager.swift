@@ -98,7 +98,7 @@ final class AuthManager: ObservableObject {
 
         return contactRequests
             .filter { $0.status == .pending && $0.addressee.id == currentUserID }
-            .sorted(by: contactsController.sortPendingNewestFirst)
+            .sorted(by: sessionFacade.sortPendingNewestFirst)
     }
 
     var outgoingPendingContactRequests: [ContactRequestResponseBody] {
@@ -108,14 +108,14 @@ final class AuthManager: ObservableObject {
 
         return contactRequests
             .filter { $0.status == .pending && $0.requester.id == currentUserID }
-            .sorted(by: contactsController.sortPendingNewestFirst)
+            .sorted(by: sessionFacade.sortPendingNewestFirst)
     }
 
     var recentResolvedContactRequests: [ContactRequestResponseBody] {
         Array(
             contactRequests
                 .filter { $0.status != .pending }
-                .sorted(by: contactsController.sortResolvedNewestFirst)
+                .sorted(by: sessionFacade.sortResolvedNewestFirst)
                 .prefix(IMHistoryPage.resolvedContactRequestHistoryLimit)
         )
     }
@@ -137,8 +137,8 @@ final class AuthManager: ObservableObject {
     }
 
     private let sessionClient: SessionClient
-    private let authSessionController: AuthSessionController
-    private let contactsController: ContactsController
+    private let sessionFacade: SessionFacade
+    private let contactStateStore = ContactStateStore()
     private let openIMConnection: @Sendable () async throws -> IMTCPConnection
     private let backgroundTransferMonitor: any BackgroundTransferMonitoring
     private let imConversationCache: IMConversationCacheHandler
@@ -156,7 +156,7 @@ final class AuthManager: ObservableObject {
     let probeManager: ProbeManager
     let fileTransferManager: FileTransferManager
     let imConversationStore: IMConversationStore
-    private lazy var imController = makeIMController()
+    private lazy var conversationRuntimeController = makeConversationRuntimeController()
 
     convenience init(
         network: NetworkEnvironment,
@@ -223,10 +223,14 @@ final class AuthManager: ObservableObject {
         shouldRestoreSession: Bool
     ) {
         self.sessionClient = sessionClient
-        self.authSessionController = AuthSessionController(sessionClient: sessionClient)
-        self.contactsController = ContactsController(
+        let authSessionController = AuthSessionController(sessionClient: sessionClient)
+        let contactsController = ContactsController(
             sessionClient: sessionClient,
             contactStateCache: contactStateCache
+        )
+        self.sessionFacade = SessionFacade(
+            authSessionController: authSessionController,
+            contactsController: contactsController
         )
         self.openIMConnection = openIMConnection
         self.backgroundTransferMonitor = backgroundTransferMonitor
@@ -248,8 +252,8 @@ final class AuthManager: ObservableObject {
         }
     }
 
-    private func makeIMController() -> IMController {
-        IMController(
+    private func makeConversationRuntimeController() -> ConversationRuntimeController {
+        ConversationRuntimeController(
             sessionClient: sessionClient,
             openIMConnection: openIMConnection,
             imConversationStore: imConversationStore,
@@ -339,14 +343,14 @@ final class AuthManager: ObservableObject {
 
     func logout() async {
         invalidateRestoreSession()
-        await authSessionController.logoutCurrentIgnoringFailure()
+        await sessionFacade.logoutCurrentIgnoringFailure()
         await clearSession(message: nil)
     }
 
     func logoutAllSessions() async {
         invalidateRestoreSession()
         do {
-            let result = try await authSessionController.logoutAll()
+            let result = try await sessionFacade.logoutAll()
             await clearSession(message: "已退出 \(result.revokedSessions) 台设备。")
         } catch {
             if await shouldPreserveSession(for: error) {
@@ -360,7 +364,7 @@ final class AuthManager: ObservableObject {
     func reloadProfile() async {
         invalidateRestoreSession()
         do {
-            let user = try await authSessionController.fetchProfile()
+            let user = try await sessionFacade.fetchProfile()
             markServerOnline()
             replaceSignedInUser(user)
             profileMessage = nil
@@ -384,7 +388,7 @@ final class AuthManager: ObservableObject {
         defer { isUpdatingProfile = false }
 
         do {
-            let user = try await authSessionController.updateProfile(
+            let user = try await sessionFacade.updateProfile(
                 displayName: displayName,
                 avatarPreset: avatarPreset
             )
@@ -414,7 +418,7 @@ final class AuthManager: ObservableObject {
         defer { isLoadingSessions = false }
 
         do {
-            let response = try await authSessionController.fetchSessions()
+            let response = try await sessionFacade.fetchSessions()
             markServerOnline()
             sessions = response
             sessionsMessage = nil
@@ -438,7 +442,7 @@ final class AuthManager: ObservableObject {
         defer { isLoadingContacts = false }
 
         do {
-            let snapshot = try await contactsController.fetchContacts()
+            let snapshot = try await sessionFacade.fetchContacts()
             guard currentUser?.id == user.id else {
                 return
             }
@@ -468,7 +472,7 @@ final class AuthManager: ObservableObject {
         defer { isLoadingContactRequests = false }
 
         do {
-            let snapshot = try await contactsController.fetchContactRequests()
+            let snapshot = try await sessionFacade.fetchContactRequests()
             guard currentUser?.id == user.id else {
                 return
             }
@@ -485,8 +489,8 @@ final class AuthManager: ObservableObject {
 
     func sendContactRequest(email: String, message: String? = nil, remark: String? = nil) async -> Bool {
         let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let normalizedMessage = contactsController.normalizedRequestMessage(message)
-        let normalizedRemark = contactsController.normalizedRemark(remark)
+        let normalizedMessage = sessionFacade.normalizedRequestMessage(message)
+        let normalizedRemark = sessionFacade.normalizedRemark(remark)
         guard !normalizedEmail.isEmpty else {
             contactRequestActionMessage = "好友邮箱不能为空。"
             return false
@@ -494,7 +498,7 @@ final class AuthManager: ObservableObject {
 
         contactRequestActionMessage = nil
         do {
-            let request = try await contactsController.sendContactRequest(
+            let request = try await sessionFacade.sendContactRequest(
                 email: normalizedEmail,
                 message: normalizedMessage,
                 remark: normalizedRemark
@@ -520,9 +524,9 @@ final class AuthManager: ObservableObject {
         defer { acceptingRequestIDs.remove(requestID) }
 
         do {
-            let contact = try await contactsController.acceptContactRequest(
+            let contact = try await sessionFacade.acceptContactRequest(
                 id: requestID,
-                remark: contactsController.normalizedRemark(remark)
+                remark: sessionFacade.normalizedRemark(remark)
             )
             markServerOnline()
             upsertContact(contact)
@@ -551,7 +555,7 @@ final class AuthManager: ObservableObject {
         defer { decliningRequestIDs.remove(requestID) }
 
         do {
-            _ = try await contactsController.declineContactRequest(id: requestID)
+            _ = try await sessionFacade.declineContactRequest(id: requestID)
             markServerOnline()
             updateContactRequestStatus(
                 id: requestID,
@@ -577,7 +581,7 @@ final class AuthManager: ObservableObject {
         defer { cancellingRequestIDs.remove(requestID) }
 
         do {
-            _ = try await contactsController.cancelContactRequest(id: requestID)
+            _ = try await sessionFacade.cancelContactRequest(id: requestID)
             markServerOnline()
             updateContactRequestStatus(
                 id: requestID,
@@ -595,9 +599,9 @@ final class AuthManager: ObservableObject {
 
     func updateContactRemark(contactUserID: UUID, remark: String) async -> Bool {
         do {
-            let contact = try await contactsController.updateContact(
+            let contact = try await sessionFacade.updateContact(
                 contactUserID: contactUserID,
-                remark: contactsController.normalizedRemark(remark)
+                remark: sessionFacade.normalizedRemark(remark)
             )
             markServerOnline()
             upsertContact(contact)
@@ -612,7 +616,7 @@ final class AuthManager: ObservableObject {
 
     func deleteContact(_ contactUserID: UUID) async -> Bool {
         do {
-            try await contactsController.deleteContact(contactUserID: contactUserID)
+            try await sessionFacade.deleteContact(contactUserID: contactUserID)
             markServerOnline()
             contacts.removeAll { $0.id == contactUserID }
             contactsMessage = "已删除联系人。"
@@ -634,7 +638,7 @@ final class AuthManager: ObservableObject {
         defer { isBusy = false }
 
         do {
-            try await authSessionController.logoutCurrent()
+            try await sessionFacade.logoutCurrent()
             await clearSession(message: nil)
         } catch {
             if await shouldPreserveSession(for: error) {
@@ -654,7 +658,7 @@ final class AuthManager: ObservableObject {
         defer { isBusy = false }
 
         do {
-            try await authSessionController.logout(sessionID: sessionID)
+            try await sessionFacade.logout(sessionID: sessionID)
             markServerOnline()
             if isCurrent {
                 await clearSession(message: nil)
@@ -673,7 +677,7 @@ final class AuthManager: ObservableObject {
     }
 
     func restoreSession() async {
-        switch await authSessionController.restoreSession() {
+        switch await sessionFacade.restoreSession() {
         case .signedOut:
             phase = .signedOut(message: nil)
         case .signedIn(let user):
@@ -696,19 +700,19 @@ final class AuthManager: ObservableObject {
     }
 
     func reloadIMConversations(force: Bool = true) async {
-        await imController.reloadConversations(force: force)
+        await conversationRuntimeController.reloadConversations(force: force)
     }
 
     func loadMoreIMConversationSummariesIfNeeded(anchorConversationID: String?) async {
-        await imController.loadMoreConversationSummariesIfNeeded(anchorConversationID: anchorConversationID)
+        await conversationRuntimeController.loadMoreConversationSummariesIfNeeded(anchorConversationID: anchorConversationID)
     }
 
     func jumpToReferencedIMMessage(_ messageID: String, in conversationID: String) async {
-        await imController.jumpToReferencedMessage(messageID, in: conversationID)
+        await conversationRuntimeController.jumpToReferencedMessage(messageID, in: conversationID)
     }
 
     func jumpToIMMessage(_ messageID: String, in conversationID: String) async {
-        await imController.jumpToReferencedMessage(messageID, in: conversationID)
+        await conversationRuntimeController.jumpToReferencedMessage(messageID, in: conversationID)
     }
 
     func searchIMConversationMessages(
@@ -717,7 +721,7 @@ final class AuthManager: ObservableObject {
         cursor: String? = nil,
         limit: Int? = nil
     ) async -> IMConversationMessageSearchPageResponseBody? {
-        await imController.searchConversationMessages(
+        await conversationRuntimeController.searchConversationMessages(
             in: conversationID,
             query: query,
             cursor: cursor,
@@ -730,7 +734,7 @@ final class AuthManager: ObservableObject {
         to destinationURL: URL,
         resumeIfPossible: Bool = true
     ) async throws -> FileTransferOperation<DownloadTransferEvent> {
-        try await imController.downloadMedia(
+        try await conversationRuntimeController.downloadMedia(
             asset,
             to: destinationURL,
             resumeIfPossible: resumeIfPossible
@@ -742,7 +746,7 @@ final class AuthManager: ObservableObject {
         to destinationURL: URL,
         resumeIfPossible: Bool = true
     ) async throws -> URL {
-        try await imController.downloadMediaToFile(
+        try await conversationRuntimeController.downloadMediaToFile(
             asset,
             to: destinationURL,
             resumeIfPossible: resumeIfPossible
@@ -753,13 +757,13 @@ final class AuthManager: ObservableObject {
         _ asset: IMMediaAsset,
         to destinationURL: URL
     ) async throws {
-        try await imController.startBackgroundMediaDownload(asset, to: destinationURL)
+        try await conversationRuntimeController.startBackgroundMediaDownload(asset, to: destinationURL)
     }
 
     func cancelBackgroundIMMediaDownload(
         _ reference: IMMessageBackgroundTransferReference
     ) async {
-        await imController.cancelBackgroundMediaDownload(reference)
+        await conversationRuntimeController.cancelBackgroundMediaDownload(reference)
     }
 
     func openIMConversation(_ conversationID: String) async {
@@ -769,9 +773,9 @@ final class AuthManager: ObservableObject {
 
         imConversationStore.openConversation(id: conversationID)
         scheduleIMConversationCachePersist()
-        await imController.loadConversationMembers(for: conversationID)
-        await imController.loadMessagesIfNeeded(for: conversationID)
-        await imController.syncConversationAfterOpen(conversationID)
+        await conversationRuntimeController.loadConversationMembers(for: conversationID)
+        await conversationRuntimeController.loadMessagesIfNeeded(for: conversationID)
+        await conversationRuntimeController.syncConversationAfterOpen(conversationID)
     }
 
     func createIMConversation(kind: IMConversationKind, title: String, memberEmails: [String]) async -> Bool {
@@ -794,7 +798,7 @@ final class AuthManager: ObservableObject {
                 memberEmails: normalizedEmails
             )
             markServerOnline()
-            imController.applyConversationSummaryReadModel([conversation])
+            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
             scheduleIMConversationCachePersist()
             await openIMConversation(conversation.id.uuidString)
             return true
@@ -818,7 +822,7 @@ final class AuthManager: ObservableObject {
                 memberEmails: [normalizedEmail]
             )
             markServerOnline()
-            imController.applyConversationSummaryReadModel([conversation])
+            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
             scheduleIMConversationCachePersist()
             let conversationID = conversation.id.uuidString
             await openIMConversation(conversationID)
@@ -856,8 +860,8 @@ final class AuthManager: ObservableObject {
                 memberEmails: normalizedEmails
             )
             markServerOnline()
-            imController.applyConversationSummaryReadModel([conversation])
-            await imController.loadConversationMembers(for: trimmedConversationID)
+            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
+            await conversationRuntimeController.loadConversationMembers(for: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
         } catch {
@@ -900,7 +904,7 @@ final class AuthManager: ObservableObject {
                 avatarPreset: avatarPreset
             )
             markServerOnline()
-            imController.applyConversationSummaryReadModel([conversation])
+            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
             scheduleIMConversationCachePersist()
             return true
         } catch {
@@ -927,7 +931,7 @@ final class AuthManager: ObservableObject {
                 isMuted: isMuted
             )
             markServerOnline()
-            imController.applyConversationSummaryReadModel([conversation])
+            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
             scheduleIMConversationCachePersist()
             return true
         } catch {
@@ -952,8 +956,8 @@ final class AuthManager: ObservableObject {
                 memberUserID: memberUserID
             )
             markServerOnline()
-            imController.applyConversationSummaryReadModel([conversation])
-            await imController.loadConversationMembers(for: trimmedConversationID)
+            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
+            await conversationRuntimeController.loadConversationMembers(for: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
         } catch {
@@ -981,8 +985,8 @@ final class AuthManager: ObservableObject {
                 role: role
             )
             markServerOnline()
-            imController.applyConversationSummaryReadModel([conversation])
-            await imController.loadConversationMembers(for: trimmedConversationID)
+            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
+            await conversationRuntimeController.loadConversationMembers(for: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
         } catch {
@@ -1002,7 +1006,7 @@ final class AuthManager: ObservableObject {
         do {
             _ = try await sessionClient.leaveIMConversation(conversationID: trimmedConversationID)
             markServerOnline()
-            imController.applyLatestConversationSummaryChanges(
+            conversationRuntimeController.applyLatestConversationSummaryChanges(
                 upserts: [],
                 removedConversationIDs: [UUID(uuidString: trimmedConversationID)].compactMap { $0 }
             )
@@ -1016,11 +1020,11 @@ final class AuthManager: ObservableObject {
     }
 
     func refreshIMConversationSummaryReadModelIfNeeded() async {
-        await imController.refreshConversationSummaryReadModelIfNeeded()
+        await conversationRuntimeController.refreshConversationSummaryReadModelIfNeeded()
     }
 
     func loadOlderIMMessages() async {
-        await imController.loadOlderMessages()
+        await conversationRuntimeController.loadOlderMessages()
     }
 
     func appDidBecomeActive() async {
@@ -1028,7 +1032,7 @@ final class AuthManager: ObservableObject {
             return
         }
 
-        imController.appDidBecomeActive()
+        conversationRuntimeController.appDidBecomeActive()
         await refreshIMConversationSummaryReadModelIfNeeded()
     }
 
@@ -1051,7 +1055,7 @@ final class AuthManager: ObservableObject {
             return false
         }
 
-        return await imController.sendText(text, to: conversationID)
+        return await conversationRuntimeController.sendText(text, to: conversationID)
     }
 
     func sendIMReply(
@@ -1063,7 +1067,7 @@ final class AuthManager: ObservableObject {
             return false
         }
 
-        return await imController.sendReply(reference: reference, text: text, to: conversationID)
+        return await conversationRuntimeController.sendReply(reference: reference, text: text, to: conversationID)
     }
 
     func sendIMMedia(
@@ -1082,7 +1086,7 @@ final class AuthManager: ObservableObject {
             return false
         }
 
-        return await imController.sendMedia(
+        return await conversationRuntimeController.sendMedia(
             fileURL: fileURL,
             kind: kind,
             mimeType: mimeType,
@@ -1101,7 +1105,7 @@ final class AuthManager: ObservableObject {
             return false
         }
 
-        return await imController.retryTextMessage(
+        return await conversationRuntimeController.retryTextMessage(
             localMessageID: localMessageID,
             in: conversationID
         )
@@ -1127,7 +1131,31 @@ final class AuthManager: ObservableObject {
             return false
         }
 
-        return await imController.recallMessage(messageID: messageID, in: conversationID)
+        return await conversationRuntimeController.recallMessage(messageID: messageID, in: conversationID)
+    }
+
+    func editIMMessage(messageID: String, text: String, in conversationID: String) async -> Bool {
+        guard case .signedIn = phase else {
+            return false
+        }
+
+        return await conversationRuntimeController.editMessage(
+            messageID: messageID,
+            text: text,
+            in: conversationID
+        )
+    }
+
+    func toggleIMMessageReaction(messageID: String, emoji: String, in conversationID: String) async -> Bool {
+        guard case .signedIn = phase else {
+            return false
+        }
+
+        return await conversationRuntimeController.toggleMessageReaction(
+            messageID: messageID,
+            emoji: emoji,
+            in: conversationID
+        )
     }
 
     private func scheduleRestoreSession() {
@@ -1137,7 +1165,7 @@ final class AuthManager: ObservableObject {
                 return
             }
 
-            let result = await self.authSessionController.restoreSession()
+            let result = await self.sessionFacade.restoreSession()
             await self.applyRestoreResult(result, generation: generation)
         }
     }
@@ -1454,14 +1482,14 @@ final class AuthManager: ObservableObject {
 
         do {
             let device = Self.deviceMetadata()
-            let sessionAction: AuthSessionController.Action
+            let sessionAction: SessionFacade.Action
             switch action {
             case .login:
                 sessionAction = .login
             case .register:
                 sessionAction = .register
             }
-            let user = try await authSessionController.authenticate(
+            let user = try await sessionFacade.authenticate(
                 action: sessionAction,
                 email: email,
                 password: password,
@@ -1494,16 +1522,16 @@ final class AuthManager: ObservableObject {
         latestIMConversationSummaries = []
         lastContactStateRefreshAt = nil
         lastSeenIncomingContactRequestAt = nil
-        await imController.resetForSignedOut(flushCache: false)
+        await conversationRuntimeController.resetForSignedOut(flushCache: false)
         probeManager.stopAllForSignedOut()
         fileTransferManager.stopAllForSignedOut()
-        await authSessionController.clearSession()
+        await sessionFacade.clearSession()
         if let signedOutUserID {
             try? await imConversationCache.clearSnapshot(for: signedOutUserID)
-            try? await contactsController.clearSnapshot(for: signedOutUserID)
+            try? await sessionFacade.clearContactStateCacheSnapshot(for: signedOutUserID)
         } else {
             try? await imConversationCache.clearAll()
-            try? await contactsController.clearAllSnapshots()
+            try? await sessionFacade.clearAllContactStateCacheSnapshots()
         }
         imConversationStore.reset()
         sessions = []
@@ -1545,11 +1573,11 @@ final class AuthManager: ObservableObject {
     }
 
     private func scheduleIMConnectionIfNeeded() {
-        imController.scheduleConnectionIfNeeded()
+        conversationRuntimeController.scheduleConnectionIfNeeded()
     }
 
     private func disconnectIMConnection(flushCache: Bool = true) async {
-        await imController.disconnect(flushCache: flushCache)
+        await conversationRuntimeController.disconnect(flushCache: flushCache)
     }
 
     private func scheduleIMConversationBootstrap(for user: AuthUser) {
@@ -1568,13 +1596,13 @@ final class AuthManager: ObservableObject {
 
     private func restoreContactStateCacheIfAvailable(for user: AuthUser) async {
         do {
-            let snapshot = try await contactsController.loadCacheSnapshot(for: user.id)
+            let snapshot = try await sessionFacade.loadContactStateCacheSnapshot(for: user.id)
             guard currentUser?.id == user.id else {
                 return
             }
 
             contacts = snapshot.contacts.map(\.contact).sorted { $0.email < $1.email }
-            contactRequests = contactsController.normalizeRequests(
+            contactRequests = sessionFacade.normalizeRequests(
                 snapshot.incomingRequests.map(\.request)
                     + snapshot.outgoingRequests.map(\.request)
                     + snapshot.resolvedRequests.map(\.request),
@@ -1600,8 +1628,9 @@ final class AuthManager: ObservableObject {
             }
 
             imConversationStore.restoreCacheSnapshot(snapshot)
-            imController.resumeRecoverableMediaUploadsIfNeeded()
-            imController.reconcileBackgroundMediaDownloadSnapshots()
+            conversationRuntimeController.restoreTransferSnapshots(snapshot.transferSnapshots)
+            conversationRuntimeController.resumeRecoverableMediaUploadsIfNeeded()
+            conversationRuntimeController.reconcileBackgroundMediaDownloadSnapshots()
             lastIMConversationSummaryRefreshAt = snapshot.lastSummaryRefreshAt
             imConversationSummarySyncToken = snapshot.metadata.summarySyncToken
             latestIMConversationSummaries = []
@@ -1646,13 +1675,14 @@ final class AuthManager: ObservableObject {
 
         let snapshot = imConversationStore.makeCacheSnapshot(
             lastSummaryRefreshAt: lastIMConversationSummaryRefreshAt,
-            summarySyncToken: imConversationSummarySyncToken
+            summarySyncToken: imConversationSummarySyncToken,
+            transferSnapshots: conversationRuntimeController.cachedTransferSnapshots()
         )
         try? await imConversationCache.saveSnapshot(snapshot, for: user.id)
     }
 
     private func markIMConversationReadUpToLatestLoadedSequence(for conversationID: String) async {
-        await imController.markConversationReadUpToLatestLoadedSequence(for: conversationID)
+        await conversationRuntimeController.markConversationReadUpToLatestLoadedSequence(for: conversationID)
     }
 
     private func markIMConversationReadIfSelectedUpToLatestLoadedSequence(for conversationID: String) async {
@@ -1663,7 +1693,7 @@ final class AuthManager: ObservableObject {
             return
         }
 
-        await imController.markConversationReadUpToLatestLoadedSequence(for: trimmedConversationID)
+        await conversationRuntimeController.markConversationReadUpToLatestLoadedSequence(for: trimmedConversationID)
     }
 
     private func markIMConversationRead(
@@ -1671,7 +1701,7 @@ final class AuthManager: ObservableObject {
         readSequence: UInt64,
         debounceNanoseconds: UInt64 = 250_000_000
     ) async {
-        await imController.markConversationRead(
+        await conversationRuntimeController.markConversationRead(
             conversationID: conversationID,
             readSequence: readSequence,
             debounceNanoseconds: debounceNanoseconds
@@ -1787,7 +1817,7 @@ final class AuthManager: ObservableObject {
             return peer
         }
 
-        await imController.loadConversationMembers(for: conversationID)
+        await conversationRuntimeController.loadConversationMembers(for: conversationID)
 
         guard let refreshedConversation = imConversationStore.conversations.first(where: { $0.id == conversationID }) else {
             return nil
@@ -1797,12 +1827,7 @@ final class AuthManager: ObservableObject {
     }
 
     private func upsertContact(_ contact: ContactResponseBody) {
-        if let index = contacts.firstIndex(where: { $0.id == contact.id }) {
-            contacts[index] = contact
-        } else {
-            contacts.append(contact)
-        }
-        contacts.sort { $0.email < $1.email }
+        contactStateStore.upsertContact(contact, contacts: &contacts)
     }
 
     private func applyContactEvent(_ payload: IMTCPContactEventPayload) {
@@ -1815,7 +1840,7 @@ final class AuthManager: ObservableObject {
         switch payload.eventType {
         case .friendRequestCreated:
             guard let request = payload.request,
-                  contactsController.isRequestRelevant(request, to: currentUser.id)
+                  sessionFacade.isRequestRelevant(request, to: currentUser.id)
             else {
                 scheduleContactStateCorrection(reason: "friend_request_created payload is incomplete")
                 return
@@ -1825,7 +1850,7 @@ final class AuthManager: ObservableObject {
             didApply = true
         case .friendRequestAccepted:
             guard let request = payload.request,
-                  contactsController.isRequestRelevant(request, to: currentUser.id),
+                  sessionFacade.isRequestRelevant(request, to: currentUser.id),
                   let contact = payload.contact
             else {
                 scheduleContactStateCorrection(reason: "friend_request_accepted payload is incomplete")
@@ -1837,7 +1862,7 @@ final class AuthManager: ObservableObject {
             didApply = true
         case .friendRequestDeclined, .friendRequestCancelled:
             guard let request = payload.request,
-                  contactsController.isRequestRelevant(request, to: currentUser.id)
+                  sessionFacade.isRequestRelevant(request, to: currentUser.id)
             else {
                 scheduleContactStateCorrection(reason: "\(payload.eventType.rawValue) payload is incomplete")
                 return
@@ -1851,7 +1876,7 @@ final class AuthManager: ObservableObject {
                 return
             }
 
-            contacts.removeAll { $0.id == contactUserID }
+            contactStateStore.removeContact(userID: contactUserID, contacts: &contacts)
             didApply = true
         }
 
@@ -1861,9 +1886,13 @@ final class AuthManager: ObservableObject {
     }
 
     private func replaceContactRequests(_ requests: [ContactRequestResponseBody], currentUserID: UUID) {
-        contactRequests = contactsController.normalizeRequests(
+        contactStateStore.replaceRequests(
             requests,
-            currentUserID: currentUserID
+            currentUserID: currentUserID,
+            contactRequests: &contactRequests,
+            normalize: { requests, currentUserID in
+                sessionFacade.normalizeRequests(requests, currentUserID: currentUserID)
+            }
         )
         recomputeIncomingContactRequestUnreadState()
     }
@@ -1873,15 +1902,16 @@ final class AuthManager: ObservableObject {
             return
         }
 
-        guard contactsController.isRequestRelevant(request, to: currentUserID) else {
-            return
-        }
-
-        contactRequests.removeAll { $0.id == request.id }
-        contactRequests.append(request)
-        contactRequests = contactsController.normalizeRequests(
-            contactRequests,
-            currentUserID: currentUserID
+        contactStateStore.upsertRequest(
+            request,
+            currentUserID: currentUserID,
+            contactRequests: &contactRequests,
+            isRelevant: { request, currentUserID in
+                sessionFacade.isRequestRelevant(request, to: currentUserID)
+            },
+            normalize: { requests, currentUserID in
+                sessionFacade.normalizeRequests(requests, currentUserID: currentUserID)
+            }
         )
         recomputeIncomingContactRequestUnreadState()
     }
@@ -1891,28 +1921,18 @@ final class AuthManager: ObservableObject {
         status: ContactRequestStatus,
         respondedAt: Date
     ) {
-        guard let currentUserID = currentUser?.id,
-              let index = contactRequests.firstIndex(where: { $0.id == requestID })
-        else {
+        guard let currentUserID = currentUser?.id else {
             return
         }
-
-        let current = contactRequests[index]
-        contactRequests[index] = ContactRequestResponseBody(
-            id: current.id,
-            requester: current.requester,
-            addressee: current.addressee,
+        contactStateStore.updateRequestStatus(
+            requestID: requestID,
             status: status,
-            message: current.message,
-            requesterRemark: current.requesterRemark,
-            addresseeRemark: current.addresseeRemark,
-            createdAt: current.createdAt,
-            updatedAt: respondedAt,
-            respondedAt: respondedAt
-        )
-        contactRequests = contactsController.normalizeRequests(
-            contactRequests,
-            currentUserID: currentUserID
+            respondedAt: respondedAt,
+            currentUserID: currentUserID,
+            contactRequests: &contactRequests,
+            normalize: { requests, currentUserID in
+                sessionFacade.normalizeRequests(requests, currentUserID: currentUserID)
+            }
         )
         recomputeIncomingContactRequestUnreadState()
     }
@@ -1941,7 +1961,7 @@ final class AuthManager: ObservableObject {
         }
 
         do {
-            try await contactsController.saveCacheSnapshot(
+            try await sessionFacade.saveContactStateCacheSnapshot(
                 makeContactStateCacheSnapshot(),
                 for: user.id
             )
@@ -1966,33 +1986,22 @@ final class AuthManager: ObservableObject {
     }
 
     private func recomputeIncomingContactRequestUnreadState() {
-        let incomingContactRequests = incomingPendingContactRequests
-
-        guard !incomingContactRequests.isEmpty else {
+        guard let currentUserID = currentUser?.id else {
             unseenIncomingContactRequestCount = 0
             return
         }
-
-        if let lastSeenIncomingContactRequestAt {
-            unseenIncomingContactRequestCount = incomingContactRequests.reduce(into: 0) { count, request in
-                guard let createdAt = request.createdAt, createdAt > lastSeenIncomingContactRequestAt else {
-                    return
-                }
-                count += 1
+        unseenIncomingContactRequestCount = contactStateStore.unseenIncomingRequestCount(
+            requests: contactRequests,
+            currentUserID: currentUserID,
+            lastSeenIncomingContactRequestAt: lastSeenIncomingContactRequestAt,
+            sortPendingNewestFirst: { lhs, rhs in
+                sessionFacade.sortPendingNewestFirst(lhs, rhs)
             }
-            return
-        }
-
-        unseenIncomingContactRequestCount = incomingContactRequests.reduce(into: 0) { count, request in
-            guard request.createdAt != nil else {
-                return
-            }
-            count += 1
-        }
+        )
     }
 
     private func scheduleIMConversationSummaryReadModelCorrection(force: Bool = false) {
-        imController.scheduleConversationSummaryReadModelCorrection(force: force)
+        conversationRuntimeController.scheduleConversationSummaryReadModelCorrection(force: force)
     }
 
     private func handleIMDataRequestError(_ error: Error) async {
@@ -2036,11 +2045,11 @@ final class AuthManager: ObservableObject {
     }
 
     private func shouldPreserveSession(for error: Error) async -> Bool {
-        await authSessionController.shouldPreserveSession(for: error)
+        await sessionFacade.shouldPreserveSession(for: error)
     }
 
     private func markServerUnavailableIfNeeded(for error: Error) async {
-        if await authSessionController.shouldMarkServerOffline(for: error) {
+        if await sessionFacade.shouldMarkServerOffline(for: error) {
             markServerOffline(error)
         }
     }

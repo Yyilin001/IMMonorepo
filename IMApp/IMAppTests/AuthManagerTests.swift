@@ -440,7 +440,141 @@ private actor IMCrossDeviceConversationListState {
             messages: filteredMessages,
             hasMore: false,
             nextAfterSequence: filteredMessages.last?.serverSequence
+            )
+    }
+
+    func currentSummary(for conversationID: UUID) -> IMConversationSummaryResponseBody? {
+        summariesByID[conversationID]
+    }
+
+    func editMessage(
+        id messageID: UUID,
+        in conversationID: UUID,
+        text: String
+    ) -> IMConversationMessageResponseBody? {
+        guard var messages = messagesByConversationID[conversationID],
+              let messageIndex = messages.firstIndex(where: { $0.id == messageID }),
+              let summary = summariesByID[conversationID]
+        else {
+            return nil
+        }
+
+        let originalMessage = messages[messageIndex]
+        switch originalMessage.content {
+        case .text, .reply:
+            break
+        case .recalled, .system, .image, .audio, .file:
+            return nil
+        }
+
+        version += 1
+        let editedState = IMMessageDerivedState(
+            recallState: originalMessage.derivedState.recallState,
+            edits: originalMessage.derivedState.edits + [
+                .init(
+                    editedAt: Date(timeIntervalSince1970: 1_700_800_000 + Double(version)),
+                    text: text
+                )
+            ],
+            reactions: originalMessage.derivedState.reactions
         )
+        let updatedMessage = IMConversationMessageResponseBody(
+            id: originalMessage.id,
+            conversationID: originalMessage.conversationID,
+            senderUserID: originalMessage.senderUserID,
+            clientMessageID: originalMessage.clientMessageID,
+            serverSequence: originalMessage.serverSequence,
+            content: originalMessage.content,
+            derivedState: editedState,
+            createdAt: originalMessage.createdAt
+        )
+        messages[messageIndex] = updatedMessage
+        messages.sort { lhs, rhs in
+            if lhs.serverSequence != rhs.serverSequence {
+                return lhs.serverSequence < rhs.serverSequence
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        messagesByConversationID[conversationID] = messages
+        summariesByID[conversationID] = updatedSummary(
+            for: summary,
+            using: messages.last,
+            updatedAt: Date(timeIntervalSince1970: 1_700_800_000 + Double(version))
+        )
+        return updatedMessage
+    }
+
+    func toggleReaction(
+        on messageID: UUID,
+        in conversationID: UUID,
+        actorUserID: UUID,
+        emoji: String
+    ) -> IMConversationMessageResponseBody? {
+        guard var messages = messagesByConversationID[conversationID],
+              let messageIndex = messages.firstIndex(where: { $0.id == messageID }),
+              let summary = summariesByID[conversationID]
+        else {
+            return nil
+        }
+
+        let originalMessage = messages[messageIndex]
+        switch originalMessage.content {
+        case .text, .reply, .image, .audio, .file:
+            break
+        case .recalled, .system:
+            return nil
+        }
+
+        version += 1
+        var reactions = originalMessage.derivedState.reactions
+        if let index = reactions.firstIndex(where: { $0.emoji == emoji }) {
+            var actorUserIDs = reactions[index].actorUserIDs
+            if let existingIndex = actorUserIDs.firstIndex(of: actorUserID) {
+                actorUserIDs.remove(at: existingIndex)
+            } else {
+                actorUserIDs.append(actorUserID)
+                actorUserIDs.sort { $0.uuidString < $1.uuidString }
+            }
+
+            if actorUserIDs.isEmpty {
+                reactions.remove(at: index)
+            } else {
+                reactions[index] = .init(emoji: emoji, actorUserIDs: actorUserIDs)
+            }
+        } else {
+            reactions.append(.init(emoji: emoji, actorUserIDs: [actorUserID]))
+            reactions.sort { $0.emoji < $1.emoji }
+        }
+
+        let updatedState = IMMessageDerivedState(
+            recallState: originalMessage.derivedState.recallState,
+            edits: originalMessage.derivedState.edits,
+            reactions: reactions
+        )
+        let updatedMessage = IMConversationMessageResponseBody(
+            id: originalMessage.id,
+            conversationID: originalMessage.conversationID,
+            senderUserID: originalMessage.senderUserID,
+            clientMessageID: originalMessage.clientMessageID,
+            serverSequence: originalMessage.serverSequence,
+            content: originalMessage.content,
+            derivedState: updatedState,
+            createdAt: originalMessage.createdAt
+        )
+        messages[messageIndex] = updatedMessage
+        messages.sort { lhs, rhs in
+            if lhs.serverSequence != rhs.serverSequence {
+                return lhs.serverSequence < rhs.serverSequence
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        messagesByConversationID[conversationID] = messages
+        summariesByID[conversationID] = updatedSummary(
+            for: summary,
+            using: messages.last,
+            updatedAt: Date(timeIntervalSince1970: 1_700_800_000 + Double(version))
+        )
+        return updatedMessage
     }
 
     func appendMessage(
@@ -658,6 +792,41 @@ private actor IMCrossDeviceConversationListState {
 
     private var snapshotToken: String {
         "snapshot-\(version)"
+    }
+
+    private func updatedSummary(
+        for summary: IMConversationSummaryResponseBody,
+        using lastMessage: IMConversationMessageResponseBody?,
+        updatedAt: Date
+    ) -> IMConversationSummaryResponseBody {
+        IMConversationSummaryResponseBody(
+            id: summary.id,
+            title: summary.title,
+            kind: summary.kind,
+            directMessagingState: summary.directMessagingState,
+            directPeer: summary.directPeer,
+            memberCount: summary.memberCount,
+            memberUserIDs: summary.memberUserIDs,
+            notice: summary.notice,
+            avatarPreset: summary.avatarPreset,
+            lastMessage: lastMessage.map {
+                IMMessagePreviewResponseBody(
+                    id: $0.id,
+                    senderUserID: $0.senderUserID,
+                    serverSequence: $0.serverSequence,
+                    content: $0.content,
+                    derivedState: $0.derivedState,
+                    createdAt: $0.createdAt
+                )
+            },
+            lastReadSequence: summary.lastReadSequence,
+            unreadCount: summary.unreadCount,
+            isPinned: summary.isPinned,
+            pinnedAt: summary.pinnedAt,
+            isMuted: summary.isMuted,
+            createdAt: summary.createdAt,
+            updatedAt: updatedAt
+        )
     }
 }
 
@@ -1834,6 +2003,122 @@ struct AuthManagerTests {
                         && transfer == IMMessageBackgroundTransferReference(
                             sessionIdentifier: snapshot.sessionIdentifier,
                             taskIdentifier: snapshot.taskIdentifier
+                        )
+                case .waitingForConnectivity, .paused, .downloaded, .failed:
+                    return false
+                }
+            }
+        }
+    }
+
+    @Test func cachedTransferSnapshotRestoresDownloadProjectionWithoutLiveBackgroundSnapshot() async throws {
+        let conversationID = "downloaded-conversation-cache-only"
+        let asset = IMMediaAsset(
+            assetID: "asset-background-download-cache-only",
+            kind: .file,
+            mimeType: "application/pdf",
+            byteSize: 256,
+            filename: "restore.pdf"
+        )
+        let destinationURL = FileManager.default.temporaryDirectory
+            .appending(path: "im-background-download-cached-\(UUID().uuidString).pdf")
+        let transferSnapshot = IMTransferSnapshot(
+            taskID: IMTransferTaskID(
+                sessionIdentifier: "tests.im.cached.download",
+                taskIdentifier: 52
+            ),
+            kind: .download,
+            intent: .mediaDownload,
+            state: .running(
+                progress: IMMessageLocalDownloadProgressSnapshot(
+                    transferredBytes: 96,
+                    totalBytes: 256,
+                    resumedBytes: 16
+                )
+            ),
+            destinationURL: destinationURL
+        )
+        let cache = InMemoryIMConversationCache()
+        await cache.seed(
+            IMConversationCacheSnapshot(
+                conversations: [
+                    IMCachedConversationState(
+                        id: conversationID,
+                        title: "Cached Snapshot Download",
+                        kind: .direct,
+                        memberCount: 2,
+                        memberUserIDs: [Self.user.id],
+                        messages: [
+                            IMCachedMessageState(
+                                id: "download-message-cache-only",
+                                conversationID: conversationID,
+                                clientMessageID: nil,
+                                serverMessageID: UUID().uuidString,
+                                senderUserID: Self.user.id,
+                                serverSequence: 12,
+                                content: .file(asset),
+                                direction: .incoming,
+                                createdAt: Date(timeIntervalSince1970: 1_701_100_000),
+                                deliveryState: .received,
+                                transferTaskID: transferSnapshot.taskID,
+                                localDownloadState: nil
+                            )
+                        ],
+                        hasLoadedMessages: true,
+                        lastMessagePreviewText: asset.filename,
+                        hasMoreHistory: false,
+                        latestSyncedServerSequence: 12,
+                        oldestLoadedServerSequence: 12,
+                        serverLastReadSequence: 12,
+                        serverUnreadCount: 0,
+                        updatedAt: Date(timeIntervalSince1970: 1_701_100_010)
+                    )
+                ],
+                selectedConversationID: conversationID,
+                lastSummaryRefreshAt: Date(timeIntervalSince1970: 1_701_100_010),
+                summarySyncToken: "snapshot-download-cache-only",
+                summaryNextCursor: nil,
+                hasMoreConversationSummaries: false,
+                transferSnapshots: [transferSnapshot]
+            ),
+            for: Self.user.id
+        )
+        let monitor = AuthManagerBackgroundTransferMonitor(initialSnapshots: [])
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+        let manager = makeManager(
+            transport: transport,
+            backgroundTransferMonitor: monitor,
+            imConversationCache: IMConversationCacheHandler(cache)
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                guard
+                    let message = manager.imConversationStore.conversations.first?.messages.first,
+                    let localDownloadState = message.localDownloadState
+                else {
+                    return false
+                }
+
+                switch localDownloadState.status {
+                case .downloading(let progress, let transfer):
+                    return progress?.transferredBytes == 96
+                        && progress?.totalBytes == 256
+                        && progress?.resumedBytes == 16
+                        && message.transferTaskID == transferSnapshot.taskID
+                        && transfer == IMMessageBackgroundTransferReference(
+                            sessionIdentifier: transferSnapshot.taskID.sessionIdentifier,
+                            taskIdentifier: transferSnapshot.taskID.taskIdentifier
                         )
                 case .waitingForConnectivity, .paused, .downloaded, .failed:
                     return false
@@ -5462,6 +5747,391 @@ struct AuthManagerTests {
         await secondManager.refreshIMConversationSummaryReadModelIfNeeded()
 
         #expect(secondManager.imConversationStore.selectedConversation?.lastMessagePreview == "撤回了一条消息")
+    }
+
+    @Test func editedMessageOnAnotherDeviceConvergesViaRealtimeEventChangesAndReconnect() async throws {
+        let harness = IMConnectionTestHarness()
+        let requestCounter = IMRequestCounter()
+        let loginCounter = IMRequestCounter()
+        let conversationID = UUID(uuidString: "aaaaaaaa-7777-2222-3333-bbbbbbbbbbbb")!
+        let messageID = UUID(uuidString: "99999999-7777-2222-3333-aaaaaaaaaaaa")!
+        let originalTimestamp = Date(timeIntervalSince1970: 1_700_860_100)
+        let state = IMCrossDeviceConversationListState(
+            conversations: [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "跨端编辑",
+                    kind: IMConversationKind.group.rawValue,
+                    memberCount: 1,
+                    memberUserIDs: [Self.user.id],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: messageID,
+                        senderUserID: Self.user.id,
+                        serverSequence: 1,
+                        content: .text("编辑前正文"),
+                        createdAt: originalTimestamp
+                    ),
+                    lastReadSequence: 1,
+                    unreadCount: 0,
+                    createdAt: Date(timeIntervalSince1970: 1_700_860_000),
+                    updatedAt: originalTimestamp
+                )
+            ],
+            messagesByConversationID: [
+                conversationID: [
+                    IMConversationMessageResponseBody(
+                        id: messageID,
+                        conversationID: conversationID,
+                        senderUserID: Self.user.id,
+                        clientMessageID: "client-edit-cross-device",
+                        serverSequence: 1,
+                        content: .text("编辑前正文"),
+                        createdAt: originalTimestamp
+                    )
+                ]
+            ]
+        )
+
+        let transport = MockHTTPTransport { request in
+            let path = request.url?.path
+            switch (request.httpMethod, path) {
+            case ("POST", "/api/auth/login"):
+                await loginCounter.increment("login")
+                let loginIndex = await loginCounter.count(for: "login")
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.authResponseBody(
+                        user: Self.user,
+                        accessToken: "access-edit-\(loginIndex)",
+                        refreshToken: "refresh-edit-\(loginIndex)"
+                    )
+                )
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.pageResponse())
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                await requestCounter.increment("changes")
+                let afterToken = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "afterToken" })?
+                    .value
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.changesResponse(afterToken: afterToken))
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: conversationID))
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
+                await requestCounter.increment("gapSync")
+                let afterSequence = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "afterSequence" })?
+                    .value
+                    .flatMap(UInt64.init)
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.messagesSinceResponse(for: conversationID, afterSequence: afterSequence))
+                )
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/messages/\(messageID.uuidString)/edit"):
+                let payload = try JSONDecoder().decode(
+                    IMConversationMessageEditRequestBody.self,
+                    from: request.httpBody ?? Data()
+                )
+                let response = await state.editMessage(
+                    id: messageID,
+                    in: conversationID,
+                    text: payload.text
+                )
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(try #require(response))
+                )
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+
+        let firstManager = makeManager(
+            transport: transport,
+            openIMConnection: nil,
+            wrapDefaultIMResponses: false
+        )
+        let secondManager = makeManager(
+            transport: transport,
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            wrapDefaultIMResponses: false
+        )
+
+        await firstManager.login(email: Self.user.email, password: "password123")
+        await secondManager.login(email: Self.user.email, password: "password123")
+        await secondManager.openIMConversation(conversationID.uuidString)
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                secondManager.imConversationStore.selectedConversation?.messages.last?.text == "编辑前正文"
+                    && secondManager.imConnectionStatus == .connected
+            }
+        }
+
+        let changesBeforeEdit = await requestCounter.count(for: "changes")
+        let didEdit = await firstManager.editIMMessage(
+            messageID: messageID.uuidString,
+            text: "编辑后正文",
+            in: conversationID.uuidString
+        )
+        #expect(didEdit)
+
+        let updatedSummary = try #require(await state.currentSummary(for: conversationID))
+        let updatedMessage = try #require(await state.messagesResponse(for: conversationID).last)
+        await harness.yield(
+            .conversationEvent(
+                requestID: nil,
+                payload: IMTCPConversationEventPayload(
+                    eventType: .messageUpdated,
+                    conversation: updatedSummary,
+                    message: updatedMessage,
+                    actorUserID: Self.user.id,
+                    serverTimestamp: Date(timeIntervalSince1970: 1_700_860_200)
+                )
+            )
+        )
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                let selectedConversation = secondManager.imConversationStore.selectedConversation
+                return selectedConversation?.lastMessagePreview == "编辑后正文"
+                    && selectedConversation?.messages.last?.text == "编辑后正文"
+                    && selectedConversation?.messages.last?.derivedState.edits.last?.text == "编辑后正文"
+            }
+        }
+
+        try await Task.sleep(for: .seconds(5.2))
+        await secondManager.refreshIMConversationSummaryReadModelIfNeeded()
+        #expect(await requestCounter.count(for: "changes") > changesBeforeEdit)
+        #expect(secondManager.imConversationStore.selectedConversation?.lastMessagePreview == "编辑后正文")
+
+        let gapSyncBeforeReconnect = await requestCounter.count(for: "gapSync")
+        await secondManager.reconnectIMConnection()
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                let selectedConversation = secondManager.imConversationStore.selectedConversation
+                return selectedConversation?.messages.last?.text == "编辑后正文"
+                    && selectedConversation?.messages.last?.derivedState.edits.last?.text == "编辑后正文"
+                    && secondManager.imConnectionStatus == .connected
+            }
+        }
+
+        #expect(await requestCounter.count(for: "gapSync") >= gapSyncBeforeReconnect)
+    }
+
+    @Test func messageReactionOnAnotherDeviceConvergesViaRealtimeEventChangesAndReconnect() async throws {
+        let harness = IMConnectionTestHarness()
+        let requestCounter = IMRequestCounter()
+        let loginCounter = IMRequestCounter()
+        let conversationID = UUID(uuidString: "aaaaaaaa-8888-2222-3333-bbbbbbbbbbbb")!
+        let messageID = UUID(uuidString: "99999999-8888-2222-3333-aaaaaaaaaaaa")!
+        let peerUserID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        let originalTimestamp = Date(timeIntervalSince1970: 1_700_861_100)
+        let state = IMCrossDeviceConversationListState(
+            conversations: [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "跨端 reaction",
+                    kind: IMConversationKind.group.rawValue,
+                    memberCount: 1,
+                    memberUserIDs: [Self.user.id],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: messageID,
+                        senderUserID: peerUserID,
+                        serverSequence: 1,
+                        content: .text("reaction 目标"),
+                        createdAt: originalTimestamp
+                    ),
+                    lastReadSequence: 1,
+                    unreadCount: 0,
+                    createdAt: Date(timeIntervalSince1970: 1_700_861_000),
+                    updatedAt: originalTimestamp
+                )
+            ],
+            messagesByConversationID: [
+                conversationID: [
+                    IMConversationMessageResponseBody(
+                        id: messageID,
+                        conversationID: conversationID,
+                        senderUserID: peerUserID,
+                        clientMessageID: nil,
+                        serverSequence: 1,
+                        content: .text("reaction 目标"),
+                        createdAt: originalTimestamp
+                    )
+                ]
+            ]
+        )
+
+        let transport = MockHTTPTransport { request in
+            let path = request.url?.path
+            switch (request.httpMethod, path) {
+            case ("POST", "/api/auth/login"):
+                await loginCounter.increment("login")
+                let loginIndex = await loginCounter.count(for: "login")
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.authResponseBody(
+                        user: Self.user,
+                        accessToken: "access-reaction-\(loginIndex)",
+                        refreshToken: "refresh-reaction-\(loginIndex)"
+                    )
+                )
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.pageResponse())
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                await requestCounter.increment("changes")
+                let afterToken = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "afterToken" })?
+                    .value
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.changesResponse(afterToken: afterToken))
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: conversationID))
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
+                await requestCounter.increment("gapSync")
+                let afterSequence = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "afterSequence" })?
+                    .value
+                    .flatMap(UInt64.init)
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(await state.messagesSinceResponse(for: conversationID, afterSequence: afterSequence))
+                )
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/messages/\(messageID.uuidString)/reactions"):
+                let payload = try JSONDecoder().decode(
+                    IMConversationMessageReactionRequestBody.self,
+                    from: request.httpBody ?? Data()
+                )
+                let response = await state.toggleReaction(
+                    on: messageID,
+                    in: conversationID,
+                    actorUserID: Self.user.id,
+                    emoji: payload.emoji
+                )
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(try #require(response))
+                )
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+
+        let firstManager = makeManager(
+            transport: transport,
+            openIMConnection: nil,
+            wrapDefaultIMResponses: false
+        )
+        let secondManager = makeManager(
+            transport: transport,
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            wrapDefaultIMResponses: false
+        )
+
+        await firstManager.login(email: Self.user.email, password: "password123")
+        await secondManager.login(email: Self.user.email, password: "password123")
+        await secondManager.openIMConversation(conversationID.uuidString)
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                secondManager.imConversationStore.selectedConversation?.messages.last?.text == "reaction 目标"
+                    && secondManager.imConnectionStatus == .connected
+            }
+        }
+
+        let didReact = await firstManager.toggleIMMessageReaction(
+            messageID: messageID.uuidString,
+            emoji: "👍",
+            in: conversationID.uuidString
+        )
+        #expect(didReact)
+
+        let updatedSummary = try #require(await state.currentSummary(for: conversationID))
+        let updatedMessage = try #require(await state.messagesResponse(for: conversationID).last)
+        await harness.yield(
+            .conversationEvent(
+                requestID: nil,
+                payload: IMTCPConversationEventPayload(
+                    eventType: .messageUpdated,
+                    conversation: updatedSummary,
+                    message: updatedMessage,
+                    actorUserID: Self.user.id,
+                    serverTimestamp: Date(timeIntervalSince1970: 1_700_861_200)
+                )
+            )
+        )
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                secondManager.imConversationStore.selectedConversation?.messages.last?.derivedState.reactions == [
+                    .init(emoji: "👍", actorUserIDs: [Self.user.id])
+                ]
+            }
+        }
+
+        try await Task.sleep(for: .seconds(5.2))
+        await secondManager.refreshIMConversationSummaryReadModelIfNeeded()
+        #expect(secondManager.imConversationStore.selectedConversation?.messages.last?.derivedState.reactions == [
+            .init(emoji: "👍", actorUserIDs: [Self.user.id])
+        ])
+
+        let gapSyncBeforeReconnect = await requestCounter.count(for: "gapSync")
+        await secondManager.reconnectIMConnection()
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                secondManager.imConversationStore.selectedConversation?.messages.last?.derivedState.reactions == [
+                    .init(emoji: "👍", actorUserIDs: [Self.user.id])
+                ]
+            }
+        }
+
+        #expect(await requestCounter.count(for: "gapSync") >= gapSyncBeforeReconnect)
+        #expect(secondManager.imConversationStore.selectedConversation?.lastMessagePreview == "reaction 目标")
     }
 
     @Test func recalledReadChangesAndGapSyncConvergeAcrossDevices() async throws {

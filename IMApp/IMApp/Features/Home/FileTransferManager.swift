@@ -39,7 +39,7 @@ final class FileTransferManager: ObservableObject {
     private var uploadOperation: FileTransferOperation<UploadTransferEvent<EmptyResponse>>?
     private var downloadOperation: FileTransferOperation<DownloadTransferEvent>?
     private var backgroundTransferUpdatesTask: Task<Void, Never>?
-    private var transferStore = IMTransferStore()
+    private var transferStore = TransferStore()
     private var trackedBackgroundUpload: IMTransferSnapshot?
     private var trackedBackgroundDownload: IMTransferSnapshot?
 

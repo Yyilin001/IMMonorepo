@@ -158,6 +158,7 @@ public struct IMTCPMessagePayload: Codable, Equatable, Sendable {
     public let serverSequence: UInt64?
     public let serverTimestamp: Date?
     public let content: IMMessageContent
+    public let derivedState: IMMessageDerivedState
 
     public var textValue: String? {
         content.textValue
@@ -170,7 +171,8 @@ public struct IMTCPMessagePayload: Codable, Equatable, Sendable {
         senderUserID: UUID?,
         serverSequence: UInt64?,
         serverTimestamp: Date?,
-        content: IMMessageContent
+        content: IMMessageContent,
+        derivedState: IMMessageDerivedState = IMMessageDerivedState()
     ) {
         self.clientMessageID = clientMessageID
         self.messageID = messageID
@@ -179,6 +181,7 @@ public struct IMTCPMessagePayload: Codable, Equatable, Sendable {
         self.serverSequence = serverSequence
         self.serverTimestamp = serverTimestamp
         self.content = content
+        self.derivedState = derivedState
     }
 }
 
@@ -189,6 +192,7 @@ public enum IMTCPConversationEventType: String, Codable, Equatable, Sendable {
     case membersUpdated = "members_updated"
     case conversationRemovedForSelf = "conversation_removed_for_self"
     case summaryUpdated = "summary_updated"
+    case messageUpdated = "message_updated"
     case messageRecalled = "message_recalled"
 }
 

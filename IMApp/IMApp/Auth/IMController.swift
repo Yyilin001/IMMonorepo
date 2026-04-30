@@ -2,7 +2,9 @@ import Foundation
 import IMClientKit
 
 @MainActor
-final class IMController {
+final class ConversationRuntimeController {
+    // 运行时收敛顺序固定为：实时 timeline -> summary changes -> messages/since 补洞。
+    // 不允许在这里重新引入“写后 summary 立即一致”的客户端假设。
     private enum HistoryConfig {
         static let latestHistoryLimit = 40
         static let gapSyncLimit = 100
@@ -65,7 +67,7 @@ final class IMController {
     private var imConversationRefreshTask: Task<Void, Never>?
     private var mediaUploadRecoveryTasks: [String: Task<Void, Never>] = [:]
     private var mediaDownloadBackgroundObserveTask: Task<Void, Never>?
-    private var mediaTransferStore = IMTransferStore()
+    private var mediaTransferStore = TransferStore()
 
     private enum HistoryMergeMode {
         case replace
@@ -504,6 +506,19 @@ final class IMController {
         applyRecoveredBackgroundMediaSnapshots(backgroundTransferMonitor.currentSnapshots())
     }
 
+    func cachedTransferSnapshots() -> [IMTransferSnapshot] {
+        mediaTransferStore.snapshots()
+    }
+
+    func restoreTransferSnapshots(_ snapshots: [IMTransferSnapshot]) {
+        guard !snapshots.isEmpty else {
+            return
+        }
+
+        mediaTransferStore.replace(with: snapshots)
+        replayCachedMediaTransferProjections()
+    }
+
     func recallMessage(messageID: String, in conversationID: String) async -> Bool {
         guard let currentUserID = currentUserProvider()?.id else {
             return false
@@ -523,6 +538,63 @@ final class IMController {
             markServerOnline()
             imConversationStore.applyRecalledMessage(response, currentUserID: currentUserID)
             _ = await reconcileConversationSummaryReadModel(force: true)
+            scheduleConversationCachePersist()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func editMessage(messageID: String, text: String, in conversationID: String) async -> Bool {
+        guard let currentUserID = currentUserProvider()?.id else {
+            return false
+        }
+
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMessageID = messageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedMessageID.isEmpty, !trimmedText.isEmpty else {
+            return false
+        }
+
+        do {
+            let response = try await sessionClient.editIMMessage(
+                conversationID: trimmedConversationID,
+                messageID: trimmedMessageID,
+                text: trimmedText
+            )
+            markServerOnline()
+            imConversationStore.applyUpdatedMessage(response, currentUserID: currentUserID)
+            _ = await reconcileConversationSummaryReadModel(force: true)
+            scheduleConversationCachePersist()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func toggleMessageReaction(messageID: String, emoji: String, in conversationID: String) async -> Bool {
+        guard let currentUserID = currentUserProvider()?.id else {
+            return false
+        }
+
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMessageID = messageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedEmoji = emoji.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedMessageID.isEmpty, !trimmedEmoji.isEmpty else {
+            return false
+        }
+
+        do {
+            let response = try await sessionClient.toggleIMMessageReaction(
+                conversationID: trimmedConversationID,
+                messageID: trimmedMessageID,
+                emoji: trimmedEmoji
+            )
+            markServerOnline()
+            imConversationStore.applyUpdatedMessage(response, currentUserID: currentUserID)
             scheduleConversationCachePersist()
             return true
         } catch {
@@ -1852,20 +1924,24 @@ final class IMController {
     }
 
     private func applyRecoveredBackgroundMediaSnapshots(_ snapshots: [BackgroundTransferSnapshot]) {
-        mediaTransferStore.replace(with: snapshots.filter { $0.kind == .download })
-        for snapshot in mediaTransferStore.snapshots(kind: .download) {
-            applyBackgroundMediaTransferSnapshot(snapshot)
-        }
+        mediaTransferStore.merge(snapshots.filter { $0.kind == .download })
+        replayCachedMediaTransferProjections()
     }
 
     private func applyBackgroundMediaSnapshot(_ snapshot: BackgroundTransferSnapshot) {
         applyBackgroundMediaTransferSnapshot(mediaTransferStore.apply(snapshot))
     }
 
+    private func replayCachedMediaTransferProjections() {
+        for snapshot in mediaTransferStore.snapshots(kind: .download) {
+            applyBackgroundMediaTransferSnapshot(snapshot)
+        }
+    }
+
     private func applyBackgroundMediaTransferSnapshot(_ snapshot: IMTransferSnapshot) {
         guard snapshot.kind == .download,
               let destinationURL = snapshot.destinationURL,
-              let match = localDownloadMessageMatch(for: destinationURL.path)
+              let match = localDownloadMessageMatch(for: snapshot, destinationPath: destinationURL.path)
         else {
             return
         }
@@ -1887,6 +1963,34 @@ final class IMController {
         scheduleConversationCachePersist()
     }
 
+    private func localDownloadMessageMatch(
+        for snapshot: IMTransferSnapshot,
+        destinationPath: String
+    ) -> (messageID: String, state: IMMessageLocalDownloadState?)? {
+        for conversation in imConversationStore.conversations {
+            if let message = conversation.messages.first(where: { $0.resolvedTransferTaskID == snapshot.taskID }) {
+                return (message.id, message.localDownloadState)
+            }
+        }
+
+        let normalizedTargetPath = URL(fileURLWithPath: destinationPath).standardizedFileURL.path
+
+        for conversation in imConversationStore.conversations {
+            if let message = conversation.messages.first(where: {
+                guard let localDownloadState = $0.localDownloadState else {
+                    return false
+                }
+                return URL(fileURLWithPath: localDownloadState.destinationFilePath)
+                    .standardizedFileURL
+                    .path == normalizedTargetPath
+            }) {
+                return (message.id, message.localDownloadState)
+            }
+        }
+
+        return nil
+    }
+
     private func localDownloadMessageMatch(for destinationPath: String) -> (messageID: String, state: IMMessageLocalDownloadState?)? {
         let normalizedTargetPath = URL(fileURLWithPath: destinationPath).standardizedFileURL.path
 
@@ -1906,6 +2010,8 @@ final class IMController {
         return nil
     }
 }
+
+typealias IMController = ConversationRuntimeController
 
 private extension IMMessageLocalDownloadState {
     var pausedProgress: IMMessageLocalDownloadProgressSnapshot? {

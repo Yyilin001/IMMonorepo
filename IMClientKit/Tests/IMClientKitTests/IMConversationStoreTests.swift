@@ -770,6 +770,134 @@ struct IMConversationStoreTests {
         #expect(conversation?.messages.last?.text == "stale local copy")
     }
 
+    @Test func messageUpdatedEventUsesEditedDerivedStateForPreviewAndTimelineText() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let messageID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
+        let createdAt = Date(timeIntervalSince1970: 1_700_300_000)
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Server Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: messageID,
+                        senderUserID: Self.currentUserID,
+                        serverSequence: 2,
+                        content: .text("before edit"),
+                        createdAt: createdAt
+                    ),
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: createdAt
+                )
+            ]
+        )
+        store.openConversation(id: conversationID.uuidString)
+        store.replaceMessages(
+            in: conversationID.uuidString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: messageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: "client-edit-1",
+                    serverSequence: 2,
+                    content: .text("before edit"),
+                    createdAt: createdAt
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        let editedState = IMMessageDerivedState(
+            edits: [.init(editedAt: Date(timeIntervalSince1970: 1_700_300_100), text: "after edit")]
+        )
+        _ = store.applyConversationEvent(
+            IMTCPConversationEventPayload(
+                eventType: .messageUpdated,
+                conversation: IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Server Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: messageID,
+                        senderUserID: Self.currentUserID,
+                        serverSequence: 2,
+                        content: .text("before edit"),
+                        derivedState: editedState,
+                        createdAt: createdAt
+                    ),
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_300_100)
+                ),
+                message: IMConversationMessageResponseBody(
+                    id: messageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: "client-edit-1",
+                    serverSequence: 2,
+                    content: .text("before edit"),
+                    derivedState: editedState,
+                    createdAt: createdAt
+                ),
+                actorUserID: Self.currentUserID,
+                serverTimestamp: Date(timeIntervalSince1970: 1_700_300_100)
+            ),
+            currentUserID: Self.currentUserID
+        )
+
+        let conversation = try #require(store.selectedConversation)
+        let message = try #require(conversation.messages.last)
+        #expect(conversation.lastMessagePreview == "after edit")
+        #expect(message.text == "after edit")
+        #expect(message.derivedState.edits.last?.text == "after edit")
+    }
+
+    @Test func messageUpdatedEventStoresReactionDerivedState() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let messageID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
+        let createdAt = Date(timeIntervalSince1970: 1_700_300_000)
+        let reactionState = IMMessageDerivedState(
+            reactions: [
+                .init(emoji: "👍", actorUserIDs: [Self.currentUserID]),
+                .init(emoji: "❤️", actorUserIDs: [Self.peerUserID])
+            ]
+        )
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Server Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: createdAt
+                )
+            ]
+        )
+
+        store.applyUpdatedMessage(
+            IMConversationMessageResponseBody(
+                id: messageID,
+                conversationID: conversationID,
+                senderUserID: Self.peerUserID,
+                clientMessageID: nil,
+                serverSequence: 2,
+                content: .text("react here"),
+                derivedState: reactionState,
+                createdAt: createdAt
+            ),
+            currentUserID: Self.currentUserID
+        )
+
+        let message = store.selectedConversation?.messages.last
+        #expect(message?.derivedState.reactions == reactionState.reactions)
+    }
+
     @Test func conversationRemovedForSelfEventRemovesConversationAndFallsBackSelection() {
         let store = IMConversationStore()
         let removedConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
@@ -2796,6 +2924,10 @@ struct IMConversationStoreTests {
 
         let messageID = try #require(store.selectedConversation?.messages.first?.id)
         let destinationURL = FileManager.default.temporaryDirectory.appending(path: "cached-download-\(UUID().uuidString).pdf")
+        let transferTaskID = IMTransferTaskID(
+            sessionIdentifier: "tests.im.cache.download",
+            taskIdentifier: 88
+        )
         store.updateLocalDownloadState(
             messageID: messageID,
             state: IMMessageLocalDownloadState(
@@ -2806,7 +2938,8 @@ struct IMConversationStoreTests {
                         totalBytes: 128,
                         resumedBytes: 32
                     )
-                )
+                ),
+                taskID: transferTaskID
             )
         )
 
@@ -2823,5 +2956,34 @@ struct IMConversationStoreTests {
                 resumedBytes: 32
             )
         ))
+        #expect(restoredMessage.transferTaskID == transferTaskID)
+    }
+
+    @Test func cacheSnapshotCarriesTransferSnapshots() throws {
+        let store = IMConversationStore()
+        let transferSnapshot = IMTransferSnapshot(
+            taskID: IMTransferTaskID(
+                sessionIdentifier: "tests.im.cache.download",
+                taskIdentifier: 77
+            ),
+            kind: .download,
+            intent: .mediaDownload,
+            state: .waitingForConnectivity(
+                progress: IMMessageLocalDownloadProgressSnapshot(
+                    transferredBytes: 12,
+                    totalBytes: 48,
+                    resumedBytes: 4
+                )
+            ),
+            destinationURL: FileManager.default.temporaryDirectory
+                .appending(path: "transfer-cache-\(UUID().uuidString).bin")
+        )
+
+        let snapshot = store.makeCacheSnapshot(
+            lastSummaryRefreshAt: nil,
+            transferSnapshots: [transferSnapshot]
+        )
+
+        #expect(snapshot.transferSnapshots == [transferSnapshot])
     }
 }

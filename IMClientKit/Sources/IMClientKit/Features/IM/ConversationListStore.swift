@@ -1,0 +1,173 @@
+import Foundation
+
+struct ConversationListStore {
+    func replaceSummaryWindow(
+        _ responses: [IMConversationSummaryResponseBody],
+        conversations: inout [IMConversation],
+        selectedConversationID: inout String?,
+        nextCursor: String?,
+        hasMore: Bool,
+        buildConversation: (IMConversationSummaryResponseBody, IMConversation?) -> IMConversation
+    ) -> (nextCursor: String?, hasMore: Bool) {
+        let existingByID = Dictionary(uniqueKeysWithValues: conversations.map { ($0.id, $0) })
+        let previousSelectedConversationID = selectedConversationID
+
+        conversations = responses.map { response in
+            let conversationID = response.id.uuidString
+            return buildConversation(response, existingByID[conversationID])
+        }
+
+        if let previousSelectedConversationID,
+           conversations.contains(where: { $0.id == previousSelectedConversationID }) {
+            selectedConversationID = previousSelectedConversationID
+        } else {
+            selectedConversationID = conversations.first?.id
+        }
+
+        return (nextCursor, hasMore)
+    }
+
+    func appendSummaryWindow(
+        _ responses: [IMConversationSummaryResponseBody],
+        conversations: inout [IMConversation],
+        nextCursor: String?,
+        hasMore: Bool,
+        upsert: (IMConversationSummaryResponseBody, inout [IMConversation]) -> Void
+    ) -> (nextCursor: String?, hasMore: Bool) {
+        for response in responses {
+            upsert(response, &conversations)
+        }
+        return (nextCursor, hasMore)
+    }
+
+    func applySummaryChanges(
+        upserts: [IMConversationSummaryResponseBody],
+        removedConversationIDs: [UUID],
+        conversations: inout [IMConversation],
+        selectedConversationID: inout String?,
+        upsert: (IMConversationSummaryResponseBody, inout [IMConversation]) -> Void
+    ) {
+        for response in upserts {
+            upsert(response, &conversations)
+        }
+
+        for conversationID in removedConversationIDs {
+            removeConversation(
+                id: conversationID.uuidString,
+                conversations: &conversations,
+                selectedConversationID: &selectedConversationID
+            )
+        }
+    }
+
+    func removeConversation(
+        id: String,
+        conversations: inout [IMConversation],
+        selectedConversationID: inout String?
+    ) {
+        let trimmedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty else {
+            return
+        }
+
+        conversations.removeAll { $0.id == trimmedID }
+
+        if selectedConversationID == trimmedID {
+            selectedConversationID = conversations.first?.id
+        } else if selectedConversationID == nil
+                    || !conversations.contains(where: { $0.id == selectedConversationID }) {
+            selectedConversationID = conversations.first?.id
+        }
+    }
+
+    func applyServerSummaryReadState(
+        lastReadSequence: UInt64,
+        unreadCount: Int,
+        for conversationID: String,
+        conversations: inout [IMConversation],
+        reconciledLocalUnreadDelta: (String, UInt64, Int, Int, UInt64, Int) -> Int
+    ) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty,
+              let index = conversations.firstIndex(where: { $0.id == trimmedConversationID })
+        else {
+            return
+        }
+
+        let previousServerLastReadSequence = conversations[index].serverLastReadSequence
+        let previousServerUnreadCount = conversations[index].serverUnreadCount
+        let previousLocalUnreadDelta = conversations[index].localUnreadDelta
+        conversations[index].serverLastReadSequence = lastReadSequence
+        conversations[index].serverUnreadCount = max(0, unreadCount)
+        conversations[index].localUnreadDelta = reconciledLocalUnreadDelta(
+            trimmedConversationID,
+            previousServerLastReadSequence,
+            previousServerUnreadCount,
+            previousLocalUnreadDelta,
+            lastReadSequence,
+            max(0, unreadCount)
+        )
+    }
+
+    func applyRealtimeUnreadIncrement(
+        for conversationID: String,
+        conversations: inout [IMConversation],
+        selectedConversationID: String?,
+        resetUnreadState: (Int, inout [IMConversation]) -> Void
+    ) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty,
+              let index = conversations.firstIndex(where: { $0.id == trimmedConversationID })
+        else {
+            return
+        }
+
+        guard selectedConversationID != trimmedConversationID else {
+            resetUnreadState(index, &conversations)
+            return
+        }
+
+        conversations[index].localUnreadDelta += 1
+    }
+
+    func applyConversationPreferences(
+        conversationID: String,
+        isPinned: Bool,
+        pinnedAt: Date?,
+        isMuted: Bool,
+        conversations: inout [IMConversation]
+    ) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty,
+              let index = conversations.firstIndex(where: { $0.id == trimmedConversationID })
+        else {
+            return
+        }
+
+        conversations[index].isPinned = isPinned
+        conversations[index].pinnedAt = pinnedAt
+        conversations[index].isMuted = isMuted
+    }
+
+    func applyConversationMetadata(
+        conversationID: String,
+        title: String?,
+        notice: String?,
+        avatarPreset: IMConversationAvatarPreset?,
+        conversations: inout [IMConversation]
+    ) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty,
+              let index = conversations.firstIndex(where: { $0.id == trimmedConversationID })
+        else {
+            return
+        }
+
+        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedTitle, !trimmedTitle.isEmpty {
+            conversations[index].title = trimmedTitle
+        }
+        conversations[index].notice = notice?.trimmingCharacters(in: .whitespacesAndNewlines)
+        conversations[index].avatarPreset = avatarPreset
+    }
+}
