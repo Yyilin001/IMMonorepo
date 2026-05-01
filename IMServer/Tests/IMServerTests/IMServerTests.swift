@@ -143,10 +143,79 @@ struct IMServerTests {
 
             #expect(reloaded.streamPublishedAt != nil)
             #expect(reloaded.streamPublishError == nil)
+            #expect(reloaded.streamPublishStartedAt == nil)
+            #expect(reloaded.streamPublishClaimedBy == nil)
 
             let secondRelayCount = try await ConversationOutboxRelay(app: app).relayPendingEvents(limit: 10)
             #expect(secondRelayCount == 0)
         }
+    }
+
+    @Test("Outbox relay skips active claims and recovers timed out claims")
+    func conversationOutboxRelayRecoversTimedOutClaims() async throws {
+        try await withApp(configure: configure) { app in
+            app.conversationOutboxConfiguration = .init(
+                batchSize: 10,
+                pollIntervalNanoseconds: 100_000_000,
+                maxRetries: 5,
+                claimTimeoutNanoseconds: 1_000_000_000
+            )
+            let event = try ConversationDomainEvent(
+                conversationID: UUID(),
+                eventType: .metadataUpdated,
+                payload: .init(recipientUserIDs: [UUID()])
+            )
+            event.streamPublishStartedAt = Date()
+            event.streamPublishClaimedBy = "other-relay"
+            try await event.create(on: app.imWriteDB)
+
+            let activeClaimRelayCount = try await ConversationOutboxRelay(app: app).relayPendingEvents(limit: 10)
+            #expect(activeClaimRelayCount == 0)
+
+            event.streamPublishStartedAt = Date(timeIntervalSinceNow: -5)
+            try await event.update(on: app.imWriteDB)
+
+            let recoveredRelayCount = try await ConversationOutboxRelay(app: app).relayPendingEvents(limit: 10)
+            #expect(recoveredRelayCount == 1)
+
+            guard let eventID = event.id,
+                  let reloaded = try await ConversationDomainEvent.find(eventID, on: app.imWriteDB)
+            else {
+                Issue.record("Missing reloaded outbox event")
+                return
+            }
+
+            #expect(reloaded.streamPublishedAt != nil)
+            #expect(reloaded.streamPublishStartedAt == nil)
+            #expect(reloaded.streamPublishClaimedBy == nil)
+        }
+    }
+
+    @Test("Hot conversation limiter rejects messages above the configured rate")
+    func hotConversationLimiterRejectsAboveConfiguredRate() async throws {
+        let limiter = HotConversationLimiter()
+        let conversationID = UUID()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+        try await limiter.reserve(conversationID: conversationID, limit: 1, now: now)
+        do {
+            try await limiter.reserve(conversationID: conversationID, limit: 1, now: now)
+            Issue.record("Expected hot conversation limiter to reject the second message in the same window")
+        } catch HotConversationLimiterError.rateLimited {
+        } catch {
+            Issue.record("Unexpected limiter error: \(error)")
+        }
+
+        try await limiter.reserve(
+            conversationID: conversationID,
+            limit: 1,
+            now: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let nextWindowCount = await limiter.currentWindowCount(
+            for: conversationID,
+            now: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        #expect(nextWindowCount == 1)
     }
 
 

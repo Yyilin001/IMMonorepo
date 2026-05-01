@@ -2,6 +2,7 @@ import Fluent
 import Foundation
 import Kafka
 import NIOCore
+import SQLKit
 import Vapor
 
 struct LocalConversationEventStreamProducer: ConversationEventStreamProducer {
@@ -147,6 +148,8 @@ struct ConversationOutboxRelay {
     let shardRouter: any ConversationShardRouter
     let producer: any ConversationEventStreamProducer
     let conversationDirectory: any ConversationDirectory
+    let nodeID: String
+    let claimTimeoutSeconds: Int
 
     init(app: Application, db: (any Database)? = nil) {
         if let db {
@@ -156,6 +159,8 @@ struct ConversationOutboxRelay {
         }
         self.producer = app.conversationEventStreamProducer
         self.conversationDirectory = app.conversationDirectory
+        self.nodeID = app.imNodeID
+        self.claimTimeoutSeconds = app.conversationOutboxConfiguration.claimTimeoutSeconds
     }
 
     func drainPendingEvents(app: Application) async throws -> Int {
@@ -176,12 +181,11 @@ struct ConversationOutboxRelay {
                 break
             }
 
-            let events = try await ConversationDomainEvent.query(on: routedDatabase.database)
-                .filter(\.$status == ConversationDomainEventStatus.pending.rawValue)
-                .filter(\.$streamPublishedAt == nil)
-                .sort(\.$createdAt, .ascending)
-                .limit(remaining)
-                .all()
+            let events = try await claimPendingEvents(
+                on: routedDatabase.database,
+                limit: remaining,
+                nodeID: nodeID
+            )
 
             for event in events {
                 guard let eventID = event.id else {
@@ -201,11 +205,15 @@ struct ConversationOutboxRelay {
                     try await producer.publish(envelope)
                     event.streamPublishedAt = Date()
                     event.streamPublishError = nil
+                    event.streamPublishStartedAt = nil
+                    event.streamPublishClaimedBy = nil
                     try await event.update(on: routedDatabase.database)
                     relayedCount += 1
                     remaining -= 1
                 } catch {
                     event.streamPublishError = String(describing: error)
+                    event.streamPublishStartedAt = nil
+                    event.streamPublishClaimedBy = nil
                     try await event.update(on: routedDatabase.database)
                     throw error
                 }
@@ -213,6 +221,78 @@ struct ConversationOutboxRelay {
         }
 
         return relayedCount
+    }
+
+    private func claimPendingEvents(
+        on database: any Database,
+        limit: Int,
+        nodeID: String
+    ) async throws -> [ConversationDomainEvent] {
+        guard limit > 0 else {
+            return []
+        }
+
+        let now = Date()
+        let cutoff = Date(timeIntervalSinceNow: -Double(claimTimeoutSeconds))
+        if let sql = database as? any SQLDatabase, sql.dialect.name == "postgresql" {
+            struct ClaimedRow: Decodable {
+                let id: UUID
+            }
+
+            let rows = try await sql.raw(
+                """
+                UPDATE \(ident: ConversationDomainEvent.schema)
+                SET \(ident: "stream_publish_started_at") = \(bind: now),
+                    \(ident: "stream_publish_claimed_by") = \(bind: nodeID),
+                    \(ident: "stream_publish_error") = NULL
+                WHERE \(ident: "id") IN (
+                    SELECT \(ident: "id")
+                    FROM \(ident: ConversationDomainEvent.schema)
+                    WHERE \(ident: "status") = \(bind: ConversationDomainEventStatus.pending.rawValue)
+                      AND \(ident: "stream_published_at") IS NULL
+                      AND (
+                          \(ident: "stream_publish_started_at") IS NULL
+                          OR \(ident: "stream_publish_started_at") <= \(bind: cutoff)
+                      )
+                    ORDER BY \(ident: "created_at") ASC, \(ident: "id") ASC
+                    LIMIT \(bind: limit)
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING \(ident: "id")
+                """
+            ).all(decoding: ClaimedRow.self)
+            guard !rows.isEmpty else {
+                return []
+            }
+            return try await ConversationDomainEvent.query(on: database)
+                .filter(\.$id ~~ rows.map(\.id))
+                .sort(\.$createdAt, .ascending)
+                .all()
+        }
+
+        return try await database.transaction { transaction in
+            let events = try await ConversationDomainEvent.query(on: transaction)
+                .filter(\.$status == ConversationDomainEventStatus.pending.rawValue)
+                .filter(\.$streamPublishedAt == nil)
+                .sort(\.$createdAt, .ascending)
+                .all()
+                .filter { event in
+                    guard let startedAt = event.streamPublishStartedAt else {
+                        return true
+                    }
+                    return startedAt <= cutoff
+                }
+                .prefix(limit)
+
+            for event in events {
+                event.streamPublishStartedAt = now
+                event.streamPublishClaimedBy = nodeID
+                event.streamPublishError = nil
+                try await event.update(on: transaction)
+            }
+
+            return Array(events)
+        }
     }
 }
 
@@ -271,6 +351,11 @@ struct KafkaConversationEventStreamConsumerRunner {
             for try await message in consumer.messages {
                 do {
                     let envelope = try decodeEnvelope(from: message)
+                    if try await hasAlreadyProcessed(envelope.eventID) {
+                        await app.streamMetrics.recordDuplicate(groupID: groupID)
+                        try await consumer.commit(message)
+                        continue
+                    }
                     let eventType = ConversationDomainEventType(rawValue: envelope.eventType)
                         ?? .metadataUpdated
                     let syntheticEvent = try ConversationDomainEvent(
@@ -299,8 +384,11 @@ struct KafkaConversationEventStreamConsumerRunner {
                             )
                         )
                     )
+                    try await recordProcessed(envelope)
+                    await app.streamMetrics.recordConsumed(groupID: groupID)
                     try await consumer.commit(message)
                 } catch {
+                    await app.streamMetrics.recordFailed(groupID: groupID)
                     app.logger.warning(
                         "Kafka stream consumer message processing failed",
                         metadata: [
@@ -319,6 +407,7 @@ struct KafkaConversationEventStreamConsumerRunner {
                             topicOverride: app.eventStreamConfiguration.deadLetterTopic,
                             additionalHeaders: [deadLetterHeader]
                         )
+                        await app.streamMetrics.recordDeadLetterPublished(groupID: groupID)
                     }
                     try? await consumer.commit(message)
                 }
@@ -351,5 +440,44 @@ struct KafkaConversationEventStreamConsumerRunner {
         var buffer = ByteBufferAllocator().buffer(capacity: value.utf8.count)
         buffer.writeString(value)
         return KafkaHeader(key: key, value: buffer)
+    }
+
+    private func hasAlreadyProcessed(_ eventID: UUID) async throws -> Bool {
+        let recordID = ConversationReplayRecord.recordID(consumerGroupID: groupID, eventID: eventID)
+        guard let record = try await ConversationReplayRecord.find(recordID, on: app.imWriteDB) else {
+            return false
+        }
+        return record.statusEnum == .replayed
+    }
+
+    private func recordProcessed(_ envelope: ConversationEventStreamEnvelope) async throws {
+        let recordID = ConversationReplayRecord.recordID(consumerGroupID: groupID, eventID: envelope.eventID)
+        let now = Date()
+        if let existing = try await ConversationReplayRecord.find(recordID, on: app.imWriteDB) {
+            existing.statusEnum = .replayed
+            existing.receiveCount += 1
+            existing.lastError = nil
+            existing.replayedAt = now
+            existing.updatedAt = now
+            try await existing.update(on: app.imWriteDB)
+            return
+        }
+
+        let record = try ConversationReplayRecord(
+            eventID: envelope.eventID,
+            consumerGroupID: groupID,
+            sourceTopic: topics.first ?? app.eventStreamConfiguration.topic,
+            conversationID: envelope.conversationID,
+            eventType: envelope.eventType,
+            producerShard: envelope.producerShard,
+            payload: envelope.payload,
+            status: .replayed,
+            lastError: nil,
+            receiveCount: 1,
+            replayedAt: now,
+            createdAt: envelope.occurredAt,
+            updatedAt: now
+        )
+        try await record.create(on: app.imWriteDB)
     }
 }

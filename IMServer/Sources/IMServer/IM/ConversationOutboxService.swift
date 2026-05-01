@@ -628,15 +628,34 @@ struct ConversationOutboxConfiguration: Sendable {
     let batchSize: Int
     let pollIntervalNanoseconds: UInt64
     let maxRetries: Int
+    let claimTimeoutNanoseconds: UInt64
+
+    init(
+        batchSize: Int,
+        pollIntervalNanoseconds: UInt64,
+        maxRetries: Int,
+        claimTimeoutNanoseconds: UInt64 = 60_000_000_000
+    ) {
+        self.batchSize = batchSize
+        self.pollIntervalNanoseconds = pollIntervalNanoseconds
+        self.maxRetries = maxRetries
+        self.claimTimeoutNanoseconds = claimTimeoutNanoseconds
+    }
+
+    var claimTimeoutSeconds: Int {
+        max(1, Int(claimTimeoutNanoseconds / 1_000_000_000))
+    }
 
     static func load(from environment: Environment) -> ConversationOutboxConfiguration {
         let batchSize = max(1, Environment.get("IM_OUTBOX_BATCH_SIZE").flatMap(Int.init(_:)) ?? 200)
         let pollIntervalMillis = max(50, Environment.get("IM_OUTBOX_POLL_INTERVAL_MS").flatMap(Int.init(_:)) ?? 500)
         let maxRetries = max(1, Environment.get("IM_OUTBOX_MAX_RETRIES").flatMap(Int.init(_:)) ?? 5)
+        let claimTimeoutMillis = max(1_000, Environment.get("IM_OUTBOX_CLAIM_TIMEOUT_MS").flatMap(Int.init(_:)) ?? 60_000)
         return ConversationOutboxConfiguration(
             batchSize: batchSize,
             pollIntervalNanoseconds: UInt64(pollIntervalMillis) * 1_000_000,
-            maxRetries: maxRetries
+            maxRetries: maxRetries,
+            claimTimeoutNanoseconds: UInt64(claimTimeoutMillis) * 1_000_000
         )
     }
 }

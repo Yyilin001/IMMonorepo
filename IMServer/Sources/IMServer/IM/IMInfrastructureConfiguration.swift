@@ -502,7 +502,7 @@ extension Application {
     }
 }
 
-private func parseBooleanEnvironment(_ key: String, defaultValue: Bool) -> Bool {
+func parseBooleanEnvironment(_ key: String, defaultValue: Bool) -> Bool {
     guard let rawValue = Environment.get(key)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
         return defaultValue
     }

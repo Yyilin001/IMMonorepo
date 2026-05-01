@@ -286,6 +286,24 @@ extension IMServerTests {
         #expect(configuration.preservesGroupedDeploymentsInProduction == false)
     }
 
+    @Test("Internal metrics endpoint returns Prometheus text only when enabled")
+    func internalMetricsEndpointHonorsConfiguration() async throws {
+        try await withApp(configure: configure) { app in
+            app.metricsConfiguration = IMMetricsConfiguration(isEnabled: true)
+            try await app.testing().test(.GET, "internal/metrics", afterResponse: { res async in
+                #expect(res.status == .ok)
+                #expect(res.headers.contentType?.type == "text")
+                #expect(res.body.string.contains("im_tcp_connections"))
+                #expect(res.body.string.contains("im_outbox_backlog_events"))
+            })
+
+            app.metricsConfiguration = IMMetricsConfiguration(isEnabled: false)
+            try await app.testing().test(.GET, "internal/metrics", afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+        }
+    }
+
     @Test("Projection worker role does not register API routes")
     func projectionWorkerRoleDoesNotRegisterAPIRoutes() async throws {
         try await withApp(configure: { app in

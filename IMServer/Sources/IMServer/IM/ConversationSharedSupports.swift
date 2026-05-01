@@ -142,6 +142,7 @@ struct ConversationSequenceAllocator {
         updatedAt: Date
     ) async throws -> Int {
         if let sql = db as? any SQLDatabase,
+           sql.dialect.name == "postgresql",
            let nextSequence = try await sql.update(Conversation.schema)
             .set(
                 "last_message_sequence",

@@ -18,6 +18,7 @@ enum IMRealtimeMessageError: Error, LocalizedError, Equatable, Sendable {
     case invalidReplyReference
     case directConversationFrozen
     case strangerDirectMessageLimitReached
+    case hotConversationRateLimited
 
     var ackStatus: String {
         switch self {
@@ -35,6 +36,8 @@ enum IMRealtimeMessageError: Error, LocalizedError, Equatable, Sendable {
             return "direct_conversation_frozen"
         case .strangerDirectMessageLimitReached:
             return "stranger_direct_message_limit_reached"
+        case .hotConversationRateLimited:
+            return "hot_conversation_rate_limited"
         }
     }
 
@@ -54,6 +57,8 @@ enum IMRealtimeMessageError: Error, LocalizedError, Equatable, Sendable {
             return "你们已不是好友，当前会话不能继续发送消息。"
         case .strangerDirectMessageLimitReached:
             return "你们还不是好友，对方回复前只能发送一条消息。"
+        case .hotConversationRateLimited:
+            return "当前会话消息过于频繁，请稍后再试。"
         }
     }
 }
@@ -86,6 +91,7 @@ struct IMRealtimeMessageService {
         guard let conversationID = UUID(uuidString: normalizedConversationID) else {
             throw IMRealtimeMessageError.invalidConversationID
         }
+        try await reserveHotConversationCapacityIfNeeded(conversationID: conversationID)
 
         let normalizedContent = try normalizedContent(from: payload.content)
         let trimmedClientMessageID = payload.clientMessageID?
@@ -181,6 +187,32 @@ struct IMRealtimeMessageService {
             fatalError("IMRealtimeMessageService missing both app and database.")
         }
         return try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
+    }
+
+    private func reserveHotConversationCapacityIfNeeded(conversationID: UUID) async throws {
+        guard let app else {
+            return
+        }
+        let configuration = app.hotConversationConfiguration
+        guard configuration.isEnabled else {
+            return
+        }
+
+        do {
+            try await app.hotConversationLimiter.reserve(
+                conversationID: conversationID,
+                limit: configuration.messagesPerSecondLimit
+            )
+        } catch HotConversationLimiterError.rateLimited {
+            await app.hotConversationMetrics.recordTrackedWindows(
+                await app.hotConversationLimiter.trackedWindowCount()
+            )
+            await app.hotConversationMetrics.recordRejectedMessage()
+            throw IMRealtimeMessageError.hotConversationRateLimited
+        }
+        await app.hotConversationMetrics.recordTrackedWindows(
+            await app.hotConversationLimiter.trackedWindowCount()
+        )
     }
 
     private func existingMessage(
@@ -497,7 +529,19 @@ struct IMRealtimeMessageService {
         updatedAt: Date,
         on database: any Database
     ) async throws -> Int {
+        let startedAt = Date()
+        defer {
+            if let app {
+                Task {
+                    await app.databaseMetrics.record(
+                        operation: "conversation_sequence_allocate",
+                        durationMillis: max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
+                    )
+                }
+            }
+        }
         if let sql = database as? any SQLDatabase,
+           sql.dialect.name == "postgresql",
            let nextSequence = try await sql.update(Conversation.schema)
             .set(
                 "last_message_sequence",

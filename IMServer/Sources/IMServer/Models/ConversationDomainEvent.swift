@@ -104,6 +104,12 @@ final class ConversationDomainEvent: Model, @unchecked Sendable {
     @OptionalField(key: "stream_publish_error")
     var streamPublishError: String?
 
+    @OptionalField(key: "stream_publish_started_at")
+    var streamPublishStartedAt: Date?
+
+    @OptionalField(key: "stream_publish_claimed_by")
+    var streamPublishClaimedBy: String?
+
     @Field(key: "retry_count")
     var retryCount: Int
 

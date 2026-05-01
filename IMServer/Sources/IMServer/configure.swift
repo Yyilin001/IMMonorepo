@@ -56,12 +56,16 @@ private func configureShared(_ app: Application) async throws {
     app.summaryStoreConfiguration = IMSummaryStoreConfiguration.load(from: app.environment)
     app.summaryReadModelConfiguration = IMSummaryReadModelConfiguration.load(from: app.environment)
     app.streamConsumerConfiguration = IMStreamConsumerConfiguration.load(from: app.environment)
+    app.metricsConfiguration = IMMetricsConfiguration.load(from: app.environment)
+    app.hotConversationConfiguration = IMHotConversationConfiguration.load(from: app.environment)
+    app.consistencyRepairConfiguration = IMConsistencyRepairConfiguration.load(from: app.environment)
 
     configureDatabases(app)
     try validateProductionInfrastructureConfiguration(app)
     app.authConfiguration = authConfiguration
     app.imTCPConfiguration = imTCPConfiguration
     app.lifecycle.use(ConversationEventStreamProducerLifecycle())
+    app.lifecycle.use(IMConsistencyRepairLifecycle())
     app.asyncCommands.use(IMProjectionWorkerCommand(), as: "worker")
     app.asyncCommands.use(IMProjectionWorkerCommand(), as: "projection-worker")
     app.asyncCommands.use(IMOutboxRelayCommand(), as: "outbox-relay")
@@ -153,6 +157,8 @@ private func validateProductionInfrastructureConfiguration(_ app: Application) t
         try validateConversationShardConfiguration(app)
         try validateGatewayRelayConfiguration(app)
         try validateKafkaProducerConfiguration(app)
+        try validateProductionMediaStorageConfiguration(app)
+        try validateHotConversationProtectionConfiguration(app)
     case .queryAPI:
         try validateConversationShardConfiguration(app)
         try validateSummaryReadModelReadConfiguration(app)
@@ -173,6 +179,7 @@ private func validateProductionInfrastructureConfiguration(_ app: Application) t
         }
         try validateSummaryReadModelWriteConfiguration(app)
         try validateSummaryReadModelReadConfiguration(app)
+        try validateSearchConfiguration(app)
     case .projectionWorker:
         throw Abort(.internalServerError, reason: "projection-worker is a development/testing fallback only; use stream-consumer in production.")
     case .combined:
@@ -299,9 +306,9 @@ private func validateSummaryShardDatabasesConfigured(_ app: Application) throws 
 private func validateSearchConfiguration(_ app: Application) throws {
     if app.environment == .production {
         switch app.imRuntimeRole {
-        case .queryAPI:
+        case .queryAPI, .ops:
             guard app.searchIndexConfiguration.driver == .openSearch else {
-                throw Abort(.internalServerError, reason: "Production query-api requires IM_SEARCH_DRIVER=opensearch.")
+                throw Abort(.internalServerError, reason: "Production \(app.imRuntimeRole.rawValue) requires IM_SEARCH_DRIVER=opensearch.")
             }
         case .streamConsumer:
             if app.streamConsumerConfiguration.isEnabled("search-index-consumer") {
@@ -321,6 +328,39 @@ private func validateSearchConfiguration(_ app: Application) throws {
           !endpoint.isEmpty
     else {
         throw Abort(.internalServerError, reason: "IM_SEARCH_DRIVER=opensearch requires IM_OPENSEARCH_ENDPOINT in production.")
+    }
+}
+
+private func validateProductionMediaStorageConfiguration(_ app: Application) throws {
+    guard app.environment == .production else {
+        return
+    }
+    let provider = (Environment.get("MEDIA_STORAGE_PROVIDER") ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    guard provider == "s3compatible" else {
+        throw Abort(.internalServerError, reason: "Production command-api requires MEDIA_STORAGE_PROVIDER=s3compatible.")
+    }
+    let requiredKeys = [
+        "MEDIA_STORAGE_S3_ENDPOINT",
+        "MEDIA_STORAGE_S3_BUCKET",
+        "MEDIA_STORAGE_S3_ACCESS_KEY_ID",
+        "MEDIA_STORAGE_S3_SECRET_ACCESS_KEY"
+    ]
+    let missing = requiredKeys.filter {
+        Environment.get($0)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+    }
+    guard missing.isEmpty else {
+        throw Abort(.internalServerError, reason: "Production S3 media storage is missing: \(missing.joined(separator: ", ")).")
+    }
+}
+
+private func validateHotConversationProtectionConfiguration(_ app: Application) throws {
+    guard app.environment == .production else {
+        return
+    }
+    guard app.hotConversationConfiguration.isEnabled else {
+        throw Abort(.internalServerError, reason: "Production command-api requires IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT to protect ordered conversation sequence allocation.")
     }
 }
 
@@ -407,6 +447,7 @@ private func registerMigrations(_ app: Application) {
     app.migrations.add(CreateConversationDomainEvent())
     app.migrations.add(AddConversationDomainEventRetryCount())
     app.migrations.add(AddConversationDomainEventStreamPublicationFields())
+    app.migrations.add(AddConversationDomainEventStreamClaimFields())
     app.migrations.add(AddConversationDomainEventIndexes())
     app.migrations.add(CreateConversationRoutingDirectories())
     app.migrations.add(CreateConversationMessageSearchIndex())
@@ -891,6 +932,10 @@ private let imSchemaRequirements: [IMTableSchemaRequirement] = [
             "processing_started_at",
             "processed_at",
             "error_message",
+            "stream_published_at",
+            "stream_publish_error",
+            "stream_publish_started_at",
+            "stream_publish_claimed_by",
             "created_at"
         ]
     ),
@@ -1032,6 +1077,7 @@ private let imMigrationNames: [String] = [
     "CreateConversationDomainEvent",
     "AddConversationDomainEventRetryCount",
     "AddConversationDomainEventStreamPublicationFields",
+    "AddConversationDomainEventStreamClaimFields",
     "AddConversationDomainEventIndexes",
     "CreateConversationMessageSearchIndex",
     "AddConversationMessageSearchIndexIndexes",

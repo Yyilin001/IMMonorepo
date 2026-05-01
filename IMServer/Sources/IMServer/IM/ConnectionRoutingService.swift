@@ -107,12 +107,19 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
 
     func routeNodeIDs(forUserIDs userIDs: [UUID]) async throws -> [UUID: Set<String>] {
         try await refreshHeartbeat()
-        var result: [UUID: Set<String>] = [:]
-        for userID in Set(userIDs) {
-            let nodeIDs = try await pool.smembers(of: userRouteKey(for: userID), as: String.self).get()
+        let activeNodeIDs = try await filterActiveNodeIDs(
+            try await pool.smembers(of: RedisKey("im:route:active_nodes"), as: String.self).get()
                 .compactMap { $0 }
-            let activeNodeIDs = try await filterActiveNodeIDs(nodeIDs)
-            result[userID] = Set(activeNodeIDs)
+        )
+        let requestedUserIDs = Set(userIDs)
+        var result: [UUID: Set<String>] = [:]
+        for activeNodeID in activeNodeIDs {
+            let nodeUserIDs = try await pool.smembers(of: nodeUsersKey(for: activeNodeID), as: String.self).get()
+                .compactMap { $0 }
+                .compactMap(UUID.init(uuidString:))
+            for userID in nodeUserIDs where requestedUserIDs.contains(userID) {
+                result[userID, default: []].insert(activeNodeID)
+            }
         }
         return result
     }
@@ -548,10 +555,33 @@ struct ConnectionRoutingService {
         guard let envelope else { return }
         do {
             let routes = try await backend.presenceStore.routeNodeIDs(forUserIDs: userIDs)
-            let remoteNodeIDs = Set(routes.values.flatMap { $0 }).filter { includeLocalNode ? true : $0 != nodeID }
-            for remoteNodeID in remoteNodeIDs {
-                try await backend.dispatchService.dispatch(envelope, toNodeID: remoteNodeID)
-                await app.routingMetrics.recordCrossNodeDispatchSucceeded()
+            var targetUserIDsByNodeID: [String: Set<UUID>] = [:]
+            for (userID, nodeIDs) in routes {
+                for remoteNodeID in nodeIDs where includeLocalNode || remoteNodeID != nodeID {
+                    targetUserIDsByNodeID[remoteNodeID, default: []].insert(userID)
+                }
+            }
+
+            for (remoteNodeID, targetUserIDs) in targetUserIDsByNodeID {
+                do {
+                    let routedEnvelope = envelope.withTargetUserIDs(
+                        targetUserIDs.sorted { $0.uuidString < $1.uuidString }
+                    )
+                    try await backend.dispatchService.dispatch(routedEnvelope, toNodeID: remoteNodeID)
+                    await app.routingMetrics.recordCrossNodeDispatchSucceeded()
+                } catch {
+                    await app.routingMetrics.recordCrossNodeDispatchFailed()
+                    app.logger.warning(
+                        "Cross-node IM dispatch failed",
+                        metadata: [
+                            "node_id": .string(nodeID),
+                            "route_backend": .string(routeBackendName),
+                            "target_node_id": .string(remoteNodeID),
+                            "target_user_count": .stringConvertible(targetUserIDs.count),
+                            "error": .string(String(describing: error))
+                        ]
+                    )
+                }
             }
         } catch {
             await app.routingMetrics.recordCrossNodeDispatchFailed()
@@ -595,6 +625,21 @@ struct ConnectionRoutingService {
             return nil
         }
         return try? JSONDecoder().decode(Payload.self, from: Data(payloadJSON.utf8))
+    }
+}
+
+private extension NodeMessageDispatchEnvelope {
+    func withTargetUserIDs(_ targetUserIDs: [UUID]) -> NodeMessageDispatchEnvelope {
+        NodeMessageDispatchEnvelope(
+            action: action,
+            packetType: packetType,
+            requestID: requestID,
+            payloadJSON: payloadJSON,
+            targetUserIDs: targetUserIDs,
+            sessionID: sessionID,
+            kickReason: kickReason,
+            kickMessage: kickMessage
+        )
     }
 }
 

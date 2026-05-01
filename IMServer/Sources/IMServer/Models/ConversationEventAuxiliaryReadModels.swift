@@ -77,6 +77,7 @@ final class ConversationNotificationEntry: Model, @unchecked Sendable {
 enum ConversationReplayStatus: String, Codable, Sendable {
     case pending
     case replayed
+    case failed
 }
 
 final class ConversationReplayRecord: Model, @unchecked Sendable {
