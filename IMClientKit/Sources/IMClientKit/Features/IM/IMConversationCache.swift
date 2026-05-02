@@ -1200,18 +1200,48 @@ public final class SwiftDataIMConversationCache: IMConversationCaching, @uncheck
 
     public static func makeDefaultHandler() -> IMConversationCacheHandler {
         do {
-            let container = try ModelContainer(
-                for: IMCacheMetadataEntity.self,
+            let schema = Schema([
+                IMCacheMetadataEntity.self,
                 IMCachedConversationSummaryEntity.self,
                 IMCachedMessageEntity.self,
                 IMSyncCursorEntity.self,
-                IMCachedTransferSnapshotEntity.self
+                IMCachedTransferSnapshotEntity.self,
+            ])
+            let configuration = try SwiftDataCacheStore.modelConfiguration(
+                for: .imConversation,
+                schema: schema
+            )
+            let container = try ModelContainer(
+                for: schema,
+                configurations: [configuration]
             )
             return IMConversationCacheHandler(
                 SwiftDataIMConversationCache(modelContainer: container)
             )
         } catch {
-            return IMConversationCacheHandler(NoopIMConversationCache())
+            do {
+                try SwiftDataCacheStore.removeStore(for: .imConversation)
+                let schema = Schema([
+                    IMCacheMetadataEntity.self,
+                    IMCachedConversationSummaryEntity.self,
+                    IMCachedMessageEntity.self,
+                    IMSyncCursorEntity.self,
+                    IMCachedTransferSnapshotEntity.self,
+                ])
+                let configuration = try SwiftDataCacheStore.modelConfiguration(
+                    for: .imConversation,
+                    schema: schema
+                )
+                let container = try ModelContainer(
+                    for: schema,
+                    configurations: [configuration]
+                )
+                return IMConversationCacheHandler(
+                    SwiftDataIMConversationCache(modelContainer: container)
+                )
+            } catch {
+                return IMConversationCacheHandler(NoopIMConversationCache())
+            }
         }
     }
 }

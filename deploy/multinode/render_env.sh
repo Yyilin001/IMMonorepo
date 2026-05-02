@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+  echo "Usage: $0 <inventory.env> <output-dir>" >&2
+  exit 2
+fi
+
+inventory="$1"
+output_dir="$2"
+
+if [[ ! -f "${inventory}" ]]; then
+  echo "Inventory file not found: ${inventory}" >&2
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source "${inventory}"
+
+mkdir -p "${output_dir}/roles"
+
+cat > "${output_dir}/common.env" <<EOF
+APP_ENV=${APP_ENV}
+LOG_LEVEL=${LOG_LEVEL:-info}
+JWT_SECRET=${JWT_SECRET}
+IM_INTERNAL_SHARED_SECRET=${IM_INTERNAL_SHARED_SECRET}
+
+REDIS_URL=${REDIS_URL}
+IM_REDIS_MAX_CONNECTIONS=${IM_REDIS_MAX_CONNECTIONS:-64}
+IM_METRICS_ENABLED=true
+IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT=${IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT:-200}
+IM_CONSISTENCY_REPAIR_ENABLED=${IM_CONSISTENCY_REPAIR_ENABLED:-true}
+
+DATABASE_HOST=${POSTGRES_HOST}
+DATABASE_PORT=${POSTGRES_PORT:-5432}
+DATABASE_USERNAME=${POSTGRES_USER}
+DATABASE_PASSWORD=${POSTGRES_PASSWORD}
+DATABASE_NAME=${POSTGRES_DB}
+
+DATABASE_PRIMARY_HOST=${POSTGRES_HOST}
+DATABASE_PRIMARY_PORT=${POSTGRES_PORT:-5432}
+DATABASE_PRIMARY_USERNAME=${POSTGRES_USER}
+DATABASE_PRIMARY_PASSWORD=${POSTGRES_PASSWORD}
+DATABASE_PRIMARY_NAME=${POSTGRES_DB}
+
+DATABASE_REPLICA_HOST=${POSTGRES_REPLICA_HOST:-${POSTGRES_HOST}}
+DATABASE_REPLICA_PORT=${POSTGRES_PORT:-5432}
+DATABASE_REPLICA_USERNAME=${POSTGRES_USER}
+DATABASE_REPLICA_PASSWORD=${POSTGRES_PASSWORD}
+DATABASE_REPLICA_NAME=${POSTGRES_DB}
+
+IM_CONVERSATION_SHARD_IDS=${IM_CONVERSATION_SHARD_IDS}
+IM_SUMMARY_SHARD_IDS=${IM_SUMMARY_SHARD_IDS}
+IM_SUMMARY_PROJECTION_WRITE_MODE=sharded
+IM_SUMMARY_QUERY_READ_SOURCE=sharded
+
+IM_EVENT_STREAM_DRIVER=kafka
+IM_KAFKA_BROKERS=${IM_KAFKA_BROKERS}
+IM_KAFKA_TOPIC=${IM_KAFKA_TOPIC:-conversation-domain-events}
+IM_KAFKA_DEAD_LETTER_TOPIC=${IM_KAFKA_DEAD_LETTER_TOPIC:-conversation-domain-events-dead-letter}
+IM_KAFKA_REQUIRED_ACKS=all
+IM_KAFKA_COMPRESSION=${IM_KAFKA_COMPRESSION:-lz4}
+IM_KAFKA_AUTO_CREATE_TOPICS=false
+IM_KAFKA_SECURITY_PROTOCOL=${IM_KAFKA_SECURITY_PROTOCOL:-plaintext}
+
+IM_SEARCH_DRIVER=${IM_SEARCH_DRIVER:-database}
+
+MEDIA_STORAGE_PROVIDER=${MEDIA_STORAGE_PROVIDER}
+MEDIA_STORAGE_S3_ENDPOINT=${MEDIA_STORAGE_S3_ENDPOINT}
+MEDIA_STORAGE_S3_BUCKET=${MEDIA_STORAGE_S3_BUCKET}
+MEDIA_STORAGE_S3_ACCESS_KEY_ID=${MEDIA_STORAGE_S3_ACCESS_KEY_ID}
+MEDIA_STORAGE_S3_SECRET_ACCESS_KEY=${MEDIA_STORAGE_S3_SECRET_ACCESS_KEY}
+MEDIA_STORAGE_S3_REGION=${MEDIA_STORAGE_S3_REGION}
+MEDIA_STORAGE_S3_FORCE_PATH_STYLE=${MEDIA_STORAGE_S3_FORCE_PATH_STYLE:-true}
+EOF
+
+IFS=',' read -r -a conversation_shards <<< "${IM_CONVERSATION_SHARD_IDS}"
+for shard in "${conversation_shards[@]}"; do
+  normalized="$(echo "${shard}" | tr '[:lower:]-' '[:upper:]_')"
+  host_var="DATABASE_CONVERSATION_${normalized}_HOST"
+  name_var="DATABASE_CONVERSATION_${normalized}_NAME"
+  {
+    echo "DATABASE_CONVERSATION_${normalized}_HOST=${!host_var}"
+    echo "DATABASE_CONVERSATION_${normalized}_PORT=${POSTGRES_PORT:-5432}"
+    echo "DATABASE_CONVERSATION_${normalized}_USERNAME=${POSTGRES_USER}"
+    echo "DATABASE_CONVERSATION_${normalized}_PASSWORD=${POSTGRES_PASSWORD}"
+    echo "DATABASE_CONVERSATION_${normalized}_NAME=${!name_var}"
+  } >> "${output_dir}/common.env"
+done
+
+IFS=',' read -r -a summary_shards <<< "${IM_SUMMARY_SHARD_IDS}"
+for shard in "${summary_shards[@]}"; do
+  normalized="$(echo "${shard}" | tr '[:lower:]-' '[:upper:]_')"
+  host_var="DATABASE_SUMMARY_${normalized}_HOST"
+  name_var="DATABASE_SUMMARY_${normalized}_NAME"
+  {
+    echo "DATABASE_SUMMARY_${normalized}_HOST=${!host_var}"
+    echo "DATABASE_SUMMARY_${normalized}_PORT=${POSTGRES_PORT:-5432}"
+    echo "DATABASE_SUMMARY_${normalized}_USERNAME=${POSTGRES_USER}"
+    echo "DATABASE_SUMMARY_${normalized}_PASSWORD=${POSTGRES_PASSWORD}"
+    echo "DATABASE_SUMMARY_${normalized}_NAME=${!name_var}"
+  } >> "${output_dir}/common.env"
+done
+
+cat > "${output_dir}/roles/gateway.env" <<EOF
+IM_NODE_ID=gateway-${IM_NODE_SUFFIX:-node}
+IM_COMMAND_API_INTERNAL_BASE_URL=${IM_COMMAND_API_INTERNAL_BASE_URL}
+IM_GATEWAY_RELAY_MODE=local
+EOF
+
+cat > "${output_dir}/roles/command-api.env" <<EOF
+IM_NODE_ID=command-api-${IM_NODE_SUFFIX:-node}
+IM_GATEWAY_RELAY_MODE=http
+IM_GATEWAY_INTERNAL_BASE_URL=${IM_GATEWAY_INTERNAL_BASE_URL}
+IM_KAFKA_CLIENT_ID=im-command-api-${IM_NODE_SUFFIX:-node}
+EOF
+
+cat > "${output_dir}/roles/query-api.env" <<EOF
+IM_NODE_ID=query-api-${IM_NODE_SUFFIX:-node}
+EOF
+
+cat > "${output_dir}/roles/outbox-relay.env" <<EOF
+IM_NODE_ID=outbox-relay-${IM_NODE_SUFFIX:-node}
+IM_KAFKA_CLIENT_ID=im-outbox-relay-${IM_NODE_SUFFIX:-node}
+IM_OUTBOX_BATCH_SIZE=${IM_OUTBOX_BATCH_SIZE:-500}
+IM_OUTBOX_POLL_INTERVAL_MS=${IM_OUTBOX_POLL_INTERVAL_MS:-200}
+IM_OUTBOX_MAX_RETRIES=${IM_OUTBOX_MAX_RETRIES:-10}
+IM_OUTBOX_CLAIM_TIMEOUT_MS=${IM_OUTBOX_CLAIM_TIMEOUT_MS:-60000}
+EOF
+
+for group in \
+  summary-projection-consumer \
+  changes-log-consumer \
+  search-index-consumer \
+  notification-consumer \
+  repair-replay-consumer
+do
+  file_group="$(echo "${group}" | tr '-' '_')"
+  cat > "${output_dir}/roles/stream-consumer-${file_group}.env" <<EOF
+IM_NODE_ID=stream-consumer-${group}-${IM_NODE_SUFFIX:-node}
+IM_KAFKA_CLIENT_ID=im-stream-consumer-${group}-${IM_NODE_SUFFIX:-node}
+IM_STREAM_CONSUMER_GROUPS=${group}
+EOF
+done
+
+chmod 0640 "${output_dir}/common.env" "${output_dir}"/roles/*.env
+echo "Rendered IMServer multi-node env files to ${output_dir}"

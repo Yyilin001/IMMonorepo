@@ -347,10 +347,12 @@ struct IMConversationSummaryProjectionService {
     func listConversations(
         for userID: UUID,
         cursor rawCursor: String?,
-        limit requestedLimit: Int?
+        limit requestedLimit: Int?,
+        kind rawKind: String? = nil
     ) async throws -> IMConversationPageResponse {
         let limit = normalizedPageLimit(requestedLimit)
         let cursor = try rawCursor.map(Self.decodePageCursor)
+        let kind = try normalizedConversationKind(rawKind)
         let query = ConversationUserSummary.query(on: readModelDB)
             .filter(\.$ownerUserID == userID)
             .filter(\.$isRemoved == false)
@@ -358,6 +360,10 @@ struct IMConversationSummaryProjectionService {
             .sort(\.$pinnedAt, .descending)
             .sort(\.$lastActivityAt, .descending)
             .sort(\.$id, .descending)
+
+        if let kind {
+            query.filter(\.$kind == kind.rawValue)
+        }
 
         if let cursor {
             query.group(.or) { group in
@@ -414,6 +420,20 @@ struct IMConversationSummaryProjectionService {
             hasMore: hasMore,
             snapshotToken: snapshotToken
         )
+    }
+
+    private func normalizedConversationKind(_ rawKind: String?) throws -> IMConversationKind? {
+        guard let rawKind = rawKind?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawKind.isEmpty
+        else {
+            return nil
+        }
+
+        guard let kind = IMConversationKind(rawValue: rawKind) else {
+            throw Abort(.badRequest, reason: "会话类型无效。")
+        }
+
+        return kind
     }
 
     func listConversationChanges(

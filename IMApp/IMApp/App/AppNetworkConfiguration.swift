@@ -7,8 +7,8 @@ struct AppNetworkConfiguration: Equatable {
     let imTCPPort: UInt16
 
     static let local = AppNetworkConfiguration(
-        apiBaseURL: URL(string: "http://127.0.0.1:8080")!,
-        imTCPHost: "127.0.0.1",
+        apiBaseURL: URL(string: "http://120.25.106.200:8080")!,
+        imTCPHost: "120.25.106.200",
         imTCPPort: 9000
     )
 

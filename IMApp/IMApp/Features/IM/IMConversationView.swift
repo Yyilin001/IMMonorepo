@@ -8,6 +8,31 @@ enum IMNavigationRoute: Hashable {
     case conversation(String)
 }
 
+private enum IMConversationListFilter: String, CaseIterable, Identifiable {
+    case all
+    case groups
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all:
+            return "全部"
+        case .groups:
+            return "群聊"
+        }
+    }
+
+    var conversationKind: IMConversationKind? {
+        switch self {
+        case .all:
+            return nil
+        case .groups:
+            return .group
+        }
+    }
+}
+
 struct IMConversationView: View {
     @EnvironmentObject private var authManager: AuthManager
     @ObservedObject var conversationStore: IMConversationStore
@@ -15,6 +40,7 @@ struct IMConversationView: View {
     let onOpenConversation: (String) -> Void
 
     @State private var isPresentingCreateConversation = false
+    @State private var conversationListFilter: IMConversationListFilter = .all
 
     var body: some View {
         List {
@@ -36,6 +62,15 @@ struct IMConversationView: View {
             }
 
             Section {
+                Picker("会话类型", selection: $conversationListFilter) {
+                    ForEach(IMConversationListFilter.allCases) { filter in
+                        Text(filter.title).tag(filter)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                .listRowBackground(Color.clear)
+
                 if conversationStore.filteredConversations.isEmpty {
                     IMConversationEmptyState {
                         isPresentingCreateConversation = true
@@ -76,16 +111,17 @@ struct IMConversationView: View {
                         }
                         .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
                     } else if conversationStore.hasMoreConversationSummaries {
-                        Color.clear
-                            .frame(height: 1)
-                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                        Button {
+                            loadMoreHistoricalConversations()
+                        } label: {
+                            Label("加载更多历史会话", systemImage: "clock.arrow.circlepath")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(conversationStore.isLoadingMoreConversationSummaries)
+                        .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
                             .onAppear {
-                                let anchorConversationID = conversationStore.conversationSummaryPaginationAnchorID
-                                Task {
-                                    await authManager.loadMoreIMConversationSummariesIfNeeded(
-                                        anchorConversationID: anchorConversationID
-                                    )
-                                }
+                                loadMoreHistoricalConversations()
                             }
                     }
                 }
@@ -125,17 +161,34 @@ struct IMConversationView: View {
         )
         .task {
             if conversationStore.conversations.isEmpty {
-                await authManager.refreshIMConversationSummaryReadModelIfNeeded()
+                await authManager.reloadIMConversations(
+                    force: true,
+                    kind: conversationListFilter.conversationKind
+                )
             }
         }
         .refreshable {
-            await authManager.reloadIMConversations(force: true)
+            await authManager.reloadIMConversations(
+                force: true,
+                kind: conversationListFilter.conversationKind
+            )
+        }
+        .onChange(of: conversationListFilter) { _, newValue in
+            Task {
+                await authManager.reloadIMConversations(
+                    force: true,
+                    kind: newValue.conversationKind
+                )
+            }
         }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
                     Task {
-                        await authManager.reloadIMConversations(force: true)
+                        await authManager.reloadIMConversations(
+                            force: true,
+                            kind: conversationListFilter.conversationKind
+                        )
                     }
                 } label: {
                     Image(systemName: "arrow.clockwise")
@@ -154,6 +207,16 @@ struct IMConversationView: View {
                 IMCreateConversationSheet(conversationStore: conversationStore)
             }
             .presentationDetents([.medium, .large])
+        }
+    }
+
+    private func loadMoreHistoricalConversations() {
+        let anchorConversationID = conversationStore.conversationSummaryPaginationAnchorID
+        Task {
+            await authManager.loadMoreIMConversationSummariesIfNeeded(
+                anchorConversationID: anchorConversationID,
+                kind: conversationListFilter.conversationKind
+            )
         }
     }
 
@@ -225,6 +288,7 @@ struct IMConversationDetailView: View {
     @State private var isPresentingEditMetadata = false
     @State private var isPresentingSearch = false
     @State private var isPresentingMediaImporter = false
+    @State private var isPresentingBatchSender = false
     @State private var replyTarget: IMConversationMessage?
     @State private var editingTarget: IMConversationMessage?
     @State private var highlightedMessageID: String?
@@ -275,6 +339,7 @@ struct IMConversationDetailView: View {
         ScrollView {
             detailMessageStack
         }
+        .defaultScrollAnchor(.bottom)
         .background(Color(.systemGroupedBackground))
     }
 
@@ -436,6 +501,16 @@ struct IMConversationDetailView: View {
     private var detailToolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Button {
+                isPresentingBatchSender = true
+            } label: {
+                Image(systemName: "timer.circle")
+            }
+            .disabled(!canSendMessages)
+            .accessibilityLabel("批量发送测试消息")
+        }
+
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
                 isPresentingSearch = true
             } label: {
                 Image(systemName: "magnifyingglass")
@@ -509,13 +584,16 @@ struct IMConversationDetailView: View {
         proxy: ScrollViewProxy
     ) -> some View {
         content
+            .task(id: conversationID) {
+                await scrollToLatestMessage(proxy: proxy, animated: false)
+            }
             .onChange(of: latestMessageID) { _ in
                 guard latestMessageID != nil else {
                     return
                 }
 
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(latestMessageID, anchor: .bottom)
+                Task {
+                    await scrollToLatestMessage(proxy: proxy, animated: true)
                 }
             }
             .onChange(of: conversationStore.replyJumpMatchedMessageID) { _, matchedMessageID in
@@ -537,6 +615,23 @@ struct IMConversationDetailView: View {
                     }
                 }
             }
+    }
+
+    @MainActor
+    private func scrollToLatestMessage(proxy: ScrollViewProxy, animated: Bool) async {
+        guard let latestMessageID else {
+            return
+        }
+
+        await Task.yield()
+
+        if animated {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo(latestMessageID, anchor: .bottom)
+            }
+        } else {
+            proxy.scrollTo(latestMessageID, anchor: .bottom)
+        }
     }
 
     private func applyingPresentationModifiers<Content: View>(to content: Content) -> some View {
@@ -563,6 +658,18 @@ struct IMConversationDetailView: View {
                     .environmentObject(authManager)
                 }
                 .presentationDetents([.medium, .large])
+            }
+            .sheet(isPresented: $isPresentingBatchSender) {
+                NavigationStack {
+                    IMBatchMessageSendSheet(
+                        senderName: authManager.currentUser?.preferredDisplayName ?? "用户",
+                        canSendMessages: canSendMessages,
+                        onSendMessage: { text in
+                            await authManager.sendIMText(text, to: conversationID)
+                        }
+                    )
+                }
+                .presentationDetents([.medium])
             }
             .sheet(item: $previewedMediaItem) { item in
                 IMDownloadedMediaQuickLookSheet(item: item)
@@ -1401,3 +1508,162 @@ struct IMConversationDetailView: View {
     }
 }
 
+private struct IMBatchMessageSendSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let senderName: String
+    let canSendMessages: Bool
+    let onSendMessage: (String) async -> Bool
+
+    @State private var nextMessageNumber = 1
+    @State private var sentCount = 0
+    @State private var failedCount = 0
+    @State private var isSending = false
+    @State private var statusText = "待开始"
+    @State private var sendTask: Task<Void, Never>?
+
+    private let finalMessageNumber = 10_000
+    private let sendIntervalNanoseconds: UInt64 = 300_000_000
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("当前用户", value: senderName)
+                LabeledContent("下一条序号", value: "\(nextMessageNumber)")
+                LabeledContent("已发送", value: "\(sentCount)")
+                LabeledContent("失败", value: "\(failedCount)")
+            }
+
+            Section {
+                ProgressView(value: progressValue, total: Double(finalMessageNumber))
+                    .progressViewStyle(.linear)
+
+                Text(statusText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            Section {
+                HStack(spacing: 12) {
+                    Button {
+                        startSending()
+                    } label: {
+                        Label(isSending ? "发送中" : "开始", systemImage: "play.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canStartSending)
+
+                    Button(role: .destructive) {
+                        stopSending()
+                    } label: {
+                        Label("停止", systemImage: "stop.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!isSending)
+                }
+
+                Button {
+                    resetProgress()
+                } label: {
+                    Label("重置", systemImage: "arrow.counterclockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(isSending || (nextMessageNumber == 1 && sentCount == 0 && failedCount == 0))
+            } footer: {
+                Text("每 0.3 秒发送一条，内容为 \(senderName) + 序号，直到 10000。")
+            }
+        }
+        .navigationTitle("批量发送")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("完成") {
+                    dismiss()
+                }
+            }
+        }
+        .onDisappear {
+            stopSending()
+        }
+    }
+
+    private var canStartSending: Bool {
+        canSendMessages && !isSending && nextMessageNumber <= finalMessageNumber
+    }
+
+    private var progressValue: Double {
+        Double(max(0, min(finalMessageNumber, nextMessageNumber - 1)))
+    }
+
+    private func startSending() {
+        guard canStartSending else {
+            return
+        }
+
+        sendTask?.cancel()
+        sendTask = Task { @MainActor in
+            await runSendLoop()
+        }
+    }
+
+    @MainActor
+    private func runSendLoop() async {
+        isSending = true
+        statusText = "正在发送..."
+        defer {
+            isSending = false
+            sendTask = nil
+        }
+
+        while nextMessageNumber <= finalMessageNumber, !Task.isCancelled {
+            let currentNumber = nextMessageNumber
+            let messageText = "\(senderName) \(currentNumber)"
+            let didSend = await onSendMessage(messageText)
+
+            if didSend {
+                sentCount += 1
+                statusText = "已发送 \(currentNumber)"
+            } else {
+                failedCount += 1
+                statusText = "发送失败 \(currentNumber)"
+            }
+
+            nextMessageNumber = currentNumber + 1
+
+            guard nextMessageNumber <= finalMessageNumber, !Task.isCancelled else {
+                break
+            }
+
+            do {
+                try await Task.sleep(nanoseconds: sendIntervalNanoseconds)
+            } catch {
+                break
+            }
+        }
+
+        if nextMessageNumber > finalMessageNumber {
+            statusText = "已完成 10000 条"
+        } else if Task.isCancelled {
+            statusText = "已停止，下一条 \(nextMessageNumber)"
+        }
+    }
+
+    private func stopSending() {
+        sendTask?.cancel()
+        if isSending {
+            statusText = "已停止，下一条 \(nextMessageNumber)"
+        } else {
+            sendTask = nil
+        }
+    }
+
+    private func resetProgress() {
+        nextMessageNumber = 1
+        sentCount = 0
+        failedCount = 0
+        statusText = "待开始"
+    }
+}

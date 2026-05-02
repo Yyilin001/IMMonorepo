@@ -1,0 +1,50 @@
+{
+  "title": "IMServer Capacity",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "HTTP RPS",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(rate(im_http_requests_total[1m]))", "legendFormat": "requests/s"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP Failure RPS",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"expr": "sum(rate(im_http_request_failures_total[1m]))", "legendFormat": "failures/s"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "TCP Connections",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [{"expr": "sum(im_tcp_connections)", "legendFormat": "connections"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox Backlog",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [{"expr": "sum(im_outbox_backlog_events)", "legendFormat": "events"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Projection and Search Lag",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "max(im_projection_lag_millis)", "legendFormat": "projection"},
+        {"expr": "max(im_search_lag_millis)", "legendFormat": "search"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Stream Events",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {"expr": "sum(rate(im_stream_consumed_events_total[1m]))", "legendFormat": "consumed/s"},
+        {"expr": "sum(rate(im_stream_failed_events_total[1m]))", "legendFormat": "failed/s"}
+      ]
+    }
+  ]
+}

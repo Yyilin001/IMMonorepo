@@ -81,7 +81,7 @@ extension Application {
             }
 
             let writer: any ConversationSearchIndexWriter
-            if environment == .production || searchIndexConfiguration.driver == .openSearch {
+            if searchIndexConfiguration.driver == .openSearch {
                 writer = OpenSearchConversationSearchIndexWriter(
                     app: self,
                     endpoint: searchIndexConfiguration.endpoint ?? "",

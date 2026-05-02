@@ -16,6 +16,7 @@ let package = Package(
         .package(url: "https://github.com/vapor/sql-kit.git", from: "3.35.0"),
         .package(url: "https://github.com/swift-server/RediStack.git", from: "1.6.0"),
         .package(url: "https://github.com/swift-server/swift-kafka-client.git", exact: "1.0.0-alpha.9"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "4.3.0"),
         // 🔵 面向 Swift 的非阻塞、事件驱动网络库，用于自定义执行器
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
     ],
@@ -31,6 +32,7 @@ let package = Package(
                 .product(name: "SQLKit", package: "sql-kit"),
                 .product(name: "RediStack", package: "RediStack"),
                 .product(name: "Kafka", package: "swift-kafka-client"),
+                .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],

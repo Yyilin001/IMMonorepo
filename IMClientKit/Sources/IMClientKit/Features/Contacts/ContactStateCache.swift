@@ -644,16 +644,44 @@ public final class SwiftDataContactStateCache: ContactStateCaching, @unchecked S
 
     public static func makeDefaultHandler() -> ContactStateCacheHandler {
         do {
-            let container = try ModelContainer(
-                for: ContactCacheMetadataEntity.self,
+            let schema = Schema([
+                ContactCacheMetadataEntity.self,
                 CachedContactEntity.self,
-                CachedContactRequestEntity.self
+                CachedContactRequestEntity.self,
+            ])
+            let configuration = try SwiftDataCacheStore.modelConfiguration(
+                for: .contactState,
+                schema: schema
+            )
+            let container = try ModelContainer(
+                for: schema,
+                configurations: [configuration]
             )
             return ContactStateCacheHandler(
                 SwiftDataContactStateCache(modelContainer: container)
             )
         } catch {
-            return ContactStateCacheHandler(NoopContactStateCache())
+            do {
+                try SwiftDataCacheStore.removeStore(for: .contactState)
+                let schema = Schema([
+                    ContactCacheMetadataEntity.self,
+                    CachedContactEntity.self,
+                    CachedContactRequestEntity.self,
+                ])
+                let configuration = try SwiftDataCacheStore.modelConfiguration(
+                    for: .contactState,
+                    schema: schema
+                )
+                let container = try ModelContainer(
+                    for: schema,
+                    configurations: [configuration]
+                )
+                return ContactStateCacheHandler(
+                    SwiftDataContactStateCache(modelContainer: container)
+                )
+            } catch {
+                return ContactStateCacheHandler(NoopContactStateCache())
+            }
         }
     }
 }

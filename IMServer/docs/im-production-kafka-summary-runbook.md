@@ -34,7 +34,7 @@ The rollout keeps the client protocol unchanged and uses:
 
 - serves `conversations`, `conversations/changes`, `messages`, `messages/since`, `search`
 - reads summary / changes from sharded summary stores
-- reads search from OpenSearch and returns shard-backed message aggregates
+- reads search from the configured search driver and returns shard-backed message aggregates
 
 ### `outbox-relay`
 
@@ -135,7 +135,8 @@ Keep:
 
 - `IM_SUMMARY_PROJECTION_WRITE_MODE=sharded`
 - `IM_SUMMARY_QUERY_READ_SOURCE=sharded`
-- `IM_SEARCH_DRIVER=opensearch`
+- `IM_EVENT_STREAM_DRIVER=kafka`
+- `IM_SEARCH_DRIVER=database` unless OpenSearch has been explicitly provisioned
 
 ### Stage B: Kafka Event Path
 
@@ -178,14 +179,14 @@ IM_SUMMARY_QUERY_READ_SOURCE=legacy
 
 7. once verification passes, remove the transitional override and return to sharded-only mode
 
-### Stage D: Search Cutover
+### Stage D: Optional OpenSearch Cutover
 
 1. provision OpenSearch
 2. set `IM_SEARCH_DRIVER=opensearch`
 3. set `IM_OPENSEARCH_ENDPOINT`
 4. set `IM_OPENSEARCH_INDEX`
 5. let `search-index-consumer` build the new index
-6. do not keep database search fallback enabled in production
+6. use this only when database search is no longer enough for message search load
 
 ### Stage E: Conversation Shards
 
@@ -195,7 +196,7 @@ Do this last.
 2. provision `DATABASE_CONVERSATION_<SHARD>_*` for every listed shard
 3. optionally provision `DATABASE_CONVERSATION_<SHARD>_REPLICA_*`
 4. keep router-enabled single-shard mode first
-5. expand to multiple conversation shards only after Kafka + summary shards + OpenSearch are stable
+5. expand to multiple conversation shards only after Kafka + summary shards are stable; OpenSearch can remain disabled if database search meets the product requirement
 
 ## 5. Cutover Safety Rules
 
@@ -206,7 +207,7 @@ Do this last.
 - do not let `gateway` proxy IM mutate traffic without `IM_COMMAND_API_INTERNAL_BASE_URL`
 - do not let production `query-api` use `legacy` summary reads
 - do not let production `stream-consumer` use `legacy` or `dual-write` summary projection modes unless `ops` is explicitly running a temporary migration override
-- do not let production `query-api` use database search fallback
+- keep production `IM_EVENT_STREAM_DRIVER=kafka`; OpenSearch is optional
 - do not let production `stream-consumer` run multiple consumer groups in one process unless `IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP=true` is set for a temporary transition
 - do not let any production role bypass `IM_CONVERSATION_SHARD_IDS` once conversation router topology is enabled
 
@@ -222,7 +223,7 @@ Before enabling production traffic, confirm:
 - Kafka producer connects with `SASL/TLS`
 - dead-letter events can be replayed through `ops --replay-conversation-dead-letter-events`
 - `conversations` and `conversations/changes` come from sharded summary stores
-- `search` resolves through OpenSearch and still returns shard-backed message aggregates
+- `search` resolves through the configured search driver and still returns shard-backed message aggregates
 - `visibleFromSequence` does not regress during projection lag or reconnect
 
 ## 7. Role Templates

@@ -1,5 +1,5 @@
 import ConsoleKit
-import Dispatch
+@preconcurrency import Dispatch
 import Foundation
 import Vapor
 

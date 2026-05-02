@@ -30,7 +30,9 @@ final class ConversationRuntimeController {
     private var imConnection: IMTCPConnection?
     private var imConnectionConnectTask: Task<Void, Never>?
     private var imConnectionEventTask: Task<Void, Never>?
+    private var imConnectionReconnectTask: Task<Void, Never>?
     private var imConnectionGeneration: UInt64 = 0
+    private var imConnectionReconnectAttempt = 0
     private var imConversationGapSyncBackfillTask: Task<Void, Never>?
     private var queuedIMTextMessageFlushTask: Task<Void, Never>?
     private var imConversationReadReportTasks: [String: Task<Void, Never>] = [:]
@@ -102,6 +104,9 @@ final class ConversationRuntimeController {
             return
         }
 
+        imConnectionReconnectTask?.cancel()
+        imConnectionReconnectTask = nil
+
         let generation = imConnectionGeneration
         setConnectionStatus(.connecting)
         imConnectionConnectTask = Task { [weak self] in
@@ -142,6 +147,11 @@ final class ConversationRuntimeController {
         let eventTask = imConnectionEventTask
         imConnectionEventTask = nil
         eventTask?.cancel()
+
+        let reconnectTask = imConnectionReconnectTask
+        imConnectionReconnectTask = nil
+        reconnectTask?.cancel()
+        imConnectionReconnectAttempt = 0
 
         if let connection {
             await connection.disconnect()
@@ -626,12 +636,12 @@ final class ConversationRuntimeController {
         }
     }
 
-    func reloadConversations(force: Bool = true) async {
+    func reloadConversations(force: Bool = true, kind: IMConversationKind? = nil) async {
         guard let user = currentUserProvider() else {
             return
         }
 
-        let didRefresh = await reconcileConversationSummaryReadModel(force: force)
+        let didRefresh = await reconcileConversationSummaryReadModel(force: force, kind: kind)
         guard didRefresh,
               currentUserProvider()?.id == user.id,
               let selectedConversationID = imConversationStore.selectedConversationID ?? imConversationStore.conversations.first?.id
@@ -646,7 +656,10 @@ final class ConversationRuntimeController {
         await markConversationReadUpToLatestLoadedSequence(for: selectedConversationID)
     }
 
-    func loadMoreConversationSummariesIfNeeded(anchorConversationID: String?) async {
+    func loadMoreConversationSummariesIfNeeded(
+        anchorConversationID: String?,
+        kind: IMConversationKind? = nil
+    ) async {
         guard let user = currentUserProvider(),
               imConversationStore.hasMoreConversationSummaries,
               !imConversationStore.isLoadingConversations,
@@ -666,7 +679,8 @@ final class ConversationRuntimeController {
         do {
             let response = try await sessionClient.fetchIMConversationSummaries(
                 cursor: nextCursor,
-                limit: HistoryConfig.summaryPageLimit
+                limit: HistoryConfig.summaryPageLimit,
+                kind: kind
             )
             guard currentUserProvider()?.id == user.id else {
                 return
@@ -739,7 +753,21 @@ final class ConversationRuntimeController {
             return
         }
 
-        guard forceReload || !imConversationStore.hasLoadedMessages(for: trimmedConversationID) else {
+        let cachedConversation = imConversationStore.conversations
+            .first(where: { $0.id == trimmedConversationID })
+        let loadedMessageCount = cachedConversation?
+            .messages
+            .filter { $0.serverSequence != nil }
+            .count ?? 0
+        let hasLoadedMessages = imConversationStore.hasLoadedMessages(for: trimmedConversationID)
+        let shouldExpandCachedHistory = hasLoadedMessages
+            && loadedMessageCount < HistoryConfig.latestHistoryLimit
+            && cachedConversation?.hasMoreHistory == true
+
+        guard forceReload
+            || !hasLoadedMessages
+            || shouldExpandCachedHistory
+        else {
             return
         }
 
@@ -958,6 +986,9 @@ final class ConversationRuntimeController {
 
         imConnectionConnectTask = nil
         imConnection = connection
+        imConnectionReconnectTask?.cancel()
+        imConnectionReconnectTask = nil
+        imConnectionReconnectAttempt = 0
         setConnectionStatus(.connected)
         startIMConnectionEventLoop(connection, generation: generation)
         await syncConversationGapsAfterConnection()
@@ -1081,19 +1112,71 @@ final class ConversationRuntimeController {
                 await clearSession(message)
             case .connectionClosed:
                 imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-                setConnectionStatus(.failed(message: "IM 连接已断开。"))
+                setConnectionStatus(.failed(message: reconnectingStatusMessage("IM 连接已断开。")))
                 scheduleConversationCachePersist()
+                scheduleIMConnectionReconnectIfNeeded(generation: generation)
             default:
                 imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-                setConnectionStatus(.failed(message: tcpError.localizedDescription))
+                setConnectionStatus(.failed(message: reconnectingStatusMessage(tcpError.localizedDescription)))
                 scheduleConversationCachePersist()
+                scheduleIMConnectionReconnectIfNeeded(generation: generation)
             }
             return
         }
 
         imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-        setConnectionStatus(.failed(message: error.localizedDescription))
+        setConnectionStatus(.failed(message: reconnectingStatusMessage(error.localizedDescription)))
         scheduleConversationCachePersist()
+        scheduleIMConnectionReconnectIfNeeded(generation: generation)
+    }
+
+    private func scheduleIMConnectionReconnectIfNeeded(generation: UInt64) {
+        guard isSignedInProvider(),
+              generation == imConnectionGeneration,
+              imConnection == nil,
+              imConnectionConnectTask == nil,
+              imConnectionReconnectTask == nil
+        else {
+            return
+        }
+
+        let delay = nextReconnectDelayNanoseconds()
+        imConnectionReconnectTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return
+            }
+
+            await self?.startScheduledIMReconnect(generation: generation)
+        }
+    }
+
+    private func startScheduledIMReconnect(generation: UInt64) {
+        guard generation == imConnectionGeneration,
+              isSignedInProvider(),
+              imConnection == nil
+        else {
+            imConnectionReconnectTask = nil
+            return
+        }
+
+        imConnectionReconnectTask = nil
+        scheduleConnectionIfNeeded()
+    }
+
+    private func nextReconnectDelayNanoseconds() -> UInt64 {
+        imConnectionReconnectAttempt += 1
+        let shift = min(imConnectionReconnectAttempt - 1, 5)
+        let multiplier = UInt64(1 << shift)
+        return min(
+            HistoryConfig.reconnectInitialDelayNanoseconds * multiplier,
+            HistoryConfig.reconnectMaxDelayNanoseconds
+        )
+    }
+
+    private func reconnectingStatusMessage(_ message: String) -> String {
+        "\(message) 正在自动重连。"
     }
 
     private func syncConversationGap(
@@ -1556,18 +1639,25 @@ final class ConversationRuntimeController {
     }
 
     @discardableResult
-    private func reconcileConversationSummaryReadModel(force: Bool = true) async -> Bool {
-        if !force,
+    private func reconcileConversationSummaryReadModel(
+        force: Bool = true,
+        kind: IMConversationKind? = nil
+    ) async -> Bool {
+        if kind == nil,
+           !force,
            let lastRefreshAt = conversationSummaryRefreshAtProvider(),
            !imConversationStore.conversations.isEmpty,
            Date().timeIntervalSince(lastRefreshAt) < HistoryConfig.minimumSummaryRefreshInterval {
             return false
         }
 
-        return await fetchAndApplyConversationSummaries(force: force)
+        return await fetchAndApplyConversationSummaries(force: force, kind: kind)
     }
 
-    private func fetchAndApplyConversationSummaries(force: Bool) async -> Bool {
+    private func fetchAndApplyConversationSummaries(
+        force: Bool,
+        kind: IMConversationKind? = nil
+    ) async -> Bool {
         guard let user = currentUserProvider() else {
             return false
         }
@@ -1579,13 +1669,13 @@ final class ConversationRuntimeController {
 
         do {
             let didRefresh: Bool
-            if !force, let summaryToken = conversationSummarySyncTokenProvider() {
+            if kind == nil, !force, let summaryToken = conversationSummarySyncTokenProvider() {
                 didRefresh = try await fetchAndApplyConversationSummaryChanges(
                     afterToken: summaryToken,
                     userID: user.id
                 )
             } else {
-                didRefresh = try await fetchAndReplaceConversationSummaries(userID: user.id)
+                didRefresh = try await fetchAndReplaceConversationSummaries(userID: user.id, kind: kind)
             }
 
             guard currentUserProvider()?.id == user.id else {
@@ -1600,16 +1690,22 @@ final class ConversationRuntimeController {
         }
     }
 
-    private func fetchAndReplaceConversationSummaries(userID: UUID) async throws -> Bool {
+    private func fetchAndReplaceConversationSummaries(
+        userID: UUID,
+        kind: IMConversationKind? = nil
+    ) async throws -> Bool {
         let response = try await sessionClient.fetchIMConversationSummaries(
             cursor: nil,
-            limit: HistoryConfig.summaryPageLimit
+            limit: HistoryConfig.summaryPageLimit,
+            kind: kind
         )
         guard currentUserProvider()?.id == userID else {
             return false
         }
 
-        setConversationSummarySyncToken(response.snapshotToken)
+        if kind == nil {
+            setConversationSummarySyncToken(response.snapshotToken)
+        }
         setLatestConversationSummaries(response.items)
         imConversationStore.replaceConversationSummaryWindow(
             response.items,

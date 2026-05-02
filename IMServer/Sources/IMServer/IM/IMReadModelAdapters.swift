@@ -7,7 +7,8 @@ protocol SummaryReadModelStore: Sendable {
     func listConversations(
         for userID: UUID,
         cursor: String?,
-        limit: Int?
+        limit: Int?,
+        kind: String?
     ) async throws -> IMConversationPageResponse
     func listConversationChanges(
         for userID: UUID,
@@ -48,9 +49,10 @@ struct DatabaseSummaryReadModelStore: SummaryReadModelStore {
     func listConversations(
         for userID: UUID,
         cursor: String?,
-        limit: Int?
+        limit: Int?,
+        kind: String? = nil
     ) async throws -> IMConversationPageResponse {
-        try await summaryProjectionService.listConversations(for: userID, cursor: cursor, limit: limit)
+        try await summaryProjectionService.listConversations(for: userID, cursor: cursor, limit: limit, kind: kind)
     }
 
     func listConversationChanges(
@@ -108,9 +110,10 @@ struct OwnerShardedSummaryReadModelStore: SummaryReadModelStore {
     func listConversations(
         for userID: UUID,
         cursor: String?,
-        limit: Int?
+        limit: Int?,
+        kind: String? = nil
     ) async throws -> IMConversationPageResponse {
-        try await store(for: userID).listConversations(for: userID, cursor: cursor, limit: limit)
+        try await store(for: userID).listConversations(for: userID, cursor: cursor, limit: limit, kind: kind)
     }
 
     func listConversationChanges(
@@ -387,7 +390,7 @@ extension Application {
             }
 
             let adapter: any ConversationSearchAdapter
-            if environment == .production {
+            if environment == .production, searchIndexConfiguration.driver == .openSearch {
                 let endpoint = searchIndexConfiguration.endpoint ?? ""
                 adapter = OpenSearchConversationSearchAdapter(
                     app: self,

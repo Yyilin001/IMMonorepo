@@ -76,7 +76,8 @@ struct IMConversationController: RouteCollection {
             .listConversations(
                 for: try user.requireID(),
                 cursor: query.cursor,
-                limit: query.limit
+                limit: query.limit,
+                kind: query.kind
             )
     }
 
@@ -578,6 +579,7 @@ struct IMMessageSearchQuery: Content {
 struct IMConversationPageQuery: Content {
     let cursor: String?
     let limit: Int?
+    let kind: String?
 }
 
 struct IMConversationChangesQuery: Content {

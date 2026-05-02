@@ -320,10 +320,11 @@ struct ConversationEventualReadService {
     func listConversations(
         for userID: UUID,
         cursor: String?,
-        limit: Int?
+        limit: Int?,
+        kind: String? = nil
     ) async throws -> IMConversationPageResponse {
         try await ConversationSummaryReadSupport(db: listDatabase())
-            .listConversations(for: userID, cursor: cursor, limit: limit)
+            .listConversations(for: userID, cursor: cursor, limit: limit, kind: kind)
     }
 
     func listConversationChanges(

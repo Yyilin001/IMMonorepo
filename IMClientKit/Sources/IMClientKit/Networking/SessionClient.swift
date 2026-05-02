@@ -191,13 +191,26 @@ public actor SessionClient {
 
     public func fetchIMConversationSummaries(
         cursor: String? = nil,
-        limit: Int? = nil
+        limit: Int? = nil,
+        kind: IMConversationKind? = nil
     ) async throws -> IMConversationSummaryPageResponseBody {
         try await executor.execute(
             IMRequest.conversations(
                 cursor: cursor,
-                limit: limit
+                limit: limit,
+                kind: kind
             )
+        )
+    }
+
+    public func fetchIMGroupConversationSummaries(
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) async throws -> IMConversationSummaryPageResponseBody {
+        try await fetchIMConversationSummaries(
+            cursor: cursor,
+            limit: limit,
+            kind: .group
         )
     }
 

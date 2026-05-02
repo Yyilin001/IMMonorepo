@@ -10,7 +10,7 @@ This runbook defines the target production posture for 1,000,000 DAU with privat
 - Stretch peak write target: `10,000 msg/s`
 - Message write latency: `P95 < 150ms`, `P99 < 300ms`
 - `conversations/changes` convergence: `P95 < 2s`
-- Search index lag: `P95 < 3s`
+- Search index lag: `P95 < 3s` when OpenSearch is enabled
 - Reconnect `messages/since` recovery success: `> 99.9%`
 - Cross-node realtime dispatch success: `> 99.9%`
 
@@ -33,7 +33,8 @@ Production must not run `combined` or `projection-worker`.
 - `IM_SUMMARY_SHARD_IDS`
 - `DATABASE_SUMMARY_<SHARD>_*`
 - `IM_EVENT_STREAM_DRIVER=kafka`
-- `IM_SEARCH_DRIVER=opensearch`
+- `IM_SEARCH_DRIVER=database` for deployments without OpenSearch
+- optional large-scale search: `IM_SEARCH_DRIVER=opensearch`, `IM_OPENSEARCH_ENDPOINT`, `IM_OPENSEARCH_INDEX`
 - `IM_STREAM_CONSUMER_GROUPS=<single-group>`
 - `IM_OUTBOX_CLAIM_TIMEOUT_MS=60000`
 - `IM_METRICS_ENABLED=true`
@@ -73,12 +74,12 @@ Go only when:
 - Outbox backlog drains after relay or consumer pause.
 - Duplicate Kafka delivery does not duplicate read models or notifications.
 - Redis routing failures degrade without message loss after reconnect gap sync.
-- OpenSearch failure does not break primary message writes.
+- Search index failure does not break primary message writes.
 - Hot conversation limiter returns `hot_conversation_rate_limited` without changing the TCP packet shape.
 
 No-Go if:
 
 - Any role runs outside its production boundary.
-- `query-api` uses legacy summary reads or database search fallback.
+- `query-api` uses legacy summary reads.
 - Any production stream consumer runs multiple groups without a temporary explicit override.
 - `messages/since` cannot repair realtime gaps.

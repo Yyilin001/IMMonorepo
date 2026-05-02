@@ -14,11 +14,16 @@ struct InternalMetricsController: RouteCollection {
         let routing = await req.application.routingMetrics.currentSnapshot()
         let outbox = await req.application.outboxMetrics.currentSnapshot()
         let hotConversations = await req.application.hotConversationMetrics.currentSnapshot()
+        let http = await req.application.httpMetrics.currentSnapshot()
         let database = await req.application.databaseMetrics.currentSnapshot()
         let stream = await req.application.streamMetrics.currentSnapshot()
         let liveLag = await collectLiveLagSnapshot(app: req.application)
 
         var lines: [String] = []
+        appendCounter("im_http_requests_total", value: http.requestCount, to: &lines)
+        appendCounter("im_http_request_failures_total", value: http.failedRequestCount, to: &lines)
+        appendGauge("im_http_request_latency_avg_millis", value: http.averageLatencyMillis, to: &lines)
+        appendGauge("im_http_request_latency_max_millis", value: http.maxLatencyMillis, to: &lines)
         appendGauge("im_tcp_connections", value: routing.currentTCPConnectionCount, to: &lines)
         appendCounter("im_redis_route_registrations_total", value: routing.redisRouteRegistrations, to: &lines)
         appendCounter("im_cross_node_dispatch_total", value: routing.crossNodeDispatchCount, to: &lines)

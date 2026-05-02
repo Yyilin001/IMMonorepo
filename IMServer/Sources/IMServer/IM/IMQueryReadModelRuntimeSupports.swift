@@ -31,9 +31,10 @@ struct QueryReadModelFacade {
     func listConversations(
         for userID: UUID,
         cursor: String?,
-        limit: Int?
+        limit: Int?,
+        kind: String? = nil
     ) async throws -> IMConversationPageResponse {
-        try await summaryStore.listConversations(for: userID, cursor: cursor, limit: limit)
+        try await summaryStore.listConversations(for: userID, cursor: cursor, limit: limit, kind: kind)
     }
 
     func listConversationChanges(

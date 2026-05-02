@@ -356,6 +356,7 @@ enum IMRequest {
 
         let cursor: String?
         let limit: Int?
+        let kind: IMConversationKind?
 
         var baseRequestSpec: HTTPRequestSpec {
             .init(
@@ -373,6 +374,10 @@ enum IMRequest {
 
             if let limit {
                 items.append(URLQueryItem(name: "limit", value: String(limit)))
+            }
+
+            if let kind {
+                items.append(URLQueryItem(name: "kind", value: kind.rawValue))
             }
 
             return items
@@ -699,9 +704,10 @@ enum IMRequest {
 
     public static func conversations(
         cursor: String? = nil,
-        limit: Int? = nil
+        limit: Int? = nil,
+        kind: IMConversationKind? = nil
     ) -> Conversations {
-        Conversations(cursor: cursor, limit: limit)
+        Conversations(cursor: cursor, limit: limit, kind: kind)
     }
 
     public static func conversationChanges(

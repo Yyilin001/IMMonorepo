@@ -18,6 +18,8 @@ struct LoginView: View {
     @State private var confirmPassword = ""
     @State private var localMessage: String?
 
+    private let demoAccounts = DemoLoginAccount.defaults
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -39,6 +41,37 @@ struct LoginView: View {
                     .pickerStyle(.segmented)
                     .onChange(of: mode) { _, _ in
                         localMessage = nil
+                    }
+
+                    if mode == .signIn {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("测试账号")
+                                .font(.headline)
+
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 10)], spacing: 10) {
+                                ForEach(demoAccounts) { account in
+                                    Button {
+                                        selectDemoAccount(account)
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(account.name)
+                                                .font(.subheadline.weight(.semibold))
+                                            Text(account.email)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.vertical, 10)
+                                        .padding(.horizontal, 12)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .tint(email == account.email ? .accentColor : .secondary)
+                                    .disabled(authManager.isBusy)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     VStack(spacing: 16) {
@@ -86,7 +119,7 @@ struct LoginView: View {
                     .disabled(authManager.isBusy || email.isEmpty || password.isEmpty || (mode == .register && confirmPassword.isEmpty))
 
                     if mode == .signIn {
-                        Text("开发环境默认账号：demo@example.com / password1234")
+                        Text("开发环境默认密码：password1234")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -102,6 +135,15 @@ struct LoginView: View {
                 .padding(24)
             }
             .background(Color(.systemGroupedBackground))
+        }
+    }
+
+    private func selectDemoAccount(_ account: DemoLoginAccount) {
+        localMessage = nil
+        email = account.email
+        password = account.password
+        Task {
+            await authManager.login(email: account.email, password: account.password)
         }
     }
 
@@ -126,4 +168,20 @@ struct LoginView: View {
             }
         }
     }
+}
+
+private struct DemoLoginAccount: Identifiable {
+    let name: String
+    let email: String
+    let password: String
+
+    var id: String { email }
+
+    static let defaults = [
+        DemoLoginAccount(name: "Demo", email: "demo@example.com", password: "password1234"),
+        DemoLoginAccount(name: "Alice", email: "alice@example.com", password: "password1234"),
+        DemoLoginAccount(name: "Bob", email: "bob@example.com", password: "password1234"),
+        DemoLoginAccount(name: "Carol", email: "carol@example.com", password: "password1234"),
+        DemoLoginAccount(name: "Dave", email: "dave@example.com", password: "password1234")
+    ]
 }

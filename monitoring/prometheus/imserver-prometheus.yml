@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - imserver-alerts.yml
+
+scrape_configs:
+  - job_name: imserver-gateway
+    metrics_path: /internal/metrics
+    static_configs:
+      - targets:
+          - gateway-1.internal:18080
+          - gateway-2.internal:18080
+
+  - job_name: imserver-command-api
+    metrics_path: /internal/metrics
+    static_configs:
+      - targets:
+          - command-api-1.internal:8081
+          - command-api-2.internal:8081
+
+  - job_name: imserver-query-api
+    metrics_path: /internal/metrics
+    static_configs:
+      - targets:
+          - query-api-1.internal:8082
+          - query-api-2.internal:8082
+

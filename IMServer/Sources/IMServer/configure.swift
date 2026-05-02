@@ -78,6 +78,7 @@ private func configureShared(_ app: Application) async throws {
 }
 
 private func configureHTTPRuntimeBase(_ app: Application) async throws {
+    app.middleware.use(IMHTTPMetricsMiddleware())
     app.middleware.use(FileMiddleware(publicDirectory: app.directory.publicDirectory))
     await app.jwtKeys.add(hmac: HMACKey(from: app.authConfiguration.jwtSecret), digestAlgorithm: .sha256)
 }
@@ -304,23 +305,6 @@ private func validateSummaryShardDatabasesConfigured(_ app: Application) throws 
 }
 
 private func validateSearchConfiguration(_ app: Application) throws {
-    if app.environment == .production {
-        switch app.imRuntimeRole {
-        case .queryAPI, .ops:
-            guard app.searchIndexConfiguration.driver == .openSearch else {
-                throw Abort(.internalServerError, reason: "Production \(app.imRuntimeRole.rawValue) requires IM_SEARCH_DRIVER=opensearch.")
-            }
-        case .streamConsumer:
-            if app.streamConsumerConfiguration.isEnabled("search-index-consumer") {
-                guard app.searchIndexConfiguration.driver == .openSearch else {
-                    throw Abort(.internalServerError, reason: "Production search-index-consumer requires IM_SEARCH_DRIVER=opensearch.")
-                }
-            }
-        default:
-            break
-        }
-    }
-
     guard app.searchIndexConfiguration.driver == .openSearch else {
         return
     }
@@ -710,32 +694,79 @@ private func seedDevelopmentUserIfNeeded(in app: Application) async throws {
         return
     }
 
-    // 本地开发自动补一个演示账号，减少第一次联调成本。
-    let email = Environment.get("SEED_USER_EMAIL") ?? "demo@example.com"
-    let password = Environment.get("SEED_USER_PASSWORD") ?? "password1234"
-    let normalizedEmail = User.normalize(email)
+    let defaultPassword = Environment.get("SEED_USER_PASSWORD") ?? "password1234"
+    let configuredEmails = (Environment.get("SEED_USER_EMAILS") ?? "")
+        .split(separator: ",")
+        .map { User.normalize(String($0)) }
+        .filter { !$0.isEmpty }
+    let seedEmails = configuredEmails.isEmpty
+        ? [
+            Environment.get("SEED_USER_EMAIL") ?? "demo@example.com",
+            "alice@example.com",
+            "bob@example.com",
+            "carol@example.com",
+            "dave@example.com"
+        ].map(User.normalize)
+        : configuredEmails
 
-    guard try await User.query(on: app.imWriteDB)
-        .filter(\.$email == normalizedEmail)
-        .first() == nil
-    else {
-        return
+    var seededEmails: [String] = []
+    var updatedEmails: [String] = []
+    for normalizedEmail in Array(Set(seedEmails)).sorted() {
+        if let existingUser = try await User.query(on: app.imWriteDB)
+            .filter(\.$email == normalizedEmail)
+            .first() {
+            if (existingUser.displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                existingUser.displayName = defaultDisplayName(for: normalizedEmail)
+                try await existingUser.update(on: app.imWriteDB)
+                updatedEmails.append(normalizedEmail)
+            }
+            continue
+        }
+
+        let user = User(
+            email: normalizedEmail,
+            passwordHash: try Bcrypt.hash(defaultPassword),
+            status: .active,
+            displayName: defaultDisplayName(for: normalizedEmail)
+        )
+        try await user.create(on: app.imWriteDB)
+        seededEmails.append(normalizedEmail)
     }
 
-    let user = User(
-        email: normalizedEmail,
-        passwordHash: try Bcrypt.hash(password),
-        status: .active
-    )
-    try await user.create(on: app.imWriteDB)
+    if !seededEmails.isEmpty {
+        app.logger.notice(
+            "Seeded development logins",
+            metadata: [
+                "emails": .array(seededEmails.map { .string($0) }),
+                "password": .string(defaultPassword)
+            ]
+        )
+    }
+    if !updatedEmails.isEmpty {
+        app.logger.notice(
+            "Updated development login display names",
+            metadata: [
+                "emails": .array(updatedEmails.map { .string($0) })
+            ]
+        )
+    }
+}
 
-    app.logger.notice(
-        "Seeded development login",
-        metadata: [
-            "email": .string(email),
-            "password": .string(password)
-        ]
-    )
+private func defaultDisplayName(for email: String) -> String {
+    switch email {
+    case "demo@example.com":
+        return "Demo"
+    case "alice@example.com":
+        return "Alice"
+    case "bob@example.com":
+        return "Bob"
+    case "carol@example.com":
+        return "Carol"
+    case "dave@example.com":
+        return "Dave"
+    default:
+        return email.split(separator: "@").first.map(String.init) ?? email
+    }
 }
 
 private func resetIMSchemaIfRequested(_ app: Application) async throws {

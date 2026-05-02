@@ -156,12 +156,14 @@ struct IMConversationService {
     func listConversations(
         for userID: UUID,
         cursor: String?,
-        limit: Int?
+        limit: Int?,
+        kind: String? = nil
     ) async throws -> IMConversationPageResponse {
         try await ConversationEventualReadService(db: db).listConversations(
             for: userID,
             cursor: cursor,
-            limit: limit
+            limit: limit,
+            kind: kind
         )
     }
 

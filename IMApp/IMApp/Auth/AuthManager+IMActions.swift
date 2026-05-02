@@ -12,12 +12,18 @@ extension AuthManager {
         scheduleIMConnectionIfNeeded()
     }
 
-    func reloadIMConversations(force: Bool = true) async {
-        await conversationRuntimeController.reloadConversations(force: force)
+    func reloadIMConversations(force: Bool = true, kind: IMConversationKind? = nil) async {
+        await conversationRuntimeController.reloadConversations(force: force, kind: kind)
     }
 
-    func loadMoreIMConversationSummariesIfNeeded(anchorConversationID: String?) async {
-        await conversationRuntimeController.loadMoreConversationSummariesIfNeeded(anchorConversationID: anchorConversationID)
+    func loadMoreIMConversationSummariesIfNeeded(
+        anchorConversationID: String?,
+        kind: IMConversationKind? = nil
+    ) async {
+        await conversationRuntimeController.loadMoreConversationSummariesIfNeeded(
+            anchorConversationID: anchorConversationID,
+            kind: kind
+        )
     }
 
     func jumpToReferencedIMMessage(_ messageID: String, in conversationID: String) async {

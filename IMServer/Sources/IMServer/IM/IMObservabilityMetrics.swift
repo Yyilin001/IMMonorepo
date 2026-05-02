@@ -1,5 +1,40 @@
 import Vapor
 
+actor IMHTTPMetrics {
+    struct Snapshot: Sendable {
+        var requestCount: Int = 0
+        var failedRequestCount: Int = 0
+        var totalLatencyMillis: Int = 0
+        var maxLatencyMillis: Int = 0
+        var lastPath: String?
+        var lastStatusCode: Int?
+
+        var averageLatencyMillis: Int {
+            guard requestCount > 0 else {
+                return 0
+            }
+            return totalLatencyMillis / requestCount
+        }
+    }
+
+    private var snapshot = Snapshot()
+
+    func record(path: String, statusCode: Int, durationMillis: Int, didFail: Bool) {
+        snapshot.requestCount += 1
+        if didFail || statusCode >= 500 {
+            snapshot.failedRequestCount += 1
+        }
+        snapshot.totalLatencyMillis += max(0, durationMillis)
+        snapshot.maxLatencyMillis = max(snapshot.maxLatencyMillis, durationMillis)
+        snapshot.lastPath = path
+        snapshot.lastStatusCode = statusCode
+    }
+
+    func currentSnapshot() -> Snapshot {
+        snapshot
+    }
+}
+
 actor IMDatabaseMetrics {
     struct Snapshot: Sendable {
         var operationCount: Int = 0
@@ -69,6 +104,38 @@ actor IMStreamMetrics {
     }
 }
 
+struct IMHTTPMetricsMiddleware: AsyncMiddleware {
+    func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
+        let start = Date()
+        do {
+            let response = try await next.respond(to: request)
+            await request.application.httpMetrics.record(
+                path: request.url.path,
+                statusCode: Int(response.status.code),
+                durationMillis: Self.elapsedMillis(since: start),
+                didFail: false
+            )
+            return response
+        } catch {
+            await request.application.httpMetrics.record(
+                path: request.url.path,
+                statusCode: 500,
+                durationMillis: Self.elapsedMillis(since: start),
+                didFail: true
+            )
+            throw error
+        }
+    }
+
+    private static func elapsedMillis(since start: Date) -> Int {
+        max(0, Int(Date().timeIntervalSince(start) * 1000))
+    }
+}
+
+private struct IMHTTPMetricsStorageKey: StorageKey {
+    typealias Value = IMHTTPMetrics
+}
+
 private struct IMDatabaseMetricsStorageKey: StorageKey {
     typealias Value = IMDatabaseMetrics
 }
@@ -78,6 +145,18 @@ private struct IMStreamMetricsStorageKey: StorageKey {
 }
 
 extension Application {
+    var httpMetrics: IMHTTPMetrics {
+        get {
+            if let metrics = storage[IMHTTPMetricsStorageKey.self] {
+                return metrics
+            }
+            let metrics = IMHTTPMetrics()
+            storage[IMHTTPMetricsStorageKey.self] = metrics
+            return metrics
+        }
+        set { storage[IMHTTPMetricsStorageKey.self] = newValue }
+    }
+
     var databaseMetrics: IMDatabaseMetrics {
         get {
             if let metrics = storage[IMDatabaseMetricsStorageKey.self] {
