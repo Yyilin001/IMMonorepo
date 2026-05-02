@@ -32,6 +32,19 @@ Use `deploy/multinode` to deploy at least:
 
 The existing single-node profile is only valid for functional verification.
 
+For block sequence validation set these on gateway and command-api roles:
+
+- `IM_SEQUENCE_ALLOCATION_MODE=block`
+- `IM_SEQUENCE_BLOCK_SIZE=256`
+- `IM_COMMAND_NODE_URLS=node-a=http://command-api-a.internal:8081,node-b=http://command-api-b.internal:8081`
+- `IM_COMMAND_INTERNAL_SHARED_SECRET=<shared-secret>`
+- `IM_CONVERSATION_MEMBER_CACHE_TTL_SECONDS=10`
+- `IM_MESSAGE_WRITE_BATCH_ENABLED=true`
+- `IM_MESSAGE_WRITE_BATCH_MAX_SIZE=32`
+- `IM_MESSAGE_WRITE_BATCH_MAX_DELAY_MS=10`
+
+Each command-api node must additionally set a unique `IM_COMMAND_NODE_ID` that matches one entry in `IM_COMMAND_NODE_URLS`.
+
 ## Load generator
 
 Run from one or more independent load-generator hosts:
@@ -135,6 +148,14 @@ Critical metrics:
 - `im_search_lag_millis`
 - `im_stream_consumed_events_total`
 - `im_stream_failed_events_total`
+- `im_sequence_blocks_reserved_total`
+- `im_sequence_block_reserve_failures_total`
+- `im_sequence_block_remaining`
+- `im_conversation_owner_forward_total`
+- `im_conversation_owner_forward_failures_total`
+- `im_conversation_write_queue_depth`
+- `im_conversation_member_cache_hit_total`
+- `im_conversation_member_cache_miss_total`
 
 ## Capacity report template
 
@@ -153,4 +174,3 @@ For each test phase record:
 - projection lag P95/P99
 - reconnect success rate
 - bottleneck and next scaling action
-

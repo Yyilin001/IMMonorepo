@@ -57,3 +57,34 @@ groups:
         annotations:
           summary: IMServer stream consumer failures detected
 
+      - alert: IMServerSequenceBlockReserveFailures
+        expr: rate(im_sequence_block_reserve_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: IMServer sequence block reservation failures detected
+
+      - alert: IMServerConversationOwnerForwardFailures
+        expr: rate(im_conversation_owner_forward_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: IMServer conversation owner forwarding failures detected
+
+      - alert: IMServerConversationWriteQueueBacklog
+        expr: im_conversation_write_queue_depth > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: IMServer conversation write queue depth is high
+
+      - alert: IMServerMessageWriteBatcherInactive
+        expr: rate(im_message_write_batch_messages_total[10m]) == 0 and rate(im_sequence_blocks_reserved_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: IMServer message write batcher is not batching messages

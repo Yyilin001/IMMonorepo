@@ -18,6 +18,7 @@ func routes(_ app: Application) throws {
     if app.imRuntimeRole.servesCommandAPI {
         let controller = IMConversationController()
         try controller.registerCommandRoutes(on: app)
+        try app.register(collection: InternalMessageCommandController())
         try app.register(collection: UserController())
         try app.register(collection: MediaController())
         try app.register(collection: FileController())

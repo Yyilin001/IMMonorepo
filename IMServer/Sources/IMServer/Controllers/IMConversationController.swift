@@ -150,6 +150,7 @@ struct IMConversationController: RouteCollection {
             memberEmails: body.memberEmails,
             requesterUserID: requesterUserID
         )
+        await invalidateMemberCacheEverywhere(conversationID: conversationID, using: req.application)
         try await req.application.processConversationOutboxForTesting()
         let updatedUserIDs = Set(response.memberUserIDs)
         let addedUserIDs = Array(updatedUserIDs.subtracting(previousUserIDs))
@@ -188,6 +189,7 @@ struct IMConversationController: RouteCollection {
             memberUserID: memberUserID,
             requesterUserID: requesterUserID
         )
+        await invalidateMemberCacheEverywhere(conversationID: conversationID, using: req.application)
         try await req.application.processConversationOutboxForTesting()
         let eventService = IMConversationEventService(app: req.application)
 
@@ -224,6 +226,7 @@ struct IMConversationController: RouteCollection {
             role: role,
             requesterUserID: requesterUserID
         )
+        await invalidateMemberCacheEverywhere(conversationID: conversationID, using: req.application)
         try await req.application.processConversationOutboxForTesting()
 
         await IMConversationEventService(app: req.application).publish(
@@ -479,6 +482,7 @@ struct IMConversationController: RouteCollection {
             in: conversationID,
             requesterUserID: requesterUserID
         )
+        await invalidateMemberCacheEverywhere(conversationID: conversationID, using: req.application)
         try await req.application.processConversationOutboxForTesting()
         let eventService = IMConversationEventService(app: req.application)
         await eventService.publish(
@@ -539,6 +543,39 @@ struct IMConversationController: RouteCollection {
                     "error": .string(String(describing: error))
                 ]
             )
+        }
+    }
+
+    private func invalidateMemberCacheEverywhere(conversationID: UUID, using app: Application) async {
+        await app.conversationMemberCache.invalidate(conversationID: conversationID)
+
+        let configuration = app.commandOwnerRoutingConfiguration
+        guard configuration.isEnabled,
+              let sharedSecret = configuration.sharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sharedSecret.isEmpty
+        else {
+            return
+        }
+
+        var headers = HTTPHeaders()
+        headers.add(name: "X-IM-Internal-Secret", value: sharedSecret)
+
+        for node in configuration.nodes where node.id != configuration.nodeID {
+            do {
+                _ = try await app.client.post(
+                    URI(string: "\(node.baseURL)/internal/im/conversations/\(conversationID.uuidString)/member-cache/invalidate"),
+                    headers: headers
+                )
+            } catch {
+                app.logger.warning(
+                    "Failed to invalidate remote IM conversation member cache",
+                    metadata: [
+                        "conversationID": .string(conversationID.uuidString),
+                        "target_node_id": .string(node.id),
+                        "error": .string(String(describing: error))
+                    ]
+                )
+            }
         }
     }
 

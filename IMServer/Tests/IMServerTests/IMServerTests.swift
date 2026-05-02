@@ -233,7 +233,8 @@ struct IMServerTests {
             func listConversations(
                 for userID: UUID,
                 cursor: String?,
-                limit: Int?
+                limit: Int?,
+                kind: String?
             ) async throws -> IMConversationPageResponse {
                 page
             }

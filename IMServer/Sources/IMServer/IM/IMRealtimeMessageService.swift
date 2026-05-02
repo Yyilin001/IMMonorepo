@@ -2,12 +2,26 @@ import Fluent
 import SQLKit
 import Vapor
 
-struct IMRealtimeMessagePersistenceResult: Sendable {
+struct IMInternalMessageSendRequest: Content, Sendable {
+    let payload: IMTCPMessagePayload
+    let senderUserID: UUID
+}
+
+struct IMRealtimeMessagePersistenceResult: Content, Sendable {
     let conversationID: UUID
     let acknowledgement: IMTCPAckPayload
     let message: IMTCPMessagePayload
     let recipientUserIDs: [UUID]
     let didCreateMessage: Bool
+}
+
+struct IMPreparedIncomingMessage: Sendable {
+    let payload: IMTCPMessagePayload
+    let senderUserID: UUID
+    let conversationID: UUID
+    let normalizedContent: IMMessageContent
+    let normalizedClientMessageID: String?
+    let serverTimestamp: Date
 }
 
 enum IMRealtimeMessageError: Error, LocalizedError, Equatable, Sendable {
@@ -91,92 +105,253 @@ struct IMRealtimeMessageService {
         guard let conversationID = UUID(uuidString: normalizedConversationID) else {
             throw IMRealtimeMessageError.invalidConversationID
         }
-        try await reserveHotConversationCapacityIfNeeded(conversationID: conversationID)
 
-        let normalizedContent = try normalizedContent(from: payload.content)
-        let trimmedClientMessageID = payload.clientMessageID?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedClientMessageID = trimmedClientMessageID?.isEmpty == false ? trimmedClientMessageID : nil
-        let serverTimestamp = Date()
+        if let forwardedResult = try await forwardToOwnerIfNeeded(
+            payload,
+            senderUserID: senderUserID,
+            conversationID: conversationID
+        ) {
+            return forwardedResult
+        }
+
+        if let app, app.messageWriteBatchConfiguration.isEnabled {
+            let prepared = try await prepareIncomingMessage(
+                payload,
+                senderUserID: senderUserID,
+                conversationID: conversationID
+            )
+            return try await app.messageWriteBatcher.enqueue(
+                .init(message: prepared),
+                conversationID: conversationID,
+                app: app,
+                configuration: app.messageWriteBatchConfiguration
+            )
+        }
+
+        if let app {
+            return try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
+                try await persistOwnedIncomingMessage(payload, senderUserID: senderUserID)
+            }
+        }
+
+        return try await persistOwnedIncomingMessage(payload, senderUserID: senderUserID)
+    }
+
+    func persistOwnedIncomingMessage(
+        _ payload: IMTCPMessagePayload,
+        senderUserID: UUID
+    ) async throws -> IMRealtimeMessagePersistenceResult {
+        let normalizedConversationID = payload.conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let conversationID = UUID(uuidString: normalizedConversationID) else {
+            throw IMRealtimeMessageError.invalidConversationID
+        }
+        let prepared = try await prepareIncomingMessage(
+            payload,
+            senderUserID: senderUserID,
+            conversationID: conversationID
+        )
+        guard let result = try await persistOwnedIncomingMessagesBatch([prepared], conversationID: conversationID).first else {
+            throw IMRealtimeMessageError.conversationUnavailable
+        }
+        return result
+    }
+
+    func persistOwnedIncomingMessagesBatch(
+        _ preparedMessages: [IMPreparedIncomingMessage],
+        conversationID: UUID
+    ) async throws -> [IMRealtimeMessagePersistenceResult] {
+        guard !preparedMessages.isEmpty else {
+            return []
+        }
         let routedDatabase = try await database(forConversationID: conversationID)
+        let preallocatedServerSequences = try await preallocateServerSequencesIfNeeded(
+            count: preparedMessages.count,
+            conversationID: conversationID,
+            updatedAt: preparedMessages.last?.serverTimestamp ?? Date(),
+            on: routedDatabase
+        )
 
-        let result = try await routedDatabase.transaction { database in
+        return try await routedDatabase.transaction { database in
             let membershipContext = try await requireConversationMembershipContext(
                 conversationID: conversationID,
-                senderUserID: senderUserID,
+                senderUserID: preparedMessages[0].senderUserID,
                 on: database
             )
             let recipientUserIDs = membershipContext.memberUserIDs
-            let canonicalContent = try await canonicalizeReplyReferenceIfNeeded(
-                normalizedContent,
-                conversationID: conversationID,
-                on: database
-            )
-            if let existingMessage = try await existingMessage(
-                conversationID: conversationID,
-                senderUserID: senderUserID,
-                clientMessageID: normalizedClientMessageID,
-                on: database
-            ) {
-                return try makePersistenceResult(
+            var results: [IMRealtimeMessagePersistenceResult] = []
+            results.reserveCapacity(preparedMessages.count)
+
+            for (index, prepared) in preparedMessages.enumerated() {
+                guard prepared.conversationID == conversationID,
+                      recipientUserIDs.contains(prepared.senderUserID)
+                else {
+                    throw IMRealtimeMessageError.conversationUnavailable
+                }
+
+                let canonicalContent = try await canonicalizeReplyReferenceIfNeeded(
+                    prepared.normalizedContent,
                     conversationID: conversationID,
-                    message: existingMessage,
-                    recipientUserIDs: recipientUserIDs,
-                    didCreateMessage: false
+                    on: database
+                )
+                if let existingMessage = try await existingMessage(
+                    conversationID: conversationID,
+                    senderUserID: prepared.senderUserID,
+                    clientMessageID: prepared.normalizedClientMessageID,
+                    on: database
+                ) {
+                    results.append(
+                        try makePersistenceResult(
+                            conversationID: conversationID,
+                            message: existingMessage,
+                            recipientUserIDs: recipientUserIDs,
+                            didCreateMessage: false
+                        )
+                    )
+                    continue
+                }
+
+                try await enforceStrangerOneToOneMessageLimitIfNeeded(
+                    conversationID: conversationID,
+                    conversationKind: membershipContext.conversationKind,
+                    directMessagingState: membershipContext.directMessagingState,
+                    senderUserID: prepared.senderUserID,
+                    memberUserIDs: recipientUserIDs,
+                    on: database
+                )
+                let serverSequence: Int
+                if let preallocatedServerSequences {
+                    serverSequence = preallocatedServerSequences[index]
+                } else {
+                    serverSequence = try await allocateNextServerSequence(
+                        conversationID: conversationID,
+                        updatedAt: prepared.serverTimestamp,
+                        on: database
+                    )
+                }
+                let message = try ConversationMessage(
+                    conversationID: conversationID,
+                    senderUserID: prepared.senderUserID,
+                    serverSequence: serverSequence,
+                    clientMessageID: prepared.normalizedClientMessageID,
+                    content: canonicalContent
+                )
+                try await message.create(on: database)
+                try await advanceReadSequence(
+                    conversationID: conversationID,
+                    userID: prepared.senderUserID,
+                    readSequence: serverSequence,
+                    on: database
+                )
+                try await ConversationOutboxService(db: database).enqueue(
+                    type: .messageCreated,
+                    conversationID: conversationID,
+                    payload: ConversationDomainEventPayload(
+                        recipientUserIDs: recipientUserIDs,
+                        messageID: try message.requireID()
+                    )
+                )
+
+                results.append(
+                    try makePersistenceResult(
+                        conversationID: conversationID,
+                        message: message,
+                        recipientUserIDs: recipientUserIDs,
+                        didCreateMessage: true,
+                        fallbackTimestamp: prepared.serverTimestamp
+                    )
                 )
             }
+            return results
+        }
+    }
 
-            try await enforceStrangerOneToOneMessageLimitIfNeeded(
-                conversationID: conversationID,
-                conversationKind: membershipContext.conversationKind,
-                directMessagingState: membershipContext.directMessagingState,
-                senderUserID: senderUserID,
-                memberUserIDs: recipientUserIDs,
-                on: database
-            )
-            let serverSequence = try await allocateNextServerSequence(
-                conversationID: conversationID,
-                updatedAt: serverTimestamp,
-                on: database
-            )
-            let message = try ConversationMessage(
-                conversationID: conversationID,
-                senderUserID: senderUserID,
-                serverSequence: serverSequence,
-                clientMessageID: normalizedClientMessageID,
-                content: canonicalContent
-            )
-            try await message.create(on: database)
-            try await advanceReadSequence(
-                conversationID: conversationID,
-                userID: senderUserID,
-                readSequence: serverSequence,
-                on: database
-            )
+    private func prepareIncomingMessage(
+        _ payload: IMTCPMessagePayload,
+        senderUserID: UUID,
+        conversationID: UUID
+    ) async throws -> IMPreparedIncomingMessage {
+        try await reserveHotConversationCapacityIfNeeded(conversationID: conversationID)
+        let normalizedContent = try normalizedContent(from: payload.content)
+        let trimmedClientMessageID = payload.clientMessageID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return IMPreparedIncomingMessage(
+            payload: payload,
+            senderUserID: senderUserID,
+            conversationID: conversationID,
+            normalizedContent: normalizedContent,
+            normalizedClientMessageID: trimmedClientMessageID?.isEmpty == false ? trimmedClientMessageID : nil,
+            serverTimestamp: Date()
+        )
+    }
 
-            return try makePersistenceResult(
-                conversationID: conversationID,
-                message: message,
-                recipientUserIDs: recipientUserIDs,
-                didCreateMessage: true,
-                fallbackTimestamp: serverTimestamp
-            )
+    private func preallocateServerSequencesIfNeeded(
+        count: Int,
+        conversationID: UUID,
+        updatedAt: Date,
+        on database: any Database
+    ) async throws -> [Int]? {
+        guard let app, app.sequenceAllocationConfiguration.mode == .block else {
+            return nil
         }
 
-        if result.didCreateMessage,
-           let rawMessageID = result.message.messageID,
-           let messageID = UUID(uuidString: rawMessageID) {
-            try await ConversationOutboxService(db: routedDatabase).enqueue(
-                type: .messageCreated,
-                conversationID: conversationID,
-                payload: ConversationDomainEventPayload(
-                    recipientUserIDs: result.recipientUserIDs,
-                    messageID: messageID
+        var sequences: [Int] = []
+        sequences.reserveCapacity(count)
+        for _ in 0..<count {
+            sequences.append(
+                try await app.sequenceBlockAllocator.nextSequence(
+                    conversationID: conversationID,
+                    blockSize: app.sequenceAllocationConfiguration.blockSize,
+                    updatedAt: updatedAt,
+                    on: database,
+                    app: app
                 )
             )
         }
+        return sequences
+    }
 
-        return result
+    private func forwardToOwnerIfNeeded(
+        _ payload: IMTCPMessagePayload,
+        senderUserID: UUID,
+        conversationID: UUID
+    ) async throws -> IMRealtimeMessagePersistenceResult? {
+        guard let app else { return nil }
+        let configuration = app.commandOwnerRoutingConfiguration
+        guard let owner = configuration.owner(for: conversationID),
+              !(app.imRuntimeRole.servesCommandAPI && owner.id == configuration.nodeID)
+        else {
+            return nil
+        }
+
+        do {
+            let target = URI(string: "\(owner.baseURL)/internal/im/messages/send")
+            let response = try await app.client.post(target, headers: internalHeaders(sharedSecret: configuration.sharedSecret)) { req in
+                try req.content.encode(
+                    IMInternalMessageSendRequest(
+                        payload: payload,
+                        senderUserID: senderUserID
+                    )
+                )
+            }
+            guard response.status == .ok else {
+                await app.messageWriteMetrics.recordOwnerForwardFailed()
+                throw Abort(.serviceUnavailable, reason: "Conversation owner \(owner.id) rejected message write with \(response.status.code).")
+            }
+            await app.messageWriteMetrics.recordOwnerForwarded()
+            return try response.content.decode(IMRealtimeMessagePersistenceResult.self)
+        } catch {
+            await app.messageWriteMetrics.recordOwnerForwardFailed()
+            throw error
+        }
+    }
+
+    private func internalHeaders(sharedSecret: String?) -> HTTPHeaders {
+        var headers = HTTPHeaders()
+        headers.contentType = .json
+        if let sharedSecret, !sharedSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: sharedSecret)
+        }
+        return headers
     }
 
     private func database(forConversationID conversationID: UUID) async throws -> any Database {
@@ -390,6 +565,22 @@ struct IMRealtimeMessageService {
         senderUserID: UUID,
         on database: any Database
     ) async throws -> ConversationMembershipContext {
+        if let app, app.conversationMemberCacheConfiguration.isEnabled,
+           let cached = await app.conversationMemberCache.value(for: conversationID) {
+            await app.messageWriteMetrics.recordMemberCacheHit()
+            guard cached.memberUserIDs.contains(senderUserID) else {
+                throw IMRealtimeMessageError.conversationUnavailable
+            }
+            return ConversationMembershipContext(
+                conversationKind: cached.conversationKind,
+                directMessagingState: cached.directMessagingState,
+                memberUserIDs: cached.memberUserIDs
+            )
+        }
+        if let app {
+            await app.messageWriteMetrics.recordMemberCacheMiss()
+        }
+
         guard let conversation = try await Conversation.find(conversationID, on: database) else {
             throw IMRealtimeMessageError.conversationUnavailable
         }
@@ -401,6 +592,18 @@ struct IMRealtimeMessageService {
         let memberUserIDs = memberships.map(\.$user.id).sorted { $0.uuidString < $1.uuidString }
         guard memberUserIDs.contains(senderUserID) else {
             throw IMRealtimeMessageError.conversationUnavailable
+        }
+
+        if let app, app.conversationMemberCacheConfiguration.isEnabled {
+            await app.conversationMemberCache.store(
+                IMCachedConversationMembership(
+                    conversationKind: conversation.conversationKind,
+                    directMessagingState: conversation.directMessagingStateEnum,
+                    memberUserIDs: memberUserIDs
+                ),
+                for: conversationID,
+                ttlSeconds: app.conversationMemberCacheConfiguration.ttlSeconds
+            )
         }
 
         return ConversationMembershipContext(

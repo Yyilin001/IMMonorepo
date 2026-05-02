@@ -58,6 +58,10 @@ private func configureShared(_ app: Application) async throws {
     app.streamConsumerConfiguration = IMStreamConsumerConfiguration.load(from: app.environment)
     app.metricsConfiguration = IMMetricsConfiguration.load(from: app.environment)
     app.hotConversationConfiguration = IMHotConversationConfiguration.load(from: app.environment)
+    app.sequenceAllocationConfiguration = IMSequenceAllocationConfiguration.load(from: app.environment)
+    app.commandOwnerRoutingConfiguration = IMCommandOwnerRoutingConfiguration.load(from: app.environment)
+    app.conversationMemberCacheConfiguration = IMConversationMemberCacheConfiguration.load(from: app.environment)
+    app.messageWriteBatchConfiguration = IMMessageWriteBatchConfiguration.load(from: app.environment)
     app.consistencyRepairConfiguration = IMConsistencyRepairConfiguration.load(from: app.environment)
 
     configureDatabases(app)
@@ -153,6 +157,7 @@ private func validateProductionInfrastructureConfiguration(_ app: Application) t
     switch app.imRuntimeRole {
     case .gateway:
         try validateGatewayCommandIngressConfiguration(app)
+        try validateCommandOwnerRoutingConfiguration(app, requiresLocalNodeID: false)
         break
     case .commandAPI:
         try validateConversationShardConfiguration(app)
@@ -160,6 +165,7 @@ private func validateProductionInfrastructureConfiguration(_ app: Application) t
         try validateKafkaProducerConfiguration(app)
         try validateProductionMediaStorageConfiguration(app)
         try validateHotConversationProtectionConfiguration(app)
+        try validateCommandOwnerRoutingConfiguration(app, requiresLocalNodeID: app.sequenceAllocationConfiguration.mode == .block)
     case .queryAPI:
         try validateConversationShardConfiguration(app)
         try validateSummaryReadModelReadConfiguration(app)
@@ -191,6 +197,27 @@ private func validateProductionInfrastructureConfiguration(_ app: Application) t
 private func validateGatewayCommandIngressConfiguration(_ app: Application) throws {
     guard app.commandAPIIngressConfiguration.isEnabled else {
         throw Abort(.internalServerError, reason: "Production gateway requires IM_COMMAND_API_INTERNAL_BASE_URL to proxy IM command ingress.")
+    }
+}
+
+private func validateCommandOwnerRoutingConfiguration(_ app: Application, requiresLocalNodeID: Bool) throws {
+    guard app.sequenceAllocationConfiguration.mode == .block else {
+        return
+    }
+    guard !app.commandOwnerRoutingConfiguration.nodes.isEmpty else {
+        throw Abort(.internalServerError, reason: "IM_SEQUENCE_ALLOCATION_MODE=block requires IM_COMMAND_NODE_URLS for conversation owner routing.")
+    }
+    guard let secret = app.commandOwnerRoutingConfiguration.sharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !secret.isEmpty
+    else {
+        throw Abort(.internalServerError, reason: "IM_SEQUENCE_ALLOCATION_MODE=block requires IM_COMMAND_INTERNAL_SHARED_SECRET or IM_INTERNAL_SHARED_SECRET.")
+    }
+    if requiresLocalNodeID {
+        guard let nodeID = app.commandOwnerRoutingConfiguration.nodeID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              app.commandOwnerRoutingConfiguration.nodes.contains(where: { $0.id == nodeID })
+        else {
+            throw Abort(.internalServerError, reason: "Production command-api with block sequence allocation requires IM_COMMAND_NODE_ID to match an entry in IM_COMMAND_NODE_URLS.")
+        }
     }
 }
 
