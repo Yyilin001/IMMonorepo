@@ -18,8 +18,14 @@ struct IMDirectConversationStateService {
             .all()
 
         for conversation in conversations where conversation.directMessagingStateEnum != state {
+            let revision = Date()
             conversation.directMessagingStateEnum = state
+            conversation.membershipRevision = revision
+            conversation.updatedAt = revision
             try await conversation.update(on: database)
+            try await DirectConversationPairDirectoryService(db: database).sync(
+                conversationID: try conversation.requireID()
+            )
         }
 
         return conversationIDs

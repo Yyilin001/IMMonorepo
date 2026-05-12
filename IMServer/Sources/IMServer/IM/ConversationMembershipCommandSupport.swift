@@ -51,6 +51,9 @@ struct ConversationMembershipCommandSupport {
             normalizedTitle: normalizedTitle,
             memberUserIDs: memberUserIDs
         )
+        if conversationKind == .group {
+            try IMGroupMemberLimitGuard.validateGroupMemberCount(memberUserIDs.count)
+        }
         let persistedTitle = conversationKind == .direct ? nil : normalizedTitle
 
         let response = try await db.transaction { database in
@@ -108,6 +111,14 @@ struct ConversationMembershipCommandSupport {
                     memberUserIDs: memberUserIDs,
                     shardID: assignedShardID
                 )
+                if memberUserIDs.count == 2 {
+                    try await DirectConversationPairDirectoryService(db: database).upsert(
+                        lhs: memberUserIDs[0],
+                        rhs: memberUserIDs[1],
+                        conversationID: conversationID,
+                        directMessagingState: .active
+                    )
+                }
             }
 
             return try await ConversationSummaryReadSupport(db: database).conversationSummary(
@@ -175,10 +186,16 @@ struct ConversationMembershipCommandSupport {
         guard !newUsers.isEmpty else {
             throw Abort(.badRequest, reason: "没有可新增的成员。")
         }
+        try IMGroupMemberLimitGuard.validateGroupMemberCount(existingMemberships.count + newUsers.count)
 
         let response = try await db.transaction { database in
+            let revision = Date()
             let sequence = try await ConversationSequenceAllocator(db: database)
-                .allocateNextServerSequence(conversationID: conversationID, updatedAt: Date())
+                .allocateNextServerSequence(conversationID: conversationID, updatedAt: revision)
+            if let persistedConversation = try await Conversation.find(conversationID, on: database) {
+                persistedConversation.membershipRevision = revision
+                try await persistedConversation.update(on: database)
+            }
             for user in newUsers {
                 try await ConversationMember(
                     conversationID: conversationID,
@@ -266,6 +283,7 @@ struct ConversationMembershipCommandSupport {
         )
 
         let requesterConversation = try await db.transaction { database in
+            let revision = Date()
             try await targetMembership.delete(on: database)
 
             let sequence = try await ConversationSystemMessageAppender(db: database).append(
@@ -277,8 +295,13 @@ struct ConversationMembershipCommandSupport {
                     actorEmail: requester.email,
                     targetUserID: memberUserID,
                     targetEmail: targetUser.email
-                )
+                ),
+                updatedAt: revision
             )
+            if let persistedConversation = try await Conversation.find(conversationID, on: database) {
+                persistedConversation.membershipRevision = revision
+                try await persistedConversation.update(on: database)
+            }
             try await ConversationReadAdvanceSupport(db: database).advanceReadSequenceIfMember(
                 conversationID: conversationID,
                 userID: requesterUserID,
@@ -354,6 +377,7 @@ struct ConversationMembershipCommandSupport {
         }
 
         let response = try await db.transaction { database in
+            let revision = Date()
             switch role {
             case .owner:
                 requesterMembership.memberRoleEnum = .admin
@@ -376,8 +400,13 @@ struct ConversationMembershipCommandSupport {
                     targetEmail: targetUser.email,
                     previousRole: previousRole,
                     newRole: role
-                )
+                ),
+                updatedAt: revision
             )
+            if let persistedConversation = try await Conversation.find(conversationID, on: database) {
+                persistedConversation.membershipRevision = revision
+                try await persistedConversation.update(on: database)
+            }
             try await ConversationReadAdvanceSupport(db: database).advanceReadSequenceIfMember(
                 conversationID: conversationID,
                 userID: requesterUserID,
@@ -433,6 +462,7 @@ struct ConversationMembershipCommandSupport {
 
         let remainingUserIDs = memberships.map(\.$user.id).filter { $0 != requesterUserID }
         try await db.transaction { database in
+            let revision = Date()
             try await membership.delete(on: database)
             _ = try await ConversationSystemMessageAppender(db: database).append(
                 in: conversationID,
@@ -441,8 +471,13 @@ struct ConversationMembershipCommandSupport {
                     type: .memberLeft,
                     actorUserID: requesterUserID,
                     actorEmail: requester.email
-                )
+                ),
+                updatedAt: revision
             )
+            if let persistedConversation = try await Conversation.find(conversationID, on: database) {
+                persistedConversation.membershipRevision = revision
+                try await persistedConversation.update(on: database)
+            }
         }
 
         try await refreshPublisher.publishConversationRemoved(

@@ -42,6 +42,7 @@ let package = Package(
             name: "IMServerTests",
             dependencies: [
                 .target(name: "IMServer"),
+                .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "VaporTesting", package: "vapor"),
             ],
             swiftSettings: swiftSettings

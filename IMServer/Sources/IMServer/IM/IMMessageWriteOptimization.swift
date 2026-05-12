@@ -92,6 +92,7 @@ struct IMMessageWriteBatchConfiguration: Sendable {
     let enabled: Bool
     let maxSize: Int
     let maxDelayMillis: Int
+    let maxQueueDepthPerConversation: Int
 
     var isEnabled: Bool {
         enabled && maxSize > 1 && maxDelayMillis > 0
@@ -103,7 +104,11 @@ struct IMMessageWriteBatchConfiguration: Sendable {
         return IMMessageWriteBatchConfiguration(
             enabled: enabled,
             maxSize: max(2, Environment.get("IM_MESSAGE_WRITE_BATCH_MAX_SIZE").flatMap(Int.init(_:)) ?? 32),
-            maxDelayMillis: max(1, Environment.get("IM_MESSAGE_WRITE_BATCH_MAX_DELAY_MS").flatMap(Int.init(_:)) ?? 10)
+            maxDelayMillis: max(1, Environment.get("IM_MESSAGE_WRITE_BATCH_MAX_DELAY_MS").flatMap(Int.init(_:)) ?? 10),
+            maxQueueDepthPerConversation: max(
+                1,
+                Environment.get("IM_MESSAGE_WRITE_BATCH_MAX_QUEUE_DEPTH").flatMap(Int.init(_:)) ?? 1_024
+            )
         )
     }
 }
@@ -144,6 +149,65 @@ actor IMConversationMemberCache {
     }
 }
 
+actor IMDirectConversationPairCache {
+    private struct Entry {
+        let conversationIDs: [UUID]
+        let expiresAt: Date
+    }
+
+    private let ttlSeconds: TimeInterval
+    private var entries: [String: Entry] = [:]
+    private var keysByConversationID: [UUID: Set<String>] = [:]
+
+    init(ttlSeconds: TimeInterval = 5) {
+        self.ttlSeconds = ttlSeconds
+    }
+
+    func conversationIDs(lhs: UUID, rhs: UUID, now: Date = Date()) -> [UUID]? {
+        let key = Self.key(lhs: lhs, rhs: rhs)
+        guard let entry = entries[key] else { return nil }
+        guard entry.expiresAt > now else {
+            removeEntry(for: key)
+            return nil
+        }
+        return entry.conversationIDs
+    }
+
+    func store(_ conversationIDs: [UUID], lhs: UUID, rhs: UUID, now: Date = Date()) {
+        let key = Self.key(lhs: lhs, rhs: rhs)
+        removeEntry(for: key)
+        entries[key] = Entry(
+            conversationIDs: conversationIDs,
+            expiresAt: now.addingTimeInterval(ttlSeconds)
+        )
+        for conversationID in conversationIDs {
+            keysByConversationID[conversationID, default: []].insert(key)
+        }
+    }
+
+    func invalidate(conversationID: UUID) {
+        let keys = keysByConversationID[conversationID] ?? []
+        for key in keys {
+            removeEntry(for: key)
+        }
+        keysByConversationID[conversationID] = nil
+    }
+
+    private func removeEntry(for key: String) {
+        guard let entry = entries.removeValue(forKey: key) else { return }
+        for conversationID in entry.conversationIDs {
+            keysByConversationID[conversationID]?.remove(key)
+            if keysByConversationID[conversationID]?.isEmpty == true {
+                keysByConversationID[conversationID] = nil
+            }
+        }
+    }
+
+    private static func key(lhs: UUID, rhs: UUID) -> String {
+        [lhs.uuidString.lowercased(), rhs.uuidString.lowercased()].sorted().joined(separator: ":")
+    }
+}
+
 actor IMMessageWriteBatcher {
     struct Item: Sendable {
         let message: IMPreparedIncomingMessage
@@ -165,6 +229,16 @@ actor IMMessageWriteBatcher {
         configuration: IMMessageWriteBatchConfiguration
     ) async throws -> IMRealtimeMessagePersistenceResult {
         try await withCheckedThrowingContinuation { continuation in
+            let currentDepth = queues[conversationID]?.count ?? 0
+            guard currentDepth < configuration.maxQueueDepthPerConversation else {
+                continuation.resume(throwing: IMRealtimeMessageError.messageWriteQueueFull)
+                Task {
+                    await app.messageWriteMetrics.recordWriteQueueRejected()
+                    await app.messageWriteMetrics.recordWriteQueueDepth(currentDepth)
+                }
+                return
+            }
+
             queues[conversationID, default: []].append(
                 QueuedItem(item: item, continuation: continuation)
             )
@@ -252,6 +326,34 @@ actor IMSequenceBlockAllocator {
 
     private var blocks: [UUID: Block] = [:]
 
+    func nextSequences(
+        count: Int,
+        conversationID: UUID,
+        blockSize: Int,
+        updatedAt: Date,
+        on database: any Database,
+        app: Application?
+    ) async throws -> [Int] {
+        guard count > 0 else {
+            return []
+        }
+
+        var sequences: [Int] = []
+        sequences.reserveCapacity(count)
+        for _ in 0..<count {
+            sequences.append(
+                try await nextSequence(
+                    conversationID: conversationID,
+                    blockSize: blockSize,
+                    updatedAt: updatedAt,
+                    on: database,
+                    app: app
+                )
+            )
+        }
+        return sequences
+    }
+
     func nextSequence(
         conversationID: UUID,
         blockSize: Int,
@@ -268,13 +370,14 @@ actor IMSequenceBlockAllocator {
         }
 
         do {
-            let end = try await reserveBlockEnd(
+            let reserved = try await ConversationSequenceAllocator(db: database).reserve(
+                count: blockSize,
                 conversationID: conversationID,
-                blockSize: blockSize,
-                updatedAt: updatedAt,
-                on: database
+                updatedAt: updatedAt
             )
-            let start = end - blockSize + 1
+            guard let start = reserved.first, let end = reserved.last else {
+                throw Abort(.notFound, reason: "会话不存在。")
+            }
             blocks[conversationID] = Block(next: start + 1, end: end)
             await app?.messageWriteMetrics.recordSequenceBlockReserved()
             await app?.messageWriteMetrics.recordSequenceBlockRemaining(blockSize - 1)
@@ -283,46 +386,6 @@ actor IMSequenceBlockAllocator {
             await app?.messageWriteMetrics.recordSequenceBlockReserveFailed()
             throw error
         }
-    }
-
-    private func reserveBlockEnd(
-        conversationID: UUID,
-        blockSize: Int,
-        updatedAt: Date,
-        on database: any Database
-    ) async throws -> Int {
-        if let sql = database as? any SQLDatabase,
-           sql.dialect.name == "postgresql",
-           let blockEnd = try await sql.update(Conversation.schema)
-            .set(
-                "last_message_sequence",
-                to: SQLQueryString(
-                    "GREATEST(\(ident: "last_message_sequence"), COALESCE((SELECT MAX(\(ident: "server_sequence")) FROM \(ident: ConversationMessage.schema) WHERE \(ident: "conversation_id") = \(bind: conversationID)), 0)) + \(bind: blockSize)"
-                )
-            )
-            .set("updated_at", to: updatedAt)
-            .where("id", .equal, conversationID)
-            .returning("last_message_sequence")
-            .first(decodingColumn: "last_message_sequence", as: Int.self)
-        {
-            return blockEnd
-        }
-
-        guard let conversation = try await Conversation.find(conversationID, on: database) else {
-            throw IMRealtimeMessageError.conversationUnavailable
-        }
-        let latestPersistedMessageSequence = try await ConversationMessage.query(on: database)
-            .filter(\.$conversation.$id == conversationID)
-            .sort(\.$serverSequence, .descending)
-            .first()?
-            .serverSequence ?? 0
-        conversation.lastMessageSequence = max(
-            conversation.lastMessageSequence,
-            latestPersistedMessageSequence
-        ) + blockSize
-        conversation.updatedAt = updatedAt
-        try await conversation.update(on: database)
-        return conversation.lastMessageSequence
     }
 }
 
@@ -391,6 +454,7 @@ actor IMMessageWriteMetrics {
         var memberCacheMisses: Int = 0
         var messageWriteBatches: Int = 0
         var messageWriteBatchMessages: Int = 0
+        var writeQueueRejected: Int = 0
     }
 
     private var snapshot = Snapshot()
@@ -403,6 +467,7 @@ actor IMMessageWriteMetrics {
     func recordWriteQueueDepth(_ value: Int) { snapshot.writeQueueDepth = value }
     func recordMemberCacheHit() { snapshot.memberCacheHits += 1 }
     func recordMemberCacheMiss() { snapshot.memberCacheMisses += 1 }
+    func recordWriteQueueRejected() { snapshot.writeQueueRejected += 1 }
     func recordMessageWriteBatch(messageCount: Int) {
         snapshot.messageWriteBatches += 1
         snapshot.messageWriteBatchMessages += messageCount
@@ -440,6 +505,10 @@ private struct IMConversationWriteCoordinatorStorageKey: StorageKey {
 
 private struct IMConversationMemberCacheStorageKey: StorageKey {
     typealias Value = IMConversationMemberCache
+}
+
+private struct IMDirectConversationPairCacheStorageKey: StorageKey {
+    typealias Value = IMDirectConversationPairCache
 }
 
 private struct IMMessageWriteMetricsStorageKey: StorageKey {
@@ -541,6 +610,18 @@ extension Application {
             return cache
         }
         set { storage[IMConversationMemberCacheStorageKey.self] = newValue }
+    }
+
+    var directConversationPairCache: IMDirectConversationPairCache {
+        get {
+            if let cache = storage[IMDirectConversationPairCacheStorageKey.self] {
+                return cache
+            }
+            let cache = IMDirectConversationPairCache()
+            storage[IMDirectConversationPairCacheStorageKey.self] = cache
+            return cache
+        }
+        set { storage[IMDirectConversationPairCacheStorageKey.self] = newValue }
     }
 
     var messageWriteMetrics: IMMessageWriteMetrics {

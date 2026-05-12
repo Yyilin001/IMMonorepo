@@ -13,6 +13,7 @@ struct CreateConversationUserSummary: AsyncMigration {
             .field("direct_peer_email", .string)
             .field("notice", .string)
             .field("avatar_preset", .string)
+            .field("mute_all", .bool, .required, .sql(.default(false)))
             .field("member_count", .int, .required)
             .field("member_user_ids_json", .string, .required)
             .field("last_message_json", .string)

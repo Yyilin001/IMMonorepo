@@ -308,7 +308,7 @@ extension Application {
     var imTCPConfiguration: IMTCPConfiguration {
         get {
             guard let configuration = storage[IMTCPConfigurationStorageKey.self] else {
-                fatalError("IMTCPConfiguration not configured")
+                preconditionFailure("IMTCPConfiguration not configured")
             }
             return configuration
         }

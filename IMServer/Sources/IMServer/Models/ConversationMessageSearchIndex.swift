@@ -19,8 +19,17 @@ final class ConversationMessageSearchIndex: Model, @unchecked Sendable {
     @Field(key: "message_type")
     var messageType: String
 
+    @OptionalField(key: "sender_user_id")
+    var senderUserID: UUID?
+
     @Field(key: "searchable_text")
     var searchableText: String
+
+    @OptionalField(key: "content_json")
+    var contentJSON: String?
+
+    @OptionalField(key: "derived_state_json")
+    var derivedStateJSON: String?
 
     @Field(key: "created_at")
     var createdAt: Date
@@ -35,7 +44,10 @@ final class ConversationMessageSearchIndex: Model, @unchecked Sendable {
         conversationID: UUID,
         serverSequence: Int,
         messageType: String,
+        senderUserID: UUID? = nil,
         searchableText: String,
+        contentJSON: String? = nil,
+        derivedStateJSON: String? = nil,
         createdAt: Date,
         updatedAt: Date
     ) {
@@ -44,7 +56,10 @@ final class ConversationMessageSearchIndex: Model, @unchecked Sendable {
         self.conversationID = conversationID
         self.serverSequence = serverSequence
         self.messageType = messageType
+        self.senderUserID = senderUserID
         self.searchableText = searchableText
+        self.contentJSON = contentJSON
+        self.derivedStateJSON = derivedStateJSON
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

@@ -32,6 +32,7 @@ actor KafkaConversationEventStreamProducer: ConversationEventStreamProducer {
     private var producer: KafkaProducer?
     private var runTask: Task<Void, Never>?
     private var eventsTask: Task<Void, Never>?
+    private var pendingDeliveries: [KafkaProducerMessageID: CheckedContinuation<Void, any Error>] = [:]
 
     init(logger: Logger, configuration: IMEventStreamConfiguration, nodeID: String) {
         self.logger = logger
@@ -56,13 +57,17 @@ actor KafkaConversationEventStreamProducer: ConversationEventStreamProducer {
             key: envelope.conversationID.uuidString,
             value: [UInt8](payload)
         )
-        _ = try producer.send(message)
+        let messageID = try producer.send(message)
+        try await waitForDelivery(messageID)
     }
 
     func shutdown() async {
         producer?.triggerGracefulShutdown()
         eventsTask?.cancel()
         runTask?.cancel()
+        failPendingDeliveries(
+            Abort(.serviceUnavailable, reason: "Kafka producer is shutting down before delivery acknowledgement.")
+        )
         producer = nil
         eventsTask = nil
         runTask = nil
@@ -88,24 +93,89 @@ actor KafkaConversationEventStreamProducer: ConversationEventStreamProducer {
                     "Kafka producer run loop exited with error",
                     metadata: ["error": .string(String(describing: error))]
                 )
+                await self.failPendingDeliveries(error)
             }
         }
         eventsTask = Task {
             for await event in events {
-                switch event {
-                case .deliveryReports(let deliveryReports):
-                    self.logger.debug(
-                        "Kafka producer delivered conversation event batch",
-                        metadata: ["count": .stringConvertible(deliveryReports.count)]
-                    )
-                case .DO_NOT_SWITCH_OVER_THIS_EXHAUSITVELY:
-                    break
-                }
+                await self.handleProducerEvent(event)
             }
         }
 
         self.producer = producer
         return producer
+    }
+
+    private func handleProducerEvent(_ event: KafkaProducerEvent) {
+        switch event {
+        case .deliveryReports(let deliveryReports):
+            logger.debug(
+                "Kafka producer delivered conversation event batch",
+                metadata: ["count": .stringConvertible(deliveryReports.count)]
+            )
+            for report in deliveryReports {
+                guard let continuation = pendingDeliveries.removeValue(forKey: report.id) else {
+                    continue
+                }
+                switch report.status {
+                case .acknowledged:
+                    continuation.resume()
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+        case .DO_NOT_SWITCH_OVER_THIS_EXHAUSITVELY:
+            break
+        }
+    }
+
+    private func waitForDelivery(_ messageID: KafkaProducerMessageID) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await self.waitForDeliveryReport(messageID)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: self.deliveryTimeoutNanoseconds)
+                throw Abort(.serviceUnavailable, reason: "Timed out waiting for Kafka delivery acknowledgement.")
+            }
+
+            do {
+                try await group.next()
+                group.cancelAll()
+            } catch {
+                group.cancelAll()
+                await self.cancelPendingDelivery(messageID)
+                throw error
+            }
+        }
+    }
+
+    private func waitForDeliveryReport(_ messageID: KafkaProducerMessageID) async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pendingDeliveries[messageID] = continuation
+            }
+        } onCancel: {
+            Task {
+                await self.cancelPendingDelivery(messageID)
+            }
+        }
+    }
+
+    private func cancelPendingDelivery(_ messageID: KafkaProducerMessageID) {
+        pendingDeliveries.removeValue(forKey: messageID)
+    }
+
+    private func failPendingDeliveries(_ error: any Error) {
+        let continuations = pendingDeliveries.values
+        pendingDeliveries.removeAll()
+        for continuation in continuations {
+            continuation.resume(throwing: error)
+        }
+    }
+
+    private var deliveryTimeoutNanoseconds: UInt64 {
+        UInt64(max(1, configuration.messageTimeoutMilliseconds)) * 1_000_000
     }
 
     private func makeHeaders(for envelope: ConversationEventStreamEnvelope) -> [KafkaHeader] {
@@ -402,12 +472,24 @@ struct KafkaConversationEventStreamConsumerRunner {
                             key: "dead-letter-error",
                             value: String(describing: error)
                         )
-                        try? await deadLetterProducer.publish(
-                            envelope,
-                            topicOverride: app.eventStreamConfiguration.deadLetterTopic,
-                            additionalHeaders: [deadLetterHeader]
-                        )
-                        await app.streamMetrics.recordDeadLetterPublished(groupID: groupID)
+                        do {
+                            try await deadLetterProducer.publish(
+                                envelope,
+                                topicOverride: app.eventStreamConfiguration.deadLetterTopic,
+                                additionalHeaders: [deadLetterHeader]
+                            )
+                            await app.streamMetrics.recordDeadLetterPublished(groupID: groupID)
+                        } catch {
+                            app.logger.error(
+                                "Kafka stream consumer dead-letter publish failed; original message will not be committed",
+                                metadata: [
+                                    "group_id": .string(groupID),
+                                    "event_id": .string(envelope.eventID.uuidString),
+                                    "error": .string(String(describing: error))
+                                ]
+                            )
+                            continue
+                        }
                     }
                     try? await consumer.commit(message)
                 }

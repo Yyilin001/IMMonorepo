@@ -15,7 +15,11 @@ struct IMConversationEventService {
         conversationID: UUID,
         recipientUserIDs: [UUID],
         message: IMMessageResponse? = nil,
-        actorUserID: UUID? = nil
+        actorUserID: UUID? = nil,
+        messageIDs: [UUID] = [],
+        favoriteChangedMessageID: UUID? = nil,
+        isFavorited: Bool? = nil,
+        visibilityAction: ConversationVisibilityAction? = nil
     ) async {
         let uniqueRecipientUserIDs = Array(Set(recipientUserIDs)).sorted { $0.uuidString < $1.uuidString }
         guard !uniqueRecipientUserIDs.isEmpty else {
@@ -36,7 +40,11 @@ struct IMConversationEventService {
                         conversation: conversation,
                         message: message,
                         actorUserID: actorUserID,
-                        serverTimestamp: timestamp
+                        serverTimestamp: timestamp,
+                        messageIDs: messageIDs,
+                        favoriteChangedMessageID: favoriteChangedMessageID,
+                        isFavorited: isFavorited,
+                        visibilityAction: visibilityAction
                     ),
                     toUserID: recipientUserID
                 )

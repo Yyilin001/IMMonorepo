@@ -51,6 +51,8 @@
 
 协议草案见 [docs/im-tcp-protocol.md](docs/im-tcp-protocol.md)。
 
+运行模式与生产上线检查清单见 [docs/im-runtime-operating-modes.md](docs/im-runtime-operating-modes.md)。
+
 ## 技术栈
 
 - Swift 6
@@ -150,6 +152,26 @@ swift run
 
 ```bash
 swift test
+```
+
+Postgres smoke 测试：
+
+```bash
+IM_POSTGRES_SMOKE_DATABASE_URL=postgres://user:password@127.0.0.1:5432/imserver_smoke swift test --no-parallel
+```
+
+生产拓扑 smoke：
+
+```bash
+./scripts/production_smoke.sh run
+```
+
+小群/私聊压测入口：
+
+```bash
+./scripts/staging_baseline.sh --profile staging-baseline --env-file LoadTests/staging-baseline.env
+cd LoadTests/k6 && k6 run -e PROFILE=local-smoke http-small-group.js
+cd LoadTests/TCPDriver && swift run IMTCPLoadDriver --profile local-smoke
 ```
 
 ## 数据与消息模型说明

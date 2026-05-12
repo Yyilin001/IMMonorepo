@@ -1,6 +1,6 @@
 # IMServer 100w DAU Upgrade Runbook
 
-This runbook defines the target production posture for 1,000,000 DAU with private chats and small groups as the primary workload.
+This runbook defines the target production posture for 1,000,000 DAU with private chats and small groups as the primary workload. This phase explicitly excludes large groups/channels and media delivery scaling.
 
 ## Capacity Targets
 
@@ -13,6 +13,7 @@ This runbook defines the target production posture for 1,000,000 DAU with privat
 - Search index lag: `P95 < 3s` when OpenSearch is enabled
 - Reconnect `messages/since` recovery success: `> 99.9%`
 - Cross-node realtime dispatch success: `> 99.9%`
+- Small group size: `<= 500` members
 
 ## Required Production Shape
 
@@ -39,6 +40,9 @@ Production must not run `combined` or `projection-worker`.
 - `IM_OUTBOX_CLAIM_TIMEOUT_MS=60000`
 - `IM_METRICS_ENABLED=true`
 - `IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT=200`
+- `IM_GROUP_MEMBER_LIMIT=500`
+- `IM_SEQUENCE_ALLOCATION_MODE=block`
+- `IM_MESSAGE_WRITE_BATCH_ENABLED=true`
 - `IM_REDIS_MAX_CONNECTIONS=32`
 - `MEDIA_STORAGE_PROVIDER=s3compatible`
 - `MEDIA_STORAGE_S3_ENDPOINT`, `MEDIA_STORAGE_S3_BUCKET`, `MEDIA_STORAGE_S3_ACCESS_KEY_ID`, `MEDIA_STORAGE_S3_SECRET_ACCESS_KEY`
@@ -71,6 +75,9 @@ Keep `/internal/metrics` on private networking only.
 
 Go only when:
 
+- `IM_GROUP_MEMBER_LIMIT=500` is enforced for create and add-member flows.
+- `3,000 msg/s` write pressure holds `P95 < 150ms` and `P99 < 300ms`.
+- `conversations/changes` convergence holds `P95 < 2s`.
 - Outbox backlog drains after relay or consumer pause.
 - Duplicate Kafka delivery does not duplicate read models or notifications.
 - Redis routing failures degrade without message loss after reconnect gap sync.
@@ -83,3 +90,14 @@ No-Go if:
 - `query-api` uses legacy summary reads.
 - Any production stream consumer runs multiple groups without a temporary explicit override.
 - `messages/since` cannot repair realtime gaps.
+- Large groups/channels or media traffic are included in the claim without separate capacity validation.
+
+## Load Test Entrypoints
+
+- Production topology smoke: `cd IMServer && ./scripts/production_smoke.sh run`
+- Failure drills: `cd IMServer && ./scripts/failure_drill.sh pause-stream-consumer`
+- Staging baseline wrapper: `cd IMServer && ./scripts/staging_baseline.sh --profile staging-baseline --env-file LoadTests/staging-baseline.env`
+- HTTP smoke: `cd IMServer/LoadTests/k6 && k6 run -e PROFILE=local-smoke http-small-group.js`
+- HTTP staging baseline: `cd IMServer/LoadTests/k6 && k6 run -e PROFILE=staging-baseline http-small-group.js`
+- TCP smoke: `cd IMServer/LoadTests/TCPDriver && swift run IMTCPLoadDriver --profile local-smoke`
+- Capacity target profiles are manual-only and must run against isolated staging infrastructure.

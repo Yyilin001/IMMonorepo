@@ -10,18 +10,7 @@ struct GatewayCommandBridgeController: RouteCollection {
                 User.guardMiddleware(throwing: Abort(.unauthorized, reason: "用户未登录。"))
             )
 
-        protected.post("conversations", use: proxyCommand)
-        protected.post("conversations", ":conversationID", "members", use: proxyCommand)
-        protected.post("conversations", ":conversationID", "members", ":memberUserID", "remove", use: proxyCommand)
-        protected.post("conversations", ":conversationID", "members", ":memberUserID", "role", use: proxyCommand)
-        protected.post("conversations", ":conversationID", "title", use: proxyCommand)
-        protected.patch("conversations", ":conversationID", "preferences", use: proxyCommand)
-        protected.patch("conversations", ":conversationID", "metadata", use: proxyCommand)
-        protected.post("conversations", ":conversationID", "messages", ":messageID", "edit", use: proxyCommand)
-        protected.post("conversations", ":conversationID", "messages", ":messageID", "reactions", use: proxyCommand)
-        protected.post("conversations", ":conversationID", "messages", ":messageID", "recall", use: proxyCommand)
-        protected.post("conversations", ":conversationID", "read", use: proxyCommand)
-        protected.post("conversations", ":conversationID", "leave", use: proxyCommand)
+        IMConversationCommandRoute.registerProxyRoutes(on: protected, use: proxyCommand)
     }
 
     private func proxyCommand(req: Request) async throws -> Response {
@@ -35,7 +24,7 @@ struct GatewayCommandBridgeController: RouteCollection {
         let querySuffix = req.url.query.map { "?\($0)" } ?? ""
         let target = URI(string: "\(baseURL)\(req.url.path)\(querySuffix)")
         let proxied = try await req.application.client.send(req.method, headers: forwardedHeaders(from: req, sharedSecret: configuration.sharedSecret), to: target) { outgoing in
-            if var bodyData = req.body.data {
+            if let bodyData = req.body.data {
                 outgoing.body = .init(buffer: bodyData)
             }
         }

@@ -44,6 +44,39 @@ enum IMRuntimeRole: String, Sendable {
     }
 }
 
+extension IMRuntimeRole {
+    static func loadFromEnvironment() -> IMRuntimeRole? {
+        Environment.get("IM_RUNTIME_ROLE").flatMap(resolve)
+    }
+
+    static func resolve(_ rawValue: String) -> IMRuntimeRole? {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "gateway":
+            return .gateway
+        case "command-api", "commandapi":
+            return .commandAPI
+        case "query-api", "queryapi":
+            return .queryAPI
+        case "outbox-relay", "outboxrelay":
+            return .outboxRelay
+        case "stream-consumer", "streamconsumer":
+            return .streamConsumer
+        case "projection-worker", "worker", "projectionworker":
+            return .projectionWorker
+        case "combined", "api":
+            return .combined
+        case "ops":
+            return .ops
+        default:
+            return nil
+        }
+    }
+
+    var commandLineRoleName: String {
+        rawValue
+    }
+}
+
 private struct IMRuntimeRoleStorageKey: StorageKey {
     typealias Value = IMRuntimeRole
 }

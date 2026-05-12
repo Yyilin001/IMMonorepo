@@ -25,11 +25,33 @@ struct ConversationSummaryReadSupport {
         conversationID: UUID,
         for userID: UUID
     ) async throws -> IMConversationResponse {
-        try await conversationResponse(
+        let recordID = ConversationUserSummary.recordID(ownerUserID: userID, conversationID: conversationID)
+        if let summary = try await ConversationUserSummary.find(recordID, on: db) {
+            guard !summary.isRemoved else {
+                throw Abort(.notFound, reason: "会话不存在。")
+            }
+            if let conversation = try await Conversation.find(conversationID, on: db),
+               let conversationRevision = conversation.membershipRevision,
+               let summaryRevision = summary.membershipRevision,
+               conversationRevision == summaryRevision,
+               summary.memberUserIDs.contains(userID)
+            {
+                return makeConversationResponse(from: summary)
+            }
+        }
+
+        let response = try await conversationResponse(
             conversationID: conversationID,
             for: userID,
             on: db
         )
+        try await summaryProjectionService.refreshConversationSummaries(
+            conversationID: conversationID,
+            recipientUserIDs: [userID],
+            on: db,
+            writeChangeLog: true
+        )
+        return response
     }
 
     func listConversations(
@@ -67,6 +89,22 @@ struct ConversationSummaryReadSupport {
         try await membershipService.listMemberResponses(in: conversationID, for: userID)
     }
 
+    func listMemberPage(
+        in conversationID: UUID,
+        for userID: UUID,
+        cursor: String?,
+        limit: Int?,
+        query: String?
+    ) async throws -> IMConversationMemberPageResponse {
+        try await membershipService.listMemberPageResponses(
+            in: conversationID,
+            for: userID,
+            cursor: cursor,
+            limit: limit,
+            query: query
+        )
+    }
+
     private func conversationResponse(
         conversationID: UUID,
         for userID: UUID,
@@ -88,12 +126,16 @@ struct ConversationSummaryReadSupport {
             throw Abort(.notFound, reason: "会话不存在。")
         }
 
-        let lastMessage = try await ConversationMessage.query(on: database)
+        let lastMessageRows = try await ConversationMessage.query(on: database)
             .filter(\.$conversation.$id == conversationID)
             .filter(\.$serverSequence >= membership.visibleFromSequence)
             .sort(\.$serverSequence, .descending)
-            .first()
-            .map(messageService.makePreview)
+            .limit(50)
+            .all()
+        let visibleLastMessageRows = try await IMCommonFeatureService(db: database)
+            .filterVisible(lastMessageRows, for: userID)
+        let lastVisibleMessage = visibleLastMessageRows.first
+        let lastMessage = try lastVisibleMessage.map(messageService.makePreview)
         let readState = try await readStateService.conversationReadState(
             conversationID: conversationID,
             userID: userID,
@@ -113,6 +155,7 @@ struct ConversationSummaryReadSupport {
             directPeer: ConversationPresentationSupport.directPeer(from: memberships, currentUserID: userID),
             notice: conversation.notice,
             avatarPreset: conversation.avatarPresetEnum,
+            muteAll: conversation.muteAll,
             memberCount: memberUserIDs.count,
             memberUserIDs: memberUserIDs,
             lastMessage: lastMessage,
@@ -123,6 +166,36 @@ struct ConversationSummaryReadSupport {
             isMuted: preferences.isMuted,
             createdAt: conversation.createdAt,
             updatedAt: lastMessage?.createdAt ?? conversation.updatedAt
+        )
+    }
+
+    private func makeConversationResponse(from row: ConversationUserSummary) -> IMConversationResponse {
+        IMConversationResponse(
+            id: row.conversationID,
+            title: row.title,
+            kind: row.kind,
+            directMessagingState: row.directMessagingState,
+            directPeer: row.directPeerUserID.map { directPeerUserID in
+                IMDirectPeerResponse(
+                    id: directPeerUserID,
+                    email: row.directPeerEmail ?? "",
+                    displayName: row.directPeerDisplayName,
+                    avatarPreset: row.directPeerAvatarPresetEnum
+                )
+            },
+            notice: row.notice,
+            avatarPreset: row.avatarPresetEnum,
+            muteAll: row.muteAll,
+            memberCount: row.memberCount,
+            memberUserIDs: row.memberUserIDs.sorted { $0.uuidString < $1.uuidString },
+            lastMessage: row.lastMessage,
+            lastReadSequence: row.lastReadSequence,
+            unreadCount: row.unreadCount,
+            isPinned: row.isPinned,
+            pinnedAt: row.pinnedAt,
+            isMuted: row.isMuted,
+            createdAt: nil,
+            updatedAt: row.lastActivityAt
         )
     }
 }
@@ -177,8 +250,11 @@ struct ConversationTimelineReadSupport {
             .limit(limit)
             .all()
             .reversed()
+        let visibleMessageRows = try await IMCommonFeatureService(db: db)
+            .filterVisible(Array(messages), for: userID)
+        let visibleMessages = visibleMessageRows.prefix(limit)
 
-        return try messages.map { try messageService.messageResponse(from: $0, conversationID: conversationID) }
+        return try visibleMessages.map { try messageService.messageResponse(from: $0, conversationID: conversationID) }
     }
 
     func listMessagesSince(
@@ -203,6 +279,7 @@ struct ConversationTimelineReadSupport {
             .sort(\.$serverSequence, .ascending)
             .limit(limit + 1)
             .all()
+        rows = try await IMCommonFeatureService(db: db).filterVisible(rows, for: userID)
         let hasMore = rows.count > limit
         if hasMore {
             rows.removeLast()
@@ -245,12 +322,27 @@ struct ConversationSearchReadSupport {
             conversationID: conversationID,
             userID: userID
         )
-        return try await searchService.searchMessages(
+        let page = try await searchService.searchMessages(
             in: conversationID,
             membership: membership,
             query: rawQuery,
             cursor: rawCursor,
             limit: requestedLimit
+        )
+        var visibleItems: [IMConversationMessageSearchHitResponse] = []
+        let featureService = IMCommonFeatureService(db: db)
+        for item in page.items {
+            guard let message = try await ConversationMessage.find(item.messageID, on: db),
+                  try await !featureService.isHidden(message: message, for: userID)
+            else {
+                continue
+            }
+            visibleItems.append(item)
+        }
+        return IMConversationMessageSearchPageResponse(
+            items: visibleItems,
+            nextCursor: page.nextCursor,
+            hasMore: page.hasMore
         )
     }
 }
@@ -317,6 +409,22 @@ struct ConversationReadSupport {
         for userID: UUID
     ) async throws -> [IMConversationMemberResponse] {
         try await summaryReadSupport.listMembers(in: conversationID, for: userID)
+    }
+
+    func listMemberPage(
+        in conversationID: UUID,
+        for userID: UUID,
+        cursor: String?,
+        limit: Int?,
+        query: String?
+    ) async throws -> IMConversationMemberPageResponse {
+        try await summaryReadSupport.listMemberPage(
+            in: conversationID,
+            for: userID,
+            cursor: cursor,
+            limit: limit,
+            query: query
+        )
     }
 
     func listMessages(

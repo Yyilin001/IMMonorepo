@@ -1,0 +1,270 @@
+x-imserver-build: &imserver_build
+  image: imserver:production-smoke
+  build:
+    context: .
+
+x-imserver-env: &imserver_env
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  JWT_SECRET: ${JWT_SECRET:-production-smoke-jwt-secret-change-me}
+  IM_INTERNAL_SHARED_SECRET: ${IM_INTERNAL_SHARED_SECRET:-production-smoke-internal-secret}
+  IM_COMMAND_INTERNAL_SHARED_SECRET: ${IM_COMMAND_INTERNAL_SHARED_SECRET:-production-smoke-internal-secret}
+  IM_GROUP_MEMBER_LIMIT: "500"
+  IM_METRICS_ENABLED: "true"
+  IM_AUTO_MIGRATE_ON_START: "false"
+  IM_INLINE_OUTBOX_PROJECTION: "false"
+  DATABASE_HOST: postgres
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: imserver_smoke
+  DATABASE_USERNAME: imserver
+  DATABASE_PASSWORD: imserver_password
+  DATABASE_CONVERSATION_SHARD_0_HOST: postgres
+  DATABASE_CONVERSATION_SHARD_0_PORT: "5432"
+  DATABASE_CONVERSATION_SHARD_0_NAME: imserver_smoke
+  DATABASE_CONVERSATION_SHARD_0_USERNAME: imserver
+  DATABASE_CONVERSATION_SHARD_0_PASSWORD: imserver_password
+  DATABASE_SUMMARY_SUMMARY_0_HOST: postgres
+  DATABASE_SUMMARY_SUMMARY_0_PORT: "5432"
+  DATABASE_SUMMARY_SUMMARY_0_NAME: imserver_smoke
+  DATABASE_SUMMARY_SUMMARY_0_USERNAME: imserver
+  DATABASE_SUMMARY_SUMMARY_0_PASSWORD: imserver_password
+  IM_CONVERSATION_SHARD_IDS: shard-0
+  IM_SUMMARY_SHARD_IDS: summary-0
+  IM_SUMMARY_PROJECTION_WRITE_MODE: sharded
+  IM_SUMMARY_QUERY_READ_SOURCE: sharded
+  IM_EVENT_STREAM_DRIVER: kafka
+  IM_KAFKA_BROKERS: redpanda:9092
+  IM_KAFKA_TOPIC: conversation-domain-events
+  IM_KAFKA_DEAD_LETTER_TOPIC: conversation-domain-events-dead-letter
+  IM_KAFKA_CLIENT_ID: imserver-production-smoke
+  IM_KAFKA_SECURITY_PROTOCOL: plaintext
+  IM_KAFKA_COMPRESSION: none
+  IM_KAFKA_AUTO_CREATE_TOPICS: "true"
+  REDIS_URL: redis://redis:6379
+  IM_ROUTING_MODE: redis
+  IM_REDIS_MAX_CONNECTIONS: "8"
+  IM_COMMAND_API_INTERNAL_BASE_URL: http://command-api:8080
+  IM_GATEWAY_RELAY_MODE: http
+  IM_GATEWAY_INTERNAL_BASE_URL: http://gateway:8080
+  IM_COMMAND_NODE_URLS: command-a=http://command-api:8080
+  IM_SEQUENCE_ALLOCATION_MODE: block
+  IM_SEQUENCE_BLOCK_SIZE: "256"
+  IM_MESSAGE_WRITE_BATCH_ENABLED: "true"
+  IM_MESSAGE_WRITE_BATCH_MAX_SIZE: "32"
+  IM_MESSAGE_WRITE_BATCH_MAX_DELAY_MS: "10"
+  IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT: "1000"
+  IM_SEARCH_DRIVER: database
+  MEDIA_STORAGE_PROVIDER: s3compatible
+  MEDIA_STORAGE_S3_ENDPOINT: http://minio:9000
+  MEDIA_STORAGE_S3_BUCKET: imserver-media
+  MEDIA_STORAGE_S3_ACCESS_KEY_ID: minioadmin
+  MEDIA_STORAGE_S3_SECRET_ACCESS_KEY: minioadmin
+  MEDIA_STORAGE_S3_REGION: us-east-1
+  MEDIA_STORAGE_S3_FORCE_PATH_STYLE: "true"
+
+x-imserver-depends: &imserver_depends
+  postgres:
+    condition: service_healthy
+  redpanda:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+  redpanda-init:
+    condition: service_completed_successfully
+  minio-init:
+    condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: imserver_smoke
+      POSTGRES_USER: imserver
+      POSTGRES_PASSWORD: imserver_password
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U imserver -d imserver_smoke"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.3.1
+    command:
+      - redpanda
+      - start
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --overprovisioned
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://127.0.0.1:19092
+    ports:
+      - "19092:19092"
+      - "19644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health --brokers=127.0.0.1:9092 --exit-when-healthy --timeout=10s >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 15s
+      retries: 30
+
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.3.1
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "rpk topic create conversation-domain-events --brokers redpanda:9092 --partitions 3 --replicas 1 || true;
+       rpk topic create conversation-domain-events-dead-letter --brokers redpanda:9092 --partitions 3 --replicas 1 || true"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "mc alias set smoke http://minio:9000 minioadmin minioadmin &&
+       mc mb --ignore-existing smoke/imserver-media"
+
+  ops:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: ops-a
+      IM_AUTO_MIGRATE_ON_START: "true"
+    depends_on: *imserver_depends
+    command: ["ops", "--env", "production"]
+
+  gateway:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: gateway-a
+      IM_TCP_ENABLED: "true"
+      IM_TCP_HOST: "0.0.0.0"
+      IM_TCP_PORT: "9001"
+    depends_on: *imserver_depends
+    ports:
+      - "8080:8080"
+      - "9001:9001"
+    command: ["serve", "--env", "production", "--hostname", "0.0.0.0", "--port", "8080", "--role", "gateway"]
+
+  command-api:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: command-a
+      IM_COMMAND_NODE_ID: command-a
+      IM_TCP_ENABLED: "false"
+    depends_on: *imserver_depends
+    ports:
+      - "8081:8080"
+    command: ["serve", "--env", "production", "--hostname", "0.0.0.0", "--port", "8080", "--role", "command-api"]
+
+  query-api:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: query-a
+      IM_RUNTIME_ROLE: query-api
+      IM_TCP_ENABLED: "false"
+    depends_on: *imserver_depends
+    ports:
+      - "8082:8080"
+    command: ["serve", "--env", "production", "--hostname", "0.0.0.0", "--port", "8080"]
+
+  outbox-relay:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: outbox-relay-a
+      IM_TCP_ENABLED: "false"
+    depends_on: *imserver_depends
+    command: ["outbox-relay", "--env", "production"]
+
+  stream-consumer-summary:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: stream-summary-a
+      IM_TCP_ENABLED: "false"
+      IM_STREAM_CONSUMER_GROUPS: summary-projection-consumer
+    depends_on: *imserver_depends
+    command: ["stream-consumer", "--env", "production"]
+
+  stream-consumer-changes:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: stream-changes-a
+      IM_TCP_ENABLED: "false"
+      IM_STREAM_CONSUMER_GROUPS: changes-log-consumer
+    depends_on: *imserver_depends
+    command: ["stream-consumer", "--env", "production"]
+
+  stream-consumer-search:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: stream-search-a
+      IM_TCP_ENABLED: "false"
+      IM_STREAM_CONSUMER_GROUPS: search-index-consumer
+    depends_on: *imserver_depends
+    command: ["stream-consumer", "--env", "production"]
+
+  stream-consumer-notification:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: stream-notification-a
+      IM_TCP_ENABLED: "false"
+      IM_STREAM_CONSUMER_GROUPS: notification-consumer
+    depends_on: *imserver_depends
+    command: ["stream-consumer", "--env", "production"]
+
+  stream-consumer-repair:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: stream-repair-a
+      IM_TCP_ENABLED: "false"
+      IM_STREAM_CONSUMER_GROUPS: repair-replay-consumer
+    depends_on: *imserver_depends
+    command: ["stream-consumer", "--env", "production"]
