@@ -48,6 +48,153 @@ extension AuthManager {
         )
     }
 
+    func favoriteIMMessage(_ messageID: String, in conversationID: String) async -> Bool {
+        await conversationRuntimeController.favoriteMessage(messageID: messageID, in: conversationID)
+    }
+
+    func unfavoriteIMMessage(_ messageID: String, in conversationID: String) async -> Bool {
+        await conversationRuntimeController.unfavoriteMessage(messageID: messageID, in: conversationID)
+    }
+
+    func deleteIMMessagesForSelf(_ messageIDs: [String], in conversationID: String) async -> Bool {
+        await conversationRuntimeController.deleteMessagesForSelf(messageIDs: messageIDs, in: conversationID)
+    }
+
+    func clearIMConversationForSelf(_ conversationID: String) async -> Bool {
+        await conversationRuntimeController.clearConversationForSelf(conversationID)
+    }
+
+    func deleteIMConversationForSelf(_ conversationID: String) async -> Bool {
+        await conversationRuntimeController.deleteConversationForSelf(conversationID)
+    }
+
+    func forwardIMMessages(_ messageIDs: [String], from conversationID: String, to targetConversationIDs: [String]) async -> Bool {
+        await conversationRuntimeController.forwardMessages(
+            messageIDs: messageIDs,
+            from: conversationID,
+            to: targetConversationIDs
+        )
+    }
+
+    func createIMGroupInvite(conversationID: String, expiresInSeconds: Int? = nil) async -> IMGroupInviteResponseBody? {
+        await conversationRuntimeController.createGroupInvite(
+            conversationID: conversationID,
+            expiresInSeconds: expiresInSeconds
+        )
+    }
+
+    func updateMyIMMemberNickname(conversationID: String, memberNickname: String?) async -> Bool {
+        await conversationRuntimeController.updateMyMemberNickname(conversationID: conversationID, memberNickname: memberNickname)
+    }
+
+    func fetchIMGroupInvites(conversationID: String) async -> [IMGroupInviteResponseBody] {
+        await conversationRuntimeController.fetchGroupInvites(conversationID: conversationID)
+    }
+
+    func revokeIMGroupInvite(conversationID: String, token: String) async -> Bool {
+        await conversationRuntimeController.revokeGroupInvite(conversationID: conversationID, token: token)
+    }
+
+    func fetchIMFavorites(
+        conversationID: UUID? = nil,
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) async -> IMFavoritePageResponseBody? {
+        do {
+            let page = try await sessionClient.fetchIMFavorites(
+                conversationID: conversationID,
+                cursor: cursor,
+                limit: limit
+            )
+            markServerOnline()
+            return page
+        } catch {
+            await handleIMDataRequestError(error)
+            return nil
+        }
+    }
+
+    func blockUser(_ userID: UUID, reason: String? = nil) async -> Bool {
+        do {
+            let block = try await sessionClient.blockUser(userID: userID, reason: reason)
+            blockedUsers.removeAll { $0.blockedUserID == block.blockedUserID }
+            blockedUsers.append(block)
+            blockedUsers.sort { $0.createdAt > $1.createdAt }
+            markServerOnline()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func unblockUser(_ userID: UUID) async -> Bool {
+        do {
+            _ = try await sessionClient.unblockUser(userID: userID)
+            blockedUsers.removeAll { $0.blockedUserID == userID }
+            markServerOnline()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func loadBlockedUsers() async {
+        guard currentUser != nil else {
+            return
+        }
+
+        isLoadingBlockedUsers = true
+        defer {
+            isLoadingBlockedUsers = false
+        }
+
+        do {
+            blockedUsers = try await sessionClient.fetchBlocks()
+                .sorted { $0.createdAt > $1.createdAt }
+            markServerOnline()
+        } catch {
+            await handleIMDataRequestError(error)
+        }
+    }
+
+    func createReport(
+        targetType: String,
+        targetID: String,
+        conversationID: UUID? = nil,
+        messageID: UUID? = nil,
+        reason: String,
+        detail: String? = nil
+    ) async -> Bool {
+        do {
+            _ = try await sessionClient.createReport(
+                targetType: targetType,
+                targetID: targetID,
+                conversationID: conversationID,
+                messageID: messageID,
+                reason: reason,
+                detail: detail
+            )
+            markServerOnline()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func registerPushDeviceToken(_ token: String) async -> Bool {
+        do {
+            _ = try await sessionClient.registerPushDeviceToken(token: token)
+            markServerOnline()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
     func downloadIMMedia(
         _ asset: IMMediaAsset,
         to destinationURL: URL,
@@ -94,7 +241,24 @@ extension AuthManager {
         scheduleIMConversationCachePersist()
         await conversationRuntimeController.loadConversationMembers(for: conversationID)
         await conversationRuntimeController.loadMessagesIfNeeded(for: conversationID)
+        await conversationRuntimeController.loadReceiptSummary(for: conversationID)
         await conversationRuntimeController.syncConversationAfterOpen(conversationID)
+    }
+
+    func loadIMConversationMembers(conversationID: String, query: String = "") async {
+        await conversationRuntimeController.loadConversationMembers(
+            for: conversationID,
+            query: query,
+            reset: true
+        )
+    }
+
+    func loadMoreIMConversationMembers(conversationID: String) async {
+        await conversationRuntimeController.loadMoreConversationMembers(for: conversationID)
+    }
+
+    func loadIMReceiptSummary(conversationID: String) async {
+        await conversationRuntimeController.loadReceiptSummary(for: conversationID)
     }
 
     func createIMConversation(kind: IMConversationKind, title: String, memberEmails: [String]) async -> Bool {
@@ -206,7 +370,8 @@ extension AuthManager {
         _ conversationID: String,
         title: String? = nil,
         notice: String? = nil,
-        avatarPreset: IMConversationAvatarPreset? = nil
+        avatarPreset: IMConversationAvatarPreset? = nil,
+        muteAll: Bool? = nil
     ) async -> Bool {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -220,7 +385,8 @@ extension AuthManager {
                 conversationID: trimmedConversationID,
                 title: title?.trimmingCharacters(in: .whitespacesAndNewlines),
                 notice: notice?.trimmingCharacters(in: .whitespacesAndNewlines),
-                avatarPreset: avatarPreset
+                avatarPreset: avatarPreset,
+                muteAll: muteAll
             )
             markServerOnline()
             conversationRuntimeController.applyConversationSummaryReadModel([conversation])

@@ -11,6 +11,8 @@ public final class IMConversationStore: ObservableObject {
     @Published public internal(set) var hasMoreConversationSummaries = false
     @Published public internal(set) var isLoadingMoreConversationSummaries = false
     @Published public internal(set) var isLoadingMembers = false
+    @Published public internal(set) var memberPageStates: [String: IMConversationMemberPageState] = [:]
+    @Published public internal(set) var receiptSummaries: [String: IMConversationReceiptSummaryResponseBody] = [:]
     @Published public internal(set) var isLoadingMessages = false
     @Published public internal(set) var searchText = ""
     @Published public internal(set) var replyJumpConversationID: String?
@@ -162,6 +164,7 @@ public final class IMConversationStore: ObservableObject {
                 directPeer: directPeer,
                 notice: response.notice,
                 avatarPreset: response.avatarPreset,
+                muteAll: response.muteAll,
                 memberCount: response.memberCount,
                 memberUserIDs: response.memberUserIDs.sorted { $0.uuidString < $1.uuidString },
                 members: existing?.members ?? [],
@@ -247,6 +250,37 @@ public final class IMConversationStore: ObservableObject {
                 updatedServerUnreadCount: updatedUnread
             )
         }
+    }
+
+    public func removeMessages(ids messageIDs: Set<String>, from conversationID: String) {
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }),
+              !messageIDs.isEmpty
+        else {
+            return
+        }
+        conversations[index].messages.removeAll { message in
+            messageIDs.contains(message.id) ||
+                message.serverMessageID.map(messageIDs.contains) == true
+        }
+        conversations[index].lastMessagePreviewText = messageTimelineState.latestPreviewText(
+            in: conversations[index].messages,
+            fallback: ""
+        )
+        conversations[index].updatedAt = messageTimelineState.latestUpdatedAt(
+            in: conversations[index].messages,
+            fallback: conversations[index].updatedAt
+        )
+    }
+
+    public func clearMessages(in conversationID: String) {
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
+            return
+        }
+
+        conversations[index].messages.removeAll()
+        conversations[index].lastMessagePreviewText = ""
+        conversations[index].serverUnreadCount = 0
+        conversations[index].localUnreadDelta = 0
     }
 
     public func applyServerSummaryReadStates(_ responses: [IMConversationSummaryResponseBody]) {
@@ -335,10 +369,46 @@ public final class IMConversationStore: ObservableObject {
             removeConversation(id: conversationID)
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
-        case .summaryUpdated:
+        case .summaryUpdated, .conversationSettingsChanged, .inviteChanged:
             // summary 与 timeline 允许短暂错位；这里只收敛列表权威字段，不假设消息窗口同步刷新。
             applyConversationSummaryContent(payload.conversation)
             applyServerSummaryReadState(payload.conversation)
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
+        case .messageFavoriteChanged:
+            applyConversationSummaryContent(payload.conversation)
+            applyServerSummaryReadState(payload.conversation)
+            if payload.favoriteChangedMessageID != nil || payload.isFavorited != nil {
+                statusMessage = nil
+            }
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
+        case .messageVisibilityChanged:
+            applyConversationSummaryContent(payload.conversation)
+            applyServerSummaryReadState(payload.conversation)
+            var eventMessageIDs = Set(payload.messageIDs.map(\.uuidString))
+            if let message = payload.message {
+                eventMessageIDs.insert(message.id.uuidString)
+            }
+            if !eventMessageIDs.isEmpty {
+                removeMessages(
+                    ids: eventMessageIDs,
+                    from: conversationID
+                )
+            }
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
+        case .conversationVisibilityChanged:
+            switch payload.visibilityAction {
+            case .conversationCleared:
+                applyConversationSummaryContent(payload.conversation)
+                applyServerSummaryReadState(payload.conversation)
+                clearMessages(in: conversationID)
+            case .conversationDeleted:
+                removeConversation(id: conversationID)
+            case .messageHidden, .none:
+                removeConversation(id: conversationID)
+            }
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .messageUpdated:
@@ -408,20 +478,80 @@ public final class IMConversationStore: ObservableObject {
         }
 
         let index = ensureConversationIndex(for: trimmedConversationID)
-        let members = responses
-            .map {
-                IMConversationMember(
-                    id: $0.id,
-                    email: $0.email,
-                    role: $0.role
-                )
-            }
+        let members = Self.members(from: responses)
             .sorted(by: sortMembers)
 
         conversations[index].members = members
         conversations[index].memberUserIDs = members.map(\.id).sorted { $0.uuidString < $1.uuidString }
         conversations[index].memberCount = members.count
         statusMessage = nil
+    }
+
+    public func applyMemberPage(
+        _ response: IMConversationMemberPageResponseBody,
+        in conversationID: String,
+        query: String,
+        appending: Bool
+    ) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return
+        }
+
+        let newMembers = Self.members(from: response.items)
+        let previousItems = appending ? memberPageStates[trimmedConversationID]?.items ?? [] : []
+        let mergedMembers = Self.uniqueMembers(previousItems + newMembers)
+
+        memberPageStates[trimmedConversationID] = IMConversationMemberPageState(
+            items: mergedMembers,
+            query: query,
+            nextCursor: response.nextCursor,
+            total: response.total,
+            limit: response.limit,
+            isLoading: false,
+            isLoadingMore: false
+        )
+
+        let index = ensureConversationIndex(for: trimmedConversationID)
+        let sortedMembers = mergedMembers.sorted(by: sortMembers)
+        conversations[index].members = sortedMembers
+        conversations[index].memberUserIDs = sortedMembers.map(\.id).sorted { $0.uuidString < $1.uuidString }
+        conversations[index].memberCount = response.total
+        statusMessage = nil
+    }
+
+    public func setMemberPageLoading(
+        conversationID: String,
+        query: String,
+        isLoading: Bool,
+        isLoadingMore: Bool = false
+    ) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return
+        }
+
+        var state = memberPageStates[trimmedConversationID] ?? IMConversationMemberPageState(query: query)
+        state.query = query
+        state.isLoading = isLoading
+        state.isLoadingMore = isLoadingMore
+        memberPageStates[trimmedConversationID] = state
+        setLoadingMembers(isLoading || isLoadingMore)
+    }
+
+    public func memberPageState(for conversationID: String) -> IMConversationMemberPageState {
+        memberPageStates[conversationID] ?? IMConversationMemberPageState()
+    }
+
+    public func setReceiptSummary(
+        _ summary: IMConversationReceiptSummaryResponseBody,
+        for conversationID: String
+    ) {
+        receiptSummaries[conversationID] = summary
+    }
+
+    public func receiptSummary(for conversationID: String) -> IMConversationReceiptSummaryResponseBody? {
+        receiptSummaries[conversationID]
     }
 
     public func updateDraft(_ text: String, for conversationID: String) {
@@ -503,7 +633,7 @@ public final class IMConversationStore: ObservableObject {
             senderUserID: senderUserID,
             deliveryState: .sending,
             shouldRegisterPendingRequest: true
-        )
+        ).request
     }
 
     @discardableResult
@@ -519,7 +649,7 @@ public final class IMConversationStore: ObservableObject {
             senderUserID: senderUserID,
             deliveryState: .queued(message: message),
             shouldRegisterPendingRequest: false
-        ) != nil
+        ).placeholder != nil
     }
 
     public func prepareOutgoingReply(
@@ -537,7 +667,7 @@ public final class IMConversationStore: ObservableObject {
             senderUserID: senderUserID,
             deliveryState: .sending,
             shouldRegisterPendingRequest: true
-        )
+        ).request
     }
 
     @discardableResult
@@ -557,7 +687,7 @@ public final class IMConversationStore: ObservableObject {
             senderUserID: senderUserID,
             deliveryState: .queued(message: message),
             shouldRegisterPendingRequest: false
-        ) != nil
+        ).placeholder != nil
     }
 
     public func stageOutgoingMediaUpload(
@@ -638,7 +768,7 @@ public final class IMConversationStore: ObservableObject {
             conversationID: conversationID,
             deliveryState: .sending,
             shouldRegisterPendingRequest: true
-        )
+        ).request
     }
 
     @discardableResult
@@ -654,7 +784,7 @@ public final class IMConversationStore: ObservableObject {
             conversationID: conversationID,
             deliveryState: .queued(message: message),
             shouldRegisterPendingRequest: false
-        ) != nil
+        ).didUpdate
     }
 
     public func recoverableOutgoingMediaUploads() -> [IMRecoverableOutgoingMediaUpload] {
@@ -687,7 +817,7 @@ public final class IMConversationStore: ObservableObject {
         deliveryState: IMMessageDeliveryState,
         shouldRegisterPendingRequest: Bool,
         localTransferState: IMMessageLocalTransferState? = nil
-    ) -> IMOutgoingMessageRequest? {
+    ) -> (placeholder: IMOutgoingMediaPlaceholder?, request: IMOutgoingMessageRequest?) {
         appendOutgoingMessage(
             content,
             conversationID: conversationID,
@@ -695,7 +825,7 @@ public final class IMConversationStore: ObservableObject {
             deliveryState: deliveryState,
             shouldRegisterPendingRequest: shouldRegisterPendingRequest,
             localTransferState: localTransferState
-        ).request
+        )
     }
 
     private func prepareOutgoingText(
@@ -704,11 +834,11 @@ public final class IMConversationStore: ObservableObject {
         senderUserID: UUID,
         deliveryState: IMMessageDeliveryState,
         shouldRegisterPendingRequest: Bool
-    ) -> IMOutgoingMessageRequest? {
+    ) -> (placeholder: IMOutgoingMediaPlaceholder?, request: IMOutgoingMessageRequest?) {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else {
             statusMessage = "消息内容不能为空。"
-            return nil
+            return (nil, nil)
         }
 
         return prepareOutgoingMessage(
@@ -1399,6 +1529,7 @@ public final class IMConversationStore: ObservableObject {
             directPeer: directPeer,
             notice: response.notice,
             avatarPreset: response.avatarPreset,
+            muteAll: response.muteAll,
             memberCount: response.memberCount,
             memberUserIDs: response.memberUserIDs.sorted { $0.uuidString < $1.uuidString },
             members: (existing?.members ?? []).filter { response.memberUserIDs.contains($0.id) },
@@ -1642,6 +1773,29 @@ public final class IMConversationStore: ObservableObject {
         return lhs.email < rhs.email
     }
 
+    private static func members(from responses: [IMConversationMemberResponseBody]) -> [IMConversationMember] {
+        responses.map {
+            IMConversationMember(
+                id: $0.id,
+                email: $0.email,
+                displayName: $0.displayName,
+                avatarPreset: $0.avatarPreset,
+                role: $0.role,
+                memberNickname: $0.memberNickname,
+                displayTitle: $0.displayTitle
+            )
+        }
+    }
+
+    private static func uniqueMembers(_ members: [IMConversationMember]) -> [IMConversationMember] {
+        var seenIDs = Set<UUID>()
+        var result: [IMConversationMember] = []
+        for member in members where seenIDs.insert(member.id).inserted {
+            result.append(member)
+        }
+        return result
+    }
+
     private func memberRolePriority(_ role: IMConversationMemberRole) -> Int {
         switch role {
         case .owner:
@@ -1857,23 +2011,23 @@ public final class IMConversationStore: ObservableObject {
         conversationID: String,
         deliveryState: IMMessageDeliveryState,
         shouldRegisterPendingRequest: Bool
-    ) -> IMOutgoingMessageRequest? {
+    ) -> (didUpdate: Bool, request: IMOutgoingMessageRequest?) {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedLocalMessageID = localMessageID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty, !trimmedLocalMessageID.isEmpty else {
-            return nil
+            return (false, nil)
         }
         guard let conversationIndex = conversations.firstIndex(where: { $0.id == trimmedConversationID }),
               let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == trimmedLocalMessageID })
         else {
             statusMessage = "附件消息不存在。"
-            return nil
+            return (false, nil)
         }
 
         let content = mediaContent(for: asset)
         guard content.isUserComposable else {
             statusMessage = "当前消息类型不支持发送。"
-            return nil
+            return (false, nil)
         }
 
         let requestID = UUID()
@@ -1894,10 +2048,10 @@ public final class IMConversationStore: ObservableObject {
         sortConversations()
 
         guard shouldRegisterPendingRequest else {
-            return nil
+            return (true, nil)
         }
 
-        return IMOutgoingMessageRequest(
+        let request = IMOutgoingMessageRequest(
             requestID: requestID,
             localMessageID: message.id,
             payload: IMTCPMessagePayload(
@@ -1910,6 +2064,7 @@ public final class IMConversationStore: ObservableObject {
                 content: content
             )
         )
+        return (true, request)
     }
 
     private func mediaContent(for asset: IMMediaAsset) -> IMMessageContent {

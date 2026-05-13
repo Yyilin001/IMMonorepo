@@ -59,27 +59,129 @@ final class AuthManager: ObservableObject {
         case failed(message: String)
     }
 
-    @Published private(set) var phase: Phase = .launching
-    @Published private(set) var isBusy = false
-    @Published private(set) var sessions: [SessionSnapshot] = []
-    @Published private(set) var isLoadingSessions = false
-    @Published private(set) var sessionsMessage: String?
-    @Published private(set) var contacts: [ContactResponseBody] = []
-    @Published private(set) var isLoadingContacts = false
-    @Published private(set) var contactsMessage: String?
-    @Published private(set) var contactRequests: [ContactRequestResponseBody] = []
-    @Published private(set) var unseenIncomingContactRequestCount = 0
-    @Published private(set) var isLoadingContactRequests = false
-    @Published private(set) var contactRequestsLoadMessage: String?
-    @Published private(set) var contactRequestActionMessage: String?
-    @Published private(set) var isUpdatingProfile = false
-    @Published private(set) var profileMessage: String?
-    @Published private(set) var acceptingRequestIDs: Set<UUID> = []
-    @Published private(set) var decliningRequestIDs: Set<UUID> = []
-    @Published private(set) var cancellingRequestIDs: Set<UUID> = []
-    @Published private(set) var directConversationRelationshipActionMessages: [String: String] = [:]
-    @Published private(set) var sendingDirectConversationFriendRequestConversationIDs: Set<String> = []
-    @Published private(set) var serverStatus: ServerStatus = .unknown
+    let appRootStore: AppRootStore
+    let sessionStore: AppSessionStore
+    let contactStore: ContactStore
+
+    var phase: Phase {
+        get { sessionStore.phase }
+        set { sessionStore.phase = newValue }
+    }
+
+    var isBusy: Bool {
+        get { sessionStore.isBusy }
+        set { sessionStore.isBusy = newValue }
+    }
+
+    var sessions: [SessionSnapshot] {
+        get { sessionStore.sessions }
+        set { sessionStore.sessions = newValue }
+    }
+
+    var isLoadingSessions: Bool {
+        get { sessionStore.isLoadingSessions }
+        set { sessionStore.isLoadingSessions = newValue }
+    }
+
+    var sessionsMessage: String? {
+        get { sessionStore.sessionsMessage }
+        set { sessionStore.sessionsMessage = newValue }
+    }
+
+    var contacts: [ContactResponseBody] {
+        get { contactStore.contacts }
+        set { contactStore.contacts = newValue }
+    }
+
+    var isLoadingContacts: Bool {
+        get { contactStore.isLoadingContacts }
+        set { contactStore.isLoadingContacts = newValue }
+    }
+
+    var contactsMessage: String? {
+        get { contactStore.contactsMessage }
+        set { contactStore.contactsMessage = newValue }
+    }
+
+    var contactRequests: [ContactRequestResponseBody] {
+        get { contactStore.contactRequests }
+        set { contactStore.contactRequests = newValue }
+    }
+
+    var unseenIncomingContactRequestCount: Int {
+        get { contactStore.unseenIncomingContactRequestCount }
+        set { contactStore.unseenIncomingContactRequestCount = newValue }
+    }
+
+    var isLoadingContactRequests: Bool {
+        get { contactStore.isLoadingContactRequests }
+        set { contactStore.isLoadingContactRequests = newValue }
+    }
+
+    var contactRequestsLoadMessage: String? {
+        get { contactStore.contactRequestsLoadMessage }
+        set { contactStore.contactRequestsLoadMessage = newValue }
+    }
+
+    var contactRequestActionMessage: String? {
+        get { contactStore.contactRequestActionMessage }
+        set { contactStore.contactRequestActionMessage = newValue }
+    }
+
+    var isUpdatingProfile: Bool {
+        get { sessionStore.isUpdatingProfile }
+        set { sessionStore.isUpdatingProfile = newValue }
+    }
+
+    var profileMessage: String? {
+        get { sessionStore.profileMessage }
+        set { sessionStore.profileMessage = newValue }
+    }
+
+    var acceptingRequestIDs: Set<UUID> {
+        get { contactStore.acceptingRequestIDs }
+        set { contactStore.acceptingRequestIDs = newValue }
+    }
+
+    var decliningRequestIDs: Set<UUID> {
+        get { contactStore.decliningRequestIDs }
+        set { contactStore.decliningRequestIDs = newValue }
+    }
+
+    var cancellingRequestIDs: Set<UUID> {
+        get { contactStore.cancellingRequestIDs }
+        set { contactStore.cancellingRequestIDs = newValue }
+    }
+
+    var directConversationRelationshipActionMessages: [String: String] {
+        get { contactStore.directConversationRelationshipActionMessages }
+        set { contactStore.directConversationRelationshipActionMessages = newValue }
+    }
+
+    var sendingDirectConversationFriendRequestConversationIDs: Set<String> {
+        get { contactStore.sendingDirectConversationFriendRequestConversationIDs }
+        set { contactStore.sendingDirectConversationFriendRequestConversationIDs = newValue }
+    }
+
+    var blockedUsers: [UserBlockResponseBody] {
+        get { contactStore.blockedUsers }
+        set { contactStore.blockedUsers = newValue }
+    }
+
+    var isLoadingBlockedUsers: Bool {
+        get { contactStore.isLoadingBlockedUsers }
+        set { contactStore.isLoadingBlockedUsers = newValue }
+    }
+
+    var blockedUserIDs: Set<UUID> {
+        Set(blockedUsers.map(\.blockedUserID))
+    }
+
+    var serverStatus: ServerStatus {
+        get { sessionStore.serverStatus }
+        set { sessionStore.serverStatus = newValue }
+    }
+
     @Published private(set) var imConnectionStatus: IMConnectionStatus = .disconnected
     @Published private(set) var isFlushingQueuedIMTextMessages = false
 
@@ -92,32 +194,21 @@ final class AuthManager: ObservableObject {
     }
 
     var incomingPendingContactRequests: [ContactRequestResponseBody] {
-        guard let currentUserID = currentUser?.id else {
-            return []
-        }
-
-        return contactRequests
-            .filter { $0.status == .pending && $0.addressee.id == currentUserID }
-            .sorted(by: sessionFacade.sortPendingNewestFirst)
+        contactStore.incomingPendingContactRequests(
+            currentUserID: currentUser?.id,
+            sort: sessionFacade.sortPendingNewestFirst
+        )
     }
 
     var outgoingPendingContactRequests: [ContactRequestResponseBody] {
-        guard let currentUserID = currentUser?.id else {
-            return []
-        }
-
-        return contactRequests
-            .filter { $0.status == .pending && $0.requester.id == currentUserID }
-            .sorted(by: sessionFacade.sortPendingNewestFirst)
+        contactStore.outgoingPendingContactRequests(
+            currentUserID: currentUser?.id,
+            sort: sessionFacade.sortPendingNewestFirst
+        )
     }
 
     var recentResolvedContactRequests: [ContactRequestResponseBody] {
-        Array(
-            contactRequests
-                .filter { $0.status != .pending }
-                .sorted(by: sessionFacade.sortResolvedNewestFirst)
-                .prefix(IMHistoryPage.resolvedContactRequestHistoryLimit)
-        )
+        contactStore.recentResolvedContactRequests(sort: sessionFacade.sortResolvedNewestFirst)
     }
 
     var pendingIncomingContactRequestCount: Int {
@@ -138,10 +229,10 @@ final class AuthManager: ObservableObject {
 
     let sessionClient: SessionClient
     private let sessionFacade: SessionFacade
-    private let contactStateStore = ContactStateStore()
     private let openIMConnection: @Sendable () async throws -> IMTCPConnection
     private let backgroundTransferMonitor: any BackgroundTransferMonitoring
     private let imConversationCache: IMConversationCacheHandler
+    private var storeCancellables: Set<AnyCancellable> = []
     private var restoreTask: Task<Void, Never>?
     private var restoreGeneration: UInt64 = 0
     private var imConversationListTask: Task<Void, Never>?
@@ -151,12 +242,20 @@ final class AuthManager: ObservableObject {
     private var lastIMConversationSummaryRefreshAt: Date?
     private var imConversationSummarySyncToken: String?
     private var latestIMConversationSummaries: [IMConversationSummaryResponseBody] = []
-    private var lastContactStateRefreshAt: Date?
-    var lastSeenIncomingContactRequestAt: Date?
+    private var lastContactStateRefreshAt: Date? {
+        get { contactStore.lastContactStateRefreshAt }
+        set { contactStore.lastContactStateRefreshAt = newValue }
+    }
+    var lastSeenIncomingContactRequestAt: Date? {
+        get { contactStore.lastSeenIncomingContactRequestAt }
+        set { contactStore.lastSeenIncomingContactRequestAt = newValue }
+    }
     let probeManager: ProbeManager
     let fileTransferManager: FileTransferManager
     let imConversationStore: IMConversationStore
     lazy var conversationRuntimeController = makeConversationRuntimeController()
+    lazy var conversationPresentationStore = IMConversationPresentationStore(authManager: self)
+    lazy var conversationRuntimeStore = IMConversationRuntimeStore(authManager: self)
 
     convenience init(
         network: NetworkEnvironment,
@@ -164,8 +263,8 @@ final class AuthManager: ObservableObject {
         tokenStore: KeychainStore = KeychainStore(),
         userCache: UserDefaultsSessionCache = UserDefaultsSessionCache(),
         backgroundTransferMonitor: any BackgroundTransferMonitoring = BackgroundTransferCoordinator.shared,
-        imConversationCache: IMConversationCacheHandler = SwiftDataIMConversationCache.makeDefaultHandler(),
-        contactStateCache: ContactStateCacheHandler = SwiftDataContactStateCache.makeDefaultHandler(),
+        imConversationCache: IMConversationCacheHandler = ClientPersistenceFactory().makeIMConversationCacheHandler(),
+        contactStateCache: ContactStateCacheHandler = ClientPersistenceFactory().makeContactStateCacheHandler(),
         shouldRestoreSession: Bool = true
     ) {
         let sessionClient = SessionClient(
@@ -205,7 +304,7 @@ final class AuthManager: ObservableObject {
         self.init(
             sessionClient: sessionClient,
             openIMConnection: openIMConnection ?? {
-                fatalError("Explicit IM connection opener is required when no openIMConnection closure is provided.")
+                preconditionFailure("Explicit IM connection opener is required when no openIMConnection closure is provided.")
             },
             backgroundTransferMonitor: backgroundTransferMonitor,
             imConversationCache: imConversationCache,
@@ -235,21 +334,46 @@ final class AuthManager: ObservableObject {
         self.openIMConnection = openIMConnection
         self.backgroundTransferMonitor = backgroundTransferMonitor
         self.imConversationCache = imConversationCache
+        let sessionStore = AppSessionStore()
+        let contactStore = ContactStore()
+        let conversationStore = IMConversationStore()
+        self.sessionStore = sessionStore
+        self.contactStore = contactStore
+        self.imConversationStore = conversationStore
+        self.appRootStore = AppRootStore(
+            sessionStore: sessionStore,
+            contactStore: contactStore,
+            conversationStore: conversationStore
+        )
         self.probeManager = ProbeManager(sessionClient: sessionClient)
         self.fileTransferManager = FileTransferManager(
             fileAPI: FileAPI(sessionClient: sessionClient),
             sessionClient: sessionClient,
             backgroundTransferMonitor: backgroundTransferMonitor
         )
-        self.imConversationStore = IMConversationStore()
         self.probeManager.delegate = self
         self.fileTransferManager.delegate = self
+        bindChildStores()
 
         if shouldRestoreSession {
             scheduleRestoreSession()
         } else {
             phase = .signedOut(message: nil)
         }
+    }
+
+    private func bindChildStores() {
+        sessionStore.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &storeCancellables)
+
+        contactStore.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &storeCancellables)
     }
 
     private func makeConversationRuntimeController() -> ConversationRuntimeController {
@@ -742,10 +866,7 @@ final class AuthManager: ObservableObject {
     }
 
     var currentUser: AuthUser? {
-        guard case .signedIn(let user) = phase else {
-            return nil
-        }
-        return user
+        sessionStore.currentUser
     }
 
     func conversationIdentityPresentation(
@@ -1083,6 +1204,8 @@ final class AuthManager: ObservableObject {
         decliningRequestIDs = []
         cancellingRequestIDs = []
         sendingDirectConversationFriendRequestConversationIDs = []
+        blockedUsers = []
+        isLoadingBlockedUsers = false
         serverStatus = .unknown
         imConnectionStatus = .disconnected
         phase = .signedOut(message: message)
@@ -1097,6 +1220,7 @@ final class AuthManager: ObservableObject {
             await self?.restoreContactStateCacheIfAvailable(for: user)
             await self?.reloadContacts()
             await self?.reloadContactRequests()
+            await self?.loadBlockedUsers()
         }
     }
 
@@ -1247,6 +1371,7 @@ final class AuthManager: ObservableObject {
 
         await reloadContacts()
         await reloadContactRequests()
+        await loadBlockedUsers()
     }
 
     private func scheduleContactStateCorrection(force: Bool = false, reason _: String? = nil) {
@@ -1359,69 +1484,38 @@ final class AuthManager: ObservableObject {
     }
 
     private func upsertContact(_ contact: ContactResponseBody) {
-        contactStateStore.upsertContact(contact, contacts: &contacts)
+        contactStore.upsertContact(contact)
     }
 
     private func applyContactEvent(_ payload: IMTCPContactEventPayload) {
-        guard let currentUser else {
-            return
-        }
-
-        var didApply = false
-
-        switch payload.eventType {
-        case .friendRequestCreated:
-            guard let request = payload.request,
-                  sessionFacade.isRequestRelevant(request, to: currentUser.id)
-            else {
-                scheduleContactStateCorrection(reason: "friend_request_created payload is incomplete")
-                return
+        let result = contactStore.apply(
+            event: payload,
+            currentUserID: currentUser?.id,
+            isRelevant: { request, currentUserID in
+                sessionFacade.isRequestRelevant(request, to: currentUserID)
+            },
+            normalize: { requests, currentUserID in
+                sessionFacade.normalizeRequests(requests, currentUserID: currentUserID)
+            },
+            sortPendingNewestFirst: { lhs, rhs in
+                sessionFacade.sortPendingNewestFirst(lhs, rhs)
             }
+        )
 
-            upsertContactRequest(request)
-            didApply = true
-        case .friendRequestAccepted:
-            guard let request = payload.request,
-                  sessionFacade.isRequestRelevant(request, to: currentUser.id),
-                  let contact = payload.contact
-            else {
-                scheduleContactStateCorrection(reason: "friend_request_accepted payload is incomplete")
-                return
-            }
-
-            upsertContactRequest(request)
-            upsertContact(contact)
-            didApply = true
-        case .friendRequestDeclined, .friendRequestCancelled:
-            guard let request = payload.request,
-                  sessionFacade.isRequestRelevant(request, to: currentUser.id)
-            else {
-                scheduleContactStateCorrection(reason: "\(payload.eventType.rawValue) payload is incomplete")
-                return
-            }
-
-            upsertContactRequest(request)
-            didApply = true
-        case .contactRemoved:
-            guard let contactUserID = payload.contactUserID else {
-                scheduleContactStateCorrection(reason: "contact_removed payload is incomplete")
-                return
-            }
-
-            contactStateStore.removeContact(userID: contactUserID, contacts: &contacts)
-            didApply = true
-        }
-
-        if didApply {
+        switch result {
+        case .applied:
             scheduleContactStateCachePersist()
+        case .needsCorrection(let reason):
+            scheduleContactStateCorrection(reason: reason)
+        case .ignored:
+            break
         }
     }
 
     private func replaceContactRequests(_ requests: [ContactRequestResponseBody], currentUserID: UUID) {
-        contactStateStore.replaceRequests(
+        contactStore.replaceRequests(
             requests,
             currentUserID: currentUserID,
-            contactRequests: &contactRequests,
             normalize: { requests, currentUserID in
                 sessionFacade.normalizeRequests(requests, currentUserID: currentUserID)
             }
@@ -1434,10 +1528,9 @@ final class AuthManager: ObservableObject {
             return
         }
 
-        contactStateStore.upsertRequest(
+        contactStore.upsertRequest(
             request,
             currentUserID: currentUserID,
-            contactRequests: &contactRequests,
             isRelevant: { request, currentUserID in
                 sessionFacade.isRequestRelevant(request, to: currentUserID)
             },
@@ -1456,12 +1549,11 @@ final class AuthManager: ObservableObject {
         guard let currentUserID = currentUser?.id else {
             return
         }
-        contactStateStore.updateRequestStatus(
-            requestID: requestID,
+        contactStore.updateRequestStatus(
+            id: requestID,
             status: status,
             respondedAt: respondedAt,
             currentUserID: currentUserID,
-            contactRequests: &contactRequests,
             normalize: { requests, currentUserID in
                 sessionFacade.normalizeRequests(requests, currentUserID: currentUserID)
             }
@@ -1522,10 +1614,8 @@ final class AuthManager: ObservableObject {
             unseenIncomingContactRequestCount = 0
             return
         }
-        unseenIncomingContactRequestCount = contactStateStore.unseenIncomingRequestCount(
-            requests: contactRequests,
+        contactStore.recomputeIncomingUnread(
             currentUserID: currentUserID,
-            lastSeenIncomingContactRequestAt: lastSeenIncomingContactRequestAt,
             sortPendingNewestFirst: { lhs, rhs in
                 sessionFacade.sortPendingNewestFirst(lhs, rhs)
             }

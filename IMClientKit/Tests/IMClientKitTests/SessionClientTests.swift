@@ -815,7 +815,9 @@ struct SessionClientTests {
         _ = try await client.login(email: Self.userEmail, password: "password123", device: noDevice)
         let members = try await client.fetchIMConversationMembers(conversationID: conversationID.uuidString)
 
-        #expect(members.map(\.email) == ["peer@example.com", Self.userEmail])
+        #expect(members.items.map(\.email) == ["peer@example.com", Self.userEmail])
+        #expect(members.total == 2)
+        #expect(members.nextCursor == nil)
     }
 
     @Test func fetchIMMessagesUsesConversationHistoryEndpoint() async throws {
@@ -1163,16 +1165,21 @@ struct SessionClientTests {
 
     private static func imConversationMembersBody() throws -> Data {
         try HTTPFixtures.jsonBody(
-            [
-                IMConversationMemberResponseBody(
-                    id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
-                    email: "peer@example.com"
-                ),
-                IMConversationMemberResponseBody(
-                    id: userID,
-                    email: userEmail
-                )
-            ]
+            IMConversationMemberPageResponseBody(
+                items: [
+                    IMConversationMemberResponseBody(
+                        id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+                        email: "peer@example.com"
+                    ),
+                    IMConversationMemberResponseBody(
+                        id: userID,
+                        email: userEmail
+                    )
+                ],
+                nextCursor: nil,
+                total: 2,
+                limit: 50
+            )
         )
     }
 

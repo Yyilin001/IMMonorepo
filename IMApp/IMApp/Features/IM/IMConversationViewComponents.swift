@@ -3,6 +3,10 @@ import Combine
 import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
+#if canImport(UIKit)
+import UIKit
+import CoreImage
+#endif
 
 struct IMConversationMessageSearchSheet: View {
     @EnvironmentObject private var authManager: AuthManager
@@ -482,11 +486,13 @@ struct IMEditConversationMetadataSheet: View {
     let initialTitle: String
     let initialNotice: String
     let initialAvatarPreset: IMConversationAvatarPreset
-    let onSubmit: (String?, String?, IMConversationAvatarPreset) async -> Bool
+    let initialMuteAll: Bool
+    let onSubmit: (String?, String?, IMConversationAvatarPreset, Bool) async -> Bool
 
     @State private var title = ""
     @State private var notice = ""
     @State private var avatarPreset: IMConversationAvatarPreset = .ocean
+    @State private var muteAll = false
 
     var body: some View {
         Form {
@@ -505,6 +511,10 @@ struct IMEditConversationMetadataSheet: View {
                 .pickerStyle(.segmented)
             }
 
+            Section("发言权限") {
+                Toggle("全员禁言", isOn: $muteAll)
+            }
+
             if let message = submitter.message, !message.isEmpty {
                 Section {
                     IMInlineStatusBanner(message: message)
@@ -520,6 +530,7 @@ struct IMEditConversationMetadataSheet: View {
                 title = initialTitle
                 notice = initialNotice
                 avatarPreset = initialAvatarPreset
+                muteAll = initialMuteAll
             }
         }
         .toolbar {
@@ -539,7 +550,8 @@ struct IMEditConversationMetadataSheet: View {
                                 await onSubmit(
                                     title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : title.trimmingCharacters(in: .whitespacesAndNewlines),
                                     notice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : notice.trimmingCharacters(in: .whitespacesAndNewlines),
-                                    avatarPreset
+                                    avatarPreset,
+                                    muteAll
                                 )
                             }
                             if submitter.didSucceed {
@@ -553,6 +565,227 @@ struct IMEditConversationMetadataSheet: View {
     }
 }
 
+struct IMGroupInviteManagementSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var submitter = IMAsyncSubmitter()
+
+    let conversationID: String
+    let loadInvites: () async -> [IMGroupInviteResponseBody]
+    let createInvite: () async -> IMGroupInviteResponseBody?
+    let revokeInvite: (String) async -> Bool
+
+    @State private var invites: [IMGroupInviteResponseBody] = []
+    @State private var isLoading = false
+
+    var body: some View {
+        List {
+            Section {
+                Button {
+                    Task {
+                        await submitter.run(messageOnFailure: "创建邀请链接失败。") {
+                            if let invite = await createInvite() {
+                                invites.insert(invite, at: 0)
+                                return true
+                            }
+                            return false
+                        }
+                    }
+                } label: {
+                    Label("创建邀请链接", systemImage: "link.badge.plus")
+                }
+            }
+
+            Section("邀请链接") {
+                if isLoading {
+                    ProgressView()
+                } else if invites.isEmpty {
+                    Text("暂无邀请链接。")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(invites, id: \.token) { invite in
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(alignment: .top, spacing: 12) {
+                                IMInviteQRCodeView(text: invite.inviteURL)
+                                    .frame(width: 72, height: 72)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(invite.revokedAt == nil ? "可用邀请" : "已撤销")
+                                        .font(.headline)
+                                    Text(invite.inviteURL)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                    Text("使用 \(invite.useCount) 次 · \(invite.expiresAt.formatted(date: .abbreviated, time: .shortened)) 过期")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+
+                            HStack {
+                                Button {
+#if canImport(UIKit)
+                                    UIPasteboard.general.string = invite.inviteURL
+#endif
+                                    submitter.message = "已复制邀请链接。"
+                                } label: {
+                                    Label("复制", systemImage: "doc.on.doc")
+                                }
+
+                                if invite.revokedAt == nil {
+                                    Button(role: .destructive) {
+                                        Task {
+                                            await submitter.run(messageOnFailure: "撤销邀请失败。") {
+                                                await revokeInvite(invite.token)
+                                            }
+                                            await reload()
+                                        }
+                                    } label: {
+                                        Label("撤销", systemImage: "xmark.circle")
+                                    }
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        .padding(.vertical, 6)
+                    }
+                }
+            }
+
+            if let message = submitter.message, !message.isEmpty {
+                Section {
+                    IMInlineStatusBanner(message: message)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                }
+            }
+        }
+        .navigationTitle("邀请链接")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await reload()
+        }
+        .refreshable {
+            await reload()
+        }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("关闭") {
+                    dismiss()
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func reload() async {
+        isLoading = true
+        defer { isLoading = false }
+        invites = await loadInvites()
+    }
+}
+
+struct IMMemberNicknameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var submitter = IMAsyncSubmitter()
+
+    let initialNickname: String
+    let onSubmit: (String?) async -> Bool
+
+    @State private var nickname = ""
+
+    var body: some View {
+        Form {
+            Section("群昵称") {
+                TextField("留空使用资料名", text: $nickname)
+                    .textInputAutocapitalization(.never)
+            }
+
+            if let message = submitter.message, !message.isEmpty {
+                Section {
+                    IMInlineStatusBanner(message: message)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                }
+            }
+        }
+        .navigationTitle("我的群昵称")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            if nickname.isEmpty {
+                nickname = initialNickname
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("取消") {
+                    dismiss()
+                }
+            }
+
+            ToolbarItem(placement: .confirmationAction) {
+                if submitter.isSubmitting {
+                    ProgressView()
+                } else {
+                    Button("保存") {
+                        Task {
+                            let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+                            await submitter.run(messageOnFailure: "保存群昵称失败。") {
+                                await onSubmit(trimmed.isEmpty ? nil : trimmed)
+                            }
+                            if submitter.didSucceed {
+                                dismiss()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct IMInviteQRCodeView: View {
+    let text: String
+
+    var body: some View {
+#if canImport(UIKit)
+        if let image = qrImage {
+            Image(uiImage: image)
+                .interpolation(.none)
+                .resizable()
+                .scaledToFit()
+        } else {
+            Image(systemName: "qrcode")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+        }
+#else
+        Image(systemName: "qrcode")
+            .font(.largeTitle)
+            .foregroundStyle(.secondary)
+#endif
+    }
+
+#if canImport(UIKit)
+    private var qrImage: UIImage? {
+        guard let data = text.data(using: .utf8),
+              let filter = CIFilter(name: "CIQRCodeGenerator")
+        else {
+            return nil
+        }
+        filter.setValue(data, forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let outputImage = filter.outputImage else {
+            return nil
+        }
+        let scaled = outputImage.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+        guard let cgImage = CIContext().createCGImage(scaled, from: scaled.extent) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage)
+    }
+#endif
+}
+
 struct IMManageConversationMembersSheet: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var submitter = IMAsyncSubmitter()
@@ -564,16 +797,28 @@ struct IMManageConversationMembersSheet: View {
     let onDemoteAdmin: (UUID) async -> Bool
     let onTransferOwner: (UUID) async -> Bool
     let onRemoveMember: (UUID) async -> Bool
+    let onSearchMembers: (String) async -> Void
+    let onLoadMoreMembers: () async -> Void
+    @State private var query = ""
+    @State private var searchTask: Task<Void, Never>?
 
     var body: some View {
         List {
             if let conversation {
                 Section {
-                    ForEach(sortedMembers) { member in
+                    TextField("搜索成员", text: $query)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } footer: {
+                    Text("成员 \(loadedMemberCount) / \(memberTotal) 人")
+                }
+
+                Section {
+                    ForEach(displayMembers) { member in
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack(spacing: 8) {
-                                    Text(member.email)
+                                    Text(member.displayTitle)
                                         .font(.body)
                                     if member.id == currentUserID {
                                         Text("我")
@@ -585,7 +830,7 @@ struct IMManageConversationMembersSheet: View {
                                     }
                                 }
 
-                                Text(member.role.displayName)
+                                Text("\(member.role.displayName) · \(member.email)")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -600,7 +845,11 @@ struct IMManageConversationMembersSheet: View {
                                         Button(item.title, role: item.role) {
                                             Task {
                                                 await submitter.run(messageOnFailure: item.failureMessage) {
-                                                    await item.action()
+                                                    let succeeded = await item.action()
+                                                    if succeeded {
+                                                        await refreshCurrentQuery()
+                                                    }
+                                                    return succeeded
                                                 }
                                             }
                                         }
@@ -615,7 +864,19 @@ struct IMManageConversationMembersSheet: View {
                 } header: {
                     Text("成员管理")
                 } footer: {
-                    Text("群主可以设置管理员、转让群主并移除成员；管理员只能移除普通成员。")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("群主可以设置管理员、转让群主并移除成员；管理员只能移除普通成员。")
+                        if pageState.isLoading {
+                            ProgressView()
+                        } else if pageState.canLoadMore {
+                            Button(pageState.isLoadingMore ? "加载中..." : "加载更多") {
+                                Task {
+                                    await onLoadMoreMembers()
+                                }
+                            }
+                            .disabled(pageState.isLoadingMore)
+                        }
+                    }
                 }
             } else {
                 Section {
@@ -634,6 +895,22 @@ struct IMManageConversationMembersSheet: View {
         }
         .navigationTitle("管理成员")
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await refreshCurrentQuery()
+        }
+        .onChange(of: query) { _, newValue in
+            searchTask?.cancel()
+            searchTask = Task {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled else {
+                    return
+                }
+                await onSearchMembers(newValue)
+            }
+        }
+        .onDisappear {
+            searchTask?.cancel()
+        }
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("关闭") {
@@ -643,8 +920,23 @@ struct IMManageConversationMembersSheet: View {
         }
     }
 
-    private var sortedMembers: [IMConversationMember] {
-        conversation?.members ?? []
+    private var pageState: IMConversationMemberPageState {
+        conversationStore.memberPageState(for: conversationID)
+    }
+
+    private var displayMembers: [IMConversationMember] {
+        if pageState.query == query.trimmingCharacters(in: .whitespacesAndNewlines) {
+            return pageState.items
+        }
+        return conversation?.members ?? []
+    }
+
+    private var loadedMemberCount: Int {
+        displayMembers.count
+    }
+
+    private var memberTotal: Int {
+        pageState.total > 0 ? pageState.total : conversation?.memberCount ?? 0
     }
 
     private var conversation: IMConversation? {
@@ -656,7 +948,12 @@ struct IMManageConversationMembersSheet: View {
             return nil
         }
 
-        return conversation?.members.first(where: { $0.id == currentUserID })?.role
+        return displayMembers.first(where: { $0.id == currentUserID })?.role
+            ?? conversation?.members.first(where: { $0.id == currentUserID })?.role
+    }
+
+    private func refreshCurrentQuery() async {
+        await onSearchMembers(query)
     }
 
     private func actionMenuItems(for member: IMConversationMember) -> [MemberActionItem] {
@@ -1172,6 +1469,7 @@ struct IMMessageBubble: View {
     let canEdit: Bool
     let canReact: Bool
     let mediaDownloadState: IMMediaDownloadState?
+    let deliveryOverrideText: String?
     let currentUserID: UUID?
     let onJumpToReplyReference: () -> Void
     let onCancel: () -> Void
@@ -1208,7 +1506,12 @@ struct IMMessageBubble: View {
 
                 HStack(spacing: 8) {
                     Text(message.createdAt.formatted(date: .omitted, time: .shortened))
-                    Text(deliveryText)
+                    if let deliveryDisplay {
+                        Label(deliveryDisplay.text, systemImage: deliveryDisplay.icon)
+                            .labelStyle(.titleAndIcon)
+                            .foregroundStyle(deliveryDisplay.tint)
+                            .lineLimit(1)
+                    }
                     if !message.derivedState.edits.isEmpty {
                         Text("已编辑")
                     }
@@ -1298,27 +1601,43 @@ struct IMMessageBubble: View {
         }
     }
 
-    private var deliveryText: String {
+    private var deliveryDisplay: (icon: String, text: String, tint: Color)? {
+        guard message.direction == .outgoing else {
+            return nil
+        }
+
+        if let deliveryOverrideText {
+            return ("checkmark.circle", deliveryOverrideText, .secondary)
+        }
+
         switch message.deliveryState {
         case .preparing(let message):
-            return "准备中: \(message)"
+            return ("clock", shortStatus("准备中", detail: message), .secondary)
         case .uploading(let message):
-            return "上传中: \(message)"
+            return ("icloud.and.arrow.up", shortStatus("上传中", detail: message), .blue)
         case .uploaded:
-            return "上传完成"
+            return ("icloud.and.arrow.up.fill", "上传完成", .blue)
         case .queued(let message):
-            return "待发送: \(message)"
+            return ("clock.badge.exclamationmark", shortStatus("待发送", detail: message), .orange)
         case .sending:
-            return "发送中"
+            return ("paperplane", "发送中", .secondary)
         case .sent:
-            return "已送达"
+            return ("checkmark", "已发送", .secondary)
         case .received:
-            return "已接收"
+            return ("checkmark.circle", "已送达", .secondary)
         case .unknown(let message):
-            return "未确认: \(message)"
+            return ("questionmark.circle", shortStatus("未确认", detail: message), .orange)
         case .failed(let message):
-            return "失败: \(message)"
+            return ("exclamationmark.circle.fill", shortStatus("失败", detail: message), .red)
         }
+    }
+
+    private func shortStatus(_ prefix: String, detail: String) -> String {
+        let trimmedDetail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDetail.isEmpty else {
+            return prefix
+        }
+        return "\(prefix): \(trimmedDetail)"
     }
 
     @ViewBuilder

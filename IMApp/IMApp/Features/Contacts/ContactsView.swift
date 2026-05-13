@@ -3,6 +3,7 @@ import IMClientKit
 
 struct ContactsView: View {
     @EnvironmentObject private var authManager: AuthManager
+    @ObservedObject var contactStore: ContactStore
 
     let onOpenConversation: (String) -> Void
 
@@ -11,10 +12,11 @@ struct ContactsView: View {
     @State private var pendingConversationContactID: UUID?
     @State private var searchText = ""
     @State private var editingContact: ContactResponseBody?
+    @State private var isPresentingBlockedUsers = false
 
     var body: some View {
         List {
-            if let message = authManager.contactsMessage, !message.isEmpty {
+            if let message = contactStore.contactsMessage, !message.isEmpty {
                 Section {
                     ContactsInlineStatusBanner(message: message)
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -22,7 +24,7 @@ struct ContactsView: View {
                 }
             }
 
-            if let message = authManager.contactRequestsLoadMessage, !message.isEmpty {
+            if let message = contactStore.contactRequestsLoadMessage, !message.isEmpty {
                 Section {
                     ContactsInlineStatusBanner(message: message)
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -35,9 +37,9 @@ struct ContactsView: View {
                     isPresentingNewContactRequests = true
                 } label: {
                     NewContactRequestsEntryRow(
-                        pendingCount: authManager.totalPendingContactRequestCount,
-                        unseenCount: authManager.unseenIncomingContactRequestCount,
-                        isLoading: authManager.isLoadingContactRequests
+                        pendingCount: totalPendingContactRequestCount,
+                        unseenCount: contactStore.unseenIncomingContactRequestCount,
+                        isLoading: contactStore.isLoadingContactRequests
                     )
                 }
                 .buttonStyle(.plain)
@@ -46,7 +48,7 @@ struct ContactsView: View {
             }
 
             Section {
-                if authManager.contacts.isEmpty {
+                if contactStore.contacts.isEmpty {
                     ContactsEmptyState {
                         isPresentingAddContact = true
                     }
@@ -69,6 +71,9 @@ struct ContactsView: View {
                             },
                             onDelete: {
                                 delete(contact)
+                            },
+                            onBlock: {
+                                block(contact)
                             }
                         )
                     }
@@ -79,7 +84,7 @@ struct ContactsView: View {
 
                     Spacer()
 
-                    if authManager.isLoadingContacts || authManager.isLoadingContactRequests {
+                    if contactStore.isLoadingContacts || contactStore.isLoadingContactRequests {
                         ProgressView()
                             .controlSize(.small)
                     }
@@ -93,16 +98,20 @@ struct ContactsView: View {
         .navigationTitle("通讯录")
         .background(Color(.systemGroupedBackground))
         .task {
-            if authManager.contacts.isEmpty {
+            if contactStore.contacts.isEmpty {
                 await authManager.reloadContacts()
             }
-            if !authManager.hasAnyContactRequests {
+            if contactStore.contactRequests.isEmpty {
                 await authManager.reloadContactRequests()
+            }
+            if contactStore.blockedUsers.isEmpty {
+                await authManager.loadBlockedUsers()
             }
         }
         .refreshable {
             await authManager.reloadContacts()
             await authManager.reloadContactRequests()
+            await authManager.loadBlockedUsers()
         }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -114,7 +123,13 @@ struct ContactsView: View {
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                .disabled(authManager.isLoadingContacts || authManager.isLoadingContactRequests)
+                .disabled(contactStore.isLoadingContacts || contactStore.isLoadingContactRequests)
+
+                Button {
+                    isPresentingBlockedUsers = true
+                } label: {
+                    Image(systemName: "hand.raised.fill")
+                }
 
                 Button {
                     isPresentingAddContact = true
@@ -131,9 +146,16 @@ struct ContactsView: View {
         }
         .sheet(isPresented: $isPresentingNewContactRequests) {
             NavigationStack {
-                NewContactRequestsView(onOpenConversation: onOpenConversation)
+                NewContactRequestsView(contactStore: contactStore, onOpenConversation: onOpenConversation)
             }
             .presentationDetents([.large])
+        }
+        .sheet(isPresented: $isPresentingBlockedUsers) {
+            NavigationStack {
+                BlockedUsersSheet(contactStore: contactStore)
+                    .environmentObject(authManager)
+            }
+            .presentationDetents([.medium, .large])
         }
         .sheet(item: $editingContact) { contact in
             NavigationStack {
@@ -146,13 +168,43 @@ struct ContactsView: View {
     private var filteredContacts: [ContactResponseBody] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
-            return authManager.contacts
+            return contactStore.contacts
         }
 
-        return authManager.contacts.filter { contact in
+        return contactStore.contacts.filter { contact in
             contact.email.localizedCaseInsensitiveContains(query)
                 || contact.displayName.localizedCaseInsensitiveContains(query)
         }
+    }
+
+    private var totalPendingContactRequestCount: Int {
+        incomingPendingContactRequests.count + outgoingPendingContactRequests.count
+    }
+
+    private var incomingPendingContactRequests: [ContactRequestResponseBody] {
+        contactStore.incomingPendingContactRequests(
+            currentUserID: authManager.currentUser?.id,
+            sort: sortContactRequestsNewestFirst
+        )
+    }
+
+    private var outgoingPendingContactRequests: [ContactRequestResponseBody] {
+        contactStore.outgoingPendingContactRequests(
+            currentUserID: authManager.currentUser?.id,
+            sort: sortContactRequestsNewestFirst
+        )
+    }
+
+    private func sortContactRequestsNewestFirst(
+        _ lhs: ContactRequestResponseBody,
+        _ rhs: ContactRequestResponseBody
+    ) -> Bool {
+        let leftDate = lhs.updatedAt ?? lhs.createdAt ?? .distantPast
+        let rightDate = rhs.updatedAt ?? rhs.createdAt ?? .distantPast
+        if leftDate == rightDate {
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        return leftDate > rightDate
     }
 
     private func startConversation(with contact: ContactResponseBody) {
@@ -169,6 +221,12 @@ struct ContactsView: View {
     private func delete(_ contact: ContactResponseBody) {
         Task {
             _ = await authManager.deleteContact(contact.id)
+        }
+    }
+
+    private func block(_ contact: ContactResponseBody) {
+        Task {
+            _ = await authManager.blockUser(contact.id)
         }
     }
 }
@@ -257,6 +315,7 @@ private struct ContactRow: View {
     let onStartConversation: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
+    let onBlock: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -310,11 +369,91 @@ private struct ContactRow: View {
                 Label("备注", systemImage: "pencil")
             }
             .tint(.blue)
+
+            Button(role: .destructive) {
+                onBlock()
+            } label: {
+                Label("拉黑", systemImage: "hand.raised.fill")
+            }
         }
     }
 
     private var subtitle: String {
         contact.displayName == contact.email ? "联系人 ID \(contact.id.uuidString.prefix(8))" : contact.email
+    }
+}
+
+private struct BlockedUsersSheet: View {
+    @EnvironmentObject private var authManager: AuthManager
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var contactStore: ContactStore
+
+    var body: some View {
+        List {
+            if contactStore.isLoadingBlockedUsers {
+                Section {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                }
+            } else if contactStore.blockedUsers.isEmpty {
+                Section {
+                    ContentUnavailableView("黑名单为空", systemImage: "hand.raised")
+                }
+            } else {
+                Section {
+                    ForEach(contactStore.blockedUsers, id: \.blockedUserID) { block in
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(displayName(for: block.blockedUserID))
+                                    .font(.body.weight(.semibold))
+                                Text(block.blockedUserID.uuidString)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                if let reason = block.reason, !reason.isEmpty {
+                                    Text(reason)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                            }
+
+                            Spacer()
+
+                            Button("解除") {
+                                Task {
+                                    _ = await authManager.unblockUser(block.blockedUserID)
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                } footer: {
+                    Text("拉黑后，对方不能向你发起好友申请、创建私聊或发送私聊消息。")
+                }
+            }
+        }
+        .navigationTitle("黑名单")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await authManager.loadBlockedUsers()
+        }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("关闭") {
+                    dismiss()
+                }
+            }
+        }
+    }
+
+    private func displayName(for userID: UUID) -> String {
+        contactStore.contacts.first(where: { $0.id == userID })?.displayName
+            ?? "用户 \(userID.uuidString.prefix(8))"
     }
 }
 
@@ -383,6 +522,7 @@ private struct IncomingContactRequestRow: View {
 private struct NewContactRequestsView: View {
     @EnvironmentObject private var authManager: AuthManager
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject var contactStore: ContactStore
 
     let onOpenConversation: (String) -> Void
 
@@ -391,7 +531,7 @@ private struct NewContactRequestsView: View {
 
     var body: some View {
         List {
-            if let message = authManager.contactRequestActionMessage, !message.isEmpty {
+            if let message = contactStore.contactRequestActionMessage, !message.isEmpty {
                 Section {
                     ContactsInlineStatusBanner(message: message)
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -399,7 +539,7 @@ private struct NewContactRequestsView: View {
                 }
             }
 
-            if let message = authManager.contactRequestsLoadMessage, !message.isEmpty {
+            if let message = contactStore.contactRequestsLoadMessage, !message.isEmpty {
                 Section {
                     ContactsInlineStatusBanner(message: message)
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
@@ -408,16 +548,16 @@ private struct NewContactRequestsView: View {
             }
 
             Section {
-                if authManager.incomingPendingContactRequests.isEmpty {
+                if incomingPendingContactRequests.isEmpty {
                     NewContactRequestsEmptyState()
                         .listRowInsets(EdgeInsets(top: 20, leading: 16, bottom: 20, trailing: 16))
                         .listRowBackground(Color.clear)
                 } else {
-                    ForEach(authManager.incomingPendingContactRequests) { request in
+                    ForEach(incomingPendingContactRequests) { request in
                         IncomingContactRequestRow(
                             request: request,
-                            isAccepting: authManager.acceptingRequestIDs.contains(request.id),
-                            isDeclining: authManager.decliningRequestIDs.contains(request.id),
+                            isAccepting: contactStore.acceptingRequestIDs.contains(request.id),
+                            isDeclining: contactStore.decliningRequestIDs.contains(request.id),
                             onAccept: {
                                 acceptingContactRequest = request
                             },
@@ -431,20 +571,20 @@ private struct NewContactRequestsView: View {
                 HStack {
                     Text("收到的申请")
                     Spacer()
-                    if authManager.pendingIncomingContactRequestCount > 0 {
-                        Text("\(authManager.pendingIncomingContactRequestCount)")
+                    if incomingPendingContactRequests.count > 0 {
+                        Text("\(incomingPendingContactRequests.count)")
                     }
                 }
             } footer: {
                 Text("接受后双方才会出现在通讯录。")
             }
 
-            if !authManager.outgoingPendingContactRequests.isEmpty {
+            if !outgoingPendingContactRequests.isEmpty {
                 Section {
-                    ForEach(authManager.outgoingPendingContactRequests) { request in
+                    ForEach(outgoingPendingContactRequests) { request in
                         OutgoingContactRequestRow(
                             request: request,
-                            isCancelling: authManager.cancellingRequestIDs.contains(request.id),
+                            isCancelling: contactStore.cancellingRequestIDs.contains(request.id),
                             onCancel: {
                                 cancel(request)
                             }
@@ -457,9 +597,9 @@ private struct NewContactRequestsView: View {
                 }
             }
 
-            if !authManager.recentResolvedContactRequests.isEmpty {
+            if !recentResolvedContactRequests.isEmpty {
                 Section {
-                    ForEach(authManager.recentResolvedContactRequests) { request in
+                    ForEach(recentResolvedContactRequests) { request in
                         ResolvedContactRequestRow(
                             request: request,
                             currentUserID: authManager.currentUser?.id,
@@ -493,7 +633,7 @@ private struct NewContactRequestsView: View {
             }
 
             ToolbarItem(placement: .topBarTrailing) {
-                if authManager.isLoadingContactRequests {
+                if contactStore.isLoadingContactRequests {
                     ProgressView()
                         .controlSize(.small)
                 }
@@ -505,6 +645,36 @@ private struct NewContactRequestsView: View {
             }
             .presentationDetents([.medium])
         }
+    }
+
+    private var incomingPendingContactRequests: [ContactRequestResponseBody] {
+        contactStore.incomingPendingContactRequests(
+            currentUserID: authManager.currentUser?.id,
+            sort: sortContactRequestsNewestFirst
+        )
+    }
+
+    private var outgoingPendingContactRequests: [ContactRequestResponseBody] {
+        contactStore.outgoingPendingContactRequests(
+            currentUserID: authManager.currentUser?.id,
+            sort: sortContactRequestsNewestFirst
+        )
+    }
+
+    private var recentResolvedContactRequests: [ContactRequestResponseBody] {
+        contactStore.recentResolvedContactRequests(sort: sortContactRequestsNewestFirst)
+    }
+
+    private func sortContactRequestsNewestFirst(
+        _ lhs: ContactRequestResponseBody,
+        _ rhs: ContactRequestResponseBody
+    ) -> Bool {
+        let leftDate = lhs.updatedAt ?? lhs.createdAt ?? .distantPast
+        let rightDate = rhs.updatedAt ?? rhs.createdAt ?? .distantPast
+        if leftDate == rightDate {
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        return leftDate > rightDate
     }
 
     private func decline(_ request: ContactRequestResponseBody) {

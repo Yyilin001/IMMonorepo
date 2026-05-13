@@ -3,9 +3,33 @@ import IMClientKit
 import Combine
 import QuickLook
 import UniformTypeIdentifiers
+#if canImport(UIKit)
+import UIKit
+#endif
 
 enum IMNavigationRoute: Hashable {
     case conversation(String)
+}
+
+private enum IMConversationDestructiveAction: Identifiable {
+    case clear
+    case delete
+
+    var id: String {
+        switch self {
+        case .clear:
+            return "clear"
+        case .delete:
+            return "delete"
+        }
+    }
+}
+
+private enum IMSelectionActionState: Equatable {
+    case idle
+    case forwarding
+    case favoriting
+    case deleting
 }
 
 private enum IMConversationListFilter: String, CaseIterable, Identifiable {
@@ -34,12 +58,14 @@ private enum IMConversationListFilter: String, CaseIterable, Identifiable {
 }
 
 struct IMConversationView: View {
-    @EnvironmentObject private var authManager: AuthManager
     @ObservedObject var conversationStore: IMConversationStore
+    @ObservedObject var presentationStore: IMConversationPresentationStore
+    @ObservedObject var runtimeStore: IMConversationRuntimeStore
 
     let onOpenConversation: (String) -> Void
 
     @State private var isPresentingCreateConversation = false
+    @State private var isPresentingFavorites = false
     @State private var conversationListFilter: IMConversationListFilter = .all
 
     var body: some View {
@@ -95,7 +121,7 @@ struct IMConversationView: View {
                         } label: {
                             IMConversationRow(
                                 conversation: conversation,
-                                identity: authManager.conversationIdentityPresentation(for: conversation),
+                                identity: presentationStore.conversationIdentityPresentation(for: conversation),
                                 isActive: conversation.id == conversationStore.selectedConversationID
                             )
                         }
@@ -161,21 +187,21 @@ struct IMConversationView: View {
         )
         .task {
             if conversationStore.conversations.isEmpty {
-                await authManager.reloadIMConversations(
+                await runtimeStore.reloadConversations(
                     force: true,
                     kind: conversationListFilter.conversationKind
                 )
             }
         }
         .refreshable {
-            await authManager.reloadIMConversations(
+            await runtimeStore.reloadConversations(
                 force: true,
                 kind: conversationListFilter.conversationKind
             )
         }
         .onChange(of: conversationListFilter) { _, newValue in
             Task {
-                await authManager.reloadIMConversations(
+                await runtimeStore.reloadConversations(
                     force: true,
                     kind: newValue.conversationKind
                 )
@@ -185,7 +211,7 @@ struct IMConversationView: View {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
                     Task {
-                        await authManager.reloadIMConversations(
+                        await runtimeStore.reloadConversations(
                             force: true,
                             kind: conversationListFilter.conversationKind
                         )
@@ -200,6 +226,13 @@ struct IMConversationView: View {
                 } label: {
                     Image(systemName: "square.and.pencil")
                 }
+
+                Button {
+                    isPresentingFavorites = true
+                } label: {
+                    Image(systemName: "star.fill")
+                }
+                .accessibilityLabel("我的收藏")
             }
         }
         .sheet(isPresented: $isPresentingCreateConversation) {
@@ -208,12 +241,29 @@ struct IMConversationView: View {
             }
             .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $isPresentingFavorites) {
+            NavigationStack {
+                IMFavoritesSheet(
+                    conversationStore: conversationStore,
+                    runtimeStore: runtimeStore,
+                    onSelect: { conversationID, messageID in
+                        isPresentingFavorites = false
+                        onOpenConversation(conversationID)
+                        Task {
+                            try? await Task.sleep(nanoseconds: 250_000_000)
+                            await runtimeStore.jumpToMessage(messageID, in: conversationID)
+                        }
+                    }
+                )
+            }
+            .presentationDetents([.medium, .large])
+        }
     }
 
     private func loadMoreHistoricalConversations() {
         let anchorConversationID = conversationStore.conversationSummaryPaginationAnchorID
         Task {
-            await authManager.loadMoreIMConversationSummariesIfNeeded(
+            await runtimeStore.loadMoreConversationSummariesIfNeeded(
                 anchorConversationID: anchorConversationID,
                 kind: conversationListFilter.conversationKind
             )
@@ -221,7 +271,7 @@ struct IMConversationView: View {
     }
 
     private var connectionTitle: String {
-        switch authManager.imConnectionStatus {
+        switch presentationStore.imConnectionStatus {
         case .disconnected:
             return "IM 长连接未建立"
         case .connecting:
@@ -234,7 +284,7 @@ struct IMConversationView: View {
     }
 
     private var connectionMessage: String {
-        switch authManager.imConnectionStatus {
+        switch presentationStore.imConnectionStatus {
         case .disconnected:
             return "当前只有 HTTP 登录态，实时消息不会到达，新发送消息会先进入待发送队列。"
         case .connecting:
@@ -247,7 +297,7 @@ struct IMConversationView: View {
     }
 
     private var connectionIcon: String {
-        switch authManager.imConnectionStatus {
+        switch presentationStore.imConnectionStatus {
         case .disconnected:
             return "bolt.slash"
         case .connecting:
@@ -260,7 +310,7 @@ struct IMConversationView: View {
     }
 
     private var connectionColor: Color {
-        switch authManager.imConnectionStatus {
+        switch presentationStore.imConnectionStatus {
         case .disconnected:
             return .secondary
         case .connecting:
@@ -274,9 +324,10 @@ struct IMConversationView: View {
 }
 
 struct IMConversationDetailView: View {
-    @EnvironmentObject private var authManager: AuthManager
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var conversationStore: IMConversationStore
+    @ObservedObject var presentationStore: IMConversationPresentationStore
+    @ObservedObject var runtimeStore: IMConversationRuntimeStore
 
     let conversationID: String
 
@@ -286,9 +337,18 @@ struct IMConversationDetailView: View {
     @State private var isPresentingLeaveConfirmation = false
     @State private var isPresentingRenameGroup = false
     @State private var isPresentingEditMetadata = false
+    @State private var isPresentingInvites = false
+    @State private var isPresentingMemberNickname = false
     @State private var isPresentingSearch = false
     @State private var isPresentingMediaImporter = false
     @State private var isPresentingBatchSender = false
+    @State private var isPresentingForwardPicker = false
+    @State private var isSelectionMode = false
+    @State private var selectedMessageIDs: Set<String> = []
+    @State private var pendingForwardMessageIDs: [String] = []
+    @State private var favoritedMessageIDs: Set<String> = []
+    @State private var selectionActionState: IMSelectionActionState = .idle
+    @State private var destructiveAction: IMConversationDestructiveAction?
     @State private var replyTarget: IMConversationMessage?
     @State private var editingTarget: IMConversationMessage?
     @State private var highlightedMessageID: String?
@@ -322,16 +382,22 @@ struct IMConversationDetailView: View {
             .navigationTitle(conversationIdentity.title)
             .navigationBarTitleDisplayMode(.inline)
             .task(id: conversationID) {
-                await authManager.openIMConversation(conversationID)
+                await runtimeStore.openConversation(conversationID)
+                await loadConversationFavoriteCache()
             }
             .onDisappear {
                 pauseAllMediaDownloads()
+                resetSelection()
             }
             .toolbar {
                 detailToolbarContent
             }
             .safeAreaInset(edge: .bottom) {
-                composerBar
+                if isSelectionMode {
+                    selectionToolbar
+                } else {
+                    composerBar
+                }
             }
     }
 
@@ -350,7 +416,7 @@ struct IMConversationDetailView: View {
             if queueSummary.hasPendingWork {
                 IMConversationQueueBanner(
                     summary: queueSummary,
-                    isFlushing: authManager.isFlushingQueuedIMTextMessages
+                    isFlushing: runtimeStore.isFlushingQueuedTextMessages
                 )
             }
 
@@ -378,7 +444,7 @@ struct IMConversationDetailView: View {
                 Button {
                     conversationStore.openConversation(id: conversationID)
                     Task {
-                        await authManager.loadOlderIMMessages()
+                        await runtimeStore.loadOlderMessages()
                     }
                 } label: {
                     Label("加载更早消息", systemImage: "clock.arrow.circlepath")
@@ -397,32 +463,51 @@ struct IMConversationDetailView: View {
 
     private func detailMessageRow(_ message: IMConversationMessage) -> some View {
         let mediaAsset = message.mediaAsset
+        let selectableID = selectableMessageID(for: message)
         return IMMessageBubble(
             message: message,
             replyReference: message.resolvedReplyReference(in: messages),
             isHighlighted: highlightedMessageID == message.id,
+            isSelectionMode: isSelectionMode,
+            isSelected: selectableID.map(selectedMessageIDs.contains) ?? false,
+            canSelect: selectableID != nil,
             canRetry: conversationStore.isRetryableFailure(message),
             canCancel: message.canCancelQueuedSend,
             canReply: message.canReply,
             canRecall: message.canRecall,
             canEdit: message.canEdit,
             canReact: message.canReact,
+            isFavorited: selectableID.map(favoritedMessageIDs.contains) ?? false,
             mediaDownloadState: resolvedMediaDownloadState(for: message),
-            currentUserID: authManager.currentUser?.id,
+            deliveryOverrideText: deliveryOverrideText(for: message),
+            currentUserID: runtimeStore.currentUserID,
+            onToggleSelection: {
+                guard let selectableID else {
+                    return
+                }
+                toggleSelectedMessage(selectableID)
+            },
+            onEnterSelection: {
+                guard let selectableID else {
+                    return
+                }
+                isSelectionMode = true
+                selectedMessageIDs.insert(selectableID)
+            },
             onJumpToReplyReference: {
                 guard case .reply(let reference, _) = message.content else {
                     return
                 }
 
                 Task {
-                    await authManager.jumpToReferencedIMMessage(
+                    await runtimeStore.jumpToReferencedMessage(
                         reference.messageID,
                         in: conversationID
                     )
                 }
             },
             onCancel: {
-                _ = authManager.cancelQueuedIMTextMessage(
+                _ = runtimeStore.cancelQueuedTextMessage(
                     localMessageID: message.id,
                     in: conversationID
                 )
@@ -438,7 +523,7 @@ struct IMConversationDetailView: View {
             },
             onRecall: {
                 Task {
-                    let didRecall = await authManager.recallIMMessage(
+                    let didRecall = await runtimeStore.recallMessage(
                         messageID: message.serverMessageID ?? message.id,
                         in: conversationID
                     )
@@ -449,15 +534,30 @@ struct IMConversationDetailView: View {
             },
             onRetry: {
                 Task {
-                    await authManager.retryIMTextMessage(
+                    await runtimeStore.retryTextMessage(
                         localMessageID: message.id,
                         in: conversationID
                     )
                 }
             },
+            onForward: {
+                guard let selectableID else {
+                    return
+                }
+                pendingForwardMessageIDs = [selectableID]
+                isPresentingForwardPicker = true
+            },
+            onToggleFavorite: {
+                guard let selectableID else {
+                    return
+                }
+                Task {
+                    await toggleFavorite(messageID: selectableID)
+                }
+            },
             onToggleReaction: { emoji in
                 Task {
-                    _ = await authManager.toggleIMMessageReaction(
+                    _ = await runtimeStore.toggleMessageReaction(
                         messageID: message.serverMessageID ?? message.id,
                         emoji: emoji,
                         in: conversationID
@@ -533,6 +633,16 @@ struct IMConversationDetailView: View {
                         }
                     }
 
+                    if canRenameConversation {
+                        Button("邀请链接") {
+                            isPresentingInvites = true
+                        }
+                    }
+
+                    Button("我的群昵称") {
+                        isPresentingMemberNickname = true
+                    }
+
                     if canAddMembers {
                         Button("添加成员") {
                             isPresentingAddMembers = true
@@ -558,7 +668,7 @@ struct IMConversationDetailView: View {
             Menu {
                 Button(conversation?.isPinned == true ? "取消置顶" : "置顶会话") {
                     Task {
-                        _ = await authManager.updateIMConversationPreferences(
+                        _ = await runtimeStore.updateConversationPreferences(
                             conversationID,
                             isPinned: !(conversation?.isPinned ?? false)
                         )
@@ -567,11 +677,41 @@ struct IMConversationDetailView: View {
 
                 Button(conversation?.isMuted == true ? "取消免打扰" : "免打扰") {
                     Task {
-                        _ = await authManager.updateIMConversationPreferences(
+                        _ = await runtimeStore.updateConversationPreferences(
                             conversationID,
                             isMuted: !(conversation?.isMuted ?? false)
                         )
                     }
+                }
+
+                if let peer = directPeer {
+                    if isDirectPeerBlocked {
+                        Button("解除拉黑") {
+                            Task {
+                                _ = await runtimeStore.unblockUser(peer.id)
+                            }
+                        }
+                    } else {
+                        Button("拉黑对方", role: .destructive) {
+                            Task {
+                                _ = await runtimeStore.blockUser(peer.id)
+                            }
+                        }
+                    }
+
+                    Button("举报对方", role: .destructive) {
+                        Task {
+                            _ = await runtimeStore.reportUser(peer.id, conversationID: conversationID)
+                        }
+                    }
+                }
+
+                Button("清空聊天记录", role: .destructive) {
+                    destructiveAction = .clear
+                }
+
+                Button("删除会话", role: .destructive) {
+                    destructiveAction = .delete
                 }
             } label: {
                 Image(systemName: "bell.slash.circle")
@@ -651,21 +791,20 @@ struct IMConversationDetailView: View {
                         conversationID: conversationID,
                         onSelect: { messageID in
                             Task {
-                                await authManager.jumpToIMMessage(messageID, in: conversationID)
+                                await runtimeStore.jumpToMessage(messageID, in: conversationID)
                             }
                         }
                     )
-                    .environmentObject(authManager)
                 }
                 .presentationDetents([.medium, .large])
             }
             .sheet(isPresented: $isPresentingBatchSender) {
                 NavigationStack {
                     IMBatchMessageSendSheet(
-                        senderName: authManager.currentUser?.preferredDisplayName ?? "用户",
+                        senderName: runtimeStore.currentUserDisplayName,
                         canSendMessages: canSendMessages,
                         onSendMessage: { text in
-                            await authManager.sendIMText(text, to: conversationID)
+                            await runtimeStore.sendText(text, to: conversationID)
                         }
                     )
                 }
@@ -679,7 +818,7 @@ struct IMConversationDetailView: View {
                     IMRenameConversationSheet(
                         initialTitle: conversation?.title ?? "",
                         onSubmit: { title in
-                            await authManager.renameIMConversation(conversationID, title: title)
+                            await runtimeStore.renameConversation(conversationID, title: title)
                         }
                     )
                 }
@@ -691,50 +830,86 @@ struct IMConversationDetailView: View {
                         initialTitle: conversation?.title ?? "",
                         initialNotice: conversation?.notice ?? "",
                         initialAvatarPreset: conversation?.avatarPreset ?? .ocean,
-                        onSubmit: { title, notice, avatarPreset in
-                            await authManager.updateIMConversationMetadata(
+                        initialMuteAll: conversation?.muteAll ?? false,
+                        onSubmit: { title, notice, avatarPreset, muteAll in
+                            await runtimeStore.updateConversationMetadata(
                                 conversationID,
                                 title: title,
                                 notice: notice,
-                                avatarPreset: avatarPreset
+                                avatarPreset: avatarPreset,
+                                muteAll: muteAll
                             )
                         }
                     )
                 }
                 .presentationDetents([.medium, .large])
             }
+            .sheet(isPresented: $isPresentingInvites) {
+                NavigationStack {
+                    IMGroupInviteManagementSheet(
+                        conversationID: conversationID,
+                        loadInvites: {
+                            await runtimeStore.fetchGroupInvites(conversationID: conversationID)
+                        },
+                        createInvite: {
+                            await runtimeStore.createGroupInvite(conversationID: conversationID)
+                        },
+                        revokeInvite: { token in
+                            await runtimeStore.revokeGroupInvite(conversationID: conversationID, token: token)
+                        }
+                    )
+                }
+                .presentationDetents([.medium, .large])
+            }
+            .sheet(isPresented: $isPresentingMemberNickname) {
+                NavigationStack {
+                    IMMemberNicknameSheet(
+                        initialNickname: currentMember?.memberNickname ?? "",
+                        onSubmit: { nickname in
+                            await runtimeStore.updateMyMemberNickname(conversationID, memberNickname: nickname)
+                        }
+                    )
+                }
+                .presentationDetents([.medium])
+            }
             .sheet(isPresented: $isPresentingManageMembers) {
                 NavigationStack {
                     IMManageConversationMembersSheet(
                         conversationStore: conversationStore,
                         conversationID: conversationID,
-                        currentUserID: authManager.currentUser?.id,
+                        currentUserID: runtimeStore.currentUserID,
                         onPromoteAdmin: { memberUserID in
-                            await authManager.updateIMConversationMemberRole(
+                            await runtimeStore.updateConversationMemberRole(
                                 memberUserID: memberUserID,
                                 role: .admin,
                                 in: conversationID
                             )
                         },
                         onDemoteAdmin: { memberUserID in
-                            await authManager.updateIMConversationMemberRole(
+                            await runtimeStore.updateConversationMemberRole(
                                 memberUserID: memberUserID,
                                 role: .member,
                                 in: conversationID
                             )
                         },
                         onTransferOwner: { memberUserID in
-                            await authManager.updateIMConversationMemberRole(
+                            await runtimeStore.updateConversationMemberRole(
                                 memberUserID: memberUserID,
                                 role: .owner,
                                 in: conversationID
                             )
                         },
                         onRemoveMember: { memberUserID in
-                            await authManager.removeIMConversationMember(
+                            await runtimeStore.removeConversationMember(
                                 memberUserID: memberUserID,
                                 from: conversationID
                             )
+                        },
+                        onSearchMembers: { query in
+                            await runtimeStore.loadConversationMembers(conversationID, query: query)
+                        },
+                        onLoadMoreMembers: {
+                            await runtimeStore.loadMoreConversationMembers(conversationID)
                         }
                     )
                 }
@@ -754,7 +929,7 @@ struct IMConversationDetailView: View {
             ) {
                 Button("退出会话", role: .destructive) {
                     Task {
-                        let didLeave = await authManager.leaveIMConversation(conversationID)
+                        let didLeave = await runtimeStore.leaveConversation(conversationID)
                         if didLeave {
                             dismiss()
                         }
@@ -779,6 +954,33 @@ struct IMConversationDetailView: View {
 
     private var messages: [IMConversationMessage] {
         conversation?.messages ?? []
+    }
+
+    private func deliveryOverrideText(for message: IMConversationMessage) -> String? {
+        guard message.direction == .outgoing,
+              message.serverSequence != nil,
+              message.deliveryState == .sent
+        else {
+            return nil
+        }
+
+        guard let sequence = message.serverSequence,
+              let summary = conversationStore.receiptSummary(for: conversationID)
+        else {
+            return "已发送"
+        }
+
+        let sequenceValue = Int(sequence)
+        if summary.readThroughSequence >= sequenceValue {
+            return "已读"
+        }
+        if conversation?.kind == .group, summary.deliveredThroughSequence >= sequenceValue {
+            return summary.readThroughSequence > 0 ? "部分已读" : "已送达"
+        }
+        if summary.deliveredThroughSequence >= sequenceValue {
+            return "已送达"
+        }
+        return "已发送"
     }
 
     private var latestMessageID: String? {
@@ -827,6 +1029,9 @@ struct IMConversationDetailView: View {
                 }
                 if conversation?.isMuted == true {
                     Text("免打扰")
+                }
+                if conversation?.muteAll == true {
+                    Text("全员禁言")
                 }
             }
             .font(.caption)
@@ -890,28 +1095,51 @@ struct IMConversationDetailView: View {
                 .padding(.top, 12)
             }
 
+            if isDirectPeerBlocked, let peer = directPeer {
+                HStack(spacing: 10) {
+                    Image(systemName: "hand.raised.fill")
+                        .foregroundStyle(.red)
+
+                    Text("已屏蔽对方，当前私聊输入已停用。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer(minLength: 0)
+
+                    Button("解除") {
+                        Task {
+                            _ = await runtimeStore.unblockUser(peer.id)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, directMessagingStatusMessage == nil ? 12 : 0)
+            }
+
             if let directRelationshipPresentation {
                 DirectPeerRelationshipActionPanel(
                     presentation: directRelationshipPresentation,
                     actionMessage: directConversationRelationshipActionMessage,
                     onSendRequest: {
                         Task {
-                            await authManager.sendDirectConversationFriendRequest(conversationID: conversationID)
+                            await runtimeStore.sendDirectConversationFriendRequest(conversationID: conversationID)
                         }
                     },
                     onAccept: {
                         Task {
-                            await authManager.acceptDirectConversationFriendRequest(conversationID: conversationID)
+                            await runtimeStore.acceptDirectConversationFriendRequest(conversationID: conversationID)
                         }
                     },
                     onDecline: {
                         Task {
-                            await authManager.declineDirectConversationFriendRequest(conversationID: conversationID)
+                            await runtimeStore.declineDirectConversationFriendRequest(conversationID: conversationID)
                         }
                     },
                     onCancelRequest: {
                         Task {
-                            await authManager.cancelDirectConversationFriendRequest(conversationID: conversationID)
+                            await runtimeStore.cancelDirectConversationFriendRequest(conversationID: conversationID)
                         }
                     }
                 )
@@ -983,13 +1211,21 @@ struct IMConversationDetailView: View {
                         .padding(.top, 12)
                     }
 
-                    TextField("输入消息", text: $composerText, axis: .vertical)
+                    if let composerDisabledReason {
+                        Label(composerDisabledReason, systemImage: "lock.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 14)
+                            .padding(.top, (replyTarget == nil && editingTarget == nil) ? 12 : 0)
+                    }
+
+                    TextField(composerDisabledReason ?? "输入消息", text: $composerText, axis: .vertical)
                         .lineLimit(1...4)
                         .textInputAutocapitalization(.sentences)
                         .disabled(!canSendMessages)
                         .padding(.horizontal, 14)
                         .padding(.bottom, 12)
-                        .padding(.top, (replyTarget == nil && editingTarget == nil) ? 12 : 0)
+                        .padding(.top, (replyTarget == nil && editingTarget == nil && composerDisabledReason == nil) ? 12 : 0)
                 }
                 .background(Color(.secondarySystemGroupedBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 18))
@@ -998,20 +1234,20 @@ struct IMConversationDetailView: View {
                     Task {
                         let didSend: Bool
                         if let editingTarget {
-                            didSend = await authManager.editIMMessage(
+                            didSend = await runtimeStore.editMessage(
                                 messageID: editingTarget.serverMessageID ?? editingTarget.id,
                                 text: composerText,
                                 in: conversationID
                             )
                         } else if let replyTarget,
                            let reference = replyReference(from: replyTarget) {
-                            didSend = await authManager.sendIMReply(
+                            didSend = await runtimeStore.sendReply(
                                 reference: reference,
                                 text: composerText,
                                 to: conversationID
                             )
                         } else {
-                            didSend = await authManager.sendIMText(composerText, to: conversationID)
+                            didSend = await runtimeStore.sendText(composerText, to: conversationID)
                         }
                         if didSend {
                             composerText = ""
@@ -1041,14 +1277,14 @@ struct IMConversationDetailView: View {
         switch result {
         case .success(let fileURLs):
             guard let fileURL = fileURLs.first else {
-                authManager.imConversationStore.setStatusMessage("未选择任何附件。")
+                runtimeStore.setStatusMessage("未选择任何附件。")
                 return
             }
             Task {
                 await sendImportedMedia(from: fileURL)
             }
         case .failure:
-            authManager.imConversationStore.setStatusMessage("选择附件失败，请重试。")
+            runtimeStore.setStatusMessage("选择附件失败，请重试。")
         }
     }
 
@@ -1061,7 +1297,7 @@ struct IMConversationDetailView: View {
         }
 
         let metadata = inferredMediaMetadata(for: fileURL)
-        let didSend = await authManager.sendIMMedia(
+        let didSend = await runtimeStore.sendMedia(
             fileURL: fileURL,
             kind: metadata.kind,
             mimeType: metadata.mimeType,
@@ -1099,14 +1335,14 @@ struct IMConversationDetailView: View {
                     )
                 )
             )
-            authManager.persistIMConversationCacheSoon()
+            runtimeStore.persistConversationCacheSoon()
         } else {
             mediaDownloadStates[assetID] = .downloading(progress: nil)
         }
 
         mediaDownloadTasks[assetID] = Task {
             do {
-                try await authManager.startBackgroundIMMediaDownload(asset, to: destinationURL)
+                try await runtimeStore.startBackgroundMediaDownload(asset, to: destinationURL)
                 await MainActor.run {
                     mediaDownloadTasks[assetID] = nil
                     mediaDownloadStates.removeValue(forKey: assetID)
@@ -1127,7 +1363,7 @@ struct IMConversationDetailView: View {
                                 status: .failed(message: failureMessage)
                             )
                         )
-                        authManager.persistIMConversationCacheSoon()
+                        runtimeStore.persistConversationCacheSoon()
                     } else {
                         mediaDownloadStates[assetID] = .failed(failureMessage)
                     }
@@ -1172,13 +1408,13 @@ struct IMConversationDetailView: View {
                     status: .paused(progress: progress.map(IMMessageLocalDownloadProgressSnapshot.init))
                 )
             )
-            authManager.persistIMConversationCacheSoon()
+            runtimeStore.persistConversationCacheSoon()
         }
 
         cancelMediaDownload(for: assetID, nextState: .paused(progress: progress))
         if let backgroundTransfer {
             Task {
-                await authManager.cancelBackgroundIMMediaDownload(backgroundTransfer)
+                await runtimeStore.cancelBackgroundMediaDownload(backgroundTransfer)
             }
         }
     }
@@ -1194,7 +1430,7 @@ struct IMConversationDetailView: View {
             try? FileManager.default.removeItem(at: metadataURL)
             if let messageID = messageID(for: assetID) {
                 conversationStore.updateLocalDownloadState(messageID: messageID, state: nil)
-                authManager.persistIMConversationCacheSoon()
+                runtimeStore.persistConversationCacheSoon()
             }
             mediaDownloadStates[assetID] = .idle
         } catch {
@@ -1380,7 +1616,7 @@ struct IMConversationDetailView: View {
             )
         }
 
-        return authManager.conversationIdentityPresentation(for: conversation)
+        return presentationStore.conversationIdentityPresentation(for: conversation)
     }
 
     private var conversationKindText: String {
@@ -1411,15 +1647,55 @@ struct IMConversationDetailView: View {
     }
 
     private var canSendMessages: Bool {
-        conversation?.canSendMessages ?? true
+        guard let conversation else {
+            return true
+        }
+        if conversation.kind == .group {
+            return !(conversation.muteAll && currentGroupRole == .member)
+        }
+        if isDirectPeerBlocked {
+            return false
+        }
+        return conversation.canSendMessages
+    }
+
+    private var composerDisabledReason: String? {
+        if isDirectPeerBlocked {
+            return "已屏蔽对方"
+        }
+        guard conversation?.kind == .group,
+              conversation?.muteAll == true,
+              currentGroupRole == .member
+        else {
+            return nil
+        }
+        return "全员禁言中"
     }
 
     private var currentGroupRole: IMConversationMemberRole? {
-        guard let currentUserID = authManager.currentUser?.id else {
+        currentMember?.role
+    }
+
+    private var currentMember: IMConversationMember? {
+        guard let currentUserID = runtimeStore.currentUserID else {
             return nil
         }
 
-        return conversation?.members.first(where: { $0.id == currentUserID })?.role
+        return conversation?.members.first(where: { $0.id == currentUserID })
+    }
+
+    private var directPeer: IMDirectPeer? {
+        guard conversation?.kind == .direct else {
+            return nil
+        }
+        return conversation?.directPeer
+    }
+
+    private var isDirectPeerBlocked: Bool {
+        guard let directPeer else {
+            return false
+        }
+        return runtimeStore.blockedUserIDs.contains(directPeer.id)
     }
 
     private var canAddMembers: Bool {
@@ -1439,15 +1715,15 @@ struct IMConversationDetailView: View {
     }
 
     private var directRelationshipPresentation: DirectPeerRelationshipPresentation? {
-        authManager.directPeerRelationshipPresentation(for: conversationID)
+        presentationStore.directPeerRelationshipPresentation(for: conversationID)
     }
 
     private var directConversationRelationshipActionMessage: String? {
-        authManager.directConversationRelationshipActionMessage(for: conversationID)
+        presentationStore.directConversationRelationshipActionMessage(for: conversationID)
     }
 
     private var connectionStatusText: String {
-        switch authManager.imConnectionStatus {
+        switch presentationStore.imConnectionStatus {
         case .connected:
             return "实时连接在线"
         case .connecting:
@@ -1460,7 +1736,7 @@ struct IMConversationDetailView: View {
     }
 
     private var connectionStatusIcon: String {
-        switch authManager.imConnectionStatus {
+        switch presentationStore.imConnectionStatus {
         case .connected:
             return "dot.radiowaves.left.and.right"
         case .connecting:
@@ -1473,7 +1749,7 @@ struct IMConversationDetailView: View {
     }
 
     private var connectionStatusColor: Color {
-        switch authManager.imConnectionStatus {
+        switch presentationStore.imConnectionStatus {
         case .connected:
             return .green
         case .connecting:

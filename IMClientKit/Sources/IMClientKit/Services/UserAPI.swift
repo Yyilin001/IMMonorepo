@@ -88,6 +88,94 @@ public struct UserProfileUpdateRequestBody: Encodable, Sendable {
     }
 }
 
+public struct UserBlockCreateRequestBody: Codable, Sendable {
+    public let reason: String?
+
+    public init(reason: String? = nil) {
+        self.reason = reason
+    }
+}
+
+public struct UserBlockResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let blockedUserID: UUID
+    public let reason: String?
+    public let createdAt: Date
+}
+
+public struct ReportCreateRequestBody: Codable, Sendable {
+    public let targetType: String
+    public let targetID: String
+    public let conversationID: UUID?
+    public let messageID: UUID?
+    public let reason: String
+    public let detail: String?
+
+    public init(
+        targetType: String,
+        targetID: String,
+        conversationID: UUID? = nil,
+        messageID: UUID? = nil,
+        reason: String,
+        detail: String? = nil
+    ) {
+        self.targetType = targetType
+        self.targetID = targetID
+        self.conversationID = conversationID
+        self.messageID = messageID
+        self.reason = reason
+        self.detail = detail
+    }
+}
+
+public struct ReportResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let id: UUID
+    public let targetType: String
+    public let targetID: String
+    public let reporterUserID: UUID?
+    public let conversationID: UUID?
+    public let messageID: UUID?
+    public let reason: String
+    public let detail: String?
+    public let status: String
+    public let handledNote: String?
+    public let messageSnapshotJSON: String?
+    public let createdAt: Date
+}
+
+public struct ReportPageResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let items: [ReportResponseBody]
+    public let nextCursor: String?
+    public let hasMore: Bool
+}
+
+public struct ReportUpdateRequestBody: Codable, Sendable {
+    public let status: String
+    public let handledNote: String?
+
+    public init(status: String, handledNote: String? = nil) {
+        self.status = status
+        self.handledNote = handledNote
+    }
+}
+
+public struct PushDeviceTokenRegisterRequestBody: Codable, Sendable {
+    public let platform: String
+    public let token: String
+
+    public init(platform: String = "ios", token: String) {
+        self.platform = platform
+        self.token = token
+    }
+}
+
+public struct PushDeviceTokenResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let id: String
+    public let platform: String
+    public let token: String
+    public let isActive: Bool
+    public let updatedAt: Date
+}
+
 public struct ContactRequestResponseBody: Codable, Identifiable, Equatable, Sendable, APIResponseBody {
     public let id: UUID
     public let requester: AuthUser
@@ -277,8 +365,125 @@ enum UserRequest {
         }
     }
 
+    public struct Blocks: AuthorizedEndpoint {
+        public typealias Response = [UserBlockResponseBody]
+
+        let baseRequestSpec = HTTPRequestSpec(path: "api/blocks")
+    }
+
+    public struct BlockUser: AuthorizedEndpoint {
+        public typealias Response = UserBlockResponseBody
+
+        let userID: UUID
+        let payload: UserBlockCreateRequestBody
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/users/\(userID.uuidString)/block", method: .post)
+        }
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct UnblockUser: AuthorizedEndpoint {
+        public typealias Response = EmptyResponse
+
+        let userID: UUID
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/users/\(userID.uuidString)/block", method: .delete)
+        }
+    }
+
+    public struct CreateReport: AuthorizedEndpoint {
+        public typealias Response = ReportResponseBody
+
+        let payload: ReportCreateRequestBody
+
+        let baseRequestSpec = HTTPRequestSpec(path: "api/reports", method: .post)
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct InternalReports: Endpoint {
+        public typealias Response = ReportPageResponseBody
+
+        let secret: String
+        let status: String?
+        let targetType: String?
+        let cursor: String?
+        let limit: Int?
+
+        public var requestSpec: HTTPRequestSpec {
+            .init(
+                path: "internal/reports",
+                headers: ["X-Internal-Secret": secret],
+                queryItems: [
+                    status.map { URLQueryItem(name: "status", value: $0) },
+                    targetType.map { URLQueryItem(name: "targetType", value: $0) },
+                    cursor.map { URLQueryItem(name: "cursor", value: $0) },
+                    limit.map { URLQueryItem(name: "limit", value: String($0)) }
+                ].compactMap { $0 }
+            )
+        }
+    }
+
+    public struct UpdateInternalReport: Endpoint {
+        public typealias Response = ReportResponseBody
+
+        let secret: String
+        let reportID: UUID
+        let payload: ReportUpdateRequestBody
+
+        public var requestSpec: HTTPRequestSpec {
+            .init(
+                path: "internal/reports/\(reportID.uuidString)",
+                method: .patch,
+                headers: ["X-Internal-Secret": secret]
+            )
+        }
+
+        public var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct RegisterPushDeviceToken: AuthorizedEndpoint {
+        public typealias Response = PushDeviceTokenResponseBody
+
+        let payload: PushDeviceTokenRegisterRequestBody
+
+        let baseRequestSpec = HTTPRequestSpec(path: "api/push/device-tokens", method: .post)
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct DeletePushDeviceToken: AuthorizedEndpoint {
+        public typealias Response = EmptyResponse
+
+        let tokenID: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/push/device-tokens/\(tokenID)", method: .delete)
+        }
+    }
+
     public static let me = Me()
     public static let contacts = Contacts()
+    public static let blocks = Blocks()
 
     public static func updateProfile(
         displayName: String? = nil,
@@ -341,5 +546,64 @@ enum UserRequest {
 
     public static func cancelContactRequest(id requestID: UUID) -> CancelContactRequest {
         CancelContactRequest(requestID: requestID)
+    }
+
+    public static func blockUser(userID: UUID, reason: String? = nil) -> BlockUser {
+        BlockUser(userID: userID, payload: UserBlockCreateRequestBody(reason: reason))
+    }
+
+    public static func unblockUser(userID: UUID) -> UnblockUser {
+        UnblockUser(userID: userID)
+    }
+
+    public static func createReport(
+        targetType: String,
+        targetID: String,
+        conversationID: UUID? = nil,
+        messageID: UUID? = nil,
+        reason: String,
+        detail: String? = nil
+    ) -> CreateReport {
+        CreateReport(
+            payload: ReportCreateRequestBody(
+                targetType: targetType,
+                targetID: targetID,
+                conversationID: conversationID,
+                messageID: messageID,
+                reason: reason,
+                detail: detail
+            )
+        )
+    }
+
+    public static func internalReports(
+        secret: String,
+        status: String? = nil,
+        targetType: String? = nil,
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) -> InternalReports {
+        InternalReports(secret: secret, status: status, targetType: targetType, cursor: cursor, limit: limit)
+    }
+
+    public static func updateInternalReport(
+        secret: String,
+        reportID: UUID,
+        status: String,
+        handledNote: String? = nil
+    ) -> UpdateInternalReport {
+        UpdateInternalReport(
+            secret: secret,
+            reportID: reportID,
+            payload: ReportUpdateRequestBody(status: status, handledNote: handledNote)
+        )
+    }
+
+    public static func registerPushDeviceToken(platform: String = "ios", token: String) -> RegisterPushDeviceToken {
+        RegisterPushDeviceToken(payload: PushDeviceTokenRegisterRequestBody(platform: platform, token: token))
+    }
+
+    public static func deletePushDeviceToken(tokenID: String) -> DeletePushDeviceToken {
+        DeletePushDeviceToken(tokenID: tokenID)
     }
 }

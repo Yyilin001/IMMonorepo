@@ -1,0 +1,246 @@
+package com.xmtx.imclientkit.features.im
+
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
+enum class IMConversationKind(val rawValue: String) {
+    Direct("direct"),
+    Group("group");
+
+    companion object {
+        fun from(rawValue: String): IMConversationKind =
+            entries.firstOrNull { it.rawValue == rawValue } ?: Group
+    }
+}
+
+@Serializable
+data class IMDirectPeerResponseBody(
+    val id: String,
+    val email: String,
+    val displayName: String? = null,
+    val avatarPreset: String? = null,
+)
+
+@Serializable
+data class IMMessagePreviewResponseBody(
+    val id: String,
+    val senderUserID: String,
+    val serverSequence: Int,
+    val content: IMMessageContent,
+    val derivedState: JsonObject = buildJsonObject { },
+    val createdAt: String? = null,
+) {
+    val previewText: String
+        get() = content.previewText
+}
+
+@Serializable
+data class IMConversationSummaryResponseBody(
+    val id: String,
+    val title: String? = null,
+    val kind: String = IMConversationKind.Group.rawValue,
+    val directMessagingState: String? = null,
+    val directPeer: IMDirectPeerResponseBody? = null,
+    val memberCount: Int,
+    val memberUserIDs: List<String> = emptyList(),
+    val notice: String? = null,
+    val avatarPreset: String? = null,
+    val muteAll: Boolean = false,
+    val lastMessage: IMMessagePreviewResponseBody? = null,
+    val lastReadSequence: Int = 0,
+    val unreadCount: Int = 0,
+    val isPinned: Boolean = false,
+    val pinnedAt: String? = null,
+    val isMuted: Boolean = false,
+    val createdAt: String? = null,
+    val updatedAt: String,
+) {
+    val displayTitle: String
+        get() = title?.trim()?.takeIf { it.isNotEmpty() }
+            ?: directPeer?.displayName?.trim()?.takeIf { it.isNotEmpty() }
+            ?: directPeer?.email
+            ?: "Conversation"
+}
+
+@Serializable
+data class IMConversationSummaryPageResponseBody(
+    val items: List<IMConversationSummaryResponseBody>,
+    val nextCursor: String? = null,
+    val hasMore: Boolean,
+    val snapshotToken: String,
+)
+
+@Serializable
+data class IMConversationSummaryChangesResponseBody(
+    val upserts: List<IMConversationSummaryResponseBody>,
+    val removedConversationIDs: List<String>,
+    val nextCursor: String? = null,
+    val hasMore: Boolean,
+    val targetToken: String,
+)
+
+@Serializable
+data class IMConversationMessageResponseBody(
+    val id: String,
+    val conversationID: String,
+    val senderUserID: String,
+    val clientMessageID: String? = null,
+    val serverSequence: Int,
+    val content: IMMessageContent,
+    val derivedState: JsonObject = buildJsonObject { },
+    val createdAt: String? = null,
+) {
+    val previewText: String
+        get() = content.previewText
+}
+
+@Serializable
+data class IMConversationMessagesSinceResponseBody(
+    val messages: List<IMConversationMessageResponseBody>,
+    val hasMore: Boolean,
+    val nextAfterSequence: Int? = null,
+)
+
+@Serializable(with = IMMessageContentSerializer::class)
+sealed interface IMMessageContent {
+    val previewText: String
+
+    @Serializable
+    data class Text(val text: String) : IMMessageContent {
+        override val previewText: String
+            get() = text
+    }
+
+    @Serializable
+    data class Reply(
+        val reference: IMReplyReference,
+        val text: String,
+    ) : IMMessageContent {
+        override val previewText: String
+            get() = text
+    }
+
+    @Serializable
+    data object Recalled : IMMessageContent {
+        override val previewText: String
+            get() = "Message recalled"
+    }
+
+    @Serializable
+    data class Media(
+        val type: String,
+        val asset: IMMediaAsset,
+    ) : IMMessageContent {
+        override val previewText: String
+            get() = when (type) {
+                "image" -> "[Image] ${asset.filename}"
+                "audio" -> "[Audio] ${asset.filename}"
+                else -> "[File] ${asset.filename}"
+            }
+    }
+
+    @Serializable
+    data class System(
+        val event: JsonObject,
+    ) : IMMessageContent {
+        override val previewText: String
+            get() = event["legacyText"]?.jsonPrimitive?.contentOrNull ?: "System message"
+    }
+
+    data class Unsupported(
+        val type: String?,
+        val raw: JsonObject,
+    ) : IMMessageContent {
+        override val previewText: String
+            get() = "Unsupported message"
+    }
+}
+
+@Serializable
+data class IMReplyReference(
+    val messageID: String,
+    val senderUserID: String? = null,
+    val previewText: String,
+)
+
+@Serializable
+data class IMMediaAsset(
+    val assetID: String,
+    val kind: String,
+    val mimeType: String,
+    val byteSize: Long,
+    val filename: String,
+    val width: Int? = null,
+    val height: Int? = null,
+    val durationMillis: Int? = null,
+    val previewAssetID: String? = null,
+)
+
+object IMMessageContentSerializer : KSerializer<IMMessageContent> {
+    override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor
+
+    override fun deserialize(decoder: Decoder): IMMessageContent {
+        val jsonDecoder = decoder as? JsonDecoder
+            ?: throw SerializationException("IMMessageContent requires JSON decoding.")
+        val raw = jsonDecoder.decodeJsonElement().jsonObject
+        return when (val type = raw["type"]?.jsonPrimitive?.contentOrNull) {
+            "text" -> IMMessageContent.Text(raw.requiredString("text"))
+            "reply" -> IMMessageContent.Reply(
+                reference = jsonDecoder.json.decodeFromJsonElement(IMReplyReference.serializer(), raw.required("reference")),
+                text = raw.requiredString("text"),
+            )
+            "recalled" -> IMMessageContent.Recalled
+            "image", "audio", "file" -> IMMessageContent.Media(
+                type = type,
+                asset = jsonDecoder.json.decodeFromJsonElement(IMMediaAsset.serializer(), raw.required("asset")),
+            )
+            "system" -> IMMessageContent.System(raw["event"]?.jsonObject ?: buildJsonObject { })
+            else -> IMMessageContent.Unsupported(type, raw)
+        }
+    }
+
+    override fun serialize(encoder: Encoder, value: IMMessageContent) {
+        val element = when (value) {
+            is IMMessageContent.Text -> buildJsonObject {
+                put("type", JsonPrimitive("text"))
+                put("text", JsonPrimitive(value.text))
+            }
+            is IMMessageContent.Reply -> buildJsonObject {
+                put("type", JsonPrimitive("reply"))
+                put("text", JsonPrimitive(value.text))
+            }
+            IMMessageContent.Recalled -> buildJsonObject {
+                put("type", JsonPrimitive("recalled"))
+            }
+            is IMMessageContent.Media -> buildJsonObject {
+                put("type", JsonPrimitive(value.type))
+            }
+            is IMMessageContent.System -> buildJsonObject {
+                put("type", JsonPrimitive("system"))
+                put("event", value.event)
+            }
+            is IMMessageContent.Unsupported -> value.raw
+        }
+        val jsonEncoder = encoder as? kotlinx.serialization.json.JsonEncoder
+            ?: throw SerializationException("IMMessageContent requires JSON encoding.")
+        jsonEncoder.encodeJsonElement(element)
+    }
+
+    private fun JsonObject.required(key: String): JsonElement =
+        get(key) ?: throw SerializationException("Missing '$key' in IMMessageContent.")
+
+    private fun JsonObject.requiredString(key: String): String =
+        required(key).jsonPrimitive.content
+}

@@ -14,13 +14,22 @@ let package = Package(
             targets: ["IMClientKit"]
         ),
     ],
+    dependencies: [
+        .package(url: "https://github.com/groue/GRDB.swift.git", .upToNextMajor(from: "7.10.0")),
+    ],
     targets: [
         .target(
-            name: "IMClientKit"
+            name: "IMClientKit",
+            dependencies: [
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ]
         ),
         .testTarget(
             name: "IMClientKitTests",
-            dependencies: ["IMClientKit"]
+            dependencies: [
+                "IMClientKit",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ]
         ),
     ]
 )

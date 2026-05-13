@@ -22,7 +22,12 @@ struct ContentView: View {
                 LoginView(message: message)
 
             case .signedIn(let user):
-                SignedInTabView(user: user)
+                SignedInTabView(
+                    user: user,
+                    sessionStore: authManager.sessionStore,
+                    contactStore: authManager.contactStore,
+                    conversationStore: authManager.imConversationStore
+                )
             }
         }
         .background(Color(.systemGroupedBackground))
