@@ -17,18 +17,21 @@ class AuthViewModelTests {
     @Test
     fun restoreSessionMovesToSignedIn() = runTest {
         val user = AuthUser("user-1", "a@example.com")
+        val gateway = FakeSessionGateway(restoreResult = RestoreResult.Authenticated(user))
         val viewModel = AuthViewModel(
-            FakeSessionGateway(restoreResult = RestoreResult.Authenticated(user)),
+            gateway,
         )
 
         assertEquals(AuthPhase.SignedIn(user), viewModel.state.value.phase)
+        assertEquals("user-1", gateway.startedRuntimeUserID)
     }
 
     @Test
     fun loginSuccessMovesToSignedIn() = runTest {
         val user = AuthUser("user-1", "a@example.com", displayName = "Alice")
+        val gateway = FakeSessionGateway(loginResult = Result.success(user))
         val viewModel = AuthViewModel(
-            FakeSessionGateway(loginResult = Result.success(user)),
+            gateway,
         )
 
         viewModel.updateEmail("a@example.com")
@@ -37,6 +40,7 @@ class AuthViewModelTests {
 
         assertEquals(AuthPhase.SignedIn(user), viewModel.state.value.phase)
         assertEquals("", viewModel.state.value.password)
+        assertEquals("user-1", gateway.startedRuntimeUserID)
     }
 
     @Test

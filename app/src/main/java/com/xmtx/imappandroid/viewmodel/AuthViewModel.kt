@@ -31,6 +31,7 @@ class AuthViewModel(
     val state: StateFlow<AuthUiState> = mutableState
 
     init {
+        observeSessionInvalidations()
         restoreSession()
     }
 
@@ -52,8 +53,18 @@ class AuthViewModel(
 
     fun signOut() {
         viewModelScope.launch {
+            gateway.stopIMRuntime()
             gateway.clearSession()
             mutableState.value = AuthUiState(phase = AuthPhase.SignedOut())
+        }
+    }
+
+    private fun observeSessionInvalidations() {
+        viewModelScope.launch {
+            gateway.sessionInvalidations.collect { message ->
+                gateway.clearSession()
+                mutableState.value = AuthUiState(phase = AuthPhase.SignedOut(message), actionMessage = message)
+            }
         }
     }
 
@@ -62,6 +73,7 @@ class AuthViewModel(
             mutableState.update { it.copy(phase = AuthPhase.Launching) }
             when (val result = gateway.restoreSession()) {
                 is RestoreResult.Authenticated -> {
+                    gateway.startIMRuntime(result.user.id)
                     mutableState.update { it.copy(phase = AuthPhase.SignedIn(result.user), actionMessage = null) }
                 }
                 is RestoreResult.SignedOut -> {
@@ -84,6 +96,7 @@ class AuthViewModel(
             runCatching {
                 if (register) gateway.register(email, password) else gateway.login(email, password)
             }.onSuccess { user ->
+                gateway.startIMRuntime(user.id)
                 mutableState.update {
                     it.copy(
                         phase = AuthPhase.SignedIn(user),

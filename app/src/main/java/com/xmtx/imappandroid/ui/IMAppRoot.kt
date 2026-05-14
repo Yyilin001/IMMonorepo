@@ -49,7 +49,9 @@ import com.xmtx.imappandroid.viewmodel.ConversationDetailViewModel
 import com.xmtx.imappandroid.viewmodel.ConversationListUiState
 import com.xmtx.imappandroid.viewmodel.ConversationListViewModel
 import com.xmtx.imclientkit.auth.AuthUser
-import com.xmtx.imclientkit.features.im.IMConversationSummaryResponseBody
+import com.xmtx.imclientkit.features.im.IMConnectionStatus
+import com.xmtx.imclientkit.features.im.IMConversation
+import com.xmtx.imclientkit.features.im.IMMessageDeliveryState
 
 @Composable
 fun IMAppRoot(container: AppContainer) {
@@ -150,7 +152,7 @@ private fun SignedInScreen(
     gateway: IMSessionGateway,
     onSignOut: () -> Unit,
 ) {
-    var selectedConversation by remember { mutableStateOf<IMConversationSummaryResponseBody?>(null) }
+    var selectedConversation by remember { mutableStateOf<IMConversation?>(null) }
     val listViewModel: ConversationListViewModel = viewModel(
         factory = viewModelFactory {
             initializer { ConversationListViewModel(gateway) }
@@ -178,11 +180,13 @@ private fun SignedInScreen(
         val conversation = selectedConversation
         val detailState by detailViewModel.state.collectAsState()
         LaunchedEffect(conversation?.id) {
-            conversation?.let { detailViewModel.loadMessages(it.id) }
+            conversation?.let { detailViewModel.openConversation(it.id) }
         }
         ConversationDetailScreen(
             title = conversation?.displayTitle ?: "Conversation",
             state = detailState,
+            onDraftChange = detailViewModel::updateDraft,
+            onSend = detailViewModel::sendText,
             onBack = { selectedConversation = null },
         )
     }
@@ -194,7 +198,7 @@ private fun ConversationListScreen(
     user: AuthUser,
     state: ConversationListUiState,
     onRefresh: () -> Unit,
-    onSelect: (IMConversationSummaryResponseBody) -> Unit,
+    onSelect: (IMConversation) -> Unit,
     onSignOut: () -> Unit,
 ) {
     Scaffold(
@@ -202,6 +206,10 @@ private fun ConversationListScreen(
             TopAppBar(
                 title = { Text(user.preferredDisplayName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 actions = {
+                    Text(
+                        text = state.connectionStatus.label,
+                        modifier = Modifier.padding(end = 8.dp),
+                    )
                     TextButton(onClick = onRefresh) { Text("Refresh") }
                     TextButton(onClick = onSignOut) { Text("Sign out") }
                 },
@@ -227,7 +235,7 @@ private fun ConversationListScreen(
                             },
                             supportingContent = {
                                 Text(
-                                    conversation.lastMessage?.previewText ?: "${conversation.memberCount} members",
+                                    conversation.lastMessagePreview,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
@@ -252,6 +260,8 @@ private fun ConversationListScreen(
 private fun ConversationDetailScreen(
     title: String,
     state: ConversationDetailUiState,
+    onDraftChange: (String) -> Unit,
+    onSend: () -> Unit,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -264,30 +274,71 @@ private fun ConversationDetailScreen(
             )
         },
     ) { padding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
         ) {
-            when {
-                state.isLoading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
-                state.messages.isEmpty() -> Text(
-                    text = state.message ?: "No messages.",
-                    modifier = Modifier.align(Alignment.Center),
-                )
-                else -> LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    reverseLayout = false,
-                ) {
-                    items(state.messages, key = { it.id }) { message ->
-                        Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
-                            Text("#${message.serverSequence}", fontWeight = FontWeight.Bold)
-                            Text(message.previewText)
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when {
+                    state.isLoading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+                    state.messages.isEmpty() -> Text(
+                        text = state.message ?: "No messages.",
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                    else -> LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        reverseLayout = false,
+                    ) {
+                        items(state.messages, key = { it.id }) { message ->
+                            Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                                Text(
+                                    text = "#${message.serverSequence ?: "-"} ${message.deliveryState.label}",
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                Text(message.previewText)
+                            }
+                            HorizontalDivider()
                         }
-                        HorizontalDivider()
                     }
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = state.draftText,
+                    onValueChange = onDraftChange,
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    label = { Text("Message") },
+                )
+                Button(onClick = onSend, enabled = state.draftText.isNotBlank()) {
+                    Text("Send")
                 }
             }
         }
     }
 }
+
+private val IMConnectionStatus.label: String
+    get() = when (this) {
+        IMConnectionStatus.Disconnected -> "offline"
+        IMConnectionStatus.Connecting -> "connecting"
+        IMConnectionStatus.Connected -> "online"
+        IMConnectionStatus.Failed -> "reconnecting"
+    }
+
+private val IMMessageDeliveryState.label: String
+    get() = when (this) {
+        IMMessageDeliveryState.Queued -> "queued"
+        IMMessageDeliveryState.Sending -> "sending"
+        IMMessageDeliveryState.Sent -> "sent"
+        IMMessageDeliveryState.Received -> "received"
+        IMMessageDeliveryState.Unknown -> "unknown"
+        IMMessageDeliveryState.Failed -> "failed"
+    }

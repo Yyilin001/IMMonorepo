@@ -12,8 +12,11 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.time.Instant
+import java.util.UUID
 
 enum class IMConversationKind(val rawValue: String) {
     Direct("direct"),
@@ -112,6 +115,191 @@ data class IMConversationMessagesSinceResponseBody(
     val hasMore: Boolean,
     val nextAfterSequence: Int? = null,
 )
+
+@Serializable
+data class IMConversationReadRequestBody(
+    val readSequence: ULong,
+)
+
+@Serializable
+data class IMConversationReadResponseBody(
+    val conversationID: String,
+    val lastReadSequence: Int,
+    val unreadCount: Int,
+)
+
+enum class IMConnectionStatus {
+    Disconnected,
+    Connecting,
+    Connected,
+    Failed,
+}
+
+enum class IMMessageDirection {
+    Incoming,
+    Outgoing,
+}
+
+enum class IMMessageDeliveryState {
+    Queued,
+    Sending,
+    Sent,
+    Received,
+    Unknown,
+    Failed,
+}
+
+data class IMConversationMessage(
+    val id: String,
+    val conversationID: String,
+    val clientMessageID: String?,
+    val serverMessageID: String?,
+    val senderUserID: String?,
+    val serverSequence: ULong?,
+    val content: IMMessageContent,
+    val direction: IMMessageDirection,
+    val createdAt: String,
+    val deliveryState: IMMessageDeliveryState,
+) {
+    val previewText: String
+        get() = content.previewText
+}
+
+data class IMConversation(
+    val id: String,
+    val summary: IMConversationSummaryResponseBody,
+    val messages: List<IMConversationMessage> = emptyList(),
+    val serverLastReadSequence: ULong = summary.lastReadSequence.toULong(),
+    val serverUnreadCount: Int = summary.unreadCount,
+    val localUnreadDelta: Int = 0,
+) {
+    val displayTitle: String
+        get() = summary.displayTitle
+
+    val unreadCount: Int
+        get() = maxOf(0, serverUnreadCount + localUnreadDelta)
+
+    val lastMessagePreview: String
+        get() = messages.maxByOrNull { it.serverSequence ?: ULong.MAX_VALUE }?.previewText
+            ?: summary.lastMessage?.previewText
+            ?: "${summary.memberCount} members"
+}
+
+data class IMOutgoingMessageRequest(
+    val requestID: String,
+    val localMessageID: String,
+    val payload: IMTCPMessagePayload,
+)
+
+data class IMTCPMessagePayload(
+    val clientMessageID: String? = null,
+    val messageID: String? = null,
+    val conversationID: String,
+    val senderUserID: String? = null,
+    val serverSequence: ULong? = null,
+    val serverTimestamp: String? = null,
+    val content: IMMessageContent,
+)
+
+@Serializable
+data class IMTCPMessagePayloadWire(
+    val clientMessageID: String? = null,
+    val messageID: String? = null,
+    val conversationID: String,
+    val senderUserID: String? = null,
+    val serverSequence: ULong? = null,
+    val serverTimestamp: String? = null,
+    val content: IMMessageContent,
+    val derivedState: JsonObject = buildJsonObject { },
+) {
+    fun toDomain(): IMTCPMessagePayload =
+        IMTCPMessagePayload(
+            clientMessageID = clientMessageID,
+            messageID = messageID,
+            conversationID = conversationID,
+            senderUserID = senderUserID,
+            serverSequence = serverSequence,
+            serverTimestamp = serverTimestamp,
+            content = content,
+        )
+
+    companion object {
+        fun fromDomain(payload: IMTCPMessagePayload): IMTCPMessagePayloadWire =
+            IMTCPMessagePayloadWire(
+                clientMessageID = payload.clientMessageID,
+                messageID = payload.messageID,
+                conversationID = payload.conversationID,
+                senderUserID = payload.senderUserID,
+                serverSequence = payload.serverSequence,
+                serverTimestamp = payload.serverTimestamp,
+                content = payload.content,
+            )
+    }
+}
+
+@Serializable
+data class IMTCPAckPayload(
+    val messageID: String,
+    val conversationID: String? = null,
+    val status: String,
+)
+
+@Serializable
+data class IMTCPConversationEventPayload(
+    val eventType: String,
+    val conversation: IMConversationSummaryResponseBody,
+    val message: IMConversationMessageResponseBody? = null,
+    val actorUserID: String? = null,
+    val serverTimestamp: String,
+    val messageIDs: List<String> = emptyList(),
+    val visibilityAction: String? = null,
+)
+
+@Serializable
+data class IMTCPContactEventPayload(
+    val eventType: String,
+    val request: JsonObject? = null,
+    val contact: JsonObject? = null,
+    val contactUserID: String? = null,
+    val actorUserID: String? = null,
+    val serverTimestamp: String,
+)
+
+@Serializable
+data class IMTCPKickPayload(
+    val reason: String,
+    val message: String,
+)
+
+fun IMConversationMessageResponseBody.toConversationMessage(currentUserID: String): IMConversationMessage =
+    IMConversationMessage(
+        id = id,
+        conversationID = conversationID,
+        clientMessageID = clientMessageID,
+        serverMessageID = id,
+        senderUserID = senderUserID,
+        serverSequence = serverSequence.toULong(),
+        content = content,
+        direction = if (senderUserID == currentUserID) IMMessageDirection.Outgoing else IMMessageDirection.Incoming,
+        createdAt = createdAt ?: Instant.now().toString(),
+        deliveryState = if (senderUserID == currentUserID) IMMessageDeliveryState.Sent else IMMessageDeliveryState.Received,
+    )
+
+fun IMTCPMessagePayload.toConversationMessage(currentUserID: String): IMConversationMessage {
+    val localID = clientMessageID ?: messageID ?: UUID.randomUUID().toString()
+    return IMConversationMessage(
+        id = messageID ?: localID,
+        conversationID = conversationID,
+        clientMessageID = clientMessageID,
+        serverMessageID = messageID,
+        senderUserID = senderUserID,
+        serverSequence = serverSequence,
+        content = content,
+        direction = if (senderUserID == currentUserID) IMMessageDirection.Outgoing else IMMessageDirection.Incoming,
+        createdAt = serverTimestamp ?: Instant.now().toString(),
+        deliveryState = if (senderUserID == currentUserID) IMMessageDeliveryState.Sent else IMMessageDeliveryState.Received,
+    )
+}
 
 @Serializable(with = IMMessageContentSerializer::class)
 sealed interface IMMessageContent {

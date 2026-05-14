@@ -20,9 +20,7 @@ class ConversationListViewModelTests {
             hasMore = false,
             snapshotToken = "snapshot",
         )
-        val viewModel = ConversationListViewModel(
-            FakeSessionGateway(conversationPageResult = Result.success(page)),
-        )
+        val viewModel = ConversationListViewModel(FakeSessionGateway(conversationPageResult = Result.success(page)))
 
         viewModel.loadConversations()
 

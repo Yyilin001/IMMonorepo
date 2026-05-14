@@ -7,12 +7,20 @@ import com.xmtx.imclientkit.auth.RestoreResult
 import com.xmtx.imclientkit.auth.SessionSnapshot
 import com.xmtx.imclientkit.features.im.IMConversationKind
 import com.xmtx.imclientkit.features.im.IMConversationMessageResponseBody
+import com.xmtx.imclientkit.features.im.IMConversationMessagesSinceResponseBody
+import com.xmtx.imclientkit.features.im.IMConversationReadResponseBody
 import com.xmtx.imclientkit.features.im.IMConversationSummaryPageResponseBody
 import com.xmtx.imclientkit.networking.APIError
 import com.xmtx.imclientkit.networking.AuthorizedRequestExecutor
 import com.xmtx.imclientkit.networking.HTTPExecutor
 import com.xmtx.imclientkit.networking.JsonConfiguration
 import com.xmtx.imclientkit.networking.NetworkEnvironment
+import com.xmtx.imclientkit.networking.imtcp.IMTCPClient
+import com.xmtx.imclientkit.networking.imtcp.IMTCPClientConfiguration
+import com.xmtx.imclientkit.networking.imtcp.IMTCPClientError
+import com.xmtx.imclientkit.networking.imtcp.IMTCPConnection
+import com.xmtx.imclientkit.networking.imtcp.IMTCPTransport
+import com.xmtx.imclientkit.networking.imtcp.SocketIMTCPTransport
 import com.xmtx.imclientkit.persistence.TokenSnapshot
 import com.xmtx.imclientkit.persistence.TokenStore
 import com.xmtx.imclientkit.persistence.UserSessionCache
@@ -43,7 +51,7 @@ class SessionClient internal constructor(
 
     private val authAPI = AuthAPI(json)
     private val userAPI = UserAPI()
-    private val imAPI = IMAPI()
+    private val imAPI = IMAPI(json)
     private val httpExecutor = HTTPExecutor(httpClient, network, json)
     private val authorizedExecutor = AuthorizedRequestExecutor(
         httpExecutor = httpExecutor,
@@ -114,6 +122,25 @@ class SessionClient internal constructor(
     ): List<IMConversationMessageResponseBody> =
         authorizedExecutor.execute(imAPI.messages(conversationID, beforeSequence, limit))
 
+    suspend fun fetchIMMessagesSince(
+        conversationID: String,
+        afterSequence: ULong,
+        limit: Int? = null,
+    ): IMConversationMessagesSinceResponseBody =
+        authorizedExecutor.execute(imAPI.messagesSince(conversationID, afterSequence, limit))
+
+    suspend fun markIMConversationRead(
+        conversationID: String,
+        readSequence: ULong,
+    ): IMConversationReadResponseBody =
+        authorizedExecutor.execute(imAPI.markRead(conversationID, readSequence))
+
+    suspend fun openIMConnection(
+        configuration: IMTCPClientConfiguration,
+        transport: IMTCPTransport = SocketIMTCPTransport(),
+    ): IMTCPConnection =
+        openIMConnection(configuration, transport, allowRefreshRetry = true)
+
     suspend fun clearSession() {
         tokenStore.clear()
         userCache.clear()
@@ -124,6 +151,28 @@ class SessionClient internal constructor(
         val response = httpExecutor.execute<AuthResponseBody>(authAPI.refresh(refreshToken))
         persistAuth(response)
         return response.accessToken
+    }
+
+    private suspend fun validAccessToken(): String =
+        tokenStore.load()?.accessToken ?: refreshAccessToken()
+
+    private suspend fun openIMConnection(
+        configuration: IMTCPClientConfiguration,
+        transport: IMTCPTransport,
+        allowRefreshRetry: Boolean,
+    ): IMTCPConnection {
+        val client = IMTCPClient(
+            configuration = configuration,
+            transport = transport,
+            accessTokenProvider = { validAccessToken() },
+        )
+        return try {
+            client.connect()
+        } catch (error: IMTCPClientError.AuthRejected) {
+            if (!allowRefreshRetry) throw error
+            refreshAccessToken()
+            openIMConnection(configuration, transport, allowRefreshRetry = false)
+        }
     }
 
     private suspend fun persistAuth(response: AuthResponseBody) {
