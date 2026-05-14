@@ -10,6 +10,7 @@ import com.xmtx.imclientkit.networking.NetworkEnvironment
 import com.xmtx.imclientkit.networking.imtcp.IMTCPClientConfiguration
 import com.xmtx.imclientkit.persistence.DataStoreTokenStore
 import com.xmtx.imclientkit.persistence.DataStoreUserSessionCache
+import com.xmtx.imclientkit.persistence.imcache.RoomIMConversationCache
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
@@ -27,6 +28,7 @@ class AppContainer(context: Context) {
     )
 
     private val conversationStore = IMConversationStore()
+    private val conversationCache = RoomIMConversationCache.create(appContext)
     private val runtimeController = IMRuntimeController(
         sessionClient = sessionClient,
         conversationStore = conversationStore,
@@ -35,6 +37,7 @@ class AppContainer(context: Context) {
             port = network.imTcpPort,
             platform = "android",
         ),
+        conversationCache = conversationCache,
     )
 
     val sessionGateway: IMSessionGateway = IMClientKitGateway(

@@ -23,6 +23,7 @@ class IMRuntimeController(
     private val sessionClient: SessionClient,
     val conversationStore: IMConversationStore,
     private val configuration: IMTCPClientConfiguration,
+    private val conversationCache: IMConversationCaching = NoopIMConversationCache(),
     private val tcpTransport: IMTCPTransport = SocketIMTCPTransport(),
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
@@ -33,6 +34,8 @@ class IMRuntimeController(
     private var reconnectJob: Job? = null
     private var gapSyncJob: Job? = null
     private var queuedFlushJob: Job? = null
+    private var cacheObserveJob: Job? = null
+    private var cacheSaveJob: Job? = null
     private var reconnectAttempt = 0
     private val readReportJobs = mutableMapOf<String, Job>()
     private val pendingReadSequences = mutableMapOf<String, ULong>()
@@ -41,9 +44,14 @@ class IMRuntimeController(
     val sessionInvalidations: SharedFlow<String> = mutableSessionInvalidations
 
     fun start(userID: String) {
+        if (currentUserID != null && currentUserID != userID) {
+            stop()
+        }
         currentUserID = userID
         reconnectAttempt = 0
+        startCachePersistence(userID)
         scope.launch {
+            restoreCachedSnapshot(userID)
             refreshConversationSummaries()
             scheduleConnectionIfNeeded()
         }
@@ -62,6 +70,8 @@ class IMRuntimeController(
         gapSyncJob = null
         queuedFlushJob?.cancel()
         queuedFlushJob = null
+        cacheObserveJob?.cancel()
+        cacheObserveJob = null
         readReportJobs.values.forEach { it.cancel() }
         readReportJobs.clear()
         pendingReadSequences.clear()
@@ -134,6 +144,36 @@ class IMRuntimeController(
                 connectJob = null
                 handleConnectionFailure(error)
             }
+        }
+    }
+
+    private fun startCachePersistence(userID: String) {
+        cacheObserveJob?.cancel()
+        cacheObserveJob = scope.launch {
+            var skippedInitial = false
+            conversationStore.state.collect { state ->
+                if (!skippedInitial) {
+                    skippedInitial = true
+                    return@collect
+                }
+                cacheSaveJob?.cancel()
+                cacheSaveJob = scope.launch {
+                    delay(CACHE_SAVE_DEBOUNCE_MILLIS)
+                    runCatching {
+                        conversationCache.saveSnapshot(userID, state)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun restoreCachedSnapshot(userID: String) {
+        runCatching {
+            conversationCache.loadSnapshot(userID)
+        }.onSuccess { snapshot ->
+            conversationStore.restoreSnapshot(snapshot ?: ConversationListState())
+        }.onFailure {
+            conversationStore.restoreSnapshot(ConversationListState())
         }
     }
 
@@ -319,5 +359,6 @@ class IMRuntimeController(
         const val READ_REPORT_DEBOUNCE_MILLIS = 300L
         const val RECONNECT_INITIAL_DELAY_MILLIS = 1_000L
         const val RECONNECT_MAX_DELAY_MILLIS = 30_000L
+        const val CACHE_SAVE_DEBOUNCE_MILLIS = 500L
     }
 }

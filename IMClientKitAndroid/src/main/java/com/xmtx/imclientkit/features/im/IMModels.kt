@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.time.Instant
@@ -400,6 +401,8 @@ object IMMessageContentSerializer : KSerializer<IMMessageContent> {
     }
 
     override fun serialize(encoder: Encoder, value: IMMessageContent) {
+        val jsonEncoder = encoder as? kotlinx.serialization.json.JsonEncoder
+            ?: throw SerializationException("IMMessageContent requires JSON encoding.")
         val element = when (value) {
             is IMMessageContent.Text -> buildJsonObject {
                 put("type", JsonPrimitive("text"))
@@ -407,6 +410,7 @@ object IMMessageContentSerializer : KSerializer<IMMessageContent> {
             }
             is IMMessageContent.Reply -> buildJsonObject {
                 put("type", JsonPrimitive("reply"))
+                put("reference", jsonEncoder.json.encodeToJsonElement(IMReplyReference.serializer(), value.reference))
                 put("text", JsonPrimitive(value.text))
             }
             IMMessageContent.Recalled -> buildJsonObject {
@@ -414,6 +418,7 @@ object IMMessageContentSerializer : KSerializer<IMMessageContent> {
             }
             is IMMessageContent.Media -> buildJsonObject {
                 put("type", JsonPrimitive(value.type))
+                put("asset", jsonEncoder.json.encodeToJsonElement(IMMediaAsset.serializer(), value.asset))
             }
             is IMMessageContent.System -> buildJsonObject {
                 put("type", JsonPrimitive("system"))
@@ -421,8 +426,6 @@ object IMMessageContentSerializer : KSerializer<IMMessageContent> {
             }
             is IMMessageContent.Unsupported -> value.raw
         }
-        val jsonEncoder = encoder as? kotlinx.serialization.json.JsonEncoder
-            ?: throw SerializationException("IMMessageContent requires JSON encoding.")
         jsonEncoder.encodeJsonElement(element)
     }
 

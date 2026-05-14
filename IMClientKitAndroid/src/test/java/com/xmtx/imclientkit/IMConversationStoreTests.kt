@@ -63,6 +63,32 @@ class IMConversationStoreTests {
         assertEquals(3UL, message.serverSequence)
     }
 
+    @Test
+    fun appendingMessagesRecordsLoadedCursorState() {
+        val store = IMConversationStore()
+        store.replaceSummaryWindow(pageWithConversation())
+
+        store.appendMessages(
+            conversationID = "conversation-1",
+            messages = listOf(
+                com.xmtx.imclientkit.features.im.IMConversationMessageResponseBody(
+                    id = "message-1",
+                    conversationID = "conversation-1",
+                    senderUserID = "user-2",
+                    serverSequence = 4,
+                    content = IMMessageContent.Text("loaded"),
+                    createdAt = "2026-05-13T00:00:00Z",
+                ),
+            ),
+            currentUserID = "user-1",
+        )
+
+        val state = store.state.value
+        assertEquals(setOf("conversation-1"), state.loadedConversationIDs)
+        assertEquals(4UL, state.latestSyncedServerSequences["conversation-1"])
+        assertEquals(4UL, state.oldestLoadedServerSequences["conversation-1"])
+    }
+
     private fun pageWithConversation() =
         com.xmtx.imclientkit.features.im.IMConversationSummaryPageResponseBody(
             items = listOf(

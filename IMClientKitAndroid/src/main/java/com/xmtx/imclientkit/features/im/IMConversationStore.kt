@@ -14,6 +14,10 @@ data class ConversationListState(
     val nextCursor: String? = null,
     val hasMore: Boolean = false,
     val snapshotToken: String? = null,
+    val lastSummaryRefreshAt: String? = null,
+    val loadedConversationIDs: Set<String> = emptySet(),
+    val latestSyncedServerSequences: Map<String, ULong> = emptyMap(),
+    val oldestLoadedServerSequences: Map<String, ULong> = emptyMap(),
     val statusMessage: String? = null,
 ) {
     val selectedConversation: IMConversation?
@@ -23,6 +27,18 @@ data class ConversationListState(
 class IMConversationStore {
     private val mutableState = MutableStateFlow(ConversationListState())
     val state: StateFlow<ConversationListState> = mutableState
+
+    fun restoreSnapshot(snapshot: ConversationListState) {
+        val selectedConversationID = snapshot.selectedConversationID?.takeIf { selected ->
+            snapshot.conversations.any { it.id == selected }
+        } ?: snapshot.conversations.firstOrNull()?.id
+        mutableState.value = snapshot.copy(
+            selectedConversationID = selectedConversationID,
+            connectionStatus = IMConnectionStatus.Disconnected,
+            connectionMessage = null,
+            statusMessage = null,
+        )
+    }
 
     fun replaceSummaryWindow(page: IMConversationSummaryPageResponseBody) {
         mutableState.update { current ->
@@ -43,6 +59,7 @@ class IMConversationStore {
                 nextCursor = page.nextCursor,
                 hasMore = page.hasMore,
                 snapshotToken = page.snapshotToken,
+                lastSummaryRefreshAt = Instant.now().toString(),
                 statusMessage = null,
             )
         }
@@ -59,6 +76,7 @@ class IMConversationStore {
                 nextCursor = page.nextCursor,
                 hasMore = page.hasMore,
                 snapshotToken = page.snapshotToken,
+                lastSummaryRefreshAt = Instant.now().toString(),
                 statusMessage = null,
             )
         }
@@ -81,6 +99,9 @@ class IMConversationStore {
             current.copy(
                 conversations = current.conversations.filterNot { it.id == id },
                 selectedConversationID = current.selectedConversationID.takeUnless { it == id },
+                loadedConversationIDs = current.loadedConversationIDs - id,
+                latestSyncedServerSequences = current.latestSyncedServerSequences - id,
+                oldestLoadedServerSequences = current.oldestLoadedServerSequences - id,
             )
         }
     }
@@ -97,7 +118,7 @@ class IMConversationStore {
         currentUserID: String,
     ) {
         val mapped = messages.map { it.toConversationMessage(currentUserID) }
-        appendDomainMessages(conversationID, mapped)
+        appendDomainMessages(conversationID, mapped, markLoaded = true)
     }
 
     fun receiveIncomingMessage(payload: IMTCPMessagePayload, currentUserID: String) {
@@ -219,7 +240,8 @@ class IMConversationStore {
     }
 
     fun latestLoadedServerSequence(conversationID: String): ULong? =
-        state.value.conversations
+        state.value.latestSyncedServerSequences[conversationID]
+            ?: state.value.conversations
             .firstOrNull { it.id == conversationID }
             ?.messages
             ?.mapNotNull { it.serverSequence }
@@ -272,19 +294,47 @@ class IMConversationStore {
         mutableState.update { it.copy(statusMessage = message) }
     }
 
-    private fun appendDomainMessages(conversationID: String, messages: List<IMConversationMessage>) {
-        if (messages.isEmpty()) return
+    private fun appendDomainMessages(
+        conversationID: String,
+        messages: List<IMConversationMessage>,
+        markLoaded: Boolean = false,
+    ) {
+        if (messages.isEmpty() && !markLoaded) return
         mutableState.update { current ->
+            val existing = current.conversations.firstOrNull { it.id == conversationID }
+            val existingMessages = existing?.messages.orEmpty()
+            val mergedMessages = if (messages.isEmpty()) {
+                existingMessages
+            } else {
+                (existingMessages + messages)
+                    .dedupeMessages()
+                    .sortedWith(compareBy<IMConversationMessage> { it.serverSequence ?: ULong.MAX_VALUE }.thenBy { it.createdAt })
+            }
+            val serverSequences = mergedMessages.mapNotNull { it.serverSequence }
+            val latest = serverSequences.maxOrNull()
+            val oldest = serverSequences.minOrNull()
             current.copy(
                 conversations = current.conversations.map { conversation ->
                     if (conversation.id != conversationID) {
                         conversation
                     } else {
-                        val merged = (conversation.messages + messages)
-                            .dedupeMessages()
-                            .sortedWith(compareBy<IMConversationMessage> { it.serverSequence ?: ULong.MAX_VALUE }.thenBy { it.createdAt })
-                        conversation.copy(messages = merged)
+                        conversation.copy(messages = mergedMessages)
                     }
+                },
+                loadedConversationIDs = if (markLoaded) {
+                    current.loadedConversationIDs + conversationID
+                } else {
+                    current.loadedConversationIDs
+                },
+                latestSyncedServerSequences = if (latest != null) {
+                    current.latestSyncedServerSequences + (conversationID to latest)
+                } else {
+                    current.latestSyncedServerSequences
+                },
+                oldestLoadedServerSequences = if (markLoaded && oldest != null) {
+                    current.oldestLoadedServerSequences + (conversationID to oldest)
+                } else {
+                    current.oldestLoadedServerSequences
                 },
             )
         }
@@ -330,11 +380,12 @@ class IMConversationStore {
 interface IMConversationCaching {
     suspend fun loadSnapshot(userID: String): ConversationListState?
     suspend fun saveSnapshot(userID: String, snapshot: ConversationListState)
-    suspend fun clearSnapshot(userID: String)
+    suspend fun clear(userID: String)
+    suspend fun clearSnapshot(userID: String) = clear(userID)
 }
 
 class NoopIMConversationCache : IMConversationCaching {
     override suspend fun loadSnapshot(userID: String): ConversationListState? = null
     override suspend fun saveSnapshot(userID: String, snapshot: ConversationListState) = Unit
-    override suspend fun clearSnapshot(userID: String) = Unit
+    override suspend fun clear(userID: String) = Unit
 }
