@@ -55,6 +55,22 @@ struct QueryReadModelFacade {
         try await timelineReadService.listMembers(in: conversationID, for: userID)
     }
 
+    func listMemberPage(
+        in conversationID: UUID,
+        for userID: UUID,
+        cursor: String?,
+        limit: Int?,
+        query: String?
+    ) async throws -> IMConversationMemberPageResponse {
+        try await timelineReadService.listMemberPage(
+            in: conversationID,
+            for: userID,
+            cursor: cursor,
+            limit: limit,
+            query: query
+        )
+    }
+
     func listMessages(
         in conversationID: UUID,
         for userID: UUID,

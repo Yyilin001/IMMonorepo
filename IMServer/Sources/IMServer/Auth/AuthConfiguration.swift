@@ -64,7 +64,7 @@ extension Application {
     var authConfiguration: AuthConfiguration {
         get {
             guard let configuration = self.storage[AuthConfigurationStorageKey.self] else {
-                fatalError("AuthConfiguration not configured")
+                preconditionFailure("AuthConfiguration not configured")
             }
             return configuration
         }

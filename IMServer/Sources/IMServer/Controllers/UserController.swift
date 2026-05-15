@@ -23,6 +23,12 @@ struct UserController: RouteCollection {
         protected.post("contact-requests", ":requestID", "accept", use: acceptContactRequest)
         protected.post("contact-requests", ":requestID", "decline", use: declineContactRequest)
         protected.post("contact-requests", ":requestID", "cancel", use: cancelContactRequest)
+        protected.get("blocks", use: blocks)
+        protected.post("users", ":userID", "block", use: blockUser)
+        protected.delete("users", ":userID", "block", use: unblockUser)
+        protected.post("reports", use: createReport)
+        protected.post("push", "device-tokens", use: registerPushDeviceToken)
+        protected.delete("push", "device-tokens", ":tokenID", use: deletePushDeviceToken)
     }
 
     func me(req: Request) async throws -> UserResponse {
@@ -148,7 +154,7 @@ struct UserController: RouteCollection {
                 conversationID: conversationID,
                 payload: ConversationDomainEventPayload(recipientUserIDs: [ownerUserID, contactUserID])
             )
-            try await req.application.processConversationOutboxForTesting()
+            try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
             await conversationEventService.publish(
                 eventType: .summaryUpdated,
                 conversationID: conversationID,
@@ -175,6 +181,15 @@ struct UserController: RouteCollection {
     func sendContactRequest(req: Request) async throws -> FriendRequestResponse {
         let user = try req.auth.require(User.self)
         let body = try req.content.decode(ContactRequestCreateRequest.self)
+        let requesterUserID = try user.requireID()
+        let normalizedEmail = User.normalize(body.email)
+        if let addressee = try await User.query(on: req.db)
+            .filter(\.$email == normalizedEmail)
+            .first(),
+           try await hasBlockBetween(requesterUserID, and: addressee.requireID(), on: req.db)
+        {
+            throw Abort(.forbidden, reason: "当前无法发送好友申请。")
+        }
         let response = try await friendRequestService.sendRequest(
             from: user,
             email: body.email,
@@ -220,7 +235,7 @@ struct UserController: RouteCollection {
                     recipientUserIDs: [result.request.requester.id, result.request.addressee.id]
                 )
             )
-            try await req.application.processConversationOutboxForTesting()
+            try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
             await conversationEventService.publish(
                 eventType: .summaryUpdated,
                 conversationID: conversationID,
@@ -323,6 +338,18 @@ struct UserController: RouteCollection {
             destination[conversationID] = Array(Set(destination[conversationID] ?? []))
                 .sorted { $0.uuidString < $1.uuidString }
         }
+    }
+
+    private func hasBlockBetween(_ lhs: UUID, and rhs: UUID, on db: any Database) async throws -> Bool {
+        let lhsBlocked = try await UserBlock.find(
+            UserBlock.recordID(ownerUserID: lhs, blockedUserID: rhs),
+            on: db
+        ) != nil
+        let rhsBlocked = try await UserBlock.find(
+            UserBlock.recordID(ownerUserID: rhs, blockedUserID: lhs),
+            on: db
+        ) != nil
+        return lhsBlocked || rhsBlocked
     }
 }
 

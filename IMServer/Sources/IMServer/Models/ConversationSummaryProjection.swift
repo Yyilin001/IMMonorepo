@@ -40,8 +40,14 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
     @OptionalField(key: "avatar_preset")
     var avatarPreset: String?
 
+    @Field(key: "mute_all")
+    var muteAll: Bool
+
     @Field(key: "member_count")
     var memberCount: Int
+
+    @OptionalField(key: "membership_revision")
+    var membershipRevision: Date?
 
     @Field(key: "member_user_ids_json")
     private var memberUserIDsJSON: String
@@ -87,6 +93,7 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
         directPeerAvatarPreset: UserAvatarPreset? = nil,
         notice: String? = nil,
         avatarPreset: IMConversationAvatarPreset? = nil,
+        muteAll: Bool = false,
         memberUserIDs: [UUID],
         lastMessage: IMMessagePreviewResponse?,
         lastReadSequence: Int,
@@ -96,7 +103,8 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
         isMuted: Bool = false,
         lastActivityAt: Date,
         updatedAt: Date,
-        isRemoved: Bool
+        isRemoved: Bool,
+        membershipRevision: Date? = nil
     ) throws {
         id = Self.recordID(ownerUserID: ownerUserID, conversationID: conversationID)
         self.ownerUserID = ownerUserID
@@ -110,7 +118,9 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
         self.directPeerAvatarPreset = directPeerAvatarPreset?.rawValue
         self.notice = notice
         self.avatarPreset = avatarPreset?.rawValue
+        self.muteAll = muteAll
         memberCount = memberUserIDs.count
+        self.membershipRevision = membershipRevision
         memberUserIDsJSON = try Self.encodeUUIDs(memberUserIDs)
         lastMessageJSON = try lastMessage.map(Self.encodeLastMessage)
         self.lastReadSequence = lastReadSequence
@@ -155,6 +165,14 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
 
     static func recordID(ownerUserID: UUID, conversationID: UUID) -> String {
         "\(ownerUserID.uuidString.lowercased()):\(conversationID.uuidString.lowercased())"
+    }
+
+    static func encodeMemberUserIDsForStorage(_ value: [UUID]) throws -> String {
+        try encodeUUIDs(value)
+    }
+
+    static func encodeLastMessageForStorage(_ value: IMMessagePreviewResponse?) throws -> String? {
+        try value.map(encodeLastMessage)
     }
 
     private static func encodeUUIDs(_ value: [UUID]) throws -> String {

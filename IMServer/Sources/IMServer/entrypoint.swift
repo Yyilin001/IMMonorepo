@@ -152,6 +152,8 @@ enum Entrypoint {
                 role = .streamConsumer
             } else if commandInput.arguments.first == "worker" || commandInput.arguments.first == "projection-worker" {
                 role = .projectionWorker
+            } else if let environmentRole = IMRuntimeRole.loadFromEnvironment() {
+                role = environmentRole
             } else {
                 role = .combined
             }

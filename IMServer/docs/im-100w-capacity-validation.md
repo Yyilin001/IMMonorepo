@@ -45,37 +45,44 @@ For block sequence validation set these on gateway and command-api roles:
 
 Each command-api node must additionally set a unique `IM_COMMAND_NODE_ID` that matches one entry in `IM_COMMAND_NODE_URLS`.
 
-## Load generator
+## Load generators
 
-Run from one or more independent load-generator hosts:
+Use the repository load-test entrypoints instead of ad hoc scripts:
 
 ```bash
-python3 tools/loadtest/im_loadgen.py \
-  --http-base-url http://api.example.com \
+cd IMServer
+./scripts/staging_baseline.sh --profile staging-baseline --env-file LoadTests/staging-baseline.env
+```
+
+For HTTP-only runs:
+
+```bash
+cd IMServer/LoadTests/k6
+k6 run -e PROFILE=staging-baseline -e BASE_URL=https://api.example.com http-small-group.js
+```
+
+For TCP-only runs:
+
+```bash
+cd IMServer/LoadTests/TCPDriver
+swift run IMTCPLoadDriver \
+  --profile staging-baseline \
+  --base-url https://api.example.com \
   --tcp-host tcp.example.com \
-  --tcp-port 9000 \
-  --users 1000 \
-  --group-size 10 \
-  --duration-seconds 900 \
-  --tcp-messages-per-second 0.05 \
-  --read-every 20
+  --tcp-port 9001 \
+  --email "$IM_EMAIL" \
+  --password "$IM_PASSWORD" \
+  --conversation-id "$IM_CONVERSATION_ID"
 ```
 
-Scale by running multiple generators with different email templates:
+The load-test suite covers:
 
-```bash
-python3 tools/loadtest/im_loadgen.py --email-template lg1-{index}@example.com ...
-python3 tools/loadtest/im_loadgen.py --email-template lg2-{index}@example.com ...
-```
-
-The generator covers:
-
-- login/register
-- conversation creation
+- login
+- conversation creation or existing conversation reuse
 - conversation list reads
-- latest 100 message reads
-- TCP auth
-- TCP message writes
+- `conversations/changes`
+- `messages/since`
+- TCP auth and message writes
 
 ## Test phases
 
@@ -115,12 +122,12 @@ The generator covers:
 
 Run these during Phase 3:
 
-- restart one gateway node
-- restart one command-api node
-- pause one stream-consumer group for 5 minutes, then resume
-- stop one outbox-relay node
-- inject Kafka broker restart
-- inject Redis 30 second outage in staging
+- `./scripts/failure_drill.sh restart-gateway`
+- restart one command-api node manually in staging
+- `./scripts/failure_drill.sh pause-stream-consumer`
+- `./scripts/failure_drill.sh stop-outbox-relay`
+- inject Kafka broker restart manually in staging
+- `./scripts/failure_drill.sh redis-outage`
 
 Pass condition:
 
@@ -159,7 +166,7 @@ Critical metrics:
 
 ## Capacity report template
 
-For each test phase record:
+Use `docs/capacity-report-template.md`. For each test phase record:
 
 - date and git commit
 - deployment topology and instance sizes

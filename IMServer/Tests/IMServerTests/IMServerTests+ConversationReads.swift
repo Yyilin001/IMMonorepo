@@ -7,6 +7,19 @@ import VaporTesting
 import Testing
 
 extension IMServerTests {
+    @Test("Summary change log writer skips missing summaries")
+    func summaryChangeLogWriterSkipsMissingSummaries() async throws {
+        try await withApp(configure: configure) { app in
+            try await IMConversationSummaryProjectionService(db: app.db).recordConversationSummaryChanges(
+                conversationID: UUID(),
+                recipientUserIDs: [UUID()]
+            )
+
+            let count = try await ConversationChangesLogEntry.query(on: app.db).count()
+            #expect(count == 0)
+        }
+    }
+
     @Test("IM conversations endpoint returns member conversations with latest message")
     func imConversations() async throws {
         try await withApp(configure: configure) { app in
@@ -135,7 +148,8 @@ extension IMServerTests {
             let secondConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
             let thirdConversationID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
 
-            for summary in try [
+            let readModelDB = app.summaryShardRouter.database(forOwnerUserID: ownerID)
+            let summaries = try [
                 makeConversationSummaryProjection(
                     ownerUserID: ownerID,
                     conversationID: firstConversationID,
@@ -163,8 +177,16 @@ extension IMServerTests {
                     lastActivityAt: Date(timeIntervalSince1970: 1_700_220_100),
                     updatedAt: Date(timeIntervalSince1970: 1_700_220_100)
                 )
-            ] {
-                try await summary.create(on: app.db)
+            ]
+            for summary in summaries {
+                try await summary.create(on: readModelDB)
+                try await ConversationChangesLogEntry(
+                    ownerUserID: ownerID,
+                    conversationID: summary.conversationID,
+                    summaryRecordID: try #require(summary.id),
+                    updatedAt: summary.updatedAt,
+                    isRemoved: summary.isRemoved
+                ).create(on: readModelDB)
             }
 
             var pageCursor = ""
@@ -258,7 +280,8 @@ extension IMServerTests {
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let members = try res.content.decode([IMConversationMemberResponse].self)
+                let memberPage = try res.content.decode(IMConversationMemberPageResponse.self)
+                let members = memberPage.items
                 #expect(members.map(\.email) == [
                     "demo@example.com",
                     "members-admin@example.com",
@@ -580,7 +603,7 @@ extension IMServerTests {
                 role: .member
             ).create(on: app.db)
 
-            _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "visible-before-join",
@@ -598,7 +621,7 @@ extension IMServerTests {
                 #expect(res.status == .ok)
             })
 
-            _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "visible-after-join",
@@ -657,7 +680,7 @@ extension IMServerTests {
                 role: .member
             ).create(on: app.db)
 
-            _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: liveConversationID,
                     clientMessageID: "verify-live-message",
@@ -665,6 +688,7 @@ extension IMServerTests {
                 ),
                 senderUserID: ownerUserID
             )
+            try await app.processInlineOutboxProjectionIfAllowed()
 
             guard let mismatchedSummary = try await ConversationUserSummary.find(
                 ConversationUserSummary.recordID(

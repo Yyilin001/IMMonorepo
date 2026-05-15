@@ -1,0 +1,34 @@
+name: IMServer Production Topology Smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  production-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Docker versions
+        run: |
+          docker --version
+          docker compose version
+
+      - name: Build IMServer smoke image
+        working-directory: IMServer
+        run: docker compose -f docker-compose.production-smoke.yml build gateway
+
+      - name: Run production topology smoke
+        working-directory: IMServer
+        run: ./scripts/production_smoke.sh run
+
+      - name: Upload smoke reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: imserver-production-smoke-reports
+          path: |
+            IMServer/reports/
+          if-no-files-found: warn

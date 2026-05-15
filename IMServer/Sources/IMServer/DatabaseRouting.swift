@@ -150,6 +150,21 @@ struct DirectoryBackedConversationShardRouter: ConversationShardRouter {
     let shardDatabaseIDs: [String: DatabaseID]
     let shardReplicaDatabaseIDs: [String: DatabaseID]
     let directory: any ConversationDirectory
+    private let shardCache = ConversationShardIDLookupCache(maxEntries: 20_000)
+
+    init(
+        app: Application,
+        shardIDs: [String],
+        shardDatabaseIDs: [String: DatabaseID],
+        shardReplicaDatabaseIDs: [String: DatabaseID],
+        directory: any ConversationDirectory
+    ) {
+        self.app = app
+        self.shardIDs = shardIDs
+        self.shardDatabaseIDs = shardDatabaseIDs
+        self.shardReplicaDatabaseIDs = shardReplicaDatabaseIDs
+        self.directory = directory
+    }
 
     var routerName: String { "directory-backed-conversation-shard" }
 
@@ -182,11 +197,19 @@ struct DirectoryBackedConversationShardRouter: ConversationShardRouter {
     }
 
     func shardID(forConversationID conversationID: UUID) async throws -> String {
+        if let cachedShardID = await shardCache.shardID(for: conversationID),
+           shardIDs.contains(cachedShardID) {
+            return cachedShardID
+        }
+
         let storedShardID = try await directory.shardID(for: conversationID)
         if shardIDs.contains(storedShardID) {
+            await shardCache.store(storedShardID, for: conversationID)
             return storedShardID
         }
-        return stableShardID(for: conversationID, shardIDs: shardIDs)
+        let fallbackShardID = stableShardID(for: conversationID, shardIDs: shardIDs)
+        await shardCache.store(fallbackShardID, for: conversationID)
+        return fallbackShardID
     }
 
     func commandDatabase(forConversationID conversationID: UUID) async throws -> any Database {
@@ -228,6 +251,40 @@ struct DirectoryBackedConversationShardRouter: ConversationShardRouter {
             return app.db(databaseID)
         }
         return app.imReplicaDatabaseEnabled ? app.db(.imReplica) : app.db
+    }
+}
+
+private actor ConversationShardIDLookupCache {
+    private let maxEntries: Int
+    private var values: [UUID: String] = [:]
+    private var insertionOrder: [UUID] = []
+
+    init(maxEntries: Int) {
+        self.maxEntries = max(1, maxEntries)
+    }
+
+    func shardID(for conversationID: UUID) -> String? {
+        values[conversationID]
+    }
+
+    func store(_ shardID: String, for conversationID: UUID) {
+        if values[conversationID] == nil {
+            insertionOrder.append(conversationID)
+        }
+        values[conversationID] = shardID
+        trimIfNeeded()
+    }
+
+    private func trimIfNeeded() {
+        guard values.count > maxEntries else {
+            return
+        }
+
+        let overflow = values.count - maxEntries
+        for conversationID in insertionOrder.prefix(overflow) {
+            values[conversationID] = nil
+        }
+        insertionOrder.removeFirst(min(overflow, insertionOrder.count))
     }
 }
 

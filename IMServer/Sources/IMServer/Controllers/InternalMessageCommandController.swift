@@ -26,6 +26,8 @@ struct InternalMessageCommandController: RouteCollection {
         }
 
         await req.application.conversationMemberCache.invalidate(conversationID: conversationID)
+        await req.application.directConversationPairCache.invalidate(conversationID: conversationID)
+        await req.application.conversationMediaAccessCache.invalidate(conversationID: conversationID)
         return .ok
     }
 

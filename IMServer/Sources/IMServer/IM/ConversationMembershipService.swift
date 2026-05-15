@@ -43,25 +43,68 @@ struct ConversationMembershipService {
         in conversationID: UUID,
         for userID: UUID
     ) async throws -> [IMConversationMemberResponse] {
+        let page = try await listMemberPageResponses(
+            in: conversationID,
+            for: userID,
+            cursor: nil,
+            limit: nil,
+            query: nil
+        )
+        return page.items
+    }
+
+    func listMemberPageResponses(
+        in conversationID: UUID,
+        for userID: UUID,
+        cursor: String?,
+        limit requestedLimit: Int?,
+        query: String?
+    ) async throws -> IMConversationMemberPageResponse {
         _ = try await requireMembershipRecord(conversationID: conversationID, userID: userID)
+        let limit = max(1, min(requestedLimit ?? 50, 100))
+        let offset = max(0, cursor.flatMap(Int.init) ?? 0)
+        let normalizedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
         let memberships = try await ConversationMember.query(on: db)
             .filter(\.$conversation.$id == conversationID)
             .with(\.$user)
             .all()
 
-        return try memberships
+        let allItems = try memberships
             .map { membership -> IMConversationMemberResponse in
                 guard let user = membership.$user.value else {
                     throw Abort(.internalServerError, reason: "会话成员数据不完整。")
                 }
+                let displayTitle = membership.memberNickname?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ?? user.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ?? user.email
                 return IMConversationMemberResponse(
                     id: try user.requireID(),
                     email: user.email,
-                    role: membership.memberRoleEnum.rawValue
+                    displayName: user.displayName,
+                    avatarPreset: user.avatarPresetEnum,
+                    role: membership.memberRoleEnum.rawValue,
+                    memberNickname: membership.memberNickname,
+                    displayTitle: displayTitle.isEmpty ? user.email : displayTitle
                 )
             }
+            .filter { item in
+                guard let normalizedQuery, !normalizedQuery.isEmpty else {
+                    return true
+                }
+                return item.email.lowercased().contains(normalizedQuery)
+                    || (item.displayName?.lowercased().contains(normalizedQuery) ?? false)
+                    || (item.memberNickname?.lowercased().contains(normalizedQuery) ?? false)
+            }
             .sorted(by: sortConversationMembers)
+        let pageItems = Array(allItems.dropFirst(offset).prefix(limit))
+        let nextOffset = offset + pageItems.count
+        return IMConversationMemberPageResponse(
+            items: pageItems,
+            nextCursor: nextOffset < allItems.count ? "\(nextOffset)" : nil,
+            total: allItems.count,
+            limit: limit
+        )
     }
 
     private func sortConversationMembers(

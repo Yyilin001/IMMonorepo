@@ -92,6 +92,7 @@ struct ConversationGovernanceCommandSupport {
         title: String?,
         notice: String?,
         avatarPreset: IMConversationAvatarPreset?,
+        muteAll: Bool?,
         requesterUserID: UUID
     ) async throws -> IMConversationResponse {
         let conversation = try await requireConversationAndMembership(
@@ -114,7 +115,8 @@ struct ConversationGovernanceCommandSupport {
         let changeSet = try governanceService.makeMetadataChangeSet(
             title: title,
             notice: notice,
-            avatarPreset: avatarPreset
+            avatarPreset: avatarPreset,
+            muteAll: muteAll
         )
 
         let requester = try await userLookup.requireUser(id: requesterUserID)
@@ -151,6 +153,37 @@ struct ConversationGovernanceCommandSupport {
                 readSequence: sequence
             )
 
+            return try await ConversationSummaryReadSupport(db: database).conversationSummary(
+                conversationID: conversationID,
+                for: requesterUserID
+            )
+        }
+
+        try await refreshPublisher.publish(
+            .metadataUpdated,
+            conversationID: conversationID,
+            recipientUserIDs: response.memberUserIDs
+        )
+        return response
+    }
+
+    func updateMemberNickname(
+        in conversationID: UUID,
+        requesterUserID: UUID,
+        memberNickname: String?
+    ) async throws -> IMConversationResponse {
+        _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
+        let normalized = memberNickname?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let storedNickname = normalized?.isEmpty == false ? normalized : nil
+
+        let response = try await db.transaction { database in
+            let membership = try await ConversationMembershipService(db: database).requireMembershipRecord(
+                conversationID: conversationID,
+                userID: requesterUserID,
+                on: database
+            )
+            membership.memberNickname = storedNickname
+            try await membership.update(on: database)
             return try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
                 for: requesterUserID

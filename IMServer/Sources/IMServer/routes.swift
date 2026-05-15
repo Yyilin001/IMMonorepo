@@ -5,6 +5,7 @@ func routes(_ app: Application) throws {
         try app.register(collection: RootRoutes())
         try app.register(collection: HelloController())
         try app.register(collection: InternalMetricsController())
+        try app.register(collection: InternalReportsController())
     }
 
     if app.imRuntimeRole.servesGateway {

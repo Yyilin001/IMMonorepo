@@ -196,6 +196,11 @@ enum IMTCPConversationEventType: String, Codable, Sendable {
     case summaryUpdated = "summary_updated"
     case messageUpdated = "message_updated"
     case messageRecalled = "message_recalled"
+    case messageVisibilityChanged = "message_visibility_changed"
+    case messageFavoriteChanged = "message_favorite_changed"
+    case conversationVisibilityChanged = "conversation_visibility_changed"
+    case conversationSettingsChanged = "conversation_settings_changed"
+    case inviteChanged = "invite_changed"
 }
 
 struct IMTCPConversationEventPayload: Codable, Sendable {
@@ -204,6 +209,32 @@ struct IMTCPConversationEventPayload: Codable, Sendable {
     let message: IMMessageResponse?
     let actorUserID: UUID?
     let serverTimestamp: Date
+    let messageIDs: [UUID]
+    let favoriteChangedMessageID: UUID?
+    let isFavorited: Bool?
+    let visibilityAction: ConversationVisibilityAction?
+
+    init(
+        eventType: IMTCPConversationEventType,
+        conversation: IMConversationResponse,
+        message: IMMessageResponse?,
+        actorUserID: UUID?,
+        serverTimestamp: Date,
+        messageIDs: [UUID] = [],
+        favoriteChangedMessageID: UUID? = nil,
+        isFavorited: Bool? = nil,
+        visibilityAction: ConversationVisibilityAction? = nil
+    ) {
+        self.eventType = eventType
+        self.conversation = conversation
+        self.message = message
+        self.actorUserID = actorUserID
+        self.serverTimestamp = serverTimestamp
+        self.messageIDs = messageIDs
+        self.favoriteChangedMessageID = favoriteChangedMessageID
+        self.isFavorited = isFavorited
+        self.visibilityAction = visibilityAction
+    }
 }
 
 enum IMTCPContactEventType: String, Codable, Sendable {

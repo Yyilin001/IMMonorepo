@@ -12,6 +12,11 @@ enum ConversationDomainEventType: String, Codable, CaseIterable, Sendable {
     case membershipRoleUpdated = "membership_role_updated"
     case conversationRemovedForUser = "conversation_removed_for_user"
     case directPeerUpdated = "direct_peer_updated"
+    case messageVisibilityChanged = "message_visibility_changed"
+    case messageFavoriteChanged = "message_favorite_changed"
+    case conversationVisibilityChanged = "conversation_visibility_changed"
+    case conversationSettingsChanged = "conversation_settings_changed"
+    case inviteChanged = "invite_changed"
 }
 
 enum ConversationDomainEventStatus: String, Codable, Sendable {
@@ -21,19 +26,58 @@ enum ConversationDomainEventStatus: String, Codable, Sendable {
     case failed
 }
 
+enum ConversationVisibilityAction: String, Codable, Equatable, Sendable {
+    case messageHidden = "message_hidden"
+    case conversationCleared = "conversation_cleared"
+    case conversationDeleted = "conversation_deleted"
+}
+
 struct ConversationDomainEventPayload: Codable, Equatable, Sendable {
     var recipientUserIDs: [UUID]
     var affectedUserID: UUID?
     var messageID: UUID?
+    var messageIDs: [UUID]
+    var favoriteChangedMessageID: UUID?
+    var isFavorited: Bool?
+    var visibilityAction: ConversationVisibilityAction?
 
     init(
         recipientUserIDs: [UUID] = [],
         affectedUserID: UUID? = nil,
-        messageID: UUID? = nil
+        messageID: UUID? = nil,
+        messageIDs: [UUID] = [],
+        favoriteChangedMessageID: UUID? = nil,
+        isFavorited: Bool? = nil,
+        visibilityAction: ConversationVisibilityAction? = nil
     ) {
         self.recipientUserIDs = recipientUserIDs
         self.affectedUserID = affectedUserID
         self.messageID = messageID
+        self.messageIDs = messageIDs
+        self.favoriteChangedMessageID = favoriteChangedMessageID
+        self.isFavorited = isFavorited
+        self.visibilityAction = visibilityAction
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case recipientUserIDs
+        case affectedUserID
+        case messageID
+        case messageIDs
+        case favoriteChangedMessageID
+        case isFavorited
+        case visibilityAction
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        recipientUserIDs = try container.decodeIfPresent([UUID].self, forKey: .recipientUserIDs) ?? []
+        affectedUserID = try container.decodeIfPresent(UUID.self, forKey: .affectedUserID)
+        messageID = try container.decodeIfPresent(UUID.self, forKey: .messageID)
+        messageIDs = try container.decodeIfPresent([UUID].self, forKey: .messageIDs) ?? []
+        favoriteChangedMessageID = try container.decodeIfPresent(UUID.self, forKey: .favoriteChangedMessageID)
+        isFavorited = try container.decodeIfPresent(Bool.self, forKey: .isFavorited)
+        visibilityAction = try container.decodeIfPresent(ConversationVisibilityAction.self, forKey: .visibilityAction)
     }
 }
 

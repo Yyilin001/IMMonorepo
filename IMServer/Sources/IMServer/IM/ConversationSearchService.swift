@@ -10,8 +10,12 @@ struct ConversationSearchService {
 
     private struct SearchIndexRow: Decodable {
         let message_id: UUID
+        let sender_user_id: UUID?
         let server_sequence: Int
+        let content_json: String?
+        let derived_state_json: String?
         let searchable_text: String
+        let created_at: Date
     }
 
     let db: any Database
@@ -50,26 +54,32 @@ struct ConversationSearchService {
         let limit = try normalizedSearchLimit(requestedLimit)
         let cursor = try normalizedSearchCursor(rawCursor)
         let normalizedPattern = "%\(query)%"
+        let searchPredicate: SQLQueryString
+        if sql.dialect.name == "postgresql" {
+            searchPredicate = "\(ident: "searchable_text") ILIKE \(bind: normalizedPattern)"
+        } else {
+            searchPredicate = "LOWER(\(ident: "searchable_text")) LIKE LOWER(\(bind: normalizedPattern))"
+        }
 
         let queryString: SQLQueryString
         if let cursor {
             queryString = """
-                SELECT message_id, server_sequence, searchable_text
+                SELECT message_id, sender_user_id, server_sequence, content_json, derived_state_json, searchable_text, created_at
                 FROM \(ident: ConversationMessageSearchIndex.schema)
                 WHERE conversation_id = \(bind: conversationID)
                   AND server_sequence >= \(bind: membership.visibleFromSequence)
-                  AND LOWER(searchable_text) LIKE LOWER(\(bind: normalizedPattern))
+                  AND \(searchPredicate)
                   AND server_sequence < \(bind: cursor)
                 ORDER BY server_sequence DESC
                 LIMIT \(bind: limit + 1)
                 """
         } else {
             queryString = """
-                SELECT message_id, server_sequence, searchable_text
+                SELECT message_id, sender_user_id, server_sequence, content_json, derived_state_json, searchable_text, created_at
                 FROM \(ident: ConversationMessageSearchIndex.schema)
                 WHERE conversation_id = \(bind: conversationID)
                   AND server_sequence >= \(bind: membership.visibleFromSequence)
-                  AND LOWER(searchable_text) LIKE LOWER(\(bind: normalizedPattern))
+                  AND \(searchPredicate)
                 ORDER BY server_sequence DESC
                 LIMIT \(bind: limit + 1)
                 """
@@ -91,6 +101,14 @@ struct ConversationSearchService {
 
         guard !messageIDs.isEmpty else {
             return IMConversationMessageSearchPageResponse(items: [], nextCursor: nil, hasMore: false)
+        }
+
+        if let indexedItems = try directSearchItems(from: pageRows, query: query) {
+            return IMConversationMessageSearchPageResponse(
+                items: indexedItems,
+                nextCursor: hasMore ? String(pageRows.last?.server_sequence ?? 0) : nil,
+                hasMore: hasMore
+            )
         }
 
         let messages = try await ConversationMessage.query(on: db)
@@ -121,6 +139,59 @@ struct ConversationSearchService {
             nextCursor: hasMore ? String(pageRows.last?.server_sequence ?? 0) : nil,
             hasMore: hasMore
         )
+    }
+
+    private func directSearchItems(
+        from rows: [SearchIndexRow],
+        query: String
+    ) throws -> [IMConversationMessageSearchHitResponse]? {
+        var items: [IMConversationMessageSearchHitResponse] = []
+        items.reserveCapacity(rows.count)
+
+        for row in rows {
+            guard let senderUserID = row.sender_user_id,
+                  let contentJSON = row.content_json,
+                  let derivedStateJSON = row.derived_state_json,
+                  let contentData = contentJSON.data(using: .utf8),
+                  let derivedStateData = derivedStateJSON.data(using: .utf8)
+            else {
+                return nil
+            }
+
+            let content = try JSONDecoder().decode(IMMessageContent.self, from: contentData)
+            let derivedState = try JSONDecoder().decode(IMMessageDerivedState.self, from: derivedStateData)
+            items.append(
+                IMConversationMessageSearchHitResponse(
+                    messageID: row.message_id,
+                    senderUserID: senderUserID,
+                    serverSequence: row.server_sequence,
+                    content: content,
+                    derivedState: derivedState,
+                    snippet: searchSnippet(for: query, searchableText: row.searchable_text),
+                    createdAt: row.created_at
+                )
+            )
+        }
+
+        return items
+    }
+
+    private func searchSnippet(for rawQuery: String, searchableText: String) -> String {
+        let normalizedQuery = rawQuery.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: .current
+        )
+        for line in searchableText.split(separator: "\n", omittingEmptySubsequences: true) {
+            let candidate = String(line)
+            let normalizedCandidate = candidate.folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: .current
+            )
+            if normalizedCandidate.contains(normalizedQuery) {
+                return candidate
+            }
+        }
+        return searchableText
     }
 
     func searchSnippet(for rawQuery: String, aggregate: IMMessageAggregate) -> String? {

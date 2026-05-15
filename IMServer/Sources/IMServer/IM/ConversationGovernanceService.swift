@@ -7,13 +7,15 @@ struct ConversationMetadataChangeSet: Equatable, Sendable {
     let requestedTitleUpdate: Bool
     let requestedNoticeUpdate: Bool
     let avatarPreset: IMConversationAvatarPreset?
+    let muteAll: Bool?
 }
 
 struct ConversationGovernanceService {
     func makeMetadataChangeSet(
         title: String?,
         notice: String?,
-        avatarPreset: IMConversationAvatarPreset?
+        avatarPreset: IMConversationAvatarPreset?,
+        muteAll: Bool?
     ) throws -> ConversationMetadataChangeSet {
         let normalizedTitle = title.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         if let normalizedTitle, title != nil, normalizedTitle.isEmpty {
@@ -25,7 +27,7 @@ struct ConversationGovernanceService {
             throw Abort(.badRequest, reason: "群公告不能为空。")
         }
 
-        guard title != nil || notice != nil || avatarPreset != nil else {
+        guard title != nil || notice != nil || avatarPreset != nil || muteAll != nil else {
             throw Abort(.badRequest, reason: "至少需要更新一项群资料。")
         }
 
@@ -34,7 +36,8 @@ struct ConversationGovernanceService {
             normalizedNotice: normalizedNotice,
             requestedTitleUpdate: title != nil,
             requestedNoticeUpdate: notice != nil,
-            avatarPreset: avatarPreset
+            avatarPreset: avatarPreset,
+            muteAll: muteAll
         )
     }
 
@@ -54,6 +57,10 @@ struct ConversationGovernanceService {
         if let avatarPreset = changeSet.avatarPreset, conversation.avatarPresetEnum != avatarPreset {
             conversation.avatarPresetEnum = avatarPreset
             updatedFields.append(.avatarPreset)
+        }
+        if let muteAll = changeSet.muteAll, conversation.muteAll != muteAll {
+            conversation.muteAll = muteAll
+            updatedFields.append(.muteAll)
         }
         return updatedFields
     }

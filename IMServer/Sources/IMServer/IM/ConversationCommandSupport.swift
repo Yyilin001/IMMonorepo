@@ -93,6 +93,7 @@ struct ConversationCommandSupport {
         title: String?,
         notice: String?,
         avatarPreset: IMConversationAvatarPreset?,
+        muteAll: Bool? = nil,
         requesterUserID: UUID
     ) async throws -> IMConversationResponse {
         try await governanceMutateSupport.updateConversationMetadata(
@@ -100,7 +101,20 @@ struct ConversationCommandSupport {
             title: title,
             notice: notice,
             avatarPreset: avatarPreset,
+            muteAll: muteAll,
             requesterUserID: requesterUserID
+        )
+    }
+
+    func updateMemberNickname(
+        in conversationID: UUID,
+        requesterUserID: UUID,
+        memberNickname: String?
+    ) async throws -> IMConversationResponse {
+        try await governanceMutateSupport.updateMemberNickname(
+            in: conversationID,
+            requesterUserID: requesterUserID,
+            memberNickname: memberNickname
         )
     }
 

@@ -292,7 +292,29 @@ public extension IMConversationMessage {
 public struct IMConversationMember: Identifiable, Equatable, Sendable {
     public let id: UUID
     public let email: String
+    public let displayName: String?
+    public let avatarPreset: UserAvatarPreset?
     public let role: IMConversationMemberRole
+    public let memberNickname: String?
+    public let displayTitle: String
+
+    public init(
+        id: UUID,
+        email: String,
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil,
+        role: IMConversationMemberRole,
+        memberNickname: String? = nil,
+        displayTitle: String? = nil
+    ) {
+        self.id = id
+        self.email = email
+        self.displayName = displayName
+        self.avatarPreset = avatarPreset
+        self.role = role
+        self.memberNickname = memberNickname
+        self.displayTitle = displayTitle ?? memberNickname ?? displayName ?? email
+    }
 }
 
 public struct IMDirectPeer: Equatable, Sendable {
@@ -322,6 +344,7 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
     public var directPeer: IMDirectPeer?
     public var notice: String?
     public var avatarPreset: IMConversationAvatarPreset?
+    public var muteAll: Bool
     public var memberCount: Int
     public var memberUserIDs: [UUID]
     public var members: [IMConversationMember]
@@ -351,7 +374,7 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
     }
 
     public var canSendMessages: Bool {
-        !isDirectMessagingFrozen
+        !isDirectMessagingFrozen && !muteAll
     }
 
     public var directMessagingStatusMessage: String? {
@@ -370,6 +393,7 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
         directPeer: IMDirectPeer? = nil,
         notice: String? = nil,
         avatarPreset: IMConversationAvatarPreset? = nil,
+        muteAll: Bool = false,
         memberCount: Int,
         memberUserIDs: [UUID],
         members: [IMConversationMember],
@@ -393,6 +417,7 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
         self.directPeer = directPeer
         self.notice = notice
         self.avatarPreset = avatarPreset
+        self.muteAll = muteAll
         self.memberCount = memberCount
         self.memberUserIDs = memberUserIDs
         self.members = members
@@ -442,3 +467,34 @@ public struct IMConversationEventApplyOutcome: Equatable, Sendable {
     public let shouldReloadMembersForConversationID: String?
 }
 
+public struct IMConversationMemberPageState: Equatable, Sendable {
+    public var items: [IMConversationMember]
+    public var query: String
+    public var nextCursor: String?
+    public var total: Int
+    public var limit: Int
+    public var isLoading: Bool
+    public var isLoadingMore: Bool
+
+    public var canLoadMore: Bool {
+        nextCursor != nil
+    }
+
+    public init(
+        items: [IMConversationMember] = [],
+        query: String = "",
+        nextCursor: String? = nil,
+        total: Int = 0,
+        limit: Int = 50,
+        isLoading: Bool = false,
+        isLoadingMore: Bool = false
+    ) {
+        self.items = items
+        self.query = query
+        self.nextCursor = nextCursor
+        self.total = total
+        self.limit = limit
+        self.isLoading = isLoading
+        self.isLoadingMore = isLoadingMore
+    }
+}

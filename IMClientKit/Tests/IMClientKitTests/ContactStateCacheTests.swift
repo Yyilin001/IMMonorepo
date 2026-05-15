@@ -1,6 +1,5 @@
 import Foundation
 @testable import IMClientKit
-import SwiftData
 import Testing
 
 struct ContactStateCacheTests {
@@ -172,15 +171,15 @@ struct ContactStateCacheTests {
         #expect(restored.resolvedRequests.map(\.status) == [.cancelled])
     }
 
-    private func makeCache() throws -> SwiftDataContactStateCache {
-        let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
-        let container = try ModelContainer(
-            for: ContactCacheMetadataEntity.self,
-            CachedContactEntity.self,
-            CachedContactRequestEntity.self,
-            configurations: configuration
-        )
-        return SwiftDataContactStateCache(modelContainer: container)
+    private func makeCache() throws -> GRDBContactStateCache {
+        try GRDBContactStateCache(databaseURL: temporaryDatabaseURL())
+    }
+
+    private func temporaryDatabaseURL() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "IMClientKitTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appending(path: "cache.sqlite", directoryHint: .notDirectory)
     }
 
     private func sampleSnapshot(ownerUserID: UUID) -> ContactStateCacheSnapshot {

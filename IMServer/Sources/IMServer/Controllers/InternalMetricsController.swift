@@ -1,5 +1,6 @@
 import Vapor
 import Fluent
+import SQLKit
 
 struct InternalMetricsController: RouteCollection {
     func boot(routes: any RoutesBuilder) throws {
@@ -7,8 +8,12 @@ struct InternalMetricsController: RouteCollection {
     }
 
     func metrics(req: Request) async throws -> Response {
-        guard req.application.metricsConfiguration.isEnabled else {
+        let configuration = req.application.metricsConfiguration
+        guard configuration.isEnabled else {
             throw Abort(.notFound)
+        }
+        guard configuration.allows(req: req) else {
+            throw Abort(.unauthorized, reason: "Invalid internal metrics secret.")
         }
 
         let routing = await req.application.routingMetrics.currentSnapshot()
@@ -27,6 +32,11 @@ struct InternalMetricsController: RouteCollection {
         appendGauge("im_http_request_latency_max_millis", value: http.maxLatencyMillis, to: &lines)
         appendGauge("im_tcp_connections", value: routing.currentTCPConnectionCount, to: &lines)
         appendCounter("im_redis_route_registrations_total", value: routing.redisRouteRegistrations, to: &lines)
+        appendCounter("im_redis_presence_route_cache_hits_total", value: routing.redisPresenceRouteCacheHits, to: &lines)
+        appendCounter("im_redis_presence_route_cache_misses_total", value: routing.redisPresenceRouteCacheMisses, to: &lines)
+        appendCounter("im_redis_presence_pipeline_lookups_total", value: routing.redisPresencePipelineLookupCount, to: &lines)
+        appendCounter("im_redis_presence_pipeline_lookup_users_total", value: routing.redisPresencePipelineLookupUserCount, to: &lines)
+        appendCounter("im_redis_presence_stale_cleanup_total", value: routing.redisPresenceStaleCleanupCount, to: &lines)
         appendCounter("im_cross_node_dispatch_total", value: routing.crossNodeDispatchCount, to: &lines)
         appendCounter("im_cross_node_dispatch_failures_total", value: routing.crossNodeDispatchFailureCount, to: &lines)
         appendCounter("im_outbox_processed_events_total", value: outbox.processedEvents, to: &lines)
@@ -53,6 +63,7 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_conversation_member_cache_miss_total", value: messageWrite.memberCacheMisses, to: &lines)
         appendCounter("im_message_write_batches_total", value: messageWrite.messageWriteBatches, to: &lines)
         appendCounter("im_message_write_batch_messages_total", value: messageWrite.messageWriteBatchMessages, to: &lines)
+        appendCounter("im_message_write_queue_rejected_total", value: messageWrite.writeQueueRejected, to: &lines)
         appendGauge("im_projection_lag_millis", value: liveLag.projectionLagMillis, to: &lines)
         appendGauge("im_search_lag_millis", value: liveLag.searchLagMillis, to: &lines)
         appendGauge("im_replay_pending_events", value: liveLag.replayPendingEvents, to: &lines)
@@ -118,25 +129,81 @@ struct InternalMetricsController: RouteCollection {
     private func oldestSearchLagMillis(app: Application) async throws -> Int {
         var oldestMissingCreatedAt: Date?
         for shard in app.conversationShardRouter.allCommandDatabases() {
-            let messages = try await ConversationMessage.query(on: shard.database)
-                .sort(\.$createdAt, .descending)
-                .limit(1_000)
-                .all()
-            for message in messages {
-                let messageID = try message.requireID()
-                guard let index = try await ConversationMessageSearchIndex.find(
-                    ConversationMessageSearchIndex.recordID(messageID: messageID),
-                    on: shard.database
-                ), index.serverSequence == message.serverSequence else {
-                    let createdAt = message.createdAt ?? Date()
-                    if oldestMissingCreatedAt.map({ createdAt < $0 }) ?? true {
-                        oldestMissingCreatedAt = createdAt
-                    }
-                    continue
-                }
+            if let createdAt = try await ConversationSearchLagReader(database: shard.database)
+                .oldestMissingOrStaleIndexCreatedAt(recentMessageLimit: 1_000),
+               oldestMissingCreatedAt.map({ createdAt < $0 }) ?? true {
+                oldestMissingCreatedAt = createdAt
             }
         }
         return oldestMissingCreatedAt.map { max(0, Int(Date().timeIntervalSince($0) * 1000)) } ?? 0
+    }
+}
+
+struct ConversationSearchLagReader {
+    let database: any Database
+
+    func oldestMissingOrStaleIndexCreatedAt(recentMessageLimit: Int) async throws -> Date? {
+        guard let sql = database as? any SQLDatabase else {
+            return try await oldestMissingOrStaleIndexCreatedAtWithFluent(recentMessageLimit: recentMessageLimit)
+        }
+
+        struct SearchLagRow: Decodable {
+            let createdAt: Date?
+
+            enum CodingKeys: String, CodingKey {
+                case createdAt = "created_at"
+            }
+        }
+
+        let indexIDExpression: SQLQueryString
+        if sql.dialect.name == "postgresql" {
+            indexIDExpression = "LOWER(CAST(\(ident: "recent").\(ident: "id") AS TEXT))"
+        } else {
+            indexIDExpression = "LOWER(CAST(\(ident: "recent").\(ident: "id") AS TEXT))"
+        }
+
+        let row = try await sql.raw("""
+            WITH \(ident: "recent") AS (
+                SELECT
+                    \(ident: "id"),
+                    \(ident: "server_sequence"),
+                    \(ident: "created_at")
+                FROM \(ident: ConversationMessage.schema)
+                ORDER BY \(ident: "created_at") DESC
+                LIMIT \(bind: recentMessageLimit)
+            )
+            SELECT \(ident: "recent").\(ident: "created_at")
+            FROM \(ident: "recent")
+            LEFT JOIN \(ident: ConversationMessageSearchIndex.schema) AS \(ident: "search_index")
+              ON \(ident: "search_index").\(ident: "id") = \(indexIDExpression)
+            WHERE \(ident: "search_index").\(ident: "id") IS NULL
+               OR \(ident: "search_index").\(ident: "server_sequence") != \(ident: "recent").\(ident: "server_sequence")
+            ORDER BY \(ident: "recent").\(ident: "created_at") ASC
+            LIMIT 1
+            """).first(decoding: SearchLagRow.self)
+        return row?.createdAt
+    }
+
+    private func oldestMissingOrStaleIndexCreatedAtWithFluent(recentMessageLimit: Int) async throws -> Date? {
+        let messages = try await ConversationMessage.query(on: database)
+            .sort(\.$createdAt, .descending)
+            .limit(recentMessageLimit)
+            .all()
+        var oldestMissingCreatedAt: Date?
+        for message in messages {
+            let messageID = try message.requireID()
+            guard let index = try await ConversationMessageSearchIndex.find(
+                ConversationMessageSearchIndex.recordID(messageID: messageID),
+                on: database
+            ), index.serverSequence == message.serverSequence else {
+                let createdAt = message.createdAt ?? Date()
+                if oldestMissingCreatedAt.map({ createdAt < $0 }) ?? true {
+                    oldestMissingCreatedAt = createdAt
+                }
+                continue
+            }
+        }
+        return oldestMissingCreatedAt
     }
 }
 
@@ -149,11 +216,39 @@ private struct LiveLagSnapshot {
 
 struct IMMetricsConfiguration: Sendable {
     let isEnabled: Bool
+    let internalSecret: String?
 
     static func load(from environment: Environment) -> IMMetricsConfiguration {
         IMMetricsConfiguration(
-            isEnabled: parseBooleanEnvironment("IM_METRICS_ENABLED", defaultValue: environment == .production)
+            isEnabled: parseBooleanEnvironment("IM_METRICS_ENABLED", defaultValue: environment == .production),
+            internalSecret: Self.internalSecret()
         )
+    }
+
+    func validateStartup(environment: Environment) throws {
+        guard environment == .production, isEnabled, internalSecret == nil else {
+            return
+        }
+
+        throw Abort(
+            .internalServerError,
+            reason: "Production metrics require IM_METRICS_INTERNAL_SECRET or IM_INTERNAL_SHARED_SECRET."
+        )
+    }
+
+    func allows(req: Request) -> Bool {
+        guard let internalSecret else {
+            return false
+        }
+        return req.headers.first(name: "X-IM-Metrics-Secret") == internalSecret
+            || req.headers.first(name: "X-IM-Internal-Secret") == internalSecret
+    }
+
+    private static func internalSecret() -> String? {
+        let rawSecret = Environment.get("IM_METRICS_INTERNAL_SECRET")
+            ?? Environment.get("IM_INTERNAL_SHARED_SECRET")
+        let secret = rawSecret?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return secret?.isEmpty == false ? secret : nil
     }
 }
 

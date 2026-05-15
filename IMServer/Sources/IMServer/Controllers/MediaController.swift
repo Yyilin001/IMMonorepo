@@ -140,52 +140,133 @@ struct MediaController: RouteCollection {
         for userID: UUID,
         on req: Request
     ) async throws -> MediaStorageService.StoredAssetFile {
-        let storage = MediaStorageService(app: req.application)
+        let storage = try MediaStorageService(app: req.application)
         if await storage.assetExists(ownerUserID: userID, assetID: assetID) {
             return try await storage.storedAssetFile(ownerUserID: userID, assetID: assetID)
         }
 
-        for shardID in req.application.conversationShardRouter.shardIDs {
-            let shardDB = req.application.conversationShardRouter.eventualReadDatabase(forShardID: shardID)
-            let memberships = try await ConversationMember.query(on: shardDB)
-                .filter(\.$user.$id == userID)
-                .all()
-            guard !memberships.isEmpty else {
+        if let cachedOwnerUserID = await req.application.conversationMediaAccessCache.ownerUserID(
+            assetID: assetID,
+            userID: userID
+        ) {
+            do {
+                return try await storage.storedAssetFile(ownerUserID: cachedOwnerUserID, assetID: assetID)
+            } catch {
+                await req.application.conversationMediaAccessCache.invalidate(assetID: assetID)
+            }
+        }
+
+        let directoryReferences = try await ConversationMediaAssetReferenceDirectoryService(db: req.application.imSummaryDB)
+            .references(assetID: assetID, on: req.application.imSummaryDB)
+        if let storedAsset = try await authorizedSharedAsset(
+            assetID: assetID,
+            userID: userID,
+            references: directoryReferences,
+            storage: storage,
+            app: req.application
+        ) {
+            return storedAsset
+        }
+
+        if req.application.environment == .development || req.application.environment == .testing {
+            if let storedAsset = try await authorizedSharedAssetByShardScanForCompatibility(
+                assetID: assetID,
+                userID: userID,
+                storage: storage,
+                app: req.application
+            ) {
+                return storedAsset
+            }
+        }
+
+        throw Abort(.notFound, reason: "附件不存在。")
+    }
+
+    private func authorizedSharedAsset(
+        assetID: String,
+        userID: UUID,
+        references: [ConversationMediaAssetReferenceDirectory],
+        storage: MediaStorageService,
+        app: Application
+    ) async throws -> MediaStorageService.StoredAssetFile? {
+        let membershipsByConversationID = try await sharedAssetMembershipsByConversationID(
+            references: references,
+            userID: userID,
+            app: app
+        )
+
+        for reference in references {
+            guard let membership = membershipsByConversationID[reference.conversationID],
+                  reference.serverSequence >= membership.visibleFromSequence
+            else {
                 continue
             }
-
-            let visibleMembershipsByConversationID = Dictionary(
-                uniqueKeysWithValues: memberships.map { ($0.$conversation.id, $0) }
+            await app.conversationMediaAccessCache.store(
+                assetID: assetID,
+                userID: userID,
+                conversationID: reference.conversationID,
+                ownerUserID: reference.ownerUserID
             )
-            let conversationIDs = Array(visibleMembershipsByConversationID.keys)
+            return try await storage.storedAssetFile(
+                ownerUserID: reference.ownerUserID,
+                assetID: assetID
+            )
+        }
+        return nil
+    }
 
-            let mediaMessages = try await ConversationMessage.query(on: shardDB)
-                .group(.or) { group in
-                    group.filter(\.$kind == IMMessageContentType.image.rawValue)
-                    group.filter(\.$kind == IMMessageContentType.audio.rawValue)
-                    group.filter(\.$kind == IMMessageContentType.file.rawValue)
-                }
+    private func sharedAssetMembershipsByConversationID(
+        references: [ConversationMediaAssetReferenceDirectory],
+        userID: UUID,
+        app: Application
+    ) async throws -> [UUID: ConversationMember] {
+        let referencesByShard = Dictionary(grouping: references, by: \.shardID)
+        var result: [UUID: ConversationMember] = [:]
+        for (shardID, shardReferences) in referencesByShard {
+            let conversationIDs = Array(Set(shardReferences.map(\.conversationID)))
+            guard !conversationIDs.isEmpty else {
+                continue
+            }
+            let shardDB = app.conversationShardRouter.eventualReadDatabase(forShardID: shardID)
+            let memberships = try await ConversationMember.query(on: shardDB)
                 .filter(\.$conversation.$id ~~ conversationIDs)
-                .sort(\.$serverSequence, .descending)
+                .filter(\.$user.$id == userID)
                 .all()
+            for membership in memberships {
+                result[membership.$conversation.id] = membership
+            }
+        }
+        return result
+    }
 
-            for message in mediaMessages {
-                guard let membership = visibleMembershipsByConversationID[message.$conversation.id],
-                      message.serverSequence >= membership.visibleFromSequence,
-                      let mediaAsset = try? message.decodedContent().mediaAsset,
-                      mediaAsset.assetID == assetID
+    private func authorizedSharedAssetByShardScanForCompatibility(
+        assetID: String,
+        userID: UUID,
+        storage: MediaStorageService,
+        app: Application
+    ) async throws -> MediaStorageService.StoredAssetFile? {
+        for shardID in app.conversationShardRouter.shardIDs {
+            let shardDB = app.conversationShardRouter.eventualReadDatabase(forShardID: shardID)
+            let references = try await ConversationMediaAssetReferenceService(db: shardDB)
+                .references(assetID: assetID, on: shardDB)
+            for reference in references {
+                guard let membership = try await ConversationMember.query(on: shardDB)
+                    .filter(\.$conversation.$id == reference.conversationID)
+                    .filter(\.$user.$id == userID)
+                    .first(),
+                    reference.serverSequence >= membership.visibleFromSequence
                 else {
                     continue
                 }
 
                 return try await storage.storedAssetFile(
-                    ownerUserID: message.$sender.id,
+                    ownerUserID: reference.ownerUserID,
                     assetID: assetID
                 )
             }
         }
 
-        throw Abort(.notFound, reason: "附件不存在。")
+        return nil
     }
 
     private func shouldHonorRangeRequest(req: Request, entityTag: String) -> Bool {

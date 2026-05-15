@@ -141,13 +141,32 @@ struct ConversationSequenceAllocator {
         conversationID: UUID,
         updatedAt: Date
     ) async throws -> Int {
+        guard let sequence = try await reserve(
+            count: 1,
+            conversationID: conversationID,
+            updatedAt: updatedAt
+        ).first else {
+            throw Abort(.notFound, reason: "会话不存在。")
+        }
+        return sequence
+    }
+
+    func reserve(
+        count: Int,
+        conversationID: UUID,
+        updatedAt: Date
+    ) async throws -> [Int] {
+        guard count > 0 else {
+            return []
+        }
+
         if let sql = db as? any SQLDatabase,
            sql.dialect.name == "postgresql",
-           let nextSequence = try await sql.update(Conversation.schema)
+           let end = try await sql.update(Conversation.schema)
             .set(
                 "last_message_sequence",
                 to: SQLQueryString(
-                    "GREATEST(\(ident: "last_message_sequence"), COALESCE((SELECT MAX(\(ident: "server_sequence")) FROM \(ident: ConversationMessage.schema) WHERE \(ident: "conversation_id") = \(bind: conversationID)), 0)) + 1"
+                    "\(ident: "last_message_sequence") + \(bind: count)"
                 )
             )
             .set("updated_at", to: updatedAt)
@@ -155,7 +174,7 @@ struct ConversationSequenceAllocator {
             .returning("last_message_sequence")
             .first(decodingColumn: "last_message_sequence", as: Int.self)
         {
-            return nextSequence
+            return Array((end - count + 1)...end)
         }
 
         guard let conversation = try await Conversation.find(conversationID, on: db) else {
@@ -170,10 +189,11 @@ struct ConversationSequenceAllocator {
         conversation.lastMessageSequence = max(
             conversation.lastMessageSequence,
             latestPersistedMessageSequence
-        ) + 1
+        ) + count
         conversation.updatedAt = updatedAt
         try await conversation.update(on: db)
-        return conversation.lastMessageSequence
+        let end = conversation.lastMessageSequence
+        return Array((end - count + 1)...end)
     }
 }
 

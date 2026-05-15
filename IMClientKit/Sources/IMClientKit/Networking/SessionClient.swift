@@ -185,6 +185,80 @@ public actor SessionClient {
         try await executor.execute(UserRequest.cancelContactRequest(id: requestID))
     }
 
+    public func fetchBlocks() async throws -> [UserBlockResponseBody] {
+        try await executor.execute(UserRequest.blocks)
+    }
+
+    public func blockUser(userID: UUID, reason: String? = nil) async throws -> UserBlockResponseBody {
+        try await executor.execute(UserRequest.blockUser(userID: userID, reason: reason))
+    }
+
+    public func unblockUser(userID: UUID) async throws -> EmptyResponse {
+        try await executor.execute(UserRequest.unblockUser(userID: userID))
+    }
+
+    public func createReport(
+        targetType: String,
+        targetID: String,
+        conversationID: UUID? = nil,
+        messageID: UUID? = nil,
+        reason: String,
+        detail: String? = nil
+    ) async throws -> ReportResponseBody {
+        try await executor.execute(
+            UserRequest.createReport(
+                targetType: targetType,
+                targetID: targetID,
+                conversationID: conversationID,
+                messageID: messageID,
+                reason: reason,
+                detail: detail
+            )
+        )
+    }
+
+    public func fetchInternalReports(
+        secret: String,
+        status: String? = nil,
+        targetType: String? = nil,
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) async throws -> ReportPageResponseBody {
+        try await executor.execute(
+            UserRequest.internalReports(
+                secret: secret,
+                status: status,
+                targetType: targetType,
+                cursor: cursor,
+                limit: limit
+            )
+        )
+    }
+
+    public func updateInternalReport(
+        secret: String,
+        reportID: UUID,
+        status: String,
+        handledNote: String? = nil
+    ) async throws -> ReportResponseBody {
+        try await executor.execute(
+            UserRequest.updateInternalReport(
+                secret: secret,
+                reportID: reportID,
+                status: status,
+                handledNote: handledNote
+            )
+        )
+    }
+
+    public func registerPushDeviceToken(platform: String = "ios", token: String) async throws -> PushDeviceTokenResponseBody {
+        try await executor.execute(UserRequest.registerPushDeviceToken(platform: platform, token: token))
+    }
+
+    public func deletePushDeviceToken(tokenID: String) async throws -> EmptyResponse {
+        try await executor.execute(UserRequest.deletePushDeviceToken(tokenID: tokenID))
+    }
+
     public func fetchSessions() async throws -> [SessionSnapshot] {
         try await executor.execute(AuthRequest.sessions)
     }
@@ -243,9 +317,12 @@ public actor SessionClient {
     }
 
     public func fetchIMConversationMembers(
-        conversationID: String
-    ) async throws -> [IMConversationMemberResponseBody] {
-        try await executor.execute(IMRequest.members(conversationID: conversationID))
+        conversationID: String,
+        cursor: String? = nil,
+        limit: Int? = nil,
+        query: String? = nil
+    ) async throws -> IMConversationMemberPageResponseBody {
+        try await executor.execute(IMRequest.members(conversationID: conversationID, cursor: cursor, limit: limit, query: query))
     }
 
     public func addIMConversationMembers(
@@ -316,15 +393,26 @@ public actor SessionClient {
         conversationID: String,
         title: String? = nil,
         notice: String? = nil,
-        avatarPreset: IMConversationAvatarPreset? = nil
+        avatarPreset: IMConversationAvatarPreset? = nil,
+        muteAll: Bool? = nil
     ) async throws -> IMConversationSummaryResponseBody {
         try await executor.execute(
             IMRequest.updateMetadata(
                 conversationID: conversationID,
                 title: title,
                 notice: notice,
-                avatarPreset: avatarPreset
+                avatarPreset: avatarPreset,
+                muteAll: muteAll
             )
+        )
+    }
+
+    public func updateIMMyMemberProfile(
+        conversationID: String,
+        memberNickname: String?
+    ) async throws -> IMConversationSummaryResponseBody {
+        try await executor.execute(
+            IMRequest.updateMyMemberProfile(conversationID: conversationID, memberNickname: memberNickname)
         )
     }
 
@@ -366,6 +454,91 @@ public actor SessionClient {
                 readSequence: readSequence
             )
         )
+    }
+
+    public func forwardIMMessages(
+        conversationID: String,
+        messageIDs: [UUID],
+        targetConversationIDs: [UUID]
+    ) async throws -> [IMConversationMessageResponseBody] {
+        try await executor.execute(
+            IMRequest.forwardMessages(
+                conversationID: conversationID,
+                messageIDs: messageIDs,
+                targetConversationIDs: targetConversationIDs
+            )
+        )
+    }
+
+    public func deleteIMMessagesForSelf(
+        conversationID: String,
+        messageIDs: [UUID]
+    ) async throws -> EmptyResponse {
+        try await executor.execute(
+            IMRequest.deleteMessagesForSelf(
+                conversationID: conversationID,
+                messageIDs: messageIDs
+            )
+        )
+    }
+
+    public func favoriteIMMessage(
+        conversationID: String,
+        messageID: String
+    ) async throws -> IMConversationMessageResponseBody {
+        try await executor.execute(IMRequest.favoriteMessage(conversationID: conversationID, messageID: messageID))
+    }
+
+    public func unfavoriteIMMessage(
+        conversationID: String,
+        messageID: String
+    ) async throws -> EmptyResponse {
+        try await executor.execute(IMRequest.unfavoriteMessage(conversationID: conversationID, messageID: messageID))
+    }
+
+    public func fetchIMFavorites(
+        conversationID: UUID? = nil,
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) async throws -> IMFavoritePageResponseBody {
+        try await executor.execute(
+            IMRequest.favorites(conversationID: conversationID, cursor: cursor, limit: limit)
+        )
+    }
+
+    public func clearIMConversationForSelf(conversationID: String) async throws -> EmptyResponse {
+        try await executor.execute(IMRequest.clearConversationForSelf(conversationID: conversationID))
+    }
+
+    public func deleteIMConversationForSelf(conversationID: String) async throws -> EmptyResponse {
+        try await executor.execute(IMRequest.deleteConversationForSelf(conversationID: conversationID))
+    }
+
+    public func fetchIMConversationReceiptSummary(
+        conversationID: String
+    ) async throws -> IMConversationReceiptSummaryResponseBody {
+        try await executor.execute(IMRequest.receiptSummary(conversationID: conversationID))
+    }
+
+    public func createIMGroupInvite(
+        conversationID: String,
+        expiresInSeconds: Int? = nil
+    ) async throws -> IMGroupInviteResponseBody {
+        try await executor.execute(
+            IMRequest.createInvite(conversationID: conversationID, expiresInSeconds: expiresInSeconds)
+        )
+    }
+
+    public func fetchIMGroupInvites(conversationID: String) async throws -> [IMGroupInviteResponseBody] {
+        try await executor.execute(IMRequest.listInvites(conversationID: conversationID))
+    }
+
+    public func revokeIMGroupInvite(conversationID: String, token: String) async throws -> EmptyResponse {
+        try await executor.execute(IMRequest.revokeInvite(conversationID: conversationID, token: token))
+    }
+
+    public func joinIMGroupInvite(token: String) async throws -> IMConversationSummaryResponseBody {
+        try await executor.execute(IMRequest.joinInvite(token: token))
     }
 
     public func searchIMConversationMessages(

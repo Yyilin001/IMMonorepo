@@ -23,10 +23,18 @@ DerivedData/
 *.log
 tmp/
 temp/
+build/
+**/build/
+.gradle/
+.idea/
+local.properties
 
 # Archives and local backups
 *.xcarchive
 *.ipa
 *.bundle
 monorepo-backups/
+dist/
 
+# IMServer generated smoke/load-test reports
+IMServer/reports/

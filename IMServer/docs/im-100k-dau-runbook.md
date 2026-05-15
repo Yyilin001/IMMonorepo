@@ -80,14 +80,14 @@
 单节点本地运行：
 
 ```bash
-/Users/yy/Desktop/vaporTest/IMServer/scripts/run_local.sh
+./scripts/run_local.sh
 ```
 
 双节点本地联调：
 
 ```bash
-/Users/yy/Desktop/vaporTest/IMServer/scripts/run_cluster_local.sh im-api-1 8080 9000
-/Users/yy/Desktop/vaporTest/IMServer/scripts/run_cluster_local.sh im-api-2 8081 9001
+./scripts/run_cluster_local.sh im-api-1 8080 9000
+./scripts/run_cluster_local.sh im-api-2 8081 9001
 ```
 
 ### 生产环境
@@ -201,12 +201,12 @@
 相关实现文件：
 
 - 路由与 dispatch：
-  - `/Users/yy/Desktop/vaporTest/IMServer/Sources/IMServer/IM/ConnectionRoutingService.swift`
+  - `Sources/IMServer/IM/ConnectionRoutingService.swift`
 - Outbox：
-  - `/Users/yy/Desktop/vaporTest/IMServer/Sources/IMServer/IM/ConversationOutboxService.swift`
+  - `Sources/IMServer/IM/ConversationOutboxService.swift`
 - 搜索：
-  - `/Users/yy/Desktop/vaporTest/IMServer/Sources/IMServer/IM/ConversationSearchService.swift`
+  - `Sources/IMServer/IM/ConversationSearchService.swift`
 - 数据库读写分流：
-  - `/Users/yy/Desktop/vaporTest/IMServer/Sources/IMServer/DatabaseRouting.swift`
+  - `Sources/IMServer/DatabaseRouting.swift`
 - 媒体 provider：
-  - `/Users/yy/Desktop/vaporTest/IMServer/Sources/IMServer/Media/MediaStorageService.swift`
+  - `Sources/IMServer/Media/MediaStorageService.swift`

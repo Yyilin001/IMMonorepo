@@ -38,11 +38,17 @@ final class Conversation: Model, Content, @unchecked Sendable {
     @Field(key: "direct_messaging_state")
     var directMessagingState: String
 
+    @Field(key: "mute_all")
+    var muteAll: Bool
+
     @Field(key: "updated_at")
     var updatedAt: Date
 
     @Field(key: "last_message_sequence")
     var lastMessageSequence: Int
+
+    @OptionalField(key: "membership_revision")
+    var membershipRevision: Date?
 
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
@@ -62,8 +68,10 @@ final class Conversation: Model, Content, @unchecked Sendable {
         avatarPreset: IMConversationAvatarPreset? = nil,
         kind: IMConversationKind = .group,
         directMessagingState: IMDirectMessagingState = .active,
+        muteAll: Bool = false,
         updatedAt: Date = Date(),
-        lastMessageSequence: Int = 0
+        lastMessageSequence: Int = 0,
+        membershipRevision: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -71,8 +79,10 @@ final class Conversation: Model, Content, @unchecked Sendable {
         self.avatarPreset = avatarPreset?.rawValue
         self.kind = kind.rawValue
         self.directMessagingState = directMessagingState.rawValue
+        self.muteAll = muteAll
         self.updatedAt = updatedAt
         self.lastMessageSequence = lastMessageSequence
+        self.membershipRevision = membershipRevision ?? updatedAt
     }
 
     var conversationKind: IMConversationKind {
@@ -112,6 +122,9 @@ final class ConversationMember: Model, Content, @unchecked Sendable {
     @Field(key: "visible_from_sequence")
     var visibleFromSequence: Int
 
+    @OptionalField(key: "member_nickname")
+    var memberNickname: String?
+
     @Timestamp(key: "joined_at", on: .create)
     var joinedAt: Date?
 
@@ -123,7 +136,8 @@ final class ConversationMember: Model, Content, @unchecked Sendable {
         userID: UUID,
         role: IMConversationMemberRole = .member,
         lastReadSequence: Int = 0,
-        visibleFromSequence: Int = 0
+        visibleFromSequence: Int = 0,
+        memberNickname: String? = nil
     ) {
         self.id = id
         self.$conversation.id = conversationID
@@ -131,6 +145,7 @@ final class ConversationMember: Model, Content, @unchecked Sendable {
         self.role = role.rawValue
         self.lastReadSequence = lastReadSequence
         self.visibleFromSequence = visibleFromSequence
+        self.memberNickname = memberNickname
     }
 
     var memberRoleEnum: IMConversationMemberRole {

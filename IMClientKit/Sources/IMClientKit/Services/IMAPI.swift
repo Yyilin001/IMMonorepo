@@ -56,20 +56,75 @@ public struct IMConversationMetadataUpdateRequestBody: Codable, Sendable {
     public let title: String?
     public let notice: String?
     public let avatarPreset: IMConversationAvatarPreset?
+    public let muteAll: Bool?
 
     public init(
         title: String? = nil,
         notice: String? = nil,
-        avatarPreset: IMConversationAvatarPreset? = nil
+        avatarPreset: IMConversationAvatarPreset? = nil,
+        muteAll: Bool? = nil
     ) {
         self.title = title
         self.notice = notice
         self.avatarPreset = avatarPreset
+        self.muteAll = muteAll
     }
+}
+
+public struct IMConversationMemberSelfUpdateRequestBody: Codable, Sendable {
+    public let memberNickname: String?
 }
 
 public struct IMConversationReadRequestBody: Codable, Sendable {
     public let readSequence: UInt64
+}
+
+public struct IMMessageForwardRequestBody: Codable, Sendable {
+    public let messageIDs: [UUID]
+    public let targetConversationIDs: [UUID]
+
+    public init(messageIDs: [UUID], targetConversationIDs: [UUID]) {
+        self.messageIDs = messageIDs
+        self.targetConversationIDs = targetConversationIDs
+    }
+}
+
+public struct IMMessageDeleteRequestBody: Codable, Sendable {
+    public let messageIDs: [UUID]
+
+    public init(messageIDs: [UUID]) {
+        self.messageIDs = messageIDs
+    }
+}
+
+public struct IMFavoritePageResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let items: [IMConversationMessageResponseBody]
+    public let nextCursor: String?
+    public let hasMore: Bool
+}
+
+public struct IMConversationReceiptSummaryResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let conversationID: UUID
+    public let deliveredThroughSequence: Int
+    public let readThroughSequence: Int
+    public let readableMemberCount: Int
+}
+
+public struct IMGroupInviteCreateRequestBody: Codable, Sendable {
+    public let expiresInSeconds: Int?
+
+    public init(expiresInSeconds: Int? = nil) {
+        self.expiresInSeconds = expiresInSeconds
+    }
+}
+
+public struct IMGroupInviteResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let token: String
+    public let conversationID: UUID
+    public let inviteURL: String
+    public let expiresAt: Date
+    public let revokedAt: Date?
+    public let useCount: Int
 }
 
 public struct IMConversationMessageEditRequestBody: Codable, Sendable {
@@ -122,13 +177,36 @@ public struct IMConversationMessageRecallResponseBody: Codable, Equatable, Senda
 public struct IMConversationMemberResponseBody: Codable, Equatable, Sendable, APIResponseBody, Identifiable {
     public let id: UUID
     public let email: String
+    public let displayName: String?
+    public let avatarPreset: UserAvatarPreset?
     public let role: IMConversationMemberRole
+    public let memberNickname: String?
+    public let displayTitle: String
 
-    public init(id: UUID, email: String, role: IMConversationMemberRole = .member) {
+    public init(
+        id: UUID,
+        email: String,
+        displayName: String? = nil,
+        avatarPreset: UserAvatarPreset? = nil,
+        role: IMConversationMemberRole = .member,
+        memberNickname: String? = nil,
+        displayTitle: String? = nil
+    ) {
         self.id = id
         self.email = email
+        self.displayName = displayName
+        self.avatarPreset = avatarPreset
         self.role = role
+        self.memberNickname = memberNickname
+        self.displayTitle = displayTitle ?? memberNickname ?? displayName ?? email
     }
+}
+
+public struct IMConversationMemberPageResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let items: [IMConversationMemberResponseBody]
+    public let nextCursor: String?
+    public let total: Int
+    public let limit: Int
 }
 
 public struct IMMessagePreviewResponseBody: Codable, Equatable, Sendable, APIResponseBody {
@@ -174,6 +252,7 @@ public struct IMConversationSummaryResponseBody: Codable, Equatable, Sendable, A
     public let memberUserIDs: [UUID]
     public let notice: String?
     public let avatarPreset: IMConversationAvatarPreset?
+    public let muteAll: Bool
     public let lastMessage: IMMessagePreviewResponseBody?
     public let lastReadSequence: Int
     public let unreadCount: Int
@@ -193,6 +272,7 @@ public struct IMConversationSummaryResponseBody: Codable, Equatable, Sendable, A
         memberUserIDs: [UUID],
         notice: String? = nil,
         avatarPreset: IMConversationAvatarPreset? = nil,
+        muteAll: Bool = false,
         lastMessage: IMMessagePreviewResponseBody?,
         lastReadSequence: Int = 0,
         unreadCount: Int = 0,
@@ -211,6 +291,7 @@ public struct IMConversationSummaryResponseBody: Codable, Equatable, Sendable, A
         self.memberUserIDs = memberUserIDs
         self.notice = notice
         self.avatarPreset = avatarPreset
+        self.muteAll = muteAll
         self.lastMessage = lastMessage
         self.lastReadSequence = lastReadSequence
         self.unreadCount = unreadCount
@@ -414,12 +495,38 @@ enum IMRequest {
     }
 
     public struct Members: AuthorizedEndpoint {
-        public typealias Response = [IMConversationMemberResponseBody]
+        public typealias Response = IMConversationMemberPageResponseBody
 
         let conversationID: String
+        let cursor: String?
+        let limit: Int?
+        let query: String?
 
         var baseRequestSpec: HTTPRequestSpec {
-            .init(path: "api/im/conversations/\(conversationID)/members")
+            var items: [URLQueryItem] = []
+            if let cursor {
+                items.append(URLQueryItem(name: "cursor", value: cursor))
+            }
+            if let limit {
+                items.append(URLQueryItem(name: "limit", value: String(limit)))
+            }
+            if let query {
+                items.append(URLQueryItem(name: "q", value: query))
+            }
+            return .init(path: "api/im/conversations/\(conversationID)/members", queryItems: items)
+        }
+    }
+
+    public struct UpdateMyMemberProfile: AuthorizedEndpoint {
+        public typealias Response = IMConversationSummaryResponseBody
+        let conversationID: String
+        let payload: IMConversationMemberSelfUpdateRequestBody
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/members/me", method: .patch)
+        }
+        var requestContentType: String? { "application/json" }
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
         }
     }
 
@@ -612,6 +719,166 @@ enum IMRequest {
         }
     }
 
+    public struct ForwardMessages: AuthorizedEndpoint {
+        public typealias Response = [IMConversationMessageResponseBody]
+
+        let conversationID: String
+        let payload: IMMessageForwardRequestBody
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/messages/forward", method: .post)
+        }
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct DeleteMessagesForSelf: AuthorizedEndpoint {
+        public typealias Response = EmptyResponse
+
+        let conversationID: String
+        let payload: IMMessageDeleteRequestBody
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/messages/delete", method: .post)
+        }
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct FavoriteMessage: AuthorizedEndpoint {
+        public typealias Response = IMConversationMessageResponseBody
+
+        let conversationID: String
+        let messageID: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/messages/\(messageID)/favorite", method: .post)
+        }
+    }
+
+    public struct UnfavoriteMessage: AuthorizedEndpoint {
+        public typealias Response = EmptyResponse
+
+        let conversationID: String
+        let messageID: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/messages/\(messageID)/favorite", method: .delete)
+        }
+    }
+
+    public struct Favorites: AuthorizedEndpoint {
+        public typealias Response = IMFavoritePageResponseBody
+
+        let conversationID: UUID?
+        let cursor: String?
+        let limit: Int?
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/favorites", queryItems: queryItems)
+        }
+
+        private var queryItems: [URLQueryItem] {
+            var items: [URLQueryItem] = []
+            if let conversationID {
+                items.append(URLQueryItem(name: "conversationID", value: conversationID.uuidString))
+            }
+            if let cursor {
+                items.append(URLQueryItem(name: "cursor", value: cursor))
+            }
+            if let limit {
+                items.append(URLQueryItem(name: "limit", value: String(limit)))
+            }
+            return items
+        }
+    }
+
+    public struct ClearConversationForSelf: AuthorizedEndpoint {
+        public typealias Response = EmptyResponse
+
+        let conversationID: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/clear", method: .post)
+        }
+    }
+
+    public struct DeleteConversationForSelf: AuthorizedEndpoint {
+        public typealias Response = EmptyResponse
+
+        let conversationID: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)", method: .delete)
+        }
+    }
+
+    public struct ReceiptSummary: AuthorizedEndpoint {
+        public typealias Response = IMConversationReceiptSummaryResponseBody
+
+        let conversationID: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/receipts/summary")
+        }
+    }
+
+    public struct CreateInvite: AuthorizedEndpoint {
+        public typealias Response = IMGroupInviteResponseBody
+
+        let conversationID: String
+        let payload: IMGroupInviteCreateRequestBody
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/invites", method: .post)
+        }
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct ListInvites: AuthorizedEndpoint {
+        public typealias Response = [IMGroupInviteResponseBody]
+
+        let conversationID: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/invites")
+        }
+    }
+
+    public struct RevokeInvite: AuthorizedEndpoint {
+        public typealias Response = EmptyResponse
+
+        let conversationID: String
+        let token: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/invites/\(token)", method: .delete)
+        }
+    }
+
+    public struct JoinInvite: AuthorizedEndpoint {
+        public typealias Response = IMConversationSummaryResponseBody
+
+        let token: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/invites/\(token)/join", method: .post)
+        }
+    }
+
     public struct SearchMessages: AuthorizedEndpoint {
         public typealias Response = IMConversationMessageSearchPageResponseBody
 
@@ -732,8 +999,13 @@ enum IMRequest {
         )
     }
 
-    public static func members(conversationID: String) -> Members {
-        Members(conversationID: conversationID)
+    public static func members(
+        conversationID: String,
+        cursor: String? = nil,
+        limit: Int? = nil,
+        query: String? = nil
+    ) -> Members {
+        Members(conversationID: conversationID, cursor: cursor, limit: limit, query: query)
     }
 
     public static func addMembers(
@@ -793,15 +1065,27 @@ enum IMRequest {
         conversationID: String,
         title: String? = nil,
         notice: String? = nil,
-        avatarPreset: IMConversationAvatarPreset? = nil
+        avatarPreset: IMConversationAvatarPreset? = nil,
+        muteAll: Bool? = nil
     ) -> UpdateMetadata {
         UpdateMetadata(
             conversationID: conversationID,
             payload: IMConversationMetadataUpdateRequestBody(
                 title: title,
                 notice: notice,
-                avatarPreset: avatarPreset
+                avatarPreset: avatarPreset,
+                muteAll: muteAll
             )
+        )
+    }
+
+    public static func updateMyMemberProfile(
+        conversationID: String,
+        memberNickname: String?
+    ) -> UpdateMyMemberProfile {
+        UpdateMyMemberProfile(
+            conversationID: conversationID,
+            payload: IMConversationMemberSelfUpdateRequestBody(memberNickname: memberNickname)
         )
     }
 
@@ -837,6 +1121,80 @@ enum IMRequest {
             conversationID: conversationID,
             payload: IMConversationReadRequestBody(readSequence: readSequence)
         )
+    }
+
+    public static func forwardMessages(
+        conversationID: String,
+        messageIDs: [UUID],
+        targetConversationIDs: [UUID]
+    ) -> ForwardMessages {
+        ForwardMessages(
+            conversationID: conversationID,
+            payload: IMMessageForwardRequestBody(
+                messageIDs: messageIDs,
+                targetConversationIDs: targetConversationIDs
+            )
+        )
+    }
+
+    public static func deleteMessagesForSelf(
+        conversationID: String,
+        messageIDs: [UUID]
+    ) -> DeleteMessagesForSelf {
+        DeleteMessagesForSelf(
+            conversationID: conversationID,
+            payload: IMMessageDeleteRequestBody(messageIDs: messageIDs)
+        )
+    }
+
+    public static func favoriteMessage(conversationID: String, messageID: String) -> FavoriteMessage {
+        FavoriteMessage(conversationID: conversationID, messageID: messageID)
+    }
+
+    public static func unfavoriteMessage(conversationID: String, messageID: String) -> UnfavoriteMessage {
+        UnfavoriteMessage(conversationID: conversationID, messageID: messageID)
+    }
+
+    public static func favorites(
+        conversationID: UUID? = nil,
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) -> Favorites {
+        Favorites(conversationID: conversationID, cursor: cursor, limit: limit)
+    }
+
+    public static func clearConversationForSelf(conversationID: String) -> ClearConversationForSelf {
+        ClearConversationForSelf(conversationID: conversationID)
+    }
+
+    public static func deleteConversationForSelf(conversationID: String) -> DeleteConversationForSelf {
+        DeleteConversationForSelf(conversationID: conversationID)
+    }
+
+    public static func receiptSummary(conversationID: String) -> ReceiptSummary {
+        ReceiptSummary(conversationID: conversationID)
+    }
+
+    public static func createInvite(
+        conversationID: String,
+        expiresInSeconds: Int? = nil
+    ) -> CreateInvite {
+        CreateInvite(
+            conversationID: conversationID,
+            payload: IMGroupInviteCreateRequestBody(expiresInSeconds: expiresInSeconds)
+        )
+    }
+
+    public static func listInvites(conversationID: String) -> ListInvites {
+        ListInvites(conversationID: conversationID)
+    }
+
+    public static func revokeInvite(conversationID: String, token: String) -> RevokeInvite {
+        RevokeInvite(conversationID: conversationID, token: token)
+    }
+
+    public static func joinInvite(token: String) -> JoinInvite {
+        JoinInvite(token: token)
     }
 
     public static func searchMessages(

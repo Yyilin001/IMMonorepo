@@ -7,6 +7,20 @@ import VaporTesting
 import Testing
 
 extension IMServerTests {
+    @Test("Realtime persistence pipeline returns empty result for empty batch")
+    func realtimePersistencePipelineReturnsEmptyResultForEmptyBatch() async throws {
+        try await withApp(configure: configure) { app in
+            let pipeline = IMMessagePersistencePipeline(
+                service: IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db),
+                conversationID: UUID(),
+                preparedMessages: []
+            )
+
+            let results = try await pipeline.run()
+            #expect(results.isEmpty)
+        }
+    }
+
     @Test("Conversation outbox worker refreshes summary and search index for created messages")
     func conversationOutboxProcessesMessageCreatedIntoSummaryAndSearchIndex() async throws {
         try await withApp(configure: configure) { app in
@@ -157,16 +171,26 @@ extension IMServerTests {
             let accessToken = try await loginAccessToken(using: app)
             let demoUser = try await user(email: "demo@example.com", on: app)
             let otherUser = try await makeUser(email: "tcp-peer@example.com", on: app)
-            let conversation = Conversation(title: "TCP Chat", updatedAt: Date(timeIntervalSince1970: 1_700_100_100))
-            try await conversation.create(on: app.db)
-            let conversationID = try conversation.requireID()
+            var createdConversationID: UUID?
 
-            try await ConversationMember(conversationID: conversationID, userID: try demoUser.requireID())
-                .create(on: app.db)
-            try await ConversationMember(conversationID: conversationID, userID: try otherUser.requireID())
-                .create(on: app.db)
+            try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                try req.content.encode(
+                    IMConversationCreateRequest(
+                        kind: IMConversationKind.direct.rawValue,
+                        title: "TCP Chat",
+                        memberEmails: [otherUser.email]
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let conversation = try res.content.decode(IMConversationResponse.self)
+                createdConversationID = conversation.id
+                #expect(conversation.memberCount == 2)
+            })
 
-            let result = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let conversationID = try #require(createdConversationID)
+            let result = try await IMRealtimeMessageService(app: app).persistIncomingMessage(
                 IMTCPMessagePayload(
                     clientMessageID: "client-msg-1",
                     messageID: nil,
@@ -179,6 +203,7 @@ extension IMServerTests {
                 ),
                 senderUserID: try demoUser.requireID()
             )
+            try await app.processInlineOutboxProjectionIfAllowed()
 
             #expect(result.acknowledgement.status == "accepted")
             #expect(result.acknowledgement.conversationID == conversationID.uuidString)
@@ -237,7 +262,7 @@ extension IMServerTests {
             try await referencedMessage.create(on: app.db)
             let referencedMessageID = try referencedMessage.requireID()
 
-            let result = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let result = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 IMTCPMessagePayload(
                     clientMessageID: "client-reply-1",
                     messageID: nil,
@@ -285,7 +310,7 @@ extension IMServerTests {
             try await ConversationMember(conversationID: conversationID, userID: try otherUser.requireID())
                 .create(on: app.db)
 
-            let first = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let first = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "client-idempotent-1",
@@ -293,7 +318,7 @@ extension IMServerTests {
                 ),
                 senderUserID: demoUserID
             )
-            let duplicate = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let duplicate = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "client-idempotent-1",
@@ -309,6 +334,64 @@ extension IMServerTests {
             #expect(duplicate.message.messageID == first.message.messageID)
             #expect(duplicate.message.serverSequence == first.message.serverSequence)
             #expect(duplicate.message.body["text"] == "first body wins")
+
+            let messages = try await ConversationMessage.query(on: app.db)
+                .filter(\.$conversation.$id == conversationID)
+                .all()
+            #expect(messages.count == 1)
+        }
+    }
+
+    @Test("Duplicate reply message returns existing message before canonicalizing reply reference")
+    func duplicateReplyMessageReturnsExistingBeforeCanonicalizingReplyReference() async throws {
+        try await withApp(configure: configure) { app in
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let otherUser = try await makeUser(email: "tcp-duplicate-reply-peer@example.com", on: app)
+            let demoUserID = try demoUser.requireID()
+            let conversation = Conversation(title: "Idempotent Reply", updatedAt: Date(timeIntervalSince1970: 1_700_100_106))
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+
+            try await ConversationMember(conversationID: conversationID, userID: demoUserID)
+                .create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try otherUser.requireID())
+                .create(on: app.db)
+
+            let existing = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: demoUserID,
+                serverSequence: 1,
+                clientMessageID: "duplicate-reply-client",
+                content: .text("stored original")
+            )
+            try await existing.create(on: app.db)
+            let existingID = try existing.requireID()
+
+            let duplicate = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
+                IMTCPMessagePayload(
+                    clientMessageID: "duplicate-reply-client",
+                    messageID: nil,
+                    conversationID: conversationID.uuidString,
+                    senderUserID: nil,
+                    serverSequence: nil,
+                    serverTimestamp: nil,
+                    content: .reply(
+                        reference: IMReplyReference(
+                            messageID: UUID().uuidString,
+                            senderUserID: nil,
+                            previewText: "stale missing reference"
+                        ),
+                        text: "retry body"
+                    )
+                ),
+                senderUserID: demoUserID
+            )
+
+            #expect(duplicate.acknowledgement.status == "accepted")
+            #expect(duplicate.didCreateMessage == false)
+            #expect(duplicate.acknowledgement.messageID == existingID.uuidString)
+            #expect(duplicate.message.messageID == existingID.uuidString)
+            #expect(duplicate.message.body["text"] == "stored original")
 
             let messages = try await ConversationMessage.query(on: app.db)
                 .filter(\.$conversation.$id == conversationID)
@@ -333,7 +416,7 @@ extension IMServerTests {
             try await ConversationMember(conversationID: conversationID, userID: try peerUser.requireID())
                 .create(on: app.db)
 
-            let first = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let first = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "stranger-idempotent-first",
@@ -341,7 +424,7 @@ extension IMServerTests {
                 ),
                 senderUserID: demoUserID
             )
-            let retry = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let retry = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "stranger-idempotent-first",
@@ -356,7 +439,7 @@ extension IMServerTests {
             #expect(retry.acknowledgement.messageID == first.acknowledgement.messageID)
 
             do {
-                _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                     imTCPTextPayload(
                         conversationID: conversationID,
                         clientMessageID: "stranger-idempotent-second",
@@ -427,7 +510,7 @@ extension IMServerTests {
                 .create(on: app.db)
 
             do {
-                _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                     IMTCPMessagePayload(
                         clientMessageID: "client-msg-outsider",
                         messageID: nil,
@@ -473,7 +556,7 @@ extension IMServerTests {
             try await ConversationMember(conversationID: conversationID, userID: peerUserID)
                 .create(on: app.db)
 
-            let firstMessage = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let firstMessage = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "stranger-first",
@@ -484,7 +567,7 @@ extension IMServerTests {
             #expect(firstMessage.acknowledgement.status == "accepted")
 
             do {
-                _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                     imTCPTextPayload(
                         conversationID: conversationID,
                         clientMessageID: "stranger-second",
@@ -498,7 +581,7 @@ extension IMServerTests {
                 #expect(error.ackStatus == "stranger_direct_message_limit_reached")
             }
 
-            let reply = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let reply = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "stranger-reply",
@@ -508,7 +591,7 @@ extension IMServerTests {
             )
             #expect(reply.acknowledgement.status == "accepted")
 
-            let thirdMessage = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let thirdMessage = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "stranger-third",
@@ -543,7 +626,7 @@ extension IMServerTests {
                 .create(on: app.db)
 
             do {
-                _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                     imTCPTextPayload(
                         conversationID: conversationID,
                         clientMessageID: "frozen-direct-message",
@@ -586,7 +669,7 @@ extension IMServerTests {
                     .create(on: app.db)
             }
 
-            _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationIDs[0],
                     clientMessageID: "duplicate-first",
@@ -596,7 +679,7 @@ extension IMServerTests {
             )
 
             do {
-                _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                     imTCPTextPayload(
                         conversationID: conversationIDs[1],
                         clientMessageID: "duplicate-second",
@@ -632,7 +715,7 @@ extension IMServerTests {
             try await ConversationMember(conversationID: conversationID, userID: peerUserID)
                 .create(on: app.db)
 
-            let firstMessage = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let firstMessage = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "two-member-group-first",
@@ -641,7 +724,7 @@ extension IMServerTests {
                 senderUserID: demoUserID
             )
 
-            let secondMessage = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let secondMessage = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "two-member-group-second",
@@ -686,7 +769,7 @@ extension IMServerTests {
                     .create(on: app.db)
             }
 
-            _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: groupConversationID,
                     clientMessageID: "group-before-direct",
@@ -695,7 +778,7 @@ extension IMServerTests {
                 senderUserID: demoUserID
             )
 
-            let firstDirectMessage = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let firstDirectMessage = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: directConversationID,
                     clientMessageID: "direct-after-group-first",
@@ -706,7 +789,7 @@ extension IMServerTests {
             #expect(firstDirectMessage.acknowledgement.status == "accepted")
 
             do {
-                _ = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+                _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                     imTCPTextPayload(
                         conversationID: directConversationID,
                         clientMessageID: "direct-after-group-second",
@@ -747,7 +830,7 @@ extension IMServerTests {
             try await ConversationMember(conversationID: conversationID, userID: peerUserID)
                 .create(on: app.db)
 
-            let firstMessage = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let firstMessage = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "friend-first",
@@ -755,7 +838,7 @@ extension IMServerTests {
                 ),
                 senderUserID: demoUserID
             )
-            let secondMessage = try await IMRealtimeMessageService(db: app.db).persistIncomingMessage(
+            let secondMessage = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
                     conversationID: conversationID,
                     clientMessageID: "friend-second",

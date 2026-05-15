@@ -115,6 +115,273 @@ extension IMServerTests {
         try? await app.asyncShutdown()
     }
 
+    @Test("Production rejects combined runtime during startup")
+    func productionRejectsCombinedRuntimeDuringStartup() async throws {
+        let app = try await Application.make(.production)
+        app.imRuntimeRole = .combined
+
+        do {
+            try await configure(app)
+            Issue.record("Expected production combined runtime to fail during configure")
+        } catch let abort as any AbortError {
+            #expect(abort.status == .internalServerError)
+            #expect(abort.reason.contains("combined runtime role"))
+        } catch {
+            Issue.record("Unexpected production runtime error: \(error)")
+        }
+
+        try? await app.asyncShutdown()
+    }
+
+    @Test("Production rejects projection-worker runtime during startup validation")
+    func productionRejectsProjectionWorkerRuntimeDuringStartupValidation() async throws {
+        let originalNodeID = Environment.get("IM_NODE_ID")
+        defer { restoreEnvironment("IM_NODE_ID", to: originalNodeID) }
+        setenv("IM_NODE_ID", "node-a", 1)
+
+        let app = try await Application.make(.production)
+        app.imRuntimeRole = .projectionWorker
+
+        do {
+            try IMProductionRuntimeValidator.validate(app: app)
+            Issue.record("Expected production projection-worker runtime to fail validation")
+        } catch let abort as any AbortError {
+            #expect(abort.status == .internalServerError)
+            #expect(abort.reason.contains("projection-worker"))
+        } catch {
+            Issue.record("Unexpected production runtime error: \(error)")
+        }
+
+        try? await app.asyncShutdown()
+    }
+
+    @Test("Production non-ops roles cannot enable startup auto-migration")
+    func productionNonOpsRolesCannotEnableStartupAutoMigration() async throws {
+        let originalValue = Environment.get(IMMigrationStartupPolicy.environmentKey)
+        defer { restoreEnvironment(IMMigrationStartupPolicy.environmentKey, to: originalValue) }
+        setenv(IMMigrationStartupPolicy.environmentKey, "true", 1)
+
+        let app = try await Application.make(.production)
+        app.imRuntimeRole = .gateway
+
+        do {
+            _ = try IMMigrationStartupPolicy.shouldAutoMigrate(app: app)
+            Issue.record("Expected production gateway auto-migration to fail")
+        } catch let abort as any AbortError {
+            #expect(abort.status == .internalServerError)
+            #expect(abort.reason.contains("must not run auto-migration"))
+        } catch {
+            Issue.record("Unexpected migration startup policy error: \(error)")
+        }
+
+        try? await app.asyncShutdown()
+    }
+
+    @Test("Migration startup policy keeps local auto-migration and production ops explicit")
+    func migrationStartupPolicyKeepsLocalAutoMigrationAndProductionOpsExplicit() async throws {
+        let originalValue = Environment.get(IMMigrationStartupPolicy.environmentKey)
+        defer { restoreEnvironment(IMMigrationStartupPolicy.environmentKey, to: originalValue) }
+        unsetenv(IMMigrationStartupPolicy.environmentKey)
+
+        let testingApp = try await Application.make(.testing)
+        #expect(try IMMigrationStartupPolicy.shouldAutoMigrate(app: testingApp))
+        try? await testingApp.asyncShutdown()
+
+        let developmentApp = try await Application.make(.development)
+        #expect(try IMMigrationStartupPolicy.shouldAutoMigrate(app: developmentApp))
+        try? await developmentApp.asyncShutdown()
+
+        let productionOps = try await Application.make(.production)
+        productionOps.imRuntimeRole = .ops
+        #expect(try IMMigrationStartupPolicy.shouldAutoMigrate(app: productionOps) == false)
+        setenv(IMMigrationStartupPolicy.environmentKey, "true", 1)
+        #expect(try IMMigrationStartupPolicy.shouldAutoMigrate(app: productionOps))
+        try? await productionOps.asyncShutdown()
+    }
+
+    @Test("Production rejects inline outbox projection")
+    func productionRejectsInlineOutboxProjection() async throws {
+        let originalValue = Environment.get(InlineOutboxProjectionPolicy.environmentKey)
+        defer { restoreEnvironment(InlineOutboxProjectionPolicy.environmentKey, to: originalValue) }
+        setenv(InlineOutboxProjectionPolicy.environmentKey, "true", 1)
+
+        let app = try await Application.make(.production)
+        app.imRuntimeRole = .commandAPI
+
+        do {
+            try InlineOutboxProjectionPolicy.validateStartup(app: app)
+            Issue.record("Expected production inline outbox projection to fail")
+        } catch let abort as any AbortError {
+            #expect(abort.status == .internalServerError)
+            #expect(abort.reason.contains("IM_INLINE_OUTBOX_PROJECTION"))
+        } catch {
+            Issue.record("Unexpected inline outbox projection policy error: \(error)")
+        }
+
+        try? await app.asyncShutdown()
+    }
+
+    @Test("Production media storage provider validation throws instead of trapping")
+    func productionMediaStorageProviderValidationThrowsInsteadOfTrapping() async throws {
+        let originalProvider = Environment.get("MEDIA_STORAGE_PROVIDER")
+        defer { restoreEnvironment("MEDIA_STORAGE_PROVIDER", to: originalProvider) }
+        setenv("MEDIA_STORAGE_PROVIDER", "local", 1)
+
+        let app = try await Application.make(.production)
+
+        do {
+            _ = try MediaStorageService(app: app)
+            Issue.record("Expected production local media storage provider to fail")
+        } catch let abort as any AbortError {
+            #expect(abort.status == .internalServerError)
+            #expect(abort.reason.contains("MEDIA_STORAGE_PROVIDER=s3compatible"))
+        } catch {
+            Issue.record("Unexpected media storage provider error: \(error)")
+        }
+
+        try? await app.asyncShutdown()
+    }
+
+    @Test("Inline outbox projection policy permits testing and development combined only")
+    func inlineOutboxProjectionPolicyPermitsTestingAndDevelopmentCombinedOnly() async throws {
+        let originalValue = Environment.get(InlineOutboxProjectionPolicy.environmentKey)
+        defer { restoreEnvironment(InlineOutboxProjectionPolicy.environmentKey, to: originalValue) }
+        unsetenv(InlineOutboxProjectionPolicy.environmentKey)
+
+        let testingApp = try await Application.make(.testing)
+        #expect(try InlineOutboxProjectionPolicy.allowsInlineProjection(app: testingApp))
+        try? await testingApp.asyncShutdown()
+
+        let developmentCombined = try await Application.make(.development)
+        developmentCombined.imRuntimeRole = .combined
+        #expect(try InlineOutboxProjectionPolicy.allowsInlineProjection(app: developmentCombined))
+        try? await developmentCombined.asyncShutdown()
+
+        let developmentCommand = try await Application.make(.development)
+        developmentCommand.imRuntimeRole = .commandAPI
+        #expect(try InlineOutboxProjectionPolicy.allowsInlineProjection(app: developmentCommand) == false)
+        try? await developmentCommand.asyncShutdown()
+    }
+
+    @Test("Production runtime validator accepts complete role fixtures")
+    func productionRuntimeValidatorAcceptsCompleteRoleFixtures() async throws {
+        try await withProductionRuntimeEnvironment {
+            for role in [
+                IMRuntimeRole.gateway,
+                .commandAPI,
+                .queryAPI,
+                .outboxRelay,
+                .streamConsumer,
+                .ops
+            ] {
+                let app = try await productionRuntimeValidationApp(role: role)
+                do {
+                    try IMProductionRuntimeValidator.validate(app: app)
+                    try await app.asyncShutdown()
+                } catch {
+                    try? await app.asyncShutdown()
+                    throw error
+                }
+            }
+        }
+    }
+
+    @Test("Per-role production validators accept complete role fixtures")
+    func perRoleProductionValidatorsAcceptCompleteRoleFixtures() async throws {
+        try await withProductionRuntimeEnvironment {
+            let validators: [(IMRuntimeRole, (Application) throws -> Void)] = [
+                (.gateway, IMGatewayProductionValidator.validate(app:)),
+                (.commandAPI, IMCommandAPIProductionValidator.validate(app:)),
+                (.queryAPI, IMQueryAPIProductionValidator.validate(app:)),
+                (.outboxRelay, IMOutboxRelayProductionValidator.validate(app:)),
+                (.streamConsumer, IMStreamConsumerProductionValidator.validate(app:)),
+                (.ops, IMOpsProductionValidator.validate(app:))
+            ]
+
+            for (role, validator) in validators {
+                let app = try await productionRuntimeValidationApp(role: role)
+                do {
+                    try validator(app)
+                    try await app.asyncShutdown()
+                } catch {
+                    try? await app.asyncShutdown()
+                    throw error
+                }
+            }
+        }
+    }
+
+    @Test("Production command API requires block sequence allocation")
+    func productionCommandAPIRequiresBlockSequenceAllocation() async throws {
+        try await withProductionRuntimeEnvironment {
+            unsetenv("IM_SEQUENCE_ALLOCATION_MODE")
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMCommandAPIProductionValidator.validate(app: app)
+                Issue.record("Expected command-api validation to require block sequence allocation")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_SEQUENCE_ALLOCATION_MODE=block"))
+            } catch {
+                Issue.record("Unexpected command-api validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production command API requires message write batching")
+    func productionCommandAPIRequiresMessageWriteBatching() async throws {
+        try await withProductionRuntimeEnvironment {
+            unsetenv("IM_MESSAGE_WRITE_BATCH_ENABLED")
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMCommandAPIProductionValidator.validate(app: app)
+                Issue.record("Expected command-api validation to require message write batching")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_MESSAGE_WRITE_BATCH_ENABLED=true"))
+            } catch {
+                Issue.record("Unexpected command-api validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Runtime role capabilities keep production responsibilities isolated")
+    func runtimeRoleCapabilitiesKeepProductionResponsibilitiesIsolated() {
+        #expect(IMRuntimeRole.gateway.servesGateway)
+        #expect(!IMRuntimeRole.gateway.servesCommandAPI)
+        #expect(!IMRuntimeRole.gateway.servesQueryAPI)
+
+        #expect(IMRuntimeRole.commandAPI.servesCommandAPI)
+        #expect(!IMRuntimeRole.commandAPI.servesGateway)
+        #expect(!IMRuntimeRole.commandAPI.servesQueryAPI)
+
+        #expect(IMRuntimeRole.queryAPI.servesQueryAPI)
+        #expect(!IMRuntimeRole.queryAPI.servesGateway)
+        #expect(!IMRuntimeRole.queryAPI.servesCommandAPI)
+
+        #expect(!IMRuntimeRole.outboxRelay.servesHTTP)
+        #expect(!IMRuntimeRole.streamConsumer.servesHTTP)
+        #expect(!IMRuntimeRole.ops.servesHTTP)
+        #expect(IMRuntimeRole.combined.servesGateway)
+        #expect(IMRuntimeRole.combined.servesCommandAPI)
+        #expect(IMRuntimeRole.combined.servesQueryAPI)
+    }
+
+    @Test("Runtime role resolves IM_RUNTIME_ROLE values")
+    func runtimeRoleResolvesEnvironmentValues() {
+        #expect(IMRuntimeRole.resolve("gateway") == .gateway)
+        #expect(IMRuntimeRole.resolve("command-api") == .commandAPI)
+        #expect(IMRuntimeRole.resolve("query-api") == .queryAPI)
+        #expect(IMRuntimeRole.resolve("outbox-relay") == .outboxRelay)
+        #expect(IMRuntimeRole.resolve("stream-consumer") == .streamConsumer)
+        #expect(IMRuntimeRole.resolve("projection-worker") == .projectionWorker)
+        #expect(IMRuntimeRole.resolve("combined") == .combined)
+        #expect(IMRuntimeRole.resolve("ops") == .ops)
+        #expect(IMRuntimeRole.resolve("unknown") == nil)
+    }
+
     @Test("Testing environment uses local routing by default")
     func testingUsesLocalRoutingBackendByDefault() async throws {
         try await withApp(configure: configure) { app in
@@ -122,11 +389,11 @@ extension IMServerTests {
         }
     }
 
-    @Test("Testing environment falls back to local routing when Redis backend is unavailable")
-    func testingFallsBackToLocalRoutingWhenRedisBackendUnavailable() async throws {
+    @Test("Testing environment falls back to local routing when Redis configuration is unavailable")
+    func testingFallsBackToLocalRoutingWhenRedisConfigurationUnavailable() async throws {
         try await withApp(configure: { app in
             app.imRedisRoutingConfigurationOverride = IMRedisRoutingConfiguration(
-                url: "://bad-redis-url",
+                url: nil,
                 mode: .redis,
                 maximumConnectionCount: 2
             )
@@ -233,6 +500,25 @@ extension IMServerTests {
         #expect(configuration.queryReadSource == .sharded)
     }
 
+    @Test("Conversation summary list order index is migrated")
+    func conversationSummaryListOrderIndexIsMigrated() async throws {
+        try await withApp(configure: configure) { app in
+            guard let sql = app.db as? any SQLDatabase else {
+                Issue.record("Expected SQL database")
+                return
+            }
+
+            struct SQLiteIndexRow: Decodable {
+                let name: String
+            }
+
+            let rows = try await sql.raw("PRAGMA index_list(\(ident: ConversationUserSummary.schema))")
+                .all(decoding: SQLiteIndexRow.self)
+
+            #expect(rows.contains { $0.name == "im_conversation_user_summaries_list_order_idx" })
+        }
+    }
+
     @Test("Production summary read model store resolves to owner-sharded store")
     func productionSummaryReadModelStoreUsesShardedStore() async throws {
         let app = try await Application.make(.production)
@@ -286,22 +572,159 @@ extension IMServerTests {
         #expect(configuration.preservesGroupedDeploymentsInProduction == false)
     }
 
+    @Test("Stream consumer multi-group production deployments require explicit override")
+    func streamConsumerMultiGroupProductionDeploymentsRequireExplicitOverride() {
+        let originalValues = [
+            "IM_STREAM_CONSUMER_GROUPS": Environment.get("IM_STREAM_CONSUMER_GROUPS"),
+            "IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP": Environment.get("IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP")
+        ]
+        defer {
+            for (key, value) in originalValues {
+                restoreEnvironment(key, to: value)
+            }
+        }
+
+        setenv("IM_STREAM_CONSUMER_GROUPS", "summary-projection-consumer,changes-log-consumer", 1)
+        unsetenv("IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP")
+
+        var configuration = IMStreamConsumerConfiguration.load(from: .production)
+        #expect(configuration.orderedEnabledGroups == ["changes-log-consumer", "summary-projection-consumer"])
+        #expect(configuration.preservesGroupedDeploymentsInProduction == false)
+
+        setenv("IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP", "true", 1)
+        configuration = IMStreamConsumerConfiguration.load(from: .production)
+        #expect(configuration.preservesGroupedDeploymentsInProduction)
+    }
+
+    @Test("Stream consumer supervision exits when a consumer task fails")
+    func streamConsumerSupervisionExitsWhenTaskFails() async throws {
+        let app = try await Application.make(.testing)
+        let failingTask = NamedStreamConsumerTask(groupID: "summary-projection-consumer", task: Task {
+            throw Abort(.internalServerError, reason: "consumer failed")
+        })
+
+        do {
+            try await superviseStreamConsumerTasks([failingTask], app: app) {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            Issue.record("Expected stream consumer supervision to fail")
+        } catch let abort as any AbortError {
+            #expect(abort.status == .internalServerError)
+            #expect(abort.reason.contains("consumer failed"))
+        } catch {
+            Issue.record("Unexpected stream consumer supervision error: \(error)")
+        }
+        try await app.asyncShutdown()
+    }
+
+    @Test("Stream consumer supervision cancels tasks on shutdown")
+    func streamConsumerSupervisionCancelsTasksOnShutdown() async throws {
+        let app = try await Application.make(.testing)
+        let longRunningTask = Task {
+            while !Task.isCancelled {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+
+        try await superviseStreamConsumerTasks(
+            [NamedStreamConsumerTask(groupID: "summary-projection-consumer", task: longRunningTask)],
+            app: app,
+            shutdownSignal: {}
+        )
+        #expect(longRunningTask.isCancelled)
+        try await app.asyncShutdown()
+    }
+
     @Test("Internal metrics endpoint returns Prometheus text only when enabled")
     func internalMetricsEndpointHonorsConfiguration() async throws {
         try await withApp(configure: configure) { app in
-            app.metricsConfiguration = IMMetricsConfiguration(isEnabled: true)
+            app.metricsConfiguration = IMMetricsConfiguration(isEnabled: true, internalSecret: "metrics-secret")
             try await app.testing().test(.GET, "internal/metrics", afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+
+            try await app.testing().test(.GET, "internal/metrics", beforeRequest: { req in
+                req.headers.replaceOrAdd(name: "X-IM-Metrics-Secret", value: "metrics-secret")
+            }, afterResponse: { res async in
                 #expect(res.status == .ok)
                 #expect(res.headers.contentType?.type == "text")
                 #expect(res.body.string.contains("im_tcp_connections"))
                 #expect(res.body.string.contains("im_outbox_backlog_events"))
             })
 
-            app.metricsConfiguration = IMMetricsConfiguration(isEnabled: false)
+            app.metricsConfiguration = IMMetricsConfiguration(isEnabled: false, internalSecret: nil)
             try await app.testing().test(.GET, "internal/metrics", afterResponse: { res async in
                 #expect(res.status == .notFound)
             })
         }
+    }
+
+    @Test("Production metrics require an internal secret")
+    func productionMetricsRequireInternalSecret() throws {
+        let originalValues = [
+            "IM_METRICS_ENABLED": Environment.get("IM_METRICS_ENABLED"),
+            "IM_METRICS_INTERNAL_SECRET": Environment.get("IM_METRICS_INTERNAL_SECRET"),
+            "IM_INTERNAL_SHARED_SECRET": Environment.get("IM_INTERNAL_SHARED_SECRET")
+        ]
+        defer {
+            for (key, value) in originalValues {
+                restoreEnvironment(key, to: value)
+            }
+        }
+
+        setenv("IM_METRICS_ENABLED", "true", 1)
+        unsetenv("IM_METRICS_INTERNAL_SECRET")
+        unsetenv("IM_INTERNAL_SHARED_SECRET")
+
+        let configuration = IMMetricsConfiguration.load(from: .production)
+        do {
+            try configuration.validateStartup(environment: .production)
+            Issue.record("Expected production metrics without secret to fail")
+        } catch let abort as any AbortError {
+            #expect(abort.status == .internalServerError)
+            #expect(abort.reason.contains("IM_METRICS_INTERNAL_SECRET"))
+        } catch {
+            Issue.record("Unexpected metrics configuration error: \(error)")
+        }
+    }
+
+    @Test("Production requires explicit primary database configuration")
+    func productionRequiresExplicitPrimaryDatabaseConfiguration() throws {
+        let keys = [
+            "DATABASE_HOST",
+            "DATABASE_NAME",
+            "DATABASE_USERNAME",
+            "DATABASE_PASSWORD",
+            "DATABASE_PRIMARY_HOST",
+            "DATABASE_PRIMARY_NAME",
+            "DATABASE_PRIMARY_USERNAME",
+            "DATABASE_PRIMARY_PASSWORD"
+        ]
+        let originalValues = Dictionary(uniqueKeysWithValues: keys.map { ($0, Environment.get($0)) })
+        defer {
+            for (key, value) in originalValues {
+                restoreEnvironment(key, to: value)
+            }
+        }
+        for key in keys {
+            unsetenv(key)
+        }
+
+        do {
+            try IMProductionRuntimeValidationSupport.validatePrimaryDatabaseConfiguration()
+            Issue.record("Expected missing production database configuration to fail")
+        } catch let abort as any AbortError {
+            #expect(abort.status == .internalServerError)
+            #expect(abort.reason.contains("primary database"))
+        } catch {
+            Issue.record("Unexpected database configuration error: \(error)")
+        }
+
+        setenv("DATABASE_HOST", "db.internal", 1)
+        setenv("DATABASE_NAME", "imserver", 1)
+        setenv("DATABASE_USERNAME", "imserver", 1)
+        setenv("DATABASE_PASSWORD", "secret", 1)
+        try IMProductionRuntimeValidationSupport.validatePrimaryDatabaseConfiguration()
     }
 
     @Test("Projection worker role does not register API routes")
@@ -370,6 +793,43 @@ extension IMServerTests {
         }
     }
 
+    @Test("Gateway command bridge registers every command route when enabled")
+    func gatewayCommandBridgeRegistersEveryCommandRouteWhenEnabled() async throws {
+        let originalBaseURL = Environment.get("IM_COMMAND_API_INTERNAL_BASE_URL")
+        defer { restoreEnvironment("IM_COMMAND_API_INTERNAL_BASE_URL", to: originalBaseURL) }
+        setenv("IM_COMMAND_API_INTERNAL_BASE_URL", "http://command.internal", 1)
+
+        try await withApp(configure: { app in
+            app.imRuntimeRole = .gateway
+            try await configure(app)
+        }) { app in
+            for route in IMConversationCommandRoute.allCases {
+                let path = "api/im/" + route.path.map { component in
+                    let raw = component.description
+                    if raw.hasPrefix(":") {
+                        switch raw {
+                        case ":conversationID", ":memberUserID", ":messageID":
+                            return UUID().uuidString
+                        case ":token":
+                            return "invite-token"
+                        default:
+                            return "value"
+                        }
+                    }
+                    return raw
+                }.joined(separator: "/")
+
+                try await app.testing().test(route.method, path, afterResponse: { res async in
+                    #expect(res.status == .unauthorized)
+                })
+            }
+
+            try await app.testing().test(.GET, "api/im/conversations", afterResponse: { res async in
+                #expect(res.status == .notFound)
+            })
+        }
+    }
+
     @Test("Command API role registers IM mutate routes but not IM query or auth routes")
     func commandAPIRoleSeparatesRoutes() async throws {
         try await withApp(configure: { app in
@@ -417,4 +877,79 @@ extension IMServerTests {
     }
 
 
+}
+
+private func withProductionRuntimeEnvironment(_ body: () async throws -> Void) async throws {
+    let values = [
+        "IM_NODE_ID": "node-a",
+        "IM_COMMAND_API_INTERNAL_BASE_URL": "http://command.internal",
+        "IM_GATEWAY_RELAY_MODE": "http",
+        "IM_GATEWAY_INTERNAL_BASE_URL": "http://gateway.internal",
+        "IM_INTERNAL_SHARED_SECRET": "test-internal-secret",
+        "IM_EVENT_STREAM_DRIVER": "kafka",
+        "IM_KAFKA_BROKERS": "kafka-a:9092",
+        "IM_KAFKA_SECURITY_PROTOCOL": "plaintext",
+        "IM_SUMMARY_PROJECTION_WRITE_MODE": "sharded",
+        "IM_SUMMARY_QUERY_READ_SOURCE": "sharded",
+        "IM_SEARCH_DRIVER": "opensearch",
+        "IM_OPENSEARCH_ENDPOINT": "https://opensearch.internal",
+        "IM_STREAM_CONSUMER_GROUPS": "summary-projection-consumer",
+        "IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT": "100",
+        "IM_SEQUENCE_ALLOCATION_MODE": "block",
+        "IM_SEQUENCE_BLOCK_SIZE": "256",
+        "IM_MESSAGE_WRITE_BATCH_ENABLED": "true",
+        "IM_MESSAGE_WRITE_BATCH_MAX_SIZE": "32",
+        "IM_MESSAGE_WRITE_BATCH_MAX_DELAY_MS": "10",
+        "IM_COMMAND_NODE_ID": "command-a",
+        "IM_COMMAND_NODE_URLS": "command-a=http://command-a.internal,command-b=http://command-b.internal",
+        "MEDIA_STORAGE_PROVIDER": "s3compatible",
+        "MEDIA_STORAGE_S3_ENDPOINT": "https://s3.internal",
+        "MEDIA_STORAGE_S3_BUCKET": "im-media",
+        "MEDIA_STORAGE_S3_ACCESS_KEY_ID": "access-key",
+        "MEDIA_STORAGE_S3_SECRET_ACCESS_KEY": "secret-key",
+        "DATABASE_HOST": "primary-db",
+        "DATABASE_NAME": "imserver",
+        "DATABASE_USERNAME": "imserver",
+        "DATABASE_PASSWORD": "database-secret",
+        "DATABASE_SUMMARY_HOST": "summary-db"
+    ]
+    let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
+    defer {
+        for (key, value) in originalValues {
+            restoreProductionRuntimeEnvironment(key, to: value)
+        }
+    }
+
+    for (key, value) in values {
+        setenv(key, value, 1)
+    }
+
+    try await body()
+}
+
+private func restoreProductionRuntimeEnvironment(_ key: String, to value: String?) {
+    if let value {
+        setenv(key, value, 1)
+    } else {
+        unsetenv(key)
+    }
+}
+
+private func productionRuntimeValidationApp(role: IMRuntimeRole) async throws -> Application {
+    let app = try await Application.make(.production)
+    app.imRuntimeRole = role
+    app.gatewayRelayConfiguration = IMGatewayRelayConfiguration.load(from: .production)
+    app.commandAPIIngressConfiguration = IMCommandAPIIngressConfiguration.load(from: .production)
+    app.eventStreamConfiguration = IMEventStreamConfiguration.load(from: .production)
+    app.searchIndexConfiguration = IMSearchIndexConfiguration.load(from: .production)
+    app.shardTopologyConfiguration = IMShardTopologyConfiguration.load(from: .production)
+    app.summaryStoreConfiguration = IMSummaryStoreConfiguration.load(from: .production)
+    app.summaryReadModelConfiguration = IMSummaryReadModelConfiguration.load(from: .production)
+    app.streamConsumerConfiguration = IMStreamConsumerConfiguration.load(from: .production)
+    app.hotConversationConfiguration = IMHotConversationConfiguration.load(from: .production)
+    app.sequenceAllocationConfiguration = IMSequenceAllocationConfiguration.load(from: .production)
+    app.messageWriteBatchConfiguration = IMMessageWriteBatchConfiguration.load(from: .production)
+    app.commandOwnerRoutingConfiguration = IMCommandOwnerRoutingConfiguration.load(from: .production)
+    IMDatabaseConfigurator.configureDatabases(app)
+    return app
 }

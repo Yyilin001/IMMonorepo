@@ -57,6 +57,7 @@ enum IMConversationMetadataField: String, Codable, Content, Sendable {
     case title
     case notice
     case avatarPreset = "avatar_preset"
+    case muteAll = "mute_all"
 }
 
 struct IMSystemEvent: Codable, Equatable, Content, Sendable {
@@ -159,6 +160,8 @@ private extension IMConversationMetadataField {
             return "群公告"
         case .avatarPreset:
             return "群头像"
+        case .muteAll:
+            return "全员禁言"
         }
     }
 }

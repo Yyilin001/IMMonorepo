@@ -230,9 +230,9 @@ Before enabling production traffic, confirm:
 
 Use the production env templates under:
 
-- `/Users/yy/Desktop/vaporTest/IMServer/config/env/gateway.production.env.example`
-- `/Users/yy/Desktop/vaporTest/IMServer/config/env/command-api.production.env.example`
-- `/Users/yy/Desktop/vaporTest/IMServer/config/env/query-api.production.env.example`
-- `/Users/yy/Desktop/vaporTest/IMServer/config/env/outbox-relay.production.env.example`
-- `/Users/yy/Desktop/vaporTest/IMServer/config/env/stream-consumer.production.env.example`
-- `/Users/yy/Desktop/vaporTest/IMServer/config/env/ops.production.env.example`
+- `config/env/gateway.production.env.example`
+- `config/env/command-api.production.env.example`
+- `config/env/query-api.production.env.example`
+- `config/env/outbox-relay.production.env.example`
+- `config/env/stream-consumer.production.env.example`
+- `config/env/ops.production.env.example`

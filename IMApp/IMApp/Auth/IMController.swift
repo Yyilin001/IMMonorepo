@@ -3,9 +3,9 @@ import IMClientKit
 
 @MainActor
 final class ConversationRuntimeController {
-    private let sessionClient: SessionClient
+    let sessionClient: SessionClient
     private let openIMConnection: @Sendable () async throws -> IMTCPConnection
-    private let imConversationStore: IMConversationStore
+    let imConversationStore: IMConversationStore
     private let currentUserProvider: () -> AuthUser?
     private let isSignedInProvider: () -> Bool
     private let latestConversationSummariesProvider: () -> [IMConversationSummaryResponseBody]
@@ -18,14 +18,14 @@ final class ConversationRuntimeController {
     private let clearSession: (String?) async -> Void
     private let handleIMDataRequestError: (Error) async -> Void
     private let syncContactStateAfterConnection: () async -> Void
-    private let scheduleConversationCachePersist: () -> Void
+    let scheduleConversationCachePersist: () -> Void
     private let flushConversationCache: () async -> Void
     private let flushContactStateCache: () async -> Void
     private let applyContactEvent: (IMTCPContactEventPayload) -> Void
     private let setConnectionStatus: (AuthManager.IMConnectionStatus) -> Void
     private let setQueuedFlushActive: (Bool) -> Void
-    private let backgroundTransferMonitor: any BackgroundTransferMonitoring
-    private let transferProjectionState = TransferProjectionState()
+    let backgroundTransferMonitor: any BackgroundTransferMonitoring
+    let transferProjectionState = TransferProjectionState()
 
     private var imConnection: IMTCPConnection?
     private var imConnectionConnectTask: Task<Void, Never>?
@@ -43,8 +43,8 @@ final class ConversationRuntimeController {
     private var imConversationMessagesTask: Task<Void, Never>?
     private var imConversationRefreshTask: Task<Void, Never>?
     private var mediaUploadRecoveryTasks: [String: Task<Void, Never>] = [:]
-    private var mediaDownloadBackgroundObserveTask: Task<Void, Never>?
-    private var mediaTransferStore = TransferStore()
+    var mediaDownloadBackgroundObserveTask: Task<Void, Never>?
+    var mediaTransferStore = TransferStore()
 
     init(
         sessionClient: SessionClient,
@@ -445,60 +445,6 @@ final class ConversationRuntimeController {
         return completedURL ?? destinationURL
     }
 
-    func startBackgroundMediaDownload(
-        _ asset: IMMediaAsset,
-        to destinationURL: URL
-    ) async throws {
-        if let match = localDownloadMessageMatch(for: destinationURL.path) {
-            imConversationStore.updateLocalDownloadState(
-                messageID: match.messageID,
-                state: IMMessageLocalDownloadState(
-                    destinationFilePath: destinationURL.path,
-                    status: .downloading(
-                        progress: match.state?.pausedProgress,
-                        backgroundTransfer: nil
-                    )
-                )
-            )
-            scheduleConversationCachePersist()
-        }
-
-        _ = try await sessionClient.downloadMediaAsset(
-            assetID: asset.assetID,
-            to: destinationURL,
-            backgroundTransfer: BackgroundTransferConfiguration(
-                isDiscretionary: false,
-                waitsForConnectivity: true
-            )
-        )
-    }
-
-    func cancelBackgroundMediaDownload(
-        _ reference: IMMessageBackgroundTransferReference
-    ) async {
-        await backgroundTransferMonitor.cancelTransfer(
-            sessionIdentifier: reference.sessionIdentifier,
-            taskIdentifier: reference.taskIdentifier
-        )
-    }
-
-    func reconcileBackgroundMediaDownloadSnapshots() {
-        applyRecoveredBackgroundMediaSnapshots(backgroundTransferMonitor.currentSnapshots())
-    }
-
-    func cachedTransferSnapshots() -> [IMTransferSnapshot] {
-        mediaTransferStore.snapshots()
-    }
-
-    func restoreTransferSnapshots(_ snapshots: [IMTransferSnapshot]) {
-        guard !snapshots.isEmpty else {
-            return
-        }
-
-        mediaTransferStore.replace(with: snapshots)
-        replayCachedMediaTransferProjections()
-    }
-
     func recallMessage(messageID: String, in conversationID: String) async -> Bool {
         guard let currentUserID = currentUserProvider()?.id else {
             return false
@@ -576,6 +522,208 @@ final class ConversationRuntimeController {
             markServerOnline()
             imConversationStore.applyUpdatedMessage(response, currentUserID: currentUserID)
             scheduleConversationCachePersist()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func favoriteMessage(messageID: String, in conversationID: String) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMessageID = messageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedMessageID.isEmpty else {
+            return false
+        }
+
+        do {
+            _ = try await sessionClient.favoriteIMMessage(
+                conversationID: trimmedConversationID,
+                messageID: trimmedMessageID
+            )
+            markServerOnline()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func unfavoriteMessage(messageID: String, in conversationID: String) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMessageID = messageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedMessageID.isEmpty else {
+            return false
+        }
+
+        do {
+            _ = try await sessionClient.unfavoriteIMMessage(
+                conversationID: trimmedConversationID,
+                messageID: trimmedMessageID
+            )
+            markServerOnline()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func deleteMessagesForSelf(messageIDs: [String], in conversationID: String) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ids = messageIDs.compactMap { UUID(uuidString: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard !trimmedConversationID.isEmpty, !ids.isEmpty else {
+            return false
+        }
+
+        do {
+            _ = try await sessionClient.deleteIMMessagesForSelf(
+                conversationID: trimmedConversationID,
+                messageIDs: ids
+            )
+            markServerOnline()
+            imConversationStore.removeMessages(
+                ids: Set(ids.map(\.uuidString) + messageIDs),
+                from: trimmedConversationID
+            )
+            scheduleConversationCachePersist()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func clearConversationForSelf(_ conversationID: String) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return false
+        }
+
+        do {
+            _ = try await sessionClient.clearIMConversationForSelf(conversationID: trimmedConversationID)
+            markServerOnline()
+            if let conversation = imConversationStore.conversations.first(where: { $0.id == trimmedConversationID }) {
+                let ids = Set(conversation.messages.map(\.id) + conversation.messages.compactMap(\.serverMessageID))
+                imConversationStore.removeMessages(ids: ids, from: trimmedConversationID)
+            }
+            scheduleConversationCachePersist()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func deleteConversationForSelf(_ conversationID: String) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return false
+        }
+
+        do {
+            _ = try await sessionClient.deleteIMConversationForSelf(conversationID: trimmedConversationID)
+            markServerOnline()
+            imConversationStore.removeConversation(id: trimmedConversationID)
+            scheduleConversationCachePersist()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func forwardMessages(messageIDs: [String], from conversationID: String, to targetConversationIDs: [String]) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sourceIDs = messageIDs.compactMap { UUID(uuidString: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        let targetIDs = targetConversationIDs.compactMap { UUID(uuidString: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard !trimmedConversationID.isEmpty, !sourceIDs.isEmpty, !targetIDs.isEmpty else {
+            return false
+        }
+
+        do {
+            _ = try await sessionClient.forwardIMMessages(
+                conversationID: trimmedConversationID,
+                messageIDs: sourceIDs,
+                targetConversationIDs: targetIDs
+            )
+            markServerOnline()
+            _ = await reconcileConversationSummaryReadModel(force: true)
+            scheduleConversationCachePersist()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func createGroupInvite(conversationID: String, expiresInSeconds: Int? = nil) async -> IMGroupInviteResponseBody? {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return nil
+        }
+
+        do {
+            let invite = try await sessionClient.createIMGroupInvite(
+                conversationID: trimmedConversationID,
+                expiresInSeconds: expiresInSeconds
+            )
+            markServerOnline()
+            return invite
+        } catch {
+            await handleIMDataRequestError(error)
+            return nil
+        }
+    }
+
+    func updateMyMemberNickname(conversationID: String, memberNickname: String?) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return false
+        }
+
+        do {
+            let conversation = try await sessionClient.updateIMMyMemberProfile(
+                conversationID: trimmedConversationID,
+                memberNickname: memberNickname?.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            markServerOnline()
+            applyConversationSummaryReadModel([conversation])
+            await loadConversationMembers(for: trimmedConversationID)
+            scheduleConversationCachePersist()
+            return true
+        } catch {
+            await handleIMDataRequestError(error)
+            return false
+        }
+    }
+
+    func fetchGroupInvites(conversationID: String) async -> [IMGroupInviteResponseBody] {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return []
+        }
+
+        do {
+            let invites = try await sessionClient.fetchIMGroupInvites(conversationID: trimmedConversationID)
+            markServerOnline()
+            return invites
+        } catch {
+            await handleIMDataRequestError(error)
+            return []
+        }
+    }
+
+    func revokeGroupInvite(conversationID: String, token: String) async -> Bool {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty, !trimmedToken.isEmpty else {
+            return false
+        }
+
+        do {
+            _ = try await sessionClient.revokeIMGroupInvite(conversationID: trimmedConversationID, token: trimmedToken)
+            markServerOnline()
             return true
         } catch {
             await handleIMDataRequestError(error)
@@ -699,7 +847,11 @@ final class ConversationRuntimeController {
         }
     }
 
-    func loadConversationMembers(for conversationID: String) async {
+    func loadConversationMembers(
+        for conversationID: String,
+        query: String = "",
+        reset: Bool = true
+    ) async {
         guard let user = currentUserProvider() else {
             return
         }
@@ -715,24 +867,37 @@ final class ConversationRuntimeController {
                 return
             }
 
-            self.imConversationStore.setLoadingMembers(true)
+            let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.imConversationStore.setMemberPageLoading(
+                conversationID: trimmedConversationID,
+                query: normalizedQuery,
+                isLoading: reset
+            )
             defer {
-                self.imConversationStore.setLoadingMembers(false)
+                self.imConversationStore.setMemberPageLoading(
+                    conversationID: trimmedConversationID,
+                    query: normalizedQuery,
+                    isLoading: false
+                )
                 self.imConversationMembersTask = nil
             }
 
             do {
-                let members = try await self.sessionClient.fetchIMConversationMembers(
-                    conversationID: trimmedConversationID
+                let membersPage = try await self.sessionClient.fetchIMConversationMembers(
+                    conversationID: trimmedConversationID,
+                    limit: 50,
+                    query: normalizedQuery.isEmpty ? nil : normalizedQuery
                 )
                 guard self.currentUserProvider()?.id == user.id else {
                     return
                 }
 
                 self.markServerOnline()
-                self.imConversationStore.replaceMembers(
+                self.imConversationStore.applyMemberPage(
+                    membersPage,
                     in: trimmedConversationID,
-                    members: members
+                    query: normalizedQuery,
+                    appending: false
                 )
                 self.scheduleConversationCachePersist()
             } catch {
@@ -741,6 +906,82 @@ final class ConversationRuntimeController {
         }
 
         await imConversationMembersTask?.value
+    }
+
+    func loadMoreConversationMembers(for conversationID: String) async {
+        guard let user = currentUserProvider() else {
+            return
+        }
+
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return
+        }
+
+        let state = imConversationStore.memberPageState(for: trimmedConversationID)
+        guard let nextCursor = state.nextCursor, !state.isLoadingMore else {
+            return
+        }
+
+        let query = state.query
+        imConversationStore.setMemberPageLoading(
+            conversationID: trimmedConversationID,
+            query: query,
+            isLoading: false,
+            isLoadingMore: true
+        )
+        defer {
+            imConversationStore.setMemberPageLoading(
+                conversationID: trimmedConversationID,
+                query: query,
+                isLoading: false,
+                isLoadingMore: false
+            )
+        }
+
+        do {
+            let membersPage = try await sessionClient.fetchIMConversationMembers(
+                conversationID: trimmedConversationID,
+                cursor: nextCursor,
+                limit: state.limit,
+                query: query.isEmpty ? nil : query
+            )
+            guard currentUserProvider()?.id == user.id else {
+                return
+            }
+
+            markServerOnline()
+            imConversationStore.applyMemberPage(
+                membersPage,
+                in: trimmedConversationID,
+                query: query,
+                appending: true
+            )
+            scheduleConversationCachePersist()
+        } catch {
+            await handleIMDataRequestError(error)
+        }
+    }
+
+    func loadReceiptSummary(for conversationID: String) async {
+        guard currentUserProvider() != nil else {
+            return
+        }
+
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return
+        }
+
+        do {
+            let summary = try await sessionClient.fetchIMConversationReceiptSummary(
+                conversationID: trimmedConversationID
+            )
+            markServerOnline()
+            imConversationStore.setReceiptSummary(summary, for: trimmedConversationID)
+        } catch {
+            await handleIMDataRequestError(error)
+        }
     }
 
     func loadMessagesIfNeeded(for conversationID: String, forceReload: Bool = false) async {
@@ -1030,6 +1271,10 @@ final class ConversationRuntimeController {
             return
         case .ack(let requestID, let payload):
             imConversationStore.applyOutgoingAcknowledgement(requestID: requestID, payload: payload)
+            if let conversationID = payload.conversationID,
+               conversationID == imConversationStore.selectedConversationID {
+                await loadReceiptSummary(for: conversationID)
+            }
             scheduleConversationCachePersist()
         case .message(let requestID, let payload):
             guard let currentUserID = currentUserProvider()?.id else {
@@ -1075,6 +1320,9 @@ final class ConversationRuntimeController {
             if let conversationID = outcome.shouldReloadMembersForConversationID,
                imConversationStore.conversations.contains(where: { $0.id == conversationID }) {
                 await loadConversationMembers(for: conversationID)
+            }
+            if payload.conversation.id.uuidString == imConversationStore.selectedConversationID {
+                await loadReceiptSummary(for: payload.conversation.id.uuidString)
             }
             scheduleConversationCachePersist()
         case .contactEvent(_, let payload):
@@ -1969,110 +2217,4 @@ final class ConversationRuntimeController {
         throw CocoaError(.fileReadUnknown)
     }
 
-    private func startObservingBackgroundMediaDownloads() {
-        guard mediaDownloadBackgroundObserveTask == nil else {
-            return
-        }
-
-        applyRecoveredBackgroundMediaSnapshots(backgroundTransferMonitor.currentSnapshots())
-        let updates = backgroundTransferMonitor.updates()
-        mediaDownloadBackgroundObserveTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            for await snapshot in updates {
-                await MainActor.run {
-                    self.applyBackgroundMediaSnapshot(snapshot)
-                }
-            }
-        }
-    }
-
-    private func applyRecoveredBackgroundMediaSnapshots(_ snapshots: [BackgroundTransferSnapshot]) {
-        mediaTransferStore.merge(snapshots.filter { $0.kind == .download })
-        replayCachedMediaTransferProjections()
-    }
-
-    private func applyBackgroundMediaSnapshot(_ snapshot: BackgroundTransferSnapshot) {
-        applyBackgroundMediaTransferSnapshot(mediaTransferStore.apply(snapshot))
-    }
-
-    private func replayCachedMediaTransferProjections() {
-        for snapshot in mediaTransferStore.snapshots(kind: .download) {
-            applyBackgroundMediaTransferSnapshot(snapshot)
-        }
-    }
-
-    private func applyBackgroundMediaTransferSnapshot(_ snapshot: IMTransferSnapshot) {
-        guard snapshot.kind == .download,
-              let destinationURL = snapshot.destinationURL,
-              let match = localDownloadMessageMatch(for: snapshot, destinationPath: destinationURL.path)
-        else {
-            return
-        }
-
-        let nextState = transferProjectionState.localDownloadState(
-            from: snapshot,
-            destinationFilePath: destinationURL.path,
-            existing: match.state
-        )
-
-        guard match.state != nextState else {
-            return
-        }
-
-        imConversationStore.updateLocalDownloadState(
-            messageID: match.messageID,
-            state: nextState
-        )
-        scheduleConversationCachePersist()
-    }
-
-    private func localDownloadMessageMatch(
-        for snapshot: IMTransferSnapshot,
-        destinationPath: String
-    ) -> (messageID: String, state: IMMessageLocalDownloadState?)? {
-        for conversation in imConversationStore.conversations {
-            if let message = conversation.messages.first(where: { $0.resolvedTransferTaskID == snapshot.taskID }) {
-                return (message.id, message.localDownloadState)
-            }
-        }
-
-        let normalizedTargetPath = URL(fileURLWithPath: destinationPath).standardizedFileURL.path
-
-        for conversation in imConversationStore.conversations {
-            if let message = conversation.messages.first(where: {
-                guard let localDownloadState = $0.localDownloadState else {
-                    return false
-                }
-                return URL(fileURLWithPath: localDownloadState.destinationFilePath)
-                    .standardizedFileURL
-                    .path == normalizedTargetPath
-            }) {
-                return (message.id, message.localDownloadState)
-            }
-        }
-
-        return nil
-    }
-
-    private func localDownloadMessageMatch(for destinationPath: String) -> (messageID: String, state: IMMessageLocalDownloadState?)? {
-        let normalizedTargetPath = URL(fileURLWithPath: destinationPath).standardizedFileURL.path
-
-        for conversation in imConversationStore.conversations {
-            if let message = conversation.messages.first(where: {
-                guard let localDownloadState = $0.localDownloadState else {
-                    return false
-                }
-                return URL(fileURLWithPath: localDownloadState.destinationFilePath)
-                    .standardizedFileURL
-                    .path == normalizedTargetPath
-            }) {
-                return (message.id, message.localDownloadState)
-            }
-        }
-
-        return nil
-    }
 }

@@ -3,10 +3,25 @@ import IMClientKit
 
 struct SignedInTabView: View {
     @EnvironmentObject private var authManager: AuthManager
+    @ObservedObject var sessionStore: AppSessionStore
+    @ObservedObject var contactStore: ContactStore
+    @ObservedObject var conversationStore: IMConversationStore
 
     let user: AuthUser
 
     @State private var navigationPath: [IMNavigationRoute] = []
+
+    init(
+        user: AuthUser,
+        sessionStore: AppSessionStore,
+        contactStore: ContactStore,
+        conversationStore: IMConversationStore
+    ) {
+        self.user = user
+        self.sessionStore = sessionStore
+        self.contactStore = contactStore
+        self.conversationStore = conversationStore
+    }
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -37,7 +52,9 @@ struct SignedInTabView: View {
                 switch route {
                 case .conversation(let conversationID):
                     IMConversationDetailView(
-                        conversationStore: authManager.imConversationStore,
+                        conversationStore: conversationStore,
+                        presentationStore: authManager.conversationPresentationStore,
+                        runtimeStore: authManager.conversationRuntimeStore,
                         conversationID: conversationID
                     )
                 }
@@ -47,11 +64,13 @@ struct SignedInTabView: View {
 
     @ViewBuilder
     private var imTab: some View {
-        let unreadCount = authManager.imConversationStore.totalUnreadCount
+        let unreadCount = conversationStore.totalUnreadCount
 
         if unreadCount > 0 {
             IMConversationView(
-                conversationStore: authManager.imConversationStore,
+                conversationStore: conversationStore,
+                presentationStore: authManager.conversationPresentationStore,
+                runtimeStore: authManager.conversationRuntimeStore,
                 onOpenConversation: openConversation
             )
             .tabItem {
@@ -60,7 +79,9 @@ struct SignedInTabView: View {
             .badge(unreadCount)
         } else {
             IMConversationView(
-                conversationStore: authManager.imConversationStore,
+                conversationStore: conversationStore,
+                presentationStore: authManager.conversationPresentationStore,
+                runtimeStore: authManager.conversationRuntimeStore,
                 onOpenConversation: openConversation
             )
             .tabItem {
@@ -71,16 +92,16 @@ struct SignedInTabView: View {
 
     @ViewBuilder
     private var contactsTab: some View {
-        let pendingCount = authManager.unseenIncomingContactRequestCount
+        let pendingCount = contactStore.unseenIncomingContactRequestCount
 
         if pendingCount > 0 {
-            ContactsView(onOpenConversation: openConversation)
+            ContactsView(contactStore: contactStore, onOpenConversation: openConversation)
                 .tabItem {
                     Label("通讯录", systemImage: "person.2")
                 }
                 .badge(pendingCount)
         } else {
-            ContactsView(onOpenConversation: openConversation)
+            ContactsView(contactStore: contactStore, onOpenConversation: openConversation)
                 .tabItem {
                     Label("通讯录", systemImage: "person.2")
                 }

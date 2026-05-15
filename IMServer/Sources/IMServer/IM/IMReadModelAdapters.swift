@@ -85,6 +85,7 @@ struct DatabaseSummaryReadModelStore: SummaryReadModelStore {
             },
             notice: row.notice,
             avatarPreset: row.avatarPresetEnum,
+            muteAll: row.muteAll,
             memberCount: row.memberCount,
             memberUserIDs: row.memberUserIDs.sorted { $0.uuidString < $1.uuidString },
             lastMessage: row.lastMessage,
@@ -144,7 +145,7 @@ struct DatabaseConversationSearchAdapter: ConversationSearchAdapter {
         self.fixedDatabase = nil
     }
 
-    init(db: any Database) {
+    init(fixedDatabaseForLowLevelTest db: any Database) {
         self.app = nil
         self.fixedDatabase = db
     }
@@ -170,7 +171,7 @@ struct DatabaseConversationSearchAdapter: ConversationSearchAdapter {
             return fixedDatabase
         }
         guard let app else {
-            fatalError("DatabaseConversationSearchAdapter missing both app and database.")
+            throw Abort(.internalServerError, reason: "DatabaseConversationSearchAdapter missing both app and database.")
         }
         return try await app.conversationShardRouter.eventualReadDatabase(forConversationID: conversationID)
     }

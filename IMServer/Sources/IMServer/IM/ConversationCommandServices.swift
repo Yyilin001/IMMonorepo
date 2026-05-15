@@ -10,7 +10,7 @@ struct ConversationCommandService {
         self.fixedDatabase = nil
     }
 
-    init(db: any Database) {
+    init(fixedDatabaseForLowLevelTest db: any Database) {
         self.app = nil
         self.fixedDatabase = db
     }
@@ -21,6 +21,15 @@ struct ConversationCommandService {
         memberEmails: [String],
         creatorUserID: UUID
     ) async throws -> IMConversationResponse {
+        if let app {
+            try await rejectBlockedDirectConversationIfNeeded(
+                kind: kind,
+                title: title,
+                memberEmails: memberEmails,
+                creatorUserID: creatorUserID,
+                on: app.db
+            )
+        }
         if let app,
            let existingDirectConversation = try await existingDirectConversation(
             app: app,
@@ -35,7 +44,7 @@ struct ConversationCommandService {
         let conversationID = UUID()
         let assignedShardID = app?.conversationShardRouter.shardID(forNewConversationID: conversationID)
             ?? SingleShardConversationShardRouter.defaultShardID
-        let commandDB = commandDatabase(forShardID: assignedShardID)
+        let commandDB = try commandDatabase(forShardID: assignedShardID)
         let response = try await ConversationCommandSupport(db: commandDB).createConversation(
             conversationID: conversationID,
             assignedShardID: assignedShardID,
@@ -58,6 +67,43 @@ struct ConversationCommandService {
             }
         }
         return response
+    }
+
+    private func rejectBlockedDirectConversationIfNeeded(
+        kind: String?,
+        title: String?,
+        memberEmails: [String],
+        creatorUserID: UUID,
+        on db: any Database
+    ) async throws {
+        let normalizedEmails = Array(Set(memberEmails.map(User.normalize).filter { !$0.isEmpty }))
+        guard normalizedEmails.count == 1 else {
+            return
+        }
+        let creator = try await ConversationUserLookupSupport(db: db).requireUser(id: creatorUserID)
+        let normalizedTitle = ConversationCommandNormalizationSupport.normalizedConversationTitle(title)
+        let peer = try await User.query(on: db)
+            .filter(\.$email == normalizedEmails[0])
+            .first()
+        guard let peer else {
+            return
+        }
+        let memberUserIDs = [creatorUserID, try peer.requireID()].sorted { $0.uuidString < $1.uuidString }
+        let conversationKind = try ConversationCommandNormalizationSupport.normalizedConversationKind(
+            kind,
+            normalizedTitle: normalizedTitle,
+            memberUserIDs: memberUserIDs
+        )
+        guard conversationKind == .direct else {
+            return
+        }
+        let lhs = try creator.requireID()
+        let rhs = try peer.requireID()
+        let lhsBlocked = try await UserBlock.find(UserBlock.recordID(ownerUserID: lhs, blockedUserID: rhs), on: db) != nil
+        let rhsBlocked = try await UserBlock.find(UserBlock.recordID(ownerUserID: rhs, blockedUserID: lhs), on: db) != nil
+        if lhsBlocked || rhsBlocked {
+            throw Abort(.forbidden, reason: "当前无法创建私聊。")
+        }
     }
 
     private func existingDirectConversation(
@@ -157,6 +203,7 @@ struct ConversationCommandService {
         title: String?,
         notice: String?,
         avatarPreset: IMConversationAvatarPreset?,
+        muteAll: Bool?,
         requesterUserID: UUID
     ) async throws -> IMConversationResponse {
         try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).updateConversationMetadata(
@@ -164,7 +211,20 @@ struct ConversationCommandService {
             title: title,
             notice: notice,
             avatarPreset: avatarPreset,
+            muteAll: muteAll,
             requesterUserID: requesterUserID
+        )
+    }
+
+    func updateMemberNickname(
+        in conversationID: UUID,
+        requesterUserID: UUID,
+        memberNickname: String?
+    ) async throws -> IMConversationResponse {
+        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).updateMemberNickname(
+            in: conversationID,
+            requesterUserID: requesterUserID,
+            memberNickname: memberNickname
         )
     }
 
@@ -244,12 +304,12 @@ struct ConversationCommandService {
         )
     }
 
-    private func commandDatabase(forShardID shardID: String) -> any Database {
+    private func commandDatabase(forShardID shardID: String) throws -> any Database {
         if let fixedDatabase {
             return fixedDatabase
         }
         guard let app else {
-            fatalError("ConversationCommandService missing both app and database.")
+            throw Abort(.internalServerError, reason: "ConversationCommandService missing both app and database.")
         }
         return app.conversationShardRouter.commandDatabase(forShardID: shardID)
     }
@@ -259,7 +319,7 @@ struct ConversationCommandService {
             return fixedDatabase
         }
         guard let app else {
-            fatalError("ConversationCommandService missing both app and database.")
+            throw Abort(.internalServerError, reason: "ConversationCommandService missing both app and database.")
         }
         return try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
     }
@@ -274,7 +334,7 @@ struct ConversationStrongReadService {
         self.fixedDatabase = nil
     }
 
-    init(db: any Database) {
+    init(fixedDatabaseForLowLevelTest db: any Database) {
         self.app = nil
         self.fixedDatabase = db
     }
@@ -297,7 +357,7 @@ struct ConversationStrongReadService {
             return fixedDatabase
         }
         guard let app else {
-            fatalError("ConversationStrongReadService missing both app and database.")
+            throw Abort(.internalServerError, reason: "ConversationStrongReadService missing both app and database.")
         }
         return try await app.conversationShardRouter.strongReadDatabase(forConversationID: conversationID)
     }
@@ -312,7 +372,7 @@ struct ConversationEventualReadService {
         self.fixedDatabase = nil
     }
 
-    init(db: any Database) {
+    init(fixedDatabaseForLowLevelTest db: any Database) {
         self.app = nil
         self.fixedDatabase = db
     }
@@ -323,7 +383,7 @@ struct ConversationEventualReadService {
         limit: Int?,
         kind: String? = nil
     ) async throws -> IMConversationPageResponse {
-        try await ConversationSummaryReadSupport(db: listDatabase())
+        try await ConversationSummaryReadSupport(db: try listDatabase())
             .listConversations(for: userID, cursor: cursor, limit: limit, kind: kind)
     }
 
@@ -333,13 +393,30 @@ struct ConversationEventualReadService {
         cursor: String?,
         limit: Int?
     ) async throws -> IMConversationChangesResponse {
-        try await ConversationSummaryReadSupport(db: listDatabase())
+        try await ConversationSummaryReadSupport(db: try listDatabase())
             .listConversationChanges(for: userID, afterToken: afterToken, cursor: cursor, limit: limit)
     }
 
     func listMembers(in conversationID: UUID, for userID: UUID) async throws -> [IMConversationMemberResponse] {
         try await ConversationMembershipService(db: database(forConversationID: conversationID))
             .listMemberResponses(in: conversationID, for: userID)
+    }
+
+    func listMemberPage(
+        in conversationID: UUID,
+        for userID: UUID,
+        cursor: String?,
+        limit: Int?,
+        query: String?
+    ) async throws -> IMConversationMemberPageResponse {
+        try await ConversationMembershipService(db: database(forConversationID: conversationID))
+            .listMemberPageResponses(
+                in: conversationID,
+                for: userID,
+                cursor: cursor,
+                limit: limit,
+                query: query
+            )
     }
 
     func listMessages(
@@ -373,12 +450,12 @@ struct ConversationEventualReadService {
             .searchMessages(in: conversationID, for: userID, query: query, cursor: cursor, limit: limit)
     }
 
-    private func listDatabase() -> any Database {
+    private func listDatabase() throws -> any Database {
         if let fixedDatabase {
             return fixedDatabase
         }
         guard let app else {
-            fatalError("ConversationEventualReadService missing both app and database.")
+            throw Abort(.internalServerError, reason: "ConversationEventualReadService missing both app and database.")
         }
         return app.conversationShardRouter.eventualReadDatabase()
     }
@@ -388,7 +465,7 @@ struct ConversationEventualReadService {
             return fixedDatabase
         }
         guard let app else {
-            fatalError("ConversationEventualReadService missing both app and database.")
+            throw Abort(.internalServerError, reason: "ConversationEventualReadService missing both app and database.")
         }
         return try await app.conversationShardRouter.eventualReadDatabase(forConversationID: conversationID)
     }

@@ -309,7 +309,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                         )
                     }
 
-                    try? await self.application.processConversationOutboxForTesting()
+                    try? await InlineOutboxProjectionRuntime(app: self.application).flushIfAllowed()
 
                     await self.application.connectionRoutingService.sendMessage(
                         result.message,

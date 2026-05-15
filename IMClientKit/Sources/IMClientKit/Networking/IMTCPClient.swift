@@ -194,6 +194,17 @@ public enum IMTCPConversationEventType: String, Codable, Equatable, Sendable {
     case summaryUpdated = "summary_updated"
     case messageUpdated = "message_updated"
     case messageRecalled = "message_recalled"
+    case messageVisibilityChanged = "message_visibility_changed"
+    case messageFavoriteChanged = "message_favorite_changed"
+    case conversationVisibilityChanged = "conversation_visibility_changed"
+    case conversationSettingsChanged = "conversation_settings_changed"
+    case inviteChanged = "invite_changed"
+}
+
+public enum IMTCPConversationVisibilityAction: String, Codable, Equatable, Sendable {
+    case messageHidden = "message_hidden"
+    case conversationCleared = "conversation_cleared"
+    case conversationDeleted = "conversation_deleted"
 }
 
 public struct IMTCPConversationEventPayload: Codable, Equatable, Sendable {
@@ -202,19 +213,59 @@ public struct IMTCPConversationEventPayload: Codable, Equatable, Sendable {
     public let message: IMConversationMessageResponseBody?
     public let actorUserID: UUID?
     public let serverTimestamp: Date
+    public let messageIDs: [UUID]
+    public let favoriteChangedMessageID: UUID?
+    public let isFavorited: Bool?
+    public let visibilityAction: IMTCPConversationVisibilityAction?
 
     public init(
         eventType: IMTCPConversationEventType,
         conversation: IMConversationSummaryResponseBody,
         message: IMConversationMessageResponseBody? = nil,
         actorUserID: UUID?,
-        serverTimestamp: Date
+        serverTimestamp: Date,
+        messageIDs: [UUID] = [],
+        favoriteChangedMessageID: UUID? = nil,
+        isFavorited: Bool? = nil,
+        visibilityAction: IMTCPConversationVisibilityAction? = nil
     ) {
         self.eventType = eventType
         self.conversation = conversation
         self.message = message
         self.actorUserID = actorUserID
         self.serverTimestamp = serverTimestamp
+        self.messageIDs = messageIDs
+        self.favoriteChangedMessageID = favoriteChangedMessageID
+        self.isFavorited = isFavorited
+        self.visibilityAction = visibilityAction
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case eventType
+        case conversation
+        case message
+        case actorUserID
+        case serverTimestamp
+        case messageIDs
+        case favoriteChangedMessageID
+        case isFavorited
+        case visibilityAction
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        eventType = try container.decode(IMTCPConversationEventType.self, forKey: .eventType)
+        conversation = try container.decode(IMConversationSummaryResponseBody.self, forKey: .conversation)
+        message = try container.decodeIfPresent(IMConversationMessageResponseBody.self, forKey: .message)
+        actorUserID = try container.decodeIfPresent(UUID.self, forKey: .actorUserID)
+        serverTimestamp = try container.decode(Date.self, forKey: .serverTimestamp)
+        messageIDs = try container.decodeIfPresent([UUID].self, forKey: .messageIDs) ?? []
+        favoriteChangedMessageID = try container.decodeIfPresent(UUID.self, forKey: .favoriteChangedMessageID)
+        isFavorited = try container.decodeIfPresent(Bool.self, forKey: .isFavorited)
+        visibilityAction = try container.decodeIfPresent(
+            IMTCPConversationVisibilityAction.self,
+            forKey: .visibilityAction
+        )
     }
 }
 
