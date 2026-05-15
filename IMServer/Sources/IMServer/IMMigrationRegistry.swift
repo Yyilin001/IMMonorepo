@@ -11,6 +11,7 @@ enum IMMigrationRegistry {
         app.migrations.add(AddUserContactRemark())
         app.migrations.add(BackfillReciprocalUserContacts())
         app.migrations.add(CreateFriendRequest())
+        app.migrations.add(CreateContactChangesLog())
         app.migrations.add(CreateAuthSession())
         app.migrations.add(AddAuthIndexes())
         app.migrations.add(EnforceSingleActiveDeviceSession())
@@ -84,6 +85,7 @@ enum IMMigrationRegistry {
             GroupInvite.schema,
             UserReport.schema,
             UserBlock.schema,
+            ContactChangeLogEntry.schema,
             ConversationVisibilityOverride.schema,
             MessageVisibilityOverride.schema,
             MessageFavorite.schema,
@@ -182,7 +184,8 @@ private let imMigrationNames: [String] = [
     "AddConversationEventAuxiliaryReadModelIndexes",
     "AddConversationSearchIndexLowerTrigramIndex",
     "CreateIMCommonFeatureTables",
-    "AddReportSnapshotFields"
+    "AddReportSnapshotFields",
+    "CreateContactChangesLog"
 ]
 
 private struct ResetIMSchemaStorageKey: StorageKey {

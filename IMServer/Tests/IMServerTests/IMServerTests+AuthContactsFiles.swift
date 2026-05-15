@@ -344,6 +344,119 @@ extension IMServerTests {
         }
     }
 
+    @Test("Contact changes endpoint reports request contact and removal deltas")
+    func contactChangesReportsRequestContactAndRemovalDeltas() async throws {
+        try await withApp(configure: configure) { app in
+            func queryEncoded(_ value: String) throws -> String {
+                var allowedCharacters = CharacterSet.urlQueryAllowed
+                allowedCharacters.remove(charactersIn: "+&=")
+                return try #require(value.addingPercentEncoding(withAllowedCharacters: allowedCharacters))
+            }
+
+            let requesterToken = try await loginAccessToken(using: app)
+            let addressee = try await makeUser(email: "friend-changes@example.com", on: app)
+            let addresseeID = try addressee.requireID()
+            let addresseeToken = try await loginAccessToken(
+                email: addressee.email,
+                password: "password1234",
+                deviceID: "friend-changes-device",
+                on: app
+            )
+            var requestID: UUID?
+            var requesterCursor = ""
+            var addresseeCursor = ""
+            var acceptedRequesterCursor = ""
+
+            try await app.testing().test(.POST, "api/contact-requests", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: requesterToken)
+                try req.content.encode(
+                    ContactRequestCreateRequest(
+                        email: addressee.email,
+                        message: "changes",
+                        remark: "delta"
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                requestID = try res.content.decode(FriendRequestResponse.self).id
+            })
+
+            let createdRequestID = try #require(requestID)
+            try await app.testing().test(.GET, "api/contacts/changes?limit=10", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: requesterToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let changes = try res.content.decode(ContactChangesResponse.self)
+                #expect(changes.requestUpserts.map(\.id) == [createdRequestID])
+                #expect(changes.requestUpserts.first?.status == FriendRequestStatus.pending.rawValue)
+                #expect(changes.contactUpserts.isEmpty)
+                #expect(changes.removedContactIDs.isEmpty)
+                requesterCursor = changes.targetToken
+            })
+
+            try await app.testing().test(.GET, "api/contacts/changes?limit=10", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: addresseeToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let changes = try res.content.decode(ContactChangesResponse.self)
+                #expect(changes.requestUpserts.map(\.id) == [createdRequestID])
+                #expect(changes.requestUpserts.first?.status == FriendRequestStatus.pending.rawValue)
+                #expect(changes.contactUpserts.isEmpty)
+                addresseeCursor = changes.targetToken
+            })
+
+            try await app.testing().test(.POST, "api/contact-requests/\(createdRequestID.uuidString)/accept", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: addresseeToken)
+                try req.content.encode(ContactRequestAcceptRequest(remark: "accepted"))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+
+            try await app.testing().test(.GET, "api/contacts/changes?afterToken=\(try queryEncoded(requesterCursor))&limit=10", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: requesterToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let changes = try res.content.decode(ContactChangesResponse.self)
+                #expect(changes.requestUpserts.map(\.id) == [createdRequestID])
+                #expect(changes.requestUpserts.first?.status == FriendRequestStatus.accepted.rawValue)
+                #expect(changes.contactUpserts.map(\.id) == [addresseeID])
+                #expect(changes.removedContactIDs.isEmpty)
+                acceptedRequesterCursor = changes.targetToken
+            })
+
+            try await app.testing().test(.GET, "api/contacts/changes?afterToken=\(try queryEncoded(addresseeCursor))&limit=10", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: addresseeToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let changes = try res.content.decode(ContactChangesResponse.self)
+                #expect(changes.requestUpserts.map(\.id) == [createdRequestID])
+                #expect(changes.requestUpserts.first?.status == FriendRequestStatus.accepted.rawValue)
+                #expect(changes.contactUpserts.count == 1)
+                #expect(changes.removedContactIDs.isEmpty)
+            })
+
+            try await app.testing().test(.DELETE, "api/contacts/\(addresseeID.uuidString)", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: requesterToken)
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
+
+            try await app.testing().test(.GET, "api/contacts/changes?afterToken=\(try queryEncoded(acceptedRequesterCursor))&limit=10", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: requesterToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+
+                let changes = try res.content.decode(ContactChangesResponse.self)
+                #expect(changes.contactUpserts.isEmpty)
+                #expect(changes.removedContactIDs == [addresseeID])
+            })
+        }
+    }
+
 
     @Test("Accepting a friend request reactivates an existing frozen direct conversation")
     func friendRequestAcceptReactivatesFrozenDirectConversation() async throws {
