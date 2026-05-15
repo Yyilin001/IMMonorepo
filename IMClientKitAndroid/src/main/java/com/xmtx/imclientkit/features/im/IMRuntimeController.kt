@@ -24,6 +24,7 @@ class IMRuntimeController(
     val conversationStore: IMConversationStore,
     private val configuration: IMTCPClientConfiguration,
     private val conversationCache: IMConversationCaching = NoopIMConversationCache(),
+    private val contactEventHandler: (() -> Unit)? = null,
     private val tcpTransport: IMTCPTransport = SocketIMTCPTransport(),
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
@@ -91,6 +92,93 @@ class IMRuntimeController(
 
     fun reloadConversations() {
         scope.launch { refreshConversationSummaries() }
+    }
+
+    fun createConversation(kind: IMConversationKind, title: String?, memberEmails: List<String>) {
+        scope.launch {
+            runCatching {
+                sessionClient.createIMConversation(kind = kind, title = title, memberEmails = memberEmails)
+            }.onSuccess { summary ->
+                conversationStore.applyConversationSummary(summary)
+                conversationStore.openConversation(summary.id)
+            }.onFailure { error ->
+                conversationStore.setStatusMessage(error.message ?: "Failed to create conversation.")
+            }
+        }
+    }
+
+    fun loadMembers(conversationID: String, query: String? = null) {
+        scope.launch {
+            runCatching {
+                sessionClient.fetchIMConversationMembers(conversationID, limit = DEFAULT_PAGE_LIMIT, query = query)
+            }.onSuccess { page ->
+                conversationStore.replaceMembers(conversationID, page)
+            }.onFailure { error ->
+                conversationStore.setStatusMessage(error.message ?: "Failed to load members.")
+            }
+        }
+    }
+
+    fun addMembers(conversationID: String, memberEmails: List<String>) {
+        scope.launch {
+            runCatching { sessionClient.addIMConversationMembers(conversationID, memberEmails) }
+                .onSuccess {
+                    conversationStore.applyConversationSummary(it)
+                    loadMembers(conversationID)
+                }
+                .onFailure { conversationStore.setStatusMessage(it.message ?: "Failed to add members.") }
+        }
+    }
+
+    fun removeMember(conversationID: String, memberUserID: String) {
+        scope.launch {
+            runCatching { sessionClient.removeIMConversationMember(conversationID, memberUserID) }
+                .onSuccess {
+                    conversationStore.applyConversationSummary(it)
+                    loadMembers(conversationID)
+                }
+                .onFailure { conversationStore.setStatusMessage(it.message ?: "Failed to remove member.") }
+        }
+    }
+
+    fun updateTitle(conversationID: String, title: String) {
+        scope.launch {
+            runCatching { sessionClient.updateIMConversationTitle(conversationID, title) }
+                .onSuccess { conversationStore.applyConversationSummary(it) }
+                .onFailure { conversationStore.setStatusMessage(it.message ?: "Failed to update title.") }
+        }
+    }
+
+    fun updatePreferences(conversationID: String, isPinned: Boolean? = null, isMuted: Boolean? = null) {
+        scope.launch {
+            runCatching { sessionClient.updateIMConversationPreferences(conversationID, isPinned, isMuted) }
+                .onSuccess { conversationStore.applyConversationSummary(it) }
+                .onFailure { conversationStore.setStatusMessage(it.message ?: "Failed to update preferences.") }
+        }
+    }
+
+    fun clearConversation(conversationID: String) {
+        scope.launch {
+            runCatching { sessionClient.clearIMConversationForSelf(conversationID) }
+                .onSuccess { conversationStore.clearMessages(conversationID) }
+                .onFailure { conversationStore.setStatusMessage(it.message ?: "Failed to clear conversation.") }
+        }
+    }
+
+    fun deleteConversation(conversationID: String) {
+        scope.launch {
+            runCatching { sessionClient.deleteIMConversationForSelf(conversationID) }
+                .onSuccess { conversationStore.removeConversation(conversationID) }
+                .onFailure { conversationStore.setStatusMessage(it.message ?: "Failed to delete conversation.") }
+        }
+    }
+
+    fun leaveConversation(conversationID: String) {
+        scope.launch {
+            runCatching { sessionClient.leaveIMConversation(conversationID) }
+                .onSuccess { conversationStore.removeConversation(conversationID) }
+                .onFailure { conversationStore.setStatusMessage(it.message ?: "Failed to leave conversation.") }
+        }
     }
 
     suspend fun loadMessages(conversationID: String) {
@@ -206,7 +294,7 @@ class IMRuntimeController(
                     conversationStore.appendMessages(message.conversationID, listOf(message), userID)
                 }
             }
-            is IMTCPConnectionEvent.ContactEvent -> Unit
+            is IMTCPConnectionEvent.ContactEvent -> contactEventHandler?.invoke()
             is IMTCPConnectionEvent.Kick -> invalidateSession(event.payload.message)
         }
     }

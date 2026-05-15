@@ -2,7 +2,9 @@ package com.xmtx.imclientkit
 
 import com.xmtx.imclientkit.auth.AuthUser
 import com.xmtx.imclientkit.auth.RestoreResult
+import com.xmtx.imclientkit.features.contacts.ContactRequestBox
 import com.xmtx.imclientkit.features.im.IMConversationMessageResponseBody
+import com.xmtx.imclientkit.features.im.IMConversationKind
 import com.xmtx.imclientkit.networking.APIError
 import com.xmtx.imclientkit.networking.JsonConfiguration
 import com.xmtx.imclientkit.networking.NetworkEnvironment
@@ -126,6 +128,81 @@ class SessionClientTests {
         assertEquals(7, message.serverSequence)
     }
 
+    @Test
+    fun fetchContactsSendsExpectedEndpoint() = runTest {
+        var captured: HttpRequestData? = null
+        val client = sessionClient(
+            tokenStore = InMemoryTokenStore(TokenSnapshot("access", "refresh")),
+        ) { request ->
+            captured = request
+            respondJson("""[]""")
+        }
+
+        client.fetchContacts()
+
+        assertEquals("/api/contacts", captured?.url?.encodedPath)
+        assertEquals(HttpMethod.Get, captured?.method)
+        assertEquals("Bearer access", captured?.headers?.get(HttpHeaders.Authorization))
+    }
+
+    @Test
+    fun contactRequestsIncludeBoxQuery() = runTest {
+        var captured: HttpRequestData? = null
+        val client = sessionClient(
+            tokenStore = InMemoryTokenStore(TokenSnapshot("access", "refresh")),
+        ) { request ->
+            captured = request
+            respondJson("""[]""")
+        }
+
+        client.fetchContactRequests(ContactRequestBox.Incoming)
+
+        assertEquals("/api/contact-requests", captured?.url?.encodedPath)
+        assertEquals("incoming", captured?.url?.parameters?.get("box"))
+    }
+
+    @Test
+    fun createConversationSendsExpectedBody() = runTest {
+        var captured: HttpRequestData? = null
+        val client = sessionClient(
+            tokenStore = InMemoryTokenStore(TokenSnapshot("access", "refresh")),
+        ) { request ->
+            captured = request
+            respondJson(conversationSummary("conversation-1"))
+        }
+
+        client.createIMConversation(
+            kind = IMConversationKind.Group,
+            title = "Project",
+            memberEmails = listOf("b@example.com", "c@example.com"),
+        )
+
+        assertEquals("/api/im/conversations", captured?.url?.encodedPath)
+        assertEquals(HttpMethod.Post, captured?.method)
+        val body = captured?.bodyText().orEmpty()
+        assertTrue(body.contains("\"kind\":\"group\""))
+        assertTrue(body.contains("\"title\":\"Project\""))
+        assertTrue(body.contains("\"memberEmails\":[\"b@example.com\",\"c@example.com\"]"))
+    }
+
+    @Test
+    fun fetchMembersSendsExpectedEndpointAndQuery() = runTest {
+        var captured: HttpRequestData? = null
+        val client = sessionClient(
+            tokenStore = InMemoryTokenStore(TokenSnapshot("access", "refresh")),
+        ) { request ->
+            captured = request
+            respondJson("""{"items":[],"nextCursor":"next","hasMore":false}""")
+        }
+
+        client.fetchIMConversationMembers("conversation-1", cursor = "cursor", limit = 20, query = "alice")
+
+        assertEquals("/api/im/conversations/conversation-1/members", captured?.url?.encodedPath)
+        assertEquals("cursor", captured?.url?.parameters?.get("cursor"))
+        assertEquals("20", captured?.url?.parameters?.get("limit"))
+        assertEquals("alice", captured?.url?.parameters?.get("q"))
+    }
+
     private fun sessionClient(
         tokenStore: InMemoryTokenStore = InMemoryTokenStore(),
         userCache: InMemoryUserSessionCache = InMemoryUserSessionCache(),
@@ -171,6 +248,20 @@ class SessionClientTests {
             "email": "a@example.com",
             "displayName": "Alice"
           }
+        }
+        """.trimIndent()
+
+    private fun conversationSummary(id: String): String =
+        """
+        {
+          "id": "$id",
+          "title": "Project",
+          "kind": "group",
+          "memberCount": 2,
+          "memberUserIDs": [],
+          "lastReadSequence": 0,
+          "unreadCount": 0,
+          "updatedAt": "2026-05-13T00:00:00Z"
         }
         """.trimIndent()
 

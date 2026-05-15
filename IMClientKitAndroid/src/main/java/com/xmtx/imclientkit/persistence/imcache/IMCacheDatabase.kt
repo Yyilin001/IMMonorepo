@@ -12,6 +12,8 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [
@@ -19,20 +21,62 @@ import androidx.room.Transaction
         IMCachedConversationEntity::class,
         IMCachedMessageEntity::class,
         IMSyncCursorEntity::class,
+        ContactCacheMetadataEntity::class,
+        CachedContactEntity::class,
+        CachedContactRequestEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class IMCacheDatabase : RoomDatabase() {
     abstract fun imConversationCacheDao(): IMConversationCacheDao
+    abstract fun contactStateCacheDao(): ContactStateCacheDao
 
     companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS contact_cache_metadata (
+                        ownerUserID TEXT NOT NULL PRIMARY KEY,
+                        updatedAt TEXT
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS cached_contacts (
+                        ownerUserID TEXT NOT NULL,
+                        contactUserID TEXT NOT NULL,
+                        contactJson TEXT NOT NULL,
+                        sortName TEXT NOT NULL,
+                        PRIMARY KEY(ownerUserID, contactUserID)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cached_contacts_ownerUserID_sortName ON cached_contacts(ownerUserID, sortName)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS cached_contact_requests (
+                        ownerUserID TEXT NOT NULL,
+                        requestID TEXT NOT NULL,
+                        bucket TEXT NOT NULL,
+                        requestJson TEXT NOT NULL,
+                        updatedAt TEXT,
+                        PRIMARY KEY(ownerUserID, requestID)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cached_contact_requests_ownerUserID_bucket ON cached_contact_requests(ownerUserID, bucket)")
+            }
+        }
+
         fun create(context: Context): IMCacheDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
                 IMCacheDatabase::class.java,
                 "im_conversation_cache.db",
-            ).build()
+            ).addMigrations(MIGRATION_1_2).build()
     }
 }
 
@@ -93,6 +137,37 @@ data class IMSyncCursorEntity(
     val hasLoadedMessages: Boolean,
     val latestSyncedServerSequence: Long?,
     val oldestLoadedServerSequence: Long?,
+)
+
+@Entity(tableName = "contact_cache_metadata")
+data class ContactCacheMetadataEntity(
+    @PrimaryKey val ownerUserID: String,
+    val updatedAt: String?,
+)
+
+@Entity(
+    tableName = "cached_contacts",
+    primaryKeys = ["ownerUserID", "contactUserID"],
+    indices = [Index(value = ["ownerUserID", "sortName"])],
+)
+data class CachedContactEntity(
+    val ownerUserID: String,
+    val contactUserID: String,
+    val contactJson: String,
+    val sortName: String,
+)
+
+@Entity(
+    tableName = "cached_contact_requests",
+    primaryKeys = ["ownerUserID", "requestID"],
+    indices = [Index(value = ["ownerUserID", "bucket"])],
+)
+data class CachedContactRequestEntity(
+    val ownerUserID: String,
+    val requestID: String,
+    val bucket: String,
+    val requestJson: String,
+    val updatedAt: String?,
 )
 
 @Dao
@@ -159,6 +234,56 @@ abstract class IMConversationCacheDao {
         deleteMessages(ownerUserID)
         deleteCursors(ownerUserID)
         deleteConversations(ownerUserID)
+        deleteMetadata(ownerUserID)
+    }
+}
+
+@Dao
+abstract class ContactStateCacheDao {
+    @Query("SELECT * FROM contact_cache_metadata WHERE ownerUserID = :ownerUserID")
+    abstract suspend fun metadata(ownerUserID: String): ContactCacheMetadataEntity?
+
+    @Query("SELECT * FROM cached_contacts WHERE ownerUserID = :ownerUserID ORDER BY sortName")
+    abstract suspend fun contacts(ownerUserID: String): List<CachedContactEntity>
+
+    @Query("SELECT * FROM cached_contact_requests WHERE ownerUserID = :ownerUserID")
+    abstract suspend fun requests(ownerUserID: String): List<CachedContactRequestEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun insertMetadata(entity: ContactCacheMetadataEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun insertContacts(entities: List<CachedContactEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun insertRequests(entities: List<CachedContactRequestEntity>)
+
+    @Query("DELETE FROM contact_cache_metadata WHERE ownerUserID = :ownerUserID")
+    abstract suspend fun deleteMetadata(ownerUserID: String)
+
+    @Query("DELETE FROM cached_contacts WHERE ownerUserID = :ownerUserID")
+    abstract suspend fun deleteContacts(ownerUserID: String)
+
+    @Query("DELETE FROM cached_contact_requests WHERE ownerUserID = :ownerUserID")
+    abstract suspend fun deleteRequests(ownerUserID: String)
+
+    @Transaction
+    open suspend fun replaceSnapshot(
+        ownerUserID: String,
+        metadata: ContactCacheMetadataEntity,
+        contacts: List<CachedContactEntity>,
+        requests: List<CachedContactRequestEntity>,
+    ) {
+        clear(ownerUserID)
+        insertMetadata(metadata)
+        if (contacts.isNotEmpty()) insertContacts(contacts)
+        if (requests.isNotEmpty()) insertRequests(requests)
+    }
+
+    @Transaction
+    open suspend fun clear(ownerUserID: String) {
+        deleteRequests(ownerUserID)
+        deleteContacts(ownerUserID)
         deleteMetadata(ownerUserID)
     }
 }

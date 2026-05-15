@@ -3,8 +3,10 @@ package com.xmtx.imappandroid
 import com.xmtx.imappandroid.session.IMSessionGateway
 import com.xmtx.imclientkit.auth.AuthUser
 import com.xmtx.imclientkit.auth.RestoreResult
+import com.xmtx.imclientkit.features.contacts.ContactState
 import com.xmtx.imclientkit.features.im.ConversationListState
 import com.xmtx.imclientkit.features.im.IMConversation
+import com.xmtx.imclientkit.features.im.IMConversationKind
 import com.xmtx.imclientkit.features.im.IMConversationMessageResponseBody
 import com.xmtx.imclientkit.features.im.IMConversationSummaryPageResponseBody
 import com.xmtx.imclientkit.features.im.IMConversationSummaryResponseBody
@@ -21,8 +23,10 @@ class FakeSessionGateway(
     var messagesResult: Result<List<IMConversationMessageResponseBody>> = Result.success(emptyList()),
 ) : IMSessionGateway {
     private val mutableConversationState = MutableStateFlow(ConversationListState())
+    private val mutableContactState = MutableStateFlow(ContactState())
     private val mutableSessionInvalidations = MutableSharedFlow<String>(extraBufferCapacity = 1)
     override val conversationState: StateFlow<ConversationListState> = mutableConversationState
+    override val contactState: StateFlow<ContactState> = mutableContactState
     override val sessionInvalidations: SharedFlow<String> = mutableSessionInvalidations
 
     var didClearSession = false
@@ -30,6 +34,9 @@ class FakeSessionGateway(
     var startedRuntimeUserID: String? = null
     var openedConversationID: String? = null
     var sentText: Pair<String, String>? = null
+    var sentContactRequest: Triple<String, String?, String?>? = null
+    var didReloadContacts = false
+    var createdConversation: Triple<IMConversationKind, String?, List<String>>? = null
 
     override suspend fun restoreSession(): RestoreResult = restoreResult
 
@@ -64,6 +71,10 @@ class FakeSessionGateway(
         }
     }
 
+    override fun reloadContacts() {
+        didReloadContacts = true
+    }
+
     override fun openConversation(conversationID: String) {
         openedConversationID = conversationID
         mutableConversationState.value = mutableConversationState.value.copy(selectedConversationID = conversationID)
@@ -72,6 +83,34 @@ class FakeSessionGateway(
     override fun sendText(text: String, conversationID: String) {
         sentText = text to conversationID
     }
+
+    override fun addContact(email: String, remark: String?) = Unit
+
+    override fun sendContactRequest(email: String, message: String?, remark: String?) {
+        sentContactRequest = Triple(email, message, remark)
+    }
+
+    override fun acceptContactRequest(requestID: String, remark: String?) = Unit
+
+    override fun declineContactRequest(requestID: String) = Unit
+
+    override fun createConversation(kind: IMConversationKind, title: String?, memberEmails: List<String>) {
+        createdConversation = Triple(kind, title, memberEmails)
+    }
+
+    override fun loadConversationMembers(conversationID: String) = Unit
+
+    override fun addConversationMembers(conversationID: String, memberEmails: List<String>) = Unit
+
+    override fun updateConversationTitle(conversationID: String, title: String) = Unit
+
+    override fun updateConversationPreferences(conversationID: String, isPinned: Boolean?, isMuted: Boolean?) = Unit
+
+    override fun clearConversation(conversationID: String) = Unit
+
+    override fun deleteConversation(conversationID: String) = Unit
+
+    override fun leaveConversation(conversationID: String) = Unit
 
     override suspend fun fetchConversationSummaries(): IMConversationSummaryPageResponseBody =
         conversationPageResult.getOrThrow()

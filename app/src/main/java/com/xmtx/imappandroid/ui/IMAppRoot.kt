@@ -48,6 +48,10 @@ import com.xmtx.imappandroid.viewmodel.ConversationDetailUiState
 import com.xmtx.imappandroid.viewmodel.ConversationDetailViewModel
 import com.xmtx.imappandroid.viewmodel.ConversationListUiState
 import com.xmtx.imappandroid.viewmodel.ConversationListViewModel
+import com.xmtx.imappandroid.viewmodel.ConversationManagementUiState
+import com.xmtx.imappandroid.viewmodel.ConversationManagementViewModel
+import com.xmtx.imappandroid.viewmodel.ContactsUiState
+import com.xmtx.imappandroid.viewmodel.ContactsViewModel
 import com.xmtx.imclientkit.auth.AuthUser
 import com.xmtx.imclientkit.features.im.IMConnectionStatus
 import com.xmtx.imclientkit.features.im.IMConversation
@@ -153,6 +157,8 @@ private fun SignedInScreen(
     onSignOut: () -> Unit,
 ) {
     var selectedConversation by remember { mutableStateOf<IMConversation?>(null) }
+    var showingContacts by remember { mutableStateOf(false) }
+    var showingSettings by remember { mutableStateOf(false) }
     val listViewModel: ConversationListViewModel = viewModel(
         factory = viewModelFactory {
             initializer { ConversationListViewModel(gateway) }
@@ -163,30 +169,88 @@ private fun SignedInScreen(
             initializer { ConversationDetailViewModel(gateway) }
         },
     )
+    val contactsViewModel: ContactsViewModel = viewModel(
+        factory = viewModelFactory {
+            initializer { ContactsViewModel(gateway) }
+        },
+    )
+    val managementViewModel: ConversationManagementViewModel = viewModel(
+        factory = viewModelFactory {
+            initializer { ConversationManagementViewModel(gateway) }
+        },
+    )
 
     if (selectedConversation == null) {
         val listState by listViewModel.state.collectAsState()
+        val contactsState by contactsViewModel.state.collectAsState()
+        val managementState by managementViewModel.state.collectAsState()
         LaunchedEffect(user.id) {
             listViewModel.loadConversations()
+            contactsViewModel.loadContacts()
         }
-        ConversationListScreen(
-            user = user,
-            state = listState,
-            onRefresh = listViewModel::loadConversations,
-            onSelect = { selectedConversation = it },
-            onSignOut = onSignOut,
-        )
+        if (showingContacts) {
+            ContactsScreen(
+                user = user,
+                state = contactsState,
+                managementState = managementState,
+                onEmailChange = contactsViewModel::updateEmail,
+                onMessageChange = contactsViewModel::updateMessage,
+                onRemarkChange = contactsViewModel::updateRemark,
+                onSendRequest = contactsViewModel::sendRequest,
+                onAccept = contactsViewModel::accept,
+                onDecline = contactsViewModel::decline,
+                onTitleChange = managementViewModel::updateTitle,
+                onMemberEmailsChange = managementViewModel::updateMemberEmails,
+                onCreateGroup = managementViewModel::createGroup,
+                onRefresh = contactsViewModel::loadContacts,
+                onBack = { showingContacts = false },
+            )
+        } else {
+            ConversationListScreen(
+                user = user,
+                state = listState,
+                onRefresh = listViewModel::loadConversations,
+                onContacts = { showingContacts = true },
+                onSelect = {
+                    selectedConversation = it
+                    showingSettings = false
+                },
+                onSignOut = onSignOut,
+            )
+        }
     } else {
         val conversation = selectedConversation
         val detailState by detailViewModel.state.collectAsState()
+        val managementState by managementViewModel.state.collectAsState()
         LaunchedEffect(conversation?.id) {
-            conversation?.let { detailViewModel.openConversation(it.id) }
+            conversation?.let {
+                detailViewModel.openConversation(it.id)
+                managementViewModel.loadMembers()
+            }
         }
         ConversationDetailScreen(
             title = conversation?.displayTitle ?: "Conversation",
             state = detailState,
+            managementState = managementState,
+            showingSettings = showingSettings,
             onDraftChange = detailViewModel::updateDraft,
             onSend = detailViewModel::sendText,
+            onTitleChange = managementViewModel::updateTitle,
+            onMemberEmailsChange = managementViewModel::updateMemberEmails,
+            onSaveTitle = managementViewModel::saveTitle,
+            onAddMembers = managementViewModel::addMembers,
+            onTogglePinned = managementViewModel::togglePinned,
+            onToggleMuted = managementViewModel::toggleMuted,
+            onClear = managementViewModel::clearConversation,
+            onLeave = {
+                managementViewModel.leaveConversation()
+                selectedConversation = null
+            },
+            onDelete = {
+                managementViewModel.deleteConversation()
+                selectedConversation = null
+            },
+            onToggleSettings = { showingSettings = !showingSettings },
             onBack = { selectedConversation = null },
         )
     }
@@ -198,6 +262,7 @@ private fun ConversationListScreen(
     user: AuthUser,
     state: ConversationListUiState,
     onRefresh: () -> Unit,
+    onContacts: () -> Unit,
     onSelect: (IMConversation) -> Unit,
     onSignOut: () -> Unit,
 ) {
@@ -210,6 +275,7 @@ private fun ConversationListScreen(
                         text = state.connectionStatus.label,
                         modifier = Modifier.padding(end = 8.dp),
                     )
+                    TextButton(onClick = onContacts) { Text("Contacts") }
                     TextButton(onClick = onRefresh) { Text("Refresh") }
                     TextButton(onClick = onSignOut) { Text("Sign out") }
                 },
@@ -257,11 +323,97 @@ private fun ConversationListScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+private fun ContactsScreen(
+    user: AuthUser,
+    state: ContactsUiState,
+    managementState: ConversationManagementUiState,
+    onEmailChange: (String) -> Unit,
+    onMessageChange: (String) -> Unit,
+    onRemarkChange: (String) -> Unit,
+    onSendRequest: () -> Unit,
+    onAccept: (String) -> Unit,
+    onDecline: (String) -> Unit,
+    onTitleChange: (String) -> Unit,
+    onMemberEmailsChange: (String) -> Unit,
+    onCreateGroup: () -> Unit,
+    onRefresh: () -> Unit,
+    onBack: () -> Unit,
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Contacts") },
+                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
+                actions = { TextButton(onClick = onRefresh) { Text("Refresh") } },
+            )
+        },
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            item {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Add contact", fontWeight = FontWeight.Bold)
+                    OutlinedTextField(state.email, onEmailChange, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Email") })
+                    OutlinedTextField(state.messageText, onMessageChange, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Message") })
+                    OutlinedTextField(state.remark, onRemarkChange, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Remark") })
+                    Button(onClick = onSendRequest, enabled = state.email.isNotBlank()) { Text("Send request") }
+                    HorizontalDivider()
+                    Text("Create group", fontWeight = FontWeight.Bold)
+                    OutlinedTextField(managementState.title, onTitleChange, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Title") })
+                    OutlinedTextField(managementState.memberEmails, onMemberEmailsChange, Modifier.fillMaxWidth(), label = { Text("Member emails") })
+                    Button(onClick = onCreateGroup, enabled = managementState.memberEmails.isNotBlank()) { Text("Create") }
+                    state.message?.let { Text(it) }
+                    Text("Signed in as ${user.preferredDisplayName}")
+                }
+            }
+            item { Text("Incoming requests", Modifier.padding(16.dp), fontWeight = FontWeight.Bold) }
+            items(state.incomingRequests, key = { it.id }) { request ->
+                ListItem(
+                    headlineContent = { Text(request.peerDisplayName(user.id)) },
+                    supportingContent = { Text(request.message ?: "Contact request") },
+                    trailingContent = {
+                        Row {
+                            TextButton(onClick = { onAccept(request.id) }) { Text("Accept") }
+                            TextButton(onClick = { onDecline(request.id) }) { Text("Decline") }
+                        }
+                    },
+                )
+                HorizontalDivider()
+            }
+            item { Text("Contacts", Modifier.padding(16.dp), fontWeight = FontWeight.Bold) }
+            items(state.contacts, key = { it.id }) { contact ->
+                ListItem(
+                    headlineContent = { Text(contact.preferredDisplayName) },
+                    supportingContent = { Text(contact.email) },
+                )
+                HorizontalDivider()
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 private fun ConversationDetailScreen(
     title: String,
     state: ConversationDetailUiState,
+    managementState: ConversationManagementUiState,
+    showingSettings: Boolean,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
+    onTitleChange: (String) -> Unit,
+    onMemberEmailsChange: (String) -> Unit,
+    onSaveTitle: () -> Unit,
+    onAddMembers: () -> Unit,
+    onTogglePinned: () -> Unit,
+    onToggleMuted: () -> Unit,
+    onClear: () -> Unit,
+    onLeave: () -> Unit,
+    onDelete: () -> Unit,
+    onToggleSettings: () -> Unit,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -271,6 +423,9 @@ private fun ConversationDetailScreen(
                 navigationIcon = {
                     TextButton(onClick = onBack) { Text("Back") }
                 },
+                actions = {
+                    TextButton(onClick = onToggleSettings) { Text("Manage") }
+                },
             )
         },
     ) { padding ->
@@ -279,6 +434,21 @@ private fun ConversationDetailScreen(
                 .fillMaxSize()
                 .padding(padding),
         ) {
+            if (showingSettings) {
+                ConversationManagementPanel(
+                    state = managementState,
+                    onTitleChange = onTitleChange,
+                    onMemberEmailsChange = onMemberEmailsChange,
+                    onSaveTitle = onSaveTitle,
+                    onAddMembers = onAddMembers,
+                    onTogglePinned = onTogglePinned,
+                    onToggleMuted = onToggleMuted,
+                    onClear = onClear,
+                    onLeave = onLeave,
+                    onDelete = onDelete,
+                )
+                HorizontalDivider()
+            }
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when {
                     state.isLoading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
@@ -322,6 +492,41 @@ private fun ConversationDetailScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ConversationManagementPanel(
+    state: ConversationManagementUiState,
+    onTitleChange: (String) -> Unit,
+    onMemberEmailsChange: (String) -> Unit,
+    onSaveTitle: () -> Unit,
+    onAddMembers: () -> Unit,
+    onTogglePinned: () -> Unit,
+    onToggleMuted: () -> Unit,
+    onClear: () -> Unit,
+    onLeave: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(state.title, onTitleChange, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Title") })
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onSaveTitle) { Text("Save") }
+            OutlinedButton(onClick = onTogglePinned) { Text(if (state.selectedConversation?.summary?.isPinned == true) "Unpin" else "Pin") }
+            OutlinedButton(onClick = onToggleMuted) { Text(if (state.selectedConversation?.summary?.isMuted == true) "Unmute" else "Mute") }
+        }
+        OutlinedTextField(state.memberEmails, onMemberEmailsChange, Modifier.fillMaxWidth(), label = { Text("Member emails") })
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onAddMembers, enabled = state.memberEmails.isNotBlank()) { Text("Add") }
+            OutlinedButton(onClick = onClear) { Text("Clear") }
+            OutlinedButton(onClick = onLeave) { Text("Leave") }
+            OutlinedButton(onClick = onDelete) { Text("Delete") }
+        }
+        val members = state.selectedConversation?.members.orEmpty()
+        if (members.isNotEmpty()) {
+            Text(members.joinToString { it.preferredDisplayName }, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        state.statusMessage?.let { Text(it) }
     }
 }
 

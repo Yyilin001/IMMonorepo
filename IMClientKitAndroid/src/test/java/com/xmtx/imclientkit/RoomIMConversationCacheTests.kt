@@ -31,7 +31,7 @@ class RoomIMConversationCacheTests {
             ApplicationProvider.getApplicationContext(),
             IMCacheDatabase::class.java,
         ).allowMainThreadQueries().build()
-        cache = RoomIMConversationCache(database)
+        cache = RoomIMConversationCache.create(database)
     }
 
     @After

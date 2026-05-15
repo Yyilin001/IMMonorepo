@@ -29,6 +29,76 @@ enum class IMConversationKind(val rawValue: String) {
     }
 }
 
+enum class IMConversationMemberRole(val rawValue: String) {
+    Owner("owner"),
+    Admin("admin"),
+    Member("member");
+}
+
+@Serializable
+data class IMConversationCreateRequestBody(
+    val kind: String,
+    val title: String? = null,
+    val memberEmails: List<String>,
+)
+
+@Serializable
+data class IMConversationMemberUpdateRequestBody(
+    val memberEmails: List<String>,
+)
+
+@Serializable
+data class IMConversationMemberRoleUpdateRequestBody(
+    val role: String,
+)
+
+@Serializable
+data class IMConversationTitleUpdateRequestBody(
+    val title: String,
+)
+
+@Serializable
+data class IMConversationPreferencesUpdateRequestBody(
+    val isPinned: Boolean? = null,
+    val isMuted: Boolean? = null,
+)
+
+@Serializable
+data class IMConversationMetadataUpdateRequestBody(
+    val title: String? = null,
+    val notice: String? = null,
+    val avatarPreset: String? = null,
+    val muteAll: Boolean? = null,
+)
+
+@Serializable
+data class IMConversationMemberSelfUpdateRequestBody(
+    val memberNickname: String? = null,
+)
+
+@Serializable
+data class IMConversationMemberResponseBody(
+    val id: String,
+    val email: String,
+    val displayName: String? = null,
+    val avatarPreset: String? = null,
+    val role: String = IMConversationMemberRole.Member.rawValue,
+    val memberNickname: String? = null,
+    val joinedAt: String? = null,
+) {
+    val preferredDisplayName: String
+        get() = memberNickname?.trim()?.takeIf { it.isNotEmpty() }
+            ?: displayName?.trim()?.takeIf { it.isNotEmpty() }
+            ?: email
+}
+
+@Serializable
+data class IMConversationMemberPageResponseBody(
+    val items: List<IMConversationMemberResponseBody>,
+    val nextCursor: String? = null,
+    val hasMore: Boolean,
+)
+
 @Serializable
 data class IMDirectPeerResponseBody(
     val id: String,
@@ -170,6 +240,9 @@ data class IMConversation(
     val id: String,
     val summary: IMConversationSummaryResponseBody,
     val messages: List<IMConversationMessage> = emptyList(),
+    val members: List<IMConversationMemberResponseBody> = emptyList(),
+    val membersNextCursor: String? = null,
+    val hasMoreMembers: Boolean = false,
     val serverLastReadSequence: ULong = summary.lastReadSequence.toULong(),
     val serverUnreadCount: Int = summary.unreadCount,
     val localUnreadDelta: Int = 0,

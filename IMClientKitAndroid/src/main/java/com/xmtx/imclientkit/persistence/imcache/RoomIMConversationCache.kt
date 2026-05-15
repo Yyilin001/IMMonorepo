@@ -12,7 +12,7 @@ import com.xmtx.imclientkit.features.im.IMMessageDeliveryState
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-class RoomIMConversationCache(
+class RoomIMConversationCache private constructor(
     database: IMCacheDatabase,
     private val json: Json = Json {
         ignoreUnknownKeys = true
@@ -77,6 +77,9 @@ class RoomIMConversationCache(
     }
 
     companion object {
+        fun create(database: IMCacheDatabase): RoomIMConversationCache =
+            RoomIMConversationCache(database)
+
         fun create(context: Context): RoomIMConversationCache =
             RoomIMConversationCache(IMCacheDatabase.create(context))
     }

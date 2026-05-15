@@ -94,6 +94,46 @@ class IMConversationStore {
         }
     }
 
+    fun replaceMembers(conversationID: String, page: IMConversationMemberPageResponseBody) {
+        mutableState.update { current ->
+            current.copy(
+                conversations = current.conversations.map { conversation ->
+                    if (conversation.id == conversationID) {
+                        conversation.copy(
+                            members = page.items.sortedBy { it.preferredDisplayName.lowercase() },
+                            membersNextCursor = page.nextCursor,
+                            hasMoreMembers = page.hasMore,
+                        )
+                    } else {
+                        conversation
+                    }
+                },
+            )
+        }
+    }
+
+    fun appendMembers(conversationID: String, page: IMConversationMemberPageResponseBody) {
+        mutableState.update { current ->
+            current.copy(
+                conversations = current.conversations.map { conversation ->
+                    if (conversation.id == conversationID) {
+                        val members = (conversation.members + page.items)
+                            .associateBy { it.id }
+                            .values
+                            .sortedBy { it.preferredDisplayName.lowercase() }
+                        conversation.copy(
+                            members = members,
+                            membersNextCursor = page.nextCursor,
+                            hasMoreMembers = page.hasMore,
+                        )
+                    } else {
+                        conversation
+                    }
+                },
+            )
+        }
+    }
+
     fun removeConversation(id: String) {
         mutableState.update { current ->
             current.copy(
@@ -102,6 +142,19 @@ class IMConversationStore {
                 loadedConversationIDs = current.loadedConversationIDs - id,
                 latestSyncedServerSequences = current.latestSyncedServerSequences - id,
                 oldestLoadedServerSequences = current.oldestLoadedServerSequences - id,
+            )
+        }
+    }
+
+    fun clearMessages(conversationID: String) {
+        mutableState.update { current ->
+            current.copy(
+                conversations = current.conversations.map { conversation ->
+                    if (conversation.id == conversationID) conversation.copy(messages = emptyList()) else conversation
+                },
+                latestSyncedServerSequences = current.latestSyncedServerSequences - conversationID,
+                oldestLoadedServerSequences = current.oldestLoadedServerSequences - conversationID,
+                loadedConversationIDs = current.loadedConversationIDs - conversationID,
             )
         }
     }
