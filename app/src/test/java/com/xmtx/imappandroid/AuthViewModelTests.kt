@@ -4,6 +4,8 @@ import com.xmtx.imappandroid.viewmodel.AuthPhase
 import com.xmtx.imappandroid.viewmodel.AuthViewModel
 import com.xmtx.imclientkit.auth.AuthUser
 import com.xmtx.imclientkit.auth.RestoreResult
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -56,5 +58,24 @@ class AuthViewModelTests {
         val phase = viewModel.state.value.phase
         assertTrue(phase is AuthPhase.SignedOut)
         assertEquals("bad credentials", viewModel.state.value.actionMessage)
+    }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun sessionInvalidationStopsRuntimeAndMovesToSignedOut() = runTest {
+        val user = AuthUser("user-1", "a@example.com")
+        val gateway = FakeSessionGateway(restoreResult = RestoreResult.Authenticated(user))
+        val viewModel = AuthViewModel(gateway)
+        advanceUntilIdle()
+
+        gateway.invalidateSession("Session revoked")
+        advanceUntilIdle()
+
+        val phase = viewModel.state.value.phase
+        assertTrue(phase is AuthPhase.SignedOut)
+        assertEquals("Session revoked", (phase as AuthPhase.SignedOut).message)
+        assertEquals("Session revoked", viewModel.state.value.actionMessage)
+        assertTrue(gateway.didStopRuntime)
+        assertTrue(gateway.didClearSession)
     }
 }

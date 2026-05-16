@@ -10,7 +10,10 @@ struct Options {
     var password = ProcessInfo.processInfo.environment["IM_PASSWORD"] ?? "password1234"
     var conversationID = ProcessInfo.processInfo.environment["IM_CONVERSATION_ID"] ?? ""
     var connections = 100
+    var devicesPerUser = 1
     var messagesPerConnection = 1
+    var sendIntervalMillis = 0
+    var timeoutSeconds = 20
 }
 
 struct LoginResponse: Decodable {
@@ -20,6 +23,18 @@ struct LoginResponse: Decodable {
 
     let accessToken: String
     let user: User
+}
+
+struct ConnectionResult: Sendable {
+    let success: Bool
+    let sent: Int
+    let acknowledgements: Int
+    let canonicalMessages: Int
+    let fanoutMessages: Int
+    let reconnects: Int
+    let serverErrors: Int
+    let ackLatenciesMillis: [Double]
+    let canonicalLatenciesMillis: [Double]
 }
 
 func parseOptions() -> Options {
@@ -46,8 +61,14 @@ func parseOptions() -> Options {
             options.conversationID = value
         case "--connections":
             options.connections = Int(value) ?? options.connections
+        case "--devices-per-user":
+            options.devicesPerUser = max(1, Int(value) ?? options.devicesPerUser)
         case "--messages":
             options.messagesPerConnection = Int(value) ?? options.messagesPerConnection
+        case "--send-interval-ms":
+            options.sendIntervalMillis = max(0, Int(value) ?? options.sendIntervalMillis)
+        case "--timeout-seconds":
+            options.timeoutSeconds = max(1, Int(value) ?? options.timeoutSeconds)
         default:
             continue
         }
@@ -56,9 +77,11 @@ func parseOptions() -> Options {
     switch options.profile {
     case "staging-baseline":
         options.connections = max(options.connections, 10_000)
+        options.devicesPerUser = max(options.devicesPerUser, 2)
         options.messagesPerConnection = max(options.messagesPerConnection, 3)
     case "capacity-target":
         options.connections = max(options.connections, 50_000)
+        options.devicesPerUser = max(options.devicesPerUser, 2)
         options.messagesPerConnection = max(options.messagesPerConnection, 3)
     default:
         options.connections = min(options.connections, 100)
@@ -67,16 +90,19 @@ func parseOptions() -> Options {
     return options
 }
 
-func login(options: Options) async throws -> LoginResponse {
+func login(options: Options, deviceIndex: Int) async throws -> LoginResponse {
     var request = URLRequest(url: options.baseURL.appending(path: "/api/auth/login"))
     request.httpMethod = "POST"
     request.addValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONSerialization.data(withJSONObject: [
         "email": options.email,
         "password": options.password,
-        "deviceID": "tcp-load-driver",
-        "deviceName": "tcp-load-driver",
-        "platform": "load-test"
+        "device": [
+            "deviceID": "tcp-load-driver-\(deviceIndex)",
+            "deviceName": "tcp-load-driver-\(deviceIndex)",
+            "platform": "load-test",
+            "appVersion": "load-test"
+        ]
     ])
 
     let (data, response) = try await URLSession.shared.data(for: request)
@@ -98,32 +124,142 @@ func packet(type: String, payload: [String: Any], requestID: String = UUID().uui
     return data
 }
 
-final class ConnectionCompletion: @unchecked Sendable {
+final class ConnectionState: @unchecked Sendable {
     private let lock = NSLock()
     private var completed = false
-    private let continuation: CheckedContinuation<Bool, Never>
+    private var sentClientIDsByRequestID: [String: String] = [:]
+    private var sentAtByClientID: [String: Date] = [:]
+    private var acknowledgedClientIDs: Set<String> = []
+    private var canonicalClientIDs: Set<String> = []
+    private var ackLatenciesMillis: [Double] = []
+    private var canonicalLatenciesMillis: [Double] = []
+    private var fanoutMessages = 0
+    private var serverErrors = 0
+    private var reconnects = 0
+    private let expectedOwnMessages: Int
+    private let continuation: CheckedContinuation<ConnectionResult, Never>
     private let connection: NWConnection
 
-    init(continuation: CheckedContinuation<Bool, Never>, connection: NWConnection) {
+    init(
+        expectedOwnMessages: Int,
+        continuation: CheckedContinuation<ConnectionResult, Never>,
+        connection: NWConnection
+    ) {
+        self.expectedOwnMessages = expectedOwnMessages
         self.continuation = continuation
         self.connection = connection
     }
 
-    func finish(_ ok: Bool) {
+    func recordSent(clientMessageID: String, requestID: String, at date: Date) {
+        lock.lock()
+        sentClientIDsByRequestID[requestID] = clientMessageID
+        sentAtByClientID[clientMessageID] = date
+        lock.unlock()
+    }
+
+    func recordReconnect() {
+        lock.lock()
+        reconnects += 1
+        lock.unlock()
+    }
+
+    func recordPacketLine(_ line: String) {
+        guard
+            let data = line.data(using: .utf8),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let type = json["type"] as? String
+        else {
+            return
+        }
+
+        let requestID = json["requestID"] as? String
+        let payload = json["payload"] as? [String: Any]
+
+        lock.lock()
+        switch type {
+        case "ack":
+            if let requestID, let clientID = sentClientIDsByRequestID[requestID], !acknowledgedClientIDs.contains(clientID) {
+                acknowledgedClientIDs.insert(clientID)
+                if let sentAt = sentAtByClientID[clientID] {
+                    ackLatenciesMillis.append(Date().timeIntervalSince(sentAt) * 1_000)
+                }
+            }
+            if let status = payload?["status"] as? String, status != "accepted" {
+                serverErrors += 1
+            }
+        case "message":
+            fanoutMessages += 1
+            if let clientID = payload?["clientMessageID"] as? String,
+               sentAtByClientID[clientID] != nil,
+               !canonicalClientIDs.contains(clientID) {
+                canonicalClientIDs.insert(clientID)
+                if let sentAt = sentAtByClientID[clientID] {
+                    canonicalLatenciesMillis.append(Date().timeIntervalSince(sentAt) * 1_000)
+                }
+            }
+        case "auth_error", "kick":
+            serverErrors += 1
+        default:
+            break
+        }
+        let shouldFinish = acknowledgedClientIDs.count >= expectedOwnMessages
+            && canonicalClientIDs.count >= expectedOwnMessages
+        lock.unlock()
+
+        if shouldFinish {
+            finish(success: true)
+        }
+    }
+
+    func finish(success: Bool) {
         lock.lock()
         guard !completed else {
             lock.unlock()
             return
         }
         completed = true
+        let result = ConnectionResult(
+            success: success,
+            sent: sentAtByClientID.count,
+            acknowledgements: acknowledgedClientIDs.count,
+            canonicalMessages: canonicalClientIDs.count,
+            fanoutMessages: fanoutMessages,
+            reconnects: reconnects,
+            serverErrors: serverErrors,
+            ackLatenciesMillis: ackLatenciesMillis,
+            canonicalLatenciesMillis: canonicalLatenciesMillis
+        )
         lock.unlock()
 
         connection.cancel()
-        continuation.resume(returning: ok)
+        continuation.resume(returning: result)
     }
 }
 
-func runConnection(index: Int, options: Options, auth: LoginResponse) async -> Bool {
+func receiveLines(connection: NWConnection, state: ConnectionState, buffer: Data = Data()) {
+    connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+        if error != nil || isComplete {
+            state.finish(success: false)
+            return
+        }
+
+        var nextBuffer = buffer
+        if let data {
+            nextBuffer.append(data)
+            while let newline = nextBuffer.firstIndex(of: 0x0A) {
+                let lineData = nextBuffer[..<newline]
+                nextBuffer.removeSubrange(...newline)
+                if let line = String(data: lineData, encoding: .utf8), !line.isEmpty {
+                    state.recordPacketLine(line)
+                }
+            }
+        }
+
+        receiveLines(connection: connection, state: state, buffer: nextBuffer)
+    }
+}
+
+func runConnection(index: Int, options: Options, auth: LoginResponse, deviceIndex: Int) async -> ConnectionResult {
     await withCheckedContinuation { continuation in
         let connection = NWConnection(
             host: NWEndpoint.Host(options.tcpHost),
@@ -131,53 +267,79 @@ func runConnection(index: Int, options: Options, auth: LoginResponse) async -> B
             using: .tcp
         )
         let queue = DispatchQueue(label: "im.tcp.load.\(index)")
-        let completion = ConnectionCompletion(continuation: continuation, connection: connection)
+        let state = ConnectionState(
+            expectedOwnMessages: options.messagesPerConnection,
+            continuation: continuation,
+            connection: connection
+        )
 
-        connection.stateUpdateHandler = { state in
-            switch state {
+        connection.stateUpdateHandler = { nwState in
+            switch nwState {
             case .ready:
+                receiveLines(connection: connection, state: state)
                 do {
                     let authPacket = try packet(type: "auth", payload: [
                         "accessToken": auth.accessToken,
-                        "deviceID": "tcp-load-\(index)",
-                        "deviceName": "tcp-load",
+                        "deviceID": "tcp-load-driver-\(deviceIndex)",
+                        "deviceName": "tcp-load-driver-\(deviceIndex)",
                         "platform": "load-test",
                         "appVersion": "load-test",
                         "protocolVersion": 1
                     ])
                     connection.send(content: authPacket, completion: .contentProcessed { error in
                         if error != nil {
-                            completion.finish(false)
+                            state.finish(success: false)
                             return
                         }
                         for messageIndex in 0..<options.messagesPerConnection {
-                            let messagePacket = try? packet(type: "message", payload: [
-                                "clientMessageID": "tcp-\(index)-\(messageIndex)-\(UUID().uuidString)",
-                                "messageID": NSNull(),
-                                "conversationID": options.conversationID,
-                                "senderUserID": NSNull(),
-                                "serverSequence": NSNull(),
-                                "serverTimestamp": NSNull(),
-                                "content": ["type": "text", "text": "tcp load \(index)/\(messageIndex)"],
-                                "derivedState": ["reactions": [], "editedAt": NSNull(), "recalledAt": NSNull()]
-                            ])
-                            if let messagePacket {
-                                connection.send(content: messagePacket, completion: .contentProcessed { _ in })
+                            let delay = DispatchTime.now() + .milliseconds(options.sendIntervalMillis * messageIndex)
+                            queue.asyncAfter(deadline: delay) {
+                                let requestID = UUID().uuidString
+                                let clientMessageID = "tcp-\(index)-\(messageIndex)-\(UUID().uuidString)"
+                                let messagePacket = try? packet(type: "message", payload: [
+                                    "clientMessageID": clientMessageID,
+                                    "messageID": NSNull(),
+                                    "conversationID": options.conversationID,
+                                    "senderUserID": NSNull(),
+                                    "serverSequence": NSNull(),
+                                    "serverTimestamp": NSNull(),
+                                    "content": ["type": "text", "text": "tcp load \(index)/\(messageIndex)"],
+                                    "derivedState": ["reactions": [], "editedAt": NSNull(), "recalledAt": NSNull()]
+                                ], requestID: requestID)
+                                if let messagePacket {
+                                    state.recordSent(clientMessageID: clientMessageID, requestID: requestID, at: Date())
+                                    connection.send(content: messagePacket, completion: .contentProcessed { error in
+                                        if error != nil {
+                                            state.finish(success: false)
+                                        }
+                                    })
+                                }
                             }
                         }
-                        completion.finish(true)
                     })
                 } catch {
-                    completion.finish(false)
+                    state.finish(success: false)
                 }
+            case .waiting:
+                state.recordReconnect()
             case .failed, .cancelled:
-                completion.finish(false)
+                state.finish(success: false)
             default:
                 break
             }
         }
+        queue.asyncAfter(deadline: .now() + .seconds(options.timeoutSeconds)) {
+            state.finish(success: false)
+        }
         connection.start(queue: queue)
     }
+}
+
+func percentile(_ values: [Double], _ p: Double) -> Double {
+    guard !values.isEmpty else { return 0 }
+    let sorted = values.sorted()
+    let index = min(sorted.count - 1, max(0, Int(Double(sorted.count - 1) * p)))
+    return sorted[index]
 }
 
 let options = parseOptions()
@@ -186,20 +348,50 @@ guard !options.conversationID.isEmpty else {
     exit(2)
 }
 
-let auth = try await login(options: options)
+let auths = try await (0..<options.devicesPerUser).asyncMap { deviceIndex in
+    try await login(options: options, deviceIndex: deviceIndex)
+}
 let startedAt = Date()
-let successes = await withTaskGroup(of: Bool.self) { group in
+let results = await withTaskGroup(of: ConnectionResult.self) { group in
     for index in 0..<options.connections {
+        let deviceIndex = index % options.devicesPerUser
         group.addTask {
-            await runConnection(index: index, options: options, auth: auth)
+            await runConnection(index: index, options: options, auth: auths[deviceIndex], deviceIndex: deviceIndex)
         }
     }
-    var count = 0
-    for await ok in group where ok {
-        count += 1
+    var values: [ConnectionResult] = []
+    for await result in group {
+        values.append(result)
     }
-    return count
+    return values
 }
 
 let elapsed = max(Date().timeIntervalSince(startedAt), 0.001)
-print("profile=\(options.profile) connections=\(options.connections) successes=\(successes) elapsed=\(String(format: "%.2f", elapsed))s")
+let successes = results.filter(\.success).count
+let sent = results.reduce(0) { $0 + $1.sent }
+let acknowledgements = results.reduce(0) { $0 + $1.acknowledgements }
+let canonicalMessages = results.reduce(0) { $0 + $1.canonicalMessages }
+let fanoutMessages = results.reduce(0) { $0 + $1.fanoutMessages }
+let reconnects = results.reduce(0) { $0 + $1.reconnects }
+let serverErrors = results.reduce(0) { $0 + $1.serverErrors }
+let ackLatencies = results.flatMap(\.ackLatenciesMillis)
+let canonicalLatencies = results.flatMap(\.canonicalLatenciesMillis)
+let ackSuccessRate = sent == 0 ? 0 : Double(acknowledgements) / Double(sent)
+let canonicalSuccessRate = sent == 0 ? 0 : Double(canonicalMessages) / Double(sent)
+
+print("profile=\(options.profile) connections=\(options.connections) devicesPerUser=\(options.devicesPerUser) successes=\(successes) elapsed=\(String(format: "%.2f", elapsed))s")
+print("sent=\(sent) ack=\(acknowledgements) canonical=\(canonicalMessages) fanout=\(fanoutMessages) reconnects=\(reconnects) serverErrors=\(serverErrors)")
+print("ackSuccessRate=\(String(format: "%.4f", ackSuccessRate)) canonicalSuccessRate=\(String(format: "%.4f", canonicalSuccessRate))")
+print("ackLatencyMs p50=\(String(format: "%.1f", percentile(ackLatencies, 0.50))) p95=\(String(format: "%.1f", percentile(ackLatencies, 0.95))) p99=\(String(format: "%.1f", percentile(ackLatencies, 0.99)))")
+print("canonicalLatencyMs p50=\(String(format: "%.1f", percentile(canonicalLatencies, 0.50))) p95=\(String(format: "%.1f", percentile(canonicalLatencies, 0.95))) p99=\(String(format: "%.1f", percentile(canonicalLatencies, 0.99)))")
+
+extension Sequence {
+    func asyncMap<T>(_ transform: (Element) async throws -> T) async throws -> [T] {
+        var values: [T] = []
+        for element in self {
+            let value = try await transform(element)
+            values.append(value)
+        }
+        return values
+    }
+}

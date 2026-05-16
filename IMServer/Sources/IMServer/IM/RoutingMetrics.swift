@@ -1,6 +1,9 @@
 actor RoutingMetrics {
     struct Snapshot: Sendable {
         var currentTCPConnectionCount: Int = 0
+        var userFanoutCount: Int = 0
+        var sessionKickCount: Int = 0
+        var sessionCountQueryFailureCount: Int = 0
         var redisRouteRegistrations: Int = 0
         var crossNodeDispatchCount: Int = 0
         var crossNodeDispatchFailureCount: Int = 0
@@ -19,6 +22,18 @@ actor RoutingMetrics {
 
     func recordCurrentTCPConnectionCount(_ count: Int) {
         snapshot.currentTCPConnectionCount = count
+    }
+
+    func recordUserFanout(targetUserCount: Int) {
+        snapshot.userFanoutCount += targetUserCount
+    }
+
+    func recordSessionKick(targetSessionCount: Int) {
+        snapshot.sessionKickCount += targetSessionCount
+    }
+
+    func recordSessionCountQueryFailed() {
+        snapshot.sessionCountQueryFailureCount += 1
     }
 
     func recordCrossNodeDispatchSucceeded() {

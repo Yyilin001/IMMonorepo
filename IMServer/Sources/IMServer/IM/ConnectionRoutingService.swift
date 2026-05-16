@@ -46,6 +46,7 @@ struct ConnectionRoutingService {
         toUserIDs userIDs: [UUID],
         requestID: UUID? = UUID()
     ) async {
+        await app.routingMetrics.recordUserFanout(targetUserCount: Set(userIDs).count)
         await app.imConnectionRegistry.sendMessage(payload, toUserIDs: userIDs, requestID: requestID)
         let envelope = try? encodePacketEnvelope(
             action: .message,
@@ -94,6 +95,7 @@ struct ConnectionRoutingService {
         reason: IMTCPKickReason,
         message: String
     ) async {
+        await app.routingMetrics.recordSessionKick(targetSessionCount: 1)
         await app.imConnectionRegistry.kickConnections(forSessionID: sessionID, reason: reason, message: message)
         let envelope = NodeMessageDispatchEnvelope(
             action: .kickSession,
@@ -117,6 +119,8 @@ struct ConnectionRoutingService {
         reason: IMTCPKickReason,
         message: String
     ) async {
+        let sessionCount = await app.imConnectionRegistry.connectionIDs(forUserID: userID).count
+        await app.routingMetrics.recordSessionKick(targetSessionCount: max(sessionCount, 1))
         await app.imConnectionRegistry.kickConnections(forUserID: userID, reason: reason, message: message)
         let envelope = NodeMessageDispatchEnvelope(
             action: .kickUser,

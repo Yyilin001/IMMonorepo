@@ -10,6 +10,7 @@ struct GatewayRelayController: RouteCollection {
         relayRoutes.post("contact-event", use: relayContactEvent)
         relayRoutes.post("kick-session", use: relayKickSession)
         relayRoutes.post("kick-user", use: relayKickUser)
+        relayRoutes.post("session-counts", use: relaySessionCounts)
     }
 
     func relayMessage(req: Request) async throws -> HTTPStatus {
@@ -60,6 +61,12 @@ struct GatewayRelayController: RouteCollection {
             message: body.message
         )
         return .ok
+    }
+
+    func relaySessionCounts(req: Request) async throws -> GatewayRelaySessionCountsResponse {
+        let body = try req.content.decode(GatewayRelaySessionCountsRequest.self)
+        let counts = await req.application.gatewaySessionService.activeConnectionCounts(forSessionIDs: body.sessionIDs)
+        return GatewayRelaySessionCountsResponse(counts: counts)
     }
 }
 

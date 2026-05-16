@@ -191,12 +191,36 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
     }
 
     func activeConnectionCounts(forSessionIDs sessionIDs: [UUID]) async -> [UUID: Int] {
-        [:]
+        guard !sessionIDs.isEmpty else { return [:] }
+
+        do {
+            let response: GatewayRelaySessionCountsResponse = try await post(
+                path: "/internal/gateway/realtime/session-counts",
+                payload: GatewayRelaySessionCountsRequest(sessionIDs: sessionIDs)
+            )
+            return response.counts
+        } catch {
+            await app.routingMetrics.recordSessionCountQueryFailed()
+            app.logger.warning(
+                "Gateway relay session count request failed",
+                metadata: [
+                    "node_id": .string(app.imNodeID),
+                    "path": .string("/internal/gateway/realtime/session-counts"),
+                    "session_count": .stringConvertible(sessionIDs.count),
+                    "error": .string(String(describing: error))
+                ]
+            )
+            return [:]
+        }
     }
 
     private func post<Payload: Content>(path: String, payload: Payload) async throws {
+        let _: EmptyGatewayRelayResponse = try await post(path: path, payload: payload)
+    }
+
+    private func post<Payload: Content, Response: Content>(path: String, payload: Payload) async throws -> Response {
         guard let baseURL = configuration.baseURL else {
-            return
+            throw GatewayRelayTransportError.missingBaseURL
         }
 
         let response = try await app.client.post(URI(string: "\(baseURL)\(path)")) { request in
@@ -210,13 +234,27 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
             app.logger.warning(
                 "Gateway relay request failed",
                 metadata: [
+                    "node_id": .string(app.imNodeID),
                     "path": .string(path),
                     "status": .string(response.status.code.description)
                 ]
             )
-            return
+            throw GatewayRelayTransportError.unexpectedStatus(response.status)
         }
+
+        if Response.self == EmptyGatewayRelayResponse.self {
+            return EmptyGatewayRelayResponse() as! Response
+        }
+
+        return try response.content.decode(Response.self)
     }
+}
+
+private struct EmptyGatewayRelayResponse: Content {}
+
+private enum GatewayRelayTransportError: Error {
+    case missingBaseURL
+    case unexpectedStatus(HTTPResponseStatus)
 }
 
 struct LoggingUnavailableGatewaySessionTransport: GatewaySessionTransport {
