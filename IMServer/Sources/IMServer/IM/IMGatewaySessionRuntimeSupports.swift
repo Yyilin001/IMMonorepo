@@ -31,6 +31,7 @@ protocol GatewaySessionTransport: Sendable {
         reason: IMTCPKickReason,
         message: String
     ) async
+    func activeConnectionCounts(forSessionIDs sessionIDs: [UUID]) async -> [UUID: Int]
 }
 
 protocol SessionDirectory: Sendable {
@@ -103,6 +104,10 @@ struct LocalGatewaySessionTransport: GatewaySessionTransport {
         message: String
     ) async {
         await routingService.kickConnections(forUserID: userID, reason: reason, message: message)
+    }
+
+    func activeConnectionCounts(forSessionIDs sessionIDs: [UUID]) async -> [UUID: Int] {
+        await routingService.activeConnectionCounts(forSessionIDs: sessionIDs)
     }
 }
 
@@ -185,6 +190,10 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         )
     }
 
+    func activeConnectionCounts(forSessionIDs sessionIDs: [UUID]) async -> [UUID: Int] {
+        [:]
+    }
+
     private func post<Payload: Content>(path: String, payload: Payload) async throws {
         guard let baseURL = configuration.baseURL else {
             return
@@ -250,6 +259,10 @@ struct LoggingUnavailableGatewaySessionTransport: GatewaySessionTransport {
         logUnavailable()
     }
 
+    func activeConnectionCounts(forSessionIDs sessionIDs: [UUID]) async -> [UUID: Int] {
+        [:]
+    }
+
     private func logUnavailable() {
         logger.warning(
             "Gateway session transport unavailable; realtime relay skipped",
@@ -311,6 +324,10 @@ struct GatewaySessionService {
         message: String
     ) async {
         await transport.kickConnections(forUserID: userID, reason: reason, message: message)
+    }
+
+    func activeConnectionCounts(forSessionIDs sessionIDs: [UUID]) async -> [UUID: Int] {
+        await transport.activeConnectionCounts(forSessionIDs: sessionIDs)
     }
 }
 

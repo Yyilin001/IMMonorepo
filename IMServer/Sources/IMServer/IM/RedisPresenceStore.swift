@@ -9,6 +9,7 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
     private let logger: Logger
     private let heartbeatTimeoutSeconds: Int
     private let routeCache = RedisPresenceRouteCache(ttl: 2)
+    private let sessionRouteCache = RedisPresenceRouteCache(ttl: 2)
     private let activeNodeCache = RedisPresenceActiveNodeCache(ttl: 2)
     private let heartbeatThrottle = RedisPresenceHeartbeatThrottle(minimumInterval: 1)
     private var metrics: RoutingMetrics?
@@ -50,6 +51,21 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         await routeCache.invalidate(userID)
     }
 
+    func activatePresence(forSessionID sessionID: UUID, userID: UUID) async throws {
+        try await refreshHeartbeat()
+        _ = try await pool.sadd(nodeID, to: sessionRouteKey(for: sessionID)).get()
+        _ = try await pool.sadd(sessionID.uuidString.lowercased(), to: nodeSessionsKey(for: nodeID)).get()
+        await sessionRouteCache.store([nodeID], for: sessionID)
+        await activeNodeCache.invalidate()
+    }
+
+    func deactivatePresence(forSessionID sessionID: UUID, userID: UUID) async throws {
+        try await refreshHeartbeat()
+        _ = try await pool.srem(nodeID, from: sessionRouteKey(for: sessionID)).get()
+        _ = try await pool.srem(sessionID.uuidString.lowercased(), from: nodeSessionsKey(for: nodeID)).get()
+        await sessionRouteCache.invalidate(sessionID)
+    }
+
     func routeNodeIDs(forUserIDs userIDs: [UUID]) async throws -> [UUID: Set<String>] {
         try await refreshHeartbeat()
         let requestedUserIDs = Set(userIDs)
@@ -85,6 +101,44 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         return result
     }
 
+    func routeNodeIDs(forSessionIDs sessionIDs: [UUID]) async throws -> [UUID: Set<String>] {
+        try await refreshHeartbeat()
+        let requestedSessionIDs = Set(sessionIDs)
+        let activeNodeIDs = Set(try await cachedActiveNodeIDs())
+        var result: [UUID: Set<String>] = [:]
+
+        var uncachedSessionIDs: [UUID] = []
+        for sessionID in requestedSessionIDs {
+            if let cached = await sessionRouteCache.nodes(for: sessionID) {
+                await metrics?.recordRedisPresenceRouteCacheHit()
+                let activeRoutes = cached.intersection(activeNodeIDs)
+                if !activeRoutes.isEmpty {
+                    result[sessionID] = activeRoutes
+                }
+            } else {
+                await metrics?.recordRedisPresenceRouteCacheMiss()
+                uncachedSessionIDs.append(sessionID)
+            }
+        }
+
+        guard !uncachedSessionIDs.isEmpty else {
+            return result
+        }
+
+        let fetchedRoutes = try await RedisPresenceRouteBatchReader(pool: pool).read(
+            userIDs: uncachedSessionIDs,
+            keyForUserID: sessionRouteKey
+        )
+        for (sessionID, nodeIDs) in fetchedRoutes {
+            let activeRoutes = nodeIDs.intersection(activeNodeIDs)
+            await sessionRouteCache.store(activeRoutes, for: sessionID)
+            if !activeRoutes.isEmpty {
+                result[sessionID] = activeRoutes
+            }
+        }
+        return result
+    }
+
     func activeNodeIDs() async throws -> Set<String> {
         try await refreshHeartbeat()
         let nodeIDs = try await pool.smembers(of: RedisKey("im:route:active_nodes"), as: String.self).get()
@@ -98,6 +152,14 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
 
     private func nodeUsersKey(for nodeID: String) -> RedisKey {
         RedisKey("im:route:node:\(nodeID):users")
+    }
+
+    private func sessionRouteKey(for sessionID: UUID) -> RedisKey {
+        RedisKey("im:route:session:\(sessionID.uuidString.lowercased()):nodes")
+    }
+
+    private func nodeSessionsKey(for nodeID: String) -> RedisKey {
+        RedisKey("im:route:node:\(nodeID):sessions")
     }
 
     private func heartbeatKey(for nodeID: String) -> RedisKey {
@@ -176,7 +238,16 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
                 await routeCache.invalidate(userID)
             }
         }
+        let sessions = try await pool.smembers(of: nodeSessionsKey(for: staleNodeID), as: String.self).get()
+            .compactMap { $0 }
+        for rawSessionID in sessions {
+            _ = try await pool.srem(staleNodeID, from: RedisKey("im:route:session:\(rawSessionID):nodes")).get()
+            if let sessionID = UUID(uuidString: rawSessionID) {
+                await sessionRouteCache.invalidate(sessionID)
+            }
+        }
         _ = try await pool.delete(nodeUsersKey(for: staleNodeID)).get()
+        _ = try await pool.delete(nodeSessionsKey(for: staleNodeID)).get()
         await activeNodeCache.invalidate()
     }
 }

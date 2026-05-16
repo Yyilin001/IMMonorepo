@@ -4,6 +4,7 @@ import com.xmtx.imclientkit.features.im.IMConversationStore
 import com.xmtx.imclientkit.features.im.IMMessageContent
 import com.xmtx.imclientkit.features.im.IMMessageDeliveryState
 import com.xmtx.imclientkit.features.im.IMTCPAckPayload
+import com.xmtx.imclientkit.features.im.IMTCPMessagePayload
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Test
@@ -61,6 +62,33 @@ class IMConversationStoreTests {
         val message = store.state.value.conversations.first().messages.first()
         assertEquals("incoming", message.previewText)
         assertEquals(3UL, message.serverSequence)
+    }
+
+    @Test
+    fun ownRealtimeEchoMergesWithPendingMessageBeforeAck() {
+        val store = IMConversationStore()
+        store.replaceSummaryWindow(pageWithConversation())
+        val request = store.prepareOutgoingText("hello from device a", "conversation-1", "user-1")
+        assertNotNull(request)
+
+        store.receiveIncomingMessage(
+            IMTCPMessagePayload(
+                clientMessageID = request!!.payload.clientMessageID,
+                messageID = "server-message-1",
+                conversationID = "conversation-1",
+                senderUserID = "user-1",
+                serverSequence = 9UL,
+                serverTimestamp = "2026-05-13T00:00:01Z",
+                content = IMMessageContent.Text("hello from device a"),
+            ),
+            currentUserID = "user-1",
+        )
+
+        val messages = store.state.value.conversations.first().messages
+        assertEquals(1, messages.size)
+        assertEquals("server-message-1", messages.first().serverMessageID)
+        assertEquals(9UL, messages.first().serverSequence)
+        assertEquals(IMMessageDeliveryState.Sent, messages.first().deliveryState)
     }
 
     @Test

@@ -1691,7 +1691,8 @@ final class AuthManager: ObservableObject {
     private static func deviceMetadata() -> DeviceMetadataPayload {
         let info = Bundle.main.infoDictionary
         return DeviceMetadataPayload(
-            deviceID: UIDevice.current.identifierForVendor?.uuidString,
+            deviceID: (try? KeychainDeviceIdentityStore().currentDeviceID())
+                ?? UIDevice.current.identifierForVendor?.uuidString,
             deviceName: UIDevice.current.model,
             platform: "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)",
             appVersion: info?["CFBundleShortVersionString"] as? String

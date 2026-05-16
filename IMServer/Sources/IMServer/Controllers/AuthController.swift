@@ -136,6 +136,8 @@ struct AuthSessionResponse: Content, Equatable {
     let createdAt: Date?
     let refreshExpiresAt: Date
     let isCurrent: Bool
+    let isOnline: Bool
+    let activeConnectionCount: Int
 }
 
 struct LogoutAllResponse: Content, Equatable {

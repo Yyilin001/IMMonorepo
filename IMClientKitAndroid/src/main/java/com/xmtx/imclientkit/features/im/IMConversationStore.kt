@@ -421,13 +421,38 @@ class IMConversationStore {
     }
 
     private fun List<IMConversationMessage>.dedupeMessages(): List<IMConversationMessage> {
-        val result = linkedMapOf<String, IMConversationMessage>()
+        val result = mutableListOf<IMConversationMessage>()
         for (message in this) {
-            val key = message.serverMessageID ?: message.clientMessageID ?: message.id
-            result[key] = message
+            val existingIndex = result.indexOfFirst { existing ->
+                existing.id == message.id ||
+                    (existing.serverMessageID != null && existing.serverMessageID == message.serverMessageID) ||
+                    (existing.clientMessageID != null && existing.clientMessageID == message.clientMessageID)
+            }
+            if (existingIndex >= 0) {
+                result[existingIndex] = result[existingIndex].mergedWith(message)
+            } else {
+                result.add(message)
+            }
         }
-        return result.values.toList()
+        return result
     }
+
+    private fun IMConversationMessage.mergedWith(next: IMConversationMessage): IMConversationMessage =
+        copy(
+            id = next.serverMessageID ?: next.id,
+            clientMessageID = next.clientMessageID ?: clientMessageID,
+            serverMessageID = next.serverMessageID ?: serverMessageID,
+            serverSequence = next.serverSequence ?: serverSequence,
+            content = next.content,
+            createdAt = next.createdAt,
+            deliveryState = if (next.serverMessageID != null || next.serverSequence != null) {
+                next.deliveryState
+            } else {
+                deliveryState
+            },
+            direction = next.direction,
+            senderUserID = next.senderUserID,
+        )
 }
 
 interface IMConversationCaching {

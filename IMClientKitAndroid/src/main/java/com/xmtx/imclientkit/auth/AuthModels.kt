@@ -53,6 +53,8 @@ data class SessionSnapshot(
     val createdAt: String? = null,
     val refreshExpiresAt: String,
     val isCurrent: Boolean,
+    val isOnline: Boolean? = null,
+    val activeConnectionCount: Int? = null,
 )
 
 sealed interface RestoreResult {

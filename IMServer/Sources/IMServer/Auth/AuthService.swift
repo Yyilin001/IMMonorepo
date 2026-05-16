@@ -188,10 +188,15 @@ struct AuthService {
             }
             .all()
 
+        let sessionIDs = sessions.compactMap(\.id)
+        let activeConnectionCounts = await app.gatewaySessionService.activeConnectionCounts(forSessionIDs: sessionIDs)
+
         return sessions
             .map { session in
-                AuthSessionResponse(
-                    id: session.id ?? currentSessionID,
+                let sessionID = session.id ?? currentSessionID
+                let activeConnectionCount = activeConnectionCounts[sessionID] ?? 0
+                return AuthSessionResponse(
+                    id: sessionID,
                     deviceID: session.deviceID,
                     deviceName: session.deviceName,
                     platform: session.platform,
@@ -199,7 +204,9 @@ struct AuthService {
                     lastSeenAt: session.lastSeenAt,
                     createdAt: session.createdAt,
                     refreshExpiresAt: session.refreshExpiresAt,
-                    isCurrent: session.id == currentSessionID
+                    isCurrent: session.id == currentSessionID,
+                    isOnline: activeConnectionCount > 0,
+                    activeConnectionCount: activeConnectionCount
                 )
             }
             .sorted { lhs, rhs in
@@ -235,12 +242,13 @@ struct AuthService {
         let userID = try user.requireID()
 
         do {
-            let (session, issuedAt) = try await db.transaction { transaction in
+            let (session, issuedAt, revokedSessionIDs) = try await db.transaction { transaction in
                 let now = Date()
+                var revokedSessionIDs: [UUID] = []
 
                 // 同一用户 + 同一设备只保留一条活跃 session，撤销旧 session 与创建新 session 在同一事务中完成。
                 if let deviceID = normalizedDevice?.deviceID {
-                    try await AuthService(app: app, db: transaction).revokeActiveSessions(
+                    revokedSessionIDs = try await AuthService(app: app, db: transaction).revokeActiveSessions(
                         for: userID,
                         deviceID: deviceID,
                         at: now
@@ -258,10 +266,18 @@ struct AuthService {
                     lastSeenAt: now
                 )
                 try await session.create(on: transaction)
-                return (session, now)
+                return (session, now, revokedSessionIDs)
             }
 
-            return try await makeAuthResponse(for: user, session: session, now: issuedAt)
+            let response = try await makeAuthResponse(for: user, session: session, now: issuedAt)
+            for revokedSessionID in revokedSessionIDs {
+                await app.gatewaySessionService.kickConnections(
+                    forSessionID: revokedSessionID,
+                    reason: .sessionRevoked,
+                    message: "This device signed in again, so the previous session was revoked."
+                )
+            }
+            return response
         } catch {
             guard let databaseError = error as? any DatabaseError,
                   databaseError.isConstraintFailure,
@@ -275,13 +291,24 @@ struct AuthService {
         }
     }
 
-    private func revokeActiveSessions(for userID: UUID, deviceID: String, at revokedAt: Date) async throws {
+    private func revokeActiveSessions(for userID: UUID, deviceID: String, at revokedAt: Date) async throws -> [UUID] {
+        let activeSessions = try await AuthSession.query(on: db)
+            .filter(\.$user.$id == userID)
+            .filter(\.$deviceID == deviceID)
+            .filter(\.$revokedAt == nil)
+            .all()
+        let revokedSessionIDs = activeSessions.compactMap(\.id)
+        guard !revokedSessionIDs.isEmpty else {
+            return []
+        }
+
         try await AuthSession.query(on: db)
             .filter(\.$user.$id == userID)
             .filter(\.$deviceID == deviceID)
             .filter(\.$revokedAt == nil)
             .set(\.$revokedAt, to: revokedAt)
             .update()
+        return revokedSessionIDs
     }
 
     private func normalize(device: DeviceMetadata?) -> DeviceMetadata? {

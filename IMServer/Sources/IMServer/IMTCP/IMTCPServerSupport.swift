@@ -94,11 +94,21 @@ actor IMConnectionRegistry {
     private var connectionsByID: [UUID: Entry] = [:]
     private var connectionIDsBySessionID: [UUID: Set<UUID>] = [:]
     private var connectionIDsByUserID: [UUID: Set<UUID>] = [:]
+    private var connectionIDsByDeviceKey: [DeviceConnectionKey: Set<UUID>] = [:]
+
+    private struct DeviceConnectionKey: Hashable, Sendable {
+        let userID: UUID
+        let deviceID: String
+    }
 
     func bind(_ connection: IMAuthenticatedConnection, control: IMConnectionControl) {
         connectionsByID[connection.connectionID] = Entry(connection: connection, control: control)
         connectionIDsBySessionID[connection.sessionID, default: []].insert(connection.connectionID)
         connectionIDsByUserID[connection.userID, default: []].insert(connection.connectionID)
+        if let deviceID = normalizedDeviceID(connection.deviceID) {
+            connectionIDsByDeviceKey[DeviceConnectionKey(userID: connection.userID, deviceID: deviceID), default: []]
+                .insert(connection.connectionID)
+        }
     }
 
     @discardableResult
@@ -115,6 +125,14 @@ actor IMConnectionRegistry {
         connectionIDsByUserID[removed.connection.userID]?.remove(connectionID)
         if connectionIDsByUserID[removed.connection.userID]?.isEmpty == true {
             connectionIDsByUserID.removeValue(forKey: removed.connection.userID)
+        }
+
+        if let deviceID = normalizedDeviceID(removed.connection.deviceID) {
+            let key = DeviceConnectionKey(userID: removed.connection.userID, deviceID: deviceID)
+            connectionIDsByDeviceKey[key]?.remove(connectionID)
+            if connectionIDsByDeviceKey[key]?.isEmpty == true {
+                connectionIDsByDeviceKey.removeValue(forKey: key)
+            }
         }
 
         return removed.connection
@@ -134,6 +152,20 @@ actor IMConnectionRegistry {
 
     func localConnectionCount(forUserID userID: UUID) -> Int {
         connectionIDsByUserID[userID]?.count ?? 0
+    }
+
+    func localConnectionCount(forSessionID sessionID: UUID) -> Int {
+        connectionIDsBySessionID[sessionID]?.count ?? 0
+    }
+
+    func localConnectionCount(forUserID userID: UUID, deviceID: String) -> Int {
+        connectionIDsByDeviceKey[DeviceConnectionKey(userID: userID, deviceID: deviceID)]?.count ?? 0
+    }
+
+    func activeConnectionCounts(forSessionIDs sessionIDs: [UUID]) -> [UUID: Int] {
+        Dictionary(uniqueKeysWithValues: Set(sessionIDs).map { sessionID in
+            (sessionID, connectionIDsBySessionID[sessionID]?.count ?? 0)
+        })
     }
 
     func totalConnectionCount() -> Int {
@@ -202,6 +234,14 @@ actor IMConnectionRegistry {
         for control in controls {
             control.sendPacket(type: type, requestID: requestID, payload: payload)
         }
+    }
+
+    private func normalizedDeviceID(_ deviceID: String?) -> String? {
+        let trimmed = deviceID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 }
 

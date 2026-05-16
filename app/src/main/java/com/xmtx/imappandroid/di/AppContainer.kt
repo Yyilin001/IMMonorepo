@@ -10,14 +10,18 @@ import com.xmtx.imclientkit.features.im.IMConversationStore
 import com.xmtx.imclientkit.features.im.IMRuntimeController
 import com.xmtx.imclientkit.networking.NetworkEnvironment
 import com.xmtx.imclientkit.networking.imtcp.IMTCPClientConfiguration
+import com.xmtx.imclientkit.persistence.DataStoreDeviceIdentityStore
 import com.xmtx.imclientkit.persistence.DataStoreTokenStore
 import com.xmtx.imclientkit.persistence.DataStoreUserSessionCache
 import com.xmtx.imclientkit.persistence.imcache.IMCacheDatabase
 import com.xmtx.imclientkit.persistence.imcache.RoomIMConversationCache
 import com.xmtx.imclientkit.persistence.imcache.RoomContactStateCache
+import kotlinx.coroutines.runBlocking
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
+    private val deviceIdentityStore = DataStoreDeviceIdentityStore(appContext)
+    private val deviceID = runBlocking { deviceIdentityStore.currentDeviceID() }
 
     val network = NetworkEnvironment(
         apiBaseUrl = "http://10.0.2.2:8080",
@@ -47,6 +51,7 @@ class AppContainer(context: Context) {
         configuration = IMTCPClientConfiguration(
             host = network.imTcpHost,
             port = network.imTcpPort,
+            deviceID = deviceID,
             platform = "android",
         ),
         conversationCache = conversationCache,
@@ -59,5 +64,6 @@ class AppContainer(context: Context) {
         conversationStore = conversationStore,
         contactRuntimeController = contactRuntimeController,
         contactStore = contactStore,
+        deviceID = deviceID,
     )
 }

@@ -52,6 +52,7 @@ class IMClientKitGateway(
     private val conversationStore: IMConversationStore,
     private val contactRuntimeController: ContactRuntimeController,
     private val contactStore: ContactStateStore,
+    private val deviceID: String,
 ) : IMSessionGateway {
     override val conversationState: StateFlow<ConversationListState> = conversationStore.state
     override val contactState: StateFlow<ContactState> = contactStore.state
@@ -63,14 +64,14 @@ class IMClientKitGateway(
         sessionClient.login(
             email = email,
             password = password,
-            device = DeviceMetadataPayload(platform = "android"),
+            device = DeviceMetadataPayload(deviceID = deviceID, platform = "android"),
         )
 
     override suspend fun register(email: String, password: String): AuthUser =
         sessionClient.register(
             email = email,
             password = password,
-            device = DeviceMetadataPayload(platform = "android"),
+            device = DeviceMetadataPayload(deviceID = deviceID, platform = "android"),
         )
 
     override suspend fun clearSession() {
