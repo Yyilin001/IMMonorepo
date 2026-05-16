@@ -64,7 +64,7 @@
 
 协议草案见 [docs/im-tcp-protocol.md](docs/im-tcp-protocol.md)。
 
-运行模式与生产上线检查清单见 [docs/im-runtime-operating-modes.md](docs/im-runtime-operating-modes.md)。
+运行模式与生产上线检查清单见 [docs/im-runtime-operating-modes.md](docs/im-runtime-operating-modes.md)。多端同时在线的上线验收门禁见 [docs/im-multidevice-release-gate.md](docs/im-multidevice-release-gate.md)。
 
 ## 技术栈
 
@@ -177,6 +177,12 @@ IM_POSTGRES_SMOKE_DATABASE_URL=postgres://user:password@127.0.0.1:5432/imserver_
 
 ```bash
 ./scripts/production_smoke.sh run
+```
+
+多端同步上线门禁：
+
+```bash
+./scripts/multidevice_release_gate.sh
 ```
 
 小群/私聊压测入口：

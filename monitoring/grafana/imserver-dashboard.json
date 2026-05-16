@@ -45,6 +45,26 @@
         {"expr": "sum(rate(im_stream_consumed_events_total[1m]))", "legendFormat": "consumed/s"},
         {"expr": "sum(rate(im_stream_failed_events_total[1m]))", "legendFormat": "failed/s"}
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Realtime Routing",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "targets": [
+        {"expr": "sum(rate(im_user_fanout_total[1m]))", "legendFormat": "user fanout/s"},
+        {"expr": "sum(rate(im_session_kick_total[1m]))", "legendFormat": "session kick/s"},
+        {"expr": "sum(rate(im_cross_node_dispatch_total[1m]))", "legendFormat": "cross-node dispatch/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Realtime Routing Failures",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "targets": [
+        {"expr": "sum(rate(im_cross_node_dispatch_failures_total[1m]))", "legendFormat": "cross-node failures/s"},
+        {"expr": "sum(rate(im_session_count_query_failures_total[1m]))", "legendFormat": "session-count failures/s"},
+        {"expr": "sum(rate(im_redis_presence_stale_cleanup_total[1m]))", "legendFormat": "stale cleanup/s"}
+      ]
     }
   ]
 }

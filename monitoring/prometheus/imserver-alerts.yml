@@ -49,6 +49,22 @@ groups:
         annotations:
           summary: IMServer cross-node dispatch failures detected
 
+      - alert: IMServerSessionCountRelayFailures
+        expr: rate(im_session_count_query_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: IMServer gateway session-count relay failures detected
+
+      - alert: IMServerRedisPresenceStaleCleanupSpike
+        expr: increase(im_redis_presence_stale_cleanup_total[10m]) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: IMServer Redis presence stale cleanup is elevated
+
       - alert: IMServerStreamFailures
         expr: rate(im_stream_failed_events_total[5m]) > 0
         for: 5m
