@@ -154,7 +154,11 @@ struct AuthService {
 
         return (
             user,
-            SessionContext(userID: payload.sub, sessionID: try session.requireID())
+            SessionContext(
+                userID: payload.sub,
+                sessionID: try session.requireID(),
+                deviceID: session.deviceID
+            )
         )
     }
 

@@ -15,6 +15,7 @@ struct ConnectionRoutingService {
     var routeBackendName: String { backend.backendName }
 
     func bind(_ connection: IMAuthenticatedConnection, control: IMConnectionControl) async throws {
+        await kickDuplicateSessionConnectionsIfNeeded(forSessionID: connection.sessionID)
         await app.imConnectionRegistry.bind(connection, control: control)
         await app.routingMetrics.recordCurrentTCPConnectionCount(await app.imConnectionRegistry.totalConnectionCount())
         if await app.imConnectionRegistry.localConnectionCount(forUserID: connection.userID) == 1 {
@@ -25,6 +26,29 @@ struct ConnectionRoutingService {
             try await backend.presenceStore.activatePresence(forSessionID: connection.sessionID, userID: connection.userID)
             await app.routingMetrics.recordPresenceRegistration()
         }
+    }
+
+    private func kickDuplicateSessionConnectionsIfNeeded(forSessionID sessionID: UUID) async {
+        let removedConnections = await kickLocalConnections(
+            forSessionID: sessionID,
+            reason: .duplicateConnection,
+            message: "This session opened a new realtime connection."
+        )
+        if !removedConnections.isEmpty {
+            await app.routingMetrics.recordSessionKick(targetSessionCount: removedConnections.count)
+        }
+
+        let envelope = NodeMessageDispatchEnvelope(
+            action: .kickSession,
+            packetType: nil,
+            requestID: nil,
+            payloadJSON: nil,
+            targetUserIDs: [],
+            sessionID: sessionID,
+            kickReason: .duplicateConnection,
+            kickMessage: "This session opened a new realtime connection."
+        )
+        await dispatchRemoteEnvelopeIfNeeded(envelope, forSessionIDs: [sessionID], includeLocalNode: false)
     }
 
     func remove(connectionID: UUID) async {
@@ -96,7 +120,11 @@ struct ConnectionRoutingService {
         message: String
     ) async {
         await app.routingMetrics.recordSessionKick(targetSessionCount: 1)
-        await app.imConnectionRegistry.kickConnections(forSessionID: sessionID, reason: reason, message: message)
+        await kickLocalConnections(
+            forSessionID: sessionID,
+            reason: reason,
+            message: message
+        )
         let envelope = NodeMessageDispatchEnvelope(
             action: .kickSession,
             packetType: nil,
@@ -119,9 +147,8 @@ struct ConnectionRoutingService {
         reason: IMTCPKickReason,
         message: String
     ) async {
-        let sessionCount = await app.imConnectionRegistry.connectionIDs(forUserID: userID).count
-        await app.routingMetrics.recordSessionKick(targetSessionCount: max(sessionCount, 1))
-        await app.imConnectionRegistry.kickConnections(forUserID: userID, reason: reason, message: message)
+        let removedConnections = await kickLocalConnections(forUserID: userID, reason: reason, message: message)
+        await app.routingMetrics.recordSessionKick(targetSessionCount: max(removedConnections.count, 1))
         let envelope = NodeMessageDispatchEnvelope(
             action: .kickUser,
             packetType: nil,
@@ -159,14 +186,71 @@ struct ConnectionRoutingService {
                   let reason = envelope.kickReason,
                   let message = envelope.kickMessage
             else { return }
-            await app.imConnectionRegistry.kickConnections(forSessionID: sessionID, reason: reason, message: message)
+            await kickLocalConnections(forSessionID: sessionID, reason: reason, message: message)
         case .kickUser:
             guard let userID = envelope.targetUserIDs.first,
                   let reason = envelope.kickReason,
                   let message = envelope.kickMessage
             else { return }
-            await app.imConnectionRegistry.kickConnections(forUserID: userID, reason: reason, message: message)
+            await kickLocalConnections(forUserID: userID, reason: reason, message: message)
         }
+    }
+
+    @discardableResult
+    private func kickLocalConnections(
+        forSessionID sessionID: UUID,
+        reason: IMTCPKickReason,
+        message: String
+    ) async -> [IMAuthenticatedConnection] {
+        let removedConnections = await app.imConnectionRegistry.kickExistingConnections(
+            forSessionID: sessionID,
+            reason: reason,
+            message: message
+        )
+        await cleanupPresenceAfterLocalKick(removedConnections)
+        return removedConnections
+    }
+
+    @discardableResult
+    private func kickLocalConnections(
+        forUserID userID: UUID,
+        reason: IMTCPKickReason,
+        message: String
+    ) async -> [IMAuthenticatedConnection] {
+        let removedConnections = await app.imConnectionRegistry.kickExistingConnections(
+            forUserID: userID,
+            reason: reason,
+            message: message
+        )
+        await cleanupPresenceAfterLocalKick(removedConnections)
+        return removedConnections
+    }
+
+    private func cleanupPresenceAfterLocalKick(_ removedConnections: [IMAuthenticatedConnection]) async {
+        guard !removedConnections.isEmpty else {
+            return
+        }
+
+        await app.routingMetrics.recordCurrentTCPConnectionCount(await app.imConnectionRegistry.totalConnectionCount())
+
+        let sessionUserPairs = Set(removedConnections.map { SessionPresenceKey(sessionID: $0.sessionID, userID: $0.userID) })
+        for pair in sessionUserPairs {
+            if await app.imConnectionRegistry.localConnectionCount(forSessionID: pair.sessionID) == 0 {
+                try? await backend.presenceStore.deactivatePresence(forSessionID: pair.sessionID, userID: pair.userID)
+            }
+        }
+
+        let userIDs = Set(removedConnections.map(\.userID))
+        for userID in userIDs {
+            if await app.imConnectionRegistry.localConnectionCount(forUserID: userID) == 0 {
+                try? await backend.presenceStore.deactivatePresence(forUserID: userID)
+            }
+        }
+    }
+
+    private struct SessionPresenceKey: Hashable, Sendable {
+        let sessionID: UUID
+        let userID: UUID
     }
 
     private func broadcastToAllNodes(_ envelope: NodeMessageDispatchEnvelope) async {

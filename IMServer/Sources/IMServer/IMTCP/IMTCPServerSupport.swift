@@ -111,6 +111,50 @@ actor IMConnectionRegistry {
         }
     }
 
+    func kickExistingConnections(
+        forSessionID sessionID: UUID,
+        reason: IMTCPKickReason,
+        message: String
+    ) -> [IMAuthenticatedConnection] {
+        let connectionIDs = connectionIDs(forSessionID: sessionID)
+        var removedConnections: [IMAuthenticatedConnection] = []
+
+        for connectionID in connectionIDs {
+            guard let entry = connectionsByID[connectionID] else {
+                continue
+            }
+            let control = entry.control
+            control.kick(reason: reason, message: message)
+            if let removed = remove(connectionID: control.connectionID) {
+                removedConnections.append(removed)
+            }
+        }
+
+        return removedConnections
+    }
+
+    func kickExistingConnections(
+        forUserID userID: UUID,
+        reason: IMTCPKickReason,
+        message: String
+    ) -> [IMAuthenticatedConnection] {
+        let connectionIDs = connectionIDs(forUserID: userID)
+        var removedConnections: [IMAuthenticatedConnection] = []
+
+        for connectionID in connectionIDs {
+            guard let entry = connectionsByID[connectionID] else {
+                continue
+            }
+            let control = entry.control
+            control.kick(reason: reason, message: message)
+            if let removed = remove(connectionID: control.connectionID) {
+                removedConnections.append(removed)
+            }
+        }
+
+        return removedConnections
+    }
+
     @discardableResult
     func remove(connectionID: UUID) -> IMAuthenticatedConnection? {
         guard let removed = connectionsByID.removeValue(forKey: connectionID) else {
@@ -170,32 +214,6 @@ actor IMConnectionRegistry {
 
     func totalConnectionCount() -> Int {
         connectionsByID.count
-    }
-
-    func kickConnections(
-        forSessionID sessionID: UUID,
-        reason: IMTCPKickReason,
-        message: String
-    ) {
-        let controls = connectionIDs(forSessionID: sessionID)
-            .compactMap { connectionsByID[$0]?.control }
-
-        for control in controls {
-            control.kick(reason: reason, message: message)
-        }
-    }
-
-    func kickConnections(
-        forUserID userID: UUID,
-        reason: IMTCPKickReason,
-        message: String
-    ) {
-        let controls = connectionIDs(forUserID: userID)
-            .compactMap { connectionsByID[$0]?.control }
-
-        for control in controls {
-            control.kick(reason: reason, message: message)
-        }
     }
 
     func sendMessage(
@@ -259,6 +277,14 @@ struct IMTCPAuthenticator {
     ) async throws -> IMAuthenticatedConnection {
         let (_, sessionContext) = try await AuthService(app: app, db: db)
             .authenticateAccessToken(accessToken)
+        let normalizedPayloadDeviceID = normalizedDeviceID(deviceID)
+        let normalizedSessionDeviceID = normalizedDeviceID(sessionContext.deviceID)
+
+        if let normalizedSessionDeviceID,
+           normalizedPayloadDeviceID != normalizedSessionDeviceID
+        {
+            throw AuthError.invalidToken
+        }
 
         return IMAuthenticatedConnection(
             connectionID: UUID(),
@@ -266,11 +292,19 @@ struct IMTCPAuthenticator {
             sessionID: sessionContext.sessionID,
             authenticatedAt: Date(),
             remoteIPAddress: remoteIPAddress,
-            deviceID: deviceID,
+            deviceID: normalizedSessionDeviceID ?? normalizedPayloadDeviceID,
             deviceName: deviceName,
             platform: platform,
             appVersion: appVersion
         )
+    }
+
+    private func normalizedDeviceID(_ deviceID: String?) -> String? {
+        let trimmed = deviceID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 }
 

@@ -42,4 +42,5 @@ struct RefreshTokenPayload: JWTPayload {
 struct SessionContext: Authenticatable, Sendable {
     let userID: UUID
     let sessionID: UUID
+    let deviceID: String?
 }

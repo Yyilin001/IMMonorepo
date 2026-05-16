@@ -6,6 +6,96 @@ import Vapor
 import VaporTesting
 
 extension IMServerTests {
+    @Test("TCP auth rejects a device ID that does not match the access-token session")
+    func tcpAuthRejectsMismatchedDeviceID() async throws {
+        try await withApp(configure: configure) { app in
+            var accessToken = ""
+
+            try await app.testing().test(.POST, "api/auth/login", beforeRequest: { req in
+                try req.content.encode(loginRequest)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                accessToken = try res.content.decode(AuthResponse.self).accessToken
+            })
+
+            let authenticator = IMTCPAuthenticator(app: app, db: app.db)
+            do {
+                _ = try await authenticator.authenticate(
+                    accessToken: accessToken,
+                    remoteIPAddress: nil,
+                    deviceID: "different-device",
+                    deviceName: "Different Device",
+                    platform: "ios",
+                    appVersion: "1.0"
+                )
+                Issue.record("Expected TCP auth to reject a mismatched device ID")
+            } catch {
+                // Expected: TCP auth must not allow clients to spoof the device identity for a session.
+            }
+
+            let connection = try await authenticator.authenticate(
+                accessToken: accessToken,
+                remoteIPAddress: nil,
+                deviceID: "simulator",
+                deviceName: "Test Device",
+                platform: "ios",
+                appVersion: "1.0"
+            )
+            #expect(connection.deviceID == "simulator")
+        }
+    }
+
+    @Test("Binding a second TCP connection for the same session replaces the old connection")
+    func bindingSecondTCPConnectionForSameSessionReplacesOldConnection() async throws {
+        try await withApp(configure: configure) { app in
+            let userID = UUID()
+            let sessionID = UUID()
+            let firstConnectionID = UUID()
+            let secondConnectionID = UUID()
+            let firstChannel = EmbeddedChannel()
+            let secondChannel = EmbeddedChannel()
+            let firstConnection = IMAuthenticatedConnection(
+                connectionID: firstConnectionID,
+                userID: userID,
+                sessionID: sessionID,
+                authenticatedAt: Date(),
+                remoteIPAddress: "127.0.0.1",
+                deviceID: "device-a",
+                deviceName: "Device A",
+                platform: "ios",
+                appVersion: "1.0"
+            )
+            let secondConnection = IMAuthenticatedConnection(
+                connectionID: secondConnectionID,
+                userID: userID,
+                sessionID: sessionID,
+                authenticatedAt: Date(),
+                remoteIPAddress: "127.0.0.1",
+                deviceID: "device-a",
+                deviceName: "Device A",
+                platform: "ios",
+                appVersion: "1.0"
+            )
+
+            try await app.gatewaySessionService.bind(
+                firstConnection,
+                control: IMConnectionControl(connectionID: firstConnectionID, channel: firstChannel)
+            )
+            #expect(await app.imConnectionRegistry.activeConnectionCounts(forSessionIDs: [sessionID])[sessionID] == 1)
+
+            try await app.gatewaySessionService.bind(
+                secondConnection,
+                control: IMConnectionControl(connectionID: secondConnectionID, channel: secondChannel)
+            )
+
+            #expect(await app.imConnectionRegistry.authenticatedConnection(for: firstConnectionID)?.connectionID == nil)
+            #expect(await app.imConnectionRegistry.authenticatedConnection(for: secondConnectionID)?.connectionID == secondConnectionID)
+            #expect(await app.imConnectionRegistry.activeConnectionCounts(forSessionIDs: [sessionID])[sessionID] == 1)
+
+            await app.gatewaySessionService.remove(connectionID: secondConnectionID)
+        }
+    }
+
     @Test("Gateway relay session-counts returns local active session counts")
     func gatewayRelaySessionCountsReturnsLocalCounts() async throws {
         try await withApp(configure: configure) { app in
