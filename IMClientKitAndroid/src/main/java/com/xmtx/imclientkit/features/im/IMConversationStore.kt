@@ -26,9 +26,11 @@ data class ConversationListState(
 
 class IMConversationStore {
     private val mutableState = MutableStateFlow(ConversationListState())
+    private val pendingRequestLocalMessageIDs = mutableMapOf<String, String>()
     val state: StateFlow<ConversationListState> = mutableState
 
     fun restoreSnapshot(snapshot: ConversationListState) {
+        pendingRequestLocalMessageIDs.clear()
         val selectedConversationID = snapshot.selectedConversationID?.takeIf { selected ->
             snapshot.conversations.any { it.id == selected }
         } ?: snapshot.conversations.firstOrNull()?.id
@@ -69,7 +71,12 @@ class IMConversationStore {
         mutableState.update { current ->
             val existingByID = current.conversations.associateBy { it.id }
             val mergedByID = (current.conversations + page.items.map { summary ->
-                existingByID[summary.id]?.copy(summary = summary) ?: IMConversation(id = summary.id, summary = summary)
+                existingByID[summary.id]?.copy(
+                    summary = summary,
+                    serverLastReadSequence = summary.lastReadSequence.toULong(),
+                    serverUnreadCount = summary.unreadCount,
+                    localUnreadDelta = 0,
+                ) ?: IMConversation(id = summary.id, summary = summary)
             }).associateBy { it.id }
             current.copy(
                 conversations = mergedByID.values.sortedByDescending { it.summary.updatedAt },
@@ -87,7 +94,12 @@ class IMConversationStore {
             current.copy(
                 conversations = current.conversations
                     .upsertByID(summary.id) { existing ->
-                        existing?.copy(summary = summary) ?: IMConversation(id = summary.id, summary = summary)
+                        existing?.copy(
+                            summary = summary,
+                            serverLastReadSequence = summary.lastReadSequence.toULong(),
+                            serverUnreadCount = summary.unreadCount,
+                            localUnreadDelta = 0,
+                        ) ?: IMConversation(id = summary.id, summary = summary)
                     }
                     .sortedByDescending { it.summary.updatedAt },
             )
@@ -206,6 +218,7 @@ class IMConversationStore {
             deliveryState = IMMessageDeliveryState.Sending,
         )
         appendDomainMessages(conversationID, listOf(localMessage))
+        pendingRequestLocalMessageIDs[requestID] = localMessageID
         return IMOutgoingMessageRequest(
             requestID = requestID,
             localMessageID = localMessageID,
@@ -230,6 +243,7 @@ class IMConversationStore {
 
     fun applyOutgoingAcknowledgement(requestID: String?, payload: IMTCPAckPayload) {
         val messageID = payload.messageID
+        val localMessageID = requestID?.let { pendingRequestLocalMessageIDs.remove(it) }
         mutableState.update { current ->
             current.copy(
                 conversations = current.conversations.map { conversation ->
@@ -238,9 +252,10 @@ class IMConversationStore {
                     } else {
                         conversation.copy(
                             messages = conversation.messages.map { message ->
+                                val matchesRequest = localMessageID != null && message.id == localMessageID
                                 val matchesClient = message.clientMessageID == messageID
                                 val matchesServer = message.serverMessageID == messageID || message.id == messageID
-                                if (matchesClient || matchesServer) {
+                                if (matchesRequest || matchesClient || matchesServer) {
                                     message.copy(
                                         serverMessageID = messageID,
                                         deliveryState = IMMessageDeliveryState.Sent,
@@ -317,8 +332,10 @@ class IMConversationStore {
                 .filter { it.deliveryState == IMMessageDeliveryState.Queued }
                 .mapNotNull { message ->
                     message.clientMessageID?.let { clientMessageID ->
+                        val requestID = UUID.randomUUID().toString()
+                        pendingRequestLocalMessageIDs[requestID] = message.id
                         IMOutgoingMessageRequest(
-                            requestID = UUID.randomUUID().toString(),
+                            requestID = requestID,
                             localMessageID = message.id,
                             payload = IMTCPMessagePayload(
                                 clientMessageID = clientMessageID,

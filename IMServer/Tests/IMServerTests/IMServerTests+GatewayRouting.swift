@@ -102,6 +102,222 @@ extension IMServerTests {
         }
     }
 
+    @Test("Cross-device read advances unread state over a real second TCP connection")
+    func crossDeviceReadAdvancesUnreadStateOverSecondTCPConnection() async throws {
+        try await withApp(configure: { app in
+            try await configure(app)
+            app.imTCPConfiguration = IMTCPConfiguration(
+                enabled: true,
+                host: "127.0.0.1",
+                port: 0,
+                protocolVersion: 1,
+                authTimeout: 2,
+                heartbeatInterval: 30,
+                idleTimeout: 90,
+                maxFrameBytes: 64 * 1024
+            )
+        }) { app in
+            let tcpServer = try await startTestIMTCPServer(app: app)
+            defer { Task { try? await tcpServer.channel.close().get() } }
+
+            let deviceAAccessToken = try await loginAccessToken(
+                email: loginRequest.email,
+                password: loginRequest.password,
+                deviceID: "read-tcp-device-a",
+                on: app
+            )
+            let deviceBAccessToken = try await loginAccessToken(
+                email: loginRequest.email,
+                password: loginRequest.password,
+                deviceID: "read-tcp-device-b",
+                on: app
+            )
+            let currentUser = try await user(email: loginRequest.email, on: app)
+            let currentUserID = try currentUser.requireID()
+            let peerUser = try await makeUser(email: "tcp-read-peer@example.com", on: app)
+
+            var createdConversationID: UUID?
+            try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: deviceAAccessToken)
+                try req.content.encode(
+                    IMConversationCreateRequest(
+                        kind: IMConversationKind.group.rawValue,
+                        title: "TCP Read",
+                        memberEmails: [peerUser.email]
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                createdConversationID = try res.content.decode(IMConversationResponse.self).id
+            })
+            let conversationID = try #require(createdConversationID)
+
+            for sequence in 1...2 {
+                _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
+                    imTCPTextPayload(
+                        conversationID: conversationID,
+                        clientMessageID: "tcp-read-peer-\(sequence)",
+                        text: "unread \(sequence)"
+                    ),
+                    senderUserID: try peerUser.requireID()
+                )
+            }
+            try await app.processInlineOutboxProjectionIfAllowed()
+
+            try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: deviceBAccessToken)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let page = try res.content.decode(IMConversationPageResponse.self)
+                let summary = try #require(page.items.first { $0.id == conversationID })
+                #expect(summary.memberUserIDs.contains(currentUserID))
+                #expect(summary.lastReadSequence == 1)
+                #expect(summary.unreadCount == 2)
+            })
+
+            let deviceA = try await IMTCPTestClient.connect(port: tcpServer.port, eventLoopGroup: app.eventLoopGroup)
+            let deviceB = try await IMTCPTestClient.connect(port: tcpServer.port, eventLoopGroup: app.eventLoopGroup)
+            defer {
+                Task {
+                    await deviceA.close()
+                    await deviceB.close()
+                }
+            }
+
+            try await deviceA.authenticate(accessToken: deviceAAccessToken, deviceID: "read-tcp-device-a")
+            try await deviceB.authenticate(accessToken: deviceBAccessToken, deviceID: "read-tcp-device-b")
+
+            try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/read", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: deviceAAccessToken)
+                try req.content.encode(IMConversationReadRequest(readSequence: 3))
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                let response = try res.content.decode(IMConversationReadResponse.self)
+                #expect(response.lastReadSequence == 3)
+                #expect(response.unreadCount == 0)
+            })
+
+            let event = try await deviceB.nextPacket(ofType: .conversationEvent)
+                .payload.decodePayload(IMTCPConversationEventPayload.self)
+            #expect(event.eventType == .summaryUpdated)
+            #expect(event.conversation.id == conversationID)
+            #expect(event.conversation.lastReadSequence == 3)
+            #expect(event.conversation.unreadCount == 0)
+        }
+    }
+
+    @Test("Reconnected device can close TCP and recover missed canonical messages over messages since")
+    func reconnectedDeviceRecoversMissedCanonicalMessagesOverMessagesSince() async throws {
+        try await withApp(configure: { app in
+            try await configure(app)
+            app.imTCPConfiguration = IMTCPConfiguration(
+                enabled: true,
+                host: "127.0.0.1",
+                port: 0,
+                protocolVersion: 1,
+                authTimeout: 2,
+                heartbeatInterval: 30,
+                idleTimeout: 90,
+                maxFrameBytes: 64 * 1024
+            )
+        }) { app in
+            let tcpServer = try await startTestIMTCPServer(app: app)
+            defer { Task { try? await tcpServer.channel.close().get() } }
+
+            let deviceAAccessToken = try await loginAccessToken(
+                email: loginRequest.email,
+                password: loginRequest.password,
+                deviceID: "gap-tcp-device-a",
+                on: app
+            )
+            let deviceBAccessToken = try await loginAccessToken(
+                email: loginRequest.email,
+                password: loginRequest.password,
+                deviceID: "gap-tcp-device-b",
+                on: app
+            )
+            let peerUser = try await makeUser(email: "tcp-gap-peer@example.com", on: app)
+
+            var createdConversationID: UUID?
+            try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: deviceAAccessToken)
+                try req.content.encode(
+                    IMConversationCreateRequest(
+                        kind: IMConversationKind.group.rawValue,
+                        title: "TCP Gap",
+                        memberEmails: [peerUser.email]
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                createdConversationID = try res.content.decode(IMConversationResponse.self).id
+            })
+            let conversationID = try #require(createdConversationID)
+
+            let deviceA = try await IMTCPTestClient.connect(port: tcpServer.port, eventLoopGroup: app.eventLoopGroup)
+            let deviceB = try await IMTCPTestClient.connect(port: tcpServer.port, eventLoopGroup: app.eventLoopGroup)
+            defer {
+                Task {
+                    await deviceA.close()
+                    await deviceB.close()
+                }
+            }
+
+            try await deviceA.authenticate(accessToken: deviceAAccessToken, deviceID: "gap-tcp-device-a")
+            try await deviceB.authenticate(accessToken: deviceBAccessToken, deviceID: "gap-tcp-device-b")
+            await deviceB.close()
+
+            for sequence in 1...2 {
+                try await deviceA.send(
+                    type: .message,
+                    requestID: UUID(),
+                    payload: imTCPTextPayload(
+                        conversationID: conversationID,
+                        clientMessageID: "tcp-gap-\(sequence)",
+                        text: "gap \(sequence)"
+                    )
+                )
+                _ = try await deviceA.nextPacket(ofType: .ack)
+                _ = try await deviceA.nextPacket(ofType: .message)
+            }
+
+            let reconnectedDeviceB = try await IMTCPTestClient.connect(port: tcpServer.port, eventLoopGroup: app.eventLoopGroup)
+            defer { Task { await reconnectedDeviceB.close() } }
+            try await reconnectedDeviceB.authenticate(accessToken: deviceBAccessToken, deviceID: "gap-tcp-device-b")
+
+            try await app.testing().test(
+                .GET,
+                "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=1",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: deviceBAccessToken)
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let response = try res.content.decode(IMMessageSinceResponse.self)
+                    #expect(response.messages.map(\.clientMessageID) == ["tcp-gap-1", "tcp-gap-2"])
+                    #expect(response.messages.map(\.serverSequence) == [2, 3])
+                    #expect(response.hasMore == false)
+                    #expect(response.nextAfterSequence == 3)
+                }
+            )
+
+            try await app.testing().test(
+                .GET,
+                "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=2",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: deviceBAccessToken)
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let response = try res.content.decode(IMMessageSinceResponse.self)
+                    #expect(response.messages.map(\.clientMessageID) == ["tcp-gap-2"])
+                    #expect(response.messages.map(\.serverSequence) == [3])
+                    #expect(response.hasMore == false)
+                }
+            )
+        }
+    }
+
     @Test("TCP auth rejects a device ID that does not match the access-token session")
     func tcpAuthRejectsMismatchedDeviceID() async throws {
         try await withApp(configure: configure) { app in
@@ -296,6 +512,60 @@ extension IMServerTests {
         #expect(dispatches.first?.nodeID == "node-b")
         #expect(dispatches.first?.envelope.action == .kickSession)
         #expect(dispatches.first?.envelope.sessionID == remoteSessionID)
+
+        try await app.asyncShutdown()
+    }
+
+    @Test("Connection routing forwards conversation events only to routed remote user nodes")
+    func connectionRoutingForwardsConversationEventsToRoutedRemoteUserNodes() async throws {
+        let app = try await Application.make(.testing)
+        app.imNodeID = "node-a"
+
+        let userID = UUID()
+        let conversation = IMConversationResponse(
+            id: UUID(),
+            title: "Remote Read",
+            kind: IMConversationKind.direct.rawValue,
+            directMessagingState: nil,
+            directPeer: nil,
+            notice: nil,
+            avatarPreset: nil,
+            memberCount: 2,
+            memberUserIDs: [userID],
+            lastMessage: nil,
+            lastReadSequence: 7,
+            unreadCount: 0,
+            isPinned: false,
+            pinnedAt: nil,
+            isMuted: false,
+            createdAt: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_700_400_000)
+        )
+        let presenceStore = FakePresenceStore()
+        await presenceStore.setUserRoutes([userID: ["node-a", "node-b"]])
+        let dispatchService = FakeNodeMessageDispatchService()
+        let routingService = ConnectionRoutingService(
+            app: app,
+            backend: FakeConnectionRoutingBackend(
+                presenceStore: presenceStore,
+                dispatchService: dispatchService
+            )
+        )
+
+        let payload = IMTCPConversationEventPayload(
+            eventType: .summaryUpdated,
+            conversation: conversation,
+            message: nil,
+            actorUserID: userID,
+            serverTimestamp: Date(timeIntervalSince1970: 1_700_400_001)
+        )
+        await routingService.sendConversationEvent(payload, toUserID: userID, requestID: UUID())
+
+        let dispatches = await dispatchService.dispatches()
+        #expect(dispatches.count == 1)
+        #expect(dispatches.first?.nodeID == "node-b")
+        #expect(dispatches.first?.envelope.action == .conversationEvent)
+        #expect(dispatches.first?.envelope.targetUserIDs == [userID])
 
         try await app.asyncShutdown()
     }

@@ -43,6 +43,27 @@ class IMConversationStoreTests {
     }
 
     @Test
+    fun serverAckUsesRequestIDWhenServerMessageIDArrivesBeforeCanonicalEcho() {
+        val store = IMConversationStore()
+        store.replaceSummaryWindow(pageWithConversation())
+        val request = store.prepareOutgoingText("hello", "conversation-1", "user-1")
+        assertNotNull(request)
+
+        store.applyOutgoingAcknowledgement(
+            requestID = request!!.requestID,
+            payload = IMTCPAckPayload(
+                messageID = "server-message-1",
+                conversationID = "conversation-1",
+                status = "accepted",
+            ),
+        )
+
+        val message = store.state.value.conversations.first().messages.first()
+        assertEquals("server-message-1", message.serverMessageID)
+        assertEquals(IMMessageDeliveryState.Sent, message.deliveryState)
+    }
+
+    @Test
     fun incomingMessageMergesIntoConversation() {
         val store = IMConversationStore()
         store.replaceSummaryWindow(pageWithConversation())
@@ -92,6 +113,72 @@ class IMConversationStoreTests {
     }
 
     @Test
+    fun lateAckAfterCanonicalEchoDoesNotDuplicateOrRegressSentState() {
+        val store = IMConversationStore()
+        store.replaceSummaryWindow(pageWithConversation())
+        val request = store.prepareOutgoingText("hello from device a", "conversation-1", "user-1")
+        assertNotNull(request)
+
+        store.receiveIncomingMessage(
+            IMTCPMessagePayload(
+                clientMessageID = request!!.payload.clientMessageID,
+                messageID = "server-message-1",
+                conversationID = "conversation-1",
+                senderUserID = "user-1",
+                serverSequence = 9UL,
+                serverTimestamp = "2026-05-13T00:00:01Z",
+                content = IMMessageContent.Text("hello from device a"),
+            ),
+            currentUserID = "user-1",
+        )
+        store.applyOutgoingAcknowledgement(
+            requestID = request.requestID,
+            payload = IMTCPAckPayload(
+                messageID = "server-message-1",
+                conversationID = "conversation-1",
+                status = "accepted",
+            ),
+        )
+
+        val messages = store.state.value.conversations.first().messages
+        assertEquals(1, messages.size)
+        assertEquals("server-message-1", messages.first().serverMessageID)
+        assertEquals(9UL, messages.first().serverSequence)
+        assertEquals(IMMessageDeliveryState.Sent, messages.first().deliveryState)
+    }
+
+    @Test
+    fun summaryUpdateFromAnotherDeviceClearsUnreadDelta() {
+        val store = IMConversationStore()
+        store.replaceSummaryWindow(pageWithConversation(unreadCount = 1, lastReadSequence = 0))
+        store.receiveIncomingMessage(
+            IMTCPMessagePayload(
+                messageID = "server-message-2",
+                conversationID = "conversation-1",
+                senderUserID = "user-2",
+                serverSequence = 2UL,
+                serverTimestamp = "2026-05-13T00:00:02Z",
+                content = IMMessageContent.Text("new unread"),
+            ),
+            currentUserID = "user-1",
+        )
+
+        store.applyConversationSummary(
+            conversation("conversation-1").copy(
+                lastReadSequence = 2,
+                unreadCount = 0,
+                updatedAt = "2026-05-13T00:00:03Z",
+            ),
+        )
+
+        val conversation = store.state.value.conversations.first()
+        assertEquals(2UL, conversation.serverLastReadSequence)
+        assertEquals(0, conversation.serverUnreadCount)
+        assertEquals(0, conversation.localUnreadDelta)
+        assertEquals(0, conversation.unreadCount)
+    }
+
+    @Test
     fun appendingMessagesRecordsLoadedCursorState() {
         val store = IMConversationStore()
         store.replaceSummaryWindow(pageWithConversation())
@@ -117,17 +204,23 @@ class IMConversationStoreTests {
         assertEquals(4UL, state.oldestLoadedServerSequences["conversation-1"])
     }
 
-    private fun pageWithConversation() =
+    private fun pageWithConversation(unreadCount: Int = 0, lastReadSequence: Int = 0) =
         com.xmtx.imclientkit.features.im.IMConversationSummaryPageResponseBody(
             items = listOf(
-                com.xmtx.imclientkit.features.im.IMConversationSummaryResponseBody(
-                    id = "conversation-1",
-                    title = "General",
-                    memberCount = 2,
-                    updatedAt = "2026-05-13T00:00:00Z",
+                conversation("conversation-1").copy(
+                    unreadCount = unreadCount,
+                    lastReadSequence = lastReadSequence,
                 ),
             ),
             hasMore = false,
             snapshotToken = "snapshot",
+        )
+
+    private fun conversation(id: String) =
+        com.xmtx.imclientkit.features.im.IMConversationSummaryResponseBody(
+            id = id,
+            title = "General",
+            memberCount = 2,
+            updatedAt = "2026-05-13T00:00:00Z",
         )
 }
