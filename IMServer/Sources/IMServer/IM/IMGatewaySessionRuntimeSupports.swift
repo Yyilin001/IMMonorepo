@@ -120,7 +120,7 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         toUserIDs userIDs: [UUID],
         requestID: UUID?
     ) async {
-        try? await post(
+        await postOrLog(
             path: "/internal/gateway/realtime/message",
             payload: GatewayRelayMessageRequest(
                 payload: payload,
@@ -135,7 +135,7 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         toUserID userID: UUID,
         requestID: UUID?
     ) async {
-        try? await post(
+        await postOrLog(
             path: "/internal/gateway/realtime/conversation-event",
             payload: GatewayRelayConversationEventRequest(
                 payload: payload,
@@ -150,7 +150,7 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         toUserID userID: UUID,
         requestID: UUID?
     ) async {
-        try? await post(
+        await postOrLog(
             path: "/internal/gateway/realtime/contact-event",
             payload: GatewayRelayContactEventRequest(
                 payload: payload,
@@ -165,7 +165,7 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         reason: IMTCPKickReason,
         message: String
     ) async {
-        try? await post(
+        await postOrLog(
             path: "/internal/gateway/realtime/kick-session",
             payload: GatewayRelayKickSessionRequest(
                 sessionID: sessionID,
@@ -180,7 +180,7 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         reason: IMTCPKickReason,
         message: String
     ) async {
-        try? await post(
+        await postOrLog(
             path: "/internal/gateway/realtime/kick-user",
             payload: GatewayRelayKickUserRequest(
                 userID: userID,
@@ -216,6 +216,22 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
 
     private func post<Payload: Content>(path: String, payload: Payload) async throws {
         let _: EmptyGatewayRelayResponse = try await post(path: path, payload: payload)
+    }
+
+    private func postOrLog<Payload: Content>(path: String, payload: Payload) async {
+        do {
+            try await post(path: path, payload: payload)
+        } catch {
+            await app.routingMetrics.recordCrossNodeDispatchFailed()
+            app.logger.warning(
+                "Gateway relay request failed",
+                metadata: [
+                    "node_id": .string(app.imNodeID),
+                    "path": .string(path),
+                    "error": .string(String(describing: error))
+                ]
+            )
+        }
     }
 
     private func post<Payload: Content, Response: Content>(path: String, payload: Payload) async throws -> Response {

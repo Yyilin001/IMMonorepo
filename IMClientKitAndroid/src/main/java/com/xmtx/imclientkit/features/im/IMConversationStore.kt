@@ -18,6 +18,7 @@ data class ConversationListState(
     val loadedConversationIDs: Set<String> = emptySet(),
     val latestSyncedServerSequences: Map<String, ULong> = emptyMap(),
     val oldestLoadedServerSequences: Map<String, ULong> = emptyMap(),
+    val pendingReadSequences: Map<String, ULong> = emptyMap(),
     val statusMessage: String? = null,
 ) {
     val selectedConversation: IMConversation?
@@ -244,6 +245,9 @@ class IMConversationStore {
     fun applyOutgoingAcknowledgement(requestID: String?, payload: IMTCPAckPayload) {
         val messageID = payload.messageID
         val localMessageID = requestID?.let { pendingRequestLocalMessageIDs.remove(it) }
+        val accepted = payload.status == "accepted"
+        val failureMessage = if (accepted) null else outgoingAcknowledgementFailureMessage(payload.status)
+        var didApplyFailure = false
         mutableState.update { current ->
             current.copy(
                 conversations = current.conversations.map { conversation ->
@@ -256,10 +260,19 @@ class IMConversationStore {
                                 val matchesClient = message.clientMessageID == messageID
                                 val matchesServer = message.serverMessageID == messageID || message.id == messageID
                                 if (matchesRequest || matchesClient || matchesServer) {
-                                    message.copy(
-                                        serverMessageID = messageID,
-                                        deliveryState = IMMessageDeliveryState.Sent,
-                                    )
+                                    if (!accepted && message.deliveryState == IMMessageDeliveryState.Sent) {
+                                        message
+                                    } else {
+                                        if (!accepted) didApplyFailure = true
+                                        message.copy(
+                                            serverMessageID = message.serverMessageID ?: messageID,
+                                            deliveryState = if (accepted) {
+                                                IMMessageDeliveryState.Sent
+                                            } else {
+                                                IMMessageDeliveryState.Failed
+                                            },
+                                        )
+                                    }
                                 } else {
                                     message
                                 }
@@ -267,6 +280,7 @@ class IMConversationStore {
                         )
                     }
                 },
+                statusMessage = if (didApplyFailure) failureMessage else current.statusMessage,
             )
         }
     }
@@ -306,6 +320,29 @@ class IMConversationStore {
             )
         }
     }
+
+    fun recordPendingReadSequence(conversationID: String, readSequence: ULong) {
+        mutableState.update { current ->
+            val currentSequence = current.pendingReadSequences[conversationID]
+            current.copy(
+                pendingReadSequences = current.pendingReadSequences +
+                    (conversationID to maxOf(currentSequence ?: 0UL, readSequence)),
+            )
+        }
+    }
+
+    fun clearPendingReadSequence(conversationID: String, readSequence: ULong) {
+        mutableState.update { current ->
+            val currentSequence = current.pendingReadSequences[conversationID]
+            if (currentSequence != null && currentSequence <= readSequence) {
+                current.copy(pendingReadSequences = current.pendingReadSequences - conversationID)
+            } else {
+                current
+            }
+        }
+    }
+
+    fun pendingReadSequences(): Map<String, ULong> = state.value.pendingReadSequences
 
     fun latestLoadedServerSequence(conversationID: String): ULong? =
         state.value.latestSyncedServerSequences[conversationID]
@@ -470,6 +507,21 @@ class IMConversationStore {
             direction = next.direction,
             senderUserID = next.senderUserID,
         )
+
+    private fun outgoingAcknowledgementFailureMessage(status: String): String =
+        when (status) {
+            "invalid_conversation_id" -> "Conversation is invalid."
+            "conversation_unavailable" -> "Conversation is unavailable."
+            "unsupported_message_content" -> "Message content is not supported."
+            "empty_text_body" -> "Message cannot be empty."
+            "invalid_reply_reference" -> "Reply target is invalid."
+            "direct_conversation_frozen" -> "This conversation cannot receive messages."
+            "stranger_direct_message_limit_reached" -> "Message limit reached before the peer replies."
+            "hot_conversation_rate_limited" -> "Messages are too frequent. Try again later."
+            "message_write_queue_full" -> "Message queue is busy. Try again later."
+            "internal_error" -> "Message failed to send."
+            else -> "Message failed to send."
+        }
 }
 
 interface IMConversationCaching {

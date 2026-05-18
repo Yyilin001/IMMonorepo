@@ -78,6 +78,8 @@ struct InternalGatewayRelaySecretMiddleware: AsyncMiddleware {
             guard actualSecret == sharedSecret else {
                 throw Abort(.unauthorized, reason: "Invalid internal relay secret.")
             }
+        } else if request.application.environment == .production {
+            throw Abort(.internalServerError, reason: "IM_INTERNAL_SHARED_SECRET is required for gateway relay in production.")
         }
         return try await next.respond(to: request)
     }

@@ -347,6 +347,42 @@ extension IMServerTests {
         }
     }
 
+    @Test("Production command API requires gateway relay internal secret")
+    func productionCommandAPIRequiresGatewayRelayInternalSecret() async throws {
+        try await withProductionRuntimeEnvironment {
+            unsetenv("IM_INTERNAL_SHARED_SECRET")
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMCommandAPIProductionValidator.validate(app: app)
+                Issue.record("Expected command-api validation to require gateway relay internal secret")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_INTERNAL_SHARED_SECRET"))
+            } catch {
+                Issue.record("Unexpected command-api validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production gateway public TCP bind requires TLS termination confirmation")
+    func productionGatewayPublicTCPBindRequiresTLSTerminationConfirmation() async throws {
+        try await withProductionRuntimeEnvironment {
+            unsetenv("IM_TCP_REQUIRES_TLS_TERMINATION")
+            let app = try await productionRuntimeValidationApp(role: .gateway)
+            do {
+                try IMGatewayProductionValidator.validate(app: app)
+                Issue.record("Expected gateway validation to require TCP TLS termination confirmation")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_TCP_REQUIRES_TLS_TERMINATION=true"))
+            } catch {
+                Issue.record("Unexpected gateway validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
     @Test("Runtime role capabilities keep production responsibilities isolated")
     func runtimeRoleCapabilitiesKeepProductionResponsibilitiesIsolated() {
         #expect(IMRuntimeRole.gateway.servesGateway)
@@ -886,6 +922,7 @@ private func withProductionRuntimeEnvironment(_ body: () async throws -> Void) a
         "IM_GATEWAY_RELAY_MODE": "http",
         "IM_GATEWAY_INTERNAL_BASE_URL": "http://gateway.internal",
         "IM_INTERNAL_SHARED_SECRET": "test-internal-secret",
+        "IM_TCP_REQUIRES_TLS_TERMINATION": "true",
         "IM_EVENT_STREAM_DRIVER": "kafka",
         "IM_KAFKA_BROKERS": "kafka-a:9092",
         "IM_KAFKA_SECURITY_PROTOCOL": "plaintext",
@@ -950,6 +987,7 @@ private func productionRuntimeValidationApp(role: IMRuntimeRole) async throws ->
     app.sequenceAllocationConfiguration = IMSequenceAllocationConfiguration.load(from: .production)
     app.messageWriteBatchConfiguration = IMMessageWriteBatchConfiguration.load(from: .production)
     app.commandOwnerRoutingConfiguration = IMCommandOwnerRoutingConfiguration.load(from: .production)
+    app.imTCPConfiguration = IMTCPConfiguration.load(from: .production)
     IMDatabaseConfigurator.configureDatabases(app)
     return app
 }

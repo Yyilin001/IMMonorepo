@@ -7,6 +7,7 @@ enum IMGatewayProductionValidator {
             app,
             requiresLocalNodeID: false
         )
+        try IMProductionRuntimeValidationSupport.validateTCPTransportExposure(app)
     }
 }
 

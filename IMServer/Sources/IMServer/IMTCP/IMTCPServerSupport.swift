@@ -14,6 +14,7 @@ struct IMTCPConfiguration: Sendable {
     let heartbeatInterval: TimeInterval
     let idleTimeout: TimeInterval
     let maxFrameBytes: Int
+    let requiresTLSTermination: Bool
 
     static func load(from environment: Environment) -> IMTCPConfiguration {
         let enabled = Environment.get("IM_TCP_ENABLED").flatMap(Bool.init(_:)) ?? (environment != .testing)
@@ -26,7 +27,8 @@ struct IMTCPConfiguration: Sendable {
             authTimeout: Environment.get("IM_TCP_AUTH_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 10,
             heartbeatInterval: Environment.get("IM_TCP_HEARTBEAT_INTERVAL").flatMap(TimeInterval.init(_:)) ?? 30,
             idleTimeout: Environment.get("IM_TCP_IDLE_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 90,
-            maxFrameBytes: Environment.get("IM_TCP_MAX_FRAME_BYTES").flatMap(Int.init(_:)) ?? 64 * 1024
+            maxFrameBytes: Environment.get("IM_TCP_MAX_FRAME_BYTES").flatMap(Int.init(_:)) ?? 64 * 1024,
+            requiresTLSTermination: parseBooleanEnvironment("IM_TCP_REQUIRES_TLS_TERMINATION", defaultValue: false)
         )
     }
 }
@@ -326,13 +328,20 @@ final class IMTCPServerLifecycle: LifecycleHandler, @unchecked Sendable {
             .childChannelOption(ChannelOptions.recvAllocator, value: AdaptiveRecvByteBufferAllocator())
             .childChannelInitializer { channel in
                 channel.pipeline.addHandler(
+                    IdleStateHandler(
+                        readTimeout: .milliseconds(Int64(configuration.idleTimeout * 1000))
+                    )
+                )
+                .flatMap {
+                    channel.pipeline.addHandler(
                     ByteToMessageHandler(
                         IMTCPLineFrameDecoder(maxFrameBytes: configuration.maxFrameBytes)
                     )
-                )
-                    .flatMap {
-                        channel.pipeline.addHandler(IMTCPConnectionHandler(application: application))
-                    }
+                    )
+                }
+                .flatMap {
+                    channel.pipeline.addHandler(IMTCPConnectionHandler(application: application))
+                }
             }
 
         let channel = try await bootstrap.bind(host: configuration.host, port: configuration.port).get()

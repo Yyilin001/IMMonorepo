@@ -39,7 +39,6 @@ class IMRuntimeController(
     private var cacheSaveJob: Job? = null
     private var reconnectAttempt = 0
     private val readReportJobs = mutableMapOf<String, Job>()
-    private val pendingReadSequences = mutableMapOf<String, ULong>()
 
     private val mutableSessionInvalidations = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val sessionInvalidations: SharedFlow<String> = mutableSessionInvalidations
@@ -54,6 +53,7 @@ class IMRuntimeController(
         scope.launch {
             restoreCachedSnapshot(userID)
             refreshConversationSummaries()
+            retryPendingReadReports()
             scheduleConnectionIfNeeded()
         }
     }
@@ -75,7 +75,6 @@ class IMRuntimeController(
         cacheObserveJob = null
         readReportJobs.values.forEach { it.cancel() }
         readReportJobs.clear()
-        pendingReadSequences.clear()
         val currentConnection = connection
         connection = null
         conversationStore.setConnectionStatus(IMConnectionStatus.Disconnected)
@@ -228,6 +227,7 @@ class IMRuntimeController(
                 startEventLoop(nextConnection)
                 flushQueuedTextMessages()
                 syncConversationGapsAfterConnection()
+                retryPendingReadReports()
             }.onFailure { error ->
                 connectJob = null
                 handleConnectionFailure(error)
@@ -370,6 +370,7 @@ class IMRuntimeController(
             sessionClient.fetchIMConversationSummaries(limit = DEFAULT_PAGE_LIMIT)
         }.onSuccess { page ->
             conversationStore.replaceSummaryWindow(page)
+            retryPendingReadReports()
         }.onFailure { error ->
             conversationStore.setStatusMessage(error.message ?: "Failed to load conversations.")
         }
@@ -426,17 +427,23 @@ class IMRuntimeController(
     }
 
     private fun markConversationRead(conversationID: String, readSequence: ULong) {
-        val current = pendingReadSequences[conversationID]
-        pendingReadSequences[conversationID] = maxOf(current ?: 0UL, readSequence)
+        conversationStore.recordPendingReadSequence(conversationID, readSequence)
         readReportJobs[conversationID]?.cancel()
         readReportJobs[conversationID] = scope.launch {
             delay(READ_REPORT_DEBOUNCE_MILLIS)
-            val sequence = pendingReadSequences.remove(conversationID) ?: return@launch
+            val sequence = conversationStore.pendingReadSequences()[conversationID] ?: return@launch
             runCatching {
                 sessionClient.markIMConversationRead(conversationID, sequence)
             }.onSuccess { response ->
                 conversationStore.applyServerExplicitReadResponse(response)
+                conversationStore.clearPendingReadSequence(conversationID, sequence)
             }
+        }
+    }
+
+    private fun retryPendingReadReports() {
+        conversationStore.pendingReadSequences().forEach { (conversationID, sequence) ->
+            markConversationRead(conversationID, sequence)
         }
     }
 

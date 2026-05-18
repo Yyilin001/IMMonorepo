@@ -102,6 +102,7 @@ private fun IMSyncCursorState.toEntity(ownerUserID: String): IMSyncCursorEntity 
         hasLoadedMessages = hasLoadedMessages,
         latestSyncedServerSequence = latestSyncedServerSequence?.toLong(),
         oldestLoadedServerSequence = oldestLoadedServerSequence?.toLong(),
+        pendingReadSequence = pendingReadSequence?.toLong(),
     )
 
 private fun IMSyncCursorEntity.toDomain(): IMSyncCursorState =
@@ -110,6 +111,7 @@ private fun IMSyncCursorEntity.toDomain(): IMSyncCursorState =
         hasLoadedMessages = hasLoadedMessages,
         latestSyncedServerSequence = latestSyncedServerSequence?.toULong(),
         oldestLoadedServerSequence = oldestLoadedServerSequence?.toULong(),
+        pendingReadSequence = pendingReadSequence?.toULong(),
     )
 
 private fun IMConversation.toEntity(ownerUserID: String, json: Json): IMCachedConversationEntity =

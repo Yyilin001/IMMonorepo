@@ -35,11 +35,32 @@ class IMConversationStoreTests {
             payload = IMTCPAckPayload(
                 messageID = request.payload.clientMessageID!!,
                 conversationID = "conversation-1",
-                status = "received",
+                status = "accepted",
             ),
         )
 
         assertEquals(IMMessageDeliveryState.Sent, store.state.value.conversations.first().messages.first().deliveryState)
+    }
+
+    @Test
+    fun failedAckMarksOutgoingMessageFailed() {
+        val store = IMConversationStore()
+        store.replaceSummaryWindow(pageWithConversation())
+        val request = store.prepareOutgoingText("hello", "conversation-1", "user-1")
+        assertNotNull(request)
+
+        store.applyOutgoingAcknowledgement(
+            requestID = request!!.requestID,
+            payload = IMTCPAckPayload(
+                messageID = request.payload.clientMessageID!!,
+                conversationID = "conversation-1",
+                status = "conversation_unavailable",
+            ),
+        )
+
+        val state = store.state.value
+        assertEquals(IMMessageDeliveryState.Failed, state.conversations.first().messages.first().deliveryState)
+        assertEquals("Conversation is unavailable.", state.statusMessage)
     }
 
     @Test
@@ -136,7 +157,7 @@ class IMConversationStoreTests {
             payload = IMTCPAckPayload(
                 messageID = "server-message-1",
                 conversationID = "conversation-1",
-                status = "accepted",
+                status = "internal_error",
             ),
         )
 
@@ -145,6 +166,22 @@ class IMConversationStoreTests {
         assertEquals("server-message-1", messages.first().serverMessageID)
         assertEquals(9UL, messages.first().serverSequence)
         assertEquals(IMMessageDeliveryState.Sent, messages.first().deliveryState)
+    }
+
+    @Test
+    fun pendingReadSequenceKeepsHighestValueUntilCleared() {
+        val store = IMConversationStore()
+        store.recordPendingReadSequence("conversation-1", 2UL)
+        store.recordPendingReadSequence("conversation-1", 5UL)
+        store.recordPendingReadSequence("conversation-1", 3UL)
+
+        assertEquals(5UL, store.state.value.pendingReadSequences["conversation-1"])
+
+        store.clearPendingReadSequence("conversation-1", 4UL)
+        assertEquals(5UL, store.state.value.pendingReadSequences["conversation-1"])
+
+        store.clearPendingReadSequence("conversation-1", 5UL)
+        assertEquals(null, store.state.value.pendingReadSequences["conversation-1"])
     }
 
     @Test

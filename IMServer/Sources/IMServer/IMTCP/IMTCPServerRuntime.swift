@@ -155,6 +155,24 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         context.close(promise: nil)
     }
 
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if let idleEvent = event as? IdleStateHandler.IdleStateEvent {
+            switch idleEvent {
+            case .read:
+                sendKickAndClose(
+                    channel: context.channel,
+                    reason: .protocolError,
+                    message: "Connection idle timeout."
+                )
+            case .write, .all:
+                break
+            }
+            return
+        }
+
+        context.fireUserInboundEventTriggered(event)
+    }
+
     private func handle(packet: IMTCPInboundPacket, channel: any Channel) {
         switch state {
         case .waitingForAuth:
@@ -295,6 +313,9 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
 
             Task {
                 do {
+                    try await AuthService(app: self.application, db: self.application.db)
+                        .validateActiveSession(id: connection.sessionID, userID: connection.userID)
+
                     let result = try await service.persistIncomingMessage(
                         payload,
                         senderUserID: connection.userID
@@ -321,6 +342,14 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                             conversationID: result.conversationID,
                             recipientUserIDs: result.recipientUserIDs,
                             actorUserID: connection.userID
+                        )
+                    }
+                } catch AuthError.sessionRevoked, AuthError.sessionExpired, AuthError.invalidToken {
+                    channel.eventLoop.execute {
+                        self.sendKickAndClose(
+                            channel: channel,
+                            reason: .sessionRevoked,
+                            message: "Current login is invalid. Please sign in again."
                         )
                     }
                 } catch let error as IMRealtimeMessageError {
@@ -415,9 +444,19 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         message: String
     ) {
         guard case .closing = state else {
+            removeAuthenticatedConnectionIfNeeded()
             state = .closing
             IMTCPChannelWriter.sendKickAndClose(on: channel, reason: reason, message: message)
             return
+        }
+    }
+
+    private func removeAuthenticatedConnectionIfNeeded() {
+        guard case .authenticated(let connection) = state else {
+            return
+        }
+        Task {
+            await self.application.connectionRoutingService.remove(connectionID: connection.connectionID)
         }
     }
 }

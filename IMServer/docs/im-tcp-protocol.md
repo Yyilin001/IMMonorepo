@@ -17,6 +17,24 @@ with an HTTP-issued access token during the initial handshake.
 - Encoding: UTF-8
 - Direction: full duplex
 
+Production deployments must not expose the plain TCP listener directly to the
+public internet. The listener must be reachable only through one of these
+deployment boundaries:
+
+- private VPC/subnet or loopback bind
+- VPN-protected network
+- load balancer TCP TLS termination
+- service mesh mTLS
+
+When the TCP listener binds to a non-private host in production, startup requires
+`IM_TCP_REQUIRES_TLS_TERMINATION=true` as an explicit deployment assertion. This
+does not add native TLS to the server protocol; it prevents accidentally running
+cleartext TCP on a public address.
+
+The server closes idle connections that stop sending frames for longer than
+`IM_TCP_IDLE_TIMEOUT`, sends `kick(protocol_error)` when possible, and removes
+the connection from registry and presence during close.
+
 Each frame is a single JSON object:
 
 ```json

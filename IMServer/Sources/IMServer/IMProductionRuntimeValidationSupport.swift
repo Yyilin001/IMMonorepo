@@ -74,6 +74,26 @@ enum IMProductionRuntimeValidationSupport {
         guard let baseURL = app.gatewayRelayConfiguration.baseURL, !baseURL.isEmpty else {
             throw GatewayRelayConfigurationError.httpModeRequiresBaseURL
         }
+        guard let secret = app.gatewayRelayConfiguration.sharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !secret.isEmpty
+        else {
+            throw Abort(.internalServerError, reason: "Production gateway relay requires IM_INTERNAL_SHARED_SECRET.")
+        }
+    }
+
+    static func validateTCPTransportExposure(_ app: Application) throws {
+        guard app.environment == .production,
+              app.imTCPConfiguration.enabled,
+              !app.imTCPConfiguration.requiresTLSTermination,
+              !isPrivateOrLoopbackTCPHost(app.imTCPConfiguration.host)
+        else {
+            return
+        }
+
+        throw Abort(
+            .internalServerError,
+            reason: "Production TCP realtime on a public bind requires IM_TCP_REQUIRES_TLS_TERMINATION=true and TLS termination, VPN, or service-mesh mTLS in front of the TCP port."
+        )
     }
 
     static func validateKafkaProducerConfiguration(_ app: Application) throws {
@@ -224,4 +244,19 @@ enum IMProductionRuntimeValidationSupport {
             )
         }
     }
+}
+
+private func isPrivateOrLoopbackTCPHost(_ host: String) -> Bool {
+    let normalized = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if normalized == "localhost" || normalized == "::1" || normalized.hasPrefix("127.") {
+        return true
+    }
+    if normalized.hasPrefix("10.") || normalized.hasPrefix("192.168.") {
+        return true
+    }
+    let parts = normalized.split(separator: ".").compactMap { Int($0) }
+    if parts.count == 4, parts[0] == 172, (16...31).contains(parts[1]) {
+        return true
+    }
+    return false
 }

@@ -1,4 +1,5 @@
 @testable import IMServer
+import Fluent
 import Foundation
 import NIOCore
 import NIOEmbedded
@@ -20,7 +21,8 @@ extension IMServerTests {
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
-                maxFrameBytes: 64 * 1024
+                maxFrameBytes: 64 * 1024,
+                requiresTLSTermination: false
             )
         }) { app in
             let tcpServer = try await startTestIMTCPServer(app: app)
@@ -114,7 +116,8 @@ extension IMServerTests {
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
-                maxFrameBytes: 64 * 1024
+                maxFrameBytes: 64 * 1024,
+                requiresTLSTermination: false
             )
         }) { app in
             let tcpServer = try await startTestIMTCPServer(app: app)
@@ -218,7 +221,8 @@ extension IMServerTests {
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
-                maxFrameBytes: 64 * 1024
+                maxFrameBytes: 64 * 1024,
+                requiresTLSTermination: false
             )
         }) { app in
             let tcpServer = try await startTestIMTCPServer(app: app)
@@ -315,6 +319,123 @@ extension IMServerTests {
                     #expect(response.hasMore == false)
                 }
             )
+        }
+    }
+
+    @Test("Revoked TCP session is kicked before message persistence")
+    func revokedTCPSessionIsKickedBeforeMessagePersistence() async throws {
+        try await withApp(configure: { app in
+            try await configure(app)
+            app.imTCPConfiguration = IMTCPConfiguration(
+                enabled: true,
+                host: "127.0.0.1",
+                port: 0,
+                protocolVersion: 1,
+                authTimeout: 2,
+                heartbeatInterval: 30,
+                idleTimeout: 90,
+                maxFrameBytes: 64 * 1024,
+                requiresTLSTermination: false
+            )
+        }) { app in
+            let tcpServer = try await startTestIMTCPServer(app: app)
+            defer { Task { try? await tcpServer.channel.close().get() } }
+
+            let accessToken = try await loginAccessToken(
+                email: loginRequest.email,
+                password: loginRequest.password,
+                deviceID: "revoked-tcp-device",
+                on: app
+            )
+            let peerUser = try await makeUser(email: "tcp-revoked-peer@example.com", on: app)
+            var createdConversationID: UUID?
+            try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                try req.content.encode(
+                    IMConversationCreateRequest(
+                        kind: IMConversationKind.direct.rawValue,
+                        title: "TCP Revoked",
+                        memberEmails: [peerUser.email]
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                createdConversationID = try res.content.decode(IMConversationResponse.self).id
+            })
+            let conversationID = try #require(createdConversationID)
+
+            let client = try await IMTCPTestClient.connect(port: tcpServer.port, eventLoopGroup: app.eventLoopGroup)
+            defer { Task { await client.close() } }
+            try await client.authenticate(accessToken: accessToken, deviceID: "revoked-tcp-device")
+
+            let activeSession = try await session(for: loginRequest.email, deviceID: "revoked-tcp-device", on: app)
+            activeSession.revokedAt = Date()
+            try await activeSession.update(on: app.db)
+
+            try await client.send(
+                type: .message,
+                requestID: UUID(),
+                payload: imTCPTextPayload(
+                    conversationID: conversationID,
+                    clientMessageID: "revoked-send",
+                    text: "must not persist"
+                )
+            )
+
+            let kick = try await client.nextPacket(ofType: .kick)
+                .payload.decodePayload(IMTCPKickPayload.self)
+            #expect(kick.reason == .sessionRevoked)
+
+            let persisted = try await ConversationMessage.query(on: app.db)
+                .filter(\.$conversation.$id == conversationID)
+                .filter(\.$clientMessageID == "revoked-send")
+                .first()
+            #expect(persisted == nil)
+        }
+    }
+
+    @Test("TCP idle timeout kicks connection and clears session count")
+    func tcpIdleTimeoutKicksConnectionAndClearsSessionCount() async throws {
+        try await withApp(configure: { app in
+            try await configure(app)
+            app.imTCPConfiguration = IMTCPConfiguration(
+                enabled: true,
+                host: "127.0.0.1",
+                port: 0,
+                protocolVersion: 1,
+                authTimeout: 2,
+                heartbeatInterval: 30,
+                idleTimeout: 0.1,
+                maxFrameBytes: 64 * 1024,
+                requiresTLSTermination: false
+            )
+        }) { app in
+            let tcpServer = try await startTestIMTCPServer(app: app)
+            defer { Task { try? await tcpServer.channel.close().get() } }
+
+            let accessToken = try await loginAccessToken(
+                email: loginRequest.email,
+                password: loginRequest.password,
+                deviceID: "idle-tcp-device",
+                on: app
+            )
+            let activeSession = try await session(
+                for: loginRequest.email,
+                deviceID: "idle-tcp-device",
+                on: app
+            )
+            let activeSessionID = try activeSession.requireID()
+
+            let client = try await IMTCPTestClient.connect(port: tcpServer.port, eventLoopGroup: app.eventLoopGroup)
+            defer { Task { await client.close() } }
+            try await client.authenticate(accessToken: accessToken, deviceID: "idle-tcp-device")
+            #expect(await app.imConnectionRegistry.activeConnectionCounts(forSessionIDs: [activeSessionID])[activeSessionID] == 1)
+
+            let kick = try await client.nextPacket(ofType: .kick)
+                .payload.decodePayload(IMTCPKickPayload.self)
+            #expect(kick.message == "Connection idle timeout.")
+
+            try await waitUntilTCPConnectionCount(app: app, sessionID: activeSessionID, expectedCount: 0)
         }
     }
 
@@ -440,6 +561,31 @@ extension IMServerTests {
             })
 
             await app.gatewaySessionService.remove(connectionID: connectionID)
+        }
+    }
+
+    @Test("Gateway relay requires configured secret when present")
+    func gatewayRelayRequiresConfiguredSecretWhenPresent() async throws {
+        try await withApp(configure: { app in
+            try await configure(app)
+            app.gatewayRelayConfiguration = IMGatewayRelayConfiguration(
+                mode: .local,
+                baseURL: nil,
+                sharedSecret: "relay-secret"
+            )
+        }) { app in
+            try await app.testing().test(.POST, "internal/gateway/realtime/session-counts", beforeRequest: { req in
+                try req.content.encode(GatewayRelaySessionCountsRequest(sessionIDs: []))
+            }, afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+
+            try await app.testing().test(.POST, "internal/gateway/realtime/session-counts", beforeRequest: { req in
+                req.headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: "relay-secret")
+                try req.content.encode(GatewayRelaySessionCountsRequest(sessionIDs: []))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+            })
         }
     }
 
@@ -593,10 +739,17 @@ private func startTestIMTCPServer(app: Application) async throws -> IMTCPTestSer
         .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
         .childChannelInitializer { channel in
             channel.pipeline.addHandler(
+                IdleStateHandler(
+                    readTimeout: .milliseconds(Int64(configuration.idleTimeout * 1000))
+                )
+            )
+            .flatMap {
+                channel.pipeline.addHandler(
                 ByteToMessageHandler(
                     IMTCPLineFrameDecoder(maxFrameBytes: configuration.maxFrameBytes)
                 )
-            )
+                )
+            }
             .flatMap {
                 channel.pipeline.addHandler(IMTCPConnectionHandler(application: app))
             }
@@ -608,6 +761,22 @@ private func startTestIMTCPServer(app: Application) async throws -> IMTCPTestSer
         throw IMTCPTestFailure.missingBoundPort
     }
     return IMTCPTestServer(channel: channel, port: port)
+}
+
+private func waitUntilTCPConnectionCount(
+    app: Application,
+    sessionID: UUID,
+    expectedCount: Int
+) async throws {
+    let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+    while DispatchTime.now().uptimeNanoseconds < deadline {
+        let count = await app.imConnectionRegistry.activeConnectionCounts(forSessionIDs: [sessionID])[sessionID] ?? 0
+        if count == expectedCount {
+            return
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    throw IMTCPTestFailure.sessionCountTimeout
 }
 
 private struct IMTCPTestClient: Sendable {
@@ -723,6 +892,7 @@ private actor IMTCPTestInbox {
 private enum IMTCPTestFailure: Error {
     case missingBoundPort
     case packetTimeout(IMTCPPacketType)
+    case sessionCountTimeout
 }
 
 private actor FakePresenceStore: PresenceStore {

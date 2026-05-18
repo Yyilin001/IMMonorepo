@@ -126,6 +126,11 @@ struct AuthService {
         guard session.refreshExpiresAt > now else {
             session.revokedAt = now
             try await session.update(on: db)
+            await kickRevokedSession(
+                sessionID: payload.sid,
+                reason: .sessionRevoked,
+                message: "Current login is invalid. Please sign in again."
+            )
             throw AuthError.expiredToken
         }
 
@@ -142,6 +147,11 @@ struct AuthService {
         // 旧 token 超出 grace period 仍被使用，视为 reuse/replay，直接吊销该 session。
         session.revokedAt = now
         try await session.update(on: db)
+        await kickRevokedSession(
+            sessionID: payload.sid,
+            reason: .sessionRevoked,
+            message: "Current login is invalid. Please sign in again."
+        )
         throw AuthError.refreshTokenReuseDetected
     }
 
@@ -162,6 +172,10 @@ struct AuthService {
         )
     }
 
+    func validateActiveSession(id sessionID: UUID, userID: UUID) async throws {
+        _ = try await requireActiveSession(id: sessionID, userID: userID, shouldRevokeExpired: true)
+    }
+
     func logout(sessionID: UUID) async throws {
         guard let session = try await AuthSession.find(sessionID, on: db) else {
             return
@@ -169,6 +183,11 @@ struct AuthService {
 
         session.revokedAt = now
         try await session.update(on: db)
+        await app.gatewaySessionService.kickConnections(
+            forSessionID: sessionID,
+            reason: .logoutCurrent,
+            message: "You have signed out from this device."
+        )
     }
 
     func logout(sessionID: UUID, for userID: UUID) async throws {
@@ -180,6 +199,11 @@ struct AuthService {
 
         session.revokedAt = now
         try await session.update(on: db)
+        await app.gatewaySessionService.kickConnections(
+            forSessionID: sessionID,
+            reason: .sessionRevoked,
+            message: "This session has been revoked."
+        )
     }
 
     func sessions(for userID: UUID, currentSessionID: UUID) async throws -> [AuthSessionResponse] {
@@ -237,6 +261,12 @@ struct AuthService {
             .filter(\.$revokedAt == nil)
             .set(\.$revokedAt, to: revokedAt)
             .update()
+
+        await app.gatewaySessionService.kickConnections(
+            forUserID: userID,
+            reason: .logoutAll,
+            message: "You have signed out from all devices."
+        )
 
         return LogoutAllResponse(revokedSessions: activeSessions.count)
     }
@@ -400,6 +430,11 @@ struct AuthService {
         }
 
         if session.revokedAt != nil {
+            await kickRevokedSession(
+                sessionID: sessionID,
+                reason: .sessionRevoked,
+                message: "Current login is invalid. Please sign in again."
+            )
             throw AuthError.sessionRevoked
         }
 
@@ -407,6 +442,11 @@ struct AuthService {
             if shouldRevokeExpired {
                 session.revokedAt = now
                 try await session.update(on: db)
+                await kickRevokedSession(
+                    sessionID: sessionID,
+                    reason: .sessionRevoked,
+                    message: "Current login is invalid. Please sign in again."
+                )
             }
             throw AuthError.sessionExpired
         }
@@ -481,6 +521,14 @@ struct AuthService {
             .filter(\.$refreshExpiresAt > now)
             .sort(\.$createdAt, .descending)
             .first()
+    }
+
+    private func kickRevokedSession(sessionID: UUID, reason: IMTCPKickReason, message: String) async {
+        await app.gatewaySessionService.kickConnections(
+            forSessionID: sessionID,
+            reason: reason,
+            message: message
+        )
     }
 }
 

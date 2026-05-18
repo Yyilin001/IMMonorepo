@@ -59,6 +59,7 @@ class RoomIMConversationCacheTests {
             loadedConversationIDs = setOf("conversation-1"),
             latestSyncedServerSequences = mapOf("conversation-1" to 1UL),
             oldestLoadedServerSequences = mapOf("conversation-1" to 1UL),
+            pendingReadSequences = mapOf("conversation-1" to 2UL),
         )
 
         cache.saveSnapshot("user-1", state)
@@ -70,6 +71,7 @@ class RoomIMConversationCacheTests {
         assertEquals(true, restored?.hasMore)
         assertEquals(setOf("conversation-1"), restored?.loadedConversationIDs)
         assertEquals(1UL, restored?.latestSyncedServerSequences?.get("conversation-1"))
+        assertEquals(2UL, restored?.pendingReadSequences?.get("conversation-1"))
         assertEquals("hello", restored?.conversations?.first()?.messages?.first()?.previewText)
     }
 
