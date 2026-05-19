@@ -71,9 +71,9 @@ Useful TCP scenarios:
 - `1 user x 5 devices`: `--connections 5 --devices-per-user 5 --messages 1`
 - `100 users x 2 devices`: pair HTTP/k6 user load with TCP `--devices-per-user 2`; use more load generator accounts for true multi-user TCP pressure.
 - `1 group x 500 members x 2 devices`: create the group through staging fixtures, then run TCPDriver against the target `IM_CONVERSATION_ID` while k6 drives HTTP changes/history reads.
-- `AI stream concurrency`: start AI message streams until the per-user and per-conversation limits reject excess requests; verify no stream remains permanently `streaming`.
+- `AI stream concurrency`: covered by `scripts/staging_baseline.sh`; tune with `IM_AI_STREAM_ATTEMPTS` and `IM_AI_STREAM_CONCURRENCY`.
 - `logout all storm`: run TCPDriver continuously, then repeatedly call `DELETE /api/auth/sessions/all` for load accounts.
-- `reconnect storm`: run TCPDriver continuously while restarting one gateway at a time and verify `messages/since` convergence.
+- `reconnect storm`: covered by `scripts/staging_baseline.sh` when `IM_RECONNECT_STORM_COMMAND` is set to a gateway restart/failover command that validates `messages/since` convergence.
 
 TCPDriver reports:
 

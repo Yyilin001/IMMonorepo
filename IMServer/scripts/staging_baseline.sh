@@ -6,6 +6,8 @@ PROFILE="staging-baseline"
 ENV_FILE=""
 RUN_HTTP="true"
 RUN_TCP="true"
+RUN_AI_STREAM="true"
+RUN_RECONNECT_STORM="true"
 REQUIRE_ACCEPTANCE="false"
 TCP_CONNECTIONS=""
 TCP_DEVICES_PER_USER=""
@@ -14,7 +16,7 @@ TCP_SEND_INTERVAL_MS=""
 
 usage() {
   cat <<'USAGE'
-Usage: staging_baseline.sh [--profile local-smoke|staging-baseline|capacity-target] [--env-file path] [--skip-http] [--skip-tcp] [--require-acceptance]
+Usage: staging_baseline.sh [--profile local-smoke|staging-baseline|capacity-target] [--env-file path] [--skip-http] [--skip-tcp] [--skip-ai-stream] [--skip-reconnect-storm] [--require-acceptance]
                            [--tcp-connections n] [--tcp-devices-per-user n] [--tcp-messages n] [--tcp-send-interval-ms n]
 
 Required for HTTP:
@@ -27,8 +29,8 @@ Useful multi-device TCP scenarios:
   1 user x 5 devices:        --profile local-smoke --tcp-connections 5 --tcp-devices-per-user 5 --tcp-messages 1
   100 users x 2 devices:     pair this script with k6 HTTP user load and TCP --tcp-devices-per-user 2
   1 group x 500 x 2 devices: set IM_GROUP_CONVERSATION_ID and TCP_GROUP_* env vars for the large group run
-  AI stream concurrency:      expose /internal/metrics and set IM_AI_STREAM_ACCEPTANCE=true after external AI load
-  reconnect/logout storms:   run against staging while externally restarting gateway or calling logout-all
+  AI stream concurrency:      set IM_AI_STREAM_ATTEMPTS / IM_AI_STREAM_CONCURRENCY to tune start pressure
+  reconnect storm:            set IM_RECONNECT_STORM_COMMAND to a gateway restart/failover command
 USAGE
 }
 
@@ -48,6 +50,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-tcp)
       RUN_TCP="false"
+      shift
+      ;;
+    --skip-ai-stream)
+      RUN_AI_STREAM="false"
+      shift
+      ;;
+    --skip-reconnect-storm)
+      RUN_RECONNECT_STORM="false"
       shift
       ;;
     --require-acceptance)
@@ -229,25 +239,177 @@ run_tcp_scenario() {
   fi
 }
 
-append_external_scenario() {
-  local label="$1"
-  local flag_name="$2"
-  local flag_value="${!flag_name:-false}"
+run_ai_stream_concurrency() {
+  local log_file="${REPORT_DIR}/staging-baseline-ai-stream-concurrency.log"
+  local attempts="${IM_AI_STREAM_ATTEMPTS:-8}"
+  local concurrency="${IM_AI_STREAM_CONCURRENCY:-8}"
+  local expected_rejections="${IM_AI_STREAM_EXPECT_REJECTIONS:-true}"
+
+  echo "Running AI stream concurrency"
+  python3 - "${BASE_URL}" "${IM_EMAIL:?IM_EMAIL is required}" "${IM_PASSWORD:?IM_PASSWORD is required}" "${IM_CONVERSATION_ID:?IM_CONVERSATION_ID is required}" "${attempts}" "${concurrency}" > "${log_file}" <<'PY'
+import concurrent.futures
+import json
+import sys
+import urllib.error
+import urllib.request
+
+base_url, email, password, conversation_id = sys.argv[1:5]
+attempts = int(sys.argv[5])
+concurrency = int(sys.argv[6])
+
+def request_json(method, url, payload=None, token=None):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            raw = response.read().decode("utf-8")
+            return response.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8")
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            body = {"raw": raw}
+        return error.code, body
+
+login_status, login_body = request_json("POST", f"{base_url}/api/auth/login", {
+    "email": email,
+    "password": password,
+    "device": {
+        "deviceID": "staging-ai-stream-concurrency",
+        "deviceName": "staging-baseline",
+        "platform": "staging"
+    }
+})
+if login_status >= 400:
+    print(f"loginStatus={login_status}")
+    print("success=0 rejected=0 errors=1")
+    sys.exit(0)
+
+token = login_body.get("accessToken")
+if not token:
+    print("loginStatus=missing-token")
+    print("success=0 rejected=0 errors=1")
+    sys.exit(0)
+
+def start_stream(index):
+    status, body = request_json("POST", f"{base_url}/api/im/conversations/{conversation_id}/ai/messages", {
+        "prompt": f"staging concurrency probe {index}"
+    }, token=token)
+    if 200 <= status < 300:
+        return ("success", status, body.get("message", {}).get("id"))
+    if status in (409, 423, 429):
+        return ("rejected", status, None)
+    return ("error", status, None)
+
+results = []
+with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+    futures = [executor.submit(start_stream, index) for index in range(attempts)]
+    for future in concurrent.futures.as_completed(futures):
+        results.append(future.result())
+
+success = sum(1 for kind, _, _ in results if kind == "success")
+rejected = sum(1 for kind, _, _ in results if kind == "rejected")
+errors = sum(1 for kind, _, _ in results if kind == "error")
+cancel_errors = 0
+statuses = {}
+for _, status, _ in results:
+    statuses[status] = statuses.get(status, 0) + 1
+for kind, _, message_id in results:
+    if kind != "success" or not message_id:
+        continue
+    cancel_status, _ = request_json("POST", f"{base_url}/api/im/conversations/{conversation_id}/messages/{message_id}/stream/cancel", None, token=token)
+    if cancel_status >= 500:
+        cancel_errors += 1
+
+print(f"loginStatus={login_status}")
+print(f"attempts={attempts} concurrency={concurrency}")
+print(f"success={success} rejected={rejected} errors={errors} cancelErrors={cancel_errors}")
+print("statuses=" + ",".join(f"{key}:{statuses[key]}" for key in sorted(statuses)))
+PY
+
+  cat "${log_file}"
+  local success rejected errors cancel_errors
+  success="$(grep -Eo 'success=[0-9]+' "${log_file}" | tail -1 | cut -d= -f2)"
+  rejected="$(grep -Eo 'rejected=[0-9]+' "${log_file}" | tail -1 | cut -d= -f2)"
+  errors="$(grep -Eo 'errors=[0-9]+' "${log_file}" | tail -1 | cut -d= -f2)"
+  cancel_errors="$(grep -Eo 'cancelErrors=[0-9]+' "${log_file}" | tail -1 | cut -d= -f2)"
   {
     echo
-    echo "## Scenario ${label}"
+    echo "## Scenario AI stream concurrency"
     echo
-    echo "- status: $([[ "${flag_value}" == "true" ]] && echo confirmed || echo not-confirmed)"
-    echo "- confirmation_env: ${flag_name}"
+    echo "- log: $(basename "${log_file}")"
+    echo "- attempts: ${attempts}"
+    echo "- concurrency: ${concurrency}"
+    echo "- success: ${success:-unknown}"
+    echo "- rejected: ${rejected:-unknown}"
+    echo "- errors: ${errors:-unknown}"
+    echo "- cancel_errors: ${cancel_errors:-unknown}"
+    echo
+    echo '```text'
+    cat "${log_file}"
+    echo '```'
   } >> "${REPORT_FILE}"
-  if [[ "${REQUIRE_ACCEPTANCE}" == "true" && "${flag_value}" != "true" ]]; then
-    record_failure "${label} not confirmed; set ${flag_name}=true after running the scenario"
+
+  if [[ "${REQUIRE_ACCEPTANCE}" == "true" ]]; then
+    awk -v value="${success:-0}" 'BEGIN { exit(value >= 1 ? 0 : 1) }' || record_failure "AI stream concurrency did not start any streams"
+    awk -v value="${errors:-1}" 'BEGIN { exit(value == 0 ? 0 : 1) }' || record_failure "AI stream concurrency returned unexpected errors"
+    awk -v value="${cancel_errors:-1}" 'BEGIN { exit(value == 0 ? 0 : 1) }' || record_failure "AI stream concurrency cleanup returned server errors"
+    if [[ "${expected_rejections}" == "true" ]]; then
+      awk -v value="${rejected:-0}" 'BEGIN { exit(value >= 1 ? 0 : 1) }' || record_failure "AI stream concurrency did not reject excess streams"
+    fi
+  fi
+}
+
+run_reconnect_storm() {
+  local log_file="${REPORT_DIR}/staging-baseline-reconnect-storm-command.log"
+  if [[ -z "${IM_RECONNECT_STORM_COMMAND:-}" ]]; then
+    {
+      echo
+      echo "## Scenario reconnect storm"
+      echo
+      echo "- status: skipped"
+      echo "- reason: IM_RECONNECT_STORM_COMMAND not set"
+    } >> "${REPORT_FILE}"
+    if [[ "${REQUIRE_ACCEPTANCE}" == "true" ]]; then
+      record_failure "reconnect storm command is required; set IM_RECONNECT_STORM_COMMAND"
+    fi
+    return
+  fi
+
+  echo "Running reconnect storm command"
+  bash -lc "${IM_RECONNECT_STORM_COMMAND}" | tee "${log_file}"
+  local command_status=${PIPESTATUS[0]}
+  {
+    echo
+    echo "## Scenario reconnect storm"
+    echo
+    echo "- command: ${IM_RECONNECT_STORM_COMMAND}"
+    echo "- status: $([[ ${command_status} -eq 0 ]] && echo passed || echo failed)"
+    echo "- log: $(basename "${log_file}")"
+    echo
+    echo '```text'
+    tail -n 40 "${log_file}"
+    echo '```'
+  } >> "${REPORT_FILE}"
+  if [[ "${REQUIRE_ACCEPTANCE}" == "true" && ${command_status} -ne 0 ]]; then
+    record_failure "reconnect storm command failed"
   fi
 }
 
 if [[ "${RUN_HTTP}" == "true" ]]; then
   command -v k6 >/dev/null 2>&1 || {
     echo "k6 is required for HTTP baseline. Install k6 or pass --skip-http." >&2
+    exit 127
+  }
+fi
+
+if [[ "${RUN_AI_STREAM}" == "true" ]]; then
+  command -v python3 >/dev/null 2>&1 || {
+    echo "python3 is required for AI stream concurrency. Install python3 or pass --skip-ai-stream." >&2
     exit 127
   }
 fi
@@ -272,6 +434,8 @@ fi
   echo "- tcp_connections: ${TCP_CONNECTIONS:-scenario-default}"
   echo "- tcp_devices_per_user: ${TCP_DEVICES_PER_USER:-scenario-default}"
   echo "- tcp_messages: ${TCP_MESSAGES:-scenario-default}"
+  echo "- ai_stream_scenario: ${RUN_AI_STREAM}"
+  echo "- reconnect_storm_scenario: ${RUN_RECONNECT_STORM}"
   echo
 } > "${REPORT_FILE}"
 
@@ -317,11 +481,16 @@ if [[ "${RUN_TCP}" == "true" ]]; then
     "${TCP_GROUP_SEND_INTERVAL_MS:-${TCP_SEND_INTERVAL_MS}}"
 fi
 
+if [[ "${RUN_AI_STREAM}" == "true" ]]; then
+  run_ai_stream_concurrency
+fi
+
+if [[ "${RUN_RECONNECT_STORM}" == "true" ]]; then
+  run_reconnect_storm
+fi
+
 after_metrics="$(capture_metrics after)"
 append_metrics_summary "after" "${after_metrics}"
-
-append_external_scenario "AI stream concurrency" "IM_AI_STREAM_ACCEPTANCE"
-append_external_scenario "reconnect storm" "IM_RECONNECT_STORM_ACCEPTANCE"
 
 if [[ "${REQUIRE_ACCEPTANCE}" == "true" && -n "${after_metrics}" ]]; then
   outbox_backlog="$(metric_value im_outbox_backlog_events "${after_metrics}")"
@@ -350,10 +519,10 @@ cat <<'EOF' >> "${REPORT_FILE}"
 - message write P95/P99 meets runbook thresholds: verify from staging metrics/dashboard
 - conversations/changes convergence P95 < 2s: verify from staging metrics/dashboard
 - outbox backlog returns to zero or continuously drains after load stops: enforced when metrics are available
-- reconnect messages/since success > 99.9%: confirm via IM_RECONNECT_STORM_ACCEPTANCE
+- reconnect messages/since success > 99.9%: enforced by IM_RECONNECT_STORM_COMMAND when --require-acceptance is set
 - session-count relay failures stay at 0: enforced when metrics are available
 - cross-node dispatch failures stay at 0: enforced when metrics are available
-- AI stream concurrency limit rejects excess requests: confirm via IM_AI_STREAM_ACCEPTANCE
+- AI stream concurrency limit rejects excess requests: enforced by scripted AI stream scenario when --require-acceptance is set
 - AI stream stale repair/finalize failure metrics stay at 0: enforced when metrics are available
 EOF
 

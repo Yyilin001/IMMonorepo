@@ -39,8 +39,8 @@ xcodebuild -project IMApp/IMApp.xcodeproj \
 - `1 user x 5 devices` passes with ack and canonical success rate >= 99.9%.
 - `100 users x 2 devices` passes with ack and canonical success rate >= 99.9%.
 - `1 group x 500 members x 2 devices` passes in the dedicated staging environment.
-- `reconnect storm` converges through `messages/since` without duplicate canonical messages.
-- AI stream concurrency is explicitly exercised and `IM_AI_STREAM_ACCEPTANCE=true` is recorded in the staging report.
+- `reconnect storm` converges through `messages/since` without duplicate canonical messages; `IM_RECONNECT_STORM_COMMAND` is recorded in the staging report.
+- AI stream concurrency is exercised by the staging baseline script and records success/rejection/error counts.
 - Outbox backlog drains to zero after load stops.
 - Redis integration tests run against a real Redis endpoint, not the fake/local store.
 
