@@ -1,6 +1,18 @@
 import Combine
 import Foundation
 
+public struct IMActiveMessageStreamTarget: Equatable, Hashable, Sendable {
+    public let conversationID: String
+    public let messageID: String
+    public let streamID: String
+
+    public init(conversationID: String, messageID: String, streamID: String) {
+        self.conversationID = conversationID
+        self.messageID = messageID
+        self.streamID = streamID
+    }
+}
+
 @MainActor
 public final class IMConversationStore: ObservableObject {
     @Published public internal(set) var conversations: [IMConversation] = []
@@ -28,6 +40,7 @@ public final class IMConversationStore: ObservableObject {
     private let messageTimelineState = MessageTimelineState()
     private let conversationTimelineStore = ConversationTimelineStore()
     private let messageDerivedStateReducer = MessageDerivedStateReducer()
+    private var pendingStreamSnapshotTargets: Set<IMActiveMessageStreamTarget> = []
 
     public init() { }
 
@@ -367,6 +380,16 @@ public final class IMConversationStore: ObservableObject {
 
         case .conversationRemovedForSelf:
             removeConversation(id: conversationID)
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
+        case .messageStreamStarted,
+             .messageStreamChunk,
+             .messageStreamCompleted,
+             .messageStreamFailed,
+             .messageStreamCancelled:
+            applyConversationSummaryContent(payload.conversation)
+            applyServerSummaryReadState(payload.conversation)
+            applyMessageStreamEvent(payload, currentUserID: currentUserID)
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .summaryUpdated, .conversationSettingsChanged, .inviteChanged:
@@ -1237,6 +1260,127 @@ public final class IMConversationStore: ObservableObject {
             ?? conversations[index].lastMessagePreviewText
         conversations[index].updatedAt = max(conversations[index].updatedAt, effectiveTimestamp)
         sortConversations()
+    }
+
+    public func applyMessageStreamEvent(
+        _ payload: IMTCPConversationEventPayload,
+        currentUserID: UUID
+    ) {
+        if let message = payload.message {
+            applyUpdatedMessage(message, currentUserID: currentUserID)
+        }
+
+        guard let stream = payload.stream else {
+            return
+        }
+
+        let conversationID = stream.conversationID
+        let index = ensureConversationIndex(for: conversationID)
+        guard let messageIndex = conversations[index].messages.firstIndex(where: { message in
+            message.serverMessageID == stream.messageID ||
+                message.id == stream.messageID ||
+                message.derivedState.streamState?.streamID == stream.streamID
+        }) else {
+            return
+        }
+
+        var message = conversations[index].messages[messageIndex]
+        let existingStreamState = message.derivedState.streamState
+        if existingStreamState?.state.isTerminal == true, stream.state == .streaming {
+            return
+        }
+        if let existingStreamState,
+           stream.state == .streaming,
+           stream.chunkIndex <= existingStreamState.lastChunkIndex {
+            return
+        }
+        if let existingStreamState,
+           stream.state == .streaming,
+           stream.chunkIndex > existingStreamState.lastChunkIndex + 1 {
+            pendingStreamSnapshotTargets.insert(
+                IMActiveMessageStreamTarget(
+                    conversationID: conversationID,
+                    messageID: stream.messageID,
+                    streamID: stream.streamID
+                )
+            )
+            return
+        }
+        if existingStreamState == nil,
+           stream.state == .streaming,
+           stream.chunkIndex > 1 {
+            pendingStreamSnapshotTargets.insert(
+                IMActiveMessageStreamTarget(
+                    conversationID: conversationID,
+                    messageID: stream.messageID,
+                    streamID: stream.streamID
+                )
+            )
+            return
+        }
+
+        let existingText = message.content.presentation(derivedState: message.derivedState).textValue ?? ""
+        let nextText: String
+        if let deltaText = stream.deltaText, stream.state == .streaming {
+            nextText = existingText + deltaText
+        } else {
+            nextText = existingText
+        }
+
+        message.content = .text(nextText)
+        message.derivedState = MessageDerivedState(
+            recallState: message.derivedState.recallState,
+            edits: message.derivedState.edits,
+            reactions: message.derivedState.reactions,
+            streamState: MessageStreamState(
+                streamID: stream.streamID,
+                state: stream.state,
+                lastChunkIndex: stream.chunkIndex,
+                partialText: nextText,
+                updatedAt: stream.serverTimestamp
+            )
+        )
+        conversations[index].messages[messageIndex] = message
+        conversations[index].lastMessagePreviewText = message.text
+        conversations[index].updatedAt = max(conversations[index].updatedAt, stream.serverTimestamp)
+        sortConversations()
+    }
+
+    public func applyMessageStreamSnapshot(
+        _ response: IMMessageStreamResponseBody,
+        currentUserID: UUID
+    ) {
+        applyUpdatedMessage(response.message, currentUserID: currentUserID)
+        pendingStreamSnapshotTargets.remove(
+            IMActiveMessageStreamTarget(
+                conversationID: response.message.conversationID.uuidString,
+                messageID: response.message.id.uuidString,
+                streamID: response.stream.streamID
+            )
+        )
+    }
+
+    public func activeMessageStreamTargets() -> [IMActiveMessageStreamTarget] {
+        conversations.flatMap { conversation in
+            conversation.messages.compactMap { message in
+                guard let streamState = message.derivedState.streamState,
+                      streamState.state == .streaming
+                else {
+                    return nil
+                }
+                return IMActiveMessageStreamTarget(
+                    conversationID: conversation.id,
+                    messageID: message.serverMessageID ?? message.id,
+                    streamID: streamState.streamID
+                )
+            }
+        }
+    }
+
+    public func consumePendingStreamSnapshotTargets() -> [IMActiveMessageStreamTarget] {
+        let targets = Array(pendingStreamSnapshotTargets)
+        pendingStreamSnapshotTargets.removeAll()
+        return targets
     }
 
     public func hasLoadedMessages(for conversationID: String) -> Bool {

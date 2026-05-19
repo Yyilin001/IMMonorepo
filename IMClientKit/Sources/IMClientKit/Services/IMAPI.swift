@@ -143,6 +143,19 @@ public struct IMConversationMessageReactionRequestBody: Codable, Sendable {
     }
 }
 
+public struct IMAIMessageStreamStartRequestBody: Codable, Sendable {
+    public let prompt: String
+
+    public init(prompt: String) {
+        self.prompt = prompt
+    }
+}
+
+public struct IMMessageStreamResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let message: IMConversationMessageResponseBody
+    public let stream: IMTCPMessageStreamPayload
+}
+
 public struct IMConversationMessageRecallResponseBody: Codable, Equatable, Sendable, APIResponseBody {
     public let id: UUID
     public let conversationID: UUID
@@ -699,6 +712,45 @@ enum IMRequest {
         }
     }
 
+    public struct StartAIMessageStream: AuthorizedEndpoint {
+        public typealias Response = IMMessageStreamResponseBody
+
+        let conversationID: String
+        let payload: IMAIMessageStreamStartRequestBody
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/ai/messages", method: .post)
+        }
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
+        }
+    }
+
+    public struct CancelMessageStream: AuthorizedEndpoint {
+        public typealias Response = IMMessageStreamResponseBody
+
+        let conversationID: String
+        let messageID: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/messages/\(messageID)/stream/cancel", method: .post)
+        }
+    }
+
+    public struct MessageStreamSnapshot: AuthorizedEndpoint {
+        public typealias Response = IMMessageStreamResponseBody
+
+        let conversationID: String
+        let messageID: String
+
+        var baseRequestSpec: HTTPRequestSpec {
+            .init(path: "api/im/conversations/\(conversationID)/messages/\(messageID)/stream")
+        }
+    }
+
     public struct MarkRead: AuthorizedEndpoint {
         public typealias Response = IMConversationReadResponseBody
 
@@ -1111,6 +1163,30 @@ enum IMRequest {
             afterSequence: afterSequence,
             limit: limit
         )
+    }
+
+    public static func startAIMessageStream(
+        conversationID: String,
+        prompt: String
+    ) -> StartAIMessageStream {
+        StartAIMessageStream(
+            conversationID: conversationID,
+            payload: IMAIMessageStreamStartRequestBody(prompt: prompt)
+        )
+    }
+
+    public static func cancelMessageStream(
+        conversationID: String,
+        messageID: String
+    ) -> CancelMessageStream {
+        CancelMessageStream(conversationID: conversationID, messageID: messageID)
+    }
+
+    public static func messageStreamSnapshot(
+        conversationID: String,
+        messageID: String
+    ) -> MessageStreamSnapshot {
+        MessageStreamSnapshot(conversationID: conversationID, messageID: messageID)
     }
 
     public static func markRead(
