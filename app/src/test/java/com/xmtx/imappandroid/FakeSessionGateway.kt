@@ -84,6 +84,10 @@ class FakeSessionGateway(
         sentText = text to conversationID
     }
 
+    override fun startAIReply(conversationID: String, prompt: String) = Unit
+
+    override fun cancelStream(conversationID: String, messageID: String) = Unit
+
     override fun addContact(email: String, remark: String?) = Unit
 
     override fun sendContactRequest(email: String, message: String?, remark: String?) {

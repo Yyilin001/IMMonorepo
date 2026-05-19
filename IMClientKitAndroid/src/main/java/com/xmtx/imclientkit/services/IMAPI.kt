@@ -10,6 +10,7 @@ import com.xmtx.imclientkit.features.im.IMConversationMetadataUpdateRequestBody
 import com.xmtx.imclientkit.features.im.IMConversationPreferencesUpdateRequestBody
 import com.xmtx.imclientkit.features.im.IMConversationReadRequestBody
 import com.xmtx.imclientkit.features.im.IMConversationTitleUpdateRequestBody
+import com.xmtx.imclientkit.features.im.IMAIMessageStreamStartRequestBody
 import com.xmtx.imclientkit.networking.HTTPQueryItem
 import com.xmtx.imclientkit.networking.HTTPRequestSpec
 import com.xmtx.imclientkit.networking.JsonConfiguration
@@ -75,6 +76,24 @@ class IMAPI(
                 HTTPQueryItem("afterSequence", afterSequence.toString()),
                 limit?.let { HTTPQueryItem("limit", it.toString()) },
             ),
+        )
+
+    fun startAIMessageStream(conversationID: String, prompt: String): HTTPRequestSpec =
+        HTTPRequestSpec(
+            path = "api/im/conversations/$conversationID/ai/messages",
+            method = HttpMethod.Post,
+            body = json.encodeToString(IMAIMessageStreamStartRequestBody(prompt)),
+        )
+
+    fun cancelMessageStream(conversationID: String, messageID: String): HTTPRequestSpec =
+        HTTPRequestSpec(
+            path = "api/im/conversations/$conversationID/messages/$messageID/stream/cancel",
+            method = HttpMethod.Post,
+        )
+
+    fun messageStreamSnapshot(conversationID: String, messageID: String): HTTPRequestSpec =
+        HTTPRequestSpec(
+            path = "api/im/conversations/$conversationID/messages/$messageID/stream",
         )
 
     fun markRead(

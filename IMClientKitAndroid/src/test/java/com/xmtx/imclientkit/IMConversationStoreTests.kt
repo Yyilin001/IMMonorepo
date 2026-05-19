@@ -1,10 +1,15 @@
 package com.xmtx.imclientkit
 
 import com.xmtx.imclientkit.features.im.IMConversationStore
+import com.xmtx.imclientkit.features.im.IMActiveMessageStreamTarget
 import com.xmtx.imclientkit.features.im.IMMessageContent
 import com.xmtx.imclientkit.features.im.IMMessageDeliveryState
 import com.xmtx.imclientkit.features.im.IMTCPAckPayload
+import com.xmtx.imclientkit.features.im.IMTCPConversationEventPayload
 import com.xmtx.imclientkit.features.im.IMTCPMessagePayload
+import com.xmtx.imclientkit.features.im.IMTCPMessageStreamPayload
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Test
@@ -239,6 +244,190 @@ class IMConversationStoreTests {
         assertEquals(setOf("conversation-1"), state.loadedConversationIDs)
         assertEquals(4UL, state.latestSyncedServerSequences["conversation-1"])
         assertEquals(4UL, state.oldestLoadedServerSequences["conversation-1"])
+    }
+
+    @Test
+    fun streamEventsMergeChunksIdempotentlyAndCompleteWithCanonicalMessage() {
+        val store = IMConversationStore()
+        store.replaceSummaryWindow(pageWithConversation())
+
+        store.applyMessageStreamEvent(
+            payload = IMTCPConversationEventPayload(
+                eventType = "message_stream_started",
+                conversation = conversation("conversation-1"),
+                message = com.xmtx.imclientkit.features.im.IMConversationMessageResponseBody(
+                    id = "message-1",
+                    conversationID = "conversation-1",
+                    senderUserID = "user-1",
+                    serverSequence = 2,
+                    content = IMMessageContent.Text(""),
+                    createdAt = "2026-05-13T00:00:00Z",
+                ),
+                stream = IMTCPMessageStreamPayload(
+                    streamID = "stream-1",
+                    messageID = "message-1",
+                    conversationID = "conversation-1",
+                    chunkIndex = 0,
+                    partialTextLength = 0,
+                    state = "streaming",
+                    serverTimestamp = "2026-05-13T00:00:00Z",
+                ),
+                actorUserID = "user-1",
+                serverTimestamp = "2026-05-13T00:00:00Z",
+            ),
+            currentUserID = "user-1",
+        )
+
+        listOf(
+            IMTCPMessageStreamPayload(
+                streamID = "stream-1",
+                messageID = "message-1",
+                conversationID = "conversation-1",
+                chunkIndex = 1,
+                deltaText = "AI",
+                partialTextLength = 2,
+                state = "streaming",
+                serverTimestamp = "2026-05-13T00:00:01Z",
+            ),
+            IMTCPMessageStreamPayload(
+                streamID = "stream-1",
+                messageID = "message-1",
+                conversationID = "conversation-1",
+                chunkIndex = 1,
+                deltaText = "AI",
+                partialTextLength = 2,
+                state = "streaming",
+                serverTimestamp = "2026-05-13T00:00:01Z",
+            ),
+            IMTCPMessageStreamPayload(
+                streamID = "stream-1",
+                messageID = "message-1",
+                conversationID = "conversation-1",
+                chunkIndex = 2,
+                deltaText = " response",
+                partialTextLength = 11,
+                state = "streaming",
+                serverTimestamp = "2026-05-13T00:00:02Z",
+            ),
+        ).forEach { stream ->
+            store.applyMessageStreamEvent(
+                payload = IMTCPConversationEventPayload(
+                    eventType = "message_stream_chunk",
+                    conversation = conversation("conversation-1"),
+                    stream = stream,
+                    actorUserID = "user-1",
+                    serverTimestamp = stream.serverTimestamp,
+                ),
+                currentUserID = "user-1",
+            )
+        }
+
+        var messages = store.state.value.conversations.first().messages
+        assertEquals(1, messages.size)
+        assertEquals("AI response", messages.first().previewText)
+        assertEquals(
+            listOf(
+                IMActiveMessageStreamTarget(
+                    conversationID = "conversation-1",
+                    messageID = "message-1",
+                    streamID = "stream-1",
+                ),
+            ),
+            store.activeMessageStreamTargets(),
+        )
+
+        store.applyMessageStreamEvent(
+            payload = IMTCPConversationEventPayload(
+                eventType = "message_stream_chunk",
+                conversation = conversation("conversation-1"),
+                stream = IMTCPMessageStreamPayload(
+                    streamID = "stream-1",
+                    messageID = "message-1",
+                    conversationID = "conversation-1",
+                    chunkIndex = 4,
+                    deltaText = " gap",
+                    partialTextLength = 15,
+                    state = "streaming",
+                    serverTimestamp = "2026-05-13T00:00:04Z",
+                ),
+                actorUserID = "user-1",
+                serverTimestamp = "2026-05-13T00:00:04Z",
+            ),
+            currentUserID = "user-1",
+        )
+        assertEquals("AI response", store.state.value.conversations.first().messages.first().previewText)
+        assertEquals(
+            listOf(
+                IMActiveMessageStreamTarget(
+                    conversationID = "conversation-1",
+                    messageID = "message-1",
+                    streamID = "stream-1",
+                ),
+            ),
+            store.consumePendingStreamSnapshotTargets(),
+        )
+
+        store.applyMessageStreamEvent(
+            payload = IMTCPConversationEventPayload(
+                eventType = "message_stream_completed",
+                conversation = conversation("conversation-1"),
+                message = com.xmtx.imclientkit.features.im.IMConversationMessageResponseBody(
+                    id = "message-1",
+                    conversationID = "conversation-1",
+                    senderUserID = "user-1",
+                    serverSequence = 2,
+                    content = IMMessageContent.Text("AI response"),
+                    createdAt = "2026-05-13T00:00:00Z",
+                ),
+                stream = IMTCPMessageStreamPayload(
+                    streamID = "stream-1",
+                    messageID = "message-1",
+                    conversationID = "conversation-1",
+                    chunkIndex = Int.MAX_VALUE,
+                    partialTextLength = 11,
+                    state = "completed",
+                    serverTimestamp = "2026-05-13T00:00:03Z",
+                ),
+                actorUserID = "user-1",
+                serverTimestamp = "2026-05-13T00:00:03Z",
+            ),
+            currentUserID = "user-1",
+        )
+
+        messages = store.state.value.conversations.first().messages
+        assertEquals(1, messages.size)
+        assertEquals("AI response", messages.first().previewText)
+        assertEquals(
+            "completed",
+            messages.first().derivedState["streamState"]!!.jsonObject["state"]!!.jsonPrimitive.toString().trim('"'),
+        )
+        assertEquals(emptyList<IMActiveMessageStreamTarget>(), store.activeMessageStreamTargets())
+
+        store.applyMessageStreamEvent(
+            payload = IMTCPConversationEventPayload(
+                eventType = "message_stream_chunk",
+                conversation = conversation("conversation-1"),
+                stream = IMTCPMessageStreamPayload(
+                    streamID = "stream-1",
+                    messageID = "message-1",
+                    conversationID = "conversation-1",
+                    chunkIndex = 3,
+                    deltaText = " late",
+                    partialTextLength = 16,
+                    state = "streaming",
+                    serverTimestamp = "2026-05-13T00:00:05Z",
+                ),
+                actorUserID = "user-1",
+                serverTimestamp = "2026-05-13T00:00:05Z",
+            ),
+            currentUserID = "user-1",
+        )
+        messages = store.state.value.conversations.first().messages
+        assertEquals("AI response", messages.first().previewText)
+        assertEquals(
+            "completed",
+            messages.first().derivedState["streamState"]!!.jsonObject["state"]!!.jsonPrimitive.toString().trim('"'),
+        )
     }
 
     private fun pageWithConversation(unreadCount: Int = 0, lastReadSequence: Int = 0) =

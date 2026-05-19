@@ -28,10 +28,12 @@ data class ConversationListState(
 class IMConversationStore {
     private val mutableState = MutableStateFlow(ConversationListState())
     private val pendingRequestLocalMessageIDs = mutableMapOf<String, String>()
+    private val pendingStreamSnapshotTargets = mutableSetOf<IMActiveMessageStreamTarget>()
     val state: StateFlow<ConversationListState> = mutableState
 
     fun restoreSnapshot(snapshot: ConversationListState) {
         pendingRequestLocalMessageIDs.clear()
+        pendingStreamSnapshotTargets.clear()
         val selectedConversationID = snapshot.selectedConversationID?.takeIf { selected ->
             snapshot.conversations.any { it.id == selected }
         } ?: snapshot.conversations.firstOrNull()?.id
@@ -191,6 +193,82 @@ class IMConversationStore {
         appendDomainMessages(payload.conversationID, listOf(payload.toConversationMessage(currentUserID)))
     }
 
+    fun applyMessageStreamEvent(payload: IMTCPConversationEventPayload, currentUserID: String) {
+        applyConversationSummary(payload.conversation)
+        payload.message?.let { appendMessages(it.conversationID, listOf(it), currentUserID) }
+        val stream = payload.stream ?: return
+        val incomingState = IMMessageStreamLifecycleState.from(stream.state) ?: return
+        mutableState.update { current ->
+            current.copy(
+                conversations = current.conversations.map { conversation ->
+                    if (conversation.id != stream.conversationID) {
+                        conversation
+                    } else {
+                        conversation.copy(
+                            messages = conversation.messages.map { message ->
+                                val existingState = message.streamState
+                                val existingStreamID = existingState?.streamID
+                                val existingChunkIndex = existingState?.lastChunkIndex ?: 0
+                                val matches = message.id == stream.messageID ||
+                                    message.serverMessageID == stream.messageID ||
+                                    existingStreamID == stream.streamID
+                                if (!matches || (existingState?.state?.isTerminal == true && incomingState == IMMessageStreamLifecycleState.Streaming)) {
+                                    message
+                                } else if (incomingState == IMMessageStreamLifecycleState.Streaming && stream.chunkIndex <= existingChunkIndex) {
+                                    message
+                                } else if (incomingState == IMMessageStreamLifecycleState.Streaming && stream.chunkIndex > existingChunkIndex + 1) {
+                                    pendingStreamSnapshotTargets += IMActiveMessageStreamTarget(
+                                        conversationID = stream.conversationID,
+                                        messageID = stream.messageID,
+                                        streamID = stream.streamID,
+                                    )
+                                    message
+                                } else if (incomingState == IMMessageStreamLifecycleState.Streaming && existingState == null && stream.chunkIndex > 1) {
+                                    pendingStreamSnapshotTargets += IMActiveMessageStreamTarget(
+                                        conversationID = stream.conversationID,
+                                        messageID = stream.messageID,
+                                        streamID = stream.streamID,
+                                    )
+                                    message
+                                } else {
+                                    val existingText = (message.content as? IMMessageContent.Text)?.text.orEmpty()
+                                    val nextText = if (incomingState == IMMessageStreamLifecycleState.Streaming) {
+                                        existingText + stream.deltaText.orEmpty()
+                                    } else {
+                                        existingText
+                                    }
+                                    message.copy(
+                                        content = IMMessageContent.Text(nextText),
+                                        derivedState = message.derivedState.withMessageStreamState(
+                                            IMMessageStreamState(
+                                                streamID = stream.streamID,
+                                                state = incomingState,
+                                                lastChunkIndex = stream.chunkIndex,
+                                                partialText = nextText,
+                                                updatedAt = stream.serverTimestamp,
+                                            ),
+                                        ),
+                                    )
+                                }
+                            },
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    fun applyMessageStreamSnapshot(response: IMMessageStreamResponseBody, currentUserID: String) {
+        appendMessages(response.message.conversationID, listOf(response.message), currentUserID)
+        pendingStreamSnapshotTargets.remove(
+            IMActiveMessageStreamTarget(
+                conversationID = response.message.conversationID,
+                messageID = response.message.id,
+                streamID = response.stream.streamID,
+            ),
+        )
+    }
+
     fun prepareOutgoingText(
         text: String,
         conversationID: String,
@@ -343,6 +421,29 @@ class IMConversationStore {
     }
 
     fun pendingReadSequences(): Map<String, ULong> = state.value.pendingReadSequences
+
+    fun activeMessageStreamTargets(): List<IMActiveMessageStreamTarget> =
+        state.value.conversations.flatMap { conversation ->
+            conversation.messages.mapNotNull { message ->
+                val streamState = message.streamState
+                if (streamState?.state == IMMessageStreamLifecycleState.Streaming) {
+                    IMActiveMessageStreamTarget(
+                        conversationID = conversation.id,
+                        messageID = message.serverMessageID ?: message.id,
+                        streamID = streamState.streamID,
+                    )
+                } else {
+                    null
+                }
+            }
+        }.distinct()
+
+    fun consumePendingStreamSnapshotTargets(): List<IMActiveMessageStreamTarget> {
+        if (pendingStreamSnapshotTargets.isEmpty()) return emptyList()
+        val targets = pendingStreamSnapshotTargets.toList()
+        pendingStreamSnapshotTargets.clear()
+        return targets
+    }
 
     fun latestLoadedServerSequence(conversationID: String): ULong? =
         state.value.latestSyncedServerSequences[conversationID]
@@ -498,6 +599,7 @@ class IMConversationStore {
             serverMessageID = next.serverMessageID ?: serverMessageID,
             serverSequence = next.serverSequence ?: serverSequence,
             content = next.content,
+            derivedState = next.derivedState,
             createdAt = next.createdAt,
             deliveryState = if (next.serverMessageID != null || next.serverSequence != null) {
                 next.deliveryState

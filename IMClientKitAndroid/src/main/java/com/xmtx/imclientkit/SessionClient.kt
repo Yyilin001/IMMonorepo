@@ -13,6 +13,7 @@ import com.xmtx.imclientkit.features.im.IMConversationMemberPageResponseBody
 import com.xmtx.imclientkit.features.im.IMConversationMemberRole
 import com.xmtx.imclientkit.features.im.IMConversationMessageResponseBody
 import com.xmtx.imclientkit.features.im.IMConversationMessagesSinceResponseBody
+import com.xmtx.imclientkit.features.im.IMMessageStreamResponseBody
 import com.xmtx.imclientkit.features.im.IMConversationReadResponseBody
 import com.xmtx.imclientkit.features.im.IMConversationSummaryPageResponseBody
 import com.xmtx.imclientkit.features.im.IMConversationSummaryResponseBody
@@ -225,6 +226,24 @@ class SessionClient internal constructor(
         limit: Int? = null,
     ): IMConversationMessagesSinceResponseBody =
         authorizedExecutor.execute(imAPI.messagesSince(conversationID, afterSequence, limit))
+
+    suspend fun startAIMessageStream(
+        conversationID: String,
+        prompt: String,
+    ): IMMessageStreamResponseBody =
+        authorizedExecutor.execute(imAPI.startAIMessageStream(conversationID, prompt))
+
+    suspend fun cancelMessageStream(
+        conversationID: String,
+        messageID: String,
+    ): IMMessageStreamResponseBody =
+        authorizedExecutor.execute(imAPI.cancelMessageStream(conversationID, messageID))
+
+    suspend fun fetchMessageStreamSnapshot(
+        conversationID: String,
+        messageID: String,
+    ): IMMessageStreamResponseBody =
+        authorizedExecutor.execute(imAPI.messageStreamSnapshot(conversationID, messageID))
 
     suspend fun markIMConversationRead(
         conversationID: String,

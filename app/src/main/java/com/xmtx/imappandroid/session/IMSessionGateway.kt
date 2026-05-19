@@ -30,6 +30,8 @@ interface IMSessionGateway {
     fun reloadContacts()
     fun openConversation(conversationID: String)
     fun sendText(text: String, conversationID: String)
+    fun startAIReply(conversationID: String, prompt: String)
+    fun cancelStream(conversationID: String, messageID: String)
     fun addContact(email: String, remark: String?)
     fun sendContactRequest(email: String, message: String?, remark: String?)
     fun acceptContactRequest(requestID: String, remark: String?)
@@ -104,6 +106,14 @@ class IMClientKitGateway(
 
     override fun sendText(text: String, conversationID: String) {
         runtimeController.sendText(text, conversationID)
+    }
+
+    override fun startAIReply(conversationID: String, prompt: String) {
+        runtimeController.startAIReply(conversationID, prompt)
+    }
+
+    override fun cancelStream(conversationID: String, messageID: String) {
+        runtimeController.cancelStream(conversationID, messageID)
     }
 
     override fun addContact(email: String, remark: String?) {
