@@ -56,6 +56,141 @@ extension IMServerTests {
         }
     }
 
+    @Test("AI message stream endpoint creates canonical message and exposes completed snapshot")
+    func aiMessageStreamCreatesCanonicalMessageAndSnapshot() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let peerUser = try await makeUser(email: "ai-stream-peer@example.com", on: app)
+
+            var createdConversationID: UUID?
+            try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                try req.content.encode(
+                    IMConversationCreateRequest(
+                        kind: IMConversationKind.direct.rawValue,
+                        title: "AI Stream",
+                        memberEmails: [peerUser.email]
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                createdConversationID = try res.content.decode(IMConversationResponse.self).id
+            })
+            let conversationID = try #require(createdConversationID)
+
+            var response: IMMessageStreamResponse?
+            try await app.testing().test(
+                .POST,
+                "api/im/conversations/\(conversationID.uuidString)/ai/messages",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                    try req.content.encode(IMAIMessageStreamStartRequest(prompt: "hello"))
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let body = try res.content.decode(IMMessageStreamResponse.self)
+                    response = body
+                    #expect(body.message.conversationID == conversationID)
+                    #expect(body.message.derivedState.streamState?.state == .streaming)
+                    #expect(body.stream.messageID == body.message.id.uuidString)
+                    #expect(body.stream.state == .streaming)
+                }
+            )
+
+            let started = try #require(response)
+            try await Task.sleep(nanoseconds: 250_000_000)
+
+            try await app.testing().test(
+                .GET,
+                "api/im/conversations/\(conversationID.uuidString)/messages/\(started.message.id.uuidString)/stream",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let body = try res.content.decode(IMMessageStreamResponse.self)
+                    #expect(body.message.id == started.message.id)
+                    #expect(body.stream.streamID == started.stream.streamID)
+                    #expect(body.stream.state == .completed)
+                    #expect(body.message.content.previewText == "AI: hello")
+                    #expect(body.message.derivedState.streamState?.partialText == "AI: hello")
+                }
+            )
+
+            try await app.testing().test(
+                .POST,
+                "api/im/conversations/\(conversationID.uuidString)/messages/\(started.message.id.uuidString)/stream/cancel",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let body = try res.content.decode(IMMessageStreamResponse.self)
+                    #expect(body.stream.streamID == started.stream.streamID)
+                    #expect(body.stream.state == .completed)
+                    #expect(body.message.content.previewText == "AI: hello")
+                }
+            )
+        }
+    }
+
+    @Test("AI stream startup repair marks stale streaming messages failed")
+    func aiMessageStreamStartupRepairMarksStaleStreamsFailed() async throws {
+        try await withApp(configure: configure) { app in
+            app.aiStreamingProvider = NeverAIStreamingProvider()
+            let accessToken = try await loginAccessToken(using: app)
+            let peerUser = try await makeUser(email: "ai-stream-repair-peer@example.com", on: app)
+
+            var createdConversationID: UUID?
+            try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                try req.content.encode(
+                    IMConversationCreateRequest(
+                        kind: IMConversationKind.direct.rawValue,
+                        title: "AI Stream Repair",
+                        memberEmails: [peerUser.email]
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                createdConversationID = try res.content.decode(IMConversationResponse.self).id
+            })
+            let conversationID = try #require(createdConversationID)
+
+            var response: IMMessageStreamResponse?
+            try await app.testing().test(
+                .POST,
+                "api/im/conversations/\(conversationID.uuidString)/ai/messages",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                    try req.content.encode(IMAIMessageStreamStartRequest(prompt: "blocked"))
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    response = try res.content.decode(IMMessageStreamResponse.self)
+                }
+            )
+            let started = try #require(response)
+            let repaired = try await IMAIStreamRepairService(app: app).repairStaleStreamingMessages()
+            #expect(repaired >= 1)
+
+            try await app.testing().test(
+                .GET,
+                "api/im/conversations/\(conversationID.uuidString)/messages/\(started.message.id.uuidString)/stream",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let body = try res.content.decode(IMMessageStreamResponse.self)
+                    #expect(body.stream.streamID == started.stream.streamID)
+                    #expect(body.stream.state == .failed)
+                    #expect(body.message.derivedState.streamState?.errorCode == "server_restarted")
+                }
+            )
+        }
+    }
+
 
     @Test("IM create conversation endpoint creates group for three or more members")
     func createGroupConversation() async throws {
@@ -334,4 +469,10 @@ extension IMServerTests {
     }
 
 
+}
+
+private struct NeverAIStreamingProvider: AIStreamingProvider {
+    func streamText(for request: AIStreamingRequest) -> AsyncThrowingStream<String, any Error> {
+        AsyncThrowingStream { _ in }
+    }
 }

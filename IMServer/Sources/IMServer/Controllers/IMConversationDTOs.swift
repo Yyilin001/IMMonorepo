@@ -36,6 +36,15 @@ struct IMConversationMessageReactionRequest: Content {
     let emoji: String
 }
 
+struct IMAIMessageStreamStartRequest: Content {
+    let prompt: String
+}
+
+struct IMMessageStreamResponse: Content, Equatable {
+    let message: IMMessageResponse
+    let stream: IMTCPMessageStreamPayload
+}
+
 struct IMConversationCreateRequest: Content {
     let kind: String?
     let title: String?

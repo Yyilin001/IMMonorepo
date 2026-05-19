@@ -201,12 +201,29 @@ enum IMTCPConversationEventType: String, Codable, Sendable {
     case conversationVisibilityChanged = "conversation_visibility_changed"
     case conversationSettingsChanged = "conversation_settings_changed"
     case inviteChanged = "invite_changed"
+    case messageStreamStarted = "message_stream_started"
+    case messageStreamChunk = "message_stream_chunk"
+    case messageStreamCompleted = "message_stream_completed"
+    case messageStreamFailed = "message_stream_failed"
+    case messageStreamCancelled = "message_stream_cancelled"
+}
+
+struct IMTCPMessageStreamPayload: Codable, Equatable, Sendable {
+    let streamID: String
+    let messageID: String
+    let conversationID: String
+    let chunkIndex: Int
+    let deltaText: String?
+    let partialTextLength: Int
+    let state: MessageStreamLifecycleState
+    let serverTimestamp: Date
 }
 
 struct IMTCPConversationEventPayload: Codable, Sendable {
     let eventType: IMTCPConversationEventType
     let conversation: IMConversationResponse
     let message: IMMessageResponse?
+    let stream: IMTCPMessageStreamPayload?
     let actorUserID: UUID?
     let serverTimestamp: Date
     let messageIDs: [UUID]
@@ -218,6 +235,7 @@ struct IMTCPConversationEventPayload: Codable, Sendable {
         eventType: IMTCPConversationEventType,
         conversation: IMConversationResponse,
         message: IMMessageResponse?,
+        stream: IMTCPMessageStreamPayload? = nil,
         actorUserID: UUID?,
         serverTimestamp: Date,
         messageIDs: [UUID] = [],
@@ -228,6 +246,7 @@ struct IMTCPConversationEventPayload: Codable, Sendable {
         self.eventType = eventType
         self.conversation = conversation
         self.message = message
+        self.stream = stream
         self.actorUserID = actorUserID
         self.serverTimestamp = serverTimestamp
         self.messageIDs = messageIDs

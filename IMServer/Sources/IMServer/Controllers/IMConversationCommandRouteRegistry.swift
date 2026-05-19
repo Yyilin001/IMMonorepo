@@ -17,6 +17,8 @@ enum IMConversationCommandRoute: CaseIterable, Sendable {
     case editMessage
     case toggleReaction
     case recallMessage
+    case startAIMessageStream
+    case cancelMessageStream
     case markRead
     case clearConversationForSelf
     case deleteConversationForSelf
@@ -75,6 +77,10 @@ enum IMConversationCommandRoute: CaseIterable, Sendable {
             return ["conversations", ":conversationID", "messages", ":messageID", "reactions"]
         case .recallMessage:
             return ["conversations", ":conversationID", "messages", ":messageID", "recall"]
+        case .startAIMessageStream:
+            return ["conversations", ":conversationID", "ai", "messages"]
+        case .cancelMessageStream:
+            return ["conversations", ":conversationID", "messages", ":messageID", "stream", "cancel"]
         case .markRead:
             return ["conversations", ":conversationID", "read"]
         case .clearConversationForSelf:
@@ -139,6 +145,10 @@ enum IMConversationCommandRoute: CaseIterable, Sendable {
                 routes.on(route.method, route.path, use: controller.toggleReaction)
             case .recallMessage:
                 routes.on(route.method, route.path, use: controller.recallMessage)
+            case .startAIMessageStream:
+                routes.on(route.method, route.path, use: controller.startAIMessageStream)
+            case .cancelMessageStream:
+                routes.on(route.method, route.path, use: controller.cancelMessageStream)
             case .markRead:
                 routes.on(route.method, route.path, use: controller.markRead)
             case .clearConversationForSelf:

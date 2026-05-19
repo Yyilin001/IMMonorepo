@@ -55,6 +55,7 @@ enum IMMigrationRegistry {
         app.migrations.add(AddConversationSearchIndexLowerTrigramIndex())
         app.migrations.add(CreateIMCommonFeatureTables())
         app.migrations.add(AddReportSnapshotFields())
+        app.migrations.add(CreateAIMessageStreamIndex())
     }
 
     static func resetIMSchemaIfRequested(_ app: Application) async throws {
@@ -81,6 +82,7 @@ enum IMMigrationRegistry {
             ConversationReplayRecord.schema,
             ConversationNotificationEntry.schema,
             MessageReceipt.schema,
+            AIMessageStreamIndex.schema,
             PushDeviceToken.schema,
             GroupInvite.schema,
             UserReport.schema,
@@ -185,6 +187,7 @@ private let imMigrationNames: [String] = [
     "AddConversationSearchIndexLowerTrigramIndex",
     "CreateIMCommonFeatureTables",
     "AddReportSnapshotFields",
+    "CreateAIMessageStreamIndex",
     "CreateContactChangesLog"
 ]
 
