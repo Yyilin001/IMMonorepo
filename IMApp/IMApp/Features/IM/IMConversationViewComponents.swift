@@ -1462,21 +1462,29 @@ struct IMMessageBubble: View {
     let message: IMConversationMessage
     let replyReference: IMReplyReferenceResolution?
     let isHighlighted: Bool
+    let isSelectionMode: Bool
+    let isSelected: Bool
+    let canSelect: Bool
     let canRetry: Bool
     let canCancel: Bool
     let canReply: Bool
     let canRecall: Bool
     let canEdit: Bool
     let canReact: Bool
+    let isFavorited: Bool
     let mediaDownloadState: IMMediaDownloadState?
     let deliveryOverrideText: String?
     let currentUserID: UUID?
+    let onToggleSelection: () -> Void
+    let onEnterSelection: () -> Void
     let onJumpToReplyReference: () -> Void
     let onCancel: () -> Void
     let onReply: () -> Void
     let onEdit: () -> Void
     let onRecall: () -> Void
     let onRetry: () -> Void
+    let onForward: () -> Void
+    let onToggleFavorite: () -> Void
     let onToggleReaction: (String) -> Void
     let onDownloadMedia: () -> Void
     let onCancelMediaDownload: () -> Void
@@ -1495,6 +1503,13 @@ struct IMMessageBubble: View {
         HStack {
             if message.direction == .outgoing {
                 Spacer(minLength: 24)
+            }
+
+            if isSelectionMode, canSelect {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .frame(width: 28)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -1554,13 +1569,41 @@ struct IMMessageBubble: View {
                 if isHighlighted {
                     RoundedRectangle(cornerRadius: 16)
                         .stroke(Color.accentColor.opacity(0.45), lineWidth: 2)
+                } else if isSelected {
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.accentColor.opacity(0.75), lineWidth: 2)
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 16))
+            .onTapGesture {
+                if isSelectionMode, canSelect {
+                    onToggleSelection()
+                }
+            }
             .contextMenu {
+                if canSelect {
+                    Button(isSelectionMode ? "切换选择" : "选择", systemImage: isSelected ? "checkmark.circle.fill" : "checkmark.circle") {
+                        if isSelectionMode {
+                            onToggleSelection()
+                        } else {
+                            onEnterSelection()
+                        }
+                    }
+                }
+
                 if canReply {
                     Button("回复", systemImage: "arrowshape.turn.up.left") {
                         onReply()
+                    }
+                }
+
+                if canSelect {
+                    Button("转发", systemImage: "arrowshape.turn.up.right") {
+                        onForward()
+                    }
+
+                    Button(isFavorited ? "取消收藏" : "收藏", systemImage: isFavorited ? "star.slash" : "star") {
+                        onToggleFavorite()
                     }
                 }
 

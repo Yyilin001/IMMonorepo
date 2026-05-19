@@ -35,6 +35,9 @@ final class ConversationRuntimeController {
     private var imConnectionReconnectAttempt = 0
     private var imConversationGapSyncBackfillTask: Task<Void, Never>?
     private var queuedIMTextMessageFlushTask: Task<Void, Never>?
+    private var imMessageStreamSnapshotWorkerTask: Task<Void, Never>?
+    private var pendingMessageStreamSnapshotTargets: Set<IMActiveMessageStreamTarget> = []
+    private var messageStreamSnapshotRetryDelays: [IMActiveMessageStreamTarget: UInt64] = [:]
     private var imConversationReadReportTasks: [String: Task<Void, Never>] = [:]
     private var pendingIMConversationReadSequences: [String: UInt64] = [:]
     private var imConversationGapSyncQueue: [String] = []
@@ -136,6 +139,7 @@ final class ConversationRuntimeController {
         imConnectionGeneration &+= 1
         cancelConversationGapSyncBackfill()
         cancelQueuedTextMessageFlush()
+        cancelMessageStreamSnapshotSync()
 
         let connection = imConnection
         imConnection = nil
@@ -172,6 +176,7 @@ final class ConversationRuntimeController {
         imConversationMessagesTask = nil
         imConversationRefreshTask?.cancel()
         imConversationRefreshTask = nil
+        cancelMessageStreamSnapshotSync()
         for task in mediaUploadRecoveryTasks.values {
             task.cancel()
         }
@@ -186,6 +191,7 @@ final class ConversationRuntimeController {
 
     func appDidBecomeActive() {
         scheduleConnectionIfNeeded()
+        syncActiveMessageStreamSnapshots()
     }
 
     func sendText(_ text: String, to conversationID: String) async -> Bool {
@@ -776,9 +782,11 @@ final class ConversationRuntimeController {
         switch await syncConversationGap(for: conversationID, currentUserID: currentUserID) {
         case .completed:
             await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
+            syncActiveMessageStreamSnapshots()
         case .incomplete:
             enqueueConversationGapSyncBackfill(for: conversationID, prioritize: true)
             await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
+            syncActiveMessageStreamSnapshots()
         case .failed:
             return
         }
@@ -1236,6 +1244,7 @@ final class ConversationRuntimeController {
         await syncContactStateAfterConnection()
         await flushQueuedTextMessagesAfterConnection(limit: HistoryConfig.queuedFlushLimit)
         startConversationGapSyncBackfillIfNeeded()
+        syncActiveMessageStreamSnapshots()
         scheduleConversationCachePersist()
     }
 
@@ -1324,6 +1333,7 @@ final class ConversationRuntimeController {
             if payload.conversation.id.uuidString == imConversationStore.selectedConversationID {
                 await loadReceiptSummary(for: payload.conversation.id.uuidString)
             }
+            syncPendingMessageStreamSnapshotsIfNeeded()
             scheduleConversationCachePersist()
         case .contactEvent(_, let payload):
             applyContactEvent(payload)
@@ -1510,6 +1520,110 @@ final class ConversationRuntimeController {
                 cancelConversationGapSyncBackfill()
                 return
             }
+        }
+        syncActiveMessageStreamSnapshots()
+    }
+
+    func syncActiveMessageStreamSnapshots() {
+        let targets = imConversationStore.activeMessageStreamTargets()
+        guard !targets.isEmpty else {
+            return
+        }
+        enqueueMessageStreamSnapshotTargets(targets)
+    }
+
+    private func syncPendingMessageStreamSnapshotsIfNeeded() {
+        let targets = imConversationStore.consumePendingStreamSnapshotTargets()
+        guard !targets.isEmpty else {
+            return
+        }
+        enqueueMessageStreamSnapshotTargets(targets)
+    }
+
+    private func enqueueMessageStreamSnapshotTargets(_ targets: [IMActiveMessageStreamTarget]) {
+        guard let currentUserID = currentUserProvider()?.id else {
+            return
+        }
+
+        pendingMessageStreamSnapshotTargets.formUnion(targets)
+        startMessageStreamSnapshotWorkerIfNeeded(currentUserID: currentUserID)
+    }
+
+    private func startMessageStreamSnapshotWorkerIfNeeded(currentUserID: UUID) {
+        guard imMessageStreamSnapshotWorkerTask == nil else {
+            return
+        }
+
+        imMessageStreamSnapshotWorkerTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+
+            while !Task.isCancelled {
+                guard self.currentUserProvider()?.id == currentUserID else {
+                    return
+                }
+                guard let target = self.pendingMessageStreamSnapshotTargets.first else {
+                    self.imMessageStreamSnapshotWorkerTask = nil
+                    if !self.pendingMessageStreamSnapshotTargets.isEmpty {
+                        self.startMessageStreamSnapshotWorkerIfNeeded(currentUserID: currentUserID)
+                    }
+                    return
+                }
+                self.pendingMessageStreamSnapshotTargets.remove(target)
+
+                do {
+                    let retryDelay = self.messageStreamSnapshotRetryDelays[target] ?? 0
+                    if retryDelay > 0 {
+                        try await Task.sleep(nanoseconds: retryDelay)
+                    }
+                    try Task.checkCancellation()
+                    let response = try await self.sessionClient.fetchMessageStreamSnapshot(
+                        conversationID: target.conversationID,
+                        messageID: target.messageID
+                    )
+                    guard self.currentUserProvider()?.id == currentUserID else {
+                        return
+                    }
+                    self.markServerOnline()
+                    self.imConversationStore.applyMessageStreamSnapshot(
+                        response,
+                        currentUserID: currentUserID
+                    )
+                    self.scheduleConversationCachePersist()
+                    self.messageStreamSnapshotRetryDelays.removeValue(forKey: target)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Snapshot recovery is a compensation path; keep the local partial and retry with bounded backoff.
+                    self.pendingMessageStreamSnapshotTargets.insert(target)
+                    self.messageStreamSnapshotRetryDelays[target] = self.nextMessageStreamSnapshotRetryDelay(
+                        after: self.messageStreamSnapshotRetryDelays[target]
+                    )
+                }
+            }
+        }
+    }
+
+    private func cancelMessageStreamSnapshotSync() {
+        imMessageStreamSnapshotWorkerTask?.cancel()
+        imMessageStreamSnapshotWorkerTask = nil
+        pendingMessageStreamSnapshotTargets.removeAll()
+        messageStreamSnapshotRetryDelays.removeAll()
+    }
+
+    private func nextMessageStreamSnapshotRetryDelay(after current: UInt64?) -> UInt64 {
+        switch current {
+        case nil, 0:
+            1_000_000_000
+        case 1_000_000_000:
+            2_000_000_000
+        case 2_000_000_000:
+            5_000_000_000
+        case 5_000_000_000:
+            10_000_000_000
+        default:
+            30_000_000_000
         }
     }
 

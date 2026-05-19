@@ -810,6 +810,31 @@ struct IMConversationDetailView: View {
                 }
                 .presentationDetents([.medium])
             }
+            .sheet(isPresented: $isPresentingForwardPicker) {
+                NavigationStack {
+                    IMForwardMessagePickerSheet(
+                        conversationStore: conversationStore,
+                        sourceConversationID: conversationID,
+                        messageCount: pendingForwardMessageIDs.count,
+                        onForward: { targetConversationIDs in
+                            selectionActionState = .forwarding
+                            defer { selectionActionState = .idle }
+                            let didForward = await runtimeStore.forwardMessages(
+                                messageIDs: pendingForwardMessageIDs,
+                                from: conversationID,
+                                to: targetConversationIDs
+                            )
+                            if didForward {
+                                isPresentingForwardPicker = false
+                                resetSelection()
+                                pendingForwardMessageIDs = []
+                            }
+                            return didForward
+                        }
+                    )
+                }
+                .presentationDetents([.medium, .large])
+            }
             .sheet(item: $previewedMediaItem) { item in
                 IMDownloadedMediaQuickLookSheet(item: item)
             }
@@ -1267,6 +1292,148 @@ struct IMConversationDetailView: View {
             .padding(.bottom, 12)
         }
         .background(.thinMaterial)
+    }
+
+    private var selectionToolbar: some View {
+        VStack(spacing: 0) {
+            Divider()
+
+            HStack(spacing: 12) {
+                Text("已选择 \(selectedMessageIDs.count) 条")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                Button {
+                    pendingForwardMessageIDs = Array(selectedMessageIDs)
+                    isPresentingForwardPicker = true
+                } label: {
+                    Label("转发", systemImage: "arrowshape.turn.up.right")
+                }
+                .disabled(selectedMessageIDs.isEmpty || selectionActionState != .idle)
+
+                Button {
+                    Task {
+                        await favoriteSelectedMessages()
+                    }
+                } label: {
+                    Label("收藏", systemImage: "star")
+                }
+                .disabled(selectedMessageIDs.isEmpty || selectionActionState != .idle)
+
+                Button(role: .destructive) {
+                    Task {
+                        await deleteSelectedMessages()
+                    }
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+                .disabled(selectedMessageIDs.isEmpty || selectionActionState != .idle)
+
+                Button {
+                    resetSelection()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("退出多选")
+            }
+            .font(.caption)
+            .labelStyle(.iconOnly)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.thinMaterial)
+        }
+    }
+
+    private func selectableMessageID(for message: IMConversationMessage) -> String? {
+        if let serverMessageID = message.serverMessageID,
+           UUID(uuidString: serverMessageID) != nil {
+            return serverMessageID
+        }
+        if UUID(uuidString: message.id) != nil {
+            return message.id
+        }
+        return nil
+    }
+
+    private func toggleSelectedMessage(_ messageID: String) {
+        if selectedMessageIDs.contains(messageID) {
+            selectedMessageIDs.remove(messageID)
+        } else {
+            selectedMessageIDs.insert(messageID)
+        }
+
+        if selectedMessageIDs.isEmpty {
+            isSelectionMode = false
+        }
+    }
+
+    private func resetSelection() {
+        isSelectionMode = false
+        selectedMessageIDs.removeAll()
+        pendingForwardMessageIDs.removeAll()
+        selectionActionState = .idle
+    }
+
+    private func loadConversationFavoriteCache() async {
+        guard let conversationUUID = UUID(uuidString: conversationID),
+              let page = await runtimeStore.fetchFavorites(conversationID: conversationUUID, limit: 200)
+        else {
+            favoritedMessageIDs = []
+            return
+        }
+
+        favoritedMessageIDs = Set(page.items.map { $0.id.uuidString })
+    }
+
+    private func toggleFavorite(messageID: String) async {
+        let wasFavorited = favoritedMessageIDs.contains(messageID)
+        let didUpdate = wasFavorited
+            ? await runtimeStore.unfavoriteMessage(messageID: messageID, in: conversationID)
+            : await runtimeStore.favoriteMessage(messageID: messageID, in: conversationID)
+
+        guard didUpdate else {
+            return
+        }
+
+        if wasFavorited {
+            favoritedMessageIDs.remove(messageID)
+        } else {
+            favoritedMessageIDs.insert(messageID)
+        }
+    }
+
+    private func favoriteSelectedMessages() async {
+        let selectedIDs = selectedMessageIDs
+        guard !selectedIDs.isEmpty else {
+            return
+        }
+
+        selectionActionState = .favoriting
+        defer { selectionActionState = .idle }
+
+        for messageID in selectedIDs where !favoritedMessageIDs.contains(messageID) {
+            if await runtimeStore.favoriteMessage(messageID: messageID, in: conversationID) {
+                favoritedMessageIDs.insert(messageID)
+            }
+        }
+    }
+
+    private func deleteSelectedMessages() async {
+        let selectedIDs = Array(selectedMessageIDs)
+        guard !selectedIDs.isEmpty else {
+            return
+        }
+
+        selectionActionState = .deleting
+        defer { selectionActionState = .idle }
+
+        if await runtimeStore.deleteMessagesForSelf(messageIDs: selectedIDs, in: conversationID) {
+            resetSelection()
+        }
     }
 
     private func handleMediaImport(_ result: Result<[URL], Error>) {
@@ -1780,6 +1947,262 @@ struct IMConversationDetailView: View {
         case .text, .reply, .system, .image, .audio, .file:
             let preview = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
             return preview.isEmpty ? "原消息暂不可用" : preview
+        }
+    }
+}
+
+private struct IMFavoritesSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    @ObservedObject var conversationStore: IMConversationStore
+    @ObservedObject var runtimeStore: IMConversationRuntimeStore
+
+    let onSelect: (String, String) -> Void
+
+    @State private var messages: [IMConversationMessageResponseBody] = []
+    @State private var nextCursor: String?
+    @State private var hasMore = false
+    @State private var isLoading = false
+    @State private var statusMessage: String?
+
+    var body: some View {
+        List {
+            if let statusMessage {
+                Section {
+                    Text(statusMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if messages.isEmpty && !isLoading {
+                ContentUnavailableView("暂无收藏", systemImage: "star", description: Text("收藏后的消息会出现在这里。"))
+            } else {
+                Section {
+                    ForEach(messages, id: \.id) { message in
+                        Button {
+                            onSelect(message.conversationID.uuidString, message.id.uuidString)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: iconName(for: message.content))
+                                        .foregroundStyle(.secondary)
+
+                                    Text(title(for: message))
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                }
+
+                                Text(message.previewText)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+
+                                Text(message.createdAt?.formatted(date: .abbreviated, time: .shortened) ?? "时间未知")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if hasMore {
+                        Button {
+                            Task {
+                                await loadMore()
+                            }
+                        } label: {
+                            Label(isLoading ? "加载中" : "加载更多", systemImage: "clock.arrow.circlepath")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(isLoading)
+                    }
+                }
+            }
+        }
+        .navigationTitle("我的收藏")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("完成") {
+                    dismiss()
+                }
+            }
+        }
+        .task {
+            if messages.isEmpty {
+                await reload()
+            }
+        }
+        .refreshable {
+            await reload()
+        }
+    }
+
+    private func reload() async {
+        messages = []
+        nextCursor = nil
+        hasMore = false
+        await loadMore()
+    }
+
+    private func loadMore() async {
+        guard !isLoading else {
+            return
+        }
+
+        isLoading = true
+        defer { isLoading = false }
+
+        guard let page = await runtimeStore.fetchFavorites(cursor: nextCursor, limit: 50) else {
+            statusMessage = "收藏列表加载失败，请稍后重试。"
+            return
+        }
+
+        statusMessage = nil
+        messages.append(contentsOf: page.items)
+        nextCursor = page.nextCursor
+        hasMore = page.hasMore
+    }
+
+    private func title(for message: IMConversationMessageResponseBody) -> String {
+        conversationStore.conversations
+            .first { $0.id == message.conversationID.uuidString }
+            .map { conversation in
+                conversation.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "会话"
+                    : conversation.title
+            } ?? "会话"
+    }
+
+    private func iconName(for content: IMMessageContent) -> String {
+        switch content {
+        case .text:
+            return "text.bubble"
+        case .reply:
+            return "arrowshape.turn.up.left"
+        case .recalled:
+            return "arrow.uturn.backward"
+        case .system:
+            return "info.circle"
+        case .image:
+            return "photo"
+        case .audio:
+            return "waveform"
+        case .file:
+            return "doc"
+        }
+    }
+}
+
+private struct IMForwardMessagePickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    @ObservedObject var conversationStore: IMConversationStore
+
+    let sourceConversationID: String
+    let messageCount: Int
+    let onForward: ([String]) async -> Bool
+
+    @State private var selectedConversationIDs: Set<String> = []
+    @State private var isForwarding = false
+    @State private var statusMessage: String?
+
+    private var candidates: [IMConversation] {
+        conversationStore.conversations
+            .filter { $0.id != sourceConversationID }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    var body: some View {
+        List {
+            if let statusMessage {
+                Section {
+                    Text(statusMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
+                if candidates.isEmpty {
+                    ContentUnavailableView("暂无可转发会话", systemImage: "arrowshape.turn.up.right", description: Text("创建或加载更多会话后再转发。"))
+                } else {
+                    ForEach(candidates) { conversation in
+                        Button {
+                            toggle(conversation.id)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: selectedConversationIDs.contains(conversation.id) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selectedConversationIDs.contains(conversation.id) ? Color.accentColor : .secondary)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(conversation.title.isEmpty ? "会话" : conversation.title)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+
+                                    Text(conversation.lastMessagePreviewText.isEmpty ? "\(conversation.memberCount) 位成员" : conversation.lastMessagePreviewText)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+
+                                Spacer(minLength: 0)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            } footer: {
+                Text("将 \(messageCount) 条消息转发到选中的会话。")
+            }
+        }
+        .navigationTitle("选择转发会话")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("取消") {
+                    dismiss()
+                }
+            }
+
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(isForwarding ? "转发中" : "转发") {
+                    Task {
+                        await forward()
+                    }
+                }
+                .disabled(selectedConversationIDs.isEmpty || isForwarding)
+            }
+        }
+    }
+
+    private func toggle(_ conversationID: String) {
+        if selectedConversationIDs.contains(conversationID) {
+            selectedConversationIDs.remove(conversationID)
+        } else {
+            selectedConversationIDs.insert(conversationID)
+        }
+    }
+
+    private func forward() async {
+        guard !selectedConversationIDs.isEmpty, !isForwarding else {
+            return
+        }
+
+        isForwarding = true
+        defer { isForwarding = false }
+
+        let didForward = await onForward(Array(selectedConversationIDs))
+        if didForward {
+            dismiss()
+        } else {
+            statusMessage = "转发失败，请稍后重试。"
         }
     }
 }

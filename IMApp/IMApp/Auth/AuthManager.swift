@@ -1287,6 +1287,7 @@ final class AuthManager: ObservableObject {
             conversationRuntimeController.restoreTransferSnapshots(snapshot.transferSnapshots)
             conversationRuntimeController.resumeRecoverableMediaUploadsIfNeeded()
             conversationRuntimeController.reconcileBackgroundMediaDownloadSnapshots()
+            conversationRuntimeController.syncActiveMessageStreamSnapshots()
             lastIMConversationSummaryRefreshAt = snapshot.lastSummaryRefreshAt
             imConversationSummarySyncToken = snapshot.metadata.summarySyncToken
             latestIMConversationSummaries = []
