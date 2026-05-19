@@ -30,6 +30,7 @@
 - Group size:
 - AI stream concurrency attempts:
 - Reconnect storm command:
+- Reconnect storm mode:
 
 ## Results
 
@@ -40,6 +41,7 @@
 - ack success rate:
 - canonical success rate:
 - duplicate canonical messages:
+- duplicate canonical source:
 - wrong-session kicks:
 - write P95/P99:
 - list conversations P95/P99:
@@ -72,3 +74,4 @@
 - Blocking issues:
 - Follow-up actions:
 - RC rule: do not mark Go when any duplicate canonical message, wrong-session kick, cross-node dispatch failure, permanent AI streaming state, or sustained outbox backlog is observed.
+- RC evidence: attach release gate report, staging baseline report, Prometheus metric snapshot, and TCPDriver logs for all required scenarios.

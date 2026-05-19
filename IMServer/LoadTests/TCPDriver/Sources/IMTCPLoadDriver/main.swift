@@ -30,6 +30,7 @@ struct ConnectionResult: Sendable {
     let sent: Int
     let acknowledgements: Int
     let canonicalMessages: Int
+    let duplicateCanonicalMessages: Int
     let fanoutMessages: Int
     let reconnects: Int
     let serverErrors: Int
@@ -131,6 +132,7 @@ final class ConnectionState: @unchecked Sendable {
     private var sentAtByClientID: [String: Date] = [:]
     private var acknowledgedClientIDs: Set<String> = []
     private var canonicalClientIDs: Set<String> = []
+    private var duplicateCanonicalMessages = 0
     private var ackLatenciesMillis: [Double] = []
     private var canonicalLatenciesMillis: [Double] = []
     private var fanoutMessages = 0
@@ -190,11 +192,14 @@ final class ConnectionState: @unchecked Sendable {
         case "message":
             fanoutMessages += 1
             if let clientID = payload?["clientMessageID"] as? String,
-               sentAtByClientID[clientID] != nil,
-               !canonicalClientIDs.contains(clientID) {
-                canonicalClientIDs.insert(clientID)
-                if let sentAt = sentAtByClientID[clientID] {
-                    canonicalLatenciesMillis.append(Date().timeIntervalSince(sentAt) * 1_000)
+               sentAtByClientID[clientID] != nil {
+                if canonicalClientIDs.contains(clientID) {
+                    duplicateCanonicalMessages += 1
+                } else {
+                    canonicalClientIDs.insert(clientID)
+                    if let sentAt = sentAtByClientID[clientID] {
+                        canonicalLatenciesMillis.append(Date().timeIntervalSince(sentAt) * 1_000)
+                    }
                 }
             }
         case "auth_error", "kick":
@@ -223,6 +228,7 @@ final class ConnectionState: @unchecked Sendable {
             sent: sentAtByClientID.count,
             acknowledgements: acknowledgedClientIDs.count,
             canonicalMessages: canonicalClientIDs.count,
+            duplicateCanonicalMessages: duplicateCanonicalMessages,
             fanoutMessages: fanoutMessages,
             reconnects: reconnects,
             serverErrors: serverErrors,
@@ -371,6 +377,7 @@ let successes = results.filter(\.success).count
 let sent = results.reduce(0) { $0 + $1.sent }
 let acknowledgements = results.reduce(0) { $0 + $1.acknowledgements }
 let canonicalMessages = results.reduce(0) { $0 + $1.canonicalMessages }
+let duplicateCanonicalMessages = results.reduce(0) { $0 + $1.duplicateCanonicalMessages }
 let fanoutMessages = results.reduce(0) { $0 + $1.fanoutMessages }
 let reconnects = results.reduce(0) { $0 + $1.reconnects }
 let serverErrors = results.reduce(0) { $0 + $1.serverErrors }
@@ -380,7 +387,7 @@ let ackSuccessRate = sent == 0 ? 0 : Double(acknowledgements) / Double(sent)
 let canonicalSuccessRate = sent == 0 ? 0 : Double(canonicalMessages) / Double(sent)
 
 print("profile=\(options.profile) connections=\(options.connections) devicesPerUser=\(options.devicesPerUser) successes=\(successes) elapsed=\(String(format: "%.2f", elapsed))s")
-print("sent=\(sent) ack=\(acknowledgements) canonical=\(canonicalMessages) fanout=\(fanoutMessages) reconnects=\(reconnects) serverErrors=\(serverErrors)")
+print("sent=\(sent) ack=\(acknowledgements) canonical=\(canonicalMessages) duplicateCanonical=\(duplicateCanonicalMessages) fanout=\(fanoutMessages) reconnects=\(reconnects) serverErrors=\(serverErrors)")
 print("ackSuccessRate=\(String(format: "%.4f", ackSuccessRate)) canonicalSuccessRate=\(String(format: "%.4f", canonicalSuccessRate))")
 print("ackLatencyMs p50=\(String(format: "%.1f", percentile(ackLatencies, 0.50))) p95=\(String(format: "%.1f", percentile(ackLatencies, 0.95))) p99=\(String(format: "%.1f", percentile(ackLatencies, 0.99)))")
 print("canonicalLatencyMs p50=\(String(format: "%.1f", percentile(canonicalLatencies, 0.50))) p95=\(String(format: "%.1f", percentile(canonicalLatencies, 0.95))) p99=\(String(format: "%.1f", percentile(canonicalLatencies, 0.99)))")

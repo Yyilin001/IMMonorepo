@@ -8,6 +8,7 @@ PROFILE="local-smoke"
 RUN_SERVER="true"
 RUN_IOS="true"
 RUN_IOS_APP_BUILD="true"
+RUN_IOS_APP_TEST="true"
 RUN_ANDROID="true"
 RUN_REDIS="auto"
 RUN_TCP_BUILD="true"
@@ -27,6 +28,7 @@ Options:
   --skip-server                Skip IMServer swift tests.
   --skip-ios                   Skip IMClientKit swift tests.
   --skip-ios-app-build         Skip IMApp simulator Debug build.
+  --skip-ios-app-test          Skip IMApp simulator unit tests.
   --skip-android               Skip Android Gradle tests.
   --skip-redis                 Do not run optional Redis integration tests.
   --require-redis              Fail when IM_REDIS_INTEGRATION_URL is missing.
@@ -71,6 +73,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-ios-app-build)
       RUN_IOS_APP_BUILD="false"
+      shift
+      ;;
+    --skip-ios-app-test)
+      RUN_IOS_APP_TEST="false"
       shift
       ;;
     --skip-android)
@@ -217,6 +223,10 @@ if [[ "${RUN_IOS_APP_BUILD}" == "true" ]]; then
   run_step "IMApp Debug simulator build" bash -lc "cd '${MONOREPO_DIR}' && xcodebuild -project IMApp/IMApp.xcodeproj -scheme IMApp -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.4' build"
 fi
 
+if [[ "${RUN_IOS_APP_TEST}" == "true" ]]; then
+  run_step "IMApp simulator unit tests" bash -lc "cd '${MONOREPO_DIR}' && xcodebuild -project IMApp/IMApp.xcodeproj -scheme IMApp -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.4' test -only-testing:IMAppTests -parallel-testing-enabled NO"
+fi
+
 if [[ "${RUN_ANDROID}" == "true" ]]; then
   run_step "Android tests and debug assemble" bash -lc "cd '${MONOREPO_DIR}' && ./gradlew :imclientkit:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug"
 fi
@@ -249,7 +259,7 @@ cat <<'EOF' >> "${REPORT_FILE}"
 - scripted: staging baseline `100 users x 2 devices`
 - scripted: staging baseline `1 group x 500 members x 2 devices`
 - scripted: staging baseline `AI stream concurrency`
-- scripted: staging baseline `reconnect storm` when `IM_RECONNECT_STORM_COMMAND` is set
+- scripted: staging baseline `reconnect storm` default recovery probe or custom `IM_RECONNECT_STORM_COMMAND`
 
 ## Manual Client Smoke
 
@@ -257,6 +267,7 @@ cat <<'EOF' >> "${REPORT_FILE}"
 - Canonical echo merges by clientMessageID and does not duplicate in UI.
 - Cold start shows cache first, then TCP + HTTP sync converges without duplicate messages.
 - Prometheus shows zero cross-node dispatch failures and zero session-count query failures during smoke.
+- UI test runner stability is tracked separately; RC gate runs deterministic `IMAppTests` unit tests.
 EOF
 
 echo

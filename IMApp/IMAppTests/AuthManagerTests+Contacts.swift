@@ -28,8 +28,7 @@ extension AuthManagerTests {
             case ("POST", "/api/auth/login"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -159,8 +158,7 @@ extension AuthManagerTests {
                 await requestCounter.increment("contactRequests")
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([pendingRequest]))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -221,8 +219,7 @@ extension AuthManagerTests {
                 await requestCounter.increment("contactRequests")
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -307,8 +304,7 @@ extension AuthManagerTests {
             case ("POST", "/api/contact-requests/\(requestID.uuidString)/accept"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody(contact))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -396,8 +392,7 @@ extension AuthManagerTests {
                     )
                 )
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -474,8 +469,7 @@ extension AuthManagerTests {
                 await requestCounter.increment("contactRequests")
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([pendingRequest]))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -615,8 +609,7 @@ extension AuthManagerTests {
                     body: try HTTPFixtures.jsonBody([networkRequest])
                 )
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -680,8 +673,7 @@ extension AuthManagerTests {
             case ("GET", "/api/contact-requests"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -757,8 +749,7 @@ extension AuthManagerTests {
             case ("GET", "/api/contact-requests"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([pendingRequest]))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -825,8 +816,7 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -917,8 +907,7 @@ extension AuthManagerTests {
                     )
                 )
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -1000,8 +989,7 @@ extension AuthManagerTests {
             case ("POST", "/api/contact-requests/\(requestID.uuidString)/accept"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody(contact))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -1070,8 +1058,7 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -1127,8 +1114,7 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -1210,8 +1196,7 @@ extension AuthManagerTests {
                 await requestCounter.increment("contactRequests")
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([oldRequest]))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -1299,8 +1284,7 @@ extension AuthManagerTests {
             case ("GET", "/api/contact-requests"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -1384,8 +1368,7 @@ extension AuthManagerTests {
             case ("GET", "/api/contact-requests"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([pendingRequest]))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(
@@ -1451,8 +1434,7 @@ extension AuthManagerTests {
             case ("GET", "/api/contact-requests"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([pendingRequest]))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
         let manager = makeManager(

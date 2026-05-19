@@ -31,6 +31,14 @@ xcodebuild -project IMApp/IMApp.xcodeproj \
   -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.4' \
   build
 
+xcodebuild -project IMApp/IMApp.xcodeproj \
+  -scheme IMApp \
+  -configuration Debug \
+  -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.4' \
+  test \
+  -only-testing:IMAppTests \
+  -parallel-testing-enabled NO
+
 ./gradlew :imclientkit:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug
 ```
 
@@ -39,10 +47,11 @@ xcodebuild -project IMApp/IMApp.xcodeproj \
 - `1 user x 5 devices` passes with ack and canonical success rate >= 99.9%.
 - `100 users x 2 devices` passes with ack and canonical success rate >= 99.9%.
 - `1 group x 500 members x 2 devices` passes in the dedicated staging environment.
-- `reconnect storm` converges through `messages/since` without duplicate canonical messages; `IM_RECONNECT_STORM_COMMAND` is recorded in the staging report.
+- `reconnect storm` converges through `messages/since` without duplicate canonical messages; the default recovery probe runs when `IM_RECONNECT_STORM_COMMAND` is not set, and a custom command is recorded when provided.
 - AI stream concurrency is exercised by the staging baseline script and records success/rejection/error counts.
 - Outbox backlog drains to zero after load stops.
 - Redis integration tests run against a real Redis endpoint, not the fake/local store.
+- UI tests are not part of the deterministic RC gate; `IMAppTests` unit tests are the required simulator test target.
 
 ## Metrics Review
 

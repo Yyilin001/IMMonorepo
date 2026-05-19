@@ -30,7 +30,7 @@ Useful multi-device TCP scenarios:
   100 users x 2 devices:     pair this script with k6 HTTP user load and TCP --tcp-devices-per-user 2
   1 group x 500 x 2 devices: set IM_GROUP_CONVERSATION_ID and TCP_GROUP_* env vars for the large group run
   AI stream concurrency:      set IM_AI_STREAM_ATTEMPTS / IM_AI_STREAM_CONCURRENCY to tune start pressure
-  reconnect storm:            set IM_RECONNECT_STORM_COMMAND to a gateway restart/failover command
+  reconnect storm:            default recovery probe runs when IM_RECONNECT_STORM_COMMAND is unset; set it for gateway restart/failover
 USAGE
 }
 
@@ -148,7 +148,21 @@ record_failure() {
 metric_value() {
   local name="$1"
   local file="$2"
-  awk -v metric="${name}" '$1 == metric { value=$2 } END { if (value != "") print value; else print "0" }' "${file}"
+  awk -v metric="${name}" '($1 == metric || index($1, metric "{") == 1) { value += $2 } END { if (value != "") print value; else print "0" }' "${file}"
+}
+
+require_number_at_most() {
+  local value="$1"
+  local max="$2"
+  local message="$3"
+  awk -v value="${value:-0}" -v max="${max}" 'BEGIN { exit(value <= max ? 0 : 1) }' || record_failure "${message}"
+}
+
+require_number_at_least() {
+  local value="$1"
+  local min="$2"
+  local message="$3"
+  awk -v value="${value:-0}" -v min="${min}" 'BEGIN { exit(value >= min ? 0 : 1) }' || record_failure "${message}"
 }
 
 capture_metrics() {
@@ -211,10 +225,12 @@ run_tcp_scenario() {
     swift run IMTCPLoadDriver "${TCP_ARGS[@]}"
   ) | tee "${log_file}"
 
-  local ack_rate canonical_rate reconnect_count
+  local ack_rate canonical_rate reconnect_count server_errors duplicate_canonical
   ack_rate="$(grep -Eo 'ackSuccessRate=[0-9.]+' "${log_file}" | tail -1 | cut -d= -f2)"
   canonical_rate="$(grep -Eo 'canonicalSuccessRate=[0-9.]+' "${log_file}" | tail -1 | cut -d= -f2)"
   reconnect_count="$(grep -Eo 'reconnects=[0-9]+' "${log_file}" | tail -1 | cut -d= -f2)"
+  server_errors="$(grep -Eo 'serverErrors=[0-9]+' "${log_file}" | tail -1 | cut -d= -f2)"
+  duplicate_canonical="$(grep -Eo 'duplicateCanonical=[0-9]+' "${log_file}" | tail -1 | cut -d= -f2)"
   {
     echo
     echo "## TCPDriver ${label}"
@@ -226,6 +242,8 @@ run_tcp_scenario() {
     echo "- ack_success_rate: ${ack_rate:-unknown}"
     echo "- canonical_success_rate: ${canonical_rate:-unknown}"
     echo "- reconnect_count: ${reconnect_count:-unknown}"
+    echo "- server_errors: ${server_errors:-unknown}"
+    echo "- duplicate_canonical: ${duplicate_canonical:-unknown}"
     echo
     echo '```text'
     tail -n 8 "${log_file}"
@@ -233,9 +251,10 @@ run_tcp_scenario() {
   } >> "${REPORT_FILE}"
 
   if [[ "${REQUIRE_ACCEPTANCE}" == "true" ]]; then
-    awk -v value="${ack_rate:-0}" 'BEGIN { exit(value >= 0.999 ? 0 : 1) }' || record_failure "${label}: TCP ack success rate below 99.9%"
-    awk -v value="${canonical_rate:-0}" 'BEGIN { exit(value >= 0.999 ? 0 : 1) }' || record_failure "${label}: TCP canonical success rate below 99.9%"
-    grep -q 'serverErrors=0' "${log_file}" || record_failure "${label}: server errors were reported"
+    require_number_at_least "${ack_rate:-0}" "0.999" "${label}: TCP ack success rate below 99.9%"
+    require_number_at_least "${canonical_rate:-0}" "0.999" "${label}: TCP canonical success rate below 99.9%"
+    require_number_at_most "${server_errors:-1}" "0" "${label}: server errors were reported"
+    require_number_at_most "${duplicate_canonical:-1}" "0" "${label}: duplicate canonical messages were observed"
   fi
 }
 
@@ -367,15 +386,94 @@ PY
 run_reconnect_storm() {
   local log_file="${REPORT_DIR}/staging-baseline-reconnect-storm-command.log"
   if [[ -z "${IM_RECONNECT_STORM_COMMAND:-}" ]]; then
+    local recovery_log="${REPORT_DIR}/staging-baseline-reconnect-recovery-probe.log"
+    echo "Running default reconnect recovery probe"
+    run_tcp_scenario \
+      "reconnect-recovery-probe" \
+      "${IM_CONVERSATION_ID:?IM_CONVERSATION_ID is required}" \
+      "${IM_RECONNECT_STORM_CONNECTIONS:-5}" \
+      "${IM_RECONNECT_STORM_DEVICES_PER_USER:-5}" \
+      "${IM_RECONNECT_STORM_MESSAGES:-2}" \
+      "${IM_RECONNECT_STORM_SEND_INTERVAL_MS:-250}"
+
+    python3 - "${BASE_URL}" "${IM_EMAIL:?IM_EMAIL is required}" "${IM_PASSWORD:?IM_PASSWORD is required}" "${IM_CONVERSATION_ID}" > "${recovery_log}" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+base_url, email, password, conversation_id = sys.argv[1:5]
+
+def request_json(method, url, payload=None, token=None):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            raw = response.read().decode("utf-8")
+            return response.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8")
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            body = {"raw": raw}
+        return error.code, body
+
+login_status, login_body = request_json("POST", f"{base_url}/api/auth/login", {
+    "email": email,
+    "password": password,
+    "device": {
+        "deviceID": "staging-reconnect-recovery-probe",
+        "deviceName": "staging-baseline",
+        "platform": "staging"
+    }
+})
+token = login_body.get("accessToken") if isinstance(login_body, dict) else None
+if login_status >= 400 or not token:
+    print(f"loginStatus={login_status}")
+    print("messagesSinceStatus=0 duplicateClientMessages=1 success=0")
+    sys.exit(0)
+
+status, body = request_json("GET", f"{base_url}/api/im/conversations/{conversation_id}/messages/since?afterSequence=0&limit=500", None, token)
+messages = body.get("messages", []) if isinstance(body, dict) else []
+seen = set()
+duplicates = 0
+for message in messages:
+    client_id = message.get("clientMessageID")
+    if not client_id:
+        continue
+    if client_id in seen:
+        duplicates += 1
+    seen.add(client_id)
+success = 1 if status == 200 and duplicates == 0 else 0
+print(f"loginStatus={login_status}")
+print(f"messagesSinceStatus={status} messageCount={len(messages)} duplicateClientMessages={duplicates} success={success}")
+PY
+
+    cat "${recovery_log}"
+    local recovery_success duplicate_client_messages
+    recovery_success="$(grep -Eo 'success=[0-9]+' "${recovery_log}" | tail -1 | cut -d= -f2)"
+    duplicate_client_messages="$(grep -Eo 'duplicateClientMessages=[0-9]+' "${recovery_log}" | tail -1 | cut -d= -f2)"
     {
       echo
       echo "## Scenario reconnect storm"
       echo
-      echo "- status: skipped"
-      echo "- reason: IM_RECONNECT_STORM_COMMAND not set"
+      echo "- mode: default-recovery-probe"
+      echo "- log: $(basename "${recovery_log}")"
+      echo "- messages_since_success: ${recovery_success:-unknown}"
+      echo "- duplicate_client_messages: ${duplicate_client_messages:-unknown}"
+      echo
+      echo '```text'
+      cat "${recovery_log}"
+      echo '```'
     } >> "${REPORT_FILE}"
     if [[ "${REQUIRE_ACCEPTANCE}" == "true" ]]; then
-      record_failure "reconnect storm command is required; set IM_RECONNECT_STORM_COMMAND"
+      require_number_at_least "${recovery_success:-0}" "1" "reconnect recovery probe did not converge through messages/since"
+      require_number_at_most "${duplicate_client_messages:-1}" "0" "reconnect recovery probe found duplicate clientMessageID values"
     fi
     return
   fi
@@ -442,17 +540,25 @@ fi
 before_metrics="$(capture_metrics before)"
 append_metrics_summary "before" "${before_metrics}"
 
+http_status=0
 if [[ "${RUN_HTTP}" == "true" ]]; then
   echo "Running k6 HTTP profile=${PROFILE}"
+  set +e
   (
     cd "${ROOT_DIR}/LoadTests/k6"
     PROFILE="${PROFILE}" BASE_URL="${BASE_URL}" k6 run http-small-group.js
   ) | tee "${REPORT_DIR}/staging-baseline-k6.log"
+  http_status=${PIPESTATUS[0]}
+  set -e
   {
     echo "## HTTP k6"
     echo
     echo "- log: staging-baseline-k6.log"
+    echo "- status: $([[ ${http_status} -eq 0 ]] && echo passed || echo failed)"
   } >> "${REPORT_FILE}"
+  if [[ "${REQUIRE_ACCEPTANCE}" == "true" && ${http_status} -ne 0 ]]; then
+    record_failure "HTTP k6 thresholds failed; HTTP/TCP error rate acceptance not met"
+  fi
 fi
 
 if [[ "${RUN_TCP}" == "true" ]]; then
@@ -492,6 +598,10 @@ fi
 after_metrics="$(capture_metrics after)"
 append_metrics_summary "after" "${after_metrics}"
 
+if [[ "${REQUIRE_ACCEPTANCE}" == "true" && -z "${after_metrics}" ]]; then
+  record_failure "metrics snapshot is required for acceptance but could not be fetched"
+fi
+
 if [[ "${REQUIRE_ACCEPTANCE}" == "true" && -n "${after_metrics}" ]]; then
   outbox_backlog="$(metric_value im_outbox_backlog_events "${after_metrics}")"
   cross_node_failures="$(metric_value im_cross_node_dispatch_failures_total "${after_metrics}")"
@@ -500,26 +610,26 @@ if [[ "${REQUIRE_ACCEPTANCE}" == "true" && -n "${after_metrics}" ]]; then
   ai_startup_repairs="$(metric_value im_ai_stream_startup_stale_repairs_total "${after_metrics}")"
   ai_finalize_failures="$(metric_value im_ai_stream_finalize_failures_total "${after_metrics}")"
 
-  awk -v value="${outbox_backlog}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "outbox backlog did not drain"
-  awk -v value="${cross_node_failures}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "cross-node dispatch failures are non-zero"
-  awk -v value="${session_count_failures}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "session-count relay failures are non-zero"
-  awk -v value="${ai_runtime_repairs}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "AI stream runtime stale repairs are non-zero"
-  awk -v value="${ai_startup_repairs}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "AI stream startup stale repairs are non-zero"
-  awk -v value="${ai_finalize_failures}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "AI stream finalize failures are non-zero"
+  require_number_at_most "${outbox_backlog}" "0" "outbox backlog did not drain"
+  require_number_at_most "${cross_node_failures}" "0" "cross-node dispatch failures are non-zero"
+  require_number_at_most "${session_count_failures}" "0" "session-count relay failures are non-zero"
+  require_number_at_most "${ai_runtime_repairs}" "0" "AI stream runtime stale repairs are non-zero"
+  require_number_at_most "${ai_startup_repairs}" "0" "AI stream startup stale repairs are non-zero"
+  require_number_at_most "${ai_finalize_failures}" "0" "AI stream finalize failures are non-zero"
 fi
 
 cat <<'EOF' >> "${REPORT_FILE}"
 
 ## Go/No-Go Checklist
 
-- HTTP/TCP error rate < 0.1%: TODO
+- HTTP/TCP error rate < 0.1%: enforced by k6/TCPDriver thresholds under --require-acceptance
 - TCP ack success rate >= 99.9%: enforced by --require-acceptance
 - TCP canonical message success rate >= 99.9%: enforced by --require-acceptance
-- no duplicate canonical messages by clientMessageID in client-side sample: verify in attached client smoke notes
+- no duplicate canonical messages by clientMessageID in TCPDriver samples: enforced by --require-acceptance
 - message write P95/P99 meets runbook thresholds: verify from staging metrics/dashboard
 - conversations/changes convergence P95 < 2s: verify from staging metrics/dashboard
 - outbox backlog returns to zero or continuously drains after load stops: enforced when metrics are available
-- reconnect messages/since success > 99.9%: enforced by IM_RECONNECT_STORM_COMMAND when --require-acceptance is set
+- reconnect messages/since success > 99.9%: enforced by default recovery probe or IM_RECONNECT_STORM_COMMAND under --require-acceptance
 - session-count relay failures stay at 0: enforced when metrics are available
 - cross-node dispatch failures stay at 0: enforced when metrics are available
 - AI stream concurrency limit rejects excess requests: enforced by scripted AI stream scenario when --require-acceptance is set

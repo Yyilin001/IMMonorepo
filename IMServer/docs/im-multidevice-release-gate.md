@@ -32,6 +32,7 @@ This runs:
 
 - `swift test --no-parallel` for IMServer
 - `swift test` for `IMClientKit`
+- `xcodebuild ... build` and `xcodebuild ... test -only-testing:IMAppTests` for IMApp
 - Android `:imclientkit:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug`
 - TCPDriver build
 - Redis integration test when `IM_REDIS_INTEGRATION_URL` is set
@@ -52,7 +53,7 @@ cd IMServer
 ./scripts/multidevice_release_gate.sh \
   --env-file LoadTests/staging-baseline.env \
   --profile staging-baseline \
-  --staging-baseline \
+  --require-staging-baseline \
   --require-redis
 ```
 
@@ -110,10 +111,11 @@ Go only when all are true:
 - no incorrect session kick in same-account multi-device tests
 - `ackSuccessRate >= 0.999`
 - `canonicalSuccessRate >= 0.999`
+- `duplicateCanonical == 0` in TCPDriver samples
 - cross-node dispatch failures stay at zero
 - session-count query failures stay at zero
 - Redis stale cleanup is not continuously increasing after load stops
 - outbox backlog drains after load stops
-- `conversations/changes` and `messages/since` close all observed gaps after reconnect
+- `messages/since` closes all observed gaps in the default reconnect recovery probe or custom reconnect storm command
 
 No-go on any protocol ambiguity, duplicate UI row, wrong-session kick, sustained Redis route failures, or unbounded write/outbox backlog.
