@@ -62,6 +62,22 @@ class AuthViewModelTests {
 
     @Test
     @OptIn(ExperimentalCoroutinesApi::class)
+    fun signOutStopsRuntimeClearsSessionAndMovesToSignedOut() = runTest {
+        val user = AuthUser("user-1", "a@example.com")
+        val gateway = FakeSessionGateway(restoreResult = RestoreResult.Authenticated(user))
+        val viewModel = AuthViewModel(gateway)
+        advanceUntilIdle()
+
+        viewModel.signOut()
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.phase is AuthPhase.SignedOut)
+        assertTrue(gateway.didStopRuntime)
+        assertTrue(gateway.didClearSession)
+    }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
     fun sessionInvalidationStopsRuntimeAndMovesToSignedOut() = runTest {
         val user = AuthUser("user-1", "a@example.com")
         val gateway = FakeSessionGateway(restoreResult = RestoreResult.Authenticated(user))

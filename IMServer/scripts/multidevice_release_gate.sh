@@ -239,15 +239,23 @@ append_metrics_snapshot
 
 cat <<'EOF' >> "${REPORT_FILE}"
 
-## Manual Multi-device Acceptance
+## Multi-device Acceptance Coverage
+
+- automated: `IMServerTests+GatewayRouting.twoTCPDevicesReceiveCanonicalMessageEchoFromSender`
+- automated: `IMServerTests+GatewayRouting.crossDeviceReadAdvancesUnreadStateOverSecondTCPConnection`
+- automated: `IMServerTests+GatewayRouting.reconnectedDeviceRecoversMissedCanonicalMessagesOverMessagesSince`
+- automated: `RedisPresenceIntegrationTests.redisAIStreamLeaseEnforcesDistributedLimitsAndCancellation` when `IM_REDIS_INTEGRATION_URL` is set
+- scripted: staging baseline `1 user x 5 devices`
+- scripted: staging baseline `100 users x 2 devices`
+- scripted: staging baseline `1 group x 500 members x 2 devices`
+- scripted: staging baseline `AI stream concurrency`
+- scripted: staging baseline `reconnect storm` when `IM_RECONNECT_STORM_COMMAND` is set
+
+## Manual Client Smoke
 
 - iOS and Android can sign in with the same account on different device IDs.
-- Same device ID re-login kicks the old session only.
-- Device A sends text; A receives ack and A/B receive canonical message.
 - Canonical echo merges by clientMessageID and does not duplicate in UI.
-- Device A marks read; Device B unread count converges to zero by realtime event or changes sync.
 - Cold start shows cache first, then TCP + HTTP sync converges without duplicate messages.
-- logout current/session/all kicks only the expected session set.
 - Prometheus shows zero cross-node dispatch failures and zero session-count query failures during smoke.
 EOF
 

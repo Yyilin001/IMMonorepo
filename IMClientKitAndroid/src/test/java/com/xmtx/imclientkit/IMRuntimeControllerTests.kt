@@ -98,6 +98,35 @@ class IMRuntimeControllerTests {
         assertEquals(IMConnectionStatus.Disconnected, controller.conversationStore.state.value.connectionStatus)
     }
 
+    @Test
+    fun failedActiveStreamSnapshotRetriesAndEventuallyAppliesResponse() = runTest {
+        var snapshotAttempts = 0
+        val controller = runtimeController(
+            requests = mutableListOf(),
+            cacheSnapshot = streamingConversationState(),
+            streamSnapshotStatus = {
+                snapshotAttempts += 1
+                if (snapshotAttempts == 1) HttpStatusCode.ServiceUnavailable else HttpStatusCode.OK
+            },
+            scope = this,
+        )
+
+        controller.start(USER_ID)
+        advanceUntilSnapshotAttempt { snapshotAttempts }
+        advanceTimeBy(1_000)
+        advanceUntilIdle()
+        advanceUntilMessagePreview(controller, "completed text")
+
+        assertEquals(2, snapshotAttempts)
+        val message = controller.conversationStore.state.value.conversations.first().messages.first()
+        assertEquals("completed text", message.previewText)
+        assertEquals(
+            IMMessageStreamLifecycleState.Completed,
+            message.streamState?.state,
+        )
+        controller.stop()
+    }
+
     private fun TestScope.advanceUntilSnapshotAttempt(
         attempts: () -> Int,
     ) {
@@ -107,6 +136,22 @@ class IMRuntimeControllerTests {
             advanceTimeBy(1)
         }
         assertEquals(1, attempts())
+    }
+
+    private fun TestScope.advanceUntilMessagePreview(
+        controller: IMRuntimeController,
+        expectedPreview: String,
+    ) {
+        repeat(50) {
+            val preview = controller.conversationStore.state.value.conversations
+                .firstOrNull()
+                ?.messages
+                ?.firstOrNull()
+                ?.previewText
+            if (preview == expectedPreview) return
+            runCurrent()
+            advanceTimeBy(1)
+        }
     }
 
     private fun runtimeController(
