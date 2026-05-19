@@ -38,6 +38,7 @@ final class ConversationRuntimeController {
     private var imMessageStreamSnapshotWorkerTask: Task<Void, Never>?
     private var pendingMessageStreamSnapshotTargets: Set<IMActiveMessageStreamTarget> = []
     private var messageStreamSnapshotRetryDelays: [IMActiveMessageStreamTarget: UInt64] = [:]
+    private var messageStreamSnapshotRetryTasks: [IMActiveMessageStreamTarget: Task<Void, Never>] = [:]
     private var imConversationReadReportTasks: [String: Task<Void, Never>] = [:]
     private var pendingIMConversationReadSequences: [String: UInt64] = [:]
     private var imConversationGapSyncQueue: [String] = []
@@ -1595,12 +1596,49 @@ final class ConversationRuntimeController {
                 } catch is CancellationError {
                     return
                 } catch {
-                    // Snapshot recovery is a compensation path; keep the local partial and retry with bounded backoff.
-                    self.pendingMessageStreamSnapshotTargets.insert(target)
-                    self.messageStreamSnapshotRetryDelays[target] = self.nextMessageStreamSnapshotRetryDelay(
+                    // Snapshot recovery is a compensation path; keep local partials and retry without blocking other targets.
+                    let retryDelay = self.nextMessageStreamSnapshotRetryDelay(
                         after: self.messageStreamSnapshotRetryDelays[target]
                     )
+                    self.messageStreamSnapshotRetryDelays[target] = retryDelay
+                    self.scheduleMessageStreamSnapshotRetry(
+                        target,
+                        currentUserID: currentUserID,
+                        delay: retryDelay
+                    )
                 }
+            }
+        }
+    }
+
+    private func scheduleMessageStreamSnapshotRetry(
+        _ target: IMActiveMessageStreamTarget,
+        currentUserID: UUID,
+        delay: UInt64
+    ) {
+        guard messageStreamSnapshotRetryTasks[target] == nil else {
+            return
+        }
+
+        messageStreamSnapshotRetryTasks[target] = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delay)
+                try Task.checkCancellation()
+            } catch {
+                return
+            }
+
+            await MainActor.run {
+                guard let self else {
+                    return
+                }
+                self.messageStreamSnapshotRetryTasks[target] = nil
+                guard self.currentUserProvider()?.id == currentUserID else {
+                    self.messageStreamSnapshotRetryDelays.removeValue(forKey: target)
+                    return
+                }
+                self.pendingMessageStreamSnapshotTargets.insert(target)
+                self.startMessageStreamSnapshotWorkerIfNeeded(currentUserID: currentUserID)
             }
         }
     }
@@ -1608,8 +1646,12 @@ final class ConversationRuntimeController {
     private func cancelMessageStreamSnapshotSync() {
         imMessageStreamSnapshotWorkerTask?.cancel()
         imMessageStreamSnapshotWorkerTask = nil
+        for task in messageStreamSnapshotRetryTasks.values {
+            task.cancel()
+        }
         pendingMessageStreamSnapshotTargets.removeAll()
         messageStreamSnapshotRetryDelays.removeAll()
+        messageStreamSnapshotRetryTasks.removeAll()
     }
 
     private func nextMessageStreamSnapshotRetryDelay(after current: UInt64?) -> UInt64 {

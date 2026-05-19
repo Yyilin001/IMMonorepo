@@ -304,7 +304,7 @@ final class AuthManager: ObservableObject {
         self.init(
             sessionClient: sessionClient,
             openIMConnection: openIMConnection ?? {
-                preconditionFailure("Explicit IM connection opener is required when no openIMConnection closure is provided.")
+                throw URLError(.notConnectedToInternet)
             },
             backgroundTransferMonitor: backgroundTransferMonitor,
             imConversationCache: imConversationCache,

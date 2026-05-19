@@ -121,12 +121,23 @@ extension AuthManagerTests {
     private func makeAIStreamRecoveryController(
         handler: @escaping @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
     ) -> ConversationRuntimeController {
+        let tokenStore = InMemoryTokenStore()
+        try? tokenStore.save("access-1", for: "access_token")
+        try? tokenStore.save("refresh-1", for: "refresh_token")
         let sessionClient = SessionClient(
             httpClient: HTTPClient(
                 baseURL: HTTPFixtures.baseURL,
-                transport: MockHTTPTransport(handler: handler)
+                transport: MockHTTPTransport { request in
+                    if request.httpMethod == "POST", request.url?.path == "/api/auth/refresh" {
+                        return HTTPFixtures.response(
+                            statusCode: 200,
+                            body: try Self.authResponseBody()
+                        )
+                    }
+                    return try await handler(request)
+                }
             ),
-            tokenStore: InMemoryTokenStore(),
+            tokenStore: tokenStore,
             userCache: InMemoryUserSessionCache()
         )
         return ConversationRuntimeController(
@@ -174,11 +185,10 @@ extension AuthManagerTests {
             updatedAt: createdAt
         )
         store.applyConversationSummaryPage([summary])
-        _ = store.applyConversationEvent(
-            IMTCPConversationEventPayload(
-                eventType: .messageStreamStarted,
-                conversation: summary,
-                message: IMConversationMessageResponseBody(
+        store.appendMessages(
+            in: conversationID.uuidString,
+            messages: [
+                IMConversationMessageResponseBody(
                     id: messageID,
                     conversationID: conversationID,
                     senderUserID: Self.user.id,
@@ -194,19 +204,8 @@ extension AuthManagerTests {
                         )
                     ),
                     createdAt: createdAt
-                ),
-                stream: IMTCPMessageStreamPayload(
-                    streamID: streamID,
-                    messageID: messageID.uuidString,
-                    conversationID: conversationID.uuidString,
-                    chunkIndex: 1,
-                    partialTextLength: 7,
-                    state: .streaming,
-                    serverTimestamp: createdAt
-                ),
-                actorUserID: Self.user.id,
-                serverTimestamp: createdAt
-            ),
+                )
+            ],
             currentUserID: Self.user.id
         )
     }

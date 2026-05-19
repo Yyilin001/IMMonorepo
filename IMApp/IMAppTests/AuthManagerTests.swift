@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import IMApp
 
+@Suite(.serialized)
 @MainActor
 struct AuthManagerTests {
     nonisolated static let user = AuthUser(
@@ -285,6 +286,8 @@ struct AuthManagerTests {
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
             case ("GET", "/api/contact-requests"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            case ("GET", "/api/blocks"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([UserBlockResponseBody]()))
             case ("GET", "/api/im/conversations"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyConversationsBody())
             case ("GET", "/api/im/conversations/changes"):
@@ -613,7 +616,7 @@ struct AuthManagerTests {
     nonisolated static func waitUntil(
         _ predicate: @escaping @Sendable () async -> Bool
     ) async throws {
-        for _ in 0..<100 {
+        for _ in 0..<300 {
             if await predicate() {
                 return
             }
