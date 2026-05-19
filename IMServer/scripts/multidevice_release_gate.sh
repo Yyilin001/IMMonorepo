@@ -7,10 +7,12 @@ ENV_FILE=""
 PROFILE="local-smoke"
 RUN_SERVER="true"
 RUN_IOS="true"
+RUN_IOS_APP_BUILD="true"
 RUN_ANDROID="true"
 RUN_REDIS="auto"
 RUN_TCP_BUILD="true"
 RUN_STAGING_BASELINE="false"
+REQUIRE_STAGING_BASELINE="false"
 REPORT_DIR="${ROOT_DIR}/reports"
 
 usage() {
@@ -21,8 +23,10 @@ Options:
   --env-file path              Source staging/load-test environment variables.
   --profile name               local-smoke|staging-baseline|capacity-target. Default: local-smoke.
   --staging-baseline           Run staging_baseline.sh after local verification.
+  --require-staging-baseline   Fail unless staging_baseline.sh is run and passes.
   --skip-server                Skip IMServer swift tests.
   --skip-ios                   Skip IMClientKit swift tests.
+  --skip-ios-app-build         Skip IMApp simulator Debug build.
   --skip-android               Skip Android Gradle tests.
   --skip-redis                 Do not run optional Redis integration tests.
   --require-redis              Fail when IM_REDIS_INTEGRATION_URL is missing.
@@ -51,12 +55,22 @@ while [[ $# -gt 0 ]]; do
       RUN_STAGING_BASELINE="true"
       shift
       ;;
+    --require-staging-baseline)
+      RUN_STAGING_BASELINE="true"
+      REQUIRE_STAGING_BASELINE="true"
+      RUN_REDIS="required"
+      shift
+      ;;
     --skip-server)
       RUN_SERVER="false"
       shift
       ;;
     --skip-ios)
       RUN_IOS="false"
+      shift
+      ;;
+    --skip-ios-app-build)
+      RUN_IOS_APP_BUILD="false"
       shift
       ;;
     --skip-android)
@@ -116,6 +130,51 @@ run_step() {
   echo "- status: passed" >> "${REPORT_FILE}"
 }
 
+append_metrics_snapshot() {
+  local metrics_url="${IM_METRICS_URL:-${BASE_URL:-}/internal/metrics}"
+  if [[ -z "${metrics_url}" || "${metrics_url}" == "/internal/metrics" ]]; then
+    {
+      echo
+      echo "## Prometheus metrics snapshot"
+      echo
+      echo "- status: skipped"
+      echo "- reason: BASE_URL or IM_METRICS_URL not set"
+    } >> "${REPORT_FILE}"
+    return
+  fi
+
+  local secret="${IM_METRICS_INTERNAL_SECRET:-${IM_INTERNAL_SHARED_SECRET:-}}"
+  local metrics_file="${REPORT_DIR}/$(date -u +%Y%m%dT%H%M%SZ)-release-gate-metrics.prom"
+  local curl_args=(-fsS "${metrics_url}")
+  [[ -n "${secret}" ]] && curl_args=(-fsS -H "X-IM-Metrics-Secret: ${secret}" "${metrics_url}")
+
+  if command -v curl >/dev/null 2>&1 && curl "${curl_args[@]}" > "${metrics_file}"; then
+    {
+      echo
+      echo "## Prometheus metrics snapshot"
+      echo
+      echo "- url: ${metrics_url}"
+      echo "- log: $(basename "${metrics_file}")"
+      echo
+      echo '```text'
+      grep -E '^(im_tcp_connections|im_outbox_backlog_events|im_cross_node_dispatch_failures_total|im_session_count_query_failures_total|im_redis_presence_stale_cleanup_total|im_ai_stream_|im_stream_failed_events_total)' "${metrics_file}" || true
+      echo '```'
+    } >> "${REPORT_FILE}"
+  else
+    {
+      echo
+      echo "## Prometheus metrics snapshot"
+      echo
+      echo "- status: failed-to-fetch"
+      echo "- url: ${metrics_url}"
+    } >> "${REPORT_FILE}"
+    if [[ "${REQUIRE_STAGING_BASELINE}" == "true" ]]; then
+      echo "Failed to fetch required metrics snapshot from ${metrics_url}" >&2
+      exit 2
+    fi
+  fi
+}
+
 {
   echo "# Multi-device release gate report"
   echo
@@ -123,7 +182,9 @@ run_step() {
   echo "- git_sha: $(git -C "${MONOREPO_DIR}" rev-parse --short HEAD)"
   echo "- profile: ${PROFILE}"
   echo "- redis_mode: ${RUN_REDIS}"
+  echo "- redis_integration_enabled: $([[ -n "${IM_REDIS_INTEGRATION_URL:-}" ]] && echo true || echo false)"
   echo "- staging_baseline: ${RUN_STAGING_BASELINE}"
+  echo "- require_staging_baseline: ${REQUIRE_STAGING_BASELINE}"
 } > "${REPORT_FILE}"
 
 if [[ "${RUN_SERVER}" == "true" ]]; then
@@ -152,6 +213,10 @@ if [[ "${RUN_IOS}" == "true" ]]; then
   run_step "IMClientKit tests" bash -lc "cd '${MONOREPO_DIR}/IMClientKit' && swift test"
 fi
 
+if [[ "${RUN_IOS_APP_BUILD}" == "true" ]]; then
+  run_step "IMApp Debug simulator build" bash -lc "cd '${MONOREPO_DIR}' && xcodebuild -project IMApp/IMApp.xcodeproj -scheme IMApp -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.4' build"
+fi
+
 if [[ "${RUN_ANDROID}" == "true" ]]; then
   run_step "Android tests and debug assemble" bash -lc "cd '${MONOREPO_DIR}' && ./gradlew :imclientkit:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug"
 fi
@@ -163,8 +228,14 @@ fi
 if [[ "${RUN_STAGING_BASELINE}" == "true" ]]; then
   STAGING_ARGS=(--profile "${PROFILE}")
   [[ -n "${ENV_FILE}" ]] && STAGING_ARGS+=(--env-file "${ENV_FILE}")
+  [[ "${REQUIRE_STAGING_BASELINE}" == "true" ]] && STAGING_ARGS+=(--require-acceptance)
   run_step "Staging baseline" bash -lc "cd '${ROOT_DIR}' && ./scripts/staging_baseline.sh $(printf ' %q' "${STAGING_ARGS[@]}")"
+elif [[ "${REQUIRE_STAGING_BASELINE}" == "true" ]]; then
+  echo "Staging baseline is required but was not enabled." >&2
+  exit 2
 fi
+
+append_metrics_snapshot
 
 cat <<'EOF' >> "${REPORT_FILE}"
 

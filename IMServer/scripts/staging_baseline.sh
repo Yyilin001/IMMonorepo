@@ -6,6 +6,7 @@ PROFILE="staging-baseline"
 ENV_FILE=""
 RUN_HTTP="true"
 RUN_TCP="true"
+REQUIRE_ACCEPTANCE="false"
 TCP_CONNECTIONS=""
 TCP_DEVICES_PER_USER=""
 TCP_MESSAGES=""
@@ -13,7 +14,7 @@ TCP_SEND_INTERVAL_MS=""
 
 usage() {
   cat <<'USAGE'
-Usage: staging_baseline.sh [--profile local-smoke|staging-baseline|capacity-target] [--env-file path] [--skip-http] [--skip-tcp]
+Usage: staging_baseline.sh [--profile local-smoke|staging-baseline|capacity-target] [--env-file path] [--skip-http] [--skip-tcp] [--require-acceptance]
                            [--tcp-connections n] [--tcp-devices-per-user n] [--tcp-messages n] [--tcp-send-interval-ms n]
 
 Required for HTTP:
@@ -25,6 +26,8 @@ Required for TCP:
 Useful multi-device TCP scenarios:
   1 user x 5 devices:        --profile local-smoke --tcp-connections 5 --tcp-devices-per-user 5 --tcp-messages 1
   100 users x 2 devices:     pair this script with k6 HTTP user load and TCP --tcp-devices-per-user 2
+  1 group x 500 x 2 devices: set IM_GROUP_CONVERSATION_ID and TCP_GROUP_* env vars for the large group run
+  AI stream concurrency:      expose /internal/metrics and set IM_AI_STREAM_ACCEPTANCE=true after external AI load
   reconnect/logout storms:   run against staging while externally restarting gateway or calling logout-all
 USAGE
 }
@@ -45,6 +48,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-tcp)
       RUN_TCP="false"
+      shift
+      ;;
+    --require-acceptance)
+      REQUIRE_ACCEPTANCE="true"
       shift
       ;;
     --tcp-connections)
@@ -103,6 +110,140 @@ TCP_CONNECTIONS="${TCP_CONNECTIONS:-}"
 TCP_DEVICES_PER_USER="${TCP_DEVICES_PER_USER:-}"
 TCP_MESSAGES="${TCP_MESSAGES:-}"
 TCP_SEND_INTERVAL_MS="${TCP_SEND_INTERVAL_MS:-}"
+METRICS_URL="${IM_METRICS_URL:-${BASE_URL}/internal/metrics}"
+METRICS_SECRET="${IM_METRICS_INTERNAL_SECRET:-${IM_INTERNAL_SHARED_SECRET:-}}"
+
+case "${PROFILE}" in
+  local-smoke)
+    DEFAULT_100_USERS_CONNECTIONS=10
+    DEFAULT_GROUP_CONNECTIONS=20
+    ;;
+  capacity-target)
+    DEFAULT_100_USERS_CONNECTIONS=2000
+    DEFAULT_GROUP_CONNECTIONS=50000
+    ;;
+  *)
+    DEFAULT_100_USERS_CONNECTIONS=200
+    DEFAULT_GROUP_CONNECTIONS=1000
+    ;;
+esac
+
+failures=()
+
+record_failure() {
+  failures+=("$1")
+  echo "ACCEPTANCE FAILURE: $1" >&2
+}
+
+metric_value() {
+  local name="$1"
+  local file="$2"
+  awk -v metric="${name}" '$1 == metric { value=$2 } END { if (value != "") print value; else print "0" }' "${file}"
+}
+
+capture_metrics() {
+  local label="$1"
+  local output_file="${REPORT_DIR}/${label}.prom"
+  local curl_args=(-fsS "${METRICS_URL}")
+  [[ -n "${METRICS_SECRET}" ]] && curl_args=(-fsS -H "X-IM-Metrics-Secret: ${METRICS_SECRET}" "${METRICS_URL}")
+  if command -v curl >/dev/null 2>&1 && curl "${curl_args[@]}" > "${output_file}"; then
+    echo "${output_file}"
+  else
+    echo ""
+  fi
+}
+
+append_metrics_summary() {
+  local label="$1"
+  local file="$2"
+  {
+    echo
+    echo "## Metrics ${label}"
+    echo
+    if [[ -z "${file}" ]]; then
+      echo "- status: skipped"
+      echo "- reason: metrics endpoint unavailable"
+    else
+      echo "- file: $(basename "${file}")"
+      echo
+      echo '```text'
+      grep -E '^(im_tcp_connections|im_outbox_backlog_events|im_cross_node_dispatch_failures_total|im_session_count_query_failures_total|im_redis_presence_stale_cleanup_total|im_ai_stream_|im_stream_failed_events_total)' "${file}" || true
+      echo '```'
+    fi
+  } >> "${REPORT_FILE}"
+}
+
+run_tcp_scenario() {
+  local label="$1"
+  local conversation_id="$2"
+  local connections="$3"
+  local devices_per_user="$4"
+  local messages="$5"
+  local send_interval_ms="$6"
+  local log_file="${REPORT_DIR}/staging-baseline-tcp-${label}.log"
+
+  echo "Running TCP scenario ${label}"
+  TCP_ARGS=(
+    --profile "${PROFILE}"
+    --base-url "${BASE_URL}"
+    --tcp-host "${TCP_HOST}"
+    --tcp-port "${TCP_PORT}"
+    --email "${IM_EMAIL:?IM_EMAIL is required}"
+    --password "${IM_PASSWORD:?IM_PASSWORD is required}"
+    --conversation-id "${conversation_id}"
+    --connections "${connections}"
+    --devices-per-user "${devices_per_user}"
+    --messages "${messages}"
+  )
+  [[ -n "${send_interval_ms}" ]] && TCP_ARGS+=(--send-interval-ms "${send_interval_ms}")
+  (
+    cd "${ROOT_DIR}/LoadTests/TCPDriver"
+    swift run IMTCPLoadDriver "${TCP_ARGS[@]}"
+  ) | tee "${log_file}"
+
+  local ack_rate canonical_rate reconnect_count
+  ack_rate="$(grep -Eo 'ackSuccessRate=[0-9.]+' "${log_file}" | tail -1 | cut -d= -f2)"
+  canonical_rate="$(grep -Eo 'canonicalSuccessRate=[0-9.]+' "${log_file}" | tail -1 | cut -d= -f2)"
+  reconnect_count="$(grep -Eo 'reconnects=[0-9]+' "${log_file}" | tail -1 | cut -d= -f2)"
+  {
+    echo
+    echo "## TCPDriver ${label}"
+    echo
+    echo "- log: $(basename "${log_file}")"
+    echo "- connections: ${connections}"
+    echo "- devices_per_user: ${devices_per_user}"
+    echo "- messages: ${messages}"
+    echo "- ack_success_rate: ${ack_rate:-unknown}"
+    echo "- canonical_success_rate: ${canonical_rate:-unknown}"
+    echo "- reconnect_count: ${reconnect_count:-unknown}"
+    echo
+    echo '```text'
+    tail -n 8 "${log_file}"
+    echo '```'
+  } >> "${REPORT_FILE}"
+
+  if [[ "${REQUIRE_ACCEPTANCE}" == "true" ]]; then
+    awk -v value="${ack_rate:-0}" 'BEGIN { exit(value >= 0.999 ? 0 : 1) }' || record_failure "${label}: TCP ack success rate below 99.9%"
+    awk -v value="${canonical_rate:-0}" 'BEGIN { exit(value >= 0.999 ? 0 : 1) }' || record_failure "${label}: TCP canonical success rate below 99.9%"
+    grep -q 'serverErrors=0' "${log_file}" || record_failure "${label}: server errors were reported"
+  fi
+}
+
+append_external_scenario() {
+  local label="$1"
+  local flag_name="$2"
+  local flag_value="${!flag_name:-false}"
+  {
+    echo
+    echo "## Scenario ${label}"
+    echo
+    echo "- status: $([[ "${flag_value}" == "true" ]] && echo confirmed || echo not-confirmed)"
+    echo "- confirmation_env: ${flag_name}"
+  } >> "${REPORT_FILE}"
+  if [[ "${REQUIRE_ACCEPTANCE}" == "true" && "${flag_value}" != "true" ]]; then
+    record_failure "${label} not confirmed; set ${flag_name}=true after running the scenario"
+  fi
+}
 
 if [[ "${RUN_HTTP}" == "true" ]]; then
   command -v k6 >/dev/null 2>&1 || {
@@ -127,11 +268,15 @@ fi
   echo "- base_url: ${BASE_URL}"
   echo "- tcp_host: ${TCP_HOST}"
   echo "- tcp_port: ${TCP_PORT}"
-  echo "- tcp_connections: ${TCP_CONNECTIONS:-profile-default}"
-  echo "- tcp_devices_per_user: ${TCP_DEVICES_PER_USER:-profile-default}"
-  echo "- tcp_messages: ${TCP_MESSAGES:-profile-default}"
+  echo "- require_acceptance: ${REQUIRE_ACCEPTANCE}"
+  echo "- tcp_connections: ${TCP_CONNECTIONS:-scenario-default}"
+  echo "- tcp_devices_per_user: ${TCP_DEVICES_PER_USER:-scenario-default}"
+  echo "- tcp_messages: ${TCP_MESSAGES:-scenario-default}"
   echo
 } > "${REPORT_FILE}"
+
+before_metrics="$(capture_metrics before)"
+append_metrics_summary "before" "${before_metrics}"
 
 if [[ "${RUN_HTTP}" == "true" ]]; then
   echo "Running k6 HTTP profile=${PROFILE}"
@@ -147,31 +292,51 @@ if [[ "${RUN_HTTP}" == "true" ]]; then
 fi
 
 if [[ "${RUN_TCP}" == "true" ]]; then
-  echo "Running Swift TCPDriver profile=${PROFILE}"
-  TCP_ARGS=(
-    --profile "${PROFILE}"
-    --base-url "${BASE_URL}"
-    --tcp-host "${TCP_HOST}"
-    --tcp-port "${TCP_PORT}"
-    --email "${IM_EMAIL:?IM_EMAIL is required}"
-    --password "${IM_PASSWORD:?IM_PASSWORD is required}"
-    --conversation-id "${IM_CONVERSATION_ID}"
-  )
-  [[ -n "${TCP_CONNECTIONS}" ]] && TCP_ARGS+=(--connections "${TCP_CONNECTIONS}")
-  [[ -n "${TCP_DEVICES_PER_USER}" ]] && TCP_ARGS+=(--devices-per-user "${TCP_DEVICES_PER_USER}")
-  [[ -n "${TCP_MESSAGES}" ]] && TCP_ARGS+=(--messages "${TCP_MESSAGES}")
-  [[ -n "${TCP_SEND_INTERVAL_MS}" ]] && TCP_ARGS+=(--send-interval-ms "${TCP_SEND_INTERVAL_MS}")
-  (
-    cd "${ROOT_DIR}/LoadTests/TCPDriver"
-    swift run IMTCPLoadDriver "${TCP_ARGS[@]}"
-  ) | tee "${REPORT_DIR}/staging-baseline-tcp.log"
-  {
-    echo
-    echo "## TCPDriver"
-    echo
-    echo "- log: staging-baseline-tcp.log"
-    echo "- devices_per_user: ${TCP_DEVICES_PER_USER:-profile-default}"
-  } >> "${REPORT_FILE}"
+  run_tcp_scenario \
+    "one-user-five-devices" \
+    "${IM_CONVERSATION_ID}" \
+    "${TCP_CONNECTIONS:-5}" \
+    "${TCP_DEVICES_PER_USER:-5}" \
+    "${TCP_MESSAGES:-1}" \
+    "${TCP_SEND_INTERVAL_MS}"
+
+  run_tcp_scenario \
+    "hundred-users-two-devices" \
+    "${IM_CONVERSATION_ID}" \
+    "${TCP_100_USERS_CONNECTIONS:-${DEFAULT_100_USERS_CONNECTIONS}}" \
+    "${TCP_100_USERS_DEVICES_PER_USER:-2}" \
+    "${TCP_100_USERS_MESSAGES:-1}" \
+    "${TCP_100_USERS_SEND_INTERVAL_MS:-${TCP_SEND_INTERVAL_MS}}"
+
+  run_tcp_scenario \
+    "group-500-members-two-devices" \
+    "${IM_GROUP_CONVERSATION_ID:-${IM_CONVERSATION_ID}}" \
+    "${TCP_GROUP_CONNECTIONS:-${DEFAULT_GROUP_CONNECTIONS}}" \
+    "${TCP_GROUP_DEVICES_PER_USER:-2}" \
+    "${TCP_GROUP_MESSAGES:-1}" \
+    "${TCP_GROUP_SEND_INTERVAL_MS:-${TCP_SEND_INTERVAL_MS}}"
+fi
+
+after_metrics="$(capture_metrics after)"
+append_metrics_summary "after" "${after_metrics}"
+
+append_external_scenario "AI stream concurrency" "IM_AI_STREAM_ACCEPTANCE"
+append_external_scenario "reconnect storm" "IM_RECONNECT_STORM_ACCEPTANCE"
+
+if [[ "${REQUIRE_ACCEPTANCE}" == "true" && -n "${after_metrics}" ]]; then
+  outbox_backlog="$(metric_value im_outbox_backlog_events "${after_metrics}")"
+  cross_node_failures="$(metric_value im_cross_node_dispatch_failures_total "${after_metrics}")"
+  session_count_failures="$(metric_value im_session_count_query_failures_total "${after_metrics}")"
+  ai_runtime_repairs="$(metric_value im_ai_stream_runtime_stale_repairs_total "${after_metrics}")"
+  ai_startup_repairs="$(metric_value im_ai_stream_startup_stale_repairs_total "${after_metrics}")"
+  ai_finalize_failures="$(metric_value im_ai_stream_finalize_failures_total "${after_metrics}")"
+
+  awk -v value="${outbox_backlog}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "outbox backlog did not drain"
+  awk -v value="${cross_node_failures}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "cross-node dispatch failures are non-zero"
+  awk -v value="${session_count_failures}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "session-count relay failures are non-zero"
+  awk -v value="${ai_runtime_repairs}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "AI stream runtime stale repairs are non-zero"
+  awk -v value="${ai_startup_repairs}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "AI stream startup stale repairs are non-zero"
+  awk -v value="${ai_finalize_failures}" 'BEGIN { exit(value <= 0 ? 0 : 1) }' || record_failure "AI stream finalize failures are non-zero"
 fi
 
 cat <<'EOF' >> "${REPORT_FILE}"
@@ -179,15 +344,30 @@ cat <<'EOF' >> "${REPORT_FILE}"
 ## Go/No-Go Checklist
 
 - HTTP/TCP error rate < 0.1%: TODO
-- TCP ack success rate >= 99.9%: TODO
-- TCP canonical message success rate >= 99.9%: TODO
-- no duplicate canonical messages by clientMessageID in client-side sample: TODO
-- message write P95/P99 meets runbook thresholds: TODO
-- conversations/changes convergence P95 < 2s: TODO
-- outbox backlog returns to zero or continuously drains after load stops: TODO
-- reconnect messages/since success > 99.9%: TODO
-- session-count relay failures stay at 0: TODO
-- cross-node dispatch failures stay at 0: TODO
+- TCP ack success rate >= 99.9%: enforced by --require-acceptance
+- TCP canonical message success rate >= 99.9%: enforced by --require-acceptance
+- no duplicate canonical messages by clientMessageID in client-side sample: verify in attached client smoke notes
+- message write P95/P99 meets runbook thresholds: verify from staging metrics/dashboard
+- conversations/changes convergence P95 < 2s: verify from staging metrics/dashboard
+- outbox backlog returns to zero or continuously drains after load stops: enforced when metrics are available
+- reconnect messages/since success > 99.9%: confirm via IM_RECONNECT_STORM_ACCEPTANCE
+- session-count relay failures stay at 0: enforced when metrics are available
+- cross-node dispatch failures stay at 0: enforced when metrics are available
+- AI stream concurrency limit rejects excess requests: confirm via IM_AI_STREAM_ACCEPTANCE
+- AI stream stale repair/finalize failure metrics stay at 0: enforced when metrics are available
 EOF
+
+if [[ ${#failures[@]} -gt 0 ]]; then
+  {
+    echo
+    echo "## Acceptance Failures"
+    echo
+    for failure in "${failures[@]}"; do
+      echo "- ${failure}"
+    done
+  } >> "${REPORT_FILE}"
+  echo "Staging baseline failed acceptance. Report: ${REPORT_FILE}" >&2
+  exit 1
+fi
 
 echo "Staging baseline report: ${REPORT_FILE}"

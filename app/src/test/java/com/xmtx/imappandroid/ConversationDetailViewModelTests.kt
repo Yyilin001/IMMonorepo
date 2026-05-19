@@ -35,4 +35,18 @@ class ConversationDetailViewModelTests {
         assertEquals("hello" to "conversation-1", gateway.sentText)
         assertEquals("", viewModel.state.value.draftText)
     }
+
+    @Test
+    fun aiStreamActionsDelegateToGateway() = runTest {
+        val gateway = FakeSessionGateway()
+        gateway.reloadConversations()
+        val viewModel = ConversationDetailViewModel(gateway)
+        viewModel.openConversation("conversation-1")
+
+        viewModel.startAIReply("  summarize this  ")
+        viewModel.cancelStream("  message-1  ")
+
+        assertEquals("conversation-1" to "summarize this", gateway.startedAIReply)
+        assertEquals("conversation-1" to "message-1", gateway.cancelledStream)
+    }
 }

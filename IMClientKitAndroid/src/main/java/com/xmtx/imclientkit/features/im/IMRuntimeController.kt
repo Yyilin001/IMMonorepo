@@ -39,8 +39,11 @@ class IMRuntimeController(
     private var gapSyncJob: Job? = null
     private var queuedFlushJob: Job? = null
     private var streamSnapshotWorkerJob: Job? = null
+    private val streamSnapshotScheduleLock = Any()
+    private val scheduledStreamSnapshotTargets = mutableSetOf<IMActiveMessageStreamTarget>()
     private val streamSnapshotMutex = Mutex()
     private val pendingStreamSnapshotTargets = linkedSetOf<IMActiveMessageStreamTarget>()
+    private val inFlightStreamSnapshotTargets = mutableSetOf<IMActiveMessageStreamTarget>()
     private val streamSnapshotRetryDelays = mutableMapOf<IMActiveMessageStreamTarget, Long>()
     private var cacheObserveJob: Job? = null
     private var cacheSaveJob: Job? = null
@@ -85,8 +88,12 @@ class IMRuntimeController(
         scope.launch {
             streamSnapshotMutex.withLock {
                 pendingStreamSnapshotTargets.clear()
+                inFlightStreamSnapshotTargets.clear()
                 streamSnapshotRetryDelays.clear()
             }
+        }
+        synchronized(streamSnapshotScheduleLock) {
+            scheduledStreamSnapshotTargets.clear()
         }
         cacheObserveJob?.cancel()
         cacheObserveJob = null
@@ -514,11 +521,19 @@ class IMRuntimeController(
 
     private fun enqueueStreamSnapshots(targets: List<IMActiveMessageStreamTarget>) {
         val userID = currentUserID ?: return
-        val distinctTargets = targets.distinct()
+        val distinctTargets = synchronized(streamSnapshotScheduleLock) {
+            targets.distinct().filter { target ->
+                scheduledStreamSnapshotTargets.add(target)
+            }
+        }
         if (distinctTargets.isEmpty()) return
         scope.launch {
             streamSnapshotMutex.withLock {
-                pendingStreamSnapshotTargets.addAll(distinctTargets)
+                distinctTargets.forEach { target ->
+                    if (target !in pendingStreamSnapshotTargets && target !in inFlightStreamSnapshotTargets) {
+                        pendingStreamSnapshotTargets.add(target)
+                    }
+                }
             }
             startStreamSnapshotWorkerIfNeeded(userID)
         }
@@ -532,6 +547,7 @@ class IMRuntimeController(
                     val next = pendingStreamSnapshotTargets.firstOrNull()
                     if (next != null) {
                         pendingStreamSnapshotTargets.remove(next)
+                        inFlightStreamSnapshotTargets.add(next)
                     }
                     next
                 } ?: break
@@ -548,14 +564,20 @@ class IMRuntimeController(
                     val response = sessionClient.fetchMessageStreamSnapshot(target.conversationID, target.messageID)
                     conversationStore.applyMessageStreamSnapshot(response, userID)
                     streamSnapshotMutex.withLock {
+                        inFlightStreamSnapshotTargets.remove(target)
                         streamSnapshotRetryDelays.remove(target)
+                    }
+                    synchronized(streamSnapshotScheduleLock) {
+                        scheduledStreamSnapshotTargets.remove(target)
                     }
                 } catch (error: Throwable) {
                     if (error is CancellationException) throw error
                     streamSnapshotMutex.withLock {
+                        inFlightStreamSnapshotTargets.remove(target)
                         pendingStreamSnapshotTargets.add(target)
                         streamSnapshotRetryDelays[target] = nextStreamSnapshotRetryDelay(streamSnapshotRetryDelays[target])
                     }
+                    break
                 }
             }
             streamSnapshotWorkerJob = null
