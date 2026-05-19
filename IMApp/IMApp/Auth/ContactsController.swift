@@ -12,7 +12,42 @@ struct ContactRequestsSnapshot: Equatable {
 }
 
 @MainActor
-final class ContactsController {
+protocol ContactRuntimeControlling: AnyObject {
+    func fetchContacts() async throws -> ContactsSnapshot
+    func fetchContactRequests() async throws -> ContactRequestsSnapshot
+    func sendContactRequest(
+        email: String,
+        message: String?,
+        remark: String?
+    ) async throws -> ContactRequestResponseBody
+    func acceptContactRequest(id requestID: UUID, remark: String?) async throws -> ContactResponseBody
+    func declineContactRequest(id requestID: UUID) async throws -> ContactRequestResponseBody
+    func cancelContactRequest(id requestID: UUID) async throws -> ContactRequestResponseBody
+    func updateContact(contactUserID: UUID, remark: String?) async throws -> ContactResponseBody
+    func deleteContact(contactUserID: UUID) async throws
+    func loadCacheSnapshot(for ownerUserID: UUID) async throws -> ContactStateCacheSnapshot
+    func saveCacheSnapshot(_ snapshot: ContactStateCacheSnapshot, for ownerUserID: UUID) async throws
+    func clearSnapshot(for ownerUserID: UUID) async throws
+    func clearAllSnapshots() async throws
+    func isRequestRelevant(_ request: ContactRequestResponseBody, to currentUserID: UUID) -> Bool
+    func normalizeRequests(
+        _ requests: [ContactRequestResponseBody],
+        currentUserID: UUID
+    ) -> [ContactRequestResponseBody]
+    func sortPendingNewestFirst(
+        _ lhs: ContactRequestResponseBody,
+        _ rhs: ContactRequestResponseBody
+    ) -> Bool
+    func sortResolvedNewestFirst(
+        _ lhs: ContactRequestResponseBody,
+        _ rhs: ContactRequestResponseBody
+    ) -> Bool
+    func normalizedRemark(_ remark: String?) -> String?
+    func normalizedRequestMessage(_ message: String?) -> String?
+}
+
+@MainActor
+final class ContactsController: ContactRuntimeControlling {
     private let sessionClient: SessionClient
     private let contactStateCache: ContactStateCacheHandler
 

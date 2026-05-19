@@ -9,11 +9,11 @@ final class SessionFacade {
     }
 
     private let authSessionController: AuthSessionController
-    private let contactsController: ContactsController
+    private let contactsController: any ContactRuntimeControlling
 
     init(
         authSessionController: AuthSessionController,
-        contactsController: ContactsController
+        contactsController: any ContactRuntimeControlling
     ) {
         self.authSessionController = authSessionController
         self.contactsController = contactsController

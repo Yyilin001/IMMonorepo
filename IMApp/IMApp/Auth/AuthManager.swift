@@ -273,14 +273,16 @@ final class AuthManager: ObservableObject {
             userCache: userCache
         )
         self.init(
-            sessionClient: sessionClient,
-            openIMConnection: {
-                try await sessionClient.openIMConnection(configuration: imConnectionConfiguration)
-            },
-            backgroundTransferMonitor: backgroundTransferMonitor,
-            imConversationCache: imConversationCache,
-            contactStateCache: contactStateCache,
-            shouldRestoreSession: shouldRestoreSession
+            dependencies: AuthManagerDependencies(
+                sessionClient: sessionClient,
+                openIMConnection: {
+                    try await sessionClient.openIMConnection(configuration: imConnectionConfiguration)
+                },
+                backgroundTransferMonitor: backgroundTransferMonitor,
+                imConversationCache: imConversationCache,
+                contactStateCache: contactStateCache,
+                shouldRestoreSession: shouldRestoreSession
+            )
         )
     }
 
@@ -302,38 +304,34 @@ final class AuthManager: ObservableObject {
             userCache: userCache
         )
         self.init(
-            sessionClient: sessionClient,
-            openIMConnection: openIMConnection ?? {
-                throw URLError(.notConnectedToInternet)
-            },
-            backgroundTransferMonitor: backgroundTransferMonitor,
-            imConversationCache: imConversationCache,
-            contactStateCache: contactStateCache,
-            shouldRestoreSession: shouldRestoreSession
+            dependencies: AuthManagerDependencies(
+                sessionClient: sessionClient,
+                openIMConnection: openIMConnection ?? {
+                    throw URLError(.notConnectedToInternet)
+                },
+                backgroundTransferMonitor: backgroundTransferMonitor,
+                imConversationCache: imConversationCache,
+                contactStateCache: contactStateCache,
+                shouldRestoreSession: shouldRestoreSession
+            )
         )
     }
 
-    private init(
-        sessionClient: SessionClient,
-        openIMConnection: @escaping @Sendable () async throws -> IMTCPConnection,
-        backgroundTransferMonitor: any BackgroundTransferMonitoring,
-        imConversationCache: IMConversationCacheHandler,
-        contactStateCache: ContactStateCacheHandler,
-        shouldRestoreSession: Bool
-    ) {
+    private init(dependencies: AuthManagerDependencies) {
+        let sessionClient = dependencies.sessionClient
         self.sessionClient = sessionClient
         let authSessionController = AuthSessionController(sessionClient: sessionClient)
         let contactsController = ContactsController(
             sessionClient: sessionClient,
-            contactStateCache: contactStateCache
+            contactStateCache: dependencies.contactStateCache
         )
         self.sessionFacade = SessionFacade(
             authSessionController: authSessionController,
             contactsController: contactsController
         )
-        self.openIMConnection = openIMConnection
-        self.backgroundTransferMonitor = backgroundTransferMonitor
-        self.imConversationCache = imConversationCache
+        self.openIMConnection = dependencies.openIMConnection
+        self.backgroundTransferMonitor = dependencies.backgroundTransferMonitor
+        self.imConversationCache = dependencies.imConversationCache
         let sessionStore = AppSessionStore()
         let contactStore = ContactStore()
         let conversationStore = IMConversationStore()
@@ -349,13 +347,13 @@ final class AuthManager: ObservableObject {
         self.fileTransferManager = FileTransferManager(
             fileAPI: FileAPI(sessionClient: sessionClient),
             sessionClient: sessionClient,
-            backgroundTransferMonitor: backgroundTransferMonitor
+            backgroundTransferMonitor: dependencies.backgroundTransferMonitor
         )
         self.probeManager.delegate = self
         self.fileTransferManager.delegate = self
         bindChildStores()
 
-        if shouldRestoreSession {
+        if dependencies.shouldRestoreSession {
             scheduleRestoreSession()
         } else {
             phase = .signedOut(message: nil)
@@ -377,7 +375,7 @@ final class AuthManager: ObservableObject {
     }
 
     private func makeConversationRuntimeController() -> ConversationRuntimeController {
-        ConversationRuntimeController(
+        ConversationRuntimeFactory.make(context: AuthRuntimeContext(
             sessionClient: sessionClient,
             openIMConnection: openIMConnection,
             imConversationStore: imConversationStore,
@@ -442,7 +440,7 @@ final class AuthManager: ObservableObject {
                 self?.isFlushingQueuedIMTextMessages = isActive
             },
             backgroundTransferMonitor: backgroundTransferMonitor
-        )
+        ))
     }
 
     func login(email: String, password: String) async {
