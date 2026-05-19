@@ -67,4 +67,83 @@ struct RedisPresenceIntegrationTests {
             throw error
         }
     }
+
+    @Test("Redis AI stream lease enforces distributed limits and cancellation")
+    func redisAIStreamLeaseEnforcesDistributedLimitsAndCancellation() async throws {
+        guard let redisURL = Environment.get("IM_REDIS_INTEGRATION_URL"), !redisURL.isEmpty else {
+            return
+        }
+
+        let suffix = UUID().uuidString.lowercased()
+        let nodeA = "redis-ai-stream-a-\(suffix)"
+        let nodeB = "redis-ai-stream-b-\(suffix)"
+        let configuration = IMRedisRoutingConfiguration(
+            url: redisURL,
+            mode: .redis,
+            maximumConnectionCount: 2
+        )
+        let appA = try await Application.make(.testing)
+        let appB = try await Application.make(.testing)
+        let storeA = try RedisAIStreamLeaseStore(
+            configuration: configuration,
+            nodeID: nodeA,
+            logger: appA.logger,
+            eventLoop: appA.eventLoopGroup.next()
+        )
+        let storeB = try RedisAIStreamLeaseStore(
+            configuration: configuration,
+            nodeID: nodeB,
+            logger: appB.logger,
+            eventLoop: appB.eventLoopGroup.next()
+        )
+
+        do {
+            try await storeA.start(app: appA)
+            try await storeB.start(app: appB)
+
+            let userID = UUID()
+            let conversationID = UUID()
+            let firstStreamID = UUID().uuidString
+            let secondStreamID = UUID().uuidString
+
+            try await storeA.reserve(streamID: firstStreamID, conversationID: conversationID, userID: userID)
+            try await storeB.reserve(streamID: secondStreamID, conversationID: conversationID, userID: userID)
+            await #expect(throws: Abort.self) {
+                try await storeA.reserve(streamID: UUID().uuidString, conversationID: conversationID, userID: userID)
+            }
+
+            var counts = try await storeB.activeCounts(conversationID: conversationID, userID: userID)
+            #expect(counts.userCount == 2)
+            #expect(counts.conversationCount == 2)
+
+            try await storeB.requestCancel(streamID: firstStreamID)
+            #expect(try await storeA.cancelRequested(streamID: firstStreamID))
+            #expect(try await storeA.heartbeat(streamID: firstStreamID, conversationID: conversationID, userID: userID))
+
+            try await storeA.finish(streamID: firstStreamID, conversationID: conversationID, userID: userID)
+            #expect(try await !storeB.isActive(streamID: firstStreamID))
+            counts = try await storeB.activeCounts(conversationID: conversationID, userID: userID)
+            #expect(counts.userCount == 1)
+            #expect(counts.conversationCount == 1)
+
+            let conversationLimitID = UUID()
+            for _ in 0..<5 {
+                try await storeA.reserve(streamID: UUID().uuidString, conversationID: conversationLimitID, userID: UUID())
+            }
+            await #expect(throws: Abort.self) {
+                try await storeB.reserve(streamID: UUID().uuidString, conversationID: conversationLimitID, userID: UUID())
+            }
+
+            await storeB.shutdown()
+            await storeA.shutdown()
+            try await appB.asyncShutdown()
+            try await appA.asyncShutdown()
+        } catch {
+            await storeB.shutdown()
+            await storeA.shutdown()
+            try? await appB.asyncShutdown()
+            try? await appA.asyncShutdown()
+            throw error
+        }
+    }
 }

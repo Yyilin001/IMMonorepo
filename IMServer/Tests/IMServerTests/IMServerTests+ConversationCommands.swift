@@ -191,6 +191,110 @@ extension IMServerTests {
         }
     }
 
+    @Test("AI stream startup repair backfills legacy streaming message index")
+    func aiMessageStreamStartupRepairBackfillsLegacyStreamIndex() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(using: app)
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "ai-stream-legacy-repair-peer@example.com", on: app)
+
+            var createdConversationID: UUID?
+            try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: accessToken)
+                try req.content.encode(
+                    IMConversationCreateRequest(
+                        kind: IMConversationKind.direct.rawValue,
+                        title: "AI Stream Legacy Repair",
+                        memberEmails: [peerUser.email]
+                    )
+                )
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+                createdConversationID = try res.content.decode(IMConversationResponse.self).id
+            })
+            let conversationID = try #require(createdConversationID)
+            let userID = try demoUser.requireID()
+            let messageID = UUID()
+            let streamID = UUID().uuidString
+            let streamState = MessageStreamState(
+                streamID: streamID,
+                state: .streaming,
+                lastChunkIndex: 2,
+                partialText: "partial legacy",
+                updatedAt: Date()
+            )
+            let legacyMessage = try ConversationMessage(
+                id: messageID,
+                conversationID: conversationID,
+                senderUserID: userID,
+                serverSequence: 1,
+                content: .text("partial legacy"),
+                derivedState: MessageDerivedState(streamState: streamState)
+            )
+            try await legacyMessage.create(on: app.db)
+            #expect(try await AIMessageStreamIndex.find(streamID, on: app.db) == nil)
+
+            let repaired = try await IMAIStreamRepairService(app: app).repairStaleStreamingMessages()
+            #expect(repaired == 1)
+
+            let index = try #require(try await AIMessageStreamIndex.find(streamID, on: app.db))
+            #expect(index.messageID == messageID)
+            #expect(index.lifecycleState == .failed)
+            #expect(index.errorCode == "server_restarted")
+
+            try await app.testing().test(
+                .GET,
+                "api/im/conversations/\(conversationID.uuidString)/messages/\(messageID.uuidString)/stream",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .ok)
+                    let body = try res.content.decode(IMMessageStreamResponse.self)
+                    #expect(body.stream.streamID == streamID)
+                    #expect(body.stream.state == .failed)
+                    #expect(body.message.derivedState.streamState?.errorCode == "server_restarted")
+                }
+            )
+        }
+    }
+
+    @Test("Local AI stream lease enforces limits and cancellation")
+    func localAIStreamLeaseEnforcesLimitsAndCancellation() async throws {
+        let store = LocalAIStreamLeaseStore()
+        let userID = UUID()
+        let conversationID = UUID()
+        let firstStreamID = UUID().uuidString
+        let secondStreamID = UUID().uuidString
+
+        try await store.reserve(streamID: firstStreamID, conversationID: conversationID, userID: userID)
+        try await store.reserve(streamID: secondStreamID, conversationID: conversationID, userID: userID)
+        await #expect(throws: Abort.self) {
+            try await store.reserve(streamID: UUID().uuidString, conversationID: conversationID, userID: userID)
+        }
+
+        var counts = try await store.activeCounts(conversationID: conversationID, userID: userID)
+        #expect(counts.userCount == 2)
+        #expect(counts.conversationCount == 2)
+
+        try await store.requestCancel(streamID: firstStreamID)
+        #expect(try await store.cancelRequested(streamID: firstStreamID))
+        #expect(try await store.heartbeat(streamID: firstStreamID, conversationID: conversationID, userID: userID))
+
+        try await store.finish(streamID: firstStreamID, conversationID: conversationID, userID: userID)
+        #expect(try await !store.isActive(streamID: firstStreamID))
+        counts = try await store.activeCounts(conversationID: conversationID, userID: userID)
+        #expect(counts.userCount == 1)
+        #expect(counts.conversationCount == 1)
+
+        for _ in 0..<4 {
+            try await store.reserve(streamID: UUID().uuidString, conversationID: conversationID, userID: UUID())
+        }
+        await #expect(throws: Abort.self) {
+            try await store.reserve(streamID: UUID().uuidString, conversationID: conversationID, userID: UUID())
+        }
+    }
+
 
     @Test("IM create conversation endpoint creates group for three or more members")
     func createGroupConversation() async throws {

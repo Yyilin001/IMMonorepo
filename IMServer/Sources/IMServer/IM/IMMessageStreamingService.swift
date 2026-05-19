@@ -896,7 +896,7 @@ final class IMAIStreamRepairLifecycle: LifecycleHandler, @unchecked Sendable {
 }
 
 struct IMAIStreamRepairService {
-    enum RepairReason: Sendable {
+    enum RepairReason: Equatable, Sendable {
         case serverRestarted
         case streamLost
 
@@ -930,6 +930,10 @@ struct IMAIStreamRepairService {
         updatedBefore: Date? = nil,
         skipActiveLeases: Bool = false
     ) async throws -> Int {
+        if reason == .serverRestarted {
+            try await backfillMissingStreamIndexes(now: now)
+        }
+
         var repairedCount = 0
         for shard in app.conversationShardRouter.allCommandDatabases() {
             var offset = 0
@@ -980,6 +984,55 @@ struct IMAIStreamRepairService {
             try await InlineOutboxProjectionRuntime(app: app).flushIfAllowed()
         }
         return repairedCount
+    }
+
+    @discardableResult
+    func backfillMissingStreamIndexes(now: Date = Date()) async throws -> Int {
+        var backfilledCount = 0
+        for shard in app.conversationShardRouter.allCommandDatabases() {
+            var offset = 0
+            while true {
+                let messages = try await ConversationMessage.query(on: shard.database)
+                    .filter(\.$kind == IMMessageContentType.text.rawValue)
+                    .sort(\.$createdAt)
+                    .range(offset..<(offset + Self.pageSize))
+                    .all()
+                guard !messages.isEmpty else {
+                    break
+                }
+
+                for message in messages {
+                    guard let messageID = message.id,
+                          let streamState = try message.decodedDerivedState().streamState,
+                          try await AIMessageStreamIndex.find(streamState.streamID, on: shard.database) == nil
+                    else {
+                        continue
+                    }
+
+                    let index = AIMessageStreamIndex(
+                        streamID: streamState.streamID,
+                        messageID: messageID,
+                        conversationID: message.$conversation.id,
+                        userID: message.$sender.id,
+                        state: streamState.state,
+                        lastChunkIndex: streamState.lastChunkIndex,
+                        createdAt: message.createdAt ?? streamState.updatedAt,
+                        updatedAt: streamState.updatedAt,
+                        terminalAt: streamState.state == .streaming ? nil : streamState.updatedAt,
+                        errorCode: streamState.errorCode
+                    )
+                    try await index.create(on: shard.database)
+                    backfilledCount += 1
+                }
+
+                guard messages.count == Self.pageSize else {
+                    break
+                }
+                offset += Self.pageSize
+            }
+        }
+
+        return backfilledCount
     }
 
     private func repair(index: AIMessageStreamIndex, reason: RepairReason, now: Date) async throws -> Bool {
