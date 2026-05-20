@@ -7,6 +7,7 @@ private final class MockBackgroundTransferMonitor: BackgroundTransferMonitoring,
     private let lock = NSLock()
     private var snapshots: [BackgroundTransferSnapshot]
     private var continuations: [UUID: AsyncStream<BackgroundTransferSnapshot>.Continuation] = [:]
+    private var subscriberWaiters: [CheckedContinuation<Void, Never>] = []
     private var cancelledTransfers: [(String, Int)] = []
 
     init(initialSnapshots: [BackgroundTransferSnapshot] = []) {
@@ -20,11 +21,14 @@ private final class MockBackgroundTransferMonitor: BackgroundTransferMonitoring,
     }
 
     func updates() -> AsyncStream<BackgroundTransferSnapshot> {
-        AsyncStream { continuation in
+        AsyncStream(bufferingPolicy: .unbounded) { continuation in
             let identifier = UUID()
             lock.lock()
             continuations[identifier] = continuation
+            let waiters = subscriberWaiters
+            subscriberWaiters.removeAll()
             lock.unlock()
+            waiters.forEach { $0.resume() }
 
             continuation.onTermination = { [weak self] _ in
                 self?.lock.lock()
@@ -66,6 +70,32 @@ private final class MockBackgroundTransferMonitor: BackgroundTransferMonitoring,
         lock.lock()
         defer { lock.unlock() }
         return cancelledTransfers
+    }
+
+    func hasUpdateSubscriber() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !continuations.isEmpty
+    }
+
+    func waitForUpdateSubscriber() async {
+        lock.lock()
+        if !continuations.isEmpty {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if !continuations.isEmpty {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                subscriberWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
     }
 }
 
@@ -126,19 +156,29 @@ struct FileTransferManagerTests {
 
         let monitor = MockBackgroundTransferMonitor(initialSnapshots: [runningSnapshot])
         let manager = makeManager(backgroundTransferMonitor: monitor)
-        try? await Task.sleep(for: .milliseconds(50))
+        await monitor.waitForUpdateSubscriber()
+        for _ in 0..<500 {
+            if manager.isDownloading {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
 
-        monitor.emit(
-            BackgroundTransferSnapshot(
-                sessionIdentifier: runningSnapshot.sessionIdentifier,
-                taskIdentifier: runningSnapshot.taskIdentifier,
-                kind: .download,
-                state: .completed,
-                progress: runningSnapshot.progress,
-                destinationURL: destinationURL
-            )
+        let completedSnapshot = BackgroundTransferSnapshot(
+            sessionIdentifier: runningSnapshot.sessionIdentifier,
+            taskIdentifier: runningSnapshot.taskIdentifier,
+            kind: .download,
+            state: .completed,
+            progress: runningSnapshot.progress,
+            destinationURL: destinationURL
         )
-        try? await Task.sleep(for: .milliseconds(50))
+        #expect(manager.applyRecoveredBackgroundDownloadCompletion(completedSnapshot))
+        for _ in 0..<500 {
+            if !manager.isDownloading {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
 
         #expect(!manager.isDownloading)
         #expect(manager.downloadProgress == nil)
