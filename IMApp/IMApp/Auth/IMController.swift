@@ -4,52 +4,52 @@ import IMClientKit
 @MainActor
 final class ConversationRuntimeController {
     let sessionClient: SessionClient
-    private let openIMConnection: @Sendable () async throws -> IMTCPConnection
+    let openIMConnection: @Sendable () async throws -> IMTCPConnection
     let imConversationStore: IMConversationStore
-    private let currentUserProvider: () -> AuthUser?
-    private let isSignedInProvider: () -> Bool
-    private let latestConversationSummariesProvider: () -> [IMConversationSummaryResponseBody]
-    private let setLatestConversationSummaries: ([IMConversationSummaryResponseBody]) -> Void
-    private let conversationSummaryRefreshAtProvider: () -> Date?
-    private let setConversationSummaryRefreshAt: (Date?) -> Void
-    private let conversationSummarySyncTokenProvider: () -> String?
-    private let setConversationSummarySyncToken: (String?) -> Void
-    private let markServerOnline: () -> Void
-    private let clearSession: (String?) async -> Void
-    private let handleIMDataRequestError: (Error) async -> Void
-    private let syncContactStateAfterConnection: () async -> Void
+    let currentUserProvider: () -> AuthUser?
+    let isSignedInProvider: () -> Bool
+    let latestConversationSummariesProvider: () -> [IMConversationSummaryResponseBody]
+    let setLatestConversationSummaries: ([IMConversationSummaryResponseBody]) -> Void
+    let conversationSummaryRefreshAtProvider: () -> Date?
+    let setConversationSummaryRefreshAt: (Date?) -> Void
+    let conversationSummarySyncTokenProvider: () -> String?
+    let setConversationSummarySyncToken: (String?) -> Void
+    let markServerOnline: () -> Void
+    let clearSession: (String?) async -> Void
+    let handleIMDataRequestError: (Error) async -> Void
+    let syncContactStateAfterConnection: () async -> Void
     let scheduleConversationCachePersist: () -> Void
-    private let flushConversationCache: () async -> Void
-    private let flushContactStateCache: () async -> Void
-    private let applyContactEvent: (IMTCPContactEventPayload) -> Void
-    private let setConnectionStatus: (AuthManager.IMConnectionStatus) -> Void
-    private let setQueuedFlushActive: (Bool) -> Void
+    let flushConversationCache: () async -> Void
+    let flushContactStateCache: () async -> Void
+    let applyContactEvent: (IMTCPContactEventPayload) -> Void
+    let setConnectionStatus: (AuthManager.IMConnectionStatus) -> Void
+    let setQueuedFlushActive: (Bool) -> Void
     let backgroundTransferMonitor: any BackgroundTransferMonitoring
     let transferProjectionState = TransferProjectionState()
 
-    private var imConnection: IMTCPConnection?
-    private var imConnectionConnectTask: Task<Void, Never>?
-    private var imConnectionEventTask: Task<Void, Never>?
-    private var imConnectionReconnectTask: Task<Void, Never>?
-    private var imConnectionGeneration: UInt64 = 0
-    private var imConnectionReconnectAttempt = 0
-    private var imConversationGapSyncBackfillTask: Task<Void, Never>?
-    private var queuedIMTextMessageFlushTask: Task<Void, Never>?
-    private lazy var messageStreamSnapshotRecoveryQueue = MessageStreamSnapshotRecoveryQueue(
+    var imConnection: IMTCPConnection?
+    var imConnectionConnectTask: Task<Void, Never>?
+    var imConnectionEventTask: Task<Void, Never>?
+    var imConnectionReconnectTask: Task<Void, Never>?
+    var imConnectionGeneration: UInt64 = 0
+    var imConnectionReconnectAttempt = 0
+    var imConversationGapSyncBackfillTask: Task<Void, Never>?
+    var queuedIMTextMessageFlushTask: Task<Void, Never>?
+    lazy var messageStreamSnapshotRecoveryQueue = MessageStreamSnapshotRecoveryQueue(
         sessionClient: sessionClient,
         imConversationStore: imConversationStore,
         currentUserProvider: currentUserProvider,
         markServerOnline: markServerOnline,
         scheduleConversationCachePersist: scheduleConversationCachePersist
     )
-    private var imConversationReadReportTasks: [String: Task<Void, Never>] = [:]
-    private var pendingIMConversationReadSequences: [String: UInt64] = [:]
-    private var imConversationGapSyncQueue: [String] = []
-    private var imConversationGapSyncActiveConversationID: String?
-    private var imConversationMembersTask: Task<Void, Never>?
-    private var imConversationMessagesTask: Task<Void, Never>?
-    private var imConversationRefreshTask: Task<Void, Never>?
-    private var mediaUploadRecoveryTasks: [String: Task<Void, Never>] = [:]
+    var imConversationReadReportTasks: [String: Task<Void, Never>] = [:]
+    var pendingIMConversationReadSequences: [String: UInt64] = [:]
+    var imConversationGapSyncQueue: [String] = []
+    var imConversationGapSyncActiveConversationID: String?
+    var imConversationMembersTask: Task<Void, Never>?
+    var imConversationMessagesTask: Task<Void, Never>?
+    var imConversationRefreshTask: Task<Void, Never>?
+    var mediaUploadRecoveryTasks: [String: Task<Void, Never>] = [:]
     var mediaDownloadBackgroundObserveTask: Task<Void, Never>?
     var mediaTransferStore = TransferStore()
 
@@ -100,102 +100,6 @@ final class ConversationRuntimeController {
         self.setQueuedFlushActive = setQueuedFlushActive
         self.backgroundTransferMonitor = backgroundTransferMonitor
         startObservingBackgroundMediaDownloads()
-    }
-
-    func scheduleConnectionIfNeeded() {
-        guard isSignedInProvider() else {
-            return
-        }
-
-        guard imConnection == nil, imConnectionConnectTask == nil else {
-            return
-        }
-
-        imConnectionReconnectTask?.cancel()
-        imConnectionReconnectTask = nil
-
-        let generation = imConnectionGeneration
-        setConnectionStatus(.connecting)
-        imConnectionConnectTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            do {
-                let connection = try await self.openIMConnection()
-                await self.applyIMConnection(connection, generation: generation)
-            } catch {
-                await self.handleIMConnectionFailure(error, generation: generation)
-            }
-        }
-    }
-
-    func reconnectConnection() async {
-        guard isSignedInProvider() else {
-            return
-        }
-
-        await disconnect(flushCache: true)
-        scheduleConnectionIfNeeded()
-    }
-
-    func disconnect(flushCache: Bool = true) async {
-        imConnectionGeneration &+= 1
-        cancelConversationGapSyncBackfill()
-        cancelQueuedTextMessageFlush()
-        cancelMessageStreamSnapshotSync()
-
-        let connection = imConnection
-        imConnection = nil
-
-        let connectTask = imConnectionConnectTask
-        imConnectionConnectTask = nil
-        connectTask?.cancel()
-
-        let eventTask = imConnectionEventTask
-        imConnectionEventTask = nil
-        eventTask?.cancel()
-
-        let reconnectTask = imConnectionReconnectTask
-        imConnectionReconnectTask = nil
-        reconnectTask?.cancel()
-        imConnectionReconnectAttempt = 0
-
-        if let connection {
-            await connection.disconnect()
-        }
-
-        setConnectionStatus(.disconnected)
-
-        if flushCache {
-            await flushConversationCache()
-            await flushContactStateCache()
-        }
-    }
-
-    func resetForSignedOut(flushCache: Bool) async {
-        imConversationMembersTask?.cancel()
-        imConversationMembersTask = nil
-        imConversationMessagesTask?.cancel()
-        imConversationMessagesTask = nil
-        imConversationRefreshTask?.cancel()
-        imConversationRefreshTask = nil
-        cancelMessageStreamSnapshotSync()
-        for task in mediaUploadRecoveryTasks.values {
-            task.cancel()
-        }
-        mediaUploadRecoveryTasks = [:]
-        for task in imConversationReadReportTasks.values {
-            task.cancel()
-        }
-        imConversationReadReportTasks = [:]
-        pendingIMConversationReadSequences = [:]
-        await disconnect(flushCache: flushCache)
-    }
-
-    func appDidBecomeActive() {
-        scheduleConnectionIfNeeded()
-        syncActiveMessageStreamSnapshots()
     }
 
     func sendText(_ text: String, to conversationID: String) async -> Bool {
@@ -1226,695 +1130,8 @@ final class ConversationRuntimeController {
         )
     }
 
-    private func applyIMConnection(_ connection: IMTCPConnection, generation: UInt64) async {
-        guard generation == imConnectionGeneration else {
-            await connection.disconnect()
-            return
-        }
-
-        guard isSignedInProvider() else {
-            await connection.disconnect()
-            return
-        }
-
-        imConnectionConnectTask = nil
-        imConnection = connection
-        imConnectionReconnectTask?.cancel()
-        imConnectionReconnectTask = nil
-        imConnectionReconnectAttempt = 0
-        setConnectionStatus(.connected)
-        startIMConnectionEventLoop(connection, generation: generation)
-        await syncConversationGapsAfterConnection()
-        await syncContactStateAfterConnection()
-        await flushQueuedTextMessagesAfterConnection(limit: HistoryConfig.queuedFlushLimit)
-        startConversationGapSyncBackfillIfNeeded()
-        syncActiveMessageStreamSnapshots()
-        scheduleConversationCachePersist()
-    }
-
-    private func startIMConnectionEventLoop(_ connection: IMTCPConnection, generation: UInt64) {
-        imConnectionEventTask?.cancel()
-        imConnectionEventTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            do {
-                for try await event in connection.events {
-                    await self.handleIMConnectionEvent(event, generation: generation)
-                }
-
-                await self.handleIMConnectionFailure(
-                    IMTCPClientError.connectionClosed,
-                    generation: generation
-                )
-            } catch {
-                await self.handleIMConnectionFailure(error, generation: generation)
-            }
-        }
-    }
-
-    private func handleIMConnectionEvent(_ event: IMTCPConnectionEvent, generation: UInt64) async {
-        guard generation == imConnectionGeneration else {
-            return
-        }
-
-        switch event {
-        case .heartbeatAck:
-            return
-        case .ack(let requestID, let payload):
-            imConversationStore.applyOutgoingAcknowledgement(requestID: requestID, payload: payload)
-            if let conversationID = payload.conversationID,
-               conversationID == imConversationStore.selectedConversationID {
-                await loadReceiptSummary(for: conversationID)
-            }
-            scheduleConversationCachePersist()
-        case .message(let requestID, let payload):
-            guard let currentUserID = currentUserProvider()?.id else {
-                return
-            }
-
-            imConversationStore.receiveIncomingMessage(payload, currentUserID: currentUserID)
-            scheduleConversationCachePersist()
-
-            if let messageID = payload.messageID, let connection = imConnection {
-                do {
-                    try await connection.sendAcknowledgement(
-                        IMTCPAckPayload(
-                            messageID: messageID,
-                            conversationID: payload.conversationID,
-                            status: "received"
-                        ),
-                        requestID: requestID
-                    )
-                } catch {
-                    await handleIMConnectionFailure(error, generation: generation)
-                    return
-                }
-            }
-
-            guard payload.senderUserID != currentUserID,
-                  payload.conversationID == imConversationStore.selectedConversationID,
-                  let readSequence = payload.serverSequence
-            else {
-                return
-            }
-
-            await markConversationReadInternal(
-                conversationID: payload.conversationID,
-                readSequence: readSequence
-            )
-        case .conversationEvent(_, let payload):
-            guard let currentUserID = currentUserProvider()?.id else {
-                return
-            }
-
-            let outcome = imConversationStore.applyConversationEvent(payload, currentUserID: currentUserID)
-            if let conversationID = outcome.shouldReloadMembersForConversationID,
-               imConversationStore.conversations.contains(where: { $0.id == conversationID }) {
-                await loadConversationMembers(for: conversationID)
-            }
-            if payload.conversation.id.uuidString == imConversationStore.selectedConversationID {
-                await loadReceiptSummary(for: payload.conversation.id.uuidString)
-            }
-            syncPendingMessageStreamSnapshotsIfNeeded()
-            scheduleConversationCachePersist()
-        case .contactEvent(_, let payload):
-            applyContactEvent(payload)
-        case .kick(let payload):
-            await clearSession(payload.message)
-        }
-    }
-
-    private func handleIMConnectionFailure(_ error: Error, generation: UInt64) async {
-        guard generation == imConnectionGeneration else {
-            return
-        }
-
-        cancelConversationGapSyncBackfill()
-        cancelQueuedTextMessageFlush()
-        for task in mediaUploadRecoveryTasks.values {
-            task.cancel()
-        }
-        mediaUploadRecoveryTasks = [:]
-        imConnectionConnectTask = nil
-        imConnectionEventTask = nil
-        imConnection = nil
-
-        if error is CancellationError {
-            setConnectionStatus(.disconnected)
-            return
-        }
-
-        if let tcpError = error as? IMTCPClientError {
-            switch tcpError {
-            case .authRejected(_, let message):
-                await clearSession(message)
-            case .kicked(_, let message):
-                await clearSession(message)
-            case .connectionClosed:
-                imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-                setConnectionStatus(.failed(message: reconnectingStatusMessage("IM 连接已断开。")))
-                scheduleConversationCachePersist()
-                scheduleIMConnectionReconnectIfNeeded(generation: generation)
-            default:
-                imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-                setConnectionStatus(.failed(message: reconnectingStatusMessage(tcpError.localizedDescription)))
-                scheduleConversationCachePersist()
-                scheduleIMConnectionReconnectIfNeeded(generation: generation)
-            }
-            return
-        }
-
-        imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-        setConnectionStatus(.failed(message: reconnectingStatusMessage(error.localizedDescription)))
-        scheduleConversationCachePersist()
-        scheduleIMConnectionReconnectIfNeeded(generation: generation)
-    }
-
-    private func scheduleIMConnectionReconnectIfNeeded(generation: UInt64) {
-        guard isSignedInProvider(),
-              generation == imConnectionGeneration,
-              imConnection == nil,
-              imConnectionConnectTask == nil,
-              imConnectionReconnectTask == nil
-        else {
-            return
-        }
-
-        let delay = nextReconnectDelayNanoseconds()
-        imConnectionReconnectTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: delay)
-            } catch {
-                return
-            }
-
-            await self?.startScheduledIMReconnect(generation: generation)
-        }
-    }
-
-    private func startScheduledIMReconnect(generation: UInt64) {
-        guard generation == imConnectionGeneration,
-              isSignedInProvider(),
-              imConnection == nil
-        else {
-            imConnectionReconnectTask = nil
-            return
-        }
-
-        imConnectionReconnectTask = nil
-        scheduleConnectionIfNeeded()
-    }
-
-    private func nextReconnectDelayNanoseconds() -> UInt64 {
-        imConnectionReconnectAttempt += 1
-        let shift = min(imConnectionReconnectAttempt - 1, 5)
-        let multiplier = UInt64(1 << shift)
-        return min(
-            HistoryConfig.reconnectInitialDelayNanoseconds * multiplier,
-            HistoryConfig.reconnectMaxDelayNanoseconds
-        )
-    }
-
-    private func reconnectingStatusMessage(_ message: String) -> String {
-        "\(message) 正在自动重连。"
-    }
-
-    private func syncConversationGap(
-        for conversationID: String,
-        currentUserID: UUID
-    ) async -> ConversationGapSyncResult {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty,
-              imConversationStore.containsConversation(id: trimmedConversationID),
-              let latestLoadedSequence = imConversationStore.latestLoadedServerSequence(for: trimmedConversationID)
-        else {
-            return .completed
-        }
-
-        do {
-            var afterSequence = latestLoadedSequence
-            var iterations = 0
-
-            while iterations < HistoryConfig.gapSyncMaxIterations {
-                let response = try await sessionClient.fetchIMMessagesSince(
-                    conversationID: trimmedConversationID,
-                    afterSequence: afterSequence,
-                    limit: HistoryConfig.gapSyncLimit
-                )
-                guard currentUserProvider()?.id == currentUserID else {
-                    return .failed
-                }
-                guard imConversationStore.containsConversation(id: trimmedConversationID) else {
-                    return .completed
-                }
-
-                markServerOnline()
-                imConversationStore.appendMessages(
-                    in: trimmedConversationID,
-                    messages: response.messages,
-                    currentUserID: currentUserID
-                )
-                scheduleConversationCachePersist()
-
-                guard response.hasMore else {
-                    return .completed
-                }
-
-                guard let nextAfterSequence = response.nextAfterSequence,
-                      nextAfterSequence > afterSequence
-                else {
-                    throw APIError.server(statusCode: 500, message: "IM 增量补洞响应无效。")
-                }
-
-                afterSequence = UInt64(nextAfterSequence)
-                iterations += 1
-            }
-            return .incomplete
-        } catch is CancellationError {
-            return .failed
-        } catch {
-            await handleIMDataRequestError(error)
-            return .failed
-        }
-    }
-
-    private func syncConversationGapsAfterConnection() async {
-        guard let currentUserID = currentUserProvider()?.id else {
-            return
-        }
-
-        guard await fetchAndApplyConversationSummaries(force: false) else {
-            return
-        }
-
-        let gapSyncTargets = prioritizedGapSyncTargets(
-            imConversationStore.gapSyncTargets(from: latestConversationSummariesProvider())
-        )
-
-        for conversationID in gapSyncTargets {
-            switch await syncConversationGap(for: conversationID, currentUserID: currentUserID) {
-            case .completed:
-                await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
-            case .incomplete:
-                enqueueConversationGapSyncBackfill(for: conversationID)
-                await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
-            case .failed:
-                cancelConversationGapSyncBackfill()
-                return
-            }
-        }
-        syncActiveMessageStreamSnapshots()
-    }
-
-    func syncActiveMessageStreamSnapshots() {
-        messageStreamSnapshotRecoveryQueue.syncActiveMessageStreamSnapshots()
-    }
-
-    private func syncPendingMessageStreamSnapshotsIfNeeded() {
-        messageStreamSnapshotRecoveryQueue.syncPendingMessageStreamSnapshotsIfNeeded()
-    }
-
-    private func cancelMessageStreamSnapshotSync() {
-        messageStreamSnapshotRecoveryQueue.cancel()
-    }
-
-    private func prioritizedGapSyncTargets(_ conversationIDs: [String]) -> [String] {
-        guard let selectedConversationID = imConversationStore.selectedConversationID,
-              conversationIDs.contains(selectedConversationID)
-        else {
-            return conversationIDs
-        }
-
-        return [selectedConversationID] + conversationIDs.filter { $0 != selectedConversationID }
-    }
-
-    private func enqueueConversationGapSyncBackfill(
-        for conversationID: String,
-        prioritize: Bool = false
-    ) {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
-            return
-        }
-
-        imConversationGapSyncQueue.removeAll { $0 == trimmedConversationID }
-        let shouldPrioritize = prioritize || trimmedConversationID == imConversationStore.selectedConversationID
-        if shouldPrioritize {
-            imConversationGapSyncQueue.insert(trimmedConversationID, at: 0)
-        } else {
-            imConversationGapSyncQueue.append(trimmedConversationID)
-        }
-
-        startConversationGapSyncBackfillIfNeeded()
-    }
-
-    private func startConversationGapSyncBackfillIfNeeded() {
-        guard let currentUserID = currentUserProvider()?.id,
-              imConnection != nil,
-              imConversationGapSyncBackfillTask == nil,
-              !imConversationGapSyncQueue.isEmpty
-        else {
-            return
-        }
-
-        let generation = imConnectionGeneration
-        imConversationGapSyncBackfillTask = Task { [weak self] in
-            await self?.runConversationGapSyncBackfillLoop(
-                currentUserID: currentUserID,
-                generation: generation
-            )
-        }
-    }
-
-    private func runConversationGapSyncBackfillLoop(
-        currentUserID: UUID,
-        generation: UInt64
-    ) async {
-        while !Task.isCancelled {
-            guard generation == imConnectionGeneration,
-                  currentUserProvider()?.id == currentUserID,
-                  imConnection != nil
-            else {
-                clearConversationGapSyncBackfillState()
-                return
-            }
-
-            guard let conversationID = dequeueNextConversationGapSyncBackfillConversationID() else {
-                imConversationGapSyncBackfillTask = nil
-                imConversationGapSyncActiveConversationID = nil
-                return
-            }
-
-            imConversationGapSyncActiveConversationID = conversationID
-            let result = await syncConversationGap(for: conversationID, currentUserID: currentUserID)
-
-            guard generation == imConnectionGeneration,
-                  currentUserProvider()?.id == currentUserID,
-                  imConnection != nil,
-                  !Task.isCancelled
-            else {
-                clearConversationGapSyncBackfillState()
-                return
-            }
-
-            switch result {
-            case .completed:
-                await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
-            case .incomplete:
-                await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
-                enqueueConversationGapSyncBackfill(for: conversationID)
-            case .failed:
-                clearConversationGapSyncBackfillState()
-                return
-            }
-
-            imConversationGapSyncActiveConversationID = nil
-            await Task.yield()
-        }
-
-        imConversationGapSyncBackfillTask = nil
-        imConversationGapSyncActiveConversationID = nil
-    }
-
-    private func dequeueNextConversationGapSyncBackfillConversationID() -> String? {
-        if let selectedConversationID = imConversationStore.selectedConversationID,
-           let selectedIndex = imConversationGapSyncQueue.firstIndex(of: selectedConversationID) {
-            return imConversationGapSyncQueue.remove(at: selectedIndex)
-        }
-
-        guard !imConversationGapSyncQueue.isEmpty else {
-            return nil
-        }
-
-        return imConversationGapSyncQueue.removeFirst()
-    }
-
-    private func cancelConversationGapSyncBackfill() {
-        imConversationGapSyncBackfillTask?.cancel()
-        clearConversationGapSyncBackfillState()
-    }
-
-    private func clearConversationGapSyncBackfillState() {
-        imConversationGapSyncBackfillTask = nil
-        imConversationGapSyncQueue = []
-        imConversationGapSyncActiveConversationID = nil
-    }
-
-    private func flushQueuedTextMessagesAfterConnection(limit: Int) async {
-        guard !hasQueuedFlushInProgress,
-              hasQueuedTextMessages()
-        else {
-            return
-        }
-
-        setQueuedFlushActive(true)
-
-        switch await flushQueuedTextMessages(limit: limit) {
-        case .drained:
-            finishQueuedTextMessageFlush()
-        case .hasMore:
-            startQueuedTextMessageFlushIfNeeded(limit: limit)
-        case .failed:
-            finishQueuedTextMessageFlush()
-        }
-    }
-
-    private func startQueuedTextMessageFlushIfNeeded(limit: Int) {
-        guard currentUserProvider() != nil,
-              imConnection != nil,
-              queuedIMTextMessageFlushTask == nil,
-              hasQueuedTextMessages()
-        else {
-            return
-        }
-
-        setQueuedFlushActive(true)
-        let generation = imConnectionGeneration
-        let currentUserID = currentUserProvider()?.id
-        queuedIMTextMessageFlushTask = Task { [weak self] in
-            guard let self, let currentUserID else {
-                return
-            }
-            await self.runQueuedTextMessageFlushLoop(
-                currentUserID: currentUserID,
-                generation: generation,
-                limit: limit
-            )
-        }
-    }
-
-    private var hasQueuedFlushInProgress: Bool {
-        queuedIMTextMessageFlushTask != nil
-    }
-
-    private func runQueuedTextMessageFlushLoop(
-        currentUserID: UUID,
-        generation: UInt64,
-        limit: Int
-    ) async {
-        while !Task.isCancelled {
-            guard generation == imConnectionGeneration,
-                  currentUserProvider()?.id == currentUserID,
-                  imConnection != nil
-            else {
-                finishQueuedTextMessageFlush()
-                return
-            }
-
-            guard hasQueuedTextMessages() else {
-                finishQueuedTextMessageFlush()
-                return
-            }
-
-            let result = await flushQueuedTextMessages(limit: limit)
-
-            guard generation == imConnectionGeneration,
-                  currentUserProvider()?.id == currentUserID,
-                  imConnection != nil,
-                  !Task.isCancelled
-            else {
-                finishQueuedTextMessageFlush()
-                return
-            }
-
-            switch result {
-            case .drained:
-                finishQueuedTextMessageFlush()
-                return
-            case .hasMore:
-                await Task.yield()
-            case .failed:
-                finishQueuedTextMessageFlush()
-                return
-            }
-        }
-
-        finishQueuedTextMessageFlush()
-    }
-
-    private func flushQueuedTextMessages(limit: Int) async -> QueuedTextMessageFlushBatchResult {
-        guard let connection = imConnection else {
-            return .failed
-        }
-
-        let requests = imConversationStore.queuedOutgoingMessageRequests(limit: limit)
-        guard !requests.isEmpty else {
-            return .drained
-        }
-
-        scheduleConversationCachePersist()
-        let generation = imConnectionGeneration
-
-        for (index, request) in requests.enumerated() {
-            do {
-                try await connection.sendMessage(request.payload, requestID: request.requestID)
-            } catch {
-                for unsentRequest in requests.dropFirst(index + 1) {
-                    imConversationStore.markOutgoingQueued(
-                        requestID: unsentRequest.requestID,
-                        message: "等待 IM 长连接恢复后发送。"
-                    )
-                }
-
-                scheduleConversationCachePersist()
-                await handleIMConnectionFailure(error, generation: generation)
-                return .failed
-            }
-        }
-
-        scheduleConversationCachePersist()
-        return hasQueuedTextMessages() ? .hasMore : .drained
-    }
-
-    private func hasQueuedTextMessages() -> Bool {
-        imConversationStore.conversations.contains { conversation in
-            conversation.messages.contains { message in
-                guard message.direction == .outgoing, message.content.isUserComposable else {
-                    return false
-                }
-
-                if case .queued = message.deliveryState {
-                    return true
-                }
-                return false
-            }
-        }
-    }
-
-    private func cancelQueuedTextMessageFlush() {
-        queuedIMTextMessageFlushTask?.cancel()
-        finishQueuedTextMessageFlush()
-    }
-
-    private func finishQueuedTextMessageFlush() {
-        queuedIMTextMessageFlushTask = nil
-        setQueuedFlushActive(false)
-    }
-
-    private func markConversationReadIfSelectedUpToLatestLoadedSequence(for conversationID: String) async {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty,
-              imConversationStore.selectedConversationID == trimmedConversationID
-        else {
-            return
-        }
-
-        await markConversationReadUpToLatestLoadedSequence(for: trimmedConversationID)
-    }
-
-    private func markConversationReadInternal(
-        conversationID: String,
-        readSequence: UInt64,
-        debounceNanoseconds: UInt64 = HistoryConfig.readReportDebounceNanoseconds
-    ) async {
-        guard let trimmedConversationID = enqueueConversationReadReport(
-            for: conversationID,
-            readSequence: readSequence,
-            debounceNanoseconds: debounceNanoseconds
-        ) else {
-            return
-        }
-
-        guard debounceNanoseconds == 0 else {
-            return
-        }
-
-        await flushConversationReadReport(for: trimmedConversationID)
-    }
-
-    private func enqueueConversationReadReport(
-        for conversationID: String,
-        readSequence: UInt64,
-        debounceNanoseconds: UInt64
-    ) -> String? {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
-            return nil
-        }
-
-        let currentServerReadSequence = imConversationStore.serverLastReadSequence(for: trimmedConversationID) ?? 0
-        let nextReadSequence = max(
-            readSequence,
-            pendingIMConversationReadSequences[trimmedConversationID] ?? 0
-        )
-        guard nextReadSequence > currentServerReadSequence else {
-            return nil
-        }
-
-        pendingIMConversationReadSequences[trimmedConversationID] = nextReadSequence
-        imConversationReadReportTasks[trimmedConversationID]?.cancel()
-
-        guard debounceNanoseconds > 0 else {
-            imConversationReadReportTasks[trimmedConversationID] = nil
-            return trimmedConversationID
-        }
-
-        imConversationReadReportTasks[trimmedConversationID] = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            try? await Task.sleep(nanoseconds: debounceNanoseconds)
-
-            guard !Task.isCancelled else {
-                return
-            }
-
-            await self.flushConversationReadReport(for: trimmedConversationID)
-        }
-
-        return trimmedConversationID
-    }
-
-    private func flushConversationReadReport(for conversationID: String) async {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
-            return
-        }
-
-        imConversationReadReportTasks[trimmedConversationID] = nil
-
-        guard let readSequence = pendingIMConversationReadSequences.removeValue(forKey: trimmedConversationID) else {
-            return
-        }
-
-        do {
-            let response = try await sessionClient.markIMConversationRead(
-                conversationID: trimmedConversationID,
-                readSequence: readSequence
-            )
-            markServerOnline()
-            imConversationStore.applyServerExplicitReadResponse(response)
-            scheduleConversationCachePersist()
-        } catch {
-            await handleIMDataRequestError(error)
-        }
-    }
-
     @discardableResult
-    private func reconcileConversationSummaryReadModel(
+    func reconcileConversationSummaryReadModel(
         force: Bool = true,
         kind: IMConversationKind? = nil
     ) async -> Bool {
@@ -1929,7 +1146,7 @@ final class ConversationRuntimeController {
         return await fetchAndApplyConversationSummaries(force: force, kind: kind)
     }
 
-    private func fetchAndApplyConversationSummaries(
+    func fetchAndApplyConversationSummaries(
         force: Bool,
         kind: IMConversationKind? = nil
     ) async -> Bool {
@@ -1965,7 +1182,7 @@ final class ConversationRuntimeController {
         }
     }
 
-    private func fetchAndReplaceConversationSummaries(
+    func fetchAndReplaceConversationSummaries(
         userID: UUID,
         kind: IMConversationKind? = nil
     ) async throws -> Bool {
@@ -1992,7 +1209,7 @@ final class ConversationRuntimeController {
         return true
     }
 
-    private func fetchAndApplyConversationSummaryChanges(
+    func fetchAndApplyConversationSummaryChanges(
         afterToken: String,
         userID: UUID
     ) async throws -> Bool {
@@ -2035,7 +1252,7 @@ final class ConversationRuntimeController {
         return true
     }
 
-    private func loadMessagesPage(
+    func loadMessagesPage(
         for conversationID: String,
         currentUserID: UUID,
         beforeSequence: UInt64?,
@@ -2091,7 +1308,7 @@ final class ConversationRuntimeController {
         await imConversationMessagesTask?.value
     }
 
-    private func resolveReplyJumpIfPossible(
+    func resolveReplyJumpIfPossible(
         targetMessageID: String,
         conversationID: String
     ) -> Bool {
@@ -2109,7 +1326,7 @@ final class ConversationRuntimeController {
         return true
     }
 
-    private func resumeRecoverableMediaUpload(
+    func resumeRecoverableMediaUpload(
         _ pendingUpload: IMRecoverableOutgoingMediaUpload,
         expectedUserID: UUID
     ) async {
@@ -2218,7 +1435,7 @@ final class ConversationRuntimeController {
         }
     }
 
-    private func resolvedMediaFilename(for fileURL: URL, filename: String?) -> String {
+    func resolvedMediaFilename(for fileURL: URL, filename: String?) -> String {
         let provided = filename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !provided.isEmpty {
             return provided
@@ -2226,7 +1443,7 @@ final class ConversationRuntimeController {
         return fileURL.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func resolvedMediaByteSize(for fileURL: URL, byteSize: Int64?) throws -> Int64 {
+    func resolvedMediaByteSize(for fileURL: URL, byteSize: Int64?) throws -> Int64 {
         if let byteSize, byteSize > 0 {
             return byteSize
         }
