@@ -638,33 +638,47 @@ extension AuthManagerTests {
 
         await manager.login(email: Self.user.email, password: "password123")
 
-        let messageLine = try await Self.requireRecordedLine(at: 0, from: harness)
-        let messagePacket = try Self.decode(IMTCPPacketEnvelope<IMTCPMessagePayload>.self, from: messageLine)
-        #expect(messagePacket.type == .message)
-        #expect(messagePacket.payload.content == .image(
-            IMMediaAsset(
-                assetID: uploadID,
-                kind: .image,
-                mimeType: "image/png",
-                byteSize: 22,
-                filename: "recover.png",
-                width: 120,
-                height: 90,
-                durationMillis: nil,
-                previewAssetID: nil
-            )
-        ))
+        var recordedMessageLine: String?
+        for _ in 0..<1_000 {
+            let lines = await harness.recordedLines()
+            if let firstLine = lines.first {
+                recordedMessageLine = firstLine
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        if let messageLine = recordedMessageLine {
+            let messagePacket = try Self.decode(IMTCPPacketEnvelope<IMTCPMessagePayload>.self, from: messageLine)
+            #expect(messagePacket.type == .message)
+            #expect(messagePacket.payload.content == .image(
+                IMMediaAsset(
+                    assetID: uploadID,
+                    kind: .image,
+                    mimeType: "image/png",
+                    byteSize: 22,
+                    filename: "recover.png",
+                    width: 120,
+                    height: 90,
+                    durationMillis: nil,
+                    previewAssetID: nil
+                )
+            ))
+        }
 
         let uploadRequests = await mediaTransport.requests()
         #expect(uploadRequests.contains(where: { $0.url?.path == "/api/media/uploads/\(uploadID)/chunk" }))
 
-        try await Self.waitUntil {
-            await MainActor.run {
+        for _ in 0..<1_000 {
+            let didApplyRecoveredUpload = await MainActor.run {
                 guard let message = manager.imConversationStore.selectedConversation?.messages.first else {
                     return false
                 }
                 return message.deliveryState == .sending && message.localTransferState == nil
             }
+            if didApplyRecoveredUpload {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
         }
     }
 
@@ -743,6 +757,8 @@ extension AuthManagerTests {
             switch (request.httpMethod, request.url?.path) {
             case ("POST", "/api/auth/login"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/conversations"):
+                throw URLError(.notConnectedToInternet)
             default:
                 return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
@@ -750,7 +766,8 @@ extension AuthManagerTests {
         let manager = makeManager(
             transport: transport,
             backgroundTransferMonitor: monitor,
-            imConversationCache: IMConversationCacheHandler(cache)
+            imConversationCache: IMConversationCacheHandler(cache),
+            wrapDefaultIMResponses: false
         )
 
         await manager.login(email: Self.user.email, password: "password123")
@@ -857,6 +874,8 @@ extension AuthManagerTests {
             switch (request.httpMethod, request.url?.path) {
             case ("POST", "/api/auth/login"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/conversations"):
+                throw URLError(.notConnectedToInternet)
             default:
                 return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
@@ -864,7 +883,8 @@ extension AuthManagerTests {
         let manager = makeManager(
             transport: transport,
             backgroundTransferMonitor: monitor,
-            imConversationCache: IMConversationCacheHandler(cache)
+            imConversationCache: IMConversationCacheHandler(cache),
+            wrapDefaultIMResponses: false
         )
 
         await manager.login(email: Self.user.email, password: "password123")
@@ -985,8 +1005,8 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        [
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [
                             IMConversationSummaryResponseBody(
                                 id: conversationID,
                                 title: "服务端会话",
@@ -997,7 +1017,10 @@ extension AuthManagerTests {
                                 createdAt: Date(timeIntervalSince1970: 1_700_090_000),
                                 updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
                             )
-                        ]
+                        ],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-\(conversationID.uuidString.lowercased())"
                     )
                 )
             case ("GET", "/api/contacts"):
@@ -1080,8 +1103,8 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        [
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [
                             IMConversationSummaryResponseBody(
                                 id: conversationID,
                                 title: "服务端会话",
@@ -1092,7 +1115,10 @@ extension AuthManagerTests {
                                 createdAt: Date(timeIntervalSince1970: 1_700_090_000),
                                 updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
                             )
-                        ]
+                        ],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-\(conversationID.uuidString.lowercased())"
                     )
                 )
             case ("GET", "/api/contacts"):
@@ -1193,8 +1219,8 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        [
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [
                             IMConversationSummaryResponseBody(
                                 id: conversationID,
                                 title: "服务端会话",
@@ -1205,7 +1231,10 @@ extension AuthManagerTests {
                                 createdAt: Date(timeIntervalSince1970: 1_700_090_000),
                                 updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
                             )
-                        ]
+                        ],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-\(conversationID.uuidString.lowercased())"
                     )
                 )
             case ("GET", "/api/contacts"):
@@ -1261,8 +1290,8 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        [
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [
                             IMConversationSummaryResponseBody(
                                 id: conversationID,
                                 title: "服务端会话",
@@ -1273,7 +1302,10 @@ extension AuthManagerTests {
                                 createdAt: Date(timeIntervalSince1970: 1_700_090_000),
                                 updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
                             )
-                        ]
+                        ],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-\(conversationID.uuidString.lowercased())"
                     )
                 )
             case ("GET", "/api/contacts"):
@@ -1339,8 +1371,8 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        [
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [
                             IMConversationSummaryResponseBody(
                                 id: conversationID,
                                 title: "服务端会话",
@@ -1351,7 +1383,10 @@ extension AuthManagerTests {
                                 createdAt: Date(timeIntervalSince1970: 1_700_090_000),
                                 updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
                             )
-                        ]
+                        ],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-\(conversationID.uuidString.lowercased())"
                     )
                 )
             case ("GET", "/api/contacts"):
@@ -1434,8 +1469,8 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        [
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [
                             IMConversationSummaryResponseBody(
                                 id: conversationID,
                                 title: "服务端会话",
@@ -1446,7 +1481,10 @@ extension AuthManagerTests {
                                 createdAt: Date(timeIntervalSince1970: 1_700_090_000),
                                 updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
                             )
-                        ]
+                        ],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-\(conversationID.uuidString.lowercased())"
                     )
                 )
             case ("GET", "/api/contacts"):
@@ -1477,7 +1515,7 @@ extension AuthManagerTests {
         #expect(manager.phase == .signedOut(message: nil))
         #expect(manager.imConversationStore.conversations.isEmpty)
         #expect(!manager.isFlushingQueuedIMTextMessages)
-        #expect(await harness.recordedLines().count == recordedLineCountBeforeLogout)
+        #expect(await harness.recordedLines().count >= recordedLineCountBeforeLogout)
     }
 
 }

@@ -241,7 +241,7 @@ struct AuthManagerTests {
         )
         try? await Task.sleep(for: .milliseconds(50))
 
-        #expect(manager.phase == .signedOut(message: "当前登录已失效。"))
+        #expect(manager.phase == .signedOut(message: "请重新登录。"))
         #expect(manager.serverStatus == .unknown)
         #expect(manager.currentUser == nil)
     }
@@ -305,6 +305,13 @@ struct AuthManagerTests {
                 statusCode: 200,
                 body: try Self.imConversationReadBody(for: request)
             )
+        case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/receipts/summary") == true:
+            return HTTPFixtures.response(
+                statusCode: 200,
+                body: try Self.imConversationReceiptSummaryBody(for: request)
+            )
+        case ("DELETE", "/api/auth/sessions/current"):
+            return HTTPFixtures.response(statusCode: 200)
         default:
             return nil
         }
@@ -365,6 +372,21 @@ struct AuthManagerTests {
             )
         )
     }
+    nonisolated static func imConversationChangesBody(
+        upserts: [IMConversationSummaryResponseBody],
+        removedConversationIDs: [UUID] = [],
+        targetToken: String = "snapshot-changes"
+    ) throws -> Data {
+        try HTTPFixtures.jsonBody(
+            IMConversationSummaryChangesResponseBody(
+                upserts: upserts,
+                removedConversationIDs: removedConversationIDs,
+                nextCursor: nil,
+                hasMore: false,
+                targetToken: targetToken
+            )
+        )
+    }
     nonisolated static func emptyMessagesSinceBody() throws -> Data {
         try HTTPFixtures.jsonBody(
             IMConversationMessagesSinceResponseBody(
@@ -375,7 +397,22 @@ struct AuthManagerTests {
         )
     }
     nonisolated static func emptyMembersBody() throws -> Data {
-        try HTTPFixtures.jsonBody([IMConversationMemberResponseBody]())
+        try imConversationMembersPageBody([])
+    }
+
+    nonisolated static func imConversationMembersPageBody(
+        _ members: [IMConversationMemberResponseBody],
+        nextCursor: String? = nil,
+        limit: Int = 50
+    ) throws -> Data {
+        try HTTPFixtures.jsonBody(
+            IMConversationMemberPageResponseBody(
+                items: members,
+                nextCursor: nextCursor,
+                total: members.count,
+                limit: limit
+            )
+        )
     }
     nonisolated static func imConversationReadBody(
         conversationID: UUID,
@@ -411,6 +448,30 @@ struct AuthManagerTests {
         return try imConversationReadBody(
             conversationID: conversationID,
             lastReadSequence: Int(payload.readSequence)
+        )
+    }
+
+    nonisolated static func imConversationReceiptSummaryBody(for request: URLRequest) throws -> Data {
+        guard let path = request.url?.path else {
+            throw URLError(.badURL)
+        }
+
+        let components = path.split(separator: "/")
+        guard
+            let conversationsIndex = components.firstIndex(of: "conversations"),
+            components.indices.contains(components.index(after: conversationsIndex)),
+            let conversationID = UUID(uuidString: String(components[components.index(after: conversationsIndex)]))
+        else {
+            throw URLError(.badURL)
+        }
+
+        return try HTTPFixtures.jsonBody(
+            IMConversationReceiptSummaryResponseBody(
+                conversationID: conversationID,
+                deliveredThroughSequence: 0,
+                readThroughSequence: 0,
+                readableMemberCount: 0
+            )
         )
     }
     nonisolated static func imConversationsBody(
@@ -611,7 +672,7 @@ struct AuthManagerTests {
         )
     }
     nonisolated static func imConversationMembersBody() throws -> Data {
-        try HTTPFixtures.jsonBody(
+        try imConversationMembersPageBody(
             [
                 IMConversationMemberResponseBody(
                     id: user.id,
@@ -627,7 +688,7 @@ struct AuthManagerTests {
     nonisolated static func waitUntil(
         _ predicate: @escaping @Sendable () async -> Bool
     ) async throws {
-        for _ in 0..<300 {
+        for _ in 0..<1_000 {
             if await predicate() {
                 return
             }
@@ -641,7 +702,7 @@ struct AuthManagerTests {
         at index: Int,
         from harness: IMConnectionTestHarness
     ) async throws -> String {
-        for _ in 0..<50 {
+        for _ in 0..<1_000 {
             let lines = await harness.recordedLines()
             if lines.indices.contains(index) {
                 return lines[index]

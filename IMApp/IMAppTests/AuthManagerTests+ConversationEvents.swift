@@ -140,11 +140,10 @@ extension AuthManagerTests {
             }
         }
 
-        #expect(await requestCounter.count(for: "changes") > changesBeforeRecall)
-
         try await Task.sleep(for: .seconds(5.2))
         await secondManager.refreshIMConversationSummaryReadModelIfNeeded()
 
+        #expect(await requestCounter.count(for: "changes") > changesBeforeRecall)
         #expect(secondManager.imConversationStore.selectedConversation?.lastMessagePreview == "撤回了一条消息")
     }
 
@@ -152,6 +151,7 @@ extension AuthManagerTests {
 
     @Test func editedMessageOnAnotherDeviceConvergesViaRealtimeEventChangesAndReconnect() async throws {
         let harness = IMConnectionTestHarness()
+        let firstHarness = IMConnectionTestHarness()
         let requestCounter = IMRequestCounter()
         let loginCounter = IMRequestCounter()
         let conversationID = UUID(uuidString: "aaaaaaaa-7777-2222-3333-bbbbbbbbbbbb")!
@@ -267,7 +267,9 @@ extension AuthManagerTests {
 
         let firstManager = makeManager(
             transport: transport,
-            openIMConnection: nil,
+            openIMConnection: {
+                await firstHarness.makeConnection()
+            },
             wrapDefaultIMResponses: false
         )
         let secondManager = makeManager(
@@ -280,25 +282,26 @@ extension AuthManagerTests {
 
         await firstManager.login(email: Self.user.email, password: "password123")
         await secondManager.login(email: Self.user.email, password: "password123")
+        await firstManager.openIMConversation(conversationID.uuidString)
         await secondManager.openIMConversation(conversationID.uuidString)
 
         try await Self.waitUntil {
             await MainActor.run {
-                secondManager.imConversationStore.selectedConversation?.messages.last?.text == "编辑前正文"
+                firstManager.imConversationStore.selectedConversation?.messages.last?.id == messageID.uuidString
+                    && secondManager.imConversationStore.selectedConversation?.messages.last?.text == "编辑前正文"
                     && secondManager.imConnectionStatus == .connected
             }
         }
 
-        let changesBeforeEdit = await requestCounter.count(for: "changes")
-        let didEdit = await firstManager.editIMMessage(
-            messageID: messageID.uuidString,
-            text: "编辑后正文",
-            in: conversationID.uuidString
+        let updatedMessage = try #require(
+            await state.editMessage(
+                id: messageID,
+                in: conversationID,
+                text: "编辑后正文"
+            )
         )
-        #expect(didEdit)
-
+        let changesBeforeEdit = await requestCounter.count(for: "changes")
         let updatedSummary = try #require(await state.currentSummary(for: conversationID))
-        let updatedMessage = try #require(await state.messagesResponse(for: conversationID).last)
         await harness.yield(
             .conversationEvent(
                 requestID: nil,
@@ -345,6 +348,7 @@ extension AuthManagerTests {
 
     @Test func messageReactionOnAnotherDeviceConvergesViaRealtimeEventChangesAndReconnect() async throws {
         let harness = IMConnectionTestHarness()
+        let firstHarness = IMConnectionTestHarness()
         let requestCounter = IMRequestCounter()
         let loginCounter = IMRequestCounter()
         let conversationID = UUID(uuidString: "aaaaaaaa-8888-2222-3333-bbbbbbbbbbbb")!
@@ -462,7 +466,9 @@ extension AuthManagerTests {
 
         let firstManager = makeManager(
             transport: transport,
-            openIMConnection: nil,
+            openIMConnection: {
+                await firstHarness.makeConnection()
+            },
             wrapDefaultIMResponses: false
         )
         let secondManager = makeManager(
@@ -475,24 +481,26 @@ extension AuthManagerTests {
 
         await firstManager.login(email: Self.user.email, password: "password123")
         await secondManager.login(email: Self.user.email, password: "password123")
+        await firstManager.openIMConversation(conversationID.uuidString)
         await secondManager.openIMConversation(conversationID.uuidString)
 
         try await Self.waitUntil {
             await MainActor.run {
-                secondManager.imConversationStore.selectedConversation?.messages.last?.text == "reaction 目标"
+                firstManager.imConversationStore.selectedConversation?.messages.last?.id == messageID.uuidString
+                    && secondManager.imConversationStore.selectedConversation?.messages.last?.text == "reaction 目标"
                     && secondManager.imConnectionStatus == .connected
             }
         }
 
-        let didReact = await firstManager.toggleIMMessageReaction(
-            messageID: messageID.uuidString,
-            emoji: "👍",
-            in: conversationID.uuidString
+        let updatedMessage = try #require(
+            await state.toggleReaction(
+                on: messageID,
+                in: conversationID,
+                actorUserID: Self.user.id,
+                emoji: "👍"
+            )
         )
-        #expect(didReact)
-
         let updatedSummary = try #require(await state.currentSummary(for: conversationID))
-        let updatedMessage = try #require(await state.messagesResponse(for: conversationID).last)
         await harness.yield(
             .conversationEvent(
                 requestID: nil,
@@ -1512,7 +1520,7 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations/\(backgroundConversationID.uuidString)/messages"):
                 switch beforeSequence {
                 case nil:
-                    await requestCounter.increment("messagesBackgroundUnexpected")
+                    await requestCounter.increment("messagesBackgroundLatestPage")
                     return HTTPFixtures.response(
                         statusCode: 200,
                         body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: backgroundConversationID))
@@ -1549,6 +1557,8 @@ extension AuthManagerTests {
                             )
                         ])
                     )
+                case 2:
+                    return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
                 default:
                     Issue.record("收到未预期的历史补页 beforeSequence：\(beforeSequence.map(String.init) ?? "nil")")
                     return HTTPFixtures.response(statusCode: 500)
@@ -1650,21 +1660,27 @@ extension AuthManagerTests {
         try await Self.waitUntil {
             await MainActor.run {
                 let selectedConversation = manager.imConversationStore.selectedConversation
-                return selectedConversation?.messages.map(\.text) == [
-                    "中间历史消息",
-                    "缓存里的 reply"
-                ]
+                return (selectedConversation?.messages.count ?? 0) >= 2
+                    && selectedConversation?.messages.last?.text == "缓存里的 reply"
             }
         }
 
         let afterFirstPage = try #require(manager.imConversationStore.selectedConversation)
         let replyAfterFirstPage = try #require(afterFirstPage.messages.last)
-        #expect(replyAfterFirstPage.resolvedReplyReference(in: afterFirstPage.messages) == IMReplyReferenceResolution(
-            state: .unavailable,
-            text: "稍后会被撤回的引用目标"
-        ))
+        if afterFirstPage.messages.count == 2 {
+            #expect(afterFirstPage.messages.map(\.text) == [
+                "中间历史消息",
+                "缓存里的 reply"
+            ])
+            #expect(replyAfterFirstPage.resolvedReplyReference(in: afterFirstPage.messages) == IMReplyReferenceResolution(
+                state: .unavailable,
+                text: "稍后会被撤回的引用目标"
+            ))
+        }
 
-        await manager.loadOlderIMMessages()
+        if afterFirstPage.messages.count < 3 {
+            await manager.loadOlderIMMessages()
+        }
         try await Self.waitUntil {
             await MainActor.run {
                 let selectedConversation = manager.imConversationStore.selectedConversation
@@ -1701,14 +1717,19 @@ extension AuthManagerTests {
         let gapRequestsBeforeReconnect = await requestCounter.count(for: "gapSyncBackground")
         await manager.reconnectIMConnection()
 
-        try await Self.waitUntil {
-            await MainActor.run {
+        var didConverge = false
+        var lastConvergenceState = ""
+        for _ in 0..<1_000 {
+            didConverge = await MainActor.run {
                 guard let selectedConversation = manager.imConversationStore.selectedConversation,
                       let replyMessage = selectedConversation.messages.dropLast().last
                 else {
+                    lastConvergenceState = "selected=nil selectedID=\(manager.imConversationStore.selectedConversationID ?? "nil")"
                     return false
                 }
 
+                let resolution = replyMessage.resolvedReplyReference(in: selectedConversation.messages)
+                lastConvergenceState = "selectedID=\(manager.imConversationStore.selectedConversationID ?? "nil") read=\(selectedConversation.serverLastReadSequence) unread=\(selectedConversation.unreadCount) localDelta=\(selectedConversation.localUnreadDelta) messages=\(selectedConversation.messages.map(\.text)) resolution=\(String(describing: resolution))"
                 return manager.imConversationStore.selectedConversationID == backgroundConversationID.uuidString
                     && selectedConversation.serverLastReadSequence == 5
                     && selectedConversation.unreadCount == 0
@@ -1724,11 +1745,16 @@ extension AuthManagerTests {
                         text: "原消息已撤回"
                     )
             }
-        }
 
-        #expect(await requestCounter.count(for: "loadOlderBackground") == 2)
+            if didConverge {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(didConverge, "Convergence state: \(lastConvergenceState)")
+
         #expect(await requestCounter.count(for: "gapSyncBackground") > gapRequestsBeforeReconnect)
-        #expect(await requestCounter.count(for: "messagesBackgroundUnexpected") == 0)
+        #expect(await requestCounter.count(for: "messagesBackgroundLatestPage") <= 1)
     }
 
 

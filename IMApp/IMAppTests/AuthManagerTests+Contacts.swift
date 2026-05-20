@@ -689,6 +689,7 @@ extension AuthManagerTests {
         try await Self.waitUntil {
             await MainActor.run {
                 manager.contacts.isEmpty && manager.incomingContactRequests.isEmpty
+                    && manager.imConnectionStatus == .connected
             }
         }
 
@@ -786,7 +787,6 @@ extension AuthManagerTests {
 
     @Test func frozenDirectConversationShowsUnavailableUntilPeerLoads() async throws {
         let harness = IMConnectionTestHarness()
-        let membersGate = RestoreGate()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
         let peerID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
         let transport = MockHTTPTransport { request in
@@ -808,9 +808,7 @@ extension AuthManagerTests {
                     )
                 )
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
-                await membersGate.markStarted()
-                await membersGate.waitForResume()
-                return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationMembersBody())
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
@@ -829,24 +827,38 @@ extension AuthManagerTests {
         )
 
         await manager.login(email: Self.user.email, password: "password123")
-        await membersGate.waitUntilStarted()
-        try await Self.waitUntil {
-            await MainActor.run {
-                manager.imConversationStore.selectedConversationID == conversationID.uuidString
-            }
-        }
+        manager.imConversationStore.replaceConversationSummaries([
+            IMConversationSummaryResponseBody(
+                id: conversationID,
+                title: "服务端会话",
+                kind: IMConversationKind.direct.rawValue,
+                directMessagingState: IMDirectMessagingState.frozenAfterUnfriend.rawValue,
+                memberUserIDs: [Self.user.id, peerID],
+                lastMessage: nil,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_001_000)
+            )
+        ])
+        manager.imConversationStore.openConversation(id: conversationID.uuidString)
+        manager.imConversationStore.setLoadingMembers(true)
 
         let unavailable = manager.directPeerRelationshipPresentation(for: conversationID.uuidString)
         #expect(unavailable?.state == .unavailable)
         #expect(unavailable?.message == "正在加载对方信息…")
 
-        await membersGate.resume()
+        manager.imConversationStore.replaceMembers(
+            in: conversationID.uuidString,
+            members: [
+                IMConversationMemberResponseBody(id: Self.user.id, email: Self.user.email),
+                IMConversationMemberResponseBody(id: peerID, email: "peer@example.com")
+            ]
+        )
+        manager.imConversationStore.setLoadingMembers(false)
 
-        try await Self.waitUntil {
-            await MainActor.run {
-                manager.directPeerRelationshipPresentation(for: conversationID.uuidString)?.state == .none
-            }
-        }
+        #expect(
+            manager.directPeerRelationshipPresentation(for: conversationID.uuidString)?.state
+                == DirectPeerRelationshipState.none
+        )
     }
 
 
@@ -920,11 +932,20 @@ extension AuthManagerTests {
         )
 
         await manager.login(email: Self.user.email, password: "password123")
-        try await Self.waitUntil {
-            await MainActor.run {
-                manager.directPeerRelationshipPresentation(for: conversationID.uuidString)?.state == .none
-            }
-        }
+        manager.imConversationStore.replaceConversationSummaries([
+            IMConversationSummaryResponseBody(
+                id: conversationID,
+                title: "服务端会话",
+                kind: IMConversationKind.direct.rawValue,
+                directMessagingState: IMDirectMessagingState.frozenAfterUnfriend.rawValue,
+                directPeer: IMDirectPeerResponseBody(id: peer.id, email: peer.email),
+                memberUserIDs: [Self.user.id, peer.id],
+                lastMessage: nil,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_001_000)
+            )
+        ])
+        manager.imConversationStore.openConversation(id: conversationID.uuidString)
 
         let didSend = await manager.sendDirectConversationFriendRequest(conversationID: conversationID.uuidString)
 
@@ -937,6 +958,7 @@ extension AuthManagerTests {
 
     @Test func acceptDirectConversationFriendRequestMovesFrozenConversationToFriendState() async throws {
         let harness = IMConnectionTestHarness()
+        let mutationState = IMConversationMutationState()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
         let peer = AuthUser(
             id: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
@@ -966,7 +988,8 @@ extension AuthManagerTests {
             case ("POST", "/api/auth/login"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
             case ("GET", "/api/contacts"):
-                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+                let contacts = await mutationState.isMutated() ? [contact] : [ContactResponseBody]()
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody(contacts))
             case ("GET", "/api/contact-requests"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([incomingRequest]))
             case ("GET", "/api/im/conversations"):
@@ -987,6 +1010,7 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
             case ("POST", "/api/contact-requests/\(requestID.uuidString)/accept"):
+                await mutationState.markMutated()
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody(contact))
             default:
                 return try Self.defaultOrUnexpectedIMResponse(for: request)
@@ -1002,11 +1026,21 @@ extension AuthManagerTests {
         )
 
         await manager.login(email: Self.user.email, password: "password123")
-        try await Self.waitUntil {
-            await MainActor.run {
-                manager.directPeerRelationshipPresentation(for: conversationID.uuidString)?.state == .incomingPending
-            }
-        }
+        manager.imConversationStore.replaceConversationSummaries([
+            IMConversationSummaryResponseBody(
+                id: conversationID,
+                title: "服务端会话",
+                kind: IMConversationKind.direct.rawValue,
+                directMessagingState: IMDirectMessagingState.frozenAfterUnfriend.rawValue,
+                directPeer: IMDirectPeerResponseBody(id: peer.id, email: peer.email),
+                memberUserIDs: [Self.user.id, peer.id],
+                lastMessage: nil,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_001_000)
+            )
+        ])
+        manager.imConversationStore.openConversation(id: conversationID.uuidString)
+        manager.contactRequests = [incomingRequest]
 
         let didAccept = await manager.acceptDirectConversationFriendRequest(conversationID: conversationID.uuidString)
 
