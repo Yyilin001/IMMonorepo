@@ -255,29 +255,23 @@ extension AuthManagerTests {
         )
 
         await manager.login(email: Self.user.email, password: "password123")
-        manager.imConversationStore.replaceConversationSummaryWindow(
-            [
-                Self.imConversationSummary(
-                    id: firstConversationID,
-                    latestServerSequence: 3,
-                    updatedAt: Date(timeIntervalSince1970: 1_700_001_200),
-                    title: "第一页顶部"
-                ),
-                Self.imConversationSummary(
-                    id: secondConversationID,
-                    latestServerSequence: 2,
-                    updatedAt: Date(timeIntervalSince1970: 1_700_001_100),
-                    title: "第一页底部"
-                )
-            ],
-            nextCursor: "cursor-page-2",
-            hasMore: true
-        )
-        manager.imConversationStore.setLoadingConversations(false)
-        #expect(manager.imConversationStore.conversations.contains { $0.id == firstConversationID.uuidString })
-        #expect(manager.imConversationStore.conversations.contains { $0.id == secondConversationID.uuidString })
+        await manager.reloadIMConversations(force: true)
+        try await Self.waitUntil {
+            await MainActor.run {
+                let ids = manager.imConversationStore.conversations.map(\.id)
+                return !manager.imConversationStore.isLoadingConversations
+                    && ids.contains(firstConversationID.uuidString)
+                    && ids.contains(secondConversationID.uuidString)
+                    && manager.imConversationStore.conversationSummaryNextCursor == "cursor-page-2"
+                    && manager.imConversationStore.hasMoreConversationSummaries
+            }
+        }
 
-        await manager.loadMoreIMConversationSummariesIfNeeded(anchorConversationID: firstConversationID.uuidString)
+        let currentAnchor = try #require(manager.imConversationStore.conversationSummaryPaginationAnchorID)
+        let nonAnchorConversationID = try #require(
+            manager.imConversationStore.conversations.map(\.id).first { $0 != currentAnchor }
+        )
+        await manager.loadMoreIMConversationSummariesIfNeeded(anchorConversationID: nonAnchorConversationID)
         var summaryRequests = await transport.requests().filter { $0.url?.path == "/api/im/conversations" }
         #expect(summaryRequests.contains { request in
             URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
@@ -1183,12 +1177,11 @@ extension AuthManagerTests {
             "重新加入前的旧历史 2"
         ])
         await summaryRefreshGate.resume()
-
-        if let fallbackSummary = await state.currentSummary(for: fallbackConversationID) {
-            manager.imConversationStore.applyConversationSummaryChanges(
-                upserts: [fallbackSummary],
-                removedConversationIDs: [rejoinedConversationID]
-            )
+        try await Self.waitUntil {
+            await MainActor.run {
+                !manager.imConversationStore.isLoadingConversations
+                    && manager.imConversationStore.conversations.map(\.id) == [fallbackConversationIDString]
+            }
         }
 
         await state.upsertSummary(
