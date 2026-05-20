@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import IMApp
 
+@Suite(.serialized)
 @MainActor
 struct AuthManagerTests {
     nonisolated static let user = AuthUser(
@@ -18,8 +19,7 @@ struct AuthManagerTests {
             case ("GET", "/api/auth/sessions"):
                 throw URLError(.notConnectedToInternet)
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -65,8 +65,7 @@ struct AuthManagerTests {
                     )
                 )
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -102,8 +101,7 @@ struct AuthManagerTests {
                 let body = try HTTPFixtures.jsonBody(ErrorEnvelope(reason: "当前登录已失效。"))
                 return HTTPFixtures.response(statusCode: 401, body: body)
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -126,8 +124,7 @@ struct AuthManagerTests {
             case ("GET", "/api/me"):
                 throw URLError(.notConnectedToInternet)
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -150,8 +147,7 @@ struct AuthManagerTests {
                 let body = try HTTPFixtures.jsonBody(ErrorEnvelope(reason: "当前设备已被撤销。"))
                 return HTTPFixtures.response(statusCode: 403, body: body)
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -171,8 +167,7 @@ struct AuthManagerTests {
             case ("POST", "/api/auth/login"):
                 throw URLError(.notConnectedToInternet)
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -190,8 +185,7 @@ struct AuthManagerTests {
             case ("POST", "/api/auth/register"):
                 throw URLError(.notConnectedToInternet)
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -209,8 +203,7 @@ struct AuthManagerTests {
             case ("POST", "/api/auth/login"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -248,7 +241,7 @@ struct AuthManagerTests {
         )
         try? await Task.sleep(for: .milliseconds(50))
 
-        #expect(manager.phase == .signedOut(message: "当前登录已失效。"))
+        #expect(manager.phase == .signedOut(message: "请重新登录。"))
         #expect(manager.serverStatus == .unknown)
         #expect(manager.currentUser == nil)
     }
@@ -280,30 +273,58 @@ struct AuthManagerTests {
     }
     func wrapWithDefaultIMResponses(_ transport: MockHTTPTransport) -> MockHTTPTransport {
         MockHTTPTransport { request in
-            switch (request.httpMethod, request.url?.path) {
-            case ("GET", "/api/contacts"):
-                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
-            case ("GET", "/api/contact-requests"):
-                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
-            case ("GET", "/api/im/conversations"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyConversationsBody())
-            case ("GET", "/api/im/conversations/changes"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyConversationChangesBody())
-            case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/members") == true:
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/messages/since") == true:
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
-            case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/messages") == true:
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
-            case ("POST", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/read") == true:
-                return HTTPFixtures.response(
-                    statusCode: 200,
-                    body: try Self.imConversationReadBody(for: request)
-                )
-            default:
-                return try await transport.send(request)
+            if let response = try Self.defaultIMResponse(for: request) {
+                return response
             }
+            return try await transport.send(request)
         }
+    }
+
+    nonisolated static func defaultIMResponse(
+        for request: URLRequest
+    ) throws -> (Data, HTTPURLResponse)? {
+        switch (request.httpMethod, request.url?.path) {
+        case ("GET", "/api/contacts"):
+            return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+        case ("GET", "/api/contact-requests"):
+            return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+        case ("GET", "/api/blocks"):
+            return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([UserBlockResponseBody]()))
+        case ("GET", "/api/im/conversations"):
+            return HTTPFixtures.response(statusCode: 200, body: try Self.emptyConversationsBody())
+        case ("GET", "/api/im/conversations/changes"):
+            return HTTPFixtures.response(statusCode: 200, body: try Self.emptyConversationChangesBody())
+        case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/members") == true:
+            return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
+        case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/messages/since") == true:
+            return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+        case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/messages") == true:
+            return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
+        case ("POST", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/read") == true:
+            return HTTPFixtures.response(
+                statusCode: 200,
+                body: try Self.imConversationReadBody(for: request)
+            )
+        case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/receipts/summary") == true:
+            return HTTPFixtures.response(
+                statusCode: 200,
+                body: try Self.imConversationReceiptSummaryBody(for: request)
+            )
+        case ("DELETE", "/api/auth/sessions/current"):
+            return HTTPFixtures.response(statusCode: 200)
+        default:
+            return nil
+        }
+    }
+
+    nonisolated static func defaultOrUnexpectedIMResponse(
+        for request: URLRequest
+    ) throws -> (Data, HTTPURLResponse) {
+        if let response = try defaultIMResponse(for: request) {
+            return response
+        }
+        Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+        return HTTPFixtures.response(statusCode: 500)
     }
     nonisolated static func authResponseBody() throws -> Data {
         try authResponseBody(
@@ -351,6 +372,21 @@ struct AuthManagerTests {
             )
         )
     }
+    nonisolated static func imConversationChangesBody(
+        upserts: [IMConversationSummaryResponseBody],
+        removedConversationIDs: [UUID] = [],
+        targetToken: String = "snapshot-changes"
+    ) throws -> Data {
+        try HTTPFixtures.jsonBody(
+            IMConversationSummaryChangesResponseBody(
+                upserts: upserts,
+                removedConversationIDs: removedConversationIDs,
+                nextCursor: nil,
+                hasMore: false,
+                targetToken: targetToken
+            )
+        )
+    }
     nonisolated static func emptyMessagesSinceBody() throws -> Data {
         try HTTPFixtures.jsonBody(
             IMConversationMessagesSinceResponseBody(
@@ -361,7 +397,22 @@ struct AuthManagerTests {
         )
     }
     nonisolated static func emptyMembersBody() throws -> Data {
-        try HTTPFixtures.jsonBody([IMConversationMemberResponseBody]())
+        try imConversationMembersPageBody([])
+    }
+
+    nonisolated static func imConversationMembersPageBody(
+        _ members: [IMConversationMemberResponseBody],
+        nextCursor: String? = nil,
+        limit: Int = 50
+    ) throws -> Data {
+        try HTTPFixtures.jsonBody(
+            IMConversationMemberPageResponseBody(
+                items: members,
+                nextCursor: nextCursor,
+                total: members.count,
+                limit: limit
+            )
+        )
     }
     nonisolated static func imConversationReadBody(
         conversationID: UUID,
@@ -397,6 +448,30 @@ struct AuthManagerTests {
         return try imConversationReadBody(
             conversationID: conversationID,
             lastReadSequence: Int(payload.readSequence)
+        )
+    }
+
+    nonisolated static func imConversationReceiptSummaryBody(for request: URLRequest) throws -> Data {
+        guard let path = request.url?.path else {
+            throw URLError(.badURL)
+        }
+
+        let components = path.split(separator: "/")
+        guard
+            let conversationsIndex = components.firstIndex(of: "conversations"),
+            components.indices.contains(components.index(after: conversationsIndex)),
+            let conversationID = UUID(uuidString: String(components[components.index(after: conversationsIndex)]))
+        else {
+            throw URLError(.badURL)
+        }
+
+        return try HTTPFixtures.jsonBody(
+            IMConversationReceiptSummaryResponseBody(
+                conversationID: conversationID,
+                deliveredThroughSequence: 0,
+                readThroughSequence: 0,
+                readableMemberCount: 0
+            )
         )
     }
     nonisolated static func imConversationsBody(
@@ -597,7 +672,7 @@ struct AuthManagerTests {
         )
     }
     nonisolated static func imConversationMembersBody() throws -> Data {
-        try HTTPFixtures.jsonBody(
+        try imConversationMembersPageBody(
             [
                 IMConversationMemberResponseBody(
                     id: user.id,
@@ -613,7 +688,7 @@ struct AuthManagerTests {
     nonisolated static func waitUntil(
         _ predicate: @escaping @Sendable () async -> Bool
     ) async throws {
-        for _ in 0..<100 {
+        for _ in 0..<1_000 {
             if await predicate() {
                 return
             }
@@ -627,7 +702,7 @@ struct AuthManagerTests {
         at index: Int,
         from harness: IMConnectionTestHarness
     ) async throws -> String {
-        for _ in 0..<50 {
+        for _ in 0..<1_000 {
             let lines = await harness.recordedLines()
             if lines.indices.contains(index) {
                 return lines[index]

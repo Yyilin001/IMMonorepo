@@ -30,6 +30,7 @@ struct IMConversationController: RouteCollection {
         protected.get("conversations", ":conversationID", "receipts", "summary", use: receiptSummary)
         protected.get("conversations", ":conversationID", "search", use: searchMessages)
         protected.get("conversations", ":conversationID", "messages", "since", use: messagesSince)
+        protected.get("conversations", ":conversationID", "messages", ":messageID", "stream", use: messageStreamSnapshot)
         protected.get("favorites", use: favorites)
     }
 }

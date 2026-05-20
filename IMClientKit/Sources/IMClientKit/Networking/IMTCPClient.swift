@@ -199,6 +199,11 @@ public enum IMTCPConversationEventType: String, Codable, Equatable, Sendable {
     case conversationVisibilityChanged = "conversation_visibility_changed"
     case conversationSettingsChanged = "conversation_settings_changed"
     case inviteChanged = "invite_changed"
+    case messageStreamStarted = "message_stream_started"
+    case messageStreamChunk = "message_stream_chunk"
+    case messageStreamCompleted = "message_stream_completed"
+    case messageStreamFailed = "message_stream_failed"
+    case messageStreamCancelled = "message_stream_cancelled"
 }
 
 public enum IMTCPConversationVisibilityAction: String, Codable, Equatable, Sendable {
@@ -211,6 +216,7 @@ public struct IMTCPConversationEventPayload: Codable, Equatable, Sendable {
     public let eventType: IMTCPConversationEventType
     public let conversation: IMConversationSummaryResponseBody
     public let message: IMConversationMessageResponseBody?
+    public let stream: IMTCPMessageStreamPayload?
     public let actorUserID: UUID?
     public let serverTimestamp: Date
     public let messageIDs: [UUID]
@@ -222,6 +228,7 @@ public struct IMTCPConversationEventPayload: Codable, Equatable, Sendable {
         eventType: IMTCPConversationEventType,
         conversation: IMConversationSummaryResponseBody,
         message: IMConversationMessageResponseBody? = nil,
+        stream: IMTCPMessageStreamPayload? = nil,
         actorUserID: UUID?,
         serverTimestamp: Date,
         messageIDs: [UUID] = [],
@@ -232,6 +239,7 @@ public struct IMTCPConversationEventPayload: Codable, Equatable, Sendable {
         self.eventType = eventType
         self.conversation = conversation
         self.message = message
+        self.stream = stream
         self.actorUserID = actorUserID
         self.serverTimestamp = serverTimestamp
         self.messageIDs = messageIDs
@@ -244,6 +252,7 @@ public struct IMTCPConversationEventPayload: Codable, Equatable, Sendable {
         case eventType
         case conversation
         case message
+        case stream
         case actorUserID
         case serverTimestamp
         case messageIDs
@@ -257,6 +266,7 @@ public struct IMTCPConversationEventPayload: Codable, Equatable, Sendable {
         eventType = try container.decode(IMTCPConversationEventType.self, forKey: .eventType)
         conversation = try container.decode(IMConversationSummaryResponseBody.self, forKey: .conversation)
         message = try container.decodeIfPresent(IMConversationMessageResponseBody.self, forKey: .message)
+        stream = try container.decodeIfPresent(IMTCPMessageStreamPayload.self, forKey: .stream)
         actorUserID = try container.decodeIfPresent(UUID.self, forKey: .actorUserID)
         serverTimestamp = try container.decode(Date.self, forKey: .serverTimestamp)
         messageIDs = try container.decodeIfPresent([UUID].self, forKey: .messageIDs) ?? []
@@ -266,6 +276,37 @@ public struct IMTCPConversationEventPayload: Codable, Equatable, Sendable {
             IMTCPConversationVisibilityAction.self,
             forKey: .visibilityAction
         )
+    }
+}
+
+public struct IMTCPMessageStreamPayload: Codable, Equatable, Sendable {
+    public let streamID: String
+    public let messageID: String
+    public let conversationID: String
+    public let chunkIndex: Int
+    public let deltaText: String?
+    public let partialTextLength: Int
+    public let state: MessageStreamLifecycleState
+    public let serverTimestamp: Date
+
+    public init(
+        streamID: String,
+        messageID: String,
+        conversationID: String,
+        chunkIndex: Int,
+        deltaText: String? = nil,
+        partialTextLength: Int,
+        state: MessageStreamLifecycleState,
+        serverTimestamp: Date
+    ) {
+        self.streamID = streamID
+        self.messageID = messageID
+        self.conversationID = conversationID
+        self.chunkIndex = chunkIndex
+        self.deltaText = deltaText
+        self.partialTextLength = partialTextLength
+        self.state = state
+        self.serverTimestamp = serverTimestamp
     }
 }
 

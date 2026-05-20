@@ -104,6 +104,106 @@ actor IMStreamMetrics {
     }
 }
 
+actor IMAIStreamMetrics {
+    struct Snapshot: Sendable {
+        var activeStreams: Int = 0
+        var startedStreams: Int = 0
+        var cancelledStreams: Int = 0
+        var completedStreams: Int = 0
+        var failedStreams: Int = 0
+        var publishedChunks: Int = 0
+        var snapshotWrites: Int = 0
+        var terminalCASConflicts: Int = 0
+        var startupStaleRepairs: Int = 0
+        var startupRepairPages: Int = 0
+        var runtimeStaleRepairs: Int = 0
+        var leaseReservations: Int = 0
+        var leaseRejections: Int = 0
+        var leaseHeartbeats: Int = 0
+        var leaseCancellationRequests: Int = 0
+        var chunkDatabaseBypasses: Int = 0
+        var finalizeRetries: Int = 0
+        var finalizeFailures: Int = 0
+    }
+
+    private var snapshot = Snapshot()
+
+    func recordStarted() {
+        snapshot.activeStreams += 1
+        snapshot.startedStreams += 1
+    }
+
+    func recordFinished(state: MessageStreamLifecycleState) {
+        snapshot.activeStreams = max(0, snapshot.activeStreams - 1)
+        switch state {
+        case .completed:
+            snapshot.completedStreams += 1
+        case .failed:
+            snapshot.failedStreams += 1
+        case .cancelled:
+            snapshot.cancelledStreams += 1
+        case .streaming:
+            break
+        }
+    }
+
+    func recordChunkPublished() {
+        snapshot.publishedChunks += 1
+    }
+
+    func recordSnapshotWrite() {
+        snapshot.snapshotWrites += 1
+    }
+
+    func recordTerminalCASConflict() {
+        snapshot.terminalCASConflicts += 1
+    }
+
+    func recordStartupStaleRepair(count: Int) {
+        snapshot.startupStaleRepairs += max(0, count)
+    }
+
+    func recordStartupRepairPage() {
+        snapshot.startupRepairPages += 1
+    }
+
+    func recordRuntimeStaleRepair(count: Int) {
+        snapshot.runtimeStaleRepairs += max(0, count)
+    }
+
+    func recordLeaseReservation() {
+        snapshot.leaseReservations += 1
+    }
+
+    func recordLeaseRejection() {
+        snapshot.leaseRejections += 1
+    }
+
+    func recordLeaseHeartbeat() {
+        snapshot.leaseHeartbeats += 1
+    }
+
+    func recordLeaseCancellationRequest() {
+        snapshot.leaseCancellationRequests += 1
+    }
+
+    func recordChunkDatabaseBypass() {
+        snapshot.chunkDatabaseBypasses += 1
+    }
+
+    func recordFinalizeRetry() {
+        snapshot.finalizeRetries += 1
+    }
+
+    func recordFinalizeFailure() {
+        snapshot.finalizeFailures += 1
+    }
+
+    func currentSnapshot() -> Snapshot {
+        snapshot
+    }
+}
+
 struct IMHTTPMetricsMiddleware: AsyncMiddleware {
     func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
         let start = Date()
@@ -144,6 +244,10 @@ private struct IMStreamMetricsStorageKey: StorageKey {
     typealias Value = IMStreamMetrics
 }
 
+private struct IMAIStreamMetricsStorageKey: StorageKey {
+    typealias Value = IMAIStreamMetrics
+}
+
 extension Application {
     var httpMetrics: IMHTTPMetrics {
         get {
@@ -179,5 +283,17 @@ extension Application {
             return metrics
         }
         set { storage[IMStreamMetricsStorageKey.self] = newValue }
+    }
+
+    var aiStreamMetrics: IMAIStreamMetrics {
+        get {
+            if let metrics = storage[IMAIStreamMetricsStorageKey.self] {
+                return metrics
+            }
+            let metrics = IMAIStreamMetrics()
+            storage[IMAIStreamMetricsStorageKey.self] = metrics
+            return metrics
+        }
+        set { storage[IMAIStreamMetricsStorageKey.self] = newValue }
     }
 }

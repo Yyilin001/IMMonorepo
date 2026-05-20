@@ -40,11 +40,13 @@ private func configureShared(_ app: Application) async throws {
     try InlineOutboxProjectionPolicy.validateStartup(app: app)
     IMDatabaseConfigurator.configureDatabases(app)
     try IMProductionRuntimeValidator.validate(app: app)
+    try await app.configureAIStreamLeaseStoreIfNeeded()
     app.authConfiguration = authConfiguration
     app.imTCPConfiguration = imTCPConfiguration
     app.lifecycle.use(ConversationEventStreamProducerLifecycle())
     app.lifecycle.use(IMConsistencyRepairLifecycle())
     app.lifecycle.use(IMCleanupLifecycle())
+    app.lifecycle.use(IMAIStreamRepairLifecycle())
     app.asyncCommands.use(IMProjectionWorkerCommand(), as: "worker")
     app.asyncCommands.use(IMProjectionWorkerCommand(), as: "projection-worker")
     app.asyncCommands.use(IMOutboxRelayCommand(), as: "outbox-relay")

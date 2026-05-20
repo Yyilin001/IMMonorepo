@@ -3,6 +3,7 @@ import Vapor
 
 struct UserController: RouteCollection {
     private let friendRequestService = FriendRequestService()
+    private let contactChangesService = ContactChangesService()
 
     func boot(routes: any RoutesBuilder) throws {
         // /api/me 走最小化的受保护路由，用来验证 access token 是否仍可用。
@@ -15,6 +16,7 @@ struct UserController: RouteCollection {
         protected.get("me", use: me)
         protected.patch("me", "profile", use: updateProfile)
         protected.get("contacts", use: contacts)
+        protected.get("contacts", "changes", use: contactChanges)
         protected.post("contacts", use: addContact)
         protected.patch("contacts", ":contactUserID", use: updateContact)
         protected.delete("contacts", ":contactUserID", use: deleteContact)
@@ -79,6 +81,17 @@ struct UserController: RouteCollection {
             .sorted { $0.email < $1.email }
     }
 
+    func contactChanges(req: Request) async throws -> ContactChangesResponse {
+        let user = try req.auth.require(User.self)
+        return try await contactChangesService.listChanges(
+            for: try user.requireID(),
+            afterToken: req.query[String.self, at: "afterToken"],
+            cursor: req.query[String.self, at: "cursor"],
+            limit: req.query[Int.self, at: "limit"],
+            on: req.db
+        )
+    }
+
     func addContact(req: Request) async throws -> ContactResponse {
         throw Abort(.badRequest, reason: "请通过好友申请添加联系人。")
     }
@@ -100,6 +113,11 @@ struct UserController: RouteCollection {
 
         contact.remark = normalizedContactRemark(body.remark)
         try await contact.update(on: req.db)
+        try await contactChangesService.recordContactUpsert(
+            ownerUserID: ownerUserID,
+            contactUserID: contactUserID,
+            on: req.db
+        )
         return try ContactResponse(contact: contact)
     }
 
@@ -132,6 +150,16 @@ struct UserController: RouteCollection {
                 on: database
             )
         }
+        try await contactChangesService.recordContactRemoval(
+            ownerUserID: ownerUserID,
+            contactUserID: contactUserID,
+            on: req.db
+        )
+        try await contactChangesService.recordContactRemoval(
+            ownerUserID: contactUserID,
+            contactUserID: ownerUserID,
+            on: req.db
+        )
 
         let eventService = IMContactEventService(app: req.application)
         await eventService.publishContactRemoved(
@@ -197,6 +225,16 @@ struct UserController: RouteCollection {
             remark: body.remark,
             on: req.db
         )
+        try await contactChangesService.recordRequestUpsert(
+            ownerUserID: response.requester.id,
+            requestID: response.id,
+            on: req.db
+        )
+        try await contactChangesService.recordRequestUpsert(
+            ownerUserID: response.addressee.id,
+            requestID: response.id,
+            on: req.db
+        )
         await IMContactEventService(app: req.application).publishRequestEvent(
             eventType: .friendRequestCreated,
             request: response,
@@ -213,6 +251,26 @@ struct UserController: RouteCollection {
             id: contactRequestID(from: req),
             addresseeUserID: try user.requireID(),
             remark: body.remark,
+            on: req.db
+        )
+        try await contactChangesService.recordRequestUpsert(
+            ownerUserID: result.request.requester.id,
+            requestID: result.request.id,
+            on: req.db
+        )
+        try await contactChangesService.recordRequestUpsert(
+            ownerUserID: result.request.addressee.id,
+            requestID: result.request.id,
+            on: req.db
+        )
+        try await contactChangesService.recordContactUpsert(
+            ownerUserID: result.request.requester.id,
+            contactUserID: result.request.addressee.id,
+            on: req.db
+        )
+        try await contactChangesService.recordContactUpsert(
+            ownerUserID: result.request.addressee.id,
+            contactUserID: result.request.requester.id,
             on: req.db
         )
         await IMContactEventService(app: req.application).publishAccepted(
@@ -253,6 +311,16 @@ struct UserController: RouteCollection {
             addresseeUserID: try user.requireID(),
             on: req.db
         )
+        try await contactChangesService.recordRequestUpsert(
+            ownerUserID: response.requester.id,
+            requestID: response.id,
+            on: req.db
+        )
+        try await contactChangesService.recordRequestUpsert(
+            ownerUserID: response.addressee.id,
+            requestID: response.id,
+            on: req.db
+        )
         await IMContactEventService(app: req.application).publishRequestEvent(
             eventType: .friendRequestDeclined,
             request: response,
@@ -267,6 +335,16 @@ struct UserController: RouteCollection {
         let response = try await friendRequestService.cancelRequest(
             id: contactRequestID(from: req),
             requesterUserID: try user.requireID(),
+            on: req.db
+        )
+        try await contactChangesService.recordRequestUpsert(
+            ownerUserID: response.requester.id,
+            requestID: response.id,
+            on: req.db
+        )
+        try await contactChangesService.recordRequestUpsert(
+            ownerUserID: response.addressee.id,
+            requestID: response.id,
             on: req.db
         )
         await IMContactEventService(app: req.application).publishRequestEvent(

@@ -46,6 +46,7 @@ class IMConversationCacheSnapshotMapperTests {
             ),
             selectedConversationID = "conversation-1",
             loadedConversationIDs = setOf("conversation-1"),
+            pendingReadSequences = mapOf("conversation-1" to 7UL),
         )
 
         val restored = IMConversationCacheSnapshotMapper.restore(
@@ -56,6 +57,7 @@ class IMConversationCacheSnapshotMapperTests {
         assertEquals(IMMessageDeliveryState.Unknown, messages[0].deliveryState)
         assertEquals(IMMessageDeliveryState.Queued, messages[1].deliveryState)
         assertEquals(setOf("conversation-1"), restored.loadedConversationIDs)
+        assertEquals(7UL, restored.pendingReadSequences["conversation-1"])
     }
 
     private fun summary(id: String) = IMConversationSummaryResponseBody(

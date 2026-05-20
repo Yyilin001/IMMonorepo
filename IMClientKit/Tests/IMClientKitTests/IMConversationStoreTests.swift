@@ -466,6 +466,257 @@ struct IMConversationStoreTests {
         #expect(message.derivedState.edits.last?.text == "after edit")
     }
 
+    @Test func messageStreamEventsMergeChunksIdempotentlyAndCompleteWithCanonicalMessage() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let messageID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
+        let streamID = "stream-1"
+        let createdAt = Date(timeIntervalSince1970: 1_700_300_000)
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "AI Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: createdAt
+                )
+            ]
+        )
+        store.openConversation(id: conversationID.uuidString)
+
+        _ = store.applyConversationEvent(
+            IMTCPConversationEventPayload(
+                eventType: .messageStreamStarted,
+                conversation: IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "AI Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: createdAt
+                ),
+                message: IMConversationMessageResponseBody(
+                    id: messageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    serverSequence: 2,
+                    content: .text(""),
+                    derivedState: IMMessageDerivedState(
+                        streamState: MessageStreamState(
+                            streamID: streamID,
+                            state: .streaming,
+                            updatedAt: createdAt
+                        )
+                    ),
+                    createdAt: createdAt
+                ),
+                stream: IMTCPMessageStreamPayload(
+                    streamID: streamID,
+                    messageID: messageID.uuidString,
+                    conversationID: conversationID.uuidString,
+                    chunkIndex: 0,
+                    partialTextLength: 0,
+                    state: .streaming,
+                    serverTimestamp: createdAt
+                ),
+                actorUserID: Self.currentUserID,
+                serverTimestamp: createdAt
+            ),
+            currentUserID: Self.currentUserID
+        )
+
+        for chunk in [
+            IMTCPMessageStreamPayload(
+                streamID: streamID,
+                messageID: messageID.uuidString,
+                conversationID: conversationID.uuidString,
+                chunkIndex: 1,
+                deltaText: "AI",
+                partialTextLength: 2,
+                state: .streaming,
+                serverTimestamp: Date(timeIntervalSince1970: 1_700_300_001)
+            ),
+            IMTCPMessageStreamPayload(
+                streamID: streamID,
+                messageID: messageID.uuidString,
+                conversationID: conversationID.uuidString,
+                chunkIndex: 1,
+                deltaText: "AI",
+                partialTextLength: 2,
+                state: .streaming,
+                serverTimestamp: Date(timeIntervalSince1970: 1_700_300_001)
+            ),
+            IMTCPMessageStreamPayload(
+                streamID: streamID,
+                messageID: messageID.uuidString,
+                conversationID: conversationID.uuidString,
+                chunkIndex: 2,
+                deltaText: " response",
+                partialTextLength: 11,
+                state: .streaming,
+                serverTimestamp: Date(timeIntervalSince1970: 1_700_300_002)
+            )
+        ] {
+            _ = store.applyConversationEvent(
+                IMTCPConversationEventPayload(
+                    eventType: .messageStreamChunk,
+                    conversation: IMConversationSummaryResponseBody(
+                        id: conversationID,
+                        title: "AI Conversation",
+                        memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                        lastMessage: nil,
+                        createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                        updatedAt: chunk.serverTimestamp
+                    ),
+                    stream: chunk,
+                    actorUserID: Self.currentUserID,
+                    serverTimestamp: chunk.serverTimestamp
+                ),
+                currentUserID: Self.currentUserID
+            )
+        }
+
+        var conversation = try #require(store.selectedConversation)
+        var message = try #require(conversation.messages.first)
+        #expect(conversation.messages.count == 1)
+        #expect(message.text == "AI response")
+        #expect(message.derivedState.streamState?.lastChunkIndex == 2)
+        #expect(store.activeMessageStreamTargets() == [
+            IMActiveMessageStreamTarget(
+                conversationID: conversationID.uuidString,
+                messageID: messageID.uuidString,
+                streamID: streamID
+            )
+        ])
+
+        _ = store.applyConversationEvent(
+            IMTCPConversationEventPayload(
+                eventType: .messageStreamChunk,
+                conversation: IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "AI Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_300_004)
+                ),
+                stream: IMTCPMessageStreamPayload(
+                    streamID: streamID,
+                    messageID: messageID.uuidString,
+                    conversationID: conversationID.uuidString,
+                    chunkIndex: 4,
+                    deltaText: " gap",
+                    partialTextLength: 15,
+                    state: .streaming,
+                    serverTimestamp: Date(timeIntervalSince1970: 1_700_300_004)
+                ),
+                actorUserID: Self.currentUserID,
+                serverTimestamp: Date(timeIntervalSince1970: 1_700_300_004)
+            ),
+            currentUserID: Self.currentUserID
+        )
+        #expect(store.selectedConversation?.messages.first?.text == "AI response")
+        #expect(store.consumePendingStreamSnapshotTargets() == [
+            IMActiveMessageStreamTarget(
+                conversationID: conversationID.uuidString,
+                messageID: messageID.uuidString,
+                streamID: streamID
+            )
+        ])
+
+        let completedAt = Date(timeIntervalSince1970: 1_700_300_003)
+        let completedState = IMMessageDerivedState(
+            streamState: MessageStreamState(
+                streamID: streamID,
+                state: .completed,
+                lastChunkIndex: Int.max,
+                partialText: "AI response",
+                updatedAt: completedAt
+            )
+        )
+        _ = store.applyConversationEvent(
+            IMTCPConversationEventPayload(
+                eventType: .messageStreamCompleted,
+                conversation: IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "AI Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: IMMessagePreviewResponseBody(
+                        id: messageID,
+                        senderUserID: Self.currentUserID,
+                        serverSequence: 2,
+                        content: .text("AI response"),
+                        derivedState: completedState,
+                        createdAt: createdAt
+                    ),
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: completedAt
+                ),
+                message: IMConversationMessageResponseBody(
+                    id: messageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    serverSequence: 2,
+                    content: .text("AI response"),
+                    derivedState: completedState,
+                    createdAt: createdAt
+                ),
+                stream: IMTCPMessageStreamPayload(
+                    streamID: streamID,
+                    messageID: messageID.uuidString,
+                    conversationID: conversationID.uuidString,
+                    chunkIndex: Int.max,
+                    partialTextLength: 11,
+                    state: .completed,
+                    serverTimestamp: completedAt
+                ),
+                actorUserID: Self.currentUserID,
+                serverTimestamp: completedAt
+            ),
+            currentUserID: Self.currentUserID
+        )
+
+        conversation = try #require(store.selectedConversation)
+        message = try #require(conversation.messages.first)
+        #expect(conversation.messages.count == 1)
+        #expect(message.text == "AI response")
+        #expect(message.derivedState.streamState?.state == .completed)
+        #expect(store.activeMessageStreamTargets().isEmpty)
+
+        _ = store.applyConversationEvent(
+            IMTCPConversationEventPayload(
+                eventType: .messageStreamChunk,
+                conversation: IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "AI Conversation",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_300_005)
+                ),
+                stream: IMTCPMessageStreamPayload(
+                    streamID: streamID,
+                    messageID: messageID.uuidString,
+                    conversationID: conversationID.uuidString,
+                    chunkIndex: 3,
+                    deltaText: " late",
+                    partialTextLength: 16,
+                    state: .streaming,
+                    serverTimestamp: Date(timeIntervalSince1970: 1_700_300_005)
+                ),
+                actorUserID: Self.currentUserID,
+                serverTimestamp: Date(timeIntervalSince1970: 1_700_300_005)
+            ),
+            currentUserID: Self.currentUserID
+        )
+        message = try #require(store.selectedConversation?.messages.first)
+        #expect(message.text == "AI response")
+        #expect(message.derivedState.streamState?.state == .completed)
+    }
+
 
     @Test func messageUpdatedEventStoresReactionDerivedState() {
         let store = IMConversationStore()

@@ -21,7 +21,8 @@ struct AppNetworkConfiguration: Equatable {
     func makeIMTCPConfiguration() -> IMTCPClientConfiguration {
         IMTCPClientConfiguration(
             host: imTCPHost,
-            port: imTCPPort
+            port: imTCPPort,
+            deviceID: try? KeychainDeviceIdentityStore().currentDeviceID()
         )
     }
 }

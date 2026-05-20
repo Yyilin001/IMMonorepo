@@ -8,7 +8,7 @@ const profiles = {
     vus: 100,
     duration: '1m',
     thresholds: {
-      http_req_failed: ['rate<0.01'],
+      http_req_failed: ['rate<0.001'],
       http_req_duration: ['p(95)<500', 'p(99)<1000'],
     },
   },
@@ -16,7 +16,7 @@ const profiles = {
     vus: 10000,
     duration: '10m',
     thresholds: {
-      http_req_failed: ['rate<0.01'],
+      http_req_failed: ['rate<0.001'],
       http_req_duration: ['p(95)<300', 'p(99)<800'],
     },
   },
@@ -24,7 +24,7 @@ const profiles = {
     vus: 50000,
     duration: '20m',
     thresholds: {
-      http_req_failed: ['rate<0.005'],
+      http_req_failed: ['rate<0.001'],
       http_req_duration: ['p(95)<150', 'p(99)<300'],
     },
   },
@@ -141,4 +141,3 @@ export default function () {
 
   sleep(profile === 'local-smoke' ? 1 : 0.1);
 }
-

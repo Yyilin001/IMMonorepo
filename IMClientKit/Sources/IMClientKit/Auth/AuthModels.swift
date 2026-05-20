@@ -72,6 +72,8 @@ public struct SessionSnapshot: Decodable, Identifiable, Equatable, Sendable, API
     public let createdAt: Date?
     public let refreshExpiresAt: Date
     public let isCurrent: Bool
+    public let isOnline: Bool?
+    public let activeConnectionCount: Int?
 }
 
 public struct LogoutAllResponseBody: Decodable, Sendable, APIResponseBody {

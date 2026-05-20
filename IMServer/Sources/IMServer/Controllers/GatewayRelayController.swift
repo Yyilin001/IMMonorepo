@@ -10,6 +10,7 @@ struct GatewayRelayController: RouteCollection {
         relayRoutes.post("contact-event", use: relayContactEvent)
         relayRoutes.post("kick-session", use: relayKickSession)
         relayRoutes.post("kick-user", use: relayKickUser)
+        relayRoutes.post("session-counts", use: relaySessionCounts)
     }
 
     func relayMessage(req: Request) async throws -> HTTPStatus {
@@ -61,6 +62,12 @@ struct GatewayRelayController: RouteCollection {
         )
         return .ok
     }
+
+    func relaySessionCounts(req: Request) async throws -> GatewayRelaySessionCountsResponse {
+        let body = try req.content.decode(GatewayRelaySessionCountsRequest.self)
+        let counts = await req.application.gatewaySessionService.activeConnectionCounts(forSessionIDs: body.sessionIDs)
+        return GatewayRelaySessionCountsResponse(counts: counts)
+    }
 }
 
 struct InternalGatewayRelaySecretMiddleware: AsyncMiddleware {
@@ -71,6 +78,8 @@ struct InternalGatewayRelaySecretMiddleware: AsyncMiddleware {
             guard actualSecret == sharedSecret else {
                 throw Abort(.unauthorized, reason: "Invalid internal relay secret.")
             }
+        } else if request.application.environment == .production {
+            throw Abort(.internalServerError, reason: "IM_INTERNAL_SHARED_SECRET is required for gateway relay in production.")
         }
         return try await next.respond(to: request)
     }

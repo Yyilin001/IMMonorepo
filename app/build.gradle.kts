@@ -4,6 +4,22 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+fun String.asBuildConfigString(): String =
+    "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+val imApiBaseUrl = providers.gradleProperty("IM_API_BASE_URL")
+    .orElse(providers.environmentVariable("IM_API_BASE_URL"))
+    .orElse("http://10.0.2.2:8080")
+val imTcpHost = providers.gradleProperty("IM_TCP_HOST")
+    .orElse(providers.environmentVariable("IM_TCP_HOST"))
+    .orElse("10.0.2.2")
+val imTcpPort = providers.gradleProperty("IM_TCP_PORT")
+    .orElse(providers.environmentVariable("IM_TCP_PORT"))
+    .orElse("9000")
+val imTcpRequiresTlsTermination = providers.gradleProperty("IM_TCP_REQUIRES_TLS_TERMINATION")
+    .orElse(providers.environmentVariable("IM_TCP_REQUIRES_TLS_TERMINATION"))
+    .orElse("false")
+
 android {
     namespace = "com.xmtx.imappandroid"
     compileSdk {
@@ -18,6 +34,10 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "IM_API_BASE_URL", imApiBaseUrl.get().asBuildConfigString())
+        buildConfigField("String", "IM_TCP_HOST", imTcpHost.get().asBuildConfigString())
+        buildConfigField("int", "IM_TCP_PORT", imTcpPort.get())
+        buildConfigField("boolean", "IM_TCP_REQUIRES_TLS_TERMINATION", imTcpRequiresTlsTermination.get())
     }
 
     buildTypes {
@@ -38,6 +58,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

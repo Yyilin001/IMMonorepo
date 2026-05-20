@@ -11,6 +11,7 @@ enum IMMigrationRegistry {
         app.migrations.add(AddUserContactRemark())
         app.migrations.add(BackfillReciprocalUserContacts())
         app.migrations.add(CreateFriendRequest())
+        app.migrations.add(CreateContactChangesLog())
         app.migrations.add(CreateAuthSession())
         app.migrations.add(AddAuthIndexes())
         app.migrations.add(EnforceSingleActiveDeviceSession())
@@ -54,6 +55,7 @@ enum IMMigrationRegistry {
         app.migrations.add(AddConversationSearchIndexLowerTrigramIndex())
         app.migrations.add(CreateIMCommonFeatureTables())
         app.migrations.add(AddReportSnapshotFields())
+        app.migrations.add(CreateAIMessageStreamIndex())
     }
 
     static func resetIMSchemaIfRequested(_ app: Application) async throws {
@@ -80,10 +82,12 @@ enum IMMigrationRegistry {
             ConversationReplayRecord.schema,
             ConversationNotificationEntry.schema,
             MessageReceipt.schema,
+            AIMessageStreamIndex.schema,
             PushDeviceToken.schema,
             GroupInvite.schema,
             UserReport.schema,
             UserBlock.schema,
+            ContactChangeLogEntry.schema,
             ConversationVisibilityOverride.schema,
             MessageVisibilityOverride.schema,
             MessageFavorite.schema,
@@ -182,7 +186,9 @@ private let imMigrationNames: [String] = [
     "AddConversationEventAuxiliaryReadModelIndexes",
     "AddConversationSearchIndexLowerTrigramIndex",
     "CreateIMCommonFeatureTables",
-    "AddReportSnapshotFields"
+    "AddReportSnapshotFields",
+    "CreateAIMessageStreamIndex",
+    "CreateContactChangesLog"
 ]
 
 private struct ResetIMSchemaStorageKey: StorageKey {

@@ -12,7 +12,7 @@
 - TCP 握手鉴权、心跳、消息投递、ack、踢线
 - 简单文件上传/下载能力
 
-当前实现聚焦单体部署和本地开发体验，暂不处理分布式、分库分表、WebSocket、多节点连接路由等复杂场景。
+当前实现已经从本地单体闭环演进到可按角色拆分的运行模式：本地开发仍默认使用 `combined`，生产环境按 `gateway`、`command-api`、`query-api`、`outbox-relay`、`stream-consumer`、`ops` 拆分部署。生产拓扑依赖 Kafka 事件流、Redis 连接路由、分片 summary read model、S3-compatible 媒体存储和私网 Prometheus 指标；具体约束以 [docs/im-runtime-operating-modes.md](docs/im-runtime-operating-modes.md) 为准。
 
 ## 当前能力
 
@@ -26,10 +26,23 @@
 - `DELETE /api/auth/sessions/all`
 - `DELETE /api/auth/sessions/:sessionID`
 
+### 联系人与好友申请
+
+- `GET /api/contacts`
+- `GET /api/contacts/changes`
+- `PATCH /api/contacts/:contactUserID`
+- `DELETE /api/contacts/:contactUserID`
+- `GET /api/contact-requests`
+- `POST /api/contact-requests`
+- `POST /api/contact-requests/:requestID/accept`
+- `POST /api/contact-requests/:requestID/decline`
+- `POST /api/contact-requests/:requestID/cancel`
+
 ### IM HTTP 接口
 
 - `POST /api/im/conversations`
 - `GET /api/im/conversations`
+- `GET /api/im/conversations/changes`
 - `GET /api/im/conversations/:conversationID/members`
 - `GET /api/im/conversations/:conversationID/messages`
 - `GET /api/im/conversations/:conversationID/messages/since`
@@ -51,7 +64,7 @@
 
 协议草案见 [docs/im-tcp-protocol.md](docs/im-tcp-protocol.md)。
 
-运行模式与生产上线检查清单见 [docs/im-runtime-operating-modes.md](docs/im-runtime-operating-modes.md)。
+运行模式与生产上线检查清单见 [docs/im-runtime-operating-modes.md](docs/im-runtime-operating-modes.md)。多端同时在线的上线验收门禁见 [docs/im-multidevice-release-gate.md](docs/im-multidevice-release-gate.md)。
 
 ## 技术栈
 
@@ -166,6 +179,12 @@ IM_POSTGRES_SMOKE_DATABASE_URL=postgres://user:password@127.0.0.1:5432/imserver_
 ./scripts/production_smoke.sh run
 ```
 
+多端同步上线门禁：
+
+```bash
+./scripts/multidevice_release_gate.sh
+```
+
 小群/私聊压测入口：
 
 ```bash
@@ -176,7 +195,7 @@ cd LoadTests/TCPDriver && swift run IMTCPLoadDriver --profile local-smoke
 
 ## 数据与消息模型说明
 
-当前 IM 数据模型以“会话 + 消息 + 成员读位点”为核心：
+当前 IM 数据模型以“会话 + 消息 + 成员读位点 + 联系人变更日志”为核心：
 
 - `Conversation`
   保存会话基础信息和最后一条消息序号
@@ -184,6 +203,8 @@ cd LoadTests/TCPDriver && swift run IMTCPLoadDriver --profile local-smoke
   保存成员关系和 `lastReadSequence`
 - `ConversationMessage`
   保存消息正文、发送者、服务端顺序号、`clientMessageID`
+- `ContactChangeLogEntry`
+  保存联系人与好友申请变更游标，用于客户端离线后的增量补洞
 
 这套模型支持以下链路对齐：
 
@@ -191,24 +212,25 @@ cd LoadTests/TCPDriver && swift run IMTCPLoadDriver --profile local-smoke
 - `messages/since` 增量补洞
 - TCP 实时消息投递
 - 客户端 pending message 与服务端落库消息合并
+- 联系人/好友请求 `changes` 增量同步
 
 ## 当前状态
 
-项目已经具备一个可运行的 IM 基础闭环：
+项目已经具备一个可运行的 IM 基础闭环，并提供生产角色拆分的启动校验：
 
 - HTTP 登录后可建立 TCP 长连接
 - 会话列表和历史消息可通过 HTTP 拉取
 - 新消息可通过 TCP 实时收发
 - 支持断线重连后的增量补洞
 - 支持基于读位点的未读校正
+- 支持联系人和好友请求的实时事件与 HTTP 增量补洞
 
-但它仍然是一个持续迭代中的工程，目前还没有覆盖：
+但它仍然是一个持续迭代中的工程，后续重点仍包括：
 
-- 分布式连接路由
-- 大规模消息分发
 - 多媒体消息模型
 - 群管理后台
-- 完整的运营与审计能力
+- 更完整的运营与审计能力
+- 更严格的生产故障演练和告警规则
 
 ## 配套客户端
 

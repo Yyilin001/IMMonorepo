@@ -52,4 +52,18 @@ class ConversationDetailViewModel(
         mutableState.value = mutableState.value.copy(draftText = "")
         gateway.sendText(text, conversationID)
     }
+
+    fun startAIReply(prompt: String) {
+        val conversationID = state.value.conversationID ?: return
+        val normalized = prompt.trim()
+        if (normalized.isBlank()) return
+        gateway.startAIReply(conversationID, normalized)
+    }
+
+    fun cancelStream(messageID: String) {
+        val conversationID = state.value.conversationID ?: return
+        val normalized = messageID.trim()
+        if (normalized.isBlank()) return
+        gateway.cancelStream(conversationID, normalized)
+    }
 }

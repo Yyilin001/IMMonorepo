@@ -49,6 +49,62 @@ groups:
         annotations:
           summary: IMServer cross-node dispatch failures detected
 
+      - alert: IMServerSessionCountRelayFailures
+        expr: rate(im_session_count_query_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: IMServer gateway session-count relay failures detected
+
+      - alert: IMServerRedisPresenceStaleCleanupSpike
+        expr: increase(im_redis_presence_stale_cleanup_total[10m]) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: IMServer Redis presence stale cleanup is elevated
+
+      - alert: IMServerAIStreamRuntimeStaleRepair
+        expr: increase(im_ai_stream_runtime_stale_repairs_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: IMServer AI stream runtime stale repair detected
+
+      - alert: IMServerAIStreamStartupStaleRepair
+        expr: increase(im_ai_stream_startup_stale_repairs_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: IMServer repaired stale AI streams on startup
+
+      - alert: IMServerAIStreamFinalizeFailures
+        expr: increase(im_ai_stream_finalize_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: IMServer AI stream finalization failures detected
+
+      - alert: IMServerAIStreamLeaseRejectionSpike
+        expr: increase(im_ai_stream_lease_rejections_total[5m]) > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: IMServer AI stream lease rejections are elevated
+
+      - alert: IMServerAIStreamLeaseHeartbeatStopped
+        expr: im_ai_stream_active > 0 and rate(im_ai_stream_lease_heartbeats_total[2m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: IMServer AI stream lease heartbeats stopped while streams are active
+
       - alert: IMServerStreamFailures
         expr: rate(im_stream_failed_events_total[5m]) > 0
         for: 5m

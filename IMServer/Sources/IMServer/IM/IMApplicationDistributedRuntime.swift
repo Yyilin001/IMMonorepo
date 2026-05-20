@@ -182,3 +182,11 @@ struct GatewayRelayKickUserRequest: Content {
     let reason: IMTCPKickReason
     let message: String
 }
+
+struct GatewayRelaySessionCountsRequest: Content {
+    let sessionIDs: [UUID]
+}
+
+struct GatewayRelaySessionCountsResponse: Content {
+    let counts: [UUID: Int]
+}

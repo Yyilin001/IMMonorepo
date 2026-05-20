@@ -30,6 +30,8 @@ interface IMSessionGateway {
     fun reloadContacts()
     fun openConversation(conversationID: String)
     fun sendText(text: String, conversationID: String)
+    fun startAIReply(conversationID: String, prompt: String)
+    fun cancelStream(conversationID: String, messageID: String)
     fun addContact(email: String, remark: String?)
     fun sendContactRequest(email: String, message: String?, remark: String?)
     fun acceptContactRequest(requestID: String, remark: String?)
@@ -52,6 +54,7 @@ class IMClientKitGateway(
     private val conversationStore: IMConversationStore,
     private val contactRuntimeController: ContactRuntimeController,
     private val contactStore: ContactStateStore,
+    private val deviceID: String,
 ) : IMSessionGateway {
     override val conversationState: StateFlow<ConversationListState> = conversationStore.state
     override val contactState: StateFlow<ContactState> = contactStore.state
@@ -63,14 +66,14 @@ class IMClientKitGateway(
         sessionClient.login(
             email = email,
             password = password,
-            device = DeviceMetadataPayload(platform = "android"),
+            device = DeviceMetadataPayload(deviceID = deviceID, platform = "android"),
         )
 
     override suspend fun register(email: String, password: String): AuthUser =
         sessionClient.register(
             email = email,
             password = password,
-            device = DeviceMetadataPayload(platform = "android"),
+            device = DeviceMetadataPayload(deviceID = deviceID, platform = "android"),
         )
 
     override suspend fun clearSession() {
@@ -103,6 +106,14 @@ class IMClientKitGateway(
 
     override fun sendText(text: String, conversationID: String) {
         runtimeController.sendText(text, conversationID)
+    }
+
+    override fun startAIReply(conversationID: String, prompt: String) {
+        runtimeController.startAIReply(conversationID, prompt)
+    }
+
+    override fun cancelStream(conversationID: String, messageID: String) {
+        runtimeController.cancelStream(conversationID, messageID)
     }
 
     override fun addContact(email: String, remark: String?) {

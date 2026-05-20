@@ -444,6 +444,42 @@ public actor SessionClient {
         )
     }
 
+    public func startAIMessageStream(
+        conversationID: String,
+        prompt: String
+    ) async throws -> IMMessageStreamResponseBody {
+        try await executor.execute(
+            IMRequest.startAIMessageStream(
+                conversationID: conversationID,
+                prompt: prompt
+            )
+        )
+    }
+
+    public func cancelMessageStream(
+        conversationID: String,
+        messageID: String
+    ) async throws -> IMMessageStreamResponseBody {
+        try await executor.execute(
+            IMRequest.cancelMessageStream(
+                conversationID: conversationID,
+                messageID: messageID
+            )
+        )
+    }
+
+    public func fetchMessageStreamSnapshot(
+        conversationID: String,
+        messageID: String
+    ) async throws -> IMMessageStreamResponseBody {
+        try await executor.execute(
+            IMRequest.messageStreamSnapshot(
+                conversationID: conversationID,
+                messageID: messageID
+            )
+        )
+    }
+
     public func markIMConversationRead(
         conversationID: String,
         readSequence: UInt64

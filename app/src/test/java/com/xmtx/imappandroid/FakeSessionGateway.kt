@@ -34,6 +34,8 @@ class FakeSessionGateway(
     var startedRuntimeUserID: String? = null
     var openedConversationID: String? = null
     var sentText: Pair<String, String>? = null
+    var startedAIReply: Pair<String, String>? = null
+    var cancelledStream: Pair<String, String>? = null
     var sentContactRequest: Triple<String, String?, String?>? = null
     var didReloadContacts = false
     var createdConversation: Triple<IMConversationKind, String?, List<String>>? = null
@@ -82,6 +84,14 @@ class FakeSessionGateway(
 
     override fun sendText(text: String, conversationID: String) {
         sentText = text to conversationID
+    }
+
+    override fun startAIReply(conversationID: String, prompt: String) {
+        startedAIReply = conversationID to prompt
+    }
+
+    override fun cancelStream(conversationID: String, messageID: String) {
+        cancelledStream = conversationID to messageID
     }
 
     override fun addContact(email: String, remark: String?) = Unit

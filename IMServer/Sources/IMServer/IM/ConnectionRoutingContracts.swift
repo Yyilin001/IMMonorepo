@@ -41,7 +41,10 @@ protocol PresenceStore: Sendable {
     func shutdown() async
     func activatePresence(forUserID userID: UUID) async throws
     func deactivatePresence(forUserID userID: UUID) async throws
+    func activatePresence(forSessionID sessionID: UUID, userID: UUID) async throws
+    func deactivatePresence(forSessionID sessionID: UUID, userID: UUID) async throws
     func routeNodeIDs(forUserIDs userIDs: [UUID]) async throws -> [UUID: Set<String>]
+    func routeNodeIDs(forSessionIDs sessionIDs: [UUID]) async throws -> [UUID: Set<String>]
     func activeNodeIDs() async throws -> Set<String>
 }
 

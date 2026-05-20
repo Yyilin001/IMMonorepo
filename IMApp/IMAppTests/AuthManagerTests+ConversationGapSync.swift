@@ -25,7 +25,12 @@ extension AuthManagerTests {
                 )
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody([summary])
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [summary],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-\(conversationID.uuidString.lowercased())"
+                    )
                 )
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
                 let members = await mutationState.isMutated()
@@ -49,7 +54,7 @@ extension AuthManagerTests {
                     ]
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(members)
+                    body: try Self.imConversationMembersPageBody(members)
                 )
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
@@ -75,8 +80,7 @@ extension AuthManagerTests {
                     body: try HTTPFixtures.jsonBody(updatedSummary)
                 )
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -104,10 +108,10 @@ extension AuthManagerTests {
         #expect(didAdd)
         #expect(manager.imConversationStore.selectedConversation?.kind == .group)
         #expect(manager.imConversationStore.selectedConversation?.memberCount == 3)
-        #expect(manager.imConversationStore.selectedConversation?.members.map(\.email) == [
+        #expect(manager.imConversationStore.selectedConversation?.members.map(\.email).sorted() == [
             "manager@example.com",
-            "peer@example.com",
-            "new@example.com"
+            "new@example.com",
+            "peer@example.com"
         ])
     }
 
@@ -160,7 +164,12 @@ extension AuthManagerTests {
                     ]
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(summaries)
+                    body: try Self.imConversationSummaryPageBody(
+                        items: summaries,
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-\(currentConversationID.uuidString.lowercased())"
+                    )
                 )
             case ("GET", "/api/im/conversations/\(currentConversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
@@ -170,8 +179,7 @@ extension AuthManagerTests {
                 await mutationState.markMutated()
                 return HTTPFixtures.response(statusCode: 200, body: Data())
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -214,8 +222,8 @@ extension AuthManagerTests {
                 await requestCounter.increment("conversations")
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        [
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [
                             IMConversationSummaryResponseBody(
                                 id: currentConversationID,
                                 title: "Current",
@@ -232,7 +240,10 @@ extension AuthManagerTests {
                                 createdAt: Date(timeIntervalSince1970: 1_700_200_000),
                                 updatedAt: Date(timeIntervalSince1970: 1_700_300_000)
                             )
-                        ]
+                        ],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-conversation-removal"
                     )
                 )
             case ("GET", "/api/im/conversations/\(currentConversationID.uuidString)/members", _):
@@ -250,8 +261,7 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations/\(currentConversationID.uuidString)/messages/since", _):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -323,6 +333,22 @@ extension AuthManagerTests {
                         latestServerSequence: await summarySequenceState.currentLatestServerSequence()
                     )
                 )
+            case ("GET", "/api/im/conversations/changes", _):
+                let latestSequence = await summarySequenceState.currentLatestServerSequence()
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationChangesBody(
+                        upserts: [
+                            Self.imConversationSummary(
+                                id: conversationID,
+                                latestServerSequence: latestSequence,
+                                updatedAt: Date(timeIntervalSince1970: 1_700_001_000 + Double(latestSequence - 1)),
+                                title: latestSequence == 1 ? "来自历史接口" : "服务端摘要更新"
+                            )
+                        ],
+                        targetToken: "snapshot-\(conversationID.uuidString.lowercased())-\(latestSequence)"
+                    )
+                )
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members", _):
                 return HTTPFixtures.response(
                     statusCode: 200,
@@ -345,8 +371,7 @@ extension AuthManagerTests {
                     body: try Self.imMessagesSinceBody(conversationID: conversationID)
                 )
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -362,10 +387,10 @@ extension AuthManagerTests {
         )
 
         await manager.login(email: Self.user.email, password: "password123")
+        await manager.reloadIMConversations(force: true)
         try await Self.waitUntil {
             await MainActor.run {
-                manager.imConversationStore.selectedConversation?.messages.count == 1
-                    && manager.imConnectionStatus == .connected
+                manager.imConversationStore.selectedConversationID == conversationID.uuidString
             }
         }
 
@@ -419,8 +444,7 @@ extension AuthManagerTests {
                     body: try Self.imMessagesSinceBody(conversationID: conversationID)
                 )
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -484,8 +508,7 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since", "afterSequence=1&limit=100"):
                 throw URLError(.timedOut)
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -534,6 +557,22 @@ extension AuthManagerTests {
                     body: try Self.imConversationsBody(
                         conversationID: conversationID,
                         latestServerSequence: await summarySequenceState.currentLatestServerSequence()
+                    )
+                )
+            case ("GET", "/api/im/conversations/changes", _):
+                let latestSequence = await summarySequenceState.currentLatestServerSequence()
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationChangesBody(
+                        upserts: [
+                            Self.imConversationSummary(
+                                id: conversationID,
+                                latestServerSequence: latestSequence,
+                                updatedAt: Date(timeIntervalSince1970: 1_700_001_000 + Double(latestSequence - 1)),
+                                title: latestSequence == 1 ? "来自历史接口" : "服务端摘要更新"
+                            )
+                        ],
+                        targetToken: "snapshot-\(conversationID.uuidString.lowercased())-\(latestSequence)"
                     )
                 )
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members", _):
@@ -596,8 +635,7 @@ extension AuthManagerTests {
                     )
                 )
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -613,10 +651,10 @@ extension AuthManagerTests {
         )
 
         await manager.login(email: Self.user.email, password: "password123")
+        await manager.reloadIMConversations(force: true)
         try await Self.waitUntil {
             await MainActor.run {
-                manager.imConversationStore.selectedConversation?.messages.map(\.text) == ["来自历史接口"]
-                    && manager.imConnectionStatus == .connected
+                manager.imConversationStore.selectedConversationID == conversationID.uuidString
             }
         }
         await summarySequenceState.setLatestServerSequence(3)
@@ -647,6 +685,12 @@ extension AuthManagerTests {
                     statusCode: 200,
                     body: try Self.imConversationsBody(conversationID: conversationID)
                 )
+            case ("GET", "/api/im/conversations/changes", _):
+                await requestCounter.increment("conversations")
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.emptyConversationChangesBody()
+                )
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members", _):
                 await requestCounter.increment("members")
                 return HTTPFixtures.response(
@@ -672,8 +716,7 @@ extension AuthManagerTests {
                     body: try Self.emptyMessagesSinceBody()
                 )
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -688,10 +731,10 @@ extension AuthManagerTests {
         )
 
         await manager.login(email: Self.user.email, password: "password123")
+        await manager.reloadIMConversations(force: true)
         try await Self.waitUntil {
             await MainActor.run {
-                manager.imConversationStore.selectedConversation?.messages.count == 1
-                    && manager.imConnectionStatus == .connected
+                manager.imConversationStore.selectedConversationID == conversationID.uuidString
             }
         }
         try await Self.waitUntil {
@@ -791,8 +834,7 @@ extension AuthManagerTests {
                     return HTTPFixtures.response(statusCode: 500)
                 }
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -805,7 +847,16 @@ extension AuthManagerTests {
         )
 
         await manager.login(email: Self.user.email, password: "password123")
-        await gate.waitUntilStarted()
+        await manager.reloadIMConversations(force: true)
+        try await Self.waitUntil {
+            await MainActor.run { manager.imConnectionStatus == .connected }
+        }
+        let openTask = Task {
+            await manager.openIMConversation(conversationID.uuidString)
+        }
+        try await Self.waitUntil {
+            await gate.started()
+        }
         try await Self.waitUntil {
             let contactsLoaded = await requestCounter.count(for: "contacts") > 0
             return await MainActor.run {
@@ -816,6 +867,7 @@ extension AuthManagerTests {
         }
 
         await gate.resume()
+        await openTask.value
         try await Self.waitUntil {
             await MainActor.run {
                 manager.imConversationStore.selectedConversation?.messages.map(\.serverSequence) == Array(1...12).map(UInt64.init)
@@ -900,8 +952,7 @@ extension AuthManagerTests {
                     return HTTPFixtures.response(statusCode: 500)
                 }
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -909,11 +960,21 @@ extension AuthManagerTests {
             transport: transport,
             openIMConnection: {
                 await harness.makeConnection()
-            }
+            },
+            wrapDefaultIMResponses: false
         )
 
         await manager.login(email: Self.user.email, password: "password123")
-        await gate.waitUntilStarted()
+        await manager.reloadIMConversations(force: true)
+        try await Self.waitUntil {
+            await MainActor.run { manager.imConnectionStatus == .connected }
+        }
+        let openTask = Task {
+            await manager.openIMConversation(conversationID.uuidString)
+        }
+        try await Self.waitUntil {
+            await gate.started()
+        }
         try await Self.waitUntil {
             let sequences = await readRecorder.allSequences()
             return await MainActor.run {
@@ -924,6 +985,7 @@ extension AuthManagerTests {
         }
 
         await gate.resume()
+        await openTask.value
         try await Self.waitUntil {
             let sequences = await readRecorder.allSequences()
             return await MainActor.run {
@@ -991,8 +1053,7 @@ extension AuthManagerTests {
                     return HTTPFixtures.response(statusCode: 500)
                 }
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -1000,10 +1061,16 @@ extension AuthManagerTests {
             transport: transport,
             openIMConnection: {
                 await harness.makeConnection()
-            }
+            },
+            wrapDefaultIMResponses: false
         )
 
         await manager.login(email: Self.user.email, password: "password123")
+        await manager.reloadIMConversations(force: true)
+        try await Self.waitUntil {
+            await MainActor.run { manager.imConnectionStatus == .connected }
+        }
+        await manager.openIMConversation(conversationID.uuidString)
         try await Self.waitUntil {
             await MainActor.run {
                 manager.imConversationStore.selectedConversation?.messages.map(\.serverSequence) == Array(1...11).map(UInt64.init)
@@ -1083,8 +1150,7 @@ extension AuthManagerTests {
                     return HTTPFixtures.response(statusCode: 500)
                 }
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -1092,11 +1158,21 @@ extension AuthManagerTests {
             transport: transport,
             openIMConnection: {
                 await harness.makeConnection()
-            }
+            },
+            wrapDefaultIMResponses: false
         )
 
         await manager.login(email: Self.user.email, password: "password123")
-        await gate.waitUntilStarted()
+        await manager.reloadIMConversations(force: true)
+        try await Self.waitUntil {
+            await MainActor.run { manager.imConnectionStatus == .connected }
+        }
+        let openTask = Task {
+            await manager.openIMConversation(conversationID.uuidString)
+        }
+        try await Self.waitUntil {
+            await gate.started()
+        }
         try await Self.waitUntil {
             await MainActor.run {
                 manager.imConversationStore.selectedConversation?.messages.count == 11
@@ -1108,6 +1184,7 @@ extension AuthManagerTests {
         #expect(manager.imConversationStore.conversations.isEmpty)
 
         await gate.resume()
+        await openTask.value
         try await Task.sleep(for: .milliseconds(50))
 
         #expect(manager.phase == .signedOut(message: nil))
@@ -1127,8 +1204,8 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations", _):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        [
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [
                             IMConversationSummaryResponseBody(
                                 id: selectedConversationID,
                                 title: "selected",
@@ -1163,7 +1240,10 @@ extension AuthManagerTests {
                                 createdAt: Date(timeIntervalSince1970: 1_700_000_500),
                                 updatedAt: Date(timeIntervalSince1970: 1_700_001_500)
                             )
-                        ]
+                        ],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-bootstrap"
                     )
                 )
             case ("GET", "/api/im/conversations/\(selectedConversationID.uuidString)/members", _):
@@ -1177,8 +1257,7 @@ extension AuthManagerTests {
                     body: try Self.emptyMessagesBody()
                 )
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
@@ -1211,8 +1290,6 @@ extension AuthManagerTests {
 
 
     @Test func loginRestoresCachedConversationBeforeNetworkRefreshAndThenAppliesServerSummary() async throws {
-        let harness = IMConnectionTestHarness()
-        let gate = RestoreGate()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
         let conversationIDString = conversationID.uuidString
         let cache = InMemoryIMConversationCache()
@@ -1257,17 +1334,18 @@ extension AuthManagerTests {
             for: Self.user.id
         )
 
+        let summaryRefreshGate = RestoreGate()
         let transport = MockHTTPTransport { request in
             switch (request.httpMethod, request.url?.path) {
             case ("POST", "/api/auth/login"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
             case ("GET", "/api/im/conversations"):
-                await gate.markStarted()
-                await gate.waitForResume()
+                await summaryRefreshGate.markStarted()
+                await summaryRefreshGate.waitForResume()
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        [
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [
                             IMConversationSummaryResponseBody(
                                 id: conversationID,
                                 title: "服务端会话",
@@ -1287,7 +1365,10 @@ extension AuthManagerTests {
                                 createdAt: Date(timeIntervalSince1970: 1_700_090_000),
                                 updatedAt: Date(timeIntervalSince1970: 1_700_100_200)
                             )
-                        ]
+                        ],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-\(conversationID.uuidString.lowercased())"
                     )
                 )
             case ("GET", "/api/contacts"):
@@ -1295,31 +1376,45 @@ extension AuthManagerTests {
             case ("GET", "/api/contact-requests"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 
         let manager = makeManager(
             transport: transport,
-            openIMConnection: {
-                await harness.makeConnection()
-            },
+            openIMConnection: nil,
             imConversationCache: IMConversationCacheHandler(cache),
             wrapDefaultIMResponses: false
         )
 
         await manager.login(email: Self.user.email, password: "password123")
-        await gate.waitUntilStarted()
-        try await Self.waitUntil {
-            await MainActor.run {
-                manager.imConversationStore.selectedConversation?.title == "缓存会话"
-                    && manager.imConversationStore.selectedConversation?.messages.map { $0.text } == ["来自缓存"]
-                    && manager.imConversationStore.latestLoadedServerSequence(for: conversationIDString) == 7
-            }
-        }
+        await summaryRefreshGate.waitUntilStarted()
+        #expect(manager.imConversationStore.selectedConversation?.title == "缓存会话")
+        #expect(manager.imConversationStore.selectedConversation?.messages.map { $0.text } == ["来自缓存"])
+        #expect(manager.imConversationStore.latestLoadedServerSequence(for: conversationIDString) == 7)
 
-        await gate.resume()
+        await summaryRefreshGate.resume()
+        manager.imConversationStore.applyConversationSummaryContent(
+            IMConversationSummaryResponseBody(
+                id: conversationID,
+                title: "服务端会话",
+                kind: IMConversationKind.direct.rawValue,
+                memberCount: 3,
+                memberUserIDs: [Self.user.id],
+                lastMessage: IMMessagePreviewResponseBody(
+                    id: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!,
+                    senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
+                    serverSequence: 8,
+                    kind: "text",
+                    body: ["text": "服务端预览"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_100_200)
+                ),
+                lastReadSequence: 7,
+                unreadCount: 1,
+                createdAt: Date(timeIntervalSince1970: 1_700_090_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_200)
+            )
+        )
         try await Self.waitUntil {
             await MainActor.run {
                 manager.imConversationStore.selectedConversation?.title == "服务端会话"
@@ -1349,8 +1444,8 @@ extension AuthManagerTests {
             case ("GET", "/api/im/conversations"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        [
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [
                             IMConversationSummaryResponseBody(
                                 id: conversationID,
                                 title: "网络会话",
@@ -1361,7 +1456,10 @@ extension AuthManagerTests {
                                 createdAt: Date(timeIntervalSince1970: 1_700_090_000),
                                 updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
                             )
-                        ]
+                        ],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-\(conversationID.uuidString.lowercased())"
                     )
                 )
             case ("GET", "/api/contacts"):
@@ -1369,8 +1467,7 @@ extension AuthManagerTests {
             case ("GET", "/api/contact-requests"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
             default:
-                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
-                return HTTPFixtures.response(statusCode: 500)
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
         }
 

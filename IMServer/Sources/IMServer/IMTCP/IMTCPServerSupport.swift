@@ -14,6 +14,7 @@ struct IMTCPConfiguration: Sendable {
     let heartbeatInterval: TimeInterval
     let idleTimeout: TimeInterval
     let maxFrameBytes: Int
+    let requiresTLSTermination: Bool
 
     static func load(from environment: Environment) -> IMTCPConfiguration {
         let enabled = Environment.get("IM_TCP_ENABLED").flatMap(Bool.init(_:)) ?? (environment != .testing)
@@ -26,7 +27,8 @@ struct IMTCPConfiguration: Sendable {
             authTimeout: Environment.get("IM_TCP_AUTH_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 10,
             heartbeatInterval: Environment.get("IM_TCP_HEARTBEAT_INTERVAL").flatMap(TimeInterval.init(_:)) ?? 30,
             idleTimeout: Environment.get("IM_TCP_IDLE_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 90,
-            maxFrameBytes: Environment.get("IM_TCP_MAX_FRAME_BYTES").flatMap(Int.init(_:)) ?? 64 * 1024
+            maxFrameBytes: Environment.get("IM_TCP_MAX_FRAME_BYTES").flatMap(Int.init(_:)) ?? 64 * 1024,
+            requiresTLSTermination: parseBooleanEnvironment("IM_TCP_REQUIRES_TLS_TERMINATION", defaultValue: false)
         )
     }
 }
@@ -94,11 +96,65 @@ actor IMConnectionRegistry {
     private var connectionsByID: [UUID: Entry] = [:]
     private var connectionIDsBySessionID: [UUID: Set<UUID>] = [:]
     private var connectionIDsByUserID: [UUID: Set<UUID>] = [:]
+    private var connectionIDsByDeviceKey: [DeviceConnectionKey: Set<UUID>] = [:]
+
+    private struct DeviceConnectionKey: Hashable, Sendable {
+        let userID: UUID
+        let deviceID: String
+    }
 
     func bind(_ connection: IMAuthenticatedConnection, control: IMConnectionControl) {
         connectionsByID[connection.connectionID] = Entry(connection: connection, control: control)
         connectionIDsBySessionID[connection.sessionID, default: []].insert(connection.connectionID)
         connectionIDsByUserID[connection.userID, default: []].insert(connection.connectionID)
+        if let deviceID = normalizedDeviceID(connection.deviceID) {
+            connectionIDsByDeviceKey[DeviceConnectionKey(userID: connection.userID, deviceID: deviceID), default: []]
+                .insert(connection.connectionID)
+        }
+    }
+
+    func kickExistingConnections(
+        forSessionID sessionID: UUID,
+        reason: IMTCPKickReason,
+        message: String
+    ) -> [IMAuthenticatedConnection] {
+        let connectionIDs = connectionIDs(forSessionID: sessionID)
+        var removedConnections: [IMAuthenticatedConnection] = []
+
+        for connectionID in connectionIDs {
+            guard let entry = connectionsByID[connectionID] else {
+                continue
+            }
+            let control = entry.control
+            control.kick(reason: reason, message: message)
+            if let removed = remove(connectionID: control.connectionID) {
+                removedConnections.append(removed)
+            }
+        }
+
+        return removedConnections
+    }
+
+    func kickExistingConnections(
+        forUserID userID: UUID,
+        reason: IMTCPKickReason,
+        message: String
+    ) -> [IMAuthenticatedConnection] {
+        let connectionIDs = connectionIDs(forUserID: userID)
+        var removedConnections: [IMAuthenticatedConnection] = []
+
+        for connectionID in connectionIDs {
+            guard let entry = connectionsByID[connectionID] else {
+                continue
+            }
+            let control = entry.control
+            control.kick(reason: reason, message: message)
+            if let removed = remove(connectionID: control.connectionID) {
+                removedConnections.append(removed)
+            }
+        }
+
+        return removedConnections
     }
 
     @discardableResult
@@ -115,6 +171,14 @@ actor IMConnectionRegistry {
         connectionIDsByUserID[removed.connection.userID]?.remove(connectionID)
         if connectionIDsByUserID[removed.connection.userID]?.isEmpty == true {
             connectionIDsByUserID.removeValue(forKey: removed.connection.userID)
+        }
+
+        if let deviceID = normalizedDeviceID(removed.connection.deviceID) {
+            let key = DeviceConnectionKey(userID: removed.connection.userID, deviceID: deviceID)
+            connectionIDsByDeviceKey[key]?.remove(connectionID)
+            if connectionIDsByDeviceKey[key]?.isEmpty == true {
+                connectionIDsByDeviceKey.removeValue(forKey: key)
+            }
         }
 
         return removed.connection
@@ -136,34 +200,22 @@ actor IMConnectionRegistry {
         connectionIDsByUserID[userID]?.count ?? 0
     }
 
+    func localConnectionCount(forSessionID sessionID: UUID) -> Int {
+        connectionIDsBySessionID[sessionID]?.count ?? 0
+    }
+
+    func localConnectionCount(forUserID userID: UUID, deviceID: String) -> Int {
+        connectionIDsByDeviceKey[DeviceConnectionKey(userID: userID, deviceID: deviceID)]?.count ?? 0
+    }
+
+    func activeConnectionCounts(forSessionIDs sessionIDs: [UUID]) -> [UUID: Int] {
+        Dictionary(uniqueKeysWithValues: Set(sessionIDs).map { sessionID in
+            (sessionID, connectionIDsBySessionID[sessionID]?.count ?? 0)
+        })
+    }
+
     func totalConnectionCount() -> Int {
         connectionsByID.count
-    }
-
-    func kickConnections(
-        forSessionID sessionID: UUID,
-        reason: IMTCPKickReason,
-        message: String
-    ) {
-        let controls = connectionIDs(forSessionID: sessionID)
-            .compactMap { connectionsByID[$0]?.control }
-
-        for control in controls {
-            control.kick(reason: reason, message: message)
-        }
-    }
-
-    func kickConnections(
-        forUserID userID: UUID,
-        reason: IMTCPKickReason,
-        message: String
-    ) {
-        let controls = connectionIDs(forUserID: userID)
-            .compactMap { connectionsByID[$0]?.control }
-
-        for control in controls {
-            control.kick(reason: reason, message: message)
-        }
     }
 
     func sendMessage(
@@ -203,6 +255,14 @@ actor IMConnectionRegistry {
             control.sendPacket(type: type, requestID: requestID, payload: payload)
         }
     }
+
+    private func normalizedDeviceID(_ deviceID: String?) -> String? {
+        let trimmed = deviceID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
 }
 
 struct IMTCPAuthenticator {
@@ -219,6 +279,14 @@ struct IMTCPAuthenticator {
     ) async throws -> IMAuthenticatedConnection {
         let (_, sessionContext) = try await AuthService(app: app, db: db)
             .authenticateAccessToken(accessToken)
+        let normalizedPayloadDeviceID = normalizedDeviceID(deviceID)
+        let normalizedSessionDeviceID = normalizedDeviceID(sessionContext.deviceID)
+
+        if let normalizedSessionDeviceID,
+           normalizedPayloadDeviceID != normalizedSessionDeviceID
+        {
+            throw AuthError.invalidToken
+        }
 
         return IMAuthenticatedConnection(
             connectionID: UUID(),
@@ -226,11 +294,19 @@ struct IMTCPAuthenticator {
             sessionID: sessionContext.sessionID,
             authenticatedAt: Date(),
             remoteIPAddress: remoteIPAddress,
-            deviceID: deviceID,
+            deviceID: normalizedSessionDeviceID ?? normalizedPayloadDeviceID,
             deviceName: deviceName,
             platform: platform,
             appVersion: appVersion
         )
+    }
+
+    private func normalizedDeviceID(_ deviceID: String?) -> String? {
+        let trimmed = deviceID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 }
 
@@ -252,13 +328,20 @@ final class IMTCPServerLifecycle: LifecycleHandler, @unchecked Sendable {
             .childChannelOption(ChannelOptions.recvAllocator, value: AdaptiveRecvByteBufferAllocator())
             .childChannelInitializer { channel in
                 channel.pipeline.addHandler(
+                    IdleStateHandler(
+                        readTimeout: .milliseconds(Int64(configuration.idleTimeout * 1000))
+                    )
+                )
+                .flatMap {
+                    channel.pipeline.addHandler(
                     ByteToMessageHandler(
                         IMTCPLineFrameDecoder(maxFrameBytes: configuration.maxFrameBytes)
                     )
-                )
-                    .flatMap {
-                        channel.pipeline.addHandler(IMTCPConnectionHandler(application: application))
-                    }
+                    )
+                }
+                .flatMap {
+                    channel.pipeline.addHandler(IMTCPConnectionHandler(application: application))
+                }
             }
 
         let channel = try await bootstrap.bind(host: configuration.host, port: configuration.port).get()

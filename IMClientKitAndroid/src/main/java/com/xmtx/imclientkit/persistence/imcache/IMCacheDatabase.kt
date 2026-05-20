@@ -25,7 +25,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CachedContactEntity::class,
         CachedContactRequestEntity::class,
     ],
-    version = 2,
+    version = 4,
     exportSchema = false,
 )
 abstract class IMCacheDatabase : RoomDatabase() {
@@ -71,12 +71,24 @@ abstract class IMCacheDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE im_sync_cursors ADD COLUMN pendingReadSequence INTEGER")
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE im_cached_messages ADD COLUMN derivedStateJson TEXT NOT NULL DEFAULT '{}'")
+            }
+        }
+
         fun create(context: Context): IMCacheDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
                 IMCacheDatabase::class.java,
                 "im_conversation_cache.db",
-            ).addMigrations(MIGRATION_1_2).build()
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
     }
 }
 
@@ -122,6 +134,7 @@ data class IMCachedMessageEntity(
     val senderUserID: String?,
     val serverSequence: Long?,
     val contentJson: String,
+    val derivedStateJson: String,
     val direction: String,
     val createdAt: String,
     val deliveryState: String,
@@ -137,6 +150,7 @@ data class IMSyncCursorEntity(
     val hasLoadedMessages: Boolean,
     val latestSyncedServerSequence: Long?,
     val oldestLoadedServerSequence: Long?,
+    val pendingReadSequence: Long?,
 )
 
 @Entity(tableName = "contact_cache_metadata")

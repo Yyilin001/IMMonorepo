@@ -102,6 +102,7 @@ private fun IMSyncCursorState.toEntity(ownerUserID: String): IMSyncCursorEntity 
         hasLoadedMessages = hasLoadedMessages,
         latestSyncedServerSequence = latestSyncedServerSequence?.toLong(),
         oldestLoadedServerSequence = oldestLoadedServerSequence?.toLong(),
+        pendingReadSequence = pendingReadSequence?.toLong(),
     )
 
 private fun IMSyncCursorEntity.toDomain(): IMSyncCursorState =
@@ -110,6 +111,7 @@ private fun IMSyncCursorEntity.toDomain(): IMSyncCursorState =
         hasLoadedMessages = hasLoadedMessages,
         latestSyncedServerSequence = latestSyncedServerSequence?.toULong(),
         oldestLoadedServerSequence = oldestLoadedServerSequence?.toULong(),
+        pendingReadSequence = pendingReadSequence?.toULong(),
     )
 
 private fun IMConversation.toEntity(ownerUserID: String, json: Json): IMCachedConversationEntity =
@@ -133,6 +135,7 @@ private fun IMConversationMessage.toEntity(ownerUserID: String, json: Json): IMC
         senderUserID = senderUserID,
         serverSequence = serverSequence?.toLong(),
         contentJson = json.encodeToString<IMMessageContent>(content),
+        derivedStateJson = json.encodeToString(derivedState),
         direction = direction.name,
         createdAt = createdAt,
         deliveryState = deliveryState.name,
@@ -147,6 +150,7 @@ private fun IMCachedMessageEntity.toDomain(json: Json): IMConversationMessage =
         senderUserID = senderUserID,
         serverSequence = serverSequence?.toULong(),
         content = json.decodeFromString<IMMessageContent>(contentJson),
+        derivedState = json.decodeFromString(derivedStateJson),
         direction = IMMessageDirection.valueOf(direction),
         createdAt = createdAt,
         deliveryState = IMMessageDeliveryState.valueOf(deliveryState),

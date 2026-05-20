@@ -4,19 +4,64 @@ public struct MessageDerivedState: Codable, Equatable, Sendable {
     public let recallState: MessageRecallState
     public let edits: [MessageEdit]
     public let reactions: [MessageReaction]
+    public let streamState: MessageStreamState?
 
     public init(
         recallState: MessageRecallState = .active,
         edits: [MessageEdit] = [],
-        reactions: [MessageReaction] = []
+        reactions: [MessageReaction] = [],
+        streamState: MessageStreamState? = nil
     ) {
         self.recallState = recallState
         self.edits = edits
         self.reactions = reactions
+        self.streamState = streamState
     }
 
     public var isRecalled: Bool {
         recallState != .active
+    }
+}
+
+public enum MessageStreamLifecycleState: String, Codable, Equatable, Sendable {
+    case streaming
+    case completed
+    case failed
+    case cancelled
+
+    public var isTerminal: Bool {
+        self != .streaming
+    }
+}
+
+public struct MessageStreamState: Codable, Equatable, Sendable {
+    public let streamID: String
+    public let state: MessageStreamLifecycleState
+    public let lastChunkIndex: Int
+    public let partialText: String
+    public let errorCode: String?
+    public let errorMessage: String?
+    public let updatedAt: Date
+    public let isAIGenerated: Bool
+
+    public init(
+        streamID: String,
+        state: MessageStreamLifecycleState,
+        lastChunkIndex: Int = 0,
+        partialText: String = "",
+        errorCode: String? = nil,
+        errorMessage: String? = nil,
+        updatedAt: Date = Date(),
+        isAIGenerated: Bool = true
+    ) {
+        self.streamID = streamID
+        self.state = state
+        self.lastChunkIndex = lastChunkIndex
+        self.partialText = partialText
+        self.errorCode = errorCode
+        self.errorMessage = errorMessage
+        self.updatedAt = updatedAt
+        self.isAIGenerated = isAIGenerated
     }
 }
 
@@ -171,6 +216,11 @@ public struct MessagePresentation: Equatable, Sendable {
     }
 
     private func effectiveText(fallback: String) -> String {
+        if let streamState = derivedState.streamState,
+           streamState.state != .completed,
+           !streamState.partialText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return streamState.partialText
+        }
         let latestEditedText = derivedState.edits.last?.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let latestEditedText, !latestEditedText.isEmpty else {
             return fallback
@@ -232,7 +282,8 @@ public extension IMMessageContent {
         return MessageDerivedState(
             recallState: base.isRecalled ? .recalled : override.recallState,
             edits: override.edits,
-            reactions: override.reactions
+            reactions: override.reactions,
+            streamState: override.streamState
         )
     }
 

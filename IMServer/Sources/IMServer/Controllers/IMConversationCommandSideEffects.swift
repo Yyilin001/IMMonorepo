@@ -18,6 +18,7 @@ struct IMConversationCommandSideEffects {
         conversationID: UUID,
         recipientUserIDs: [UUID],
         message: IMMessageResponse? = nil,
+        stream: IMTCPMessageStreamPayload? = nil,
         actorUserID: UUID? = nil
     ) async {
         await eventService.publish(
@@ -25,6 +26,7 @@ struct IMConversationCommandSideEffects {
             conversationID: conversationID,
             recipientUserIDs: recipientUserIDs,
             message: message,
+            stream: stream,
             actorUserID: actorUserID
         )
     }

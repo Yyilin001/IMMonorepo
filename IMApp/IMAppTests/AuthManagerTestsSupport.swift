@@ -30,6 +30,10 @@ actor RestoreGate {
         }
     }
 
+    func started() -> Bool {
+        hasStarted
+    }
+
     func waitForResume() async {
         guard !isResumed else {
             return
@@ -933,6 +937,7 @@ final class AuthManagerBackgroundTransferMonitor: BackgroundTransferMonitoring, 
 
 actor IMConnectionTestHarness {
     private var continuation: AsyncThrowingStream<IMTCPConnectionEvent, Error>.Continuation?
+    private var pendingEvents: [IMTCPConnectionEvent] = []
     private var disconnectCount = 0
     private var sentLines: [String] = []
     private var sendAttemptCount = 0
@@ -947,6 +952,11 @@ actor IMConnectionTestHarness {
     func makeConnection() -> IMTCPConnection {
         let events = AsyncThrowingStream<IMTCPConnectionEvent, Error> { continuation in
             self.continuation = continuation
+            let events = self.pendingEvents
+            self.pendingEvents.removeAll()
+            for event in events {
+                continuation.yield(event)
+            }
         }
 
         return IMTCPConnection(
@@ -968,7 +978,11 @@ actor IMConnectionTestHarness {
     }
 
     func yield(_ event: IMTCPConnectionEvent) {
-        continuation?.yield(event)
+        if let continuation {
+            continuation.yield(event)
+        } else {
+            pendingEvents.append(event)
+        }
     }
 
     func disconnections() -> Int {
@@ -983,6 +997,7 @@ actor IMConnectionTestHarness {
         disconnectCount += 1
         continuation?.finish()
         continuation = nil
+        pendingEvents.removeAll()
     }
 
     private func record(_ line: String) async throws {

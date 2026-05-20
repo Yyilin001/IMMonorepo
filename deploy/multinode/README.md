@@ -78,9 +78,21 @@ Each process must run exactly one group in production.
 
 1. Deploy the role split above.
 2. Confirm all `/internal/metrics` targets are scraped by Prometheus.
-3. Run `tools/loadtest/im_loadgen.py` from one or more load generator hosts.
-4. Scale gateway until TCP connection target is reached.
-5. Scale command-api and Kafka partitions until write target is reached.
-6. Scale query-api until conversation/history P95 is stable.
-7. Pause one `stream-consumer`, verify lag rises, resume it, verify lag recovers.
+3. Run the multi-device release gate from a trusted host:
 
+   ```bash
+   cd IMServer
+   ./scripts/multidevice_release_gate.sh \
+     --env-file LoadTests/staging-baseline.env \
+     --profile staging-baseline \
+     --staging-baseline \
+     --require-redis
+   ```
+
+4. Run `tools/loadtest/im_loadgen.py` from one or more load generator hosts for HTTP and mixed read/write pressure.
+5. Scale gateway until TCP connection target is reached.
+6. Scale command-api and Kafka partitions until write target is reached.
+7. Scale query-api until conversation/history P95 is stable.
+8. Pause one `stream-consumer`, verify lag rises, resume it, verify lag recovers.
+
+Multi-device release details live in `IMServer/docs/im-multidevice-release-gate.md`.

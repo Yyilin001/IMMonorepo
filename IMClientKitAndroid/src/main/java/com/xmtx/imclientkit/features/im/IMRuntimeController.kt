@@ -9,6 +9,7 @@ import com.xmtx.imclientkit.networking.imtcp.IMTCPConnectionEvent
 import com.xmtx.imclientkit.networking.imtcp.IMTCPTransport
 import com.xmtx.imclientkit.networking.imtcp.SocketIMTCPTransport
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -17,6 +18,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.math.min
 
 class IMRuntimeController(
@@ -35,11 +38,17 @@ class IMRuntimeController(
     private var reconnectJob: Job? = null
     private var gapSyncJob: Job? = null
     private var queuedFlushJob: Job? = null
+    private var streamSnapshotWorkerJob: Job? = null
+    private val streamSnapshotScheduleLock = Any()
+    private val scheduledStreamSnapshotTargets = mutableSetOf<IMActiveMessageStreamTarget>()
+    private val streamSnapshotMutex = Mutex()
+    private val pendingStreamSnapshotTargets = linkedSetOf<IMActiveMessageStreamTarget>()
+    private val inFlightStreamSnapshotTargets = mutableSetOf<IMActiveMessageStreamTarget>()
+    private val streamSnapshotRetryDelays = mutableMapOf<IMActiveMessageStreamTarget, Long>()
     private var cacheObserveJob: Job? = null
     private var cacheSaveJob: Job? = null
     private var reconnectAttempt = 0
     private val readReportJobs = mutableMapOf<String, Job>()
-    private val pendingReadSequences = mutableMapOf<String, ULong>()
 
     private val mutableSessionInvalidations = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val sessionInvalidations: SharedFlow<String> = mutableSessionInvalidations
@@ -53,7 +62,10 @@ class IMRuntimeController(
         startCachePersistence(userID)
         scope.launch {
             restoreCachedSnapshot(userID)
+            syncActiveStreamSnapshots()
             refreshConversationSummaries()
+            syncActiveStreamSnapshots()
+            retryPendingReadReports()
             scheduleConnectionIfNeeded()
         }
     }
@@ -71,11 +83,22 @@ class IMRuntimeController(
         gapSyncJob = null
         queuedFlushJob?.cancel()
         queuedFlushJob = null
+        streamSnapshotWorkerJob?.cancel()
+        streamSnapshotWorkerJob = null
+        scope.launch {
+            streamSnapshotMutex.withLock {
+                pendingStreamSnapshotTargets.clear()
+                inFlightStreamSnapshotTargets.clear()
+                streamSnapshotRetryDelays.clear()
+            }
+        }
+        synchronized(streamSnapshotScheduleLock) {
+            scheduledStreamSnapshotTargets.clear()
+        }
         cacheObserveJob?.cancel()
         cacheObserveJob = null
         readReportJobs.values.forEach { it.cancel() }
         readReportJobs.clear()
-        pendingReadSequences.clear()
         val currentConnection = connection
         connection = null
         conversationStore.setConnectionStatus(IMConnectionStatus.Disconnected)
@@ -212,6 +235,33 @@ class IMRuntimeController(
         }
     }
 
+    fun startAIReply(conversationID: String, prompt: String) {
+        val userID = currentUserID ?: return
+        scope.launch {
+            runCatching {
+                sessionClient.startAIMessageStream(conversationID, prompt)
+            }.onSuccess { response ->
+                conversationStore.applyMessageStreamSnapshot(response, userID)
+                syncActiveStreamSnapshots()
+            }.onFailure { error ->
+                conversationStore.setStatusMessage(error.message ?: "Failed to start AI reply.")
+            }
+        }
+    }
+
+    fun cancelStream(conversationID: String, messageID: String) {
+        val userID = currentUserID ?: return
+        scope.launch {
+            runCatching {
+                sessionClient.cancelMessageStream(conversationID, messageID)
+            }.onSuccess { response ->
+                conversationStore.applyMessageStreamSnapshot(response, userID)
+            }.onFailure { error ->
+                conversationStore.setStatusMessage(error.message ?: "Failed to cancel stream.")
+            }
+        }
+    }
+
     private suspend fun scheduleConnectionIfNeeded() {
         if (currentUserID == null || connection != null || connectJob != null) return
         reconnectJob?.cancel()
@@ -228,6 +278,8 @@ class IMRuntimeController(
                 startEventLoop(nextConnection)
                 flushQueuedTextMessages()
                 syncConversationGapsAfterConnection()
+                retryPendingReadReports()
+                syncActiveStreamSnapshots()
             }.onFailure { error ->
                 connectJob = null
                 handleConnectionFailure(error)
@@ -287,11 +339,16 @@ class IMRuntimeController(
             is IMTCPConnectionEvent.Ack -> conversationStore.applyOutgoingAcknowledgement(event.requestID, event.payload)
             is IMTCPConnectionEvent.Message -> handleIncomingMessage(event)
             is IMTCPConnectionEvent.ConversationEvent -> {
-                conversationStore.applyConversationSummary(event.payload.conversation)
                 val userID = currentUserID
-                val message = event.payload.message
-                if (userID != null && message != null) {
-                    conversationStore.appendMessages(message.conversationID, listOf(message), userID)
+                if (event.payload.eventType.startsWith("message_stream_") && userID != null) {
+                    conversationStore.applyMessageStreamEvent(event.payload, userID)
+                    syncPendingStreamSnapshotsIfNeeded()
+                } else {
+                    conversationStore.applyConversationSummary(event.payload.conversation)
+                    val message = event.payload.message
+                    if (userID != null && message != null) {
+                        conversationStore.appendMessages(message.conversationID, listOf(message), userID)
+                    }
                 }
             }
             is IMTCPConnectionEvent.ContactEvent -> contactEventHandler?.invoke()
@@ -370,6 +427,7 @@ class IMRuntimeController(
             sessionClient.fetchIMConversationSummaries(limit = DEFAULT_PAGE_LIMIT)
         }.onSuccess { page ->
             conversationStore.replaceSummaryWindow(page)
+            retryPendingReadReports()
         }.onFailure { error ->
             conversationStore.setStatusMessage(error.message ?: "Failed to load conversations.")
         }
@@ -384,6 +442,7 @@ class IMRuntimeController(
                 syncConversationGap(conversationID, userID)
                 markConversationReadUpToLatestLoadedSequence(conversationID)
             }
+            syncActiveStreamSnapshots()
         }
     }
 
@@ -426,19 +485,117 @@ class IMRuntimeController(
     }
 
     private fun markConversationRead(conversationID: String, readSequence: ULong) {
-        val current = pendingReadSequences[conversationID]
-        pendingReadSequences[conversationID] = maxOf(current ?: 0UL, readSequence)
+        conversationStore.recordPendingReadSequence(conversationID, readSequence)
         readReportJobs[conversationID]?.cancel()
         readReportJobs[conversationID] = scope.launch {
             delay(READ_REPORT_DEBOUNCE_MILLIS)
-            val sequence = pendingReadSequences.remove(conversationID) ?: return@launch
+            val sequence = conversationStore.pendingReadSequences()[conversationID] ?: return@launch
             runCatching {
                 sessionClient.markIMConversationRead(conversationID, sequence)
             }.onSuccess { response ->
                 conversationStore.applyServerExplicitReadResponse(response)
+                conversationStore.clearPendingReadSequence(conversationID, sequence)
             }
         }
     }
+
+    private fun retryPendingReadReports() {
+        conversationStore.pendingReadSequences().forEach { (conversationID, sequence) ->
+            markConversationRead(conversationID, sequence)
+        }
+    }
+
+    private fun syncPendingStreamSnapshotsIfNeeded() {
+        val targets = conversationStore.consumePendingStreamSnapshotTargets()
+        if (targets.isNotEmpty()) {
+            enqueueStreamSnapshots(targets)
+        }
+    }
+
+    private fun syncActiveStreamSnapshots() {
+        val targets = conversationStore.activeMessageStreamTargets()
+        if (targets.isNotEmpty()) {
+            enqueueStreamSnapshots(targets)
+        }
+    }
+
+    private fun enqueueStreamSnapshots(targets: List<IMActiveMessageStreamTarget>) {
+        val userID = currentUserID ?: return
+        val distinctTargets = synchronized(streamSnapshotScheduleLock) {
+            targets.distinct().filter { target ->
+                scheduledStreamSnapshotTargets.add(target)
+            }
+        }
+        if (distinctTargets.isEmpty()) return
+        scope.launch {
+            streamSnapshotMutex.withLock {
+                distinctTargets.forEach { target ->
+                    if (target !in pendingStreamSnapshotTargets && target !in inFlightStreamSnapshotTargets) {
+                        pendingStreamSnapshotTargets.add(target)
+                    }
+                }
+            }
+            startStreamSnapshotWorkerIfNeeded(userID)
+        }
+    }
+
+    private fun startStreamSnapshotWorkerIfNeeded(userID: String) {
+        if (streamSnapshotWorkerJob?.isActive == true) return
+        streamSnapshotWorkerJob = scope.launch {
+            while (currentUserID == userID) {
+                val target = streamSnapshotMutex.withLock {
+                    val next = pendingStreamSnapshotTargets.firstOrNull()
+                    if (next != null) {
+                        pendingStreamSnapshotTargets.remove(next)
+                        inFlightStreamSnapshotTargets.add(next)
+                    }
+                    next
+                } ?: break
+
+                val retryDelay = streamSnapshotMutex.withLock {
+                    streamSnapshotRetryDelays[target] ?: 0L
+                }
+                if (retryDelay > 0L) {
+                    delay(retryDelay)
+                }
+                if (currentUserID != userID) break
+
+                try {
+                    val response = sessionClient.fetchMessageStreamSnapshot(target.conversationID, target.messageID)
+                    conversationStore.applyMessageStreamSnapshot(response, userID)
+                    streamSnapshotMutex.withLock {
+                        inFlightStreamSnapshotTargets.remove(target)
+                        streamSnapshotRetryDelays.remove(target)
+                    }
+                    synchronized(streamSnapshotScheduleLock) {
+                        scheduledStreamSnapshotTargets.remove(target)
+                    }
+                } catch (error: Throwable) {
+                    if (error is CancellationException) throw error
+                    streamSnapshotMutex.withLock {
+                        inFlightStreamSnapshotTargets.remove(target)
+                        pendingStreamSnapshotTargets.add(target)
+                        streamSnapshotRetryDelays[target] = nextStreamSnapshotRetryDelay(streamSnapshotRetryDelays[target])
+                    }
+                    break
+                }
+            }
+            streamSnapshotWorkerJob = null
+            val shouldRestart = streamSnapshotMutex.withLock { pendingStreamSnapshotTargets.isNotEmpty() }
+            if (currentUserID == userID && shouldRestart) {
+                startStreamSnapshotWorkerIfNeeded(userID)
+            }
+        }
+    }
+
+    private fun nextStreamSnapshotRetryDelay(current: Long?): Long =
+        when (current) {
+            null, 0L -> 1_000L
+            1_000L -> 2_000L
+            2_000L -> 5_000L
+            5_000L -> 10_000L
+            else -> 30_000L
+        }
 
     private companion object {
         const val DEFAULT_PAGE_LIMIT = 50

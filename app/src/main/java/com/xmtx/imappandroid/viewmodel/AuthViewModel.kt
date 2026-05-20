@@ -62,6 +62,7 @@ class AuthViewModel(
     private fun observeSessionInvalidations() {
         viewModelScope.launch {
             gateway.sessionInvalidations.collect { message ->
+                gateway.stopIMRuntime()
                 gateway.clearSession()
                 mutableState.value = AuthUiState(phase = AuthPhase.SignedOut(message), actionMessage = message)
             }

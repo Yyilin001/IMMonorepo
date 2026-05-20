@@ -19,6 +19,7 @@ data class IMSyncCursorState(
     val hasLoadedMessages: Boolean,
     val latestSyncedServerSequence: ULong?,
     val oldestLoadedServerSequence: ULong?,
+    val pendingReadSequence: ULong?,
 )
 
 data class IMConversationCacheSnapshot(
@@ -70,6 +71,7 @@ object IMConversationCacheSnapshotMapper {
                 latestSyncedServerSequence = state.latestSyncedServerSequences[conversationID] ?: sequences.maxOrNull(),
                 oldestLoadedServerSequence = state.oldestLoadedServerSequences[conversationID]
                     ?: sequences.minOrNull()?.takeIf { state.loadedConversationIDs.contains(conversationID) },
+                pendingReadSequence = state.pendingReadSequences[conversationID],
             )
         }
         return IMConversationCacheSnapshot(
@@ -120,6 +122,9 @@ object IMConversationCacheSnapshotMapper {
             }.toMap(),
             oldestLoadedServerSequences = cursorsByConversationID.mapNotNull { (conversationID, cursor) ->
                 cursor.oldestLoadedServerSequence?.let { conversationID to it }
+            }.toMap(),
+            pendingReadSequences = cursorsByConversationID.mapNotNull { (conversationID, cursor) ->
+                cursor.pendingReadSequence?.let { conversationID to it }
             }.toMap(),
             statusMessage = null,
         )

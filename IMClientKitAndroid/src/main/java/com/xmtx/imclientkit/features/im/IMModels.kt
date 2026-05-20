@@ -14,6 +14,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.time.Instant
@@ -220,6 +221,72 @@ enum class IMMessageDeliveryState {
     Failed,
 }
 
+enum class IMMessageStreamLifecycleState(val rawValue: String) {
+    Streaming("streaming"),
+    Completed("completed"),
+    Failed("failed"),
+    Cancelled("cancelled");
+
+    val isTerminal: Boolean
+        get() = this != Streaming
+
+    companion object {
+        fun from(rawValue: String?): IMMessageStreamLifecycleState? =
+            entries.firstOrNull { it.rawValue == rawValue }
+    }
+}
+
+data class IMMessageStreamState(
+    val streamID: String,
+    val state: IMMessageStreamLifecycleState,
+    val lastChunkIndex: Int = 0,
+    val partialText: String = "",
+    val errorCode: String? = null,
+    val errorMessage: String? = null,
+    val updatedAt: String? = null,
+    val isAIGenerated: Boolean = true,
+)
+
+data class IMActiveMessageStreamTarget(
+    val conversationID: String,
+    val messageID: String,
+    val streamID: String,
+)
+
+fun JsonObject.messageStreamState(): IMMessageStreamState? {
+    val raw = this["streamState"]?.jsonObject ?: return null
+    val streamID = raw["streamID"]?.jsonPrimitive?.contentOrNull ?: return null
+    val state = IMMessageStreamLifecycleState.from(raw["state"]?.jsonPrimitive?.contentOrNull) ?: return null
+    return IMMessageStreamState(
+        streamID = streamID,
+        state = state,
+        lastChunkIndex = raw["lastChunkIndex"]?.jsonPrimitive?.intOrNull ?: 0,
+        partialText = raw["partialText"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        errorCode = raw["errorCode"]?.jsonPrimitive?.contentOrNull,
+        errorMessage = raw["errorMessage"]?.jsonPrimitive?.contentOrNull,
+        updatedAt = raw["updatedAt"]?.jsonPrimitive?.contentOrNull,
+        isAIGenerated = raw["isAIGenerated"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: true,
+    )
+}
+
+fun JsonObject.withMessageStreamState(state: IMMessageStreamState): JsonObject =
+    buildJsonObject {
+        this@withMessageStreamState.forEach { (key, value) -> put(key, value) }
+        put(
+            "streamState",
+            buildJsonObject {
+                put("streamID", JsonPrimitive(state.streamID))
+                put("state", JsonPrimitive(state.state.rawValue))
+                put("lastChunkIndex", JsonPrimitive(state.lastChunkIndex))
+                put("partialText", JsonPrimitive(state.partialText))
+                state.errorCode?.let { put("errorCode", JsonPrimitive(it)) }
+                state.errorMessage?.let { put("errorMessage", JsonPrimitive(it)) }
+                state.updatedAt?.let { put("updatedAt", JsonPrimitive(it)) }
+                put("isAIGenerated", JsonPrimitive(state.isAIGenerated))
+            },
+        )
+    }
+
 data class IMConversationMessage(
     val id: String,
     val conversationID: String,
@@ -228,12 +295,16 @@ data class IMConversationMessage(
     val senderUserID: String?,
     val serverSequence: ULong?,
     val content: IMMessageContent,
+    val derivedState: JsonObject = buildJsonObject { },
     val direction: IMMessageDirection,
     val createdAt: String,
     val deliveryState: IMMessageDeliveryState,
 ) {
     val previewText: String
         get() = content.previewText
+
+    val streamState: IMMessageStreamState?
+        get() = derivedState.messageStreamState()
 }
 
 data class IMConversation(
@@ -273,6 +344,7 @@ data class IMTCPMessagePayload(
     val serverSequence: ULong? = null,
     val serverTimestamp: String? = null,
     val content: IMMessageContent,
+    val derivedState: JsonObject = buildJsonObject { },
 )
 
 @Serializable
@@ -295,6 +367,7 @@ data class IMTCPMessagePayloadWire(
             serverSequence = serverSequence,
             serverTimestamp = serverTimestamp,
             content = content,
+            derivedState = derivedState,
         )
 
     companion object {
@@ -307,6 +380,7 @@ data class IMTCPMessagePayloadWire(
                 serverSequence = payload.serverSequence,
                 serverTimestamp = payload.serverTimestamp,
                 content = payload.content,
+                derivedState = payload.derivedState,
             )
     }
 }
@@ -323,10 +397,34 @@ data class IMTCPConversationEventPayload(
     val eventType: String,
     val conversation: IMConversationSummaryResponseBody,
     val message: IMConversationMessageResponseBody? = null,
+    val stream: IMTCPMessageStreamPayload? = null,
     val actorUserID: String? = null,
     val serverTimestamp: String,
     val messageIDs: List<String> = emptyList(),
     val visibilityAction: String? = null,
+)
+
+@Serializable
+data class IMTCPMessageStreamPayload(
+    val streamID: String,
+    val messageID: String,
+    val conversationID: String,
+    val chunkIndex: Int,
+    val deltaText: String? = null,
+    val partialTextLength: Int,
+    val state: String,
+    val serverTimestamp: String,
+)
+
+@Serializable
+data class IMAIMessageStreamStartRequestBody(
+    val prompt: String,
+)
+
+@Serializable
+data class IMMessageStreamResponseBody(
+    val message: IMConversationMessageResponseBody,
+    val stream: IMTCPMessageStreamPayload,
 )
 
 @Serializable
@@ -354,6 +452,7 @@ fun IMConversationMessageResponseBody.toConversationMessage(currentUserID: Strin
         senderUserID = senderUserID,
         serverSequence = serverSequence.toULong(),
         content = content,
+        derivedState = derivedState,
         direction = if (senderUserID == currentUserID) IMMessageDirection.Outgoing else IMMessageDirection.Incoming,
         createdAt = createdAt ?: Instant.now().toString(),
         deliveryState = if (senderUserID == currentUserID) IMMessageDeliveryState.Sent else IMMessageDeliveryState.Received,
@@ -369,6 +468,7 @@ fun IMTCPMessagePayload.toConversationMessage(currentUserID: String): IMConversa
         senderUserID = senderUserID,
         serverSequence = serverSequence,
         content = content,
+        derivedState = derivedState,
         direction = if (senderUserID == currentUserID) IMMessageDirection.Outgoing else IMMessageDirection.Incoming,
         createdAt = serverTimestamp ?: Instant.now().toString(),
         deliveryState = if (senderUserID == currentUserID) IMMessageDeliveryState.Sent else IMMessageDeliveryState.Received,

@@ -283,6 +283,37 @@ extension IMConversationStoreTests {
         #expect(store.selectedConversation?.messages.first?.deliveryState == .sent)
     }
 
+    @Test func canonicalEchoBeforeAckMergesWithSendingMessageWithoutDuplication() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let request = try #require(store.prepareOutgoingText(
+            "echo before ack",
+            conversationID: conversationIDString,
+            senderUserID: Self.currentUserID
+        ))
+        let clientMessageID = try #require(request.payload.clientMessageID)
+
+        store.receiveIncomingMessage(
+            IMTCPMessagePayload(
+                clientMessageID: clientMessageID,
+                messageID: "11111111-2222-3333-4444-555555555555",
+                conversationID: conversationIDString,
+                senderUserID: Self.currentUserID,
+                serverSequence: 8,
+                serverTimestamp: Date(timeIntervalSince1970: 1_700_400_008),
+                kind: "text",
+                body: ["text": "echo before ack"]
+            ),
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(store.selectedConversation?.messages.count == 1)
+        #expect(store.selectedConversation?.messages.first?.clientMessageID == clientMessageID)
+        #expect(store.selectedConversation?.messages.first?.serverSequence == 8)
+        #expect(store.selectedConversation?.messages.first?.deliveryState == .sent)
+    }
+
 
     @Test func cancelQueuedOutgoingMessageRemovesMessageAndUpdatesSummaryAndPreview() throws {
         let store = IMConversationStore()

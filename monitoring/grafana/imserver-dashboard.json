@@ -45,6 +45,82 @@
         {"expr": "sum(rate(im_stream_consumed_events_total[1m]))", "legendFormat": "consumed/s"},
         {"expr": "sum(rate(im_stream_failed_events_total[1m]))", "legendFormat": "failed/s"}
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Realtime Routing",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "targets": [
+        {"expr": "sum(rate(im_user_fanout_total[1m]))", "legendFormat": "user fanout/s"},
+        {"expr": "sum(rate(im_session_kick_total[1m]))", "legendFormat": "session kick/s"},
+        {"expr": "sum(rate(im_cross_node_dispatch_total[1m]))", "legendFormat": "cross-node dispatch/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Realtime Routing Failures",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "targets": [
+        {"expr": "sum(rate(im_cross_node_dispatch_failures_total[1m]))", "legendFormat": "cross-node failures/s"},
+        {"expr": "sum(rate(im_session_count_query_failures_total[1m]))", "legendFormat": "session-count failures/s"},
+        {"expr": "sum(rate(im_redis_presence_stale_cleanup_total[1m]))", "legendFormat": "stale cleanup/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AI Stream Lifecycle",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "targets": [
+        {"expr": "sum(im_ai_stream_active)", "legendFormat": "active"},
+        {"expr": "sum(rate(im_ai_stream_started_total[1m]))", "legendFormat": "started/s"},
+        {"expr": "sum(rate(im_ai_stream_completed_total[1m]))", "legendFormat": "completed/s"},
+        {"expr": "sum(rate(im_ai_stream_failed_total[1m]))", "legendFormat": "failed/s"},
+        {"expr": "sum(rate(im_ai_stream_cancelled_total[1m]))", "legendFormat": "cancelled/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AI Stream Chunks and Snapshots",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "targets": [
+        {"expr": "sum(rate(im_ai_stream_chunks_published_total[1m]))", "legendFormat": "chunks/s"},
+        {"expr": "sum(rate(im_ai_stream_snapshot_writes_total[1m]))", "legendFormat": "snapshot writes/s"},
+        {"expr": "sum(rate(im_ai_stream_chunk_db_bypasses_total[1m]))", "legendFormat": "chunk db bypass/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AI Stream Lease",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+      "targets": [
+        {"expr": "sum(rate(im_ai_stream_lease_reservations_total[1m]))", "legendFormat": "reservations/s"},
+        {"expr": "sum(rate(im_ai_stream_lease_rejections_total[1m]))", "legendFormat": "rejections/s"},
+        {"expr": "sum(rate(im_ai_stream_lease_heartbeats_total[1m]))", "legendFormat": "heartbeats/s"},
+        {"expr": "sum(rate(im_ai_stream_lease_cancellations_total[1m]))", "legendFormat": "cancellations/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AI Stream Reliability",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "targets": [
+        {"expr": "sum(rate(im_ai_stream_finalize_retries_total[1m]))", "legendFormat": "finalize retries/s"},
+        {"expr": "sum(rate(im_ai_stream_finalize_failures_total[1m]))", "legendFormat": "finalize failures/s"},
+        {"expr": "sum(rate(im_ai_stream_runtime_stale_repairs_total[1m]))", "legendFormat": "runtime stale repairs/s"},
+        {"expr": "sum(rate(im_ai_stream_startup_stale_repairs_total[1m]))", "legendFormat": "startup stale repairs/s"},
+        {"expr": "sum(rate(im_ai_stream_terminal_cas_conflicts_total[1m]))", "legendFormat": "terminal CAS conflicts/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Release Gate Routing",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 48},
+      "targets": [
+        {"expr": "sum(rate(im_redis_presence_route_cache_hits_total[1m]))", "legendFormat": "redis route cache hits/s"},
+        {"expr": "sum(rate(im_redis_presence_route_cache_misses_total[1m]))", "legendFormat": "redis route cache misses/s"},
+        {"expr": "sum(rate(im_redis_presence_stale_cleanup_total[1m]))", "legendFormat": "stale cleanup/s"},
+        {"expr": "sum(rate(im_session_count_query_failures_total[1m]))", "legendFormat": "session count failures/s"}
+      ]
     }
   ]
 }
