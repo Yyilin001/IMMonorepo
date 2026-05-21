@@ -9,6 +9,8 @@
 - [ ] App/UI layers do not directly handle TCP, HTTP sync, cache persistence, Room/GRDB, or stream chunk compensation.
 - [ ] IMServer remains the protocol and persistence authority for message timeline, read state, sessions, and AI stream terminal state.
 - [ ] AI stream message/index writes go through the stream state store; no direct dual-write bypass was added.
+- [ ] AI stream provider, content safety, billing, or model routing code does not write message/index state directly.
+- [ ] New AI stream terminal states, audit rules, or repair behavior include state store / repair regression tests.
 - [ ] Public HTTP API, TCP packet shape, and DB primary semantics are unchanged, or compatibility/migration is documented.
 
 ## Risk checklist
