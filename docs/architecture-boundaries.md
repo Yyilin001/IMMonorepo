@@ -22,11 +22,16 @@ wire protocols or runtime behavior; it defines where new code is allowed to live
   observe state.
 - Client core libraries must keep DTOs, persistence models, and wire models behind
   domain/read models before they reach UI.
-- AI stream state writes must go through the stream state store. Do not update
-  message `derivedState` and `im_ai_message_streams` independently.
+- AI stream state writes must go through `AIMessageStreamStateStore`, with
+  message `derivedState`/content and `im_ai_message_streams` double-writes
+  centralized in `AIMessageStreamWriteStore`.
 - AI stream provider, content safety, billing, and model routing code must not
-  write message/index state. New providers call the streaming service, and new
-  audit or repair rules belong in the AI stream repair store.
+  write message/index state or hold database write dependencies. New providers
+  call the streaming service/facade only, and new audit or repair rules belong
+  in `AIMessageStreamRepairStore`.
+- Large IM runtime services should stay as facades over small components. New
+  summary projection, outbox, event stream, or message write behavior belongs in
+  a focused helper/coordinator rather than expanding the facade file.
 - TCP is the realtime accelerator. HTTP `changes`, `messages/since`, and stream
   snapshots remain the convergence source after reconnect.
 - Cross-subsystem work must be split into reviewable commits: protocol/server,

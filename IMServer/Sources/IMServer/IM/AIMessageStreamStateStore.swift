@@ -52,6 +52,56 @@ struct AIMessageStreamConsistencyIssue: Sendable, Equatable {
     let conversationID: UUID?
 }
 
+protocol AIMessageStreamStateReading {
+    func snapshot(
+        conversationID: UUID,
+        messageID: UUID,
+        userID: UUID
+    ) async throws -> IMMessageStreamResponse
+}
+
+protocol AIMessageStreamStateWriting {
+    func createInitialStreamingMessage(
+        streamID: String,
+        conversationID: UUID,
+        userID: UUID
+    ) async throws -> AIMessageStreamStartEnvelope
+
+    @discardableResult
+    func updateSnapshot(
+        streamID: String,
+        conversationID: UUID,
+        messageID: UUID,
+        partialText: String,
+        chunkIndex: Int,
+        state: MessageStreamLifecycleState,
+        errorCode: String?,
+        errorMessage: String?
+    ) async throws -> IMMessageResponse
+
+    @discardableResult
+    func finalize(
+        streamID: String,
+        conversationID: UUID,
+        messageID: UUID,
+        userID: UUID,
+        finalText: String,
+        state: MessageStreamLifecycleState,
+        errorCode: String?,
+        errorMessage: String?
+    ) async throws -> AIMessageStreamPublishEnvelope
+}
+
+protocol AIMessageStreamRepairing {
+    @discardableResult
+    func backfillMissingStreamIndexes(now: Date) async throws -> Int
+
+    func auditConsistency() async throws -> [AIMessageStreamConsistencyIssue]
+
+    @discardableResult
+    func repair(index: AIMessageStreamIndex, reason: AIStreamRepairReason, now: Date) async throws -> Bool
+}
+
 struct AIMessageStreamStateStore {
     let app: Application
 
@@ -139,3 +189,5 @@ struct AIMessageStreamStateStore {
         try await AIMessageStreamRepairStore(app: app).repair(index: index, reason: reason, now: now)
     }
 }
+
+extension AIMessageStreamStateStore: AIMessageStreamStateReading, AIMessageStreamStateWriting, AIMessageStreamRepairing {}

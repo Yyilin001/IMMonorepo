@@ -31,4 +31,25 @@ require_match "AI stream message/index writes go through the stream state store"
 require_match "App/UI layers must not directly parse TCP packets" "docs/architecture-boundaries.md"
 require_match "real Redis staging and capacity data" "docs/architecture-boundaries.md"
 
+check_ai_stream_state_write_boundaries() {
+  local allowed='AIMessageStream(WriteStore|RepairStore|StateStore|MutationBuilder)\.swift$'
+  local matches
+  matches="$(
+    rg -n \
+      'AIMessageStreamIndex\(|withStreamState\(|lifecycleState\s*=' \
+      "${ROOT_DIR}/IMServer/Sources/IMServer/IM" || true
+  )"
+
+  while IFS= read -r match; do
+    [[ -z "${match}" ]] && continue
+    local file="${match%%:*}"
+    if [[ ! "${file}" =~ ${allowed} ]]; then
+      echo "AI stream state mutation must stay behind the state/write/repair stores: ${match}" >&2
+      exit 1
+    fi
+  done <<< "${matches}"
+}
+
+check_ai_stream_state_write_boundaries
+
 echo "Governance boundary checks passed."
