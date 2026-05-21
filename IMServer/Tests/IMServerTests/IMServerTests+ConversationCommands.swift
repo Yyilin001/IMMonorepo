@@ -134,6 +134,49 @@ extension IMServerTests {
         }
     }
 
+    @Test("AI stream guardrails reject unsafe or over-budget prompts before provider execution")
+    func aiMessageStreamGuardrailsRejectUnsafeOrOverBudgetPrompts() async throws {
+        try await withApp(configure: configure) { app in
+            app.aiStreamGuardrailConfiguration = AIStreamGuardrailConfiguration(
+                maxPromptCharacters: 32,
+                maxEstimatedCostUnits: 16_420,
+                blockedPromptTerms: ["blocked-term"]
+            )
+            let guardrails = AIStreamRequestGuardrails(app: app)
+            let conversationID = UUID()
+            let userID = UUID()
+
+            #expect(throws: Abort.self) {
+                try guardrails.validateStart(
+                    prompt: "please include blocked-term",
+                    conversationID: conversationID,
+                    userID: userID
+                )
+            }
+
+            #expect(throws: Abort.self) {
+                try guardrails.validateStart(
+                    prompt: String(repeating: "x", count: 33),
+                    conversationID: conversationID,
+                    userID: userID
+                )
+            }
+
+            app.aiStreamGuardrailConfiguration = AIStreamGuardrailConfiguration(
+                maxPromptCharacters: 4_000,
+                maxEstimatedCostUnits: 16_384,
+                blockedPromptTerms: []
+            )
+            #expect(throws: Abort.self) {
+                try guardrails.validateStart(
+                    prompt: "cost",
+                    conversationID: conversationID,
+                    userID: userID
+                )
+            }
+        }
+    }
+
     @Test("AI stream startup repair marks stale streaming messages failed")
     func aiMessageStreamStartupRepairMarksStaleStreamsFailed() async throws {
         try await withApp(configure: configure) { app in

@@ -3,7 +3,7 @@ import Vapor
 struct AIStreamProviderRunner {
     private static let snapshotCharacterThreshold = 512
     private static let snapshotIntervalSeconds: TimeInterval = 1
-    private static let maxFinalTextLength = 16_384
+    static let maxFinalTextLength = 16_384
     private static let timeoutSeconds: UInt64 = 120
     private static let leaseHeartbeatIntervalSeconds: TimeInterval = 5
 

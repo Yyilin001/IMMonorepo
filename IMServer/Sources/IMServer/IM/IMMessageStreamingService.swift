@@ -12,6 +12,11 @@ struct IMMessageStreamingService {
         guard !prompt.isEmpty else {
             throw Abort(.badRequest, reason: "Prompt cannot be empty.")
         }
+        try AIStreamRequestGuardrails(app: app).validateStart(
+            prompt: prompt,
+            conversationID: conversationID,
+            userID: userID
+        )
 
         let streamID = UUID().uuidString
         do {
