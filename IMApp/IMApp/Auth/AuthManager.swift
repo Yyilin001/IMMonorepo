@@ -29,21 +29,10 @@ struct IMConversationIdentityPresentation: Equatable {
 
 @MainActor
 final class AuthManager: ObservableObject {
-    enum IMHistoryPage {
-        static let refreshDebounceNanoseconds: UInt64 = 400_000_000
-        static let cachePersistDebounceNanoseconds: UInt64 = 300_000_000
-        static let resolvedContactRequestHistoryLimit = 50
-    }
-
     enum Phase: Equatable {
         case launching
         case signedOut(message: String?)
         case signedIn(AuthUser)
-    }
-
-    enum AuthAction {
-        case login
-        case register
     }
 
     enum ServerStatus: Equatable {
@@ -182,7 +171,7 @@ final class AuthManager: ObservableObject {
         set { sessionStore.serverStatus = newValue }
     }
 
-    @Published var imConnectionStatus: IMConnectionStatus = .disconnected
+    @Published private(set) var imConnectionStatus: IMConnectionStatus = .disconnected
     @Published private(set) var isFlushingQueuedIMTextMessages = false
 
     var incomingContactRequests: [ContactRequestResponseBody] {
@@ -434,12 +423,16 @@ final class AuthManager: ObservableObject {
                 self?.applyContactEvent(payload)
             },
             setConnectionStatus: { [weak self] status in
-                self?.imConnectionStatus = status
+                self?.setIMConnectionStatus(status)
             },
             setQueuedFlushActive: { [weak self] isActive in
                 self?.isFlushingQueuedIMTextMessages = isActive
             },
             backgroundTransferMonitor: backgroundTransferMonitor
         ))
+    }
+
+    func setIMConnectionStatus(_ status: IMConnectionStatus) {
+        imConnectionStatus = status
     }
 }

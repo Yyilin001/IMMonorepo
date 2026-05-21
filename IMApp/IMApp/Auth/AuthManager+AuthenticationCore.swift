@@ -6,7 +6,7 @@ import UIKit
 
 @MainActor
 extension AuthManager {
-    func authenticate(action: AuthAction, email: String, password: String) async {
+    func authenticate(action: SessionFacade.Action, email: String, password: String) async {
         guard !isBusy else {
             return
         }
@@ -16,15 +16,8 @@ extension AuthManager {
 
         do {
             let device = Self.deviceMetadata()
-            let sessionAction: SessionFacade.Action
-            switch action {
-            case .login:
-                sessionAction = .login
-            case .register:
-                sessionAction = .register
-            }
             let user = try await sessionFacade.authenticate(
-                action: sessionAction,
+                action: action,
                 email: email,
                 password: password,
                 device: device
@@ -88,7 +81,7 @@ extension AuthManager {
         blockedUsers = []
         isLoadingBlockedUsers = false
         serverStatus = .unknown
-        imConnectionStatus = .disconnected
+        setIMConnectionStatus(.disconnected)
         phase = .signedOut(message: message)
     }
 

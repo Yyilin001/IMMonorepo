@@ -4,6 +4,11 @@ import IMClientKit
 import SwiftUI
 import UIKit
 
+private enum ContactStateRuntimeTiming {
+    static let correctionDebounceNanoseconds: UInt64 = 400_000_000
+    static let cachePersistDebounceNanoseconds: UInt64 = 300_000_000
+}
+
 @MainActor
 extension AuthManager {
     func syncContactStateAfterConnection() async {
@@ -24,7 +29,7 @@ extension AuthManager {
             }
 
             if !force {
-                try? await Task.sleep(nanoseconds: IMHistoryPage.refreshDebounceNanoseconds)
+                try? await Task.sleep(nanoseconds: ContactStateRuntimeTiming.correctionDebounceNanoseconds)
             }
 
             guard !Task.isCancelled else {
@@ -210,7 +215,7 @@ extension AuthManager {
 
         contactStateCachePersistTask?.cancel()
         contactStateCachePersistTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: IMHistoryPage.cachePersistDebounceNanoseconds)
+            try? await Task.sleep(nanoseconds: ContactStateRuntimeTiming.cachePersistDebounceNanoseconds)
             guard !Task.isCancelled else {
                 return
             }

@@ -4,6 +4,10 @@ import IMClientKit
 import SwiftUI
 import UIKit
 
+private enum AuthManagerCachePersistTiming {
+    static let debounceNanoseconds: UInt64 = 300_000_000
+}
+
 @MainActor
 extension AuthManager {
     func restoreContactStateCacheIfAvailable(for user: AuthUser) async {
@@ -63,7 +67,7 @@ extension AuthManager {
                 return
             }
 
-            try? await Task.sleep(nanoseconds: IMHistoryPage.cachePersistDebounceNanoseconds)
+            try? await Task.sleep(nanoseconds: AuthManagerCachePersistTiming.debounceNanoseconds)
 
             guard !Task.isCancelled else {
                 return
