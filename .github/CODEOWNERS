@@ -1,0 +1,30 @@
+# Repository ownership guardrails.
+# Keep owner groups broad enough for routing, and use the PR checklist for
+# feature-specific reviewers when a change crosses multiple boundaries.
+
+* @Yyilin001
+
+# Backend runtime and protocol authority
+/IMServer/Sources/IMServer/IM/ @Yyilin001
+/IMServer/Sources/IMServer/IMTCP/ @Yyilin001
+/IMServer/Sources/IMServer/Controllers/IMConversation* @Yyilin001
+/IMServer/Sources/IMServer/Migrations/ @Yyilin001
+/IMServer/Sources/IMServer/Models/ @Yyilin001
+
+# Release, capacity, and production operations
+/IMServer/scripts/ @Yyilin001
+/IMServer/LoadTests/ @Yyilin001
+/IMServer/docs/ @Yyilin001
+/monitoring/ @Yyilin001
+/deploy/ @Yyilin001
+
+# Apple clients
+/IMApp/ @Yyilin001
+/IMClientKit/ @Yyilin001
+
+# Android clients
+/IMClientKitAndroid/ @Yyilin001
+/app/ @Yyilin001
+/gradle/ @Yyilin001
+/build.gradle.kts @Yyilin001
+/settings.gradle.kts @Yyilin001
