@@ -27,14 +27,10 @@ final class ConversationRuntimeController {
     let backgroundTransferMonitor: any BackgroundTransferMonitoring
     let transferProjectionState = TransferProjectionState()
 
-    var imConnection: IMTCPConnection?
-    var imConnectionConnectTask: Task<Void, Never>?
-    var imConnectionEventTask: Task<Void, Never>?
-    var imConnectionReconnectTask: Task<Void, Never>?
-    var imConnectionGeneration: UInt64 = 0
-    var imConnectionReconnectAttempt = 0
-    var imConversationGapSyncBackfillTask: Task<Void, Never>?
-    var queuedIMTextMessageFlushTask: Task<Void, Never>?
+    lazy var connectionCoordinator = IMConnectionCoordinator(runtime: self)
+    lazy var gapSyncCoordinator = IMGapSyncCoordinator(runtime: self)
+    lazy var readReportCoordinator = IMReadReportCoordinator(runtime: self)
+    lazy var queuedMessageFlushCoordinator = QueuedMessageFlushCoordinator(runtime: self)
     lazy var messageStreamSnapshotRecoveryQueue = MessageStreamSnapshotRecoveryQueue(
         sessionClient: sessionClient,
         imConversationStore: imConversationStore,
@@ -42,10 +38,6 @@ final class ConversationRuntimeController {
         markServerOnline: markServerOnline,
         scheduleConversationCachePersist: scheduleConversationCachePersist
     )
-    var imConversationReadReportTasks: [String: Task<Void, Never>] = [:]
-    var pendingIMConversationReadSequences: [String: UInt64] = [:]
-    var imConversationGapSyncQueue: [String] = []
-    var imConversationGapSyncActiveConversationID: String?
     var imConversationMembersTask: Task<Void, Never>?
     var imConversationMessagesTask: Task<Void, Never>?
     var imConversationRefreshTask: Task<Void, Never>?
@@ -100,6 +92,14 @@ final class ConversationRuntimeController {
         self.setQueuedFlushActive = setQueuedFlushActive
         self.backgroundTransferMonitor = backgroundTransferMonitor
         startObservingBackgroundMediaDownloads()
+    }
+
+    var imConnection: IMTCPConnection? {
+        connectionCoordinator.connection
+    }
+
+    var imConnectionGeneration: UInt64 {
+        connectionCoordinator.generation
     }
 
     func syncConversationAfterOpen(_ conversationID: String) async {
@@ -523,30 +523,6 @@ final class ConversationRuntimeController {
 
                 return lhs.id.uuidString > rhs.id.uuidString
             }
-        )
-    }
-
-    func markConversationReadUpToLatestLoadedSequence(for conversationID: String) async {
-        guard let readSequence = imConversationStore.latestLoadedServerSequence(for: conversationID) else {
-            return
-        }
-
-        await markConversationReadInternal(
-            conversationID: conversationID,
-            readSequence: readSequence,
-            debounceNanoseconds: 0
-        )
-    }
-
-    func markConversationRead(
-        conversationID: String,
-        readSequence: UInt64,
-        debounceNanoseconds: UInt64 = HistoryConfig.readReportDebounceNanoseconds
-    ) async {
-        await markConversationReadInternal(
-            conversationID: conversationID,
-            readSequence: readSequence,
-            debounceNanoseconds: debounceNanoseconds
         )
     }
 

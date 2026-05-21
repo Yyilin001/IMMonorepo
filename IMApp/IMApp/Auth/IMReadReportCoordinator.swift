@@ -2,25 +2,51 @@ import Foundation
 import IMClientKit
 
 @MainActor
-extension ConversationRuntimeController {
-    func markConversationReadIfSelectedUpToLatestLoadedSequence(for conversationID: String) async {
+final class IMReadReportCoordinator {
+    private weak var runtime: ConversationRuntimeController?
+    private var reportTasks: [String: Task<Void, Never>] = [:]
+    private var pendingReadSequences: [String: UInt64] = [:]
+
+    init(runtime: ConversationRuntimeController) {
+        self.runtime = runtime
+    }
+
+    func markIfSelectedUpToLatestLoadedSequence(for conversationID: String) async {
+        guard let runtime else {
+            return
+        }
+
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty,
-              imConversationStore.selectedConversationID == trimmedConversationID
+              runtime.imConversationStore.selectedConversationID == trimmedConversationID
         else {
             return
         }
 
-        await markConversationReadUpToLatestLoadedSequence(for: trimmedConversationID)
+        await markUpToLatestLoadedSequence(for: trimmedConversationID)
     }
 
-    func markConversationReadInternal(
+    func markUpToLatestLoadedSequence(for conversationID: String) async {
+        guard let runtime,
+              let readSequence = runtime.imConversationStore.latestLoadedServerSequence(for: conversationID)
+        else {
+            return
+        }
+
+        await mark(
+            conversationID: conversationID,
+            readSequence: readSequence,
+            debounceNanoseconds: 0
+        )
+    }
+
+    func mark(
         conversationID: String,
         readSequence: UInt64,
-        debounceNanoseconds: UInt64 = HistoryConfig.readReportDebounceNanoseconds
+        debounceNanoseconds: UInt64 = ConversationRuntimeController.HistoryConfig.readReportDebounceNanoseconds
     ) async {
-        guard let trimmedConversationID = enqueueConversationReadReport(
-            for: conversationID,
+        guard let trimmedConversationID = enqueue(
+            conversationID: conversationID,
             readSequence: readSequence,
             debounceNanoseconds: debounceNanoseconds
         ) else {
@@ -31,75 +57,126 @@ extension ConversationRuntimeController {
             return
         }
 
-        await flushConversationReadReport(for: trimmedConversationID)
+        await flush(for: trimmedConversationID)
     }
 
-    func enqueueConversationReadReport(
-        for conversationID: String,
+    func cancelAll() {
+        for task in reportTasks.values {
+            task.cancel()
+        }
+        reportTasks = [:]
+        pendingReadSequences = [:]
+    }
+
+    private func enqueue(
+        conversationID: String,
         readSequence: UInt64,
         debounceNanoseconds: UInt64
     ) -> String? {
+        guard let runtime else {
+            return nil
+        }
+
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty else {
             return nil
         }
 
-        let currentServerReadSequence = imConversationStore.serverLastReadSequence(for: trimmedConversationID) ?? 0
+        let currentServerReadSequence = runtime.imConversationStore.serverLastReadSequence(for: trimmedConversationID) ?? 0
         let nextReadSequence = max(
             readSequence,
-            pendingIMConversationReadSequences[trimmedConversationID] ?? 0
+            pendingReadSequences[trimmedConversationID] ?? 0
         )
         guard nextReadSequence > currentServerReadSequence else {
             return nil
         }
 
-        pendingIMConversationReadSequences[trimmedConversationID] = nextReadSequence
-        imConversationReadReportTasks[trimmedConversationID]?.cancel()
+        pendingReadSequences[trimmedConversationID] = nextReadSequence
+        reportTasks[trimmedConversationID]?.cancel()
 
         guard debounceNanoseconds > 0 else {
-            imConversationReadReportTasks[trimmedConversationID] = nil
+            reportTasks[trimmedConversationID] = nil
             return trimmedConversationID
         }
 
-        imConversationReadReportTasks[trimmedConversationID] = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
+        reportTasks[trimmedConversationID] = Task { [weak self] in
             try? await Task.sleep(nanoseconds: debounceNanoseconds)
 
             guard !Task.isCancelled else {
                 return
             }
 
-            await self.flushConversationReadReport(for: trimmedConversationID)
+            await self?.flush(for: trimmedConversationID)
         }
 
         return trimmedConversationID
     }
 
-    func flushConversationReadReport(for conversationID: String) async {
+    private func flush(for conversationID: String) async {
+        guard let runtime else {
+            return
+        }
+
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty else {
             return
         }
 
-        imConversationReadReportTasks[trimmedConversationID] = nil
+        reportTasks[trimmedConversationID] = nil
 
-        guard let readSequence = pendingIMConversationReadSequences.removeValue(forKey: trimmedConversationID) else {
+        guard let readSequence = pendingReadSequences.removeValue(forKey: trimmedConversationID) else {
             return
         }
 
         do {
-            let response = try await sessionClient.markIMConversationRead(
+            let response = try await runtime.sessionClient.markIMConversationRead(
                 conversationID: trimmedConversationID,
                 readSequence: readSequence
             )
-            markServerOnline()
-            imConversationStore.applyServerExplicitReadResponse(response)
-            scheduleConversationCachePersist()
+            runtime.markServerOnline()
+            runtime.imConversationStore.applyServerExplicitReadResponse(response)
+            runtime.scheduleConversationCachePersist()
         } catch {
-            await handleIMDataRequestError(error)
+            await runtime.handleIMDataRequestError(error)
         }
+    }
+}
+
+@MainActor
+extension ConversationRuntimeController {
+    func markConversationReadIfSelectedUpToLatestLoadedSequence(for conversationID: String) async {
+        await readReportCoordinator.markIfSelectedUpToLatestLoadedSequence(for: conversationID)
+    }
+
+    func markConversationReadUpToLatestLoadedSequence(for conversationID: String) async {
+        await readReportCoordinator.markUpToLatestLoadedSequence(for: conversationID)
+    }
+
+    func markConversationRead(
+        conversationID: String,
+        readSequence: UInt64,
+        debounceNanoseconds: UInt64 = HistoryConfig.readReportDebounceNanoseconds
+    ) async {
+        await readReportCoordinator.mark(
+            conversationID: conversationID,
+            readSequence: readSequence,
+            debounceNanoseconds: debounceNanoseconds
+        )
+    }
+
+    func markConversationReadInternal(
+        conversationID: String,
+        readSequence: UInt64,
+        debounceNanoseconds: UInt64 = HistoryConfig.readReportDebounceNanoseconds
+    ) async {
+        await readReportCoordinator.mark(
+            conversationID: conversationID,
+            readSequence: readSequence,
+            debounceNanoseconds: debounceNanoseconds
+        )
+    }
+
+    func cancelConversationReadReports() {
+        readReportCoordinator.cancelAll()
     }
 }

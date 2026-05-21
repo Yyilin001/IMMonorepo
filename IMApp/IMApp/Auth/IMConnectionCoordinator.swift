@@ -2,153 +2,222 @@ import Foundation
 import IMClientKit
 
 @MainActor
-extension ConversationRuntimeController {
-    func scheduleConnectionIfNeeded() {
-        guard isSignedInProvider() else {
+final class IMConnectionCoordinator {
+    private weak var runtime: ConversationRuntimeController?
+    private(set) var connection: IMTCPConnection?
+    private var connectTask: Task<Void, Never>?
+    private var eventTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private(set) var generation: UInt64 = 0
+    private var reconnectAttempt = 0
+
+    init(runtime: ConversationRuntimeController) {
+        self.runtime = runtime
+    }
+
+    func scheduleIfNeeded() {
+        guard let runtime,
+              runtime.isSignedInProvider()
+        else {
             return
         }
 
-        guard imConnection == nil, imConnectionConnectTask == nil else {
+        guard connection == nil, connectTask == nil else {
             return
         }
 
-        imConnectionReconnectTask?.cancel()
-        imConnectionReconnectTask = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
 
-        let generation = imConnectionGeneration
-        setConnectionStatus(.connecting)
-        imConnectionConnectTask = Task { [weak self] in
-            guard let self else {
+        let targetGeneration = generation
+        runtime.setConnectionStatus(.connecting)
+        connectTask = Task { [weak self] in
+            guard let self, let runtime = self.runtime else {
                 return
             }
 
             do {
-                let connection = try await self.openIMConnection()
-                await self.applyIMConnection(connection, generation: generation)
+                let connection = try await runtime.openIMConnection()
+                await self.applyConnection(connection, generation: targetGeneration)
             } catch {
-                await self.handleIMConnectionFailure(error, generation: generation)
+                await self.handleFailure(error, generation: targetGeneration)
             }
         }
     }
 
-    func reconnectConnection() async {
-        guard isSignedInProvider() else {
+    func reconnect() async {
+        guard runtime?.isSignedInProvider() == true else {
             return
         }
 
         await disconnect(flushCache: true)
-        scheduleConnectionIfNeeded()
+        scheduleIfNeeded()
     }
 
     func disconnect(flushCache: Bool = true) async {
-        imConnectionGeneration &+= 1
-        cancelConversationGapSyncBackfill()
-        cancelQueuedTextMessageFlush()
-        cancelMessageStreamSnapshotSync()
+        generation &+= 1
+        runtime?.cancelConversationGapSyncBackfill()
+        runtime?.cancelQueuedTextMessageFlush()
+        runtime?.cancelMessageStreamSnapshotSync()
 
-        let connection = imConnection
-        imConnection = nil
+        let currentConnection = connection
+        connection = nil
 
-        let connectTask = imConnectionConnectTask
-        imConnectionConnectTask = nil
-        connectTask?.cancel()
+        let currentConnectTask = connectTask
+        connectTask = nil
+        currentConnectTask?.cancel()
 
-        let eventTask = imConnectionEventTask
-        imConnectionEventTask = nil
-        eventTask?.cancel()
+        let currentEventTask = eventTask
+        eventTask = nil
+        currentEventTask?.cancel()
 
-        let reconnectTask = imConnectionReconnectTask
-        imConnectionReconnectTask = nil
-        reconnectTask?.cancel()
-        imConnectionReconnectAttempt = 0
+        let currentReconnectTask = reconnectTask
+        reconnectTask = nil
+        currentReconnectTask?.cancel()
+        reconnectAttempt = 0
 
-        if let connection {
-            await connection.disconnect()
+        if let currentConnection {
+            await currentConnection.disconnect()
         }
 
-        setConnectionStatus(.disconnected)
+        runtime?.setConnectionStatus(.disconnected)
 
-        if flushCache {
-            await flushConversationCache()
-            await flushContactStateCache()
+        if flushCache, let runtime {
+            await runtime.flushConversationCache()
+            await runtime.flushContactStateCache()
         }
     }
 
     func resetForSignedOut(flushCache: Bool) async {
-        imConversationMembersTask?.cancel()
-        imConversationMembersTask = nil
-        imConversationMessagesTask?.cancel()
-        imConversationMessagesTask = nil
-        imConversationRefreshTask?.cancel()
-        imConversationRefreshTask = nil
-        cancelMessageStreamSnapshotSync()
-        for task in mediaUploadRecoveryTasks.values {
+        guard let runtime else {
+            return
+        }
+
+        runtime.imConversationMembersTask?.cancel()
+        runtime.imConversationMembersTask = nil
+        runtime.imConversationMessagesTask?.cancel()
+        runtime.imConversationMessagesTask = nil
+        runtime.imConversationRefreshTask?.cancel()
+        runtime.imConversationRefreshTask = nil
+        runtime.cancelMessageStreamSnapshotSync()
+        for task in runtime.mediaUploadRecoveryTasks.values {
             task.cancel()
         }
-        mediaUploadRecoveryTasks = [:]
-        for task in imConversationReadReportTasks.values {
-            task.cancel()
-        }
-        imConversationReadReportTasks = [:]
-        pendingIMConversationReadSequences = [:]
+        runtime.mediaUploadRecoveryTasks = [:]
+        runtime.cancelConversationReadReports()
         await disconnect(flushCache: flushCache)
     }
 
     func appDidBecomeActive() {
-        scheduleConnectionIfNeeded()
-        syncActiveMessageStreamSnapshots()
+        scheduleIfNeeded()
+        runtime?.syncActiveMessageStreamSnapshots()
     }
 
-    func applyIMConnection(_ connection: IMTCPConnection, generation: UInt64) async {
-        guard generation == imConnectionGeneration else {
-            await connection.disconnect()
+    func handleFailure(_ error: Error, generation targetGeneration: UInt64) async {
+        guard let runtime,
+              targetGeneration == generation
+        else {
             return
         }
 
-        guard isSignedInProvider() else {
-            await connection.disconnect()
+        runtime.cancelConversationGapSyncBackfill()
+        runtime.cancelQueuedTextMessageFlush()
+        for task in runtime.mediaUploadRecoveryTasks.values {
+            task.cancel()
+        }
+        runtime.mediaUploadRecoveryTasks = [:]
+        connectTask = nil
+        eventTask = nil
+        connection = nil
+
+        if error is CancellationError {
+            runtime.setConnectionStatus(.disconnected)
             return
         }
 
-        imConnectionConnectTask = nil
-        imConnection = connection
-        imConnectionReconnectTask?.cancel()
-        imConnectionReconnectTask = nil
-        imConnectionReconnectAttempt = 0
-        setConnectionStatus(.connected)
-        startIMConnectionEventLoop(connection, generation: generation)
-        await syncConversationGapsAfterConnection()
-        await syncContactStateAfterConnection()
-        await flushQueuedTextMessagesAfterConnection(limit: HistoryConfig.queuedFlushLimit)
-        startConversationGapSyncBackfillIfNeeded()
-        syncActiveMessageStreamSnapshots()
-        scheduleConversationCachePersist()
+        if let tcpError = error as? IMTCPClientError {
+            switch tcpError {
+            case .authRejected(_, let message):
+                await runtime.clearSession(message)
+            case .kicked(_, let message):
+                await runtime.clearSession(message)
+            case .connectionClosed:
+                markPendingMessagesUnknownAndReconnect(
+                    message: "IM 连接已断开。",
+                    generation: targetGeneration
+                )
+            default:
+                markPendingMessagesUnknownAndReconnect(
+                    message: tcpError.localizedDescription,
+                    generation: targetGeneration
+                )
+            }
+            return
+        }
+
+        markPendingMessagesUnknownAndReconnect(
+            message: error.localizedDescription,
+            generation: targetGeneration
+        )
     }
 
-    func startIMConnectionEventLoop(_ connection: IMTCPConnection, generation: UInt64) {
-        imConnectionEventTask?.cancel()
-        imConnectionEventTask = Task { [weak self] in
+    private func applyConnection(_ newConnection: IMTCPConnection, generation targetGeneration: UInt64) async {
+        guard let runtime else {
+            await newConnection.disconnect()
+            return
+        }
+
+        guard targetGeneration == generation else {
+            await newConnection.disconnect()
+            return
+        }
+
+        guard runtime.isSignedInProvider() else {
+            await newConnection.disconnect()
+            return
+        }
+
+        connectTask = nil
+        connection = newConnection
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempt = 0
+        runtime.setConnectionStatus(.connected)
+        startEventLoop(newConnection, generation: targetGeneration)
+        await runtime.syncConversationGapsAfterConnection()
+        await runtime.syncContactStateAfterConnection()
+        await runtime.flushQueuedTextMessagesAfterConnection(limit: ConversationRuntimeController.HistoryConfig.queuedFlushLimit)
+        runtime.startConversationGapSyncBackfillIfNeeded()
+        runtime.syncActiveMessageStreamSnapshots()
+        runtime.scheduleConversationCachePersist()
+    }
+
+    private func startEventLoop(_ connection: IMTCPConnection, generation targetGeneration: UInt64) {
+        eventTask?.cancel()
+        eventTask = Task { [weak self] in
             guard let self else {
                 return
             }
 
             do {
                 for try await event in connection.events {
-                    await self.handleIMConnectionEvent(event, generation: generation)
+                    await self.handleEvent(event, generation: targetGeneration)
                 }
 
-                await self.handleIMConnectionFailure(
+                await self.handleFailure(
                     IMTCPClientError.connectionClosed,
-                    generation: generation
+                    generation: targetGeneration
                 )
             } catch {
-                await self.handleIMConnectionFailure(error, generation: generation)
+                await self.handleFailure(error, generation: targetGeneration)
             }
         }
     }
 
-    func handleIMConnectionEvent(_ event: IMTCPConnectionEvent, generation: UInt64) async {
-        guard generation == imConnectionGeneration else {
+    private func handleEvent(_ event: IMTCPConnectionEvent, generation targetGeneration: UInt64) async {
+        guard let runtime,
+              targetGeneration == generation
+        else {
             return
         }
 
@@ -156,21 +225,21 @@ extension ConversationRuntimeController {
         case .heartbeatAck:
             return
         case .ack(let requestID, let payload):
-            imConversationStore.applyOutgoingAcknowledgement(requestID: requestID, payload: payload)
+            runtime.imConversationStore.applyOutgoingAcknowledgement(requestID: requestID, payload: payload)
             if let conversationID = payload.conversationID,
-               conversationID == imConversationStore.selectedConversationID {
-                await loadReceiptSummary(for: conversationID)
+               conversationID == runtime.imConversationStore.selectedConversationID {
+                await runtime.loadReceiptSummary(for: conversationID)
             }
-            scheduleConversationCachePersist()
+            runtime.scheduleConversationCachePersist()
         case .message(let requestID, let payload):
-            guard let currentUserID = currentUserProvider()?.id else {
+            guard let currentUserID = runtime.currentUserProvider()?.id else {
                 return
             }
 
-            imConversationStore.receiveIncomingMessage(payload, currentUserID: currentUserID)
-            scheduleConversationCachePersist()
+            runtime.imConversationStore.receiveIncomingMessage(payload, currentUserID: currentUserID)
+            runtime.scheduleConversationCachePersist()
 
-            if let messageID = payload.messageID, let connection = imConnection {
+            if let messageID = payload.messageID, let connection {
                 do {
                     try await connection.sendAcknowledgement(
                         IMTCPAckPayload(
@@ -181,136 +250,130 @@ extension ConversationRuntimeController {
                         requestID: requestID
                     )
                 } catch {
-                    await handleIMConnectionFailure(error, generation: generation)
+                    await handleFailure(error, generation: targetGeneration)
                     return
                 }
             }
 
             guard payload.senderUserID != currentUserID,
-                  payload.conversationID == imConversationStore.selectedConversationID,
+                  payload.conversationID == runtime.imConversationStore.selectedConversationID,
                   let readSequence = payload.serverSequence
             else {
                 return
             }
 
-            await markConversationReadInternal(
+            await runtime.markConversationReadInternal(
                 conversationID: payload.conversationID,
                 readSequence: readSequence
             )
         case .conversationEvent(_, let payload):
-            guard let currentUserID = currentUserProvider()?.id else {
+            guard let currentUserID = runtime.currentUserProvider()?.id else {
                 return
             }
 
-            let outcome = imConversationStore.applyConversationEvent(payload, currentUserID: currentUserID)
+            let outcome = runtime.imConversationStore.applyConversationEvent(payload, currentUserID: currentUserID)
             if let conversationID = outcome.shouldReloadMembersForConversationID,
-               imConversationStore.conversations.contains(where: { $0.id == conversationID }) {
-                await loadConversationMembers(for: conversationID)
+               runtime.imConversationStore.conversations.contains(where: { $0.id == conversationID }) {
+                await runtime.loadConversationMembers(for: conversationID)
             }
-            if payload.conversation.id.uuidString == imConversationStore.selectedConversationID {
-                await loadReceiptSummary(for: payload.conversation.id.uuidString)
+            if payload.conversation.id.uuidString == runtime.imConversationStore.selectedConversationID {
+                await runtime.loadReceiptSummary(for: payload.conversation.id.uuidString)
             }
-            syncPendingMessageStreamSnapshotsIfNeeded()
-            scheduleConversationCachePersist()
+            runtime.syncPendingMessageStreamSnapshotsIfNeeded()
+            runtime.scheduleConversationCachePersist()
         case .contactEvent(_, let payload):
-            applyContactEvent(payload)
+            runtime.applyContactEvent(payload)
         case .kick(let payload):
-            await clearSession(payload.message)
+            await runtime.clearSession(payload.message)
         }
     }
 
-    func handleIMConnectionFailure(_ error: Error, generation: UInt64) async {
-        guard generation == imConnectionGeneration else {
+    private func markPendingMessagesUnknownAndReconnect(message: String, generation targetGeneration: UInt64) {
+        guard let runtime else {
             return
         }
 
-        cancelConversationGapSyncBackfill()
-        cancelQueuedTextMessageFlush()
-        for task in mediaUploadRecoveryTasks.values {
-            task.cancel()
-        }
-        mediaUploadRecoveryTasks = [:]
-        imConnectionConnectTask = nil
-        imConnectionEventTask = nil
-        imConnection = nil
-
-        if error is CancellationError {
-            setConnectionStatus(.disconnected)
-            return
-        }
-
-        if let tcpError = error as? IMTCPClientError {
-            switch tcpError {
-            case .authRejected(_, let message):
-                await clearSession(message)
-            case .kicked(_, let message):
-                await clearSession(message)
-            case .connectionClosed:
-                imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-                setConnectionStatus(.failed(message: reconnectingStatusMessage("IM 连接已断开。")))
-                scheduleConversationCachePersist()
-                scheduleIMConnectionReconnectIfNeeded(generation: generation)
-            default:
-                imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-                setConnectionStatus(.failed(message: reconnectingStatusMessage(tcpError.localizedDescription)))
-                scheduleConversationCachePersist()
-                scheduleIMConnectionReconnectIfNeeded(generation: generation)
-            }
-            return
-        }
-
-        imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
-        setConnectionStatus(.failed(message: reconnectingStatusMessage(error.localizedDescription)))
-        scheduleConversationCachePersist()
-        scheduleIMConnectionReconnectIfNeeded(generation: generation)
+        runtime.imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
+        runtime.setConnectionStatus(.failed(message: reconnectingStatusMessage(message)))
+        runtime.scheduleConversationCachePersist()
+        scheduleReconnectIfNeeded(generation: targetGeneration)
     }
 
-    func scheduleIMConnectionReconnectIfNeeded(generation: UInt64) {
-        guard isSignedInProvider(),
-              generation == imConnectionGeneration,
-              imConnection == nil,
-              imConnectionConnectTask == nil,
-              imConnectionReconnectTask == nil
+    private func scheduleReconnectIfNeeded(generation targetGeneration: UInt64) {
+        guard let runtime,
+              runtime.isSignedInProvider(),
+              targetGeneration == generation,
+              connection == nil,
+              connectTask == nil,
+              reconnectTask == nil
         else {
             return
         }
 
         let delay = nextReconnectDelayNanoseconds()
-        imConnectionReconnectTask = Task { [weak self] in
+        reconnectTask = Task { [weak self] in
             do {
                 try await Task.sleep(nanoseconds: delay)
             } catch {
                 return
             }
 
-            self?.startScheduledIMReconnect(generation: generation)
+            self?.startScheduledReconnect(generation: targetGeneration)
         }
     }
 
-    func startScheduledIMReconnect(generation: UInt64) {
-        guard generation == imConnectionGeneration,
-              isSignedInProvider(),
-              imConnection == nil
+    private func startScheduledReconnect(generation targetGeneration: UInt64) {
+        guard let runtime,
+              targetGeneration == generation,
+              runtime.isSignedInProvider(),
+              connection == nil
         else {
-            imConnectionReconnectTask = nil
+            reconnectTask = nil
             return
         }
 
-        imConnectionReconnectTask = nil
-        scheduleConnectionIfNeeded()
+        reconnectTask = nil
+        scheduleIfNeeded()
     }
 
-    func nextReconnectDelayNanoseconds() -> UInt64 {
-        imConnectionReconnectAttempt += 1
-        let shift = min(imConnectionReconnectAttempt - 1, 5)
+    private func nextReconnectDelayNanoseconds() -> UInt64 {
+        reconnectAttempt += 1
+        let shift = min(reconnectAttempt - 1, 5)
         let multiplier = UInt64(1 << shift)
         return min(
-            HistoryConfig.reconnectInitialDelayNanoseconds * multiplier,
-            HistoryConfig.reconnectMaxDelayNanoseconds
+            ConversationRuntimeController.HistoryConfig.reconnectInitialDelayNanoseconds * multiplier,
+            ConversationRuntimeController.HistoryConfig.reconnectMaxDelayNanoseconds
         )
     }
 
-    func reconnectingStatusMessage(_ message: String) -> String {
+    private func reconnectingStatusMessage(_ message: String) -> String {
         "\(message) 正在自动重连。"
+    }
+}
+
+@MainActor
+extension ConversationRuntimeController {
+    func scheduleConnectionIfNeeded() {
+        connectionCoordinator.scheduleIfNeeded()
+    }
+
+    func reconnectConnection() async {
+        await connectionCoordinator.reconnect()
+    }
+
+    func disconnect(flushCache: Bool = true) async {
+        await connectionCoordinator.disconnect(flushCache: flushCache)
+    }
+
+    func resetForSignedOut(flushCache: Bool) async {
+        await connectionCoordinator.resetForSignedOut(flushCache: flushCache)
+    }
+
+    func appDidBecomeActive() {
+        connectionCoordinator.appDidBecomeActive()
+    }
+
+    func handleIMConnectionFailure(_ error: Error, generation: UInt64) async {
+        await connectionCoordinator.handleFailure(error, generation: generation)
     }
 }

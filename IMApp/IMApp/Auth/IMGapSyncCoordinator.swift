@@ -2,15 +2,28 @@ import Foundation
 import IMClientKit
 
 @MainActor
-extension ConversationRuntimeController {
-    func syncConversationGap(
+final class IMGapSyncCoordinator {
+    private weak var runtime: ConversationRuntimeController?
+    private var backfillTask: Task<Void, Never>?
+    private var queue: [String] = []
+    private var activeConversationID: String?
+
+    init(runtime: ConversationRuntimeController) {
+        self.runtime = runtime
+    }
+
+    func syncGap(
         for conversationID: String,
         currentUserID: UUID
-    ) async -> ConversationGapSyncResult {
+    ) async -> ConversationRuntimeController.ConversationGapSyncResult {
+        guard let runtime else {
+            return .failed
+        }
+
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty,
-              imConversationStore.containsConversation(id: trimmedConversationID),
-              let latestLoadedSequence = imConversationStore.latestLoadedServerSequence(for: trimmedConversationID)
+              runtime.imConversationStore.containsConversation(id: trimmedConversationID),
+              let latestLoadedSequence = runtime.imConversationStore.latestLoadedServerSequence(for: trimmedConversationID)
         else {
             return .completed
         }
@@ -19,26 +32,26 @@ extension ConversationRuntimeController {
             var afterSequence = latestLoadedSequence
             var iterations = 0
 
-            while iterations < HistoryConfig.gapSyncMaxIterations {
-                let response = try await sessionClient.fetchIMMessagesSince(
+            while iterations < ConversationRuntimeController.HistoryConfig.gapSyncMaxIterations {
+                let response = try await runtime.sessionClient.fetchIMMessagesSince(
                     conversationID: trimmedConversationID,
                     afterSequence: afterSequence,
-                    limit: HistoryConfig.gapSyncLimit
+                    limit: ConversationRuntimeController.HistoryConfig.gapSyncLimit
                 )
-                guard currentUserProvider()?.id == currentUserID else {
+                guard runtime.currentUserProvider()?.id == currentUserID else {
                     return .failed
                 }
-                guard imConversationStore.containsConversation(id: trimmedConversationID) else {
+                guard runtime.imConversationStore.containsConversation(id: trimmedConversationID) else {
                     return .completed
                 }
 
-                markServerOnline()
-                imConversationStore.appendMessages(
+                runtime.markServerOnline()
+                runtime.imConversationStore.appendMessages(
                     in: trimmedConversationID,
                     messages: response.messages,
                     currentUserID: currentUserID
                 )
-                scheduleConversationCachePersist()
+                runtime.scheduleConversationCachePersist()
 
                 guard response.hasMore else {
                     return .completed
@@ -57,37 +70,181 @@ extension ConversationRuntimeController {
         } catch is CancellationError {
             return .failed
         } catch {
-            await handleIMDataRequestError(error)
+            await runtime.handleIMDataRequestError(error)
             return .failed
         }
     }
 
-    func syncConversationGapsAfterConnection() async {
-        guard let currentUserID = currentUserProvider()?.id else {
+    func syncAfterConnection() async {
+        guard let runtime,
+              let currentUserID = runtime.currentUserProvider()?.id
+        else {
             return
         }
 
-        guard await fetchAndApplyConversationSummaries(force: false) else {
+        guard await runtime.fetchAndApplyConversationSummaries(force: false) else {
             return
         }
 
-        let gapSyncTargets = prioritizedGapSyncTargets(
-            imConversationStore.gapSyncTargets(from: latestConversationSummariesProvider())
+        let gapSyncTargets = prioritizedTargets(
+            runtime.imConversationStore.gapSyncTargets(from: runtime.latestConversationSummariesProvider())
         )
 
         for conversationID in gapSyncTargets {
-            switch await syncConversationGap(for: conversationID, currentUserID: currentUserID) {
+            switch await syncGap(for: conversationID, currentUserID: currentUserID) {
             case .completed:
-                await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
+                await runtime.markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
             case .incomplete:
-                enqueueConversationGapSyncBackfill(for: conversationID)
-                await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
+                enqueueBackfill(for: conversationID)
+                await runtime.markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
             case .failed:
-                cancelConversationGapSyncBackfill()
+                cancelBackfill()
                 return
             }
         }
-        syncActiveMessageStreamSnapshots()
+        runtime.syncActiveMessageStreamSnapshots()
+    }
+
+    func prioritizedTargets(_ conversationIDs: [String]) -> [String] {
+        guard let selectedConversationID = runtime?.imConversationStore.selectedConversationID,
+              conversationIDs.contains(selectedConversationID)
+        else {
+            return conversationIDs
+        }
+
+        return [selectedConversationID] + conversationIDs.filter { $0 != selectedConversationID }
+    }
+
+    func enqueueBackfill(
+        for conversationID: String,
+        prioritize: Bool = false
+    ) {
+        guard let runtime else {
+            return
+        }
+
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return
+        }
+
+        queue.removeAll { $0 == trimmedConversationID }
+        let shouldPrioritize = prioritize || trimmedConversationID == runtime.imConversationStore.selectedConversationID
+        if shouldPrioritize {
+            queue.insert(trimmedConversationID, at: 0)
+        } else {
+            queue.append(trimmedConversationID)
+        }
+
+        startBackfillIfNeeded()
+    }
+
+    func startBackfillIfNeeded() {
+        guard let runtime,
+              let currentUserID = runtime.currentUserProvider()?.id,
+              runtime.imConnection != nil,
+              backfillTask == nil,
+              !queue.isEmpty
+        else {
+            return
+        }
+
+        let generation = runtime.imConnectionGeneration
+        backfillTask = Task { [weak self] in
+            await self?.runBackfillLoop(
+                currentUserID: currentUserID,
+                generation: generation
+            )
+        }
+    }
+
+    func cancelBackfill() {
+        backfillTask?.cancel()
+        clearBackfillState()
+    }
+
+    private func runBackfillLoop(
+        currentUserID: UUID,
+        generation: UInt64
+    ) async {
+        while !Task.isCancelled {
+            guard let runtime,
+                  generation == runtime.imConnectionGeneration,
+                  runtime.currentUserProvider()?.id == currentUserID,
+                  runtime.imConnection != nil
+            else {
+                clearBackfillState()
+                return
+            }
+
+            guard let conversationID = dequeueNextConversationID() else {
+                backfillTask = nil
+                activeConversationID = nil
+                return
+            }
+
+            activeConversationID = conversationID
+            let result = await syncGap(for: conversationID, currentUserID: currentUserID)
+
+            guard generation == runtime.imConnectionGeneration,
+                  runtime.currentUserProvider()?.id == currentUserID,
+                  runtime.imConnection != nil,
+                  !Task.isCancelled
+            else {
+                clearBackfillState()
+                return
+            }
+
+            switch result {
+            case .completed:
+                await runtime.markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
+            case .incomplete:
+                await runtime.markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
+                enqueueBackfill(for: conversationID)
+            case .failed:
+                clearBackfillState()
+                return
+            }
+
+            activeConversationID = nil
+            await Task.yield()
+        }
+
+        backfillTask = nil
+        activeConversationID = nil
+    }
+
+    private func dequeueNextConversationID() -> String? {
+        if let selectedConversationID = runtime?.imConversationStore.selectedConversationID,
+           let selectedIndex = queue.firstIndex(of: selectedConversationID) {
+            return queue.remove(at: selectedIndex)
+        }
+
+        guard !queue.isEmpty else {
+            return nil
+        }
+
+        return queue.removeFirst()
+    }
+
+    private func clearBackfillState() {
+        backfillTask = nil
+        queue = []
+        activeConversationID = nil
+    }
+}
+
+@MainActor
+extension ConversationRuntimeController {
+    func syncConversationGap(
+        for conversationID: String,
+        currentUserID: UUID
+    ) async -> ConversationGapSyncResult {
+        await gapSyncCoordinator.syncGap(for: conversationID, currentUserID: currentUserID)
+    }
+
+    func syncConversationGapsAfterConnection() async {
+        await gapSyncCoordinator.syncAfterConnection()
     }
 
     func syncActiveMessageStreamSnapshots() {
@@ -103,124 +260,21 @@ extension ConversationRuntimeController {
     }
 
     func prioritizedGapSyncTargets(_ conversationIDs: [String]) -> [String] {
-        guard let selectedConversationID = imConversationStore.selectedConversationID,
-              conversationIDs.contains(selectedConversationID)
-        else {
-            return conversationIDs
-        }
-
-        return [selectedConversationID] + conversationIDs.filter { $0 != selectedConversationID }
+        gapSyncCoordinator.prioritizedTargets(conversationIDs)
     }
 
     func enqueueConversationGapSyncBackfill(
         for conversationID: String,
         prioritize: Bool = false
     ) {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty else {
-            return
-        }
-
-        imConversationGapSyncQueue.removeAll { $0 == trimmedConversationID }
-        let shouldPrioritize = prioritize || trimmedConversationID == imConversationStore.selectedConversationID
-        if shouldPrioritize {
-            imConversationGapSyncQueue.insert(trimmedConversationID, at: 0)
-        } else {
-            imConversationGapSyncQueue.append(trimmedConversationID)
-        }
-
-        startConversationGapSyncBackfillIfNeeded()
+        gapSyncCoordinator.enqueueBackfill(for: conversationID, prioritize: prioritize)
     }
 
     func startConversationGapSyncBackfillIfNeeded() {
-        guard let currentUserID = currentUserProvider()?.id,
-              imConnection != nil,
-              imConversationGapSyncBackfillTask == nil,
-              !imConversationGapSyncQueue.isEmpty
-        else {
-            return
-        }
-
-        let generation = imConnectionGeneration
-        imConversationGapSyncBackfillTask = Task { [weak self] in
-            await self?.runConversationGapSyncBackfillLoop(
-                currentUserID: currentUserID,
-                generation: generation
-            )
-        }
-    }
-
-    func runConversationGapSyncBackfillLoop(
-        currentUserID: UUID,
-        generation: UInt64
-    ) async {
-        while !Task.isCancelled {
-            guard generation == imConnectionGeneration,
-                  currentUserProvider()?.id == currentUserID,
-                  imConnection != nil
-            else {
-                clearConversationGapSyncBackfillState()
-                return
-            }
-
-            guard let conversationID = dequeueNextConversationGapSyncBackfillConversationID() else {
-                imConversationGapSyncBackfillTask = nil
-                imConversationGapSyncActiveConversationID = nil
-                return
-            }
-
-            imConversationGapSyncActiveConversationID = conversationID
-            let result = await syncConversationGap(for: conversationID, currentUserID: currentUserID)
-
-            guard generation == imConnectionGeneration,
-                  currentUserProvider()?.id == currentUserID,
-                  imConnection != nil,
-                  !Task.isCancelled
-            else {
-                clearConversationGapSyncBackfillState()
-                return
-            }
-
-            switch result {
-            case .completed:
-                await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
-            case .incomplete:
-                await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
-                enqueueConversationGapSyncBackfill(for: conversationID)
-            case .failed:
-                clearConversationGapSyncBackfillState()
-                return
-            }
-
-            imConversationGapSyncActiveConversationID = nil
-            await Task.yield()
-        }
-
-        imConversationGapSyncBackfillTask = nil
-        imConversationGapSyncActiveConversationID = nil
-    }
-
-    func dequeueNextConversationGapSyncBackfillConversationID() -> String? {
-        if let selectedConversationID = imConversationStore.selectedConversationID,
-           let selectedIndex = imConversationGapSyncQueue.firstIndex(of: selectedConversationID) {
-            return imConversationGapSyncQueue.remove(at: selectedIndex)
-        }
-
-        guard !imConversationGapSyncQueue.isEmpty else {
-            return nil
-        }
-
-        return imConversationGapSyncQueue.removeFirst()
+        gapSyncCoordinator.startBackfillIfNeeded()
     }
 
     func cancelConversationGapSyncBackfill() {
-        imConversationGapSyncBackfillTask?.cancel()
-        clearConversationGapSyncBackfillState()
-    }
-
-    func clearConversationGapSyncBackfillState() {
-        imConversationGapSyncBackfillTask = nil
-        imConversationGapSyncQueue = []
-        imConversationGapSyncActiveConversationID = nil
+        gapSyncCoordinator.cancelBackfill()
     }
 }

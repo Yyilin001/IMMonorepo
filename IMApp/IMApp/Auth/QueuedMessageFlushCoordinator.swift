@@ -2,43 +2,55 @@ import Foundation
 import IMClientKit
 
 @MainActor
-extension ConversationRuntimeController {
-    func flushQueuedTextMessagesAfterConnection(limit: Int) async {
-        guard !hasQueuedFlushInProgress,
+final class QueuedMessageFlushCoordinator {
+    private weak var runtime: ConversationRuntimeController?
+    private var flushTask: Task<Void, Never>?
+
+    init(runtime: ConversationRuntimeController) {
+        self.runtime = runtime
+    }
+
+    var isInProgress: Bool {
+        flushTask != nil
+    }
+
+    func flushAfterConnection(limit: Int) async {
+        guard !isInProgress,
               hasQueuedTextMessages()
         else {
             return
         }
 
-        setQueuedFlushActive(true)
+        runtime?.setQueuedFlushActive(true)
 
-        switch await flushQueuedTextMessages(limit: limit) {
+        switch await flushBatch(limit: limit) {
         case .drained:
-            finishQueuedTextMessageFlush()
+            finish()
         case .hasMore:
-            startQueuedTextMessageFlushIfNeeded(limit: limit)
+            startIfNeeded(limit: limit)
         case .failed:
-            finishQueuedTextMessageFlush()
+            finish()
         }
     }
 
-    func startQueuedTextMessageFlushIfNeeded(limit: Int) {
-        guard currentUserProvider() != nil,
-              imConnection != nil,
-              queuedIMTextMessageFlushTask == nil,
+    func startIfNeeded(limit: Int) {
+        guard let runtime,
+              runtime.currentUserProvider() != nil,
+              runtime.imConnection != nil,
+              flushTask == nil,
               hasQueuedTextMessages()
         else {
             return
         }
 
-        setQueuedFlushActive(true)
-        let generation = imConnectionGeneration
-        let currentUserID = currentUserProvider()?.id
-        queuedIMTextMessageFlushTask = Task { [weak self] in
+        runtime.setQueuedFlushActive(true)
+        let generation = runtime.imConnectionGeneration
+        let currentUserID = runtime.currentUserProvider()?.id
+        flushTask = Task { [weak self] in
             guard let self, let currentUserID else {
                 return
             }
-            await self.runQueuedTextMessageFlushLoop(
+            await self.runLoop(
                 currentUserID: currentUserID,
                 generation: generation,
                 limit: limit
@@ -46,91 +58,99 @@ extension ConversationRuntimeController {
         }
     }
 
-    var hasQueuedFlushInProgress: Bool {
-        queuedIMTextMessageFlushTask != nil
+    func cancel() {
+        flushTask?.cancel()
+        finish()
     }
 
-    func runQueuedTextMessageFlushLoop(
+    private func runLoop(
         currentUserID: UUID,
         generation: UInt64,
         limit: Int
     ) async {
         while !Task.isCancelled {
-            guard generation == imConnectionGeneration,
-                  currentUserProvider()?.id == currentUserID,
-                  imConnection != nil
+            guard let runtime,
+                  generation == runtime.imConnectionGeneration,
+                  runtime.currentUserProvider()?.id == currentUserID,
+                  runtime.imConnection != nil
             else {
-                finishQueuedTextMessageFlush()
+                finish()
                 return
             }
 
             guard hasQueuedTextMessages() else {
-                finishQueuedTextMessageFlush()
+                finish()
                 return
             }
 
-            let result = await flushQueuedTextMessages(limit: limit)
+            let result = await flushBatch(limit: limit)
 
-            guard generation == imConnectionGeneration,
-                  currentUserProvider()?.id == currentUserID,
-                  imConnection != nil,
+            guard generation == runtime.imConnectionGeneration,
+                  runtime.currentUserProvider()?.id == currentUserID,
+                  runtime.imConnection != nil,
                   !Task.isCancelled
             else {
-                finishQueuedTextMessageFlush()
+                finish()
                 return
             }
 
             switch result {
             case .drained:
-                finishQueuedTextMessageFlush()
+                finish()
                 return
             case .hasMore:
                 await Task.yield()
             case .failed:
-                finishQueuedTextMessageFlush()
+                finish()
                 return
             }
         }
 
-        finishQueuedTextMessageFlush()
+        finish()
     }
 
-    func flushQueuedTextMessages(limit: Int) async -> QueuedTextMessageFlushBatchResult {
-        guard let connection = imConnection else {
+    private func flushBatch(limit: Int) async -> ConversationRuntimeController.QueuedTextMessageFlushBatchResult {
+        guard let runtime,
+              let connection = runtime.imConnection
+        else {
             return .failed
         }
 
-        let requests = imConversationStore.queuedOutgoingMessageRequests(limit: limit)
+        let requests = runtime.imConversationStore.queuedOutgoingMessageRequests(limit: limit)
         guard !requests.isEmpty else {
             return .drained
         }
 
-        scheduleConversationCachePersist()
-        let generation = imConnectionGeneration
+        runtime.scheduleConversationCachePersist()
+        let generation = runtime.imConnectionGeneration
 
         for (index, request) in requests.enumerated() {
             do {
                 try await connection.sendMessage(request.payload, requestID: request.requestID)
             } catch {
                 for unsentRequest in requests.dropFirst(index + 1) {
-                    imConversationStore.markOutgoingQueued(
+                    runtime.imConversationStore.markOutgoingQueued(
                         requestID: unsentRequest.requestID,
                         message: "等待 IM 长连接恢复后发送。"
                     )
                 }
 
-                scheduleConversationCachePersist()
-                await handleIMConnectionFailure(error, generation: generation)
+                runtime.scheduleConversationCachePersist()
+                await runtime.handleIMConnectionFailure(error, generation: generation)
                 return .failed
             }
         }
 
-        scheduleConversationCachePersist()
+        runtime.scheduleConversationCachePersist()
         return hasQueuedTextMessages() ? .hasMore : .drained
     }
 
-    func hasQueuedTextMessages() -> Bool {
-        imConversationStore.conversations.contains { conversation in
+    private func hasQueuedTextMessages() -> Bool {
+        guard let runtime else {
+            return false
+        }
+
+        return runtime.imConversationStore.conversations.contains { conversation in
             conversation.messages.contains { message in
                 guard message.direction == .outgoing, message.content.isUserComposable else {
                     return false
@@ -144,13 +164,27 @@ extension ConversationRuntimeController {
         }
     }
 
-    func cancelQueuedTextMessageFlush() {
-        queuedIMTextMessageFlushTask?.cancel()
-        finishQueuedTextMessageFlush()
+    private func finish() {
+        flushTask = nil
+        runtime?.setQueuedFlushActive(false)
+    }
+}
+
+@MainActor
+extension ConversationRuntimeController {
+    func flushQueuedTextMessagesAfterConnection(limit: Int) async {
+        await queuedMessageFlushCoordinator.flushAfterConnection(limit: limit)
     }
 
-    func finishQueuedTextMessageFlush() {
-        queuedIMTextMessageFlushTask = nil
-        setQueuedFlushActive(false)
+    func startQueuedTextMessageFlushIfNeeded(limit: Int) {
+        queuedMessageFlushCoordinator.startIfNeeded(limit: limit)
+    }
+
+    var hasQueuedFlushInProgress: Bool {
+        queuedMessageFlushCoordinator.isInProgress
+    }
+
+    func cancelQueuedTextMessageFlush() {
+        queuedMessageFlushCoordinator.cancel()
     }
 }
