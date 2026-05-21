@@ -10,6 +10,8 @@ struct AIStreamProviderRunner {
     let app: Application
     let context: ActiveAIMessageStreamContext
     let prompt: String
+    let modelID: String
+    let estimatedCostUnits: Int
 
     func run() async {
         var partial = ""
@@ -32,7 +34,13 @@ struct AIStreamProviderRunner {
 
         do {
             for try await delta in app.aiStreamingProvider.streamText(
-                for: AIStreamingRequest(conversationID: context.conversationID, prompt: prompt, userID: context.userID)
+                for: AIStreamingRequest(
+                    conversationID: context.conversationID,
+                    prompt: prompt,
+                    userID: context.userID,
+                    modelID: modelID,
+                    estimatedCostUnits: estimatedCostUnits
+                )
             ) {
                 try Task.checkCancellation()
                 try await ensureLeaseActive(lastHeartbeatAt: &lastLeaseHeartbeatAt)

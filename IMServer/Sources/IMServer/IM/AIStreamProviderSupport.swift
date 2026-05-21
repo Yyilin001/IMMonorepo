@@ -4,6 +4,8 @@ struct AIStreamingRequest: Sendable {
     let conversationID: UUID
     let prompt: String
     let userID: UUID
+    let modelID: String
+    let estimatedCostUnits: Int
 }
 
 protocol AIStreamingProvider: Sendable {

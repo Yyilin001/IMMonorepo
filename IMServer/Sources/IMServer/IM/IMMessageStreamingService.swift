@@ -12,7 +12,7 @@ struct IMMessageStreamingService {
         guard !prompt.isEmpty else {
             throw Abort(.badRequest, reason: "Prompt cannot be empty.")
         }
-        try AIStreamRequestGuardrails(app: app).validateStart(
+        let policyDecision = try await AIStreamProviderPolicyService(app: app).authorizeStart(
             prompt: prompt,
             conversationID: conversationID,
             userID: userID
@@ -23,6 +23,7 @@ struct IMMessageStreamingService {
             try await app.aiStreamLeaseStore.reserve(streamID: streamID, conversationID: conversationID, userID: userID)
             await app.aiStreamMetrics.recordLeaseReservation()
         } catch {
+            await app.aiStreamCostLedger.release(policyDecision.costReservationID)
             await app.aiStreamMetrics.recordLeaseRejection()
             throw error
         }
@@ -44,13 +45,20 @@ struct IMMessageStreamingService {
             try await app.aiStreamLeaseStore.attach(streamID: streamID)
             await app.aiStreamMetrics.recordStarted()
             let task = Task {
-                await AIStreamProviderRunner(app: app, context: context, prompt: prompt).run()
+                await AIStreamProviderRunner(
+                    app: app,
+                    context: context,
+                    prompt: prompt,
+                    modelID: policyDecision.modelID,
+                    estimatedCostUnits: policyDecision.estimatedCostUnits
+                ).run()
             }
             await app.activeAIMessageStreamRegistry.attach(task: task, streamID: streamID)
             return initial.response
         } catch {
             await app.activeAIMessageStreamRegistry.finish(streamID: streamID)
             try? await app.aiStreamLeaseStore.finish(streamID: streamID, conversationID: conversationID, userID: userID)
+            await app.aiStreamCostLedger.release(policyDecision.costReservationID)
             throw error
         }
     }

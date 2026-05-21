@@ -177,6 +177,74 @@ extension IMServerTests {
         }
     }
 
+    @Test("AI stream provider policy enforces rate limits, cost ledger, and model routing")
+    func aiMessageStreamProviderPolicyEnforcesRateCostAndModelRouting() async throws {
+        try await withApp(configure: configure) { app in
+            app.aiStreamGuardrailConfiguration = AIStreamGuardrailConfiguration(
+                maxPromptCharacters: 128,
+                maxEstimatedCostUnits: 17_000,
+                blockedPromptTerms: [],
+                maxRequestsPerUserPerMinute: 2,
+                maxCostUnitsPerUserPerDay: 60_000,
+                defaultModelID: "test-small",
+                largePromptModelID: "test-large",
+                largePromptCharacterThreshold: 8
+            )
+            let policy = AIStreamProviderPolicyService(app: app)
+            let conversationID = UUID()
+            let userID = UUID()
+
+            let small = try await policy.authorizeStart(
+                prompt: "short",
+                conversationID: conversationID,
+                userID: userID
+            )
+            #expect(small.modelID == "test-small")
+            #expect(small.estimatedCostUnits == "short".count + AIStreamProviderRunner.maxFinalTextLength)
+
+            let large = try await policy.authorizeStart(
+                prompt: "this prompt routes large",
+                conversationID: conversationID,
+                userID: userID
+            )
+            #expect(large.modelID == "test-large")
+
+            do {
+                _ = try await policy.authorizeStart(
+                    prompt: "third",
+                    conversationID: conversationID,
+                    userID: userID
+                )
+                Issue.record("Expected AI stream rate limit rejection")
+            } catch let abort as Abort {
+                #expect(abort.status == .tooManyRequests)
+            }
+        }
+
+        try await withApp(configure: configure) { app in
+            app.aiStreamGuardrailConfiguration = AIStreamGuardrailConfiguration(
+                maxPromptCharacters: 128,
+                maxEstimatedCostUnits: 17_000,
+                blockedPromptTerms: [],
+                maxRequestsPerUserPerMinute: 10,
+                maxCostUnitsPerUserPerDay: 16_384,
+                defaultModelID: "test-small",
+                largePromptModelID: "test-large",
+                largePromptCharacterThreshold: 8
+            )
+            do {
+                _ = try await AIStreamProviderPolicyService(app: app).authorizeStart(
+                    prompt: "cost-budget",
+                    conversationID: UUID(),
+                    userID: UUID()
+                )
+                Issue.record("Expected AI stream cost ledger rejection")
+            } catch let abort as Abort {
+                #expect(abort.status == .paymentRequired)
+            }
+        }
+    }
+
     @Test("AI stream startup repair marks stale streaming messages failed")
     func aiMessageStreamStartupRepairMarksStaleStreamsFailed() async throws {
         try await withApp(configure: configure) { app in
