@@ -10,7 +10,9 @@
 - [ ] IMServer remains the protocol and persistence authority for message timeline, read state, sessions, and AI stream terminal state.
 - [ ] AI stream message/index writes go through the stream state store; no direct dual-write bypass was added.
 - [ ] AI stream provider, content safety, billing, or model routing code does not write message/index state directly.
+- [ ] AI provider changes pass through `AIStreamRequestGuardrails` for content safety, concurrency limiting, and cost ceilings.
 - [ ] New AI stream terminal states, audit rules, or repair behavior include state store / repair regression tests.
+- [ ] High-complexity service files remain within `docs/service-size-budgets.tsv`, or the budget increase is reviewed as architecture work.
 - [ ] Public HTTP API, TCP packet shape, and DB primary semantics are unchanged, or compatibility/migration is documented.
 
 ## Risk checklist

@@ -11,6 +11,17 @@
 /IMServer/Sources/IMServer/Migrations/ @Yyilin001
 /IMServer/Sources/IMServer/Models/ @Yyilin001
 
+# Backend high-complexity service files require explicit owner review before
+# adding new behavior. Prefer focused helpers behind the existing facade.
+/IMServer/Sources/IMServer/DatabaseRouting.swift @Yyilin001
+/IMServer/Sources/IMServer/Auth/AuthService.swift @Yyilin001
+/IMServer/Sources/IMServer/IM/ConversationEventConsumers.swift @Yyilin001
+/IMServer/Sources/IMServer/IM/IMInfrastructureConfiguration.swift @Yyilin001
+/IMServer/Sources/IMServer/IM/ConversationMembershipCommandSupport.swift @Yyilin001
+/IMServer/Sources/IMServer/IM/ConversationSharedSupports.swift @Yyilin001
+/IMServer/Sources/IMServer/IM/ConversationCommandServices.swift @Yyilin001
+/IMServer/Sources/IMServer/IM/ConnectionRoutingService.swift @Yyilin001
+
 # Release, capacity, and production operations
 /IMServer/scripts/ @Yyilin001
 /IMServer/LoadTests/ @Yyilin001
