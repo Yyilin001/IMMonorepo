@@ -4,15 +4,32 @@
 
 * @Yyilin001
 
-# Backend runtime and protocol authority
-/IMServer/Sources/IMServer/IM/ @Yyilin001
+# Backend timeline, routing, read-model, and outbox authority
+/IMServer/Sources/IMServer/IM/*Message* @Yyilin001
+/IMServer/Sources/IMServer/IM/*Conversation* @Yyilin001
+/IMServer/Sources/IMServer/IM/*Outbox* @Yyilin001
+/IMServer/Sources/IMServer/IM/*Projection* @Yyilin001
+/IMServer/Sources/IMServer/IM/*Read* @Yyilin001
+/IMServer/Sources/IMServer/IM/*Routing* @Yyilin001
 /IMServer/Sources/IMServer/IMTCP/ @Yyilin001
 /IMServer/Sources/IMServer/Controllers/IMConversation* @Yyilin001
 /IMServer/Sources/IMServer/Migrations/ @Yyilin001
 /IMServer/Sources/IMServer/Models/ @Yyilin001
 
-# Backend high-complexity service files require explicit owner review before
-# adding new behavior. Prefer focused helpers behind the existing facade.
+# Backend AI stream and provider policy
+/IMServer/Sources/IMServer/IM/AI* @Yyilin001
+/IMServer/Sources/IMServer/IM/*AI* @Yyilin001
+/IMServer/Sources/IMServer/IM/IMMessageStreamingService.swift @Yyilin001
+/IMServer/Sources/IMServer/IM/IMAIStreamRepairService.swift @Yyilin001
+
+# Backend media, auth, contacts, and social graph
+/IMServer/Sources/IMServer/Media/ @Yyilin001
+/IMServer/Sources/IMServer/Auth/ @Yyilin001
+/IMServer/Sources/IMServer/Contacts/ @Yyilin001
+/IMServer/Sources/IMServer/Controllers/UserController.swift @Yyilin001
+
+# Backend high-complexity files require explicit owner review before adding new
+# behavior. Prefer focused helpers behind the existing facade.
 /IMServer/Sources/IMServer/DatabaseRouting.swift @Yyilin001
 /IMServer/Sources/IMServer/Auth/AuthService.swift @Yyilin001
 /IMServer/Sources/IMServer/IM/ConversationEventConsumers.swift @Yyilin001
@@ -28,14 +45,26 @@
 /IMServer/docs/ @Yyilin001
 /monitoring/ @Yyilin001
 /deploy/ @Yyilin001
+/docs/ @Yyilin001
+/scripts/check_governance_boundaries.sh @Yyilin001
 
-# Apple clients
+# Apple clients: app runtime/UI and core runtime are separate review domains
+/IMApp/IMApp/Auth/ @Yyilin001
+/IMApp/IMApp/Features/IM/ @Yyilin001
+/IMApp/IMApp/Features/Contacts/ @Yyilin001
+/IMApp/IMApp/Features/Home/ @Yyilin001
 /IMApp/ @Yyilin001
+/IMClientKit/Sources/IMClientKit/Features/IM/ @Yyilin001
+/IMClientKit/Sources/IMClientKit/Networking/ @Yyilin001
+/IMClientKit/Sources/IMClientKit/Services/ @Yyilin001
 /IMClientKit/ @Yyilin001
 
-# Android clients
+# Android clients: core runtime and app UI/gateway stay separate
+/imclientkit/ @Yyilin001
 /IMClientKitAndroid/ @Yyilin001
-/app/ @Yyilin001
+/app/src/main/java/com/xmtx/imappandroid/ui/ @Yyilin001
+/app/src/main/java/com/xmtx/imappandroid/viewmodel/ @Yyilin001
+/app/src/main/java/com/xmtx/imappandroid/ @Yyilin001
 /gradle/ @Yyilin001
 /build.gradle.kts @Yyilin001
 /settings.gradle.kts @Yyilin001

@@ -1,10 +1,2 @@
-# path	max_lines	owner_note
-IMServer/Sources/IMServer/DatabaseRouting.swift	620	database-routing-owner
-IMServer/Sources/IMServer/Auth/AuthService.swift	580	auth-service-owner
-IMServer/Sources/IMServer/IM/ConversationEventConsumers.swift	540	im-event-consumers-owner
-IMServer/Sources/IMServer/IM/IMInfrastructureConfiguration.swift	540	im-infra-config-owner
-IMServer/Sources/IMServer/IM/ConversationMembershipCommandSupport.swift	535	conversation-membership-owner
-IMServer/Sources/IMServer/IM/ConversationSharedSupports.swift	520	conversation-shared-supports-owner
-IMServer/Sources/IMServer/IM/ConversationCommandServices.swift	510	conversation-command-services-owner
-IMServer/Sources/IMServer/IM/ConnectionRoutingService.swift	510	connection-routing-owner
-IMApp/IMApp/Auth/IMController.swift	780	ios-im-runtime-owner
+# Deprecated compatibility pointer.
+# Use docs/complexity-budgets.tsv for the active cross-client/server budget.

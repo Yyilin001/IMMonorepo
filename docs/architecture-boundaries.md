@@ -2,6 +2,8 @@
 
 This document is the maintenance contract for the monorepo. It does not change
 wire protocols or runtime behavior; it defines where new code is allowed to live.
+The domain-level dependency matrix lives in `docs/domain-boundaries.md`, and the
+enforced file budget baseline lives in `docs/complexity-budgets.tsv`.
 
 ## Ownership
 
@@ -32,10 +34,10 @@ wire protocols or runtime behavior; it defines where new code is allowed to live
 - Large IM runtime services should stay as facades over small components. New
   summary projection, outbox, event stream, or message write behavior belongs in
   a focused helper/coordinator rather than expanding the facade file.
-- High-complexity service files listed in `docs/service-size-budgets.tsv` have
-  explicit owners and line budgets. Increasing a budget is a design decision:
-  split a helper first, and only raise the budget with owner review and a clear
-  reason in the PR.
+- High-complexity files listed in `docs/complexity-budgets.tsv` have explicit
+  owners, categories, and line budgets. Increasing a budget is a design decision:
+  split a helper first, and only raise the budget in a separate commit with
+  owner review and a clear reason in the PR.
 - Real AI providers must pass through `AIStreamRequestGuardrails` before lease
   reservation/provider execution. Content safety, concurrency limiting, and cost
   ceilings are provider-entry requirements, not optional provider-specific code.
@@ -43,6 +45,8 @@ wire protocols or runtime behavior; it defines where new code is allowed to live
   snapshots remain the convergence source after reconnect.
 - Cross-subsystem work must be split into reviewable commits: protocol/server,
   iOS core/app, Android core/app, release/monitoring, and docs.
+- The legacy `docs/service-size-budgets.tsv` file is only a compatibility
+  pointer. New governance work must update `docs/complexity-budgets.tsv`.
 
 ## Review Requirements
 
