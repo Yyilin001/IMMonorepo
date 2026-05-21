@@ -80,18 +80,6 @@ actor ActiveAIMessageStreamRegistry {
     }
 }
 
-private struct StreamPublishEnvelope: Sendable {
-    let response: IMMessageStreamResponse
-    let recipients: [UUID]
-    let eventType: IMTCPConversationEventType
-    let actorUserID: UUID
-    let shouldPublish: Bool
-}
-
-private struct StreamStartEnvelope: Sendable {
-    let response: IMMessageStreamResponse
-    let recipientUserIDs: [UUID]
-}
 
 struct IMMessageStreamingService {
     private static let snapshotCharacterThreshold = 512
@@ -188,35 +176,10 @@ struct IMMessageStreamingService {
         messageID: UUID,
         userID: UUID
     ) async throws -> IMMessageStreamResponse {
-        let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-        _ = try await ConversationMembershipService(db: db).requireMembershipRecord(
+        try await AIMessageStreamStateStore(app: app).snapshot(
             conversationID: conversationID,
+            messageID: messageID,
             userID: userID
-        )
-        guard let message = try await ConversationMessage.find(messageID, on: db),
-              message.$conversation.id == conversationID
-        else {
-            throw Abort(.notFound, reason: "Message not found.")
-        }
-
-        let response = try ConversationMessageService(db: db).messageResponse(
-            from: message,
-            conversationID: conversationID
-        )
-        guard let streamState = response.derivedState.streamState else {
-            throw Abort(.notFound, reason: "Message stream not found.")
-        }
-        return IMMessageStreamResponse(
-            message: response,
-            stream: streamPayload(
-                streamID: streamState.streamID,
-                messageID: messageID,
-                conversationID: conversationID,
-                chunkIndex: streamState.lastChunkIndex,
-                deltaText: nil,
-                partialTextLength: streamState.partialText.count,
-                state: streamState.state
-            )
         )
     }
 
@@ -224,110 +187,31 @@ struct IMMessageStreamingService {
         streamID: String,
         conversationID: UUID,
         userID: UUID
-    ) async throws -> StreamStartEnvelope {
-        let envelope = try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
-            let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-            let now = Date()
-            return try await db.transaction { database in
-                let realtimeService = IMRealtimeMessageService(app: app)
-                let membership = try await realtimeService.requireConversationMembershipContext(
-                    conversationID: conversationID,
-                    senderUserID: userID,
-                    on: database
-                )
-                let sequence = try await realtimeService.allocateNextServerSequence(
-                    conversationID: conversationID,
-                    updatedAt: now,
-                    on: database
-                )
-                let state = MessageDerivedState(
-                    streamState: MessageStreamState(
-                        streamID: streamID,
-                        state: .streaming,
-                        updatedAt: now
-                    )
-                )
-                let message = try ConversationMessage(
-                    conversationID: conversationID,
-                    senderUserID: userID,
-                    serverSequence: sequence,
-                    content: .text(""),
-                    derivedState: state
-                )
-                try await message.create(on: database)
-                try await AIMessageStreamIndex(
-                    streamID: streamID,
-                    messageID: try message.requireID(),
-                    conversationID: conversationID,
-                    userID: userID,
-                    state: .streaming,
-                    createdAt: now,
-                    updatedAt: now
-                ).create(on: database)
-                try await realtimeService.advanceReadSequence(
-                    conversationID: conversationID,
-                    userID: userID,
-                    readSequence: sequence,
-                    on: database
-                )
-                try await ConversationOutboxService(db: database).enqueue(
-                    type: .messageCreated,
-                    conversationID: conversationID,
-                    payload: ConversationDomainEventPayload(
-                        recipientUserIDs: membership.memberUserIDs,
-                        messageID: try message.requireID()
-                    ),
-                    on: database
-                )
-                let response = try ConversationMessageService(db: database).messageResponse(
-                    from: message,
-                    conversationID: conversationID
-                )
-                let stream = streamPayload(
-                    streamID: streamID,
-                    messageID: try message.requireID(),
-                    conversationID: conversationID,
-                    chunkIndex: 0,
-                    deltaText: nil,
-                    partialTextLength: 0,
-                    state: .streaming,
-                    serverTimestamp: now
-                )
-                return StreamPublishEnvelope(
-                    response: IMMessageStreamResponse(
-                        message: response,
-                        stream: stream
-                    ),
-                    recipients: membership.memberUserIDs,
-                    eventType: .messageStreamStarted,
-                    actorUserID: userID,
-                    shouldPublish: true
-                )
-            }
-        }
-
+    ) async throws -> AIMessageStreamStartEnvelope {
+        let initial = try await AIMessageStreamStateStore(app: app).createInitialStreamingMessage(
+            streamID: streamID,
+            conversationID: conversationID,
+            userID: userID
+        )
         try await InlineOutboxProjectionRuntime(app: app).flushIfAllowed()
         await publish(
-            eventType: envelope.eventType,
+            eventType: .messageStreamStarted,
             conversationID: conversationID,
-            recipientUserIDs: envelope.recipients,
-            message: envelope.response.message,
-            stream: envelope.response.stream,
-            actorUserID: envelope.actorUserID
+            recipientUserIDs: initial.recipientUserIDs,
+            message: initial.response.message,
+            stream: initial.response.stream,
+            actorUserID: userID
         )
         app.logger.info(
             "AI stream started",
             metadata: streamLogMetadata(
                 streamID: streamID,
-                messageID: envelope.response.message.id,
+                messageID: initial.response.message.id,
                 conversationID: conversationID,
                 userID: userID
             )
         )
-        return StreamStartEnvelope(
-            response: envelope.response,
-            recipientUserIDs: envelope.recipients
-        )
+        return initial
     }
 
     private func runProviderStream(
@@ -524,68 +408,16 @@ struct IMMessageStreamingService {
         errorCode: String? = nil,
         errorMessage: String? = nil
     ) async throws -> IMMessageResponse {
-        let response = try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
-            let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-            return try await db.transaction { database in
-                guard let message = try await ConversationMessage.query(on: database)
-                    .filter(\.$id == messageID)
-                    .filter(\.$conversation.$id == conversationID)
-                    .first()
-                else {
-                    throw Abort(.notFound, reason: "Message not found.")
-                }
-                let derivedState = try message.decodedDerivedState()
-                guard let existing = derivedState.streamState,
-                      existing.streamID == streamID
-                else {
-                    throw Abort(.notFound, reason: "Message stream not found.")
-                }
-                guard existing.state == .streaming else {
-                    await app.aiStreamMetrics.recordTerminalCASConflict()
-                    return try ConversationMessageService(db: database).messageResponse(
-                        from: message,
-                        conversationID: conversationID
-                    )
-                }
-                guard chunkIndex >= existing.lastChunkIndex else {
-                    return try ConversationMessageService(db: database).messageResponse(
-                        from: message,
-                        conversationID: conversationID
-                    )
-                }
-
-                let now = Date()
-                try message.replaceContent(.text(partialText))
-                try message.replaceDerivedState(
-                    derivedState.withStreamState(
-                        MessageStreamState(
-                            streamID: streamID,
-                            state: state,
-                            lastChunkIndex: chunkIndex,
-                            partialText: partialText,
-                            errorCode: errorCode,
-                            errorMessage: errorMessage,
-                            updatedAt: now
-                        )
-                    )
-                )
-                try await message.update(on: database)
-                if let index = try await AIMessageStreamIndex.find(streamID, on: database) {
-                    index.lifecycleState = state
-                    index.lastChunkIndex = chunkIndex
-                    index.updatedAt = now
-                    index.errorCode = errorCode
-                    if state != .streaming {
-                        index.terminalAt = now
-                    }
-                    try await index.update(on: database)
-                }
-                return try ConversationMessageService(db: database).messageResponse(
-                    from: message,
-                    conversationID: conversationID
-                )
-            }
-        }
+        let response = try await AIMessageStreamStateStore(app: app).updateSnapshot(
+            streamID: streamID,
+            conversationID: conversationID,
+            messageID: messageID,
+            partialText: partialText,
+            chunkIndex: chunkIndex,
+            state: state,
+            errorCode: errorCode,
+            errorMessage: errorMessage
+        )
         await app.aiStreamMetrics.recordSnapshotWrite()
         app.logger.debug(
             "AI stream snapshot saved",
@@ -610,108 +442,16 @@ struct IMMessageStreamingService {
         errorCode: String?,
         errorMessage: String?
     ) async throws -> IMMessageStreamResponse {
-        let envelope = try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
-            let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-            return try await db.transaction { database in
-                guard let message = try await ConversationMessage.query(on: database)
-                    .filter(\.$id == messageID)
-                    .filter(\.$conversation.$id == conversationID)
-                    .first()
-                else {
-                    throw Abort(.notFound, reason: "Message not found.")
-                }
-                _ = try await ConversationMembershipService(db: database).requireMembershipRecord(
-                    conversationID: conversationID,
-                    userID: userID
-                )
-                let derivedState = try message.decodedDerivedState()
-                guard let existing = derivedState.streamState,
-                      existing.streamID == streamID
-                else {
-                    throw Abort(.notFound, reason: "Message stream not found.")
-                }
-
-                if existing.state != .streaming {
-                    await app.aiStreamMetrics.recordTerminalCASConflict()
-                    let response = try ConversationMessageService(db: database).messageResponse(
-                        from: message,
-                        conversationID: conversationID
-                    )
-                    return StreamPublishEnvelope(
-                        response: IMMessageStreamResponse(
-                            message: response,
-                            stream: streamPayload(
-                                streamID: existing.streamID,
-                                messageID: messageID,
-                                conversationID: conversationID,
-                                chunkIndex: existing.lastChunkIndex,
-                                deltaText: nil,
-                                partialTextLength: existing.partialText.count,
-                                state: existing.state
-                            )
-                        ),
-                        recipients: [],
-                        eventType: Self.eventType(for: existing.state),
-                        actorUserID: userID,
-                        shouldPublish: false
-                    )
-                }
-
-                let now = Date()
-                let terminalState = MessageStreamState(
-                    streamID: streamID,
-                    state: state,
-                    lastChunkIndex: Int.max,
-                    partialText: finalText,
-                    errorCode: errorCode,
-                    errorMessage: errorMessage,
-                    updatedAt: now
-                )
-                try message.replaceContent(.text(finalText))
-                try message.replaceDerivedState(derivedState.withStreamState(terminalState))
-                try await message.update(on: database)
-                if let index = try await AIMessageStreamIndex.find(streamID, on: database) {
-                    index.lifecycleState = state
-                    index.lastChunkIndex = terminalState.lastChunkIndex
-                    index.updatedAt = now
-                    index.terminalAt = now
-                    index.errorCode = errorCode
-                    try await index.update(on: database)
-                }
-                let recipients = try await memberUserIDs(conversationID: conversationID, on: database)
-                try await ConversationOutboxService(db: database).enqueue(
-                    type: .messageUpdated,
-                    conversationID: conversationID,
-                    payload: ConversationDomainEventPayload(
-                        recipientUserIDs: recipients,
-                        messageID: messageID
-                    ),
-                    on: database
-                )
-                let response = try ConversationMessageService(db: database).messageResponse(
-                    from: message,
-                    conversationID: conversationID
-                )
-                return StreamPublishEnvelope(
-                    response: IMMessageStreamResponse(
-                        message: response,
-                        stream: streamPayload(
-                            streamID: streamID,
-                            messageID: messageID,
-                            conversationID: conversationID,
-                            chunkIndex: terminalState.lastChunkIndex,
-                            deltaText: nil,
-                            partialTextLength: finalText.count,
-                            state: state
-                        )
-                    ),
-                    recipients: recipients,
-                    eventType: Self.eventType(for: state),
-                    actorUserID: userID,
-                    shouldPublish: true
-                )
-            }
-        }
+        let envelope = try await AIMessageStreamStateStore(app: app).finalize(
+            streamID: streamID,
+            conversationID: conversationID,
+            messageID: messageID,
+            userID: userID,
+            finalText: finalText,
+            state: state,
+            errorCode: errorCode,
+            errorMessage: errorMessage
+        )
 
         if envelope.shouldPublish {
             try await InlineOutboxProjectionRuntime(app: app).flushIfAllowed()
@@ -735,35 +475,6 @@ struct IMMessageStreamingService {
             )
         }
         return envelope.response
-    }
-
-    private func memberUserIDs(conversationID: UUID, on db: any Database) async throws -> [UUID] {
-        try await ConversationMember.query(on: db)
-            .filter(\.$conversation.$id == conversationID)
-            .all()
-            .map(\.$user.id)
-    }
-
-    private func currentStreamState(
-        streamID: String,
-        conversationID: UUID,
-        messageID: UUID,
-        on db: any Database
-    ) async throws -> MessageStreamState {
-        guard let message = try await ConversationMessage.query(on: db)
-            .filter(\.$id == messageID)
-            .filter(\.$conversation.$id == conversationID)
-            .first()
-        else {
-            throw Abort(.notFound, reason: "Message not found.")
-        }
-        let derivedState = try message.decodedDerivedState()
-        guard let streamState = derivedState.streamState,
-              streamState.streamID == streamID
-        else {
-            throw Abort(.notFound, reason: "Message stream not found.")
-        }
-        return streamState
     }
 
     private func publish(
@@ -806,19 +517,6 @@ struct IMMessageStreamingService {
         )
     }
 
-    private static func eventType(for state: MessageStreamLifecycleState) -> IMTCPConversationEventType {
-        switch state {
-        case .completed:
-            .messageStreamCompleted
-        case .failed:
-            .messageStreamFailed
-        case .cancelled:
-            .messageStreamCancelled
-        case .streaming:
-            .messageStreamChunk
-        }
-    }
-
     private func streamLogMetadata(
         streamID: String,
         messageID: UUID,
@@ -838,16 +536,6 @@ struct IMMessageStreamingService {
     }
 }
 
-private extension MessageDerivedState {
-    func withStreamState(_ streamState: MessageStreamState) -> MessageDerivedState {
-        MessageDerivedState(
-            recallState: recallState,
-            edits: edits,
-            reactions: reactions,
-            streamState: streamState
-        )
-    }
-}
 
 final class IMAIStreamRepairLifecycle: LifecycleHandler, @unchecked Sendable {
     private var sweeperTask: Task<Void, Never>?
@@ -896,42 +584,20 @@ final class IMAIStreamRepairLifecycle: LifecycleHandler, @unchecked Sendable {
 }
 
 struct IMAIStreamRepairService {
-    enum RepairReason: Equatable, Sendable {
-        case serverRestarted
-        case streamLost
-
-        var errorCode: String {
-            switch self {
-            case .serverRestarted:
-                "server_restarted"
-            case .streamLost:
-                "stream_lost"
-            }
-        }
-
-        var errorMessage: String {
-            switch self {
-            case .serverRestarted:
-                "AI stream was interrupted by server restart."
-            case .streamLost:
-                "AI stream was interrupted before a terminal state was persisted."
-            }
-        }
-    }
-
     private static let pageSize = 100
 
     let app: Application
 
     @discardableResult
     func repairStaleStreamingMessages(
-        reason: RepairReason = .serverRestarted,
+        reason: AIStreamRepairReason = .serverRestarted,
         now: Date = Date(),
         updatedBefore: Date? = nil,
         skipActiveLeases: Bool = false
     ) async throws -> Int {
+        let stateStore = AIMessageStreamStateStore(app: app)
         if reason == .serverRestarted {
-            try await backfillMissingStreamIndexes(now: now)
+            try await stateStore.backfillMissingStreamIndexes(now: now)
         }
 
         var repairedCount = 0
@@ -954,7 +620,7 @@ struct IMAIStreamRepairService {
                     if skipActiveLeases, try await app.aiStreamLeaseStore.isActive(streamID: index.streamID) {
                         continue
                     }
-                    let didRepair = try await repair(index: index, reason: reason, now: now)
+                    let didRepair = try await stateStore.repair(index: index, reason: reason, now: now)
                     if didRepair {
                         repairedCount += 1
                     }
@@ -975,7 +641,7 @@ struct IMAIStreamRepairService {
                 await app.aiStreamMetrics.recordRuntimeStaleRepair(count: repairedCount)
             }
             app.logger.warning(
-                "AI stream startup repair marked stale streams failed",
+                "AI stream repair marked stale streams failed",
                 metadata: [
                     "count": .stringConvertible(repairedCount),
                     "reason": .string(reason.errorCode)
@@ -988,115 +654,11 @@ struct IMAIStreamRepairService {
 
     @discardableResult
     func backfillMissingStreamIndexes(now: Date = Date()) async throws -> Int {
-        var backfilledCount = 0
-        for shard in app.conversationShardRouter.allCommandDatabases() {
-            var offset = 0
-            while true {
-                let messages = try await ConversationMessage.query(on: shard.database)
-                    .filter(\.$kind == IMMessageContentType.text.rawValue)
-                    .sort(\.$createdAt)
-                    .range(offset..<(offset + Self.pageSize))
-                    .all()
-                guard !messages.isEmpty else {
-                    break
-                }
-
-                for message in messages {
-                    guard let messageID = message.id,
-                          let streamState = try message.decodedDerivedState().streamState,
-                          try await AIMessageStreamIndex.find(streamState.streamID, on: shard.database) == nil
-                    else {
-                        continue
-                    }
-
-                    let index = AIMessageStreamIndex(
-                        streamID: streamState.streamID,
-                        messageID: messageID,
-                        conversationID: message.$conversation.id,
-                        userID: message.$sender.id,
-                        state: streamState.state,
-                        lastChunkIndex: streamState.lastChunkIndex,
-                        createdAt: message.createdAt ?? streamState.updatedAt,
-                        updatedAt: streamState.updatedAt,
-                        terminalAt: streamState.state == .streaming ? nil : streamState.updatedAt,
-                        errorCode: streamState.errorCode
-                    )
-                    try await index.create(on: shard.database)
-                    backfilledCount += 1
-                }
-
-                guard messages.count == Self.pageSize else {
-                    break
-                }
-                offset += Self.pageSize
-            }
-        }
-
-        return backfilledCount
+        try await AIMessageStreamStateStore(app: app).backfillMissingStreamIndexes(now: now)
     }
 
-    private func repair(index: AIMessageStreamIndex, reason: RepairReason, now: Date) async throws -> Bool {
-        let streamID = index.streamID
-        let conversationID = index.conversationID
-        let messageID = index.messageID
-        return try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
-            let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-            return try await db.transaction { database -> Bool in
-                guard let lockedIndex = try await AIMessageStreamIndex.find(streamID, on: database),
-                      lockedIndex.lifecycleState == .streaming,
-                      let lockedMessage = try await ConversationMessage.query(on: database)
-                        .filter(\.$id == messageID)
-                        .filter(\.$conversation.$id == conversationID)
-                        .first()
-                else {
-                    return false
-                }
-                let currentState = try lockedMessage.decodedDerivedState()
-                guard let currentStream = currentState.streamState,
-                      currentStream.streamID == streamID,
-                      currentStream.state == .streaming
-                else {
-                    lockedIndex.lifecycleState = .failed
-                    lockedIndex.updatedAt = now
-                    lockedIndex.terminalAt = now
-                    lockedIndex.errorCode = reason.errorCode
-                    try await lockedIndex.update(on: database)
-                    return false
-                }
-                let failedState = MessageStreamState(
-                    streamID: currentStream.streamID,
-                    state: .failed,
-                    lastChunkIndex: currentStream.lastChunkIndex,
-                    partialText: currentStream.partialText,
-                    errorCode: reason.errorCode,
-                    errorMessage: reason.errorMessage,
-                    updatedAt: now
-                )
-                try lockedMessage.replaceContent(.text(currentStream.partialText))
-                try lockedMessage.replaceDerivedState(currentState.withStreamState(failedState))
-                try await lockedMessage.update(on: database)
-                lockedIndex.lifecycleState = .failed
-                lockedIndex.lastChunkIndex = currentStream.lastChunkIndex
-                lockedIndex.updatedAt = now
-                lockedIndex.terminalAt = now
-                lockedIndex.errorCode = reason.errorCode
-                try await lockedIndex.update(on: database)
-                let recipients = try await ConversationMember.query(on: database)
-                    .filter(\.$conversation.$id == conversationID)
-                    .all()
-                    .map(\.$user.id)
-                try await ConversationOutboxService(db: database).enqueue(
-                    type: .messageUpdated,
-                    conversationID: conversationID,
-                    payload: ConversationDomainEventPayload(
-                        recipientUserIDs: recipients,
-                        messageID: messageID
-                    ),
-                    on: database
-                )
-                return true
-            }
-        }
+    func auditConsistency() async throws -> [AIMessageStreamConsistencyIssue] {
+        try await AIMessageStreamStateStore(app: app).auditConsistency()
     }
 }
 

@@ -259,6 +259,57 @@ extension IMServerTests {
         }
     }
 
+    @Test("AI stream state store audits and repairs message index consistency")
+    func aiMessageStreamStateStoreAuditsAndRepairsConsistency() async throws {
+        try await withApp(configure: configure) { app in
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "ai-stream-audit-peer@example.com", on: app)
+            let conversation = Conversation(title: "AI Stream Audit", kind: .direct)
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+            let userID = try demoUser.requireID()
+            try await ConversationMember(conversationID: conversationID, userID: userID).create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try peerUser.requireID()).create(on: app.db)
+
+            let messageID = UUID()
+            let streamID = UUID().uuidString
+            let streamState = MessageStreamState(
+                streamID: streamID,
+                state: .streaming,
+                lastChunkIndex: 3,
+                partialText: "audit partial",
+                updatedAt: Date()
+            )
+            let message = try ConversationMessage(
+                id: messageID,
+                conversationID: conversationID,
+                senderUserID: userID,
+                serverSequence: 1,
+                content: .text("audit partial"),
+                derivedState: MessageDerivedState(streamState: streamState)
+            )
+            try await message.create(on: app.db)
+
+            let stateStore = AIMessageStreamStateStore(app: app)
+            var issues = try await stateStore.auditConsistency()
+            #expect(issues.contains { $0.kind == .missingIndex && $0.streamID == streamID })
+
+            let backfilled = try await stateStore.backfillMissingStreamIndexes()
+            #expect(backfilled == 1)
+            issues = try await stateStore.auditConsistency()
+            #expect(!issues.contains { $0.kind == .missingIndex && $0.streamID == streamID })
+
+            let index = try #require(try await AIMessageStreamIndex.find(streamID, on: app.db))
+            let repaired = try await stateStore.repair(index: index, reason: .serverRestarted, now: Date())
+            #expect(repaired)
+            let repairedIndex = try #require(try await AIMessageStreamIndex.find(streamID, on: app.db))
+            #expect(repairedIndex.lifecycleState == .failed)
+            #expect(repairedIndex.terminalAt != nil)
+            issues = try await stateStore.auditConsistency()
+            #expect(!issues.contains { $0.streamID == streamID && $0.kind == .missingTerminalAt })
+        }
+    }
+
     @Test("Local AI stream lease enforces limits and cancellation")
     func localAIStreamLeaseEnforcesLimitsAndCancellation() async throws {
         let store = LocalAIStreamLeaseStore()
