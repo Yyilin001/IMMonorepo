@@ -64,6 +64,7 @@ extension IMConversationDetailView {
                 NavigationStack {
                     IMAddConversationMembersSheet(
                         conversationStore: conversationStore,
+                        runtimeStore: runtimeStore,
                         conversationID: conversationID
                     )
                 }
@@ -72,6 +73,7 @@ extension IMConversationDetailView {
             .sheet(isPresented: $isPresentingSearch) {
                 NavigationStack {
                     IMConversationMessageSearchSheet(
+                        runtimeStore: runtimeStore,
                         conversationID: conversationID,
                         onSelect: { messageID in
                             Task {

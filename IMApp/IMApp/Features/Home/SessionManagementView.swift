@@ -2,15 +2,20 @@ import SwiftUI
 import IMClientKit
 
 struct SessionManagementView: View {
-    @EnvironmentObject private var authManager: AuthManager
+    let sessionStore: AppSessionStore
+
+    let loadSessions: () async -> Void
+    let signOutCurrentDevice: () async -> Void
+    let logoutAllSessions: () async -> Void
+    let signOut: (UUID, Bool) async -> Void
 
     var body: some View {
         List {
             Section("活跃设备") {
-                if authManager.isLoadingSessions && authManager.sessions.isEmpty {
+                if sessionStore.isLoadingSessions && sessionStore.sessions.isEmpty {
                     ProgressView("正在加载设备列表…")
                 } else {
-                    ForEach(authManager.sessions) { session in
+                    ForEach(sessionStore.sessions) { session in
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text(session.deviceName ?? "未知设备")
@@ -48,7 +53,7 @@ struct SessionManagementView: View {
                         .swipeActions(allowsFullSwipe: false) {
                             Button(role: .destructive) {
                                 Task {
-                                    await authManager.signOut(sessionID: session.id, isCurrent: session.isCurrent)
+                                    await signOut(session.id, session.isCurrent)
                                 }
                             } label: {
                                 Text(session.isCurrent ? "退出当前" : "退出此设备")
@@ -58,7 +63,7 @@ struct SessionManagementView: View {
                 }
             }
 
-            if let message = authManager.sessionsMessage, !message.isEmpty {
+            if let message = sessionStore.sessionsMessage, !message.isEmpty {
                 Section {
                     Text(message)
                         .font(.footnote)
@@ -69,29 +74,29 @@ struct SessionManagementView: View {
             Section("操作") {
                 Button("刷新设备列表") {
                     Task {
-                        await authManager.loadSessions()
+                        await loadSessions()
                     }
                 }
 
                 Button("退出当前设备", role: .destructive) {
                     Task {
-                        await authManager.signOutCurrentDevice()
+                        await signOutCurrentDevice()
                     }
                 }
 
                 Button("退出所有设备", role: .destructive) {
                     Task {
-                        await authManager.logoutAllSessions()
+                        await logoutAllSessions()
                     }
                 }
             }
         }
         .navigationTitle("设备管理")
         .task {
-            await authManager.loadSessions()
+            await loadSessions()
         }
         .refreshable {
-            await authManager.loadSessions()
+            await loadSessions()
         }
     }
 }

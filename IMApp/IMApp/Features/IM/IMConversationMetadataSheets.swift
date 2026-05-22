@@ -3,7 +3,7 @@ import SwiftUI
 
 struct IMRenameConversationSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var submitter = IMAsyncSubmitter()
+    @State private var submitter = IMAsyncSubmitter()
 
     let initialTitle: String
     let onSubmit: (String) async -> Bool
@@ -61,7 +61,7 @@ struct IMRenameConversationSheet: View {
 
 struct IMEditConversationMetadataSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var submitter = IMAsyncSubmitter()
+    @State private var submitter = IMAsyncSubmitter()
 
     let initialTitle: String
     let initialNotice: String
@@ -144,4 +144,3 @@ struct IMEditConversationMetadataSheet: View {
         }
     }
 }
-

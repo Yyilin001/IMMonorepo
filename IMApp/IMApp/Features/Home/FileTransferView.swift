@@ -3,7 +3,7 @@ import IMClientKit
 import UniformTypeIdentifiers
 
 struct FileTransferView: View {
-    @ObservedObject var fileTransferManager: FileTransferManager
+    @Bindable var fileTransferManager: FileTransferManager
 
     @State private var isPickingUploadFile = false
 

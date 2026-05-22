@@ -3,6 +3,9 @@ import Foundation
 import SQLKit
 import Vapor
 
+// Async bridge from canonical timeline writes to projections and realtime
+// dispatch. Command handlers enqueue events; this processor owns retry and
+// dead-letter behavior after the write transaction commits.
 struct ConversationOutboxProcessor {
     let db: any Database
 

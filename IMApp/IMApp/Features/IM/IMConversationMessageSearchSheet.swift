@@ -2,9 +2,9 @@ import IMClientKit
 import SwiftUI
 
 struct IMConversationMessageSearchSheet: View {
-    @EnvironmentObject private var authManager: AuthManager
     @Environment(\.dismiss) private var dismiss
 
+    let runtimeStore: IMConversationRuntimeStore
     let conversationID: String
     let onSelect: (String) -> Void
 
@@ -117,7 +117,7 @@ struct IMConversationMessageSearchSheet: View {
         defer { isSearching = false }
 
         let cursor = reset ? nil : nextCursor
-        guard let page = await authManager.searchIMConversationMessages(
+        guard let page = await runtimeStore.searchMessages(
             in: conversationID,
             query: trimmedQuery,
             cursor: cursor,
@@ -139,4 +139,3 @@ struct IMConversationMessageSearchSheet: View {
         statusMessage = results.isEmpty ? "没有找到匹配消息。" : nil
     }
 }
-

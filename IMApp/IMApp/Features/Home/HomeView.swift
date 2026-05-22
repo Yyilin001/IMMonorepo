@@ -2,10 +2,15 @@ import SwiftUI
 import IMClientKit
 
 struct HomeView: View {
-    @EnvironmentObject private var authManager: AuthManager
-    @ObservedObject var probeManager: ProbeManager
+    let sessionStore: AppSessionStore
+    let probeManager: ProbeManager
 
     let user: AuthUser
+    let imConnectionStatus: AuthManager.IMConnectionStatus
+    let reloadProfile: () async -> Void
+    let updateProfile: (String?, UserAvatarPreset?) async -> Bool
+    let reconnectIMConnection: () async -> Void
+    let logout: () async -> Void
 
     @State private var isPresentingEditProfile = false
 
@@ -36,7 +41,7 @@ struct HomeView: View {
                         Spacer()
                     }
 
-                    if let message = authManager.profileMessage, !message.isEmpty {
+                    if let message = sessionStore.profileMessage, !message.isEmpty {
                         Text(message)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
@@ -51,15 +56,15 @@ struct HomeView: View {
                             isPresentingEditProfile = true
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(authManager.isUpdatingProfile)
+                        .disabled(sessionStore.isUpdatingProfile)
 
                         Button("刷新资料") {
                             Task {
-                                await authManager.reloadProfile()
+                                await reloadProfile()
                             }
                         }
                         .buttonStyle(.bordered)
-                        .disabled(authManager.isUpdatingProfile)
+                        .disabled(sessionStore.isUpdatingProfile)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -96,10 +101,10 @@ struct HomeView: View {
                         }
                     }
 
-                    if authManager.imConnectionStatus != .connected {
+                    if imConnectionStatus != .connected {
                         Button("重连 IM") {
                             Task {
-                                await authManager.reconnectIMConnection()
+                                await reconnectIMConnection()
                             }
                         }
                         .buttonStyle(.bordered)
@@ -140,7 +145,7 @@ struct HomeView: View {
 
                     Button("退出登录") {
                         Task {
-                            await authManager.logout()
+                            await logout()
                         }
                     }
                     .buttonStyle(.bordered)
@@ -231,13 +236,10 @@ struct HomeView: View {
                 initialEmail: activeUser.email,
                 initialDisplayName: activeUser.displayName,
                 initialAvatarPreset: activeUser.avatarPreset,
-                isSubmitting: authManager.isUpdatingProfile,
-                message: authManager.profileMessage,
+                isSubmitting: sessionStore.isUpdatingProfile,
+                message: sessionStore.profileMessage,
                 onSubmit: { displayName, avatarPreset in
-                    await authManager.updateProfile(
-                        displayName: displayName,
-                        avatarPreset: avatarPreset
-                    )
+                    await updateProfile(displayName, avatarPreset)
                 }
             )
         }
@@ -286,11 +288,11 @@ struct HomeView: View {
     }
 
     private var activeUser: AuthUser {
-        authManager.currentUser ?? user
+        sessionStore.currentUser ?? user
     }
 
     private var serverStatusTitle: String {
-        switch authManager.serverStatus {
+        switch sessionStore.serverStatus {
         case .unknown:
             return "尚未确认服务器状态"
         case .online:
@@ -301,7 +303,7 @@ struct HomeView: View {
     }
 
     private var serverStatusMessage: String {
-        switch authManager.serverStatus {
+        switch sessionStore.serverStatus {
         case .unknown:
             return "客户端会继续保留当前登录状态。"
         case .online:
@@ -312,7 +314,7 @@ struct HomeView: View {
     }
 
     private var serverStatusIcon: String {
-        switch authManager.serverStatus {
+        switch sessionStore.serverStatus {
         case .unknown:
             return "questionmark.circle"
         case .online:
@@ -323,7 +325,7 @@ struct HomeView: View {
     }
 
     private var serverStatusColor: Color {
-        switch authManager.serverStatus {
+        switch sessionStore.serverStatus {
         case .unknown:
             return .secondary
         case .online:
@@ -334,7 +336,7 @@ struct HomeView: View {
     }
 
     private var imConnectionStatusTitle: String {
-        switch authManager.imConnectionStatus {
+        switch imConnectionStatus {
         case .disconnected:
             return "IM 连接未建立"
         case .connecting:
@@ -347,7 +349,7 @@ struct HomeView: View {
     }
 
     private var imConnectionStatusMessage: String {
-        switch authManager.imConnectionStatus {
+        switch imConnectionStatus {
         case .disconnected:
             return "当前仅保留 HTTP 登录态，还没有 TCP 长连接。"
         case .connecting:
@@ -360,7 +362,7 @@ struct HomeView: View {
     }
 
     private var imConnectionStatusIcon: String {
-        switch authManager.imConnectionStatus {
+        switch imConnectionStatus {
         case .disconnected:
             return "bolt.slash"
         case .connecting:
@@ -373,7 +375,7 @@ struct HomeView: View {
     }
 
     private var imConnectionStatusColor: Color {
-        switch authManager.imConnectionStatus {
+        switch imConnectionStatus {
         case .disconnected:
             return .secondary
         case .connecting:

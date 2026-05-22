@@ -4,6 +4,8 @@ This document is the maintenance contract for the monorepo. It does not change
 wire protocols or runtime behavior; it defines where new code is allowed to live.
 The domain-level dependency matrix lives in `docs/domain-boundaries.md`, and the
 enforced file budget baseline lives in `docs/complexity-budgets.tsv`.
+For a flow-oriented map of the core implementations, start with
+`docs/core-implementation-guide.md`.
 
 ## Ownership
 

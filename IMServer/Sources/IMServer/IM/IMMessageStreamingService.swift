@@ -1,5 +1,7 @@
 import Vapor
 
+// Orchestrates policy, lease, provider execution, and fanout. Persistent stream
+// state always goes through AIMessageStreamStateStore.
 struct IMMessageStreamingService {
     let app: Application
 

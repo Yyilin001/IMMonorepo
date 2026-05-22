@@ -1,4 +1,3 @@
-import Combine
 import Foundation
 import IMClientKit
 import SwiftUI
@@ -7,43 +6,27 @@ import UIKit
 @MainActor
 extension AuthManager {
     func authenticate(action: SessionFacade.Action, email: String, password: String) async {
-        guard !isBusy else {
-            return
-        }
-
-        isBusy = true
-        defer { isBusy = false }
-
-        do {
-            let device = Self.deviceMetadata()
-            let user = try await sessionFacade.authenticate(
-                action: action,
-                email: email,
-                password: password,
-                device: device
-            )
-
-            markServerOnline()
-            sessionsMessage = nil
-            applySignedInState(user)
-        } catch {
-            if await shouldPreserveSession(for: error) {
-                await markServerUnavailableIfNeeded(for: error)
-            }
-            phase = .signedOut(message: error.localizedDescription)
-        }
+        await sessionRuntimeController.authenticate(action: action, email: email, password: password)
     }
 
     func clearSession(message: String?) async {
-        let signedOutUserID = currentUser?.id
+        await sessionRuntimeController.clearSession(message: message)
+    }
+
+    func applySignedInState(_ user: AuthUser) {
+        sessionRuntimeController.applySignedInState(user)
+    }
+
+    func replaceSignedInUser(_ user: AuthUser) {
+        sessionRuntimeController.replaceSignedInUser(user)
+    }
+
+    func resetApplicationStateForSignedOut(signedOutUserID: UUID?) async {
         imConversationListTask?.cancel()
         imConversationListTask = nil
-        contactStateCorrectionTask?.cancel()
-        contactStateCorrectionTask = nil
+        contactRuntimeController.cancelRuntimeTasksForSignedOut()
         imConversationCachePersistTask?.cancel()
         imConversationCachePersistTask = nil
-        contactStateCachePersistTask?.cancel()
-        contactStateCachePersistTask = nil
         lastIMConversationSummaryRefreshAt = nil
         imConversationSummarySyncToken = nil
         latestIMConversationSummaries = []
@@ -82,12 +65,10 @@ extension AuthManager {
         isLoadingBlockedUsers = false
         serverStatus = .unknown
         setIMConnectionStatus(.disconnected)
-        phase = .signedOut(message: message)
     }
 
-    func applySignedInState(_ user: AuthUser) {
+    func startSignedInFeatures(for user: AuthUser) {
         profileMessage = nil
-        replaceSignedInUser(user)
         scheduleIMConnectionIfNeeded()
         scheduleIMConversationBootstrap(for: user)
         Task { [weak self] in
@@ -96,9 +77,5 @@ extension AuthManager {
             await self?.reloadContactRequests()
             await self?.loadBlockedUsers()
         }
-    }
-
-    func replaceSignedInUser(_ user: AuthUser) {
-        phase = .signedIn(user)
     }
 }

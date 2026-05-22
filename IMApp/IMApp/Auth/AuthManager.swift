@@ -1,6 +1,6 @@
-import Combine
 import Foundation
 import IMClientKit
+import Observation
 import SwiftUI
 import UIKit
 
@@ -28,13 +28,8 @@ struct IMConversationIdentityPresentation: Equatable {
 }
 
 @MainActor
-final class AuthManager: ObservableObject {
-    enum Phase: Equatable {
-        case launching
-        case signedOut(message: String?)
-        case signedIn(AuthUser)
-    }
-
+@Observable
+final class AuthManager {
     enum ServerStatus: Equatable {
         case unknown
         case online
@@ -51,11 +46,6 @@ final class AuthManager: ObservableObject {
     let appRootStore: AppRootStore
     let sessionStore: AppSessionStore
     let contactStore: ContactStore
-
-    var phase: Phase {
-        get { sessionStore.phase }
-        set { sessionStore.phase = newValue }
-    }
 
     var isBusy: Bool {
         get { sessionStore.isBusy }
@@ -171,8 +161,8 @@ final class AuthManager: ObservableObject {
         set { sessionStore.serverStatus = newValue }
     }
 
-    @Published private(set) var imConnectionStatus: IMConnectionStatus = .disconnected
-    @Published private(set) var isFlushingQueuedIMTextMessages = false
+    private(set) var imConnectionStatus: IMConnectionStatus = .disconnected
+    private(set) var isFlushingQueuedIMTextMessages = false
 
     var incomingContactRequests: [ContactRequestResponseBody] {
         incomingPendingContactRequests
@@ -221,15 +211,15 @@ final class AuthManager: ObservableObject {
     let openIMConnection: @Sendable () async throws -> IMTCPConnection
     let backgroundTransferMonitor: any BackgroundTransferMonitoring
     let imConversationCache: IMConversationCacheHandler
-    var storeCancellables: Set<AnyCancellable> = []
-    var restoreTask: Task<Void, Never>?
-    var restoreGeneration: UInt64 = 0
+    @ObservationIgnored
     var imConversationListTask: Task<Void, Never>?
-    var contactStateCorrectionTask: Task<Void, Never>?
+    @ObservationIgnored
     var imConversationCachePersistTask: Task<Void, Never>?
-    var contactStateCachePersistTask: Task<Void, Never>?
+    @ObservationIgnored
     var lastIMConversationSummaryRefreshAt: Date?
+    @ObservationIgnored
     var imConversationSummarySyncToken: String?
+    @ObservationIgnored
     var latestIMConversationSummaries: [IMConversationSummaryResponseBody] = []
     var lastContactStateRefreshAt: Date? {
         get { contactStore.lastContactStateRefreshAt }
@@ -242,9 +232,16 @@ final class AuthManager: ObservableObject {
     let probeManager: ProbeManager
     let fileTransferManager: FileTransferManager
     let imConversationStore: IMConversationStore
+    @ObservationIgnored
+    lazy var sessionRuntimeController = makeSessionRuntimeController()
+    @ObservationIgnored
+    lazy var contactRuntimeController = makeContactRuntimeController()
+    @ObservationIgnored
     lazy var conversationRuntimeController = makeConversationRuntimeController()
-    lazy var conversationPresentationStore = IMConversationPresentationStore(authManager: self)
-    lazy var conversationRuntimeStore = IMConversationRuntimeStore(authManager: self)
+    @ObservationIgnored
+    lazy var conversationPresentationStore = IMConversationPresentationStore(provider: self)
+    @ObservationIgnored
+    lazy var conversationRuntimeStore = IMConversationRuntimeStore(provider: self)
 
     convenience init(
         network: NetworkEnvironment,
@@ -340,27 +337,12 @@ final class AuthManager: ObservableObject {
         )
         self.probeManager.delegate = self
         self.fileTransferManager.delegate = self
-        bindChildStores()
 
         if dependencies.shouldRestoreSession {
             scheduleRestoreSession()
         } else {
-            phase = .signedOut(message: nil)
+            sessionStore.setSignedOut(notice: nil)
         }
-    }
-
-    func bindChildStores() {
-        sessionStore.objectWillChange
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            .store(in: &storeCancellables)
-
-        contactStore.objectWillChange
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            .store(in: &storeCancellables)
     }
 
     func makeConversationRuntimeController() -> ConversationRuntimeController {
@@ -372,13 +354,7 @@ final class AuthManager: ObservableObject {
                 self?.currentUser
             },
             isSignedInProvider: { [weak self] in
-                guard let self else {
-                    return false
-                }
-                if case .signedIn = self.phase {
-                    return true
-                }
-                return false
+                self?.currentUser != nil
             },
             latestConversationSummariesProvider: { [weak self] in
                 self?.latestIMConversationSummaries ?? []

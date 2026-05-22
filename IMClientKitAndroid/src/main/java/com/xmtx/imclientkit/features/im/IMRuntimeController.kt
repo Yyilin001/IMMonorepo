@@ -22,6 +22,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.math.min
 
+// Core IM lifecycle coordinator. App/ViewModel code should call this facade and
+// observe IMConversationStore state; TCP, HTTP sync, cache restore, read retry,
+// queued flush, and stream snapshot recovery stay inside the core module.
 class IMRuntimeController(
     private val sessionClient: SessionClient,
     val conversationStore: IMConversationStore,

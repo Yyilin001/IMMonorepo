@@ -3,8 +3,8 @@ import SwiftUI
 
 struct IMAddConversationMembersSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var authManager: AuthManager
-    @ObservedObject var conversationStore: IMConversationStore
+    let conversationStore: IMConversationStore
+    let runtimeStore: IMConversationRuntimeStore
 
     let conversationID: String
 
@@ -44,7 +44,7 @@ struct IMAddConversationMembersSheet: View {
                     Button("添加") {
                         Task {
                             isSubmitting = true
-                            let didAdd = await authManager.addIMConversationMembers(
+                            let didAdd = await runtimeStore.addConversationMembers(
                                 to: conversationID,
                                 memberEmails: parsedMemberEmails
                             )
@@ -68,4 +68,3 @@ struct IMAddConversationMembersSheet: View {
             .filter { !$0.isEmpty }
     }
 }
-

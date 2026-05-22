@@ -32,7 +32,7 @@ extension AuthManager {
     }
 
     func sendIMText(_ text: String, to conversationID: String) async -> Bool {
-        guard case .signedIn = phase else {
+        guard currentUser != nil else {
             return false
         }
 
@@ -44,7 +44,7 @@ extension AuthManager {
         text: String,
         to conversationID: String
     ) async -> Bool {
-        guard case .signedIn = phase else {
+        guard currentUser != nil else {
             return false
         }
 
@@ -53,7 +53,7 @@ extension AuthManager {
 
 
     func retryIMTextMessage(localMessageID: String, in conversationID: String) async -> Bool {
-        guard case .signedIn = phase else {
+        guard currentUser != nil else {
             return false
         }
 
@@ -64,7 +64,7 @@ extension AuthManager {
     }
 
     func cancelQueuedIMTextMessage(localMessageID: String, in conversationID: String) -> Bool {
-        guard case .signedIn = phase else {
+        guard currentUser != nil else {
             return false
         }
 
@@ -79,7 +79,7 @@ extension AuthManager {
     }
 
     func recallIMMessage(messageID: String, in conversationID: String) async -> Bool {
-        guard case .signedIn = phase else {
+        guard currentUser != nil else {
             return false
         }
 
@@ -87,7 +87,7 @@ extension AuthManager {
     }
 
     func editIMMessage(messageID: String, text: String, in conversationID: String) async -> Bool {
-        guard case .signedIn = phase else {
+        guard currentUser != nil else {
             return false
         }
 
@@ -99,7 +99,7 @@ extension AuthManager {
     }
 
     func toggleIMMessageReaction(messageID: String, emoji: String, in conversationID: String) async -> Bool {
-        guard case .signedIn = phase else {
+        guard currentUser != nil else {
             return false
         }
 

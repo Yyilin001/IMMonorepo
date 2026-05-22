@@ -1,10 +1,11 @@
-import Combine
 import Foundation
+import Observation
 
 @MainActor
-final class IMAsyncSubmitter: ObservableObject {
-    @Published var isSubmitting = false
-    @Published var message: String?
+@Observable
+final class IMAsyncSubmitter {
+    var isSubmitting = false
+    var message: String?
     var didSucceed = false
 
     func run(

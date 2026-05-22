@@ -4,8 +4,8 @@ import IMClientKit
 struct IMFavoritesSheet: View {
     @Environment(\.dismiss) var dismiss
 
-    @ObservedObject var conversationStore: IMConversationStore
-    @ObservedObject var runtimeStore: IMConversationRuntimeStore
+    let conversationStore: IMConversationStore
+    let runtimeStore: IMConversationRuntimeStore
 
     let onSelect: (String, String) -> Void
 
@@ -151,7 +151,7 @@ struct IMFavoritesSheet: View {
 struct IMForwardMessagePickerSheet: View {
     @Environment(\.dismiss) var dismiss
 
-    @ObservedObject var conversationStore: IMConversationStore
+    let conversationStore: IMConversationStore
 
     let sourceConversationID: String
     let messageCount: Int

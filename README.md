@@ -52,6 +52,7 @@ swift test --no-parallel
 Manual local text IM testing:
 
 - See `docs/LOCAL_TEXT_IM_TESTING.md` for the two-account checklist covering contacts, direct chats, two-member groups, stranger limits, retries, and restart recovery.
+- See `docs/core-implementation-guide.md` for the core server/client runtime flow before changing timeline, outbox, store merge, cache restore, or AI stream behavior.
 
 ## Architecture Boundary
 

@@ -1,6 +1,6 @@
-import Combine
 import Foundation
 import IMClientKit
+import Observation
 
 @MainActor
 protocol FileTransferManagerDelegate: AnyObject {
@@ -9,38 +9,38 @@ protocol FileTransferManagerDelegate: AnyObject {
 }
 
 @MainActor
-final class FileTransferManager: ObservableObject {
-    @Published var uploadPath = "api/files/upload"
-    @Published var downloadPath = "api/files/download"
-    @Published var downloadFileName = "downloaded-demo.bin"
+@Observable
+final class FileTransferManager {
+    var uploadPath = "api/files/upload"
+    var downloadPath = "api/files/download"
+    var downloadFileName = "downloaded-demo.bin"
 
-    @Published var selectedUploadFileURL: URL?
-    @Published var selectedUploadFileName = "未选择文件"
+    var selectedUploadFileURL: URL?
+    var selectedUploadFileName = "未选择文件"
 
-    @Published var uploadStatus = "未开始"
-    @Published var uploadProgress: FileTransferProgress?
-    @Published var isUploading = false
+    var uploadStatus = "未开始"
+    var uploadProgress: FileTransferProgress?
+    var isUploading = false
 
-    @Published var downloadStatus = "未开始"
-    @Published var downloadProgress: FileTransferProgress?
-    @Published var isDownloading = false
-    @Published var downloadedFileURL: URL?
+    var downloadStatus = "未开始"
+    var downloadProgress: FileTransferProgress?
+    var isDownloading = false
+    var downloadedFileURL: URL?
 
+    @ObservationIgnored
     weak var delegate: (any FileTransferManagerDelegate)?
 
+    @ObservationIgnored
     let fileAPI: FileAPI
+    @ObservationIgnored
     let sessionClient: SessionClient
+    @ObservationIgnored
     let backgroundTransferMonitor: any BackgroundTransferMonitoring
+    @ObservationIgnored
     let transferProjectionState = TransferProjectionState()
 
-    var uploadTask: Task<Void, Never>?
-    var downloadTask: Task<Void, Never>?
-    var uploadOperation: FileTransferOperation<UploadTransferEvent<EmptyResponse>>?
-    var downloadOperation: FileTransferOperation<DownloadTransferEvent>?
-    var backgroundTransferUpdatesTask: Task<Void, Never>?
-    var transferStore = TransferStore()
-    var trackedBackgroundUpload: IMTransferSnapshot?
-    var trackedBackgroundDownload: IMTransferSnapshot?
+    @ObservationIgnored
+    lazy var runtimeController = FileTransferRuntimeController(manager: self)
 
     init(
         fileAPI: FileAPI,

@@ -33,7 +33,7 @@ extension AuthManagerTests {
 
         await manager.logout()
         try await Self.waitUntil {
-            await MainActor.run { manager.phase == .signedOut(message: nil) }
+            await MainActor.run { manager.sessionStore.authRouteState == .signedOut(nil) }
         }
 
         #expect(await harness.disconnections() == 1)
@@ -70,7 +70,14 @@ extension AuthManagerTests {
             .kick(IMTCPKickPayload(reason: .sessionRevoked, message: "当前登录已失效。"))
         )
         try await Self.waitUntil {
-            await MainActor.run { manager.phase == .signedOut(message: "当前登录已失效。") }
+            await MainActor.run {
+                manager.sessionStore.authRouteState == .signedOut(AuthNotice(
+                    code: .sessionRevoked,
+                    message: "当前登录已失效。",
+                    severity: .error,
+                    isRecoverable: false
+                ))
+            }
         }
 
         #expect(manager.currentUser == nil)
@@ -339,10 +346,7 @@ extension AuthManagerTests {
         await manager.login(email: Self.user.email, password: "password123")
         try await Self.waitUntil {
             await MainActor.run {
-                if case .signedIn = manager.phase {
-                    return true
-                }
-                return false
+                manager.currentUser != nil
             }
         }
 
@@ -935,10 +939,7 @@ extension AuthManagerTests {
         await manager.login(email: Self.user.email, password: "password123")
         try await Self.waitUntil {
             await MainActor.run {
-                if case .signedIn = manager.phase {
-                    return true
-                }
-                return false
+                manager.currentUser != nil
             }
         }
 
@@ -1512,7 +1513,7 @@ extension AuthManagerTests {
         await manager.logout()
         try await Task.sleep(for: .milliseconds(300))
 
-        #expect(manager.phase == .signedOut(message: nil))
+        #expect(manager.sessionStore.authRouteState == .signedOut(nil))
         #expect(manager.imConversationStore.conversations.isEmpty)
         #expect(!manager.isFlushingQueuedIMTextMessages)
         #expect(await harness.recordedLines().count >= recordedLineCountBeforeLogout)

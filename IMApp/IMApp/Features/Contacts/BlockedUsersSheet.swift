@@ -2,9 +2,10 @@ import SwiftUI
 import IMClientKit
 
 struct BlockedUsersSheet: View {
-    @EnvironmentObject private var authManager: AuthManager
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject var contactStore: ContactStore
+    let contactStore: ContactStore
+    let loadBlockedUsers: () async -> Void
+    let unblockUser: (UUID) async -> Bool
 
     var body: some View {
         List {
@@ -43,7 +44,7 @@ struct BlockedUsersSheet: View {
 
                             Button("解除") {
                                 Task {
-                                    _ = await authManager.unblockUser(block.blockedUserID)
+                                    _ = await unblockUser(block.blockedUserID)
                                 }
                             }
                             .buttonStyle(.bordered)
@@ -58,7 +59,7 @@ struct BlockedUsersSheet: View {
         .navigationTitle("黑名单")
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            await authManager.loadBlockedUsers()
+            await loadBlockedUsers()
         }
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {

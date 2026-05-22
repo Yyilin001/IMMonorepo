@@ -52,7 +52,7 @@ extension AuthManager {
         previewAssetID: String? = nil,
         to conversationID: String
     ) async -> Bool {
-        guard case .signedIn = phase else {
+        guard currentUser != nil else {
             return false
         }
 

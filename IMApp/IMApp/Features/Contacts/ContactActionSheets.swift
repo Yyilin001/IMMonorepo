@@ -2,8 +2,9 @@ import SwiftUI
 import IMClientKit
 
 struct SendContactRequestSheet: View {
-    @EnvironmentObject private var authManager: AuthManager
     @Environment(\.dismiss) private var dismiss
+    let contactStore: ContactStore
+    let sendContactRequest: (String, String, String) async -> Bool
 
     @State private var email = ""
     @State private var message = ""
@@ -28,7 +29,7 @@ struct SendContactRequestSheet: View {
                 Text("对方接受后才会成为好友，备注仅自己可见。")
             }
 
-            if let message = authManager.contactRequestActionMessage, !message.isEmpty {
+            if let message = contactStore.contactRequestActionMessage, !message.isEmpty {
                 Section {
                     Text(message)
                         .font(.footnote)
@@ -58,11 +59,7 @@ struct SendContactRequestSheet: View {
     private func submit() {
         isSubmitting = true
         Task {
-            let didSend = await authManager.sendContactRequest(
-                email: email,
-                message: message,
-                remark: remark
-            )
+            let didSend = await sendContactRequest(email, message, remark)
             isSubmitting = false
             if didSend {
                 dismiss()
@@ -72,10 +69,11 @@ struct SendContactRequestSheet: View {
 }
 
 struct AcceptContactRequestSheet: View {
-    @EnvironmentObject private var authManager: AuthManager
     @Environment(\.dismiss) private var dismiss
+    let contactStore: ContactStore
 
     let request: ContactRequestResponseBody
+    let acceptContactRequest: (UUID, String) async -> Bool
 
     @State private var remark = ""
     @State private var isSubmitting = false
@@ -96,7 +94,7 @@ struct AcceptContactRequestSheet: View {
                 Text("接受后会建立双向好友关系，双方都能在通讯录看到对方。")
             }
 
-            if let message = authManager.contactRequestActionMessage, !message.isEmpty {
+            if let message = contactStore.contactRequestActionMessage, !message.isEmpty {
                 Section {
                     Text(message)
                         .font(.footnote)
@@ -126,10 +124,7 @@ struct AcceptContactRequestSheet: View {
     private func submit() {
         isSubmitting = true
         Task {
-            let didAccept = await authManager.acceptContactRequest(
-                id: request.id,
-                remark: remark
-            )
+            let didAccept = await acceptContactRequest(request.id, remark)
             isSubmitting = false
             if didAccept {
                 dismiss()
@@ -139,16 +134,23 @@ struct AcceptContactRequestSheet: View {
 }
 
 struct EditContactRemarkSheet: View {
-    @EnvironmentObject private var authManager: AuthManager
     @Environment(\.dismiss) private var dismiss
+    let contactStore: ContactStore
 
     let contact: ContactResponseBody
+    let updateContactRemark: (UUID, String) async -> Bool
 
     @State private var remark: String
     @State private var isSubmitting = false
 
-    init(contact: ContactResponseBody) {
+    init(
+        contactStore: ContactStore,
+        contact: ContactResponseBody,
+        updateContactRemark: @escaping (UUID, String) async -> Bool
+    ) {
+        self.contactStore = contactStore
         self.contact = contact
+        self.updateContactRemark = updateContactRemark
         _remark = State(initialValue: contact.remark ?? "")
     }
 
@@ -164,7 +166,7 @@ struct EditContactRemarkSheet: View {
                 Text("清空备注后，通讯录会直接显示邮箱。")
             }
 
-            if let message = authManager.contactsMessage, !message.isEmpty {
+            if let message = contactStore.contactsMessage, !message.isEmpty {
                 Section {
                     Text(message)
                         .font(.footnote)
@@ -194,10 +196,7 @@ struct EditContactRemarkSheet: View {
     private func submit() {
         isSubmitting = true
         Task {
-            let didUpdate = await authManager.updateContactRemark(
-                contactUserID: contact.id,
-                remark: remark
-            )
+            let didUpdate = await updateContactRemark(contact.id, remark)
             isSubmitting = false
             if didUpdate {
                 dismiss()

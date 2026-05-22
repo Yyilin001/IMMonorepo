@@ -1,23 +1,56 @@
-import Combine
 import Foundation
 import IMClientKit
+import Observation
 
 @MainActor
-final class AppSessionStore: ObservableObject {
-    @Published var phase: AuthManager.Phase = .launching
-    @Published var isBusy = false
-    @Published var sessions: [SessionSnapshot] = []
-    @Published var isLoadingSessions = false
-    @Published var sessionsMessage: String?
-    @Published var isUpdatingProfile = false
-    @Published var profileMessage: String?
-    @Published var serverStatus: AuthManager.ServerStatus = .unknown
+@Observable
+final class AppSessionStore {
+    var authRouteState: AuthRouteState = .launching {
+        didSet {
+            if case .signedOut(let notice) = authRouteState {
+                authNotice = notice
+            }
+        }
+    }
+    var authOperationState: AuthOperationState = .idle
+    var authNotice: AuthNotice?
+    var isBusy = false
+    var sessions: [SessionSnapshot] = []
+    var isLoadingSessions = false
+    var sessionsMessage: String?
+    var isUpdatingProfile = false
+    var profileMessage: String?
+    var serverStatus: AuthManager.ServerStatus = .unknown {
+        didSet {
+            syncAvailabilityWithServerStatus()
+        }
+    }
 
     var currentUser: AuthUser? {
-        guard case .signedIn(let user) = phase else {
+        guard case .signedIn(let user, _) = authRouteState else {
             return nil
         }
         return user
+    }
+
+    func setSignedOut(notice: AuthNotice?) {
+        authNotice = notice
+        authRouteState = .signedOut(notice)
+    }
+
+    func setSignedIn(
+        _ user: AuthUser,
+        availability: AuthAvailability = .online
+    ) {
+        authNotice = nil
+        authRouteState = .signedIn(user, availability: availability)
+    }
+
+    func setOperation(_ operation: AuthOperationState) {
+        authOperationState = operation
+        isBusy = operation.isBusy
+        isLoadingSessions = operation == .loadingSessions
+        isUpdatingProfile = operation == .updatingProfile
     }
 
     func resetForSignedOut(message: String?) {
@@ -26,12 +59,30 @@ final class AppSessionStore: ObservableObject {
         isUpdatingProfile = false
         profileMessage = nil
         serverStatus = .unknown
-        phase = .signedOut(message: message)
+        setOperation(.idle)
+        setSignedOut(notice: AuthClientErrorMapper.notice(forMessage: message))
+    }
+
+    private func syncAvailabilityWithServerStatus() {
+        guard case .signedIn(let user, _) = authRouteState else {
+            return
+        }
+        authRouteState = .signedIn(user, availability: availabilityFromServerStatus())
+    }
+
+    private func availabilityFromServerStatus() -> AuthAvailability {
+        switch serverStatus {
+        case .offline(let message):
+            return .offline(message: message)
+        case .unknown, .online:
+            return .online
+        }
     }
 }
 
 @MainActor
-final class ContactStore: ObservableObject {
+@Observable
+final class ContactStore {
     enum EventApplyResult: Equatable {
         case applied
         case ignored
@@ -42,25 +93,26 @@ final class ContactStore: ObservableObject {
         static let resolvedContactRequestHistoryLimit = 50
     }
 
-    @Published var contacts: [ContactResponseBody] = []
-    @Published var isLoadingContacts = false
-    @Published var contactsMessage: String?
-    @Published var contactRequests: [ContactRequestResponseBody] = []
-    @Published var unseenIncomingContactRequestCount = 0
-    @Published var isLoadingContactRequests = false
-    @Published var contactRequestsLoadMessage: String?
-    @Published var contactRequestActionMessage: String?
-    @Published var acceptingRequestIDs: Set<UUID> = []
-    @Published var decliningRequestIDs: Set<UUID> = []
-    @Published var cancellingRequestIDs: Set<UUID> = []
-    @Published var directConversationRelationshipActionMessages: [String: String] = [:]
-    @Published var sendingDirectConversationFriendRequestConversationIDs: Set<String> = []
-    @Published var blockedUsers: [UserBlockResponseBody] = []
-    @Published var isLoadingBlockedUsers = false
+    var contacts: [ContactResponseBody] = []
+    var isLoadingContacts = false
+    var contactsMessage: String?
+    var contactRequests: [ContactRequestResponseBody] = []
+    var unseenIncomingContactRequestCount = 0
+    var isLoadingContactRequests = false
+    var contactRequestsLoadMessage: String?
+    var contactRequestActionMessage: String?
+    var acceptingRequestIDs: Set<UUID> = []
+    var decliningRequestIDs: Set<UUID> = []
+    var cancellingRequestIDs: Set<UUID> = []
+    var directConversationRelationshipActionMessages: [String: String] = [:]
+    var sendingDirectConversationFriendRequestConversationIDs: Set<String> = []
+    var blockedUsers: [UserBlockResponseBody] = []
+    var isLoadingBlockedUsers = false
 
     var lastContactStateRefreshAt: Date?
     var lastSeenIncomingContactRequestAt: Date?
 
+    @ObservationIgnored
     private let contactStateStore = ContactStateStore()
 
     func incomingPendingContactRequests(
@@ -271,7 +323,8 @@ final class ContactStore: ObservableObject {
 }
 
 @MainActor
-final class AppRootStore: ObservableObject {
+@Observable
+final class AppRootStore {
     let sessionStore: AppSessionStore
     let contactStore: ContactStore
     let conversationStore: IMConversationStore

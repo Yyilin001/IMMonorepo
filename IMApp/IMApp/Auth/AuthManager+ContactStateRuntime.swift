@@ -1,44 +1,16 @@
-import Combine
 import Foundation
 import IMClientKit
 import SwiftUI
 import UIKit
 
-private enum ContactStateRuntimeTiming {
-    static let correctionDebounceNanoseconds: UInt64 = 400_000_000
-    static let cachePersistDebounceNanoseconds: UInt64 = 300_000_000
-}
-
 @MainActor
 extension AuthManager {
     func syncContactStateAfterConnection() async {
-        guard currentUser != nil else {
-            return
-        }
-
-        await reloadContacts()
-        await reloadContactRequests()
-        await loadBlockedUsers()
+        await contactRuntimeController.syncAfterConnection()
     }
 
     func scheduleContactStateCorrection(force: Bool = false, reason _: String? = nil) {
-        contactStateCorrectionTask?.cancel()
-        contactStateCorrectionTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
-
-            if !force {
-                try? await Task.sleep(nanoseconds: ContactStateRuntimeTiming.correctionDebounceNanoseconds)
-            }
-
-            guard !Task.isCancelled else {
-                return
-            }
-
-            await self.syncContactStateAfterConnection()
-            self.contactStateCorrectionTask = nil
-        }
+        contactRuntimeController.scheduleCorrection(force: force)
     }
 
     func setDirectConversationRelationshipActionMessage(_ message: String?, for conversationID: String) {
@@ -131,61 +103,19 @@ extension AuthManager {
     }
 
     func upsertContact(_ contact: ContactResponseBody) {
-        contactStore.upsertContact(contact)
+        contactRuntimeController.upsertContact(contact)
     }
 
     func applyContactEvent(_ payload: IMTCPContactEventPayload) {
-        let result = contactStore.apply(
-            event: payload,
-            currentUserID: currentUser?.id,
-            isRelevant: { request, currentUserID in
-                sessionFacade.isRequestRelevant(request, to: currentUserID)
-            },
-            normalize: { requests, currentUserID in
-                sessionFacade.normalizeRequests(requests, currentUserID: currentUserID)
-            },
-            sortPendingNewestFirst: { lhs, rhs in
-                sessionFacade.sortPendingNewestFirst(lhs, rhs)
-            }
-        )
-
-        switch result {
-        case .applied:
-            scheduleContactStateCachePersist()
-        case .needsCorrection(let reason):
-            scheduleContactStateCorrection(reason: reason)
-        case .ignored:
-            break
-        }
+        contactRuntimeController.applyContactEvent(payload)
     }
 
     func replaceContactRequests(_ requests: [ContactRequestResponseBody], currentUserID: UUID) {
-        contactStore.replaceRequests(
-            requests,
-            currentUserID: currentUserID,
-            normalize: { requests, currentUserID in
-                sessionFacade.normalizeRequests(requests, currentUserID: currentUserID)
-            }
-        )
-        recomputeIncomingContactRequestUnreadState()
+        contactRuntimeController.replaceContactRequests(requests, currentUserID: currentUserID)
     }
 
     func upsertContactRequest(_ request: ContactRequestResponseBody) {
-        guard let currentUserID = currentUser?.id else {
-            return
-        }
-
-        contactStore.upsertRequest(
-            request,
-            currentUserID: currentUserID,
-            isRelevant: { request, currentUserID in
-                sessionFacade.isRequestRelevant(request, to: currentUserID)
-            },
-            normalize: { requests, currentUserID in
-                sessionFacade.normalizeRequests(requests, currentUserID: currentUserID)
-            }
-        )
-        recomputeIncomingContactRequestUnreadState()
+        contactRuntimeController.upsertContactRequest(request)
     }
 
     func updateContactRequestStatus(
@@ -193,79 +123,30 @@ extension AuthManager {
         status: ContactRequestStatus,
         respondedAt: Date
     ) {
-        guard let currentUserID = currentUser?.id else {
-            return
-        }
-        contactStore.updateRequestStatus(
+        contactRuntimeController.updateContactRequestStatus(
             id: requestID,
             status: status,
-            respondedAt: respondedAt,
-            currentUserID: currentUserID,
-            normalize: { requests, currentUserID in
-                sessionFacade.normalizeRequests(requests, currentUserID: currentUserID)
-            }
+            respondedAt: respondedAt
         )
-        recomputeIncomingContactRequestUnreadState()
     }
 
     func scheduleContactStateCachePersist() {
-        guard currentUser != nil else {
-            return
-        }
-
-        contactStateCachePersistTask?.cancel()
-        contactStateCachePersistTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: ContactStateRuntimeTiming.cachePersistDebounceNanoseconds)
-            guard !Task.isCancelled else {
-                return
-            }
-            await self?.flushContactStateCache()
-        }
+        contactRuntimeController.scheduleCachePersist()
     }
 
     func flushContactStateCache() async {
-        contactStateCachePersistTask?.cancel()
-        contactStateCachePersistTask = nil
-
-        guard let user = currentUser else {
-            return
-        }
-
-        do {
-            try await sessionFacade.saveContactStateCacheSnapshot(
-                makeContactStateCacheSnapshot(),
-                for: user.id
-            )
-        } catch {
-            // Ignore cache persistence failures and keep the in-memory state authoritative.
-        }
+        await contactRuntimeController.flushCache()
     }
 
     func makeContactStateCacheSnapshot() -> ContactStateCacheSnapshot {
-        ContactStateCacheSnapshot(
-            contacts: contacts.map(CachedContactState.init),
-            incomingRequests: incomingPendingContactRequests.map(CachedContactRequestState.init),
-            outgoingRequests: outgoingPendingContactRequests.map(CachedContactRequestState.init),
-            resolvedRequests: recentResolvedContactRequests.map(CachedContactRequestState.init),
-            lastRefreshAt: lastContactStateRefreshAt,
-            lastSeenIncomingContactRequestAt: lastSeenIncomingContactRequestAt
-        )
+        contactRuntimeController.makeCacheSnapshot()
     }
 
     var latestIncomingContactRequestAt: Date? {
-        incomingPendingContactRequests.compactMap(\.createdAt).max()
+        contactRuntimeController.latestIncomingContactRequestAt
     }
 
     func recomputeIncomingContactRequestUnreadState() {
-        guard let currentUserID = currentUser?.id else {
-            unseenIncomingContactRequestCount = 0
-            return
-        }
-        contactStore.recomputeIncomingUnread(
-            currentUserID: currentUserID,
-            sortPendingNewestFirst: { lhs, rhs in
-                sessionFacade.sortPendingNewestFirst(lhs, rhs)
-            }
-        )
+        contactRuntimeController.recomputeIncomingUnreadState()
     }
 }

@@ -1,6 +1,9 @@
 import Fluent
 import Vapor
 
+// The only writer for message stream derivedState/content and
+// im_ai_message_streams. All mutations stay in the conversation write
+// coordinator transaction so clients never observe split-brain stream state.
 struct AIMessageStreamWriteStore {
     let app: Application
 

@@ -19,8 +19,8 @@ enum IMCreateConversationMode: String, CaseIterable, Identifiable {
 
 struct IMCreateConversationSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var authManager: AuthManager
-    @ObservedObject var conversationStore: IMConversationStore
+    let conversationStore: IMConversationStore
+    let runtimeStore: IMConversationRuntimeStore
 
     @State private var mode: IMCreateConversationMode = .direct
     @State private var conversationTitle = ""
@@ -75,7 +75,7 @@ struct IMCreateConversationSheet: View {
                     Button("创建") {
                         Task {
                             isSubmitting = true
-                            let didCreate = await authManager.createIMConversation(
+                            let didCreate = await runtimeStore.createConversation(
                                 kind: conversationKind,
                                 title: createConversationTitle,
                                 memberEmails: parsedMemberEmails
@@ -136,4 +136,3 @@ struct IMCreateConversationSheet: View {
             .filter { !$0.isEmpty }
     }
 }
-

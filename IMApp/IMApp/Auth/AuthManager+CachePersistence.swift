@@ -1,4 +1,3 @@
-import Combine
 import Foundation
 import IMClientKit
 import SwiftUI
@@ -11,25 +10,7 @@ private enum AuthManagerCachePersistTiming {
 @MainActor
 extension AuthManager {
     func restoreContactStateCacheIfAvailable(for user: AuthUser) async {
-        do {
-            let snapshot = try await sessionFacade.loadContactStateCacheSnapshot(for: user.id)
-            guard currentUser?.id == user.id else {
-                return
-            }
-
-            contacts = snapshot.contacts.map(\.contact).sorted { $0.email < $1.email }
-            contactRequests = sessionFacade.normalizeRequests(
-                snapshot.incomingRequests.map(\.request)
-                    + snapshot.outgoingRequests.map(\.request)
-                    + snapshot.resolvedRequests.map(\.request),
-                currentUserID: user.id
-            )
-            lastContactStateRefreshAt = snapshot.lastRefreshAt
-            lastSeenIncomingContactRequestAt = snapshot.lastSeenIncomingContactRequestAt
-            recomputeIncomingContactRequestUnreadState()
-        } catch {
-            // Ignore cache restore failures and fall back to HTTP recovery.
-        }
+        await contactRuntimeController.restoreCacheIfAvailable(for: user)
     }
 
     func restoreIMConversationCacheIfAvailable(for user: AuthUser) async {

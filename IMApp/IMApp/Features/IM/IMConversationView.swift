@@ -1,15 +1,10 @@
 import SwiftUI
 import IMClientKit
-import Combine
 import QuickLook
 import UniformTypeIdentifiers
 #if canImport(UIKit)
 import UIKit
 #endif
-
-enum IMNavigationRoute: Hashable {
-    case conversation(String)
-}
 
 enum IMConversationDestructiveAction: Identifiable {
     case clear
@@ -58,9 +53,9 @@ enum IMConversationListFilter: String, CaseIterable, Identifiable {
 }
 
 struct IMConversationView: View {
-    @ObservedObject var conversationStore: IMConversationStore
-    @ObservedObject var presentationStore: IMConversationPresentationStore
-    @ObservedObject var runtimeStore: IMConversationRuntimeStore
+    let conversationStore: IMConversationStore
+    let presentationStore: IMConversationPresentationStore
+    let runtimeStore: IMConversationRuntimeStore
 
     let onOpenConversation: (String) -> Void
 
@@ -237,7 +232,10 @@ struct IMConversationView: View {
         }
         .sheet(isPresented: $isPresentingCreateConversation) {
             NavigationStack {
-                IMCreateConversationSheet(conversationStore: conversationStore)
+                IMCreateConversationSheet(
+                    conversationStore: conversationStore,
+                    runtimeStore: runtimeStore
+                )
             }
             .presentationDetents([.medium, .large])
         }
@@ -325,9 +323,9 @@ struct IMConversationView: View {
 
 struct IMConversationDetailView: View {
     @Environment(\.dismiss) var dismiss
-    @ObservedObject var conversationStore: IMConversationStore
-    @ObservedObject var presentationStore: IMConversationPresentationStore
-    @ObservedObject var runtimeStore: IMConversationRuntimeStore
+    let conversationStore: IMConversationStore
+    let presentationStore: IMConversationPresentationStore
+    let runtimeStore: IMConversationRuntimeStore
 
     let conversationID: String
 

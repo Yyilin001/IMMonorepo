@@ -3,9 +3,9 @@ import SwiftUI
 
 struct IMManageConversationMembersSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var submitter = IMAsyncSubmitter()
+    @State private var submitter = IMAsyncSubmitter()
 
-    @ObservedObject var conversationStore: IMConversationStore
+    let conversationStore: IMConversationStore
     let conversationID: String
     let currentUserID: UUID?
     let onPromoteAdmin: (UUID) async -> Bool

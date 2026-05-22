@@ -2,9 +2,15 @@ import SwiftUI
 import IMClientKit
 
 struct NewContactRequestsView: View {
-    @EnvironmentObject private var authManager: AuthManager
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject var contactStore: ContactStore
+    let contactStore: ContactStore
+    let currentUserID: UUID?
+    let markIncomingContactRequestsSeen: () -> Void
+    let reloadContactRequests: () async -> Void
+    let acceptContactRequest: (UUID, String) async -> Bool
+    let declineContactRequest: (UUID) async -> Bool
+    let cancelContactRequest: (UUID) async -> Bool
+    let createDirectConversation: (String) async -> String?
 
     let onOpenConversation: (String) -> Void
 
@@ -84,7 +90,7 @@ struct NewContactRequestsView: View {
                     ForEach(recentResolvedContactRequests) { request in
                         ResolvedContactRequestRow(
                             request: request,
-                            currentUserID: authManager.currentUser?.id,
+                            currentUserID: currentUserID,
                             isStartingConversation: startingConversationRequestID == request.id,
                             onStartConversation: request.status == .accepted ? {
                                 startConversation(with: request)
@@ -102,10 +108,10 @@ struct NewContactRequestsView: View {
         .navigationTitle("新的朋友")
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            authManager.markIncomingContactRequestsSeen()
+            markIncomingContactRequestsSeen()
         }
         .refreshable {
-            await authManager.reloadContactRequests()
+            await reloadContactRequests()
         }
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -123,7 +129,11 @@ struct NewContactRequestsView: View {
         }
         .sheet(item: $acceptingContactRequest) { request in
             NavigationStack {
-                AcceptContactRequestSheet(request: request)
+                AcceptContactRequestSheet(
+                    contactStore: contactStore,
+                    request: request,
+                    acceptContactRequest: acceptContactRequest
+                )
             }
             .presentationDetents([.medium])
         }
@@ -131,14 +141,14 @@ struct NewContactRequestsView: View {
 
     private var incomingPendingContactRequests: [ContactRequestResponseBody] {
         contactStore.incomingPendingContactRequests(
-            currentUserID: authManager.currentUser?.id,
+            currentUserID: currentUserID,
             sort: sortContactRequestsNewestFirst
         )
     }
 
     private var outgoingPendingContactRequests: [ContactRequestResponseBody] {
         contactStore.outgoingPendingContactRequests(
-            currentUserID: authManager.currentUser?.id,
+            currentUserID: currentUserID,
             sort: sortContactRequestsNewestFirst
         )
     }
@@ -161,18 +171,18 @@ struct NewContactRequestsView: View {
 
     private func decline(_ request: ContactRequestResponseBody) {
         Task {
-            _ = await authManager.declineContactRequest(id: request.id)
+            _ = await declineContactRequest(request.id)
         }
     }
 
     private func cancel(_ request: ContactRequestResponseBody) {
         Task {
-            _ = await authManager.cancelContactRequest(id: request.id)
+            _ = await cancelContactRequest(request.id)
         }
     }
 
     private func startConversation(with request: ContactRequestResponseBody) {
-        guard let currentUserID = authManager.currentUser?.id else {
+        guard let currentUserID else {
             return
         }
 
@@ -185,7 +195,7 @@ struct NewContactRequestsView: View {
 
         startingConversationRequestID = request.id
         Task {
-            let conversationID = await authManager.createDirectIMConversation(memberEmail: peerEmail)
+            let conversationID = await createDirectConversation(peerEmail)
             startingConversationRequestID = nil
 
             guard let conversationID else {
@@ -197,4 +207,3 @@ struct NewContactRequestsView: View {
         }
     }
 }
-

@@ -1,25 +1,119 @@
-import Combine
 import Foundation
 import IMClientKit
+import Observation
 
 @MainActor
-final class IMConversationPresentationStore: ObservableObject {
-    private weak var authManager: AuthManager?
-    private var cancellable: AnyCancellable?
+protocol IMConversationPresentationProviding: AnyObject {
+    var imConnectionStatus: AuthManager.IMConnectionStatus { get }
 
-    init(authManager: AuthManager) {
-        self.authManager = authManager
-        cancellable = authManager.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
-        }
+    func conversationIdentityPresentation(for conversation: IMConversation) -> IMConversationIdentityPresentation
+    func directPeerRelationshipPresentation(for conversationID: String) -> DirectPeerRelationshipPresentation?
+    func directConversationRelationshipActionMessage(for conversationID: String) -> String?
+}
+
+@MainActor
+protocol IMConversationRuntimeProviding: AnyObject {
+    var currentUser: AuthUser? { get }
+    var blockedUserIDs: Set<UUID> { get }
+    var isFlushingQueuedIMTextMessages: Bool { get }
+    var imConversationStore: IMConversationStore { get }
+
+    func reloadIMConversations(force: Bool, kind: IMConversationKind?) async
+    func loadMoreIMConversationSummariesIfNeeded(anchorConversationID: String?, kind: IMConversationKind?) async
+    func createIMConversation(kind: IMConversationKind, title: String, memberEmails: [String]) async -> Bool
+    func addIMConversationMembers(to conversationID: String, memberEmails: [String]) async -> Bool
+    func openIMConversation(_ conversationID: String) async
+    func loadOlderIMMessages() async
+    func jumpToReferencedIMMessage(_ messageID: String, in conversationID: String) async
+    func jumpToIMMessage(_ messageID: String, in conversationID: String) async
+    func cancelQueuedIMTextMessage(localMessageID: String, in conversationID: String) -> Bool
+    func recallIMMessage(messageID: String, in conversationID: String) async -> Bool
+    func retryIMTextMessage(localMessageID: String, in conversationID: String) async -> Bool
+    func toggleIMMessageReaction(messageID: String, emoji: String, in conversationID: String) async -> Bool
+    func favoriteIMMessage(_ messageID: String, in conversationID: String) async -> Bool
+    func unfavoriteIMMessage(_ messageID: String, in conversationID: String) async -> Bool
+    func deleteIMMessagesForSelf(_ messageIDs: [String], in conversationID: String) async -> Bool
+    func forwardIMMessages(_ messageIDs: [String], from conversationID: String, to targetConversationIDs: [String]) async -> Bool
+    func fetchIMFavorites(conversationID: UUID?, cursor: String?, limit: Int?) async -> IMFavoritePageResponseBody?
+    func clearIMConversationForSelf(_ conversationID: String) async -> Bool
+    func deleteIMConversationForSelf(_ conversationID: String) async -> Bool
+    func updateIMConversationPreferences(_ conversationID: String, isPinned: Bool?, isMuted: Bool?) async -> Bool
+    func sendIMText(_ text: String, to conversationID: String) async -> Bool
+    func sendIMReply(reference: IMReplyReference, text: String, to conversationID: String) async -> Bool
+    func sendIMMedia(
+        fileURL: URL,
+        kind: IMMediaAssetKind,
+        mimeType: String,
+        filename: String?,
+        byteSize: Int64?,
+        width: Int?,
+        height: Int?,
+        durationMillis: Int?,
+        previewAssetID: String?,
+        to conversationID: String
+    ) async -> Bool
+    func editIMMessage(messageID: String, text: String, in conversationID: String) async -> Bool
+    func renameIMConversation(_ conversationID: String, title: String) async -> Bool
+    func updateIMConversationMetadata(
+        _ conversationID: String,
+        title: String?,
+        notice: String?,
+        avatarPreset: IMConversationAvatarPreset?,
+        muteAll: Bool?
+    ) async -> Bool
+    func updateIMConversationMemberRole(memberUserID: UUID, role: IMConversationMemberRole, in conversationID: String) async -> Bool
+    func removeIMConversationMember(memberUserID: UUID, from conversationID: String) async -> Bool
+    func loadIMConversationMembers(conversationID: String, query: String) async
+    func loadMoreIMConversationMembers(conversationID: String) async
+    func loadIMReceiptSummary(conversationID: String) async
+    func searchIMConversationMessages(
+        in conversationID: String,
+        query: String,
+        cursor: String?,
+        limit: Int?
+    ) async -> IMConversationMessageSearchPageResponseBody?
+    func updateMyIMMemberNickname(conversationID: String, memberNickname: String?) async -> Bool
+    func leaveIMConversation(_ conversationID: String) async -> Bool
+    func fetchIMGroupInvites(conversationID: String) async -> [IMGroupInviteResponseBody]
+    func createIMGroupInvite(conversationID: String, expiresInSeconds: Int?) async -> IMGroupInviteResponseBody?
+    func revokeIMGroupInvite(conversationID: String, token: String) async -> Bool
+    func blockUser(_ userID: UUID, reason: String?) async -> Bool
+    func unblockUser(_ userID: UUID) async -> Bool
+    func createReport(
+        targetType: String,
+        targetID: String,
+        conversationID: UUID?,
+        messageID: UUID?,
+        reason: String,
+        detail: String?
+    ) async -> Bool
+    func sendDirectConversationFriendRequest(conversationID: String) async -> Bool
+    func acceptDirectConversationFriendRequest(conversationID: String, remark: String?) async -> Bool
+    func declineDirectConversationFriendRequest(conversationID: String) async -> Bool
+    func cancelDirectConversationFriendRequest(conversationID: String) async -> Bool
+    func persistIMConversationCacheSoon()
+    func startBackgroundIMMediaDownload(_ asset: IMMediaAsset, to destinationURL: URL) async throws
+    func cancelBackgroundIMMediaDownload(_ reference: IMMessageBackgroundTransferReference) async
+}
+
+extension AuthManager: IMConversationPresentationProviding, IMConversationRuntimeProviding {}
+
+@MainActor
+@Observable
+final class IMConversationPresentationStore {
+    @ObservationIgnored
+    private weak var provider: (any IMConversationPresentationProviding)?
+
+    init(provider: any IMConversationPresentationProviding) {
+        self.provider = provider
     }
 
     var imConnectionStatus: AuthManager.IMConnectionStatus {
-        authManager?.imConnectionStatus ?? .disconnected
+        provider?.imConnectionStatus ?? .disconnected
     }
 
     func conversationIdentityPresentation(for conversation: IMConversation) -> IMConversationIdentityPresentation {
-        authManager?.conversationIdentityPresentation(for: conversation)
+        provider?.conversationIdentityPresentation(for: conversation)
             ?? IMConversationIdentityPresentation(
                 title: conversation.title,
                 detailSummary: "\(conversation.memberCount) 位成员",
@@ -30,102 +124,108 @@ final class IMConversationPresentationStore: ObservableObject {
     func directPeerRelationshipPresentation(
         for conversationID: String
     ) -> DirectPeerRelationshipPresentation? {
-        authManager?.directPeerRelationshipPresentation(for: conversationID)
+        provider?.directPeerRelationshipPresentation(for: conversationID)
     }
 
     func directConversationRelationshipActionMessage(for conversationID: String) -> String? {
-        authManager?.directConversationRelationshipActionMessage(for: conversationID)
+        provider?.directConversationRelationshipActionMessage(for: conversationID)
     }
 }
 
 @MainActor
-final class IMConversationRuntimeStore: ObservableObject {
-    private weak var authManager: AuthManager?
-    private var cancellable: AnyCancellable?
+@Observable
+final class IMConversationRuntimeStore {
+    @ObservationIgnored
+    private weak var provider: (any IMConversationRuntimeProviding)?
 
-    init(authManager: AuthManager) {
-        self.authManager = authManager
-        cancellable = authManager.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
-        }
+    init(provider: any IMConversationRuntimeProviding) {
+        self.provider = provider
     }
 
     func reloadConversations(force: Bool = true, kind: IMConversationKind? = nil) async {
-        await authManager?.reloadIMConversations(force: force, kind: kind)
+        await provider?.reloadIMConversations(force: force, kind: kind)
     }
 
     func loadMoreConversationSummariesIfNeeded(
         anchorConversationID: String?,
         kind: IMConversationKind? = nil
     ) async {
-        await authManager?.loadMoreIMConversationSummariesIfNeeded(
+        await provider?.loadMoreIMConversationSummariesIfNeeded(
             anchorConversationID: anchorConversationID,
             kind: kind
         )
     }
 
+    func createConversation(kind: IMConversationKind, title: String, memberEmails: [String]) async -> Bool {
+        await provider?.createIMConversation(kind: kind, title: title, memberEmails: memberEmails) ?? false
+    }
+
+    func addConversationMembers(to conversationID: String, memberEmails: [String]) async -> Bool {
+        await provider?.addIMConversationMembers(to: conversationID, memberEmails: memberEmails) ?? false
+    }
+
     var currentUserID: UUID? {
-        authManager?.currentUser?.id
+        provider?.currentUser?.id
     }
 
     var currentUserDisplayName: String {
-        authManager?.currentUser?.preferredDisplayName ?? "用户"
+        provider?.currentUser?.preferredDisplayName ?? "用户"
     }
 
     var blockedUserIDs: Set<UUID> {
-        authManager?.blockedUserIDs ?? []
+        provider?.blockedUserIDs ?? []
     }
 
     var isFlushingQueuedTextMessages: Bool {
-        authManager?.isFlushingQueuedIMTextMessages ?? false
+        provider?.isFlushingQueuedIMTextMessages ?? false
     }
 
     func openConversation(_ conversationID: String) async {
-        await authManager?.openIMConversation(conversationID)
+        await provider?.openIMConversation(conversationID)
     }
 
     func loadOlderMessages() async {
-        await authManager?.loadOlderIMMessages()
+        await provider?.loadOlderIMMessages()
     }
 
     func jumpToReferencedMessage(_ messageID: String, in conversationID: String) async {
-        await authManager?.jumpToReferencedIMMessage(messageID, in: conversationID)
+        await provider?.jumpToReferencedIMMessage(messageID, in: conversationID)
     }
 
     func jumpToMessage(_ messageID: String, in conversationID: String) async {
-        await authManager?.jumpToIMMessage(messageID, in: conversationID)
+        await provider?.jumpToIMMessage(messageID, in: conversationID)
     }
 
     func cancelQueuedTextMessage(localMessageID: String, in conversationID: String) -> Bool {
-        authManager?.cancelQueuedIMTextMessage(localMessageID: localMessageID, in: conversationID) ?? false
+        provider?.cancelQueuedIMTextMessage(localMessageID: localMessageID, in: conversationID) ?? false
     }
 
     func recallMessage(messageID: String, in conversationID: String) async -> Bool {
-        await authManager?.recallIMMessage(messageID: messageID, in: conversationID) ?? false
+        await provider?.recallIMMessage(messageID: messageID, in: conversationID) ?? false
     }
 
     func retryTextMessage(localMessageID: String, in conversationID: String) async -> Bool {
-        await authManager?.retryIMTextMessage(localMessageID: localMessageID, in: conversationID) ?? false
+        await provider?.retryIMTextMessage(localMessageID: localMessageID, in: conversationID) ?? false
     }
 
     func toggleMessageReaction(messageID: String, emoji: String, in conversationID: String) async -> Bool {
-        await authManager?.toggleIMMessageReaction(messageID: messageID, emoji: emoji, in: conversationID) ?? false
+        await provider?.toggleIMMessageReaction(messageID: messageID, emoji: emoji, in: conversationID) ?? false
     }
 
     func favoriteMessage(messageID: String, in conversationID: String) async -> Bool {
-        await authManager?.favoriteIMMessage(messageID, in: conversationID) ?? false
+        await provider?.favoriteIMMessage(messageID, in: conversationID) ?? false
     }
 
     func unfavoriteMessage(messageID: String, in conversationID: String) async -> Bool {
-        await authManager?.unfavoriteIMMessage(messageID, in: conversationID) ?? false
+        await provider?.unfavoriteIMMessage(messageID, in: conversationID) ?? false
     }
 
     func deleteMessagesForSelf(messageIDs: [String], in conversationID: String) async -> Bool {
-        await authManager?.deleteIMMessagesForSelf(messageIDs, in: conversationID) ?? false
+        await provider?.deleteIMMessagesForSelf(messageIDs, in: conversationID) ?? false
     }
 
     func forwardMessages(messageIDs: [String], from conversationID: String, to targetConversationIDs: [String]) async -> Bool {
-        await authManager?.forwardIMMessages(messageIDs, from: conversationID, to: targetConversationIDs) ?? false
+        await provider?.forwardIMMessages(messageIDs, from: conversationID, to: targetConversationIDs) ?? false
     }
 
     func fetchFavorites(
@@ -133,15 +233,15 @@ final class IMConversationRuntimeStore: ObservableObject {
         cursor: String? = nil,
         limit: Int? = nil
     ) async -> IMFavoritePageResponseBody? {
-        await authManager?.fetchIMFavorites(conversationID: conversationID, cursor: cursor, limit: limit)
+        await provider?.fetchIMFavorites(conversationID: conversationID, cursor: cursor, limit: limit)
     }
 
     func clearConversationForSelf(_ conversationID: String) async -> Bool {
-        await authManager?.clearIMConversationForSelf(conversationID) ?? false
+        await provider?.clearIMConversationForSelf(conversationID) ?? false
     }
 
     func deleteConversationForSelf(_ conversationID: String) async -> Bool {
-        await authManager?.deleteIMConversationForSelf(conversationID) ?? false
+        await provider?.deleteIMConversationForSelf(conversationID) ?? false
     }
 
     func updateConversationPreferences(
@@ -149,15 +249,15 @@ final class IMConversationRuntimeStore: ObservableObject {
         isPinned: Bool? = nil,
         isMuted: Bool? = nil
     ) async -> Bool {
-        await authManager?.updateIMConversationPreferences(conversationID, isPinned: isPinned, isMuted: isMuted) ?? false
+        await provider?.updateIMConversationPreferences(conversationID, isPinned: isPinned, isMuted: isMuted) ?? false
     }
 
     func sendText(_ text: String, to conversationID: String) async -> Bool {
-        await authManager?.sendIMText(text, to: conversationID) ?? false
+        await provider?.sendIMText(text, to: conversationID) ?? false
     }
 
     func sendReply(reference: IMReplyReference, text: String, to conversationID: String) async -> Bool {
-        await authManager?.sendIMReply(reference: reference, text: text, to: conversationID) ?? false
+        await provider?.sendIMReply(reference: reference, text: text, to: conversationID) ?? false
     }
 
     func sendMedia(
@@ -168,22 +268,26 @@ final class IMConversationRuntimeStore: ObservableObject {
         byteSize: Int64? = nil,
         to conversationID: String
     ) async -> Bool {
-        await authManager?.sendIMMedia(
+        await provider?.sendIMMedia(
             fileURL: fileURL,
             kind: kind,
             mimeType: mimeType,
             filename: filename,
             byteSize: byteSize,
+            width: nil,
+            height: nil,
+            durationMillis: nil,
+            previewAssetID: nil,
             to: conversationID
         ) ?? false
     }
 
     func editMessage(messageID: String, text: String, in conversationID: String) async -> Bool {
-        await authManager?.editIMMessage(messageID: messageID, text: text, in: conversationID) ?? false
+        await provider?.editIMMessage(messageID: messageID, text: text, in: conversationID) ?? false
     }
 
     func renameConversation(_ conversationID: String, title: String) async -> Bool {
-        await authManager?.renameIMConversation(conversationID, title: title) ?? false
+        await provider?.renameIMConversation(conversationID, title: title) ?? false
     }
 
     func updateConversationMetadata(
@@ -193,7 +297,7 @@ final class IMConversationRuntimeStore: ObservableObject {
         avatarPreset: IMConversationAvatarPreset?,
         muteAll: Bool? = nil
     ) async -> Bool {
-        await authManager?.updateIMConversationMetadata(
+        await provider?.updateIMConversationMetadata(
             conversationID,
             title: title,
             notice: notice,
@@ -207,7 +311,7 @@ final class IMConversationRuntimeStore: ObservableObject {
         role: IMConversationMemberRole,
         in conversationID: String
     ) async -> Bool {
-        await authManager?.updateIMConversationMemberRole(
+        await provider?.updateIMConversationMemberRole(
             memberUserID: memberUserID,
             role: role,
             in: conversationID
@@ -215,88 +319,103 @@ final class IMConversationRuntimeStore: ObservableObject {
     }
 
     func removeConversationMember(memberUserID: UUID, from conversationID: String) async -> Bool {
-        await authManager?.removeIMConversationMember(memberUserID: memberUserID, from: conversationID) ?? false
+        await provider?.removeIMConversationMember(memberUserID: memberUserID, from: conversationID) ?? false
     }
 
     func loadConversationMembers(_ conversationID: String, query: String = "") async {
-        await authManager?.loadIMConversationMembers(conversationID: conversationID, query: query)
+        await provider?.loadIMConversationMembers(conversationID: conversationID, query: query)
     }
 
     func loadMoreConversationMembers(_ conversationID: String) async {
-        await authManager?.loadMoreIMConversationMembers(conversationID: conversationID)
+        await provider?.loadMoreIMConversationMembers(conversationID: conversationID)
     }
 
     func loadReceiptSummary(_ conversationID: String) async {
-        await authManager?.loadIMReceiptSummary(conversationID: conversationID)
+        await provider?.loadIMReceiptSummary(conversationID: conversationID)
+    }
+
+    func searchMessages(
+        in conversationID: String,
+        query: String,
+        cursor: String? = nil,
+        limit: Int? = nil
+    ) async -> IMConversationMessageSearchPageResponseBody? {
+        await provider?.searchIMConversationMessages(
+            in: conversationID,
+            query: query,
+            cursor: cursor,
+            limit: limit
+        )
     }
 
     func updateMyMemberNickname(_ conversationID: String, memberNickname: String?) async -> Bool {
-        await authManager?.updateMyIMMemberNickname(conversationID: conversationID, memberNickname: memberNickname) ?? false
+        await provider?.updateMyIMMemberNickname(conversationID: conversationID, memberNickname: memberNickname) ?? false
     }
 
     func leaveConversation(_ conversationID: String) async -> Bool {
-        await authManager?.leaveIMConversation(conversationID) ?? false
+        await provider?.leaveIMConversation(conversationID) ?? false
     }
 
     func fetchGroupInvites(conversationID: String) async -> [IMGroupInviteResponseBody] {
-        await authManager?.fetchIMGroupInvites(conversationID: conversationID) ?? []
+        await provider?.fetchIMGroupInvites(conversationID: conversationID) ?? []
     }
 
     func createGroupInvite(conversationID: String, expiresInSeconds: Int? = nil) async -> IMGroupInviteResponseBody? {
-        await authManager?.createIMGroupInvite(conversationID: conversationID, expiresInSeconds: expiresInSeconds)
+        await provider?.createIMGroupInvite(conversationID: conversationID, expiresInSeconds: expiresInSeconds)
     }
 
     func revokeGroupInvite(conversationID: String, token: String) async -> Bool {
-        await authManager?.revokeIMGroupInvite(conversationID: conversationID, token: token) ?? false
+        await provider?.revokeIMGroupInvite(conversationID: conversationID, token: token) ?? false
     }
 
     func blockUser(_ userID: UUID, reason: String? = nil) async -> Bool {
-        await authManager?.blockUser(userID, reason: reason) ?? false
+        await provider?.blockUser(userID, reason: reason) ?? false
     }
 
     func unblockUser(_ userID: UUID) async -> Bool {
-        await authManager?.unblockUser(userID) ?? false
+        await provider?.unblockUser(userID) ?? false
     }
 
     func reportUser(_ userID: UUID, conversationID: String) async -> Bool {
-        await authManager?.createReport(
+        await provider?.createReport(
             targetType: "user",
             targetID: userID.uuidString,
             conversationID: UUID(uuidString: conversationID),
+            messageID: nil,
             reason: "inappropriate_behavior",
             detail: nil
         ) ?? false
     }
 
     func sendDirectConversationFriendRequest(conversationID: String) async {
-        _ = await authManager?.sendDirectConversationFriendRequest(conversationID: conversationID)
+        _ = await provider?.sendDirectConversationFriendRequest(conversationID: conversationID)
     }
 
     func acceptDirectConversationFriendRequest(conversationID: String) async {
-        _ = await authManager?.acceptDirectConversationFriendRequest(conversationID: conversationID)
+        _ = await provider?.acceptDirectConversationFriendRequest(conversationID: conversationID, remark: nil)
     }
 
     func declineDirectConversationFriendRequest(conversationID: String) async {
-        _ = await authManager?.declineDirectConversationFriendRequest(conversationID: conversationID)
+        _ = await provider?.declineDirectConversationFriendRequest(conversationID: conversationID)
     }
 
     func cancelDirectConversationFriendRequest(conversationID: String) async {
-        _ = await authManager?.cancelDirectConversationFriendRequest(conversationID: conversationID)
+        _ = await provider?.cancelDirectConversationFriendRequest(conversationID: conversationID)
     }
 
     func setStatusMessage(_ message: String) {
-        authManager?.imConversationStore.setStatusMessage(message)
+        provider?.imConversationStore.setStatusMessage(message)
     }
 
     func persistConversationCacheSoon() {
-        authManager?.persistIMConversationCacheSoon()
+        provider?.persistIMConversationCacheSoon()
     }
 
     func startBackgroundMediaDownload(_ asset: IMMediaAsset, to destinationURL: URL) async throws {
-        try await authManager?.startBackgroundIMMediaDownload(asset, to: destinationURL)
+        try await provider?.startBackgroundIMMediaDownload(asset, to: destinationURL)
     }
 
     func cancelBackgroundMediaDownload(_ reference: IMMessageBackgroundTransferReference) async {
-        await authManager?.cancelBackgroundIMMediaDownload(reference)
+        await provider?.cancelBackgroundIMMediaDownload(reference)
     }
 }

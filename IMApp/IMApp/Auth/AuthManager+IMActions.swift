@@ -4,7 +4,7 @@ import IMClientKit
 @MainActor
 extension AuthManager {
     func reconnectIMConnection() async {
-        guard case .signedIn = phase else {
+        guard currentUser != nil else {
             return
         }
 
@@ -14,48 +14,15 @@ extension AuthManager {
 
 
     func blockUser(_ userID: UUID, reason: String? = nil) async -> Bool {
-        do {
-            let block = try await sessionClient.blockUser(userID: userID, reason: reason)
-            blockedUsers.removeAll { $0.blockedUserID == block.blockedUserID }
-            blockedUsers.append(block)
-            blockedUsers.sort { $0.createdAt > $1.createdAt }
-            markServerOnline()
-            return true
-        } catch {
-            await handleIMDataRequestError(error)
-            return false
-        }
+        await contactRuntimeController.blockUser(userID, reason: reason)
     }
 
     func unblockUser(_ userID: UUID) async -> Bool {
-        do {
-            _ = try await sessionClient.unblockUser(userID: userID)
-            blockedUsers.removeAll { $0.blockedUserID == userID }
-            markServerOnline()
-            return true
-        } catch {
-            await handleIMDataRequestError(error)
-            return false
-        }
+        await contactRuntimeController.unblockUser(userID)
     }
 
     func loadBlockedUsers() async {
-        guard currentUser != nil else {
-            return
-        }
-
-        isLoadingBlockedUsers = true
-        defer {
-            isLoadingBlockedUsers = false
-        }
-
-        do {
-            blockedUsers = try await sessionClient.fetchBlocks()
-                .sorted { $0.createdAt > $1.createdAt }
-            markServerOnline()
-        } catch {
-            await handleIMDataRequestError(error)
-        }
+        await contactRuntimeController.loadBlockedUsers()
     }
 
     func createReport(
@@ -95,7 +62,7 @@ extension AuthManager {
     }
 
     func appDidBecomeActive() async {
-        guard case .signedIn = phase else {
+        guard currentUser != nil else {
             return
         }
 
@@ -109,11 +76,6 @@ extension AuthManager {
     }
 
     func markIncomingContactRequestsSeen() {
-        if let latestIncomingContactRequestAt {
-            lastSeenIncomingContactRequestAt = latestIncomingContactRequestAt
-        }
-
-        recomputeIncomingContactRequestUnreadState()
-        scheduleContactStateCachePersist()
+        contactRuntimeController.markIncomingRequestsSeen()
     }
 }

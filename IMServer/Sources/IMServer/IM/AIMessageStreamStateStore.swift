@@ -1,5 +1,7 @@
 import Vapor
 
+// Facade for AI stream state. Keep transaction details in the read/write/repair
+// stores so provider, policy, and fanout code cannot bypass the state boundary.
 struct AIMessageStreamPublishEnvelope: Sendable {
     let response: IMMessageStreamResponse
     let recipients: [UUID]

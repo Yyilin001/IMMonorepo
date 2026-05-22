@@ -2,8 +2,21 @@ import SwiftUI
 import IMClientKit
 
 struct ContactsView: View {
-    @EnvironmentObject private var authManager: AuthManager
-    @ObservedObject var contactStore: ContactStore
+    let contactStore: ContactStore
+    let currentUserID: UUID?
+    let reloadContacts: () async -> Void
+    let reloadContactRequests: () async -> Void
+    let loadBlockedUsers: () async -> Void
+    let markIncomingContactRequestsSeen: () -> Void
+    let sendContactRequest: (String, String, String) async -> Bool
+    let acceptContactRequest: (UUID, String) async -> Bool
+    let declineContactRequest: (UUID) async -> Bool
+    let cancelContactRequest: (UUID) async -> Bool
+    let updateContactRemark: (UUID, String) async -> Bool
+    let deleteContact: (UUID) async -> Bool
+    let blockUser: (UUID) async -> Bool
+    let unblockUser: (UUID) async -> Bool
+    let createDirectConversation: (String) async -> String?
 
     let onOpenConversation: (String) -> Void
 
@@ -99,26 +112,26 @@ struct ContactsView: View {
         .background(Color(.systemGroupedBackground))
         .task {
             if contactStore.contacts.isEmpty {
-                await authManager.reloadContacts()
+                await reloadContacts()
             }
             if contactStore.contactRequests.isEmpty {
-                await authManager.reloadContactRequests()
+                await reloadContactRequests()
             }
             if contactStore.blockedUsers.isEmpty {
-                await authManager.loadBlockedUsers()
+                await loadBlockedUsers()
             }
         }
         .refreshable {
-            await authManager.reloadContacts()
-            await authManager.reloadContactRequests()
-            await authManager.loadBlockedUsers()
+            await reloadContacts()
+            await reloadContactRequests()
+            await loadBlockedUsers()
         }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
                     Task {
-                        await authManager.reloadContacts()
-                        await authManager.reloadContactRequests()
+                        await reloadContacts()
+                        await reloadContactRequests()
                     }
                 } label: {
                     Image(systemName: "arrow.clockwise")
@@ -140,26 +153,46 @@ struct ContactsView: View {
         }
         .sheet(isPresented: $isPresentingAddContact) {
             NavigationStack {
-                SendContactRequestSheet()
+                SendContactRequestSheet(
+                    contactStore: contactStore,
+                    sendContactRequest: sendContactRequest
+                )
             }
             .presentationDetents([.medium])
         }
         .sheet(isPresented: $isPresentingNewContactRequests) {
             NavigationStack {
-                NewContactRequestsView(contactStore: contactStore, onOpenConversation: onOpenConversation)
+                NewContactRequestsView(
+                    contactStore: contactStore,
+                    currentUserID: currentUserID,
+                    markIncomingContactRequestsSeen: markIncomingContactRequestsSeen,
+                    reloadContactRequests: reloadContactRequests,
+                    acceptContactRequest: acceptContactRequest,
+                    declineContactRequest: declineContactRequest,
+                    cancelContactRequest: cancelContactRequest,
+                    createDirectConversation: createDirectConversation,
+                    onOpenConversation: onOpenConversation
+                )
             }
             .presentationDetents([.large])
         }
         .sheet(isPresented: $isPresentingBlockedUsers) {
             NavigationStack {
-                BlockedUsersSheet(contactStore: contactStore)
-                    .environmentObject(authManager)
+                BlockedUsersSheet(
+                    contactStore: contactStore,
+                    loadBlockedUsers: loadBlockedUsers,
+                    unblockUser: unblockUser
+                )
             }
             .presentationDetents([.medium, .large])
         }
         .sheet(item: $editingContact) { contact in
             NavigationStack {
-                EditContactRemarkSheet(contact: contact)
+                EditContactRemarkSheet(
+                    contactStore: contactStore,
+                    contact: contact,
+                    updateContactRemark: updateContactRemark
+                )
             }
             .presentationDetents([.medium])
         }
@@ -183,14 +216,14 @@ struct ContactsView: View {
 
     private var incomingPendingContactRequests: [ContactRequestResponseBody] {
         contactStore.incomingPendingContactRequests(
-            currentUserID: authManager.currentUser?.id,
+            currentUserID: currentUserID,
             sort: sortContactRequestsNewestFirst
         )
     }
 
     private var outgoingPendingContactRequests: [ContactRequestResponseBody] {
         contactStore.outgoingPendingContactRequests(
-            currentUserID: authManager.currentUser?.id,
+            currentUserID: currentUserID,
             sort: sortContactRequestsNewestFirst
         )
     }
@@ -210,7 +243,7 @@ struct ContactsView: View {
     private func startConversation(with contact: ContactResponseBody) {
         pendingConversationContactID = contact.id
         Task {
-            let conversationID = await authManager.createDirectIMConversation(memberEmail: contact.email)
+            let conversationID = await createDirectConversation(contact.email)
             pendingConversationContactID = nil
             if let conversationID {
                 onOpenConversation(conversationID)
@@ -220,13 +253,13 @@ struct ContactsView: View {
 
     private func delete(_ contact: ContactResponseBody) {
         Task {
-            _ = await authManager.deleteContact(contact.id)
+            _ = await deleteContact(contact.id)
         }
     }
 
     private func block(_ contact: ContactResponseBody) {
         Task {
-            _ = await authManager.blockUser(contact.id)
+            _ = await blockUser(contact.id)
         }
     }
 }

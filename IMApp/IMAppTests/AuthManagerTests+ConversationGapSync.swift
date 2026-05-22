@@ -532,7 +532,7 @@ extension AuthManagerTests {
         await manager.openIMConversation(conversationID.uuidString)
         try? await Task.sleep(for: .milliseconds(50))
 
-        #expect(manager.phase == .signedIn(Self.user))
+        #expect(manager.sessionStore.authRouteState == .signedIn(Self.user, availability: .offline(message: "请求超时，请稍后重试。")))
         #expect(manager.currentUser?.id == Self.user.id)
         #expect(manager.imConversationStore.selectedConversation?.messages.count == 1)
         #expect(manager.imConversationStore.selectedConversation?.messages.first?.text == "来自历史接口")
@@ -1180,14 +1180,14 @@ extension AuthManagerTests {
         }
 
         await manager.logout()
-        #expect(manager.phase == .signedOut(message: nil))
+        #expect(manager.sessionStore.authRouteState == .signedOut(nil))
         #expect(manager.imConversationStore.conversations.isEmpty)
 
         await gate.resume()
         await openTask.value
         try await Task.sleep(for: .milliseconds(50))
 
-        #expect(manager.phase == .signedOut(message: nil))
+        #expect(manager.sessionStore.authRouteState == .signedOut(nil))
         #expect(manager.imConversationStore.conversations.isEmpty)
     }
 

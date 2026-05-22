@@ -11,6 +11,76 @@ struct AuthManagerTests {
         email: "manager@example.com"
     )
 
+    @Test func loginSuccessSetsOnlineAuthRouteState() async {
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+
+        let manager = makeManager(transport: transport)
+        await manager.login(email: Self.user.email, password: "password123")
+
+        #expect(manager.sessionStore.authRouteState == .signedIn(Self.user, availability: .online))
+        #expect(manager.sessionStore.authOperationState == .idle)
+        #expect(manager.sessionStore.authNotice == nil)
+    }
+
+    @Test func registerSuccessSetsOnlineAuthRouteState() async {
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/register"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+
+        let manager = makeManager(transport: transport)
+        await manager.register(email: Self.user.email, password: "password123")
+
+        #expect(manager.sessionStore.authRouteState == .signedIn(Self.user, availability: .online))
+        #expect(manager.sessionStore.authOperationState == .idle)
+        #expect(manager.sessionStore.authNotice == nil)
+    }
+
+    @Test func restoreOfflineSetsSignedInOfflineAuthRouteState() async throws {
+        let tokenStore = InMemoryTokenStore()
+        let userCache = InMemoryUserSessionCache()
+        try tokenStore.save("refresh-1", for: "refresh_token")
+        userCache.save(Self.user)
+
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/refresh"),
+                 ("GET", "/api/contacts"),
+                 ("GET", "/api/contact-requests"),
+                 ("GET", "/api/blocks"):
+                throw URLError(.notConnectedToInternet)
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+
+        let manager = AuthManager(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: transport),
+            tokenStore: tokenStore,
+            userCache: userCache,
+            shouldRestoreSession: false
+        )
+
+        await manager.restoreSession()
+
+        #expect(manager.sessionStore.authRouteState == .signedIn(
+            Self.user,
+            availability: .offline(message: "当前无法连接服务器。")
+        ))
+        #expect(manager.sessionStore.authOperationState == .idle)
+    }
+
     @Test func loadSessionsMarksServerOfflineWhenConnectivityFails() async {
         let transport = MockHTTPTransport { request in
             switch (request.httpMethod, request.url?.path) {
@@ -84,7 +154,7 @@ struct AuthManagerTests {
         await gate.resume()
         try? await Task.sleep(for: .milliseconds(50))
 
-        #expect(manager.phase == .signedIn(Self.user))
+        #expect(manager.sessionStore.authRouteState == .signedIn(Self.user, availability: .online))
         #expect(manager.currentUser?.email == Self.user.email)
     }
 
@@ -109,7 +179,14 @@ struct AuthManagerTests {
         await manager.login(email: Self.user.email, password: "password123")
         await manager.loadSessions()
 
-        #expect(manager.phase == .signedOut(message: "当前登录已失效。"))
+        #expect(manager.sessionStore.authRouteState == .signedOut(AuthNotice(
+            code: .sessionRevoked,
+            message: "当前登录已失效。",
+            severity: .error,
+            isRecoverable: false
+        )))
+        #expect(manager.sessionStore.authNotice?.code == .sessionRevoked)
+        #expect(manager.sessionStore.authOperationState == .idle)
         #expect(manager.serverStatus == .unknown)
         #expect(manager.currentUser == nil)
         #expect(manager.sessions.isEmpty)
@@ -155,7 +232,12 @@ struct AuthManagerTests {
         await manager.login(email: Self.user.email, password: "password123")
         await manager.signOut(sessionID: targetSessionID, isCurrent: false)
 
-        #expect(manager.phase == .signedOut(message: "当前设备已被撤销。"))
+        #expect(manager.sessionStore.authRouteState == .signedOut(AuthNotice(
+            code: .forbidden,
+            message: "当前设备已被撤销。",
+            severity: .error,
+            isRecoverable: false
+        )))
         #expect(manager.serverStatus == .unknown)
         #expect(manager.currentUser == nil)
     }
@@ -174,7 +256,14 @@ struct AuthManagerTests {
         let manager = makeManager(transport: transport)
         await manager.login(email: Self.user.email, password: "password123")
 
-        #expect(manager.phase == .signedOut(message: "当前无法连接服务器。"))
+        #expect(manager.sessionStore.authRouteState == .signedOut(AuthNotice(
+            code: .offline,
+            message: "当前无法连接服务器。",
+            severity: .warning,
+            isRecoverable: true
+        )))
+        #expect(manager.sessionStore.authNotice?.code == .offline)
+        #expect(manager.sessionStore.authOperationState == .idle)
         #expect(manager.serverStatus == .offline(message: "当前无法连接服务器。"))
     }
 
@@ -192,7 +281,14 @@ struct AuthManagerTests {
         let manager = makeManager(transport: transport)
         await manager.register(email: Self.user.email, password: "password123")
 
-        #expect(manager.phase == .signedOut(message: "当前无法连接服务器。"))
+        #expect(manager.sessionStore.authRouteState == .signedOut(AuthNotice(
+            code: .offline,
+            message: "当前无法连接服务器。",
+            severity: .warning,
+            isRecoverable: true
+        )))
+        #expect(manager.sessionStore.authNotice?.code == .offline)
+        #expect(manager.sessionStore.authOperationState == .idle)
         #expect(manager.serverStatus == .offline(message: "当前无法连接服务器。"))
     }
 
@@ -241,7 +337,12 @@ struct AuthManagerTests {
         )
         try? await Task.sleep(for: .milliseconds(50))
 
-        #expect(manager.phase == .signedOut(message: "请重新登录。"))
+        #expect(manager.sessionStore.authRouteState == .signedOut(AuthNotice(
+            code: .unknown,
+            message: "请重新登录。",
+            severity: .error,
+            isRecoverable: false
+        )))
         #expect(manager.serverStatus == .unknown)
         #expect(manager.currentUser == nil)
     }

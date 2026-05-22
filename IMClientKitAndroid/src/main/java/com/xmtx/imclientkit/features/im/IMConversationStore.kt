@@ -6,6 +6,9 @@ import kotlinx.coroutines.flow.update
 import java.time.Instant
 import java.util.UUID
 
+// StateFlow read model for Android IM. Runtime code merges server summaries,
+// messages, read state, outgoing delivery, cache snapshots, and AI stream events
+// here so Compose screens do not need protocol or persistence knowledge.
 data class ConversationListState(
     val conversations: List<IMConversation> = emptyList(),
     val selectedConversationID: String? = null,

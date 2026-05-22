@@ -1,6 +1,9 @@
-import Combine
 import Foundation
+import Observation
 
+// Main-actor client read model for IM state. Runtime controllers feed this store
+// with HTTP/TCP/cache events; SwiftUI should observe the merged result instead
+// of reimplementing sync, read, outgoing, or stream merge rules.
 public struct IMActiveMessageStreamTarget: Equatable, Hashable, Sendable {
     public let conversationID: String
     public let messageID: String
@@ -14,23 +17,24 @@ public struct IMActiveMessageStreamTarget: Equatable, Hashable, Sendable {
 }
 
 @MainActor
-public final class IMConversationStore: ObservableObject {
-    @Published public internal(set) var conversations: [IMConversation] = []
-    @Published public internal(set) var selectedConversationID: String?
-    @Published public internal(set) var statusMessage: String?
-    @Published public internal(set) var isLoadingConversations = false
-    @Published public internal(set) var conversationSummaryNextCursor: String?
-    @Published public internal(set) var hasMoreConversationSummaries = false
-    @Published public internal(set) var isLoadingMoreConversationSummaries = false
-    @Published public internal(set) var isLoadingMembers = false
-    @Published public internal(set) var memberPageStates: [String: IMConversationMemberPageState] = [:]
-    @Published public internal(set) var receiptSummaries: [String: IMConversationReceiptSummaryResponseBody] = [:]
-    @Published public internal(set) var isLoadingMessages = false
-    @Published public internal(set) var searchText = ""
-    @Published public internal(set) var replyJumpConversationID: String?
-    @Published public internal(set) var replyJumpTargetMessageID: String?
-    @Published public internal(set) var replyJumpMatchedMessageID: String?
-    @Published public internal(set) var replyJumpState: IMReplyJumpState = .idle
+@Observable
+public final class IMConversationStore {
+    public internal(set) var conversations: [IMConversation] = []
+    public internal(set) var selectedConversationID: String?
+    public internal(set) var statusMessage: String?
+    public internal(set) var isLoadingConversations = false
+    public internal(set) var conversationSummaryNextCursor: String?
+    public internal(set) var hasMoreConversationSummaries = false
+    public internal(set) var isLoadingMoreConversationSummaries = false
+    public internal(set) var isLoadingMembers = false
+    public internal(set) var memberPageStates: [String: IMConversationMemberPageState] = [:]
+    public internal(set) var receiptSummaries: [String: IMConversationReceiptSummaryResponseBody] = [:]
+    public internal(set) var isLoadingMessages = false
+    public internal(set) var searchText = ""
+    public internal(set) var replyJumpConversationID: String?
+    public internal(set) var replyJumpTargetMessageID: String?
+    public internal(set) var replyJumpMatchedMessageID: String?
+    public internal(set) var replyJumpState: IMReplyJumpState = .idle
 
     let listReadModel = ConversationListReadModel()
     private let conversationListStore = ConversationListStore()
@@ -248,6 +252,7 @@ public final class IMConversationStore: ObservableObject {
         unreadCount: Int,
         for conversationID: String
     ) {
+        let hasLatestLoadedServerSequence = latestLoadedServerSequence(for: conversationID) != nil
         conversationListStore.applyServerSummaryReadState(
             lastReadSequence: lastReadSequence,
             unreadCount: unreadCount,
@@ -260,7 +265,8 @@ public final class IMConversationStore: ObservableObject {
                 previousServerUnreadCount: previousUnread,
                 previousLocalUnreadDelta: previousDelta,
                 updatedServerLastReadSequence: updatedLastRead,
-                updatedServerUnreadCount: updatedUnread
+                updatedServerUnreadCount: updatedUnread,
+                hasLatestLoadedServerSequence: hasLatestLoadedServerSequence
             )
         }
     }
@@ -1750,7 +1756,8 @@ public final class IMConversationStore: ObservableObject {
         previousServerUnreadCount: Int,
         previousLocalUnreadDelta: Int,
         updatedServerLastReadSequence: UInt64,
-        updatedServerUnreadCount: Int
+        updatedServerUnreadCount: Int,
+        hasLatestLoadedServerSequence: Bool
     ) -> Int {
         guard previousLocalUnreadDelta > 0 else {
             return 0
@@ -1760,7 +1767,7 @@ public final class IMConversationStore: ObservableObject {
             return 0
         }
 
-        guard latestLoadedServerSequence(for: conversationID) != nil else {
+        guard hasLatestLoadedServerSequence else {
             return previousLocalUnreadDelta
         }
 

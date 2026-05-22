@@ -1,6 +1,6 @@
-import Combine
 import Foundation
 import IMClientKit
+import Observation
 
 @MainActor
 protocol ProbeManagerDelegate: AnyObject {
@@ -9,34 +9,41 @@ protocol ProbeManagerDelegate: AnyObject {
 }
 
 @MainActor
-final class ProbeManager: ObservableObject {
-    @Published private(set) var isTrafficTestRunning = false
-    @Published private(set) var trafficTestStatus = "未开始"
-    @Published private(set) var trafficTestSuccessCount = 0
-    @Published private(set) var trafficTestRateLimitedCount = 0
-    @Published private(set) var trafficTestFailureCount = 0
-    @Published private(set) var trafficTestLastRequestAt: Date?
+@Observable
+final class ProbeManager {
+    private(set) var isTrafficTestRunning = false
+    private(set) var trafficTestStatus = "未开始"
+    private(set) var trafficTestSuccessCount = 0
+    private(set) var trafficTestRateLimitedCount = 0
+    private(set) var trafficTestFailureCount = 0
+    private(set) var trafficTestLastRequestAt: Date?
 
-    @Published private(set) var isConcurrentTestRunning = false
-    @Published private(set) var concurrentTestStatus = "未开始"
-    @Published private(set) var concurrentTestSuccessCount = 0
-    @Published private(set) var concurrentTestRateLimitedCount = 0
-    @Published private(set) var concurrentTestFailureCount = 0
-    @Published private(set) var concurrentTestLastRunAt: Date?
+    private(set) var isConcurrentTestRunning = false
+    private(set) var concurrentTestStatus = "未开始"
+    private(set) var concurrentTestSuccessCount = 0
+    private(set) var concurrentTestRateLimitedCount = 0
+    private(set) var concurrentTestFailureCount = 0
+    private(set) var concurrentTestLastRunAt: Date?
 
-    @Published private(set) var isLoadTestRunning = false
-    @Published private(set) var loadTestStatus = "未开始"
-    @Published private(set) var loadTestSuccessCount = 0
-    @Published private(set) var loadTestRateLimitedCount = 0
-    @Published private(set) var loadTestFailureCount = 0
-    @Published private(set) var loadTestLastRequestAt: Date?
+    private(set) var isLoadTestRunning = false
+    private(set) var loadTestStatus = "未开始"
+    private(set) var loadTestSuccessCount = 0
+    private(set) var loadTestRateLimitedCount = 0
+    private(set) var loadTestFailureCount = 0
+    private(set) var loadTestLastRequestAt: Date?
 
+    @ObservationIgnored
     weak var delegate: (any ProbeManagerDelegate)?
 
+    @ObservationIgnored
     private let runner: ProbeRunner
+    @ObservationIgnored
     private var concurrentTestTask: Task<Void, Never>?
+    @ObservationIgnored
     private var concurrentTestRunID: UInt64 = 0
+    @ObservationIgnored
     private var trafficTestTask: Task<Void, Never>?
+    @ObservationIgnored
     private var loadTestTask: Task<Void, Never>?
 
     init(sessionClient: SessionClient) {

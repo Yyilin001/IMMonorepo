@@ -1,6 +1,9 @@
 import Foundation
 import IMClientKit
 
+// App-level IM facade. It preserves the SwiftUI-facing API while delegating
+// connection, gap sync, read reporting, queued flush, media, and AI recovery to
+// coordinators behind this boundary.
 @MainActor
 final class ConversationRuntimeController {
     let sessionClient: SessionClient

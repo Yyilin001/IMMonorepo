@@ -3,6 +3,8 @@ import Foundation
 import SQLKit
 import Vapor
 
+// Maintains per-user conversation summaries from canonical events. This is a
+// read-model projection layer; command behavior belongs in conversation services.
 extension IMConversationSummaryProjectionService {
     func applyMessageCreated(
         conversationID: UUID,

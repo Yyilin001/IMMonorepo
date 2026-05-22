@@ -6,7 +6,7 @@ import Testing
 extension AuthManagerTests {
     @Test func appSessionStoreResetPreservesSignedOutBoundary() {
         let store = AppSessionStore()
-        store.phase = .signedIn(Self.user)
+        store.setSignedIn(Self.user)
         store.isBusy = true
         store.isLoadingSessions = true
         store.sessionsMessage = "loaded"
@@ -16,7 +16,12 @@ extension AuthManagerTests {
 
         store.resetForSignedOut(message: "signed out")
 
-        #expect(store.phase == .signedOut(message: "signed out"))
+        #expect(store.authRouteState == .signedOut(AuthNotice(
+            code: .unknown,
+            message: "signed out",
+            severity: .error,
+            isRecoverable: false
+        )))
         #expect(store.currentUser == nil)
         #expect(store.sessions.isEmpty)
         #expect(store.sessionsMessage == nil)
@@ -141,12 +146,12 @@ extension AuthManagerTests {
             createdAt: nil
         )
 
-        manager.phase = .signedIn(Self.user)
+        manager.sessionStore.setSignedIn(Self.user)
         manager.serverStatus = .online
         manager.contacts = [contact]
         manager.unseenIncomingContactRequestCount = 2
 
-        #expect(manager.sessionStore.phase == .signedIn(Self.user))
+        #expect(manager.sessionStore.authRouteState == .signedIn(Self.user, availability: .online))
         #expect(manager.sessionStore.serverStatus == .online)
         #expect(manager.contactStore.contacts == [contact])
         #expect(manager.contactStore.unseenIncomingContactRequestCount == 2)

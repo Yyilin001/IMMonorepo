@@ -7,7 +7,7 @@ import CoreImage
 
 struct IMGroupInviteManagementSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var submitter = IMAsyncSubmitter()
+    @State private var submitter = IMAsyncSubmitter()
 
     let conversationID: String
     let loadInvites: () async -> [IMGroupInviteResponseBody]
@@ -126,7 +126,7 @@ struct IMGroupInviteManagementSheet: View {
 
 struct IMMemberNicknameSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var submitter = IMAsyncSubmitter()
+    @State private var submitter = IMAsyncSubmitter()
 
     let initialNickname: String
     let onSubmit: (String?) async -> Bool
@@ -225,4 +225,3 @@ struct IMInviteQRCodeView: View {
     }
 #endif
 }
-
