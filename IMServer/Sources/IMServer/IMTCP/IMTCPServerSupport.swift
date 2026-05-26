@@ -23,7 +23,7 @@ struct IMTCPConfiguration: Sendable {
             enabled: enabled,
             host: Environment.get("IM_TCP_HOST") ?? "0.0.0.0",
             port: Environment.get("IM_TCP_PORT").flatMap(Int.init(_:)) ?? 9000,
-            protocolVersion: Environment.get("IM_TCP_PROTOCOL_VERSION").flatMap(Int.init(_:)) ?? 1,
+            protocolVersion: Environment.get("IM_TCP_PROTOCOL_VERSION").flatMap(Int.init(_:)) ?? 2,
             authTimeout: Environment.get("IM_TCP_AUTH_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 10,
             heartbeatInterval: Environment.get("IM_TCP_HEARTBEAT_INTERVAL").flatMap(TimeInterval.init(_:)) ?? 30,
             idleTimeout: Environment.get("IM_TCP_IDLE_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 90,
@@ -43,7 +43,7 @@ final class IMConnectionControl: @unchecked Sendable {
         self.channel = channel
     }
 
-    func sendPacket<Payload: Codable & Sendable>(
+    func sendPacket<Payload: Sendable>(
         type: IMTCPPacketType,
         requestID: UUID?,
         payload: Payload
@@ -242,7 +242,7 @@ actor IMConnectionRegistry {
         sendPacket(type: .contactEvent, payload: payload, toUserIDs: [userID], requestID: requestID)
     }
 
-    private func sendPacket<Payload: Codable & Sendable>(
+    private func sendPacket<Payload: Sendable>(
         type: IMTCPPacketType,
         payload: Payload,
         toUserIDs userIDs: [UUID],
@@ -335,7 +335,7 @@ final class IMTCPServerLifecycle: LifecycleHandler, @unchecked Sendable {
                 .flatMap {
                     channel.pipeline.addHandler(
                     ByteToMessageHandler(
-                        IMTCPLineFrameDecoder(maxFrameBytes: configuration.maxFrameBytes)
+                        IMTCPFrameDecoder(maxFrameBytes: configuration.maxFrameBytes)
                     )
                     )
                 }

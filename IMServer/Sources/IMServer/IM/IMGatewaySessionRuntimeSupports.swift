@@ -120,10 +120,13 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         toUserIDs userIDs: [UUID],
         requestID: UUID?
     ) async {
+        guard let packetBase64 = packetBase64(type: .message, requestID: requestID, payload: payload) else {
+            return
+        }
         await postOrLog(
             path: "/internal/gateway/realtime/message",
             payload: GatewayRelayMessageRequest(
-                payload: payload,
+                packetBase64: packetBase64,
                 recipientUserIDs: userIDs,
                 requestID: requestID
             )
@@ -135,10 +138,13 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         toUserID userID: UUID,
         requestID: UUID?
     ) async {
+        guard let packetBase64 = packetBase64(type: .conversationEvent, requestID: requestID, payload: payload) else {
+            return
+        }
         await postOrLog(
             path: "/internal/gateway/realtime/conversation-event",
             payload: GatewayRelayConversationEventRequest(
-                payload: payload,
+                packetBase64: packetBase64,
                 recipientUserID: userID,
                 requestID: requestID
             )
@@ -150,10 +156,13 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         toUserID userID: UUID,
         requestID: UUID?
     ) async {
+        guard let packetBase64 = packetBase64(type: .contactEvent, requestID: requestID, payload: payload) else {
+            return
+        }
         await postOrLog(
             path: "/internal/gateway/realtime/contact-event",
             payload: GatewayRelayContactEventRequest(
-                payload: payload,
+                packetBase64: packetBase64,
                 recipientUserID: userID,
                 requestID: requestID
             )
@@ -263,6 +272,27 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         }
 
         return try response.content.decode(Response.self)
+    }
+
+    private func packetBase64<Payload: Sendable>(
+        type: IMTCPPacketType,
+        requestID: UUID?,
+        payload: Payload
+    ) -> String? {
+        do {
+            return try IMTCPProtobufCodec.encode(type: type, requestID: requestID, payload: payload)
+                .base64EncodedString()
+        } catch {
+            app.logger.warning(
+                "Gateway relay packet encode failed",
+                metadata: [
+                    "node_id": .string(app.imNodeID),
+                    "packet_type": .string(type.rawValue),
+                    "error": .string(String(describing: error))
+                ]
+            )
+            return nil
+        }
     }
 }
 

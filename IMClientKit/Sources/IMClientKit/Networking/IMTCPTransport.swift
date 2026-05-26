@@ -6,23 +6,23 @@ public protocol IMTCPTransport: Sendable {
 }
 
 public struct IMTCPTransportConnection: Sendable {
-    public let lines: AsyncThrowingStream<String, Error>
+    public let frames: AsyncThrowingStream<Data, Error>
 
-    private let sendLineHandler: @Sendable (String) async throws -> Void
+    private let sendFrameHandler: @Sendable (Data) async throws -> Void
     private let disconnectHandler: @Sendable () async -> Void
 
     init(
-        lines: AsyncThrowingStream<String, Error>,
-        sendLine: @escaping @Sendable (String) async throws -> Void,
+        frames: AsyncThrowingStream<Data, Error>,
+        sendFrame: @escaping @Sendable (Data) async throws -> Void,
         disconnect: @escaping @Sendable () async -> Void
     ) {
-        self.lines = lines
-        self.sendLineHandler = sendLine
+        self.frames = frames
+        self.sendFrameHandler = sendFrame
         self.disconnectHandler = disconnect
     }
 
-    public func sendLine(_ line: String) async throws {
-        try await sendLineHandler(line)
+    public func sendFrame(_ frame: Data) async throws {
+        try await sendFrameHandler(frame)
     }
 
     public func disconnect() async {
@@ -57,16 +57,16 @@ private final class NWIMTCPConnectionBridge: @unchecked Sendable {
     private var isConnected = false
     private var isFinished = false
     private var incomingBuffer = Data()
-    private var lineContinuation: AsyncThrowingStream<String, Error>.Continuation?
+    private var frameContinuation: AsyncThrowingStream<Data, Error>.Continuation?
 
     init(connection: NWConnection) {
         self.connection = connection
     }
 
     public func open() async throws -> IMTCPTransportConnection {
-        let lines = AsyncThrowingStream<String, Error> { continuation in
+        let frames = AsyncThrowingStream<Data, Error> { continuation in
             lock.lock()
-            lineContinuation = continuation
+            frameContinuation = continuation
             lock.unlock()
         }
 
@@ -82,9 +82,9 @@ private final class NWIMTCPConnectionBridge: @unchecked Sendable {
         }
 
         return IMTCPTransportConnection(
-            lines: lines,
-            sendLine: { line in
-                try await self.send(line: line)
+            frames: frames,
+            sendFrame: { frame in
+                try await self.send(frame: frame)
             },
             disconnect: {
                 self.cancel()
@@ -145,33 +145,40 @@ private final class NWIMTCPConnectionBridge: @unchecked Sendable {
     private func consume(data: Data) {
         lock.lock()
         incomingBuffer.append(data)
-        let continuation = lineContinuation
+        let continuation = frameContinuation
 
-        while let newlineIndex = incomingBuffer.firstIndex(of: UInt8(ascii: "\n")) {
-            let lineData = incomingBuffer.prefix(upTo: newlineIndex)
-            incomingBuffer.removeSubrange(...newlineIndex)
-
-            let normalizedLineData: Data
-            if lineData.last == UInt8(ascii: "\r") {
-                normalizedLineData = Data(lineData.dropLast())
-            } else {
-                normalizedLineData = Data(lineData)
+        while incomingBuffer.count >= 4 {
+            let length = incomingBuffer.prefix(4).reduce(UInt32(0)) { partial, byte in
+                (partial << 8) | UInt32(byte)
             }
-
-            guard let line = String(data: normalizedLineData, encoding: .utf8) else {
+            if length > 64 * 1024 {
                 lock.unlock()
                 finish(with: IMTCPClientError.invalidPacket)
                 return
             }
-
-            continuation?.yield(line)
+            let frameLength = Int(length)
+            guard incomingBuffer.count >= 4 + frameLength else {
+                break
+            }
+            let frame = Data(incomingBuffer.dropFirst(4).prefix(frameLength))
+            incomingBuffer.removeSubrange(0..<(4 + frameLength))
+            continuation?.yield(frame)
         }
 
         lock.unlock()
     }
 
-    private func send(line: String) async throws {
-        let data = Data((line + "\n").utf8)
+    private func send(frame: Data) async throws {
+        guard frame.count <= Int(UInt32.max) else {
+            throw IMTCPClientError.invalidPacket
+        }
+        var data = Data()
+        let length = UInt32(frame.count)
+        data.append(UInt8((length >> 24) & 0xff))
+        data.append(UInt8((length >> 16) & 0xff))
+        data.append(UInt8((length >> 8) & 0xff))
+        data.append(UInt8(length & 0xff))
+        data.append(frame)
 
         guard currentConnectedState() else {
             throw IMTCPClientError.connectionClosed
@@ -218,8 +225,8 @@ private final class NWIMTCPConnectionBridge: @unchecked Sendable {
 
         isFinished = true
         isConnected = false
-        let continuation = lineContinuation
-        lineContinuation = nil
+        let continuation = frameContinuation
+        frameContinuation = nil
         lock.unlock()
 
         if let error {

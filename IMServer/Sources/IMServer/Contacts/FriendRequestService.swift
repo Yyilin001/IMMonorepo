@@ -301,6 +301,30 @@ struct FriendRequestResponse: Content, Equatable, Sendable {
     let updatedAt: Date?
     let respondedAt: Date?
 
+    init(
+        id: UUID,
+        requester: UserResponse,
+        addressee: UserResponse,
+        status: String,
+        message: String?,
+        requesterRemark: String?,
+        addresseeRemark: String?,
+        createdAt: Date?,
+        updatedAt: Date?,
+        respondedAt: Date?
+    ) {
+        self.id = id
+        self.requester = requester
+        self.addressee = addressee
+        self.status = status
+        self.message = message
+        self.requesterRemark = requesterRemark
+        self.addresseeRemark = addresseeRemark
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.respondedAt = respondedAt
+    }
+
     init(request: FriendRequest) throws {
         self.id = try request.requireID()
         self.requester = try request.requester.asResponse()

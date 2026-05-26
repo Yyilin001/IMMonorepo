@@ -4,21 +4,17 @@ import NIOPosix
 import Vapor
 
 enum IMTCPChannelWriter {
-    static func writePacket<Payload: Codable & Sendable>(
+    static func writePacket<Payload: Sendable>(
         type: IMTCPPacketType,
         requestID: UUID?,
         payload: Payload,
         on channel: any Channel
     ) {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-
         do {
-            let envelope = IMTCPPacketEnvelope(type: type, requestID: requestID, payload: payload)
-            let data = try encoder.encode(envelope)
-            var buffer = channel.allocator.buffer(capacity: data.count + 1)
+            let data = try IMTCPProtobufCodec.encode(type: type, requestID: requestID, payload: payload)
+            var buffer = channel.allocator.buffer(capacity: data.count + 4)
+            buffer.writeInteger(UInt32(data.count), endianness: .big)
             buffer.writeBytes(data)
-            buffer.writeInteger(UInt8(ascii: "\n"))
             channel.writeAndFlush(buffer, promise: nil)
         } catch {
             channel.close(promise: nil)
@@ -40,10 +36,9 @@ enum IMTCPChannelWriter {
     }
 }
 
-final class IMTCPLineFrameDecoder: ByteToMessageDecoder {
-    typealias InboundOut = String
+final class IMTCPFrameDecoder: ByteToMessageDecoder {
+    typealias InboundOut = Data
 
-    private let newline = UInt8(ascii: "\n")
     private let maxFrameBytes: Int
 
     init(maxFrameBytes: Int) {
@@ -51,24 +46,29 @@ final class IMTCPLineFrameDecoder: ByteToMessageDecoder {
     }
 
     func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
-        let readableBytes = buffer.readableBytesView
-
-        if readableBytes.count > maxFrameBytes {
+        guard let length: UInt32 = buffer.getInteger(at: buffer.readerIndex, endianness: .big) else {
+            return .needMoreData
+        }
+        guard length <= UInt32(maxFrameBytes) else {
             throw IMTCPProtocolError.frameTooLarge
         }
 
-        if let firstLine = readableBytes.firstIndex(of: self.newline).map({ readableBytes[..<$0] }) {
-            buffer.moveReaderIndex(forwardBy: firstLine.count + 1)
-            context.fireChannelRead(Self.wrapInboundOut(String(buffer: ByteBuffer(firstLine))))
-            return .continue
+        let frameLength = Int(length)
+        guard buffer.readableBytes >= 4 + frameLength else {
+            return .needMoreData
         }
 
-        return .needMoreData
+        buffer.moveReaderIndex(forwardBy: 4)
+        guard let bytes = buffer.readBytes(length: frameLength) else {
+            return .needMoreData
+        }
+        context.fireChannelRead(Self.wrapInboundOut(Data(bytes)))
+        return .continue
     }
 }
 
 final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = String
+    typealias InboundIn = Data
 
     private enum State {
         case waitingForAuth
@@ -119,10 +119,10 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let line = unwrapInboundIn(data)
+        let frame = unwrapInboundIn(data)
 
         do {
-            let packet = try decodePacket(from: line)
+            let packet = try IMTCPProtobufCodec.decode(frame)
             handle(packet: packet, channel: context.channel)
         } catch let error as IMTCPProtocolError {
             application.logger.debug(
@@ -403,17 +403,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func decodePacket(from line: String) throws -> IMTCPInboundPacket {
-        guard let data = line.data(using: .utf8) else {
-            throw IMTCPProtocolError.invalidEnvelope
-        }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(IMTCPInboundPacket.self, from: data)
-    }
-
-    private func writePacket<Payload: Codable & Sendable>(
+    private func writePacket<Payload: Sendable>(
         type: IMTCPPacketType,
         requestID: UUID?,
         payload: Payload,

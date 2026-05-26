@@ -1,219 +1,92 @@
-# IM TCP Protocol Draft
+# IM TCP Realtime Protocol v2
 
 ## Scope
 
-This draft keeps the current HTTP authentication model:
+HTTP still owns registration, login, refresh, logout, file upload, normal business DTOs, and database outbox JSON payloads. TCP only carries realtime IM presence, delivery, acknowledgements, and server push.
 
-- HTTP handles `register`, `login`, `refresh`, `logout`, and session management.
-- TCP handles long-lived IM presence, delivery, acknowledgements, and server push.
-
-The TCP layer never receives a refresh token. Clients authenticate the TCP connection
-with an HTTP-issued access token during the initial handshake.
+TCP clients authenticate with an HTTP-issued access token during the first packet. Refresh tokens are never sent over TCP.
 
 ## Transport
 
-- Protocol: plain TCP
-- Framing: newline-delimited JSON (`NDJSON`)
-- Encoding: UTF-8
+- Protocol: plain TCP behind the existing deployment boundary
+- Framing: 4-byte big-endian unsigned length prefix followed by one Protobuf packet
+- Encoding: `Protocol/im_realtime/v1/im_realtime.proto`
+- Current protocol version: `2`
 - Direction: full duplex
 
-Production deployments must not expose the plain TCP listener directly to the
-public internet. The listener must be reachable only through one of these
-deployment boundaries:
+Each frame is:
 
-- private VPC/subnet or loopback bind
-- VPN-protected network
-- load balancer TCP TLS termination
-- service mesh mTLS
+```text
+uint32_be payload_length
+payload_length bytes of im.realtime.v1.Packet
+```
 
-When the TCP listener binds to a non-private host in production, startup requires
-`IM_TCP_REQUIRES_TLS_TERMINATION=true` as an explicit deployment assertion. This
-does not add native TLS to the server protocol; it prevents accidentally running
-cleartext TCP on a public address.
+The server rejects frames larger than `IM_TCP_MAX_FRAME_BYTES`, closes malformed streams, closes idle connections after `IM_TCP_IDLE_TIMEOUT`, and sends `kick(protocol_error)` when possible.
 
-The server closes idle connections that stop sending frames for longer than
-`IM_TCP_IDLE_TIMEOUT`, sends `kick(protocol_error)` when possible, and removes
-the connection from registry and presence during close.
+## Packet Envelope
 
-Each frame is a single JSON object:
+Every payload is wrapped in `Packet`:
 
-```json
-{
-  "type": "auth",
-  "requestID": "8F8D7A17-635A-41E8-AF1D-74F77CF8981F",
-  "timestamp": "2026-04-22T11:00:00Z",
-  "payload": {}
+```proto
+message Packet {
+  optional string request_id = 1;
+  int64 timestamp_ms = 2;
+  uint32 protocol_version = 3;
+
+  oneof body {
+    AuthRequest auth = 10;
+    AuthAccepted auth_ok = 11;
+    AuthError auth_error = 12;
+    Heartbeat heartbeat = 20;
+    Heartbeat heartbeat_ack = 21;
+    MessagePayload message = 30;
+    Ack ack = 31;
+    ConversationEvent conversation_event = 40;
+    ContactEvent contact_event = 41;
+    Kick kick = 50;
+  }
 }
 ```
 
+UUIDs are strings, timestamps are `int64 timestamp_ms`, and `server_sequence` is `uint64`. Message media fields contain asset references only; uploads stay on the existing HTTP/file path.
+
 ## Packet Types
 
-### Client -> Server
+Client to server:
 
 - `auth`: initial authentication handshake
 - `heartbeat`: keepalive ping
 - `message`: client-sent IM message
 - `ack`: acknowledgement for server-delivered message
 
-### Server -> Client
+Server to client:
 
 - `auth_ok`: authentication succeeded
 - `auth_error`: authentication failed and the server will close the connection
 - `heartbeat_ack`: keepalive response
-- `message`: server-delivered IM message
+- `message`: server-delivered IM message or canonical echo
 - `ack`: acknowledgement for client-sent message
+- `conversation_event`: realtime conversation summary/message event
+- `contact_event`: realtime contact/request event
 - `kick`: server-initiated disconnect notice
 
 ## Handshake
 
-The client must send `auth` as the first packet within a short timeout window.
+The client must send `auth` as the first packet before the auth timeout. `AuthRequest.protocol_version` must be `2`; unsupported versions are rejected.
 
-Example:
+On success, the server binds the TCP channel to the resolved `userID`, `sessionID`, and connection metadata, then sends `auth_ok`. On failure, it sends `auth_error` and closes.
 
-```json
-{
-  "type": "auth",
-  "requestID": "8F8D7A17-635A-41E8-AF1D-74F77CF8981F",
-  "timestamp": "2026-04-22T11:00:00Z",
-  "payload": {
-    "accessToken": "<http-access-token>",
-    "deviceID": "iphone-yy-main",
-    "deviceName": "yy iPhone",
-    "platform": "iOS",
-    "appVersion": "1.0.0",
-    "protocolVersion": 1
-  }
-}
-```
+## Realtime Relay
 
-The server validates the access token with the existing HTTP auth service and binds
-the TCP connection to the resolved `userID` and `sessionID`.
+Local fanout writes the same PB packet directly to active TCP channels.
 
-Success response:
-
-```json
-{
-  "type": "auth_ok",
-  "requestID": "8F8D7A17-635A-41E8-AF1D-74F77CF8981F",
-  "timestamp": "2026-04-22T11:00:00Z",
-  "payload": {
-    "connectionID": "47A5A1D0-0615-4064-8A51-7D2D3BEE5F4C",
-    "userID": "F7A56A2A-5A7B-45AB-83E2-6173E11D0E06",
-    "sessionID": "24F3E8B6-283E-42D9-B070-8A81E8D1FC3E",
-    "heartbeatIntervalSeconds": 30,
-    "serverTime": "2026-04-22T11:00:00Z"
-  }
-}
-```
-
-Failure response:
-
-```json
-{
-  "type": "auth_error",
-  "requestID": "8F8D7A17-635A-41E8-AF1D-74F77CF8981F",
-  "timestamp": "2026-04-22T11:00:00Z",
-  "payload": {
-    "code": "invalid_token",
-    "message": "当前登录已失效，请重新登录。"
-  }
-}
-```
-
-After `auth_error`, the server closes the connection.
-
-## Keepalive
-
-The client should periodically send:
-
-```json
-{
-  "type": "heartbeat",
-  "requestID": "0F6B1B6B-5B24-48F6-8D5B-063F49C7E3E1",
-  "timestamp": "2026-04-22T11:00:30Z",
-  "payload": {
-    "sequence": 42
-  }
-}
-```
-
-The server responds with `heartbeat_ack` and updates the connection's last-seen time.
-
-## Message Delivery
-
-Client send:
-
-```json
-{
-  "type": "message",
-  "requestID": "C5F3ED8A-6A97-47C1-9E46-2A8A94A4A32C",
-  "timestamp": "2026-04-22T11:01:00Z",
-  "payload": {
-    "clientMessageID": "msg-client-1001",
-    "conversationID": "conv-42",
-    "kind": "text",
-    "body": {
-      "text": "hello"
-    }
-  }
-}
-```
-
-Server acknowledgement:
-
-```json
-{
-  "type": "ack",
-  "requestID": "C5F3ED8A-6A97-47C1-9E46-2A8A94A4A32C",
-  "timestamp": "2026-04-22T11:01:00Z",
-  "payload": {
-    "messageID": "srv-msg-9001",
-    "conversationID": "conv-42",
-    "status": "accepted"
-  }
-}
-```
-
-Server push uses the same `message` packet type, and the client returns an `ack`
-for delivery confirmation.
-
-## Kicks
-
-The server may send a `kick` before closing a connection:
-
-- `session_revoked`
-- `logout_current`
-- `logout_all`
-- `duplicate_connection`
-- `server_shutdown`
-- `protocol_error`
-
-This bridges existing HTTP session management with the TCP channel lifecycle.
+Cross-node Redis dispatch and gateway HTTP relay keep a JSON envelope for observability and routing metadata, but realtime payload data is `packetBase64`, a base64 encoded serialized PB `Packet`. HTTP/REST response bodies and database outbox payload JSON are intentionally unchanged.
 
 ## Server Structure
 
-The server should be split into these layers:
-
-1. `IMTCPServer`
-   Accepts TCP connections and owns the `ServerBootstrap`.
-2. `IMTCPFrameCodec`
-   Turns inbound bytes into packet envelopes and outbound packets into NDJSON frames.
-3. `IMConnectionHandler`
-   Maintains per-connection state: unauthenticated, authenticated, closing.
-4. `IMTCPAuthenticator`
-   Reuses the current `AuthService.authenticateAccessToken(...)` path.
-5. `IMConnectionRegistry`
-   Maps `connectionID -> connection metadata` and `sessionID -> active connections`.
-6. `IMSessionRevocationBridge`
-   Allows HTTP logout/logout-all to locate and disconnect matching TCP connections.
-7. `IMMessageService`
-   Owns domain logic such as send, fanout, ack processing, and delivery state.
-
-## Recommended First Implementation
-
-- Start one TCP port dedicated to IM, separate from Vapor HTTP.
-- Require auth as the first packet.
-- Bind one authenticated connection to one server-side `sessionID`.
-- On HTTP logout of the current device, disconnect connections for that `sessionID`.
-- On HTTP logout-all, disconnect every connection for that `userID`.
-- Do not refresh tokens over TCP. Keep refresh on HTTP only.
+1. `IMTCPFrameDecoder`: turns TCP bytes into length-prefixed PB packet bytes.
+2. `IMTCPProtobufCodec`: maps PB wire DTOs to existing internal realtime payload structs.
+3. `IMTCPConnectionHandler`: owns per-connection state and auth/message dispatch.
+4. `IMTCPAuthenticator`: reuses HTTP access-token validation.
+5. `IMConnectionRegistry`: maps authenticated connections and writes PB packets to local channels.
+6. `ConnectionRoutingService`: fans out locally and relays base64 PB packets across Redis/gateway boundaries.

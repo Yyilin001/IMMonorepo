@@ -22,19 +22,19 @@ actor MockIMTCPTransport: IMTCPTransport {
 }
 
 actor MockIMTCPWire: Sendable {
-    private var sentLines: [String] = []
+    private var sentFrames: [Data] = []
     private var disconnectCount = 0
-    private var continuation: AsyncThrowingStream<String, Error>.Continuation?
+    private var continuation: AsyncThrowingStream<Data, Error>.Continuation?
 
     func makeConnection() -> IMTCPTransportConnection {
-        let lines = AsyncThrowingStream<String, Error> { continuation in
+        let frames = AsyncThrowingStream<Data, Error> { continuation in
             self.continuation = continuation
         }
 
         return IMTCPTransportConnection(
-            lines: lines,
-            sendLine: { line in
-                await self.record(line)
+            frames: frames,
+            sendFrame: { frame in
+                await self.record(frame)
             },
             disconnect: {
                 await self.disconnect()
@@ -42,8 +42,8 @@ actor MockIMTCPWire: Sendable {
         )
     }
 
-    func yieldIncoming(_ line: String) {
-        continuation?.yield(line)
+    func yieldIncoming(_ frame: Data) {
+        continuation?.yield(frame)
     }
 
     func finishIncoming(throwing error: Error? = nil) {
@@ -55,16 +55,16 @@ actor MockIMTCPWire: Sendable {
         continuation = nil
     }
 
-    func recordedLines() -> [String] {
-        sentLines
+    func recordedFrames() -> [Data] {
+        sentFrames
     }
 
     func disconnections() -> Int {
         disconnectCount
     }
 
-    private func record(_ line: String) {
-        sentLines.append(line)
+    private func record(_ frame: Data) {
+        sentFrames.append(frame)
     }
 
     private func disconnect() {

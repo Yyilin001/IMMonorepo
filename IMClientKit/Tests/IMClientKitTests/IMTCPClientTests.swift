@@ -17,7 +17,7 @@ struct IMTCPClientTests {
         let configuration = IMTCPClientConfiguration(
             host: "127.0.0.1",
             port: 9000,
-            protocolVersion: 1,
+            protocolVersion: 2,
             deviceID: "device-1",
             deviceName: "iPhone",
             platform: "ios",
@@ -32,18 +32,18 @@ struct IMTCPClientTests {
             try await client.connect()
         }
 
-        let authLine = try await requireRecordedLine(at: 0, from: wire)
-        let authPacket = try decode(IMTCPPacketEnvelope<IMTCPAuthRequestPayload>.self, from: authLine)
+        let authFrame = try await requireRecordedFrame(at: 0, from: wire)
+        let (authPacket, authPayload) = try decodePayload(IMTCPAuthRequestPayload.self, from: authFrame)
         #expect(authPacket.type == .auth)
-        #expect(authPacket.payload.accessToken == "access-123")
-        #expect(authPacket.payload.deviceID == "device-1")
-        #expect(authPacket.payload.deviceName == "iPhone")
-        #expect(authPacket.payload.platform == "ios")
-        #expect(authPacket.payload.appVersion == "1.0.0")
-        #expect(authPacket.payload.protocolVersion == 1)
+        #expect(authPayload.accessToken == "access-123")
+        #expect(authPayload.deviceID == "device-1")
+        #expect(authPayload.deviceName == "iPhone")
+        #expect(authPayload.platform == "ios")
+        #expect(authPayload.appVersion == "1.0.0")
+        #expect(authPayload.protocolVersion == 2)
 
         await wire.yieldIncoming(
-            try encodeLine(
+            try encodeFrame(
                 type: .authOK,
                 payload: IMTCPAuthAcceptedPayload(
                     connectionID: Self.connectionID,
@@ -78,10 +78,10 @@ struct IMTCPClientTests {
             try await client.connect()
         }
 
-        _ = try await requireRecordedLine(at: 0, from: wire)
+        _ = try await requireRecordedFrame(at: 0, from: wire)
 
         await wire.yieldIncoming(
-            try encodeLine(
+            try encodeFrame(
                 type: .authOK,
                 payload: IMTCPAuthAcceptedPayload(
                     connectionID: Self.connectionID,
@@ -98,14 +98,14 @@ struct IMTCPClientTests {
         let heartbeatRequestID = UUID(uuidString: "dddddddd-dddd-dddd-dddd-dddddddddddd")!
 
         try await connection.sendHeartbeat(sequence: 7, requestID: heartbeatRequestID)
-        let heartbeatLine = try await requireRecordedLine(at: 1, from: wire)
-        let heartbeatPacket = try decode(IMTCPPacketEnvelope<IMTCPHeartbeatPayload>.self, from: heartbeatLine)
+        let heartbeatFrame = try await requireRecordedFrame(at: 1, from: wire)
+        let (heartbeatPacket, heartbeatPayload) = try decodePayload(IMTCPHeartbeatPayload.self, from: heartbeatFrame)
         #expect(heartbeatPacket.type == .heartbeat)
         #expect(heartbeatPacket.requestID == heartbeatRequestID)
-        #expect(heartbeatPacket.payload.sequence == 7)
+        #expect(heartbeatPayload.sequence == 7)
 
         await wire.yieldIncoming(
-            try encodeLine(
+            try encodeFrame(
                 type: .heartbeatAck,
                 requestID: heartbeatRequestID,
                 payload: IMTCPHeartbeatPayload(sequence: 7)
@@ -123,12 +123,11 @@ struct IMTCPClientTests {
             senderUserID: Self.userID,
             serverSequence: 7,
             serverTimestamp: Date(timeIntervalSince1970: 1_700_000_101),
-            kind: "text",
-            body: ["text": "hello"]
+            content: .text("hello")
         )
 
         await wire.yieldIncoming(
-            try encodeLine(
+            try encodeFrame(
                 type: .message,
                 requestID: messageRequestID,
                 payload: messagePayload
@@ -149,8 +148,7 @@ struct IMTCPClientTests {
                     id: UUID(uuidString: "13131313-3434-5656-7878-909090909090")!,
                     senderUserID: Self.userID,
                     serverSequence: 8,
-                    kind: "text",
-                    body: ["text": "summary update"],
+                    content: .text("summary update"),
                     createdAt: Date(timeIntervalSince1970: 1_700_000_102)
                 ),
                 lastReadSequence: 8,
@@ -163,7 +161,7 @@ struct IMTCPClientTests {
         )
 
         await wire.yieldIncoming(
-            try encodeLine(
+            try encodeFrame(
                 type: .conversationEvent,
                 requestID: conversationRequestID,
                 payload: conversationEventPayload
@@ -199,7 +197,7 @@ struct IMTCPClientTests {
         )
 
         await wire.yieldIncoming(
-            try encodeLine(
+            try encodeFrame(
                 type: .contactEvent,
                 requestID: contactEventRequestID,
                 payload: contactEventPayload
@@ -210,7 +208,7 @@ struct IMTCPClientTests {
         #expect(contactEvent == .contactEvent(requestID: contactEventRequestID, payload: contactEventPayload))
 
         await wire.yieldIncoming(
-            try encodeLine(
+            try encodeFrame(
                 type: .kick,
                 payload: IMTCPKickPayload(reason: .logoutAll, message: "已在其他设备退出登录。")
             )
@@ -238,10 +236,10 @@ struct IMTCPClientTests {
             try await client.connect()
         }
 
-        _ = try await requireRecordedLine(at: 0, from: wire)
+        _ = try await requireRecordedFrame(at: 0, from: wire)
 
         await wire.yieldIncoming(
-            try encodeLine(
+            try encodeFrame(
                 type: .authOK,
                 payload: IMTCPAuthAcceptedPayload(
                     connectionID: Self.connectionID,
@@ -265,13 +263,13 @@ struct IMTCPClientTests {
             requestID: requestID
         )
 
-        let ackLine = try await requireRecordedLine(at: 1, from: wire)
-        let ackPacket = try decode(IMTCPPacketEnvelope<IMTCPAckPayload>.self, from: ackLine)
+        let ackFrame = try await requireRecordedFrame(at: 1, from: wire)
+        let (ackPacket, ackPayload) = try decodePayload(IMTCPAckPayload.self, from: ackFrame)
         #expect(ackPacket.type == .ack)
         #expect(ackPacket.requestID == requestID)
-        #expect(ackPacket.payload.messageID == "srv-msg-2")
-        #expect(ackPacket.payload.conversationID == "conv-100")
-        #expect(ackPacket.payload.status == "received")
+        #expect(ackPayload.messageID == "srv-msg-2")
+        #expect(ackPayload.conversationID == "conv-100")
+        #expect(ackPayload.status == "received")
     }
 
     @Test func sessionClientRefreshesAccessTokenBeforeTCPHandshake() async throws {
@@ -307,12 +305,12 @@ struct IMTCPClientTests {
             )
         }
 
-        let authLine = try await requireRecordedLine(at: 0, from: wire)
-        let authPacket = try decode(IMTCPPacketEnvelope<IMTCPAuthRequestPayload>.self, from: authLine)
-        #expect(authPacket.payload.accessToken == "tcp-access")
+        let authFrame = try await requireRecordedFrame(at: 0, from: wire)
+        let (_, authPayload) = try decodePayload(IMTCPAuthRequestPayload.self, from: authFrame)
+        #expect(authPayload.accessToken == "tcp-access")
 
         await wire.yieldIncoming(
-            try encodeLine(
+            try encodeFrame(
                 type: .authOK,
                 payload: IMTCPAuthAcceptedPayload(
                     connectionID: Self.connectionID,
@@ -331,11 +329,11 @@ struct IMTCPClientTests {
         #expect(try tokenStore.readString(for: "refresh_token") == "refresh-2")
     }
 
-    private func requireRecordedLine(at index: Int, from wire: MockIMTCPWire) async throws -> String {
+    private func requireRecordedFrame(at index: Int, from wire: MockIMTCPWire) async throws -> Data {
         for _ in 0..<50 {
-            let lines = await wire.recordedLines()
-            if lines.indices.contains(index) {
-                return lines[index]
+            let frames = await wire.recordedFrames()
+            if frames.indices.contains(index) {
+                return frames[index]
             }
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -344,23 +342,20 @@ struct IMTCPClientTests {
         throw IMTCPClientError.connectionClosed
     }
 
-    private func encodeLine<Payload: Codable & Sendable>(
+    private func encodeFrame<Payload: Sendable>(
         type: IMTCPPacketType,
         requestID: UUID? = nil,
         payload: Payload
-    ) throws -> String {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(
-            IMTCPPacketEnvelope(type: type, requestID: requestID, payload: payload)
-        )
-        return String(decoding: data, as: UTF8.self)
+    ) throws -> Data {
+        try IMTCPProtobufCodec.encode(type: type, requestID: requestID, payload: payload)
     }
 
-    private func decode<T: Decodable>(_ type: T.Type, from line: String) throws -> T {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(type, from: Data(line.utf8))
+    private func decodePayload<T: Sendable>(
+        _: T.Type,
+        from frame: Data
+    ) throws -> (packet: IMTCPInboundPacket, payload: T) {
+        let packet = try IMTCPProtobufCodec.decode(frame)
+        return (packet, try packet.payload.decodePayload(T.self))
     }
 
     private static func authResponseBody(accessToken: String, refreshToken: String) throws -> Data {

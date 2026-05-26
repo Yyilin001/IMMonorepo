@@ -453,6 +453,22 @@ struct ContactResponse: Content, Equatable, Sendable {
     let remark: String?
     let createdAt: Date?
 
+    init(
+        id: UUID,
+        email: String,
+        displayName: String?,
+        avatarPreset: UserAvatarPreset?,
+        remark: String?,
+        createdAt: Date?
+    ) {
+        self.id = id
+        self.email = email
+        self.displayName = displayName
+        self.avatarPreset = avatarPreset
+        self.remark = remark
+        self.createdAt = createdAt
+    }
+
     init(contact: UserContact) throws {
         self.id = try contact.contact.requireID()
         self.email = contact.contact.email

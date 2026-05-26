@@ -1,0 +1,267 @@
+syntax = "proto3";
+
+package im.realtime.v1;
+
+option swift_prefix = "IMRT";
+
+message Packet {
+  optional string request_id = 1;
+  int64 timestamp_ms = 2;
+  uint32 protocol_version = 3;
+
+  oneof body {
+    AuthRequest auth = 10;
+    AuthAccepted auth_ok = 11;
+    AuthError auth_error = 12;
+    Heartbeat heartbeat = 20;
+    Heartbeat heartbeat_ack = 21;
+    MessagePayload message = 30;
+    Ack ack = 31;
+    ConversationEvent conversation_event = 40;
+    ContactEvent contact_event = 41;
+    Kick kick = 50;
+  }
+}
+
+message AuthRequest {
+  string access_token = 1;
+  optional string device_id = 2;
+  optional string device_name = 3;
+  optional string platform = 4;
+  optional string app_version = 5;
+  uint32 protocol_version = 6;
+}
+
+message AuthAccepted {
+  string connection_id = 1;
+  string user_id = 2;
+  string session_id = 3;
+  uint32 heartbeat_interval_seconds = 4;
+  int64 server_time_ms = 5;
+}
+
+message AuthError {
+  string code = 1;
+  string message = 2;
+}
+
+message Heartbeat {
+  int32 sequence = 1;
+}
+
+message Ack {
+  string message_id = 1;
+  optional string conversation_id = 2;
+  string status = 3;
+}
+
+message MessagePayload {
+  optional string client_message_id = 1;
+  optional string message_id = 2;
+  string conversation_id = 3;
+  optional string sender_user_id = 4;
+  optional uint64 server_sequence = 5;
+  optional int64 server_timestamp_ms = 6;
+  MessageContent content = 7;
+  MessageDerivedState derived_state = 8;
+}
+
+message ConversationEvent {
+  string event_type = 1;
+  ConversationSummary conversation = 2;
+  optional ConversationMessage message = 3;
+  optional MessageStreamPayload stream = 4;
+  optional string actor_user_id = 5;
+  int64 server_timestamp_ms = 6;
+  repeated string message_ids = 7;
+  optional string favorite_changed_message_id = 8;
+  optional bool is_favorited = 9;
+  optional string visibility_action = 10;
+}
+
+message ContactEvent {
+  string event_type = 1;
+  optional ContactRequest request = 2;
+  optional Contact contact = 3;
+  optional string contact_user_id = 4;
+  optional string actor_user_id = 5;
+  int64 server_timestamp_ms = 6;
+}
+
+message Kick {
+  string reason = 1;
+  string message = 2;
+}
+
+message MessageStreamPayload {
+  string stream_id = 1;
+  string message_id = 2;
+  string conversation_id = 3;
+  int32 chunk_index = 4;
+  optional string delta_text = 5;
+  int32 partial_text_length = 6;
+  string state = 7;
+  int64 server_timestamp_ms = 8;
+}
+
+message ConversationSummary {
+  string id = 1;
+  optional string title = 2;
+  string kind = 3;
+  optional string direct_messaging_state = 4;
+  optional DirectPeer direct_peer = 5;
+  optional string notice = 6;
+  optional string avatar_preset = 7;
+  bool mute_all = 8;
+  int32 member_count = 9;
+  repeated string member_user_ids = 10;
+  optional MessagePreview last_message = 11;
+  int32 last_read_sequence = 12;
+  int32 unread_count = 13;
+  bool is_pinned = 14;
+  optional int64 pinned_at_ms = 15;
+  bool is_muted = 16;
+  optional int64 created_at_ms = 17;
+  int64 updated_at_ms = 18;
+}
+
+message DirectPeer {
+  string id = 1;
+  string email = 2;
+  optional string display_name = 3;
+  optional string avatar_preset = 4;
+}
+
+message MessagePreview {
+  string id = 1;
+  string sender_user_id = 2;
+  int32 server_sequence = 3;
+  MessageContent content = 4;
+  MessageDerivedState derived_state = 5;
+  optional int64 created_at_ms = 6;
+}
+
+message ConversationMessage {
+  string id = 1;
+  string conversation_id = 2;
+  string sender_user_id = 3;
+  optional string client_message_id = 4;
+  int32 server_sequence = 5;
+  MessageContent content = 6;
+  MessageDerivedState derived_state = 7;
+  optional int64 created_at_ms = 8;
+}
+
+message MessageContent {
+  oneof body {
+    TextContent text = 1;
+    ReplyContent reply = 2;
+    RecalledContent recalled = 3;
+    SystemContent system = 4;
+    MediaAsset image = 5;
+    MediaAsset audio = 6;
+    MediaAsset file = 7;
+  }
+}
+
+message TextContent {
+  string text = 1;
+}
+
+message ReplyContent {
+  ReplyReference reference = 1;
+  string text = 2;
+}
+
+message RecalledContent {}
+
+message SystemContent {
+  string type = 1;
+  optional string actor_user_id = 2;
+  optional string actor_email = 3;
+  optional string target_user_id = 4;
+  optional string target_email = 5;
+  repeated string member_emails = 6;
+  optional string previous_role = 7;
+  optional string new_role = 8;
+  repeated string updated_fields = 9;
+  optional string title = 10;
+  optional string notice = 11;
+  optional string avatar_preset = 12;
+  optional string legacy_text = 13;
+}
+
+message ReplyReference {
+  string message_id = 1;
+  optional string sender_user_id = 2;
+  string preview_text = 3;
+}
+
+message MediaAsset {
+  string asset_id = 1;
+  string kind = 2;
+  string mime_type = 3;
+  int64 byte_size = 4;
+  string filename = 5;
+  optional int32 width = 6;
+  optional int32 height = 7;
+  optional int32 duration_millis = 8;
+  optional string preview_asset_id = 9;
+}
+
+message MessageDerivedState {
+  string recall_state = 1;
+  repeated MessageEdit edits = 2;
+  repeated MessageReaction reactions = 3;
+  optional MessageStreamState stream_state = 4;
+}
+
+message MessageEdit {
+  optional int64 edited_at_ms = 1;
+  string text = 2;
+}
+
+message MessageReaction {
+  string emoji = 1;
+  repeated string actor_user_ids = 2;
+}
+
+message MessageStreamState {
+  string stream_id = 1;
+  string state = 2;
+  int32 last_chunk_index = 3;
+  string partial_text = 4;
+  optional string error_code = 5;
+  optional string error_message = 6;
+  int64 updated_at_ms = 7;
+  bool is_ai_generated = 8;
+}
+
+message Contact {
+  string id = 1;
+  string email = 2;
+  optional string display_name = 3;
+  optional string avatar_preset = 4;
+  optional string remark = 5;
+  optional int64 created_at_ms = 6;
+}
+
+message ContactRequest {
+  string id = 1;
+  User requester = 2;
+  User addressee = 3;
+  string status = 4;
+  optional string message = 5;
+  optional string requester_remark = 6;
+  optional string addressee_remark = 7;
+  optional int64 created_at_ms = 8;
+  optional int64 updated_at_ms = 9;
+  optional int64 responded_at_ms = 10;
+}
+
+message User {
+  string id = 1;
+  string email = 2;
+  optional string display_name = 3;
+  optional string avatar_preset = 4;
+}

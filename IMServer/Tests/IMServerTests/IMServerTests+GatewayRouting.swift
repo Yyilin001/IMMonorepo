@@ -17,7 +17,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 1,
+                protocolVersion: 2,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -92,8 +92,8 @@ extension IMServerTests {
                     #expect(deviceBMessage.messageID == acknowledgement.messageID)
                     #expect(deviceAMessage.serverSequence == 1)
                     #expect(deviceBMessage.serverSequence == 1)
-                    #expect(deviceAMessage.body["text"] == "hello from tcp device a")
-                    #expect(deviceBMessage.body["text"] == "hello from tcp device a")
+                    #expect(deviceAMessage.content == .text("hello from tcp device a"))
+                    #expect(deviceBMessage.content == .text("hello from tcp device a"))
                 }
             }
         }
@@ -107,7 +107,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 1,
+                protocolVersion: 2,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -207,7 +207,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 1,
+                protocolVersion: 2,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -321,7 +321,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 1,
+                protocolVersion: 2,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -392,7 +392,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 1,
+                protocolVersion: 2,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 0.1,
@@ -739,7 +739,7 @@ private func startTestIMTCPServer(app: Application) async throws -> IMTCPTestSer
             .flatMap {
                 channel.pipeline.addHandler(
                 ByteToMessageHandler(
-                    IMTCPLineFrameDecoder(maxFrameBytes: configuration.maxFrameBytes)
+                    IMTCPFrameDecoder(maxFrameBytes: configuration.maxFrameBytes)
                 )
                 )
             }
@@ -836,7 +836,7 @@ private struct IMTCPTestClient: Sendable {
             .channelInitializer { channel in
                 channel.pipeline.addHandler(
                     ByteToMessageHandler(
-                        IMTCPLineFrameDecoder(maxFrameBytes: 64 * 1024)
+                        IMTCPFrameDecoder(maxFrameBytes: 64 * 1024)
                     )
                 )
                 .flatMap {
@@ -858,24 +858,21 @@ private struct IMTCPTestClient: Sendable {
                 deviceName: "Test \(deviceID)",
                 platform: "ios",
                 appVersion: "1.0",
-                protocolVersion: 1
+                protocolVersion: 2
             )
         )
         _ = try await nextPacket(ofType: .authOK)
     }
 
-    func send<Payload: Codable & Sendable>(
+    func send<Payload: Sendable>(
         type: IMTCPPacketType,
         requestID: UUID? = nil,
         payload: Payload
     ) async throws {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let envelope = IMTCPPacketEnvelope(type: type, requestID: requestID, payload: payload)
-        let data = try encoder.encode(envelope)
-        var buffer = channel.allocator.buffer(capacity: data.count + 1)
+        let data = try IMTCPProtobufCodec.encode(type: type, requestID: requestID, payload: payload)
+        var buffer = channel.allocator.buffer(capacity: data.count + 4)
+        buffer.writeInteger(UInt32(data.count), endianness: .big)
         buffer.writeBytes(data)
-        buffer.writeInteger(UInt8(ascii: "\n"))
         try await channel.writeAndFlush(buffer).get()
     }
 
@@ -889,7 +886,7 @@ private struct IMTCPTestClient: Sendable {
 }
 
 private final class IMTCPTestClientHandler: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = String
+    typealias InboundIn = Data
 
     private let inbox: IMTCPTestInbox
 
@@ -898,12 +895,8 @@ private final class IMTCPTestClientHandler: ChannelInboundHandler, @unchecked Se
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let line = unwrapInboundIn(data)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let payload = line.data(using: .utf8),
-              let packet = try? decoder.decode(IMTCPInboundPacket.self, from: payload)
-        else {
+        let frame = unwrapInboundIn(data)
+        guard let packet = try? IMTCPProtobufCodec.decode(frame) else {
             return
         }
 

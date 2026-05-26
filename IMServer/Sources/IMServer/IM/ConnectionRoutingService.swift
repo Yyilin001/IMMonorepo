@@ -42,7 +42,7 @@ struct ConnectionRoutingService {
             action: .kickSession,
             packetType: nil,
             requestID: nil,
-            payloadJSON: nil,
+            packetBase64: nil,
             targetUserIDs: [],
             sessionID: sessionID,
             kickReason: .duplicateConnection,
@@ -129,7 +129,7 @@ struct ConnectionRoutingService {
             action: .kickSession,
             packetType: nil,
             requestID: nil,
-            payloadJSON: nil,
+            packetBase64: nil,
             targetUserIDs: [],
             sessionID: sessionID,
             kickReason: reason,
@@ -153,7 +153,7 @@ struct ConnectionRoutingService {
             action: .kickUser,
             packetType: nil,
             requestID: nil,
-            payloadJSON: nil,
+            packetBase64: nil,
             targetUserIDs: [userID],
             sessionID: nil,
             kickReason: reason,
@@ -394,7 +394,7 @@ struct ConnectionRoutingService {
                             action: envelope.action,
                             packetType: envelope.packetType,
                             requestID: envelope.requestID,
-                            payloadJSON: envelope.payloadJSON,
+                            packetBase64: envelope.packetBase64,
                             targetUserIDs: envelope.targetUserIDs,
                             sessionID: targetSessionID,
                             kickReason: envelope.kickReason,
@@ -451,22 +451,19 @@ struct ConnectionRoutingService {
         case timeout(String)
     }
 
-    private func encodePacketEnvelope<Payload: Codable & Sendable>(
+    private func encodePacketEnvelope<Payload: Sendable>(
         action: NodeMessageDispatchEnvelope.Action,
         packetType: IMTCPPacketType,
         requestID: UUID?,
         payload: Payload,
         targetUserIDs: [UUID]
     ) throws -> NodeMessageDispatchEnvelope {
-        let data = try JSONEncoder().encode(payload)
-        guard let payloadJSON = String(data: data, encoding: .utf8) else {
-            throw RedisRoutingError.invalidDispatchPayload
-        }
+        let data = try IMTCPProtobufCodec.encode(type: packetType, requestID: requestID, payload: payload)
         return NodeMessageDispatchEnvelope(
             action: action,
             packetType: packetType,
             requestID: requestID,
-            payloadJSON: payloadJSON,
+            packetBase64: data.base64EncodedString(),
             targetUserIDs: targetUserIDs,
             sessionID: nil,
             kickReason: nil,
@@ -474,10 +471,15 @@ struct ConnectionRoutingService {
         )
     }
 
-    private func decodePayload<Payload: Decodable>(from envelope: NodeMessageDispatchEnvelope) -> Payload? {
-        guard let payloadJSON = envelope.payloadJSON else {
+    private func decodePayload<Payload: Sendable>(from envelope: NodeMessageDispatchEnvelope) -> Payload? {
+        guard let packetBase64 = envelope.packetBase64,
+              let packetData = Data(base64Encoded: packetBase64)
+        else {
             return nil
         }
-        return try? JSONDecoder().decode(Payload.self, from: Data(payloadJSON.utf8))
+        guard let packet = try? IMTCPProtobufCodec.decode(packetData) else {
+            return nil
+        }
+        return try? packet.payload.decodePayload(Payload.self)
     }
 }

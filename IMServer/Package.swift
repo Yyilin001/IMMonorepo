@@ -19,6 +19,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.3.0"),
         // 🔵 面向 Swift 的非阻塞、事件驱动网络库，用于自定义执行器
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+        .package(url: "https://github.com/apple/swift-protobuf.git", .upToNextMajor(from: "1.29.0")),
     ],
     targets: [
         .executableTarget(
@@ -35,6 +36,7 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ],
             swiftSettings: swiftSettings
         ),

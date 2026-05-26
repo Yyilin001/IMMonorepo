@@ -16,12 +16,14 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", .upToNextMajor(from: "7.10.0")),
+        .package(url: "https://github.com/apple/swift-protobuf.git", .upToNextMajor(from: "1.29.0")),
     ],
     targets: [
         .target(
             name: "IMClientKit",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ]
         ),
         .testTarget(
@@ -29,6 +31,7 @@ let package = Package(
             dependencies: [
                 "IMClientKit",
                 .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ]
         ),
     ]

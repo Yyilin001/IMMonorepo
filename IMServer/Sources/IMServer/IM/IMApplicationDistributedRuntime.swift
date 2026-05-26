@@ -154,19 +154,19 @@ struct ExplicitDatabaseConversationShardRouter: ConversationShardRouter {
 }
 
 struct GatewayRelayMessageRequest: Content {
-    let payload: IMTCPMessagePayload
+    let packetBase64: String
     let recipientUserIDs: [UUID]
     let requestID: UUID?
 }
 
 struct GatewayRelayConversationEventRequest: Content {
-    let payload: IMTCPConversationEventPayload
+    let packetBase64: String
     let recipientUserID: UUID
     let requestID: UUID?
 }
 
 struct GatewayRelayContactEventRequest: Content {
-    let payload: IMTCPContactEventPayload
+    let packetBase64: String
     let recipientUserID: UUID
     let requestID: UUID?
 }

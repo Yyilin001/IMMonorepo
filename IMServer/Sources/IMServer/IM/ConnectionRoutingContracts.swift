@@ -13,7 +13,7 @@ struct NodeMessageDispatchEnvelope: Codable, Sendable {
     let action: Action
     let packetType: IMTCPPacketType?
     let requestID: UUID?
-    let payloadJSON: String?
+    let packetBase64: String?
     let targetUserIDs: [UUID]
     let sessionID: UUID?
     let kickReason: IMTCPKickReason?
@@ -26,7 +26,7 @@ extension NodeMessageDispatchEnvelope {
             action: action,
             packetType: packetType,
             requestID: requestID,
-            payloadJSON: payloadJSON,
+            packetBase64: packetBase64,
             targetUserIDs: targetUserIDs,
             sessionID: sessionID,
             kickReason: kickReason,

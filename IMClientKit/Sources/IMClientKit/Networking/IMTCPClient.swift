@@ -13,91 +13,6 @@ public enum IMTCPPacketType: String, Codable, Sendable {
     case kick
 }
 
-public enum IMTCPJSONValue: Codable, Sendable {
-    case string(String)
-    case number(Double)
-    case object([String: IMTCPJSONValue])
-    case array([IMTCPJSONValue])
-    case bool(Bool)
-    case null
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.singleValueContainer()
-
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .number(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([String: IMTCPJSONValue].self) {
-            self = .object(value)
-        } else if let value = try? container.decode([IMTCPJSONValue].self) {
-            self = .array(value)
-        } else {
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported JSON payload")
-        }
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.singleValueContainer()
-
-        switch self {
-        case .string(let value):
-            try container.encode(value)
-        case .number(let value):
-            try container.encode(value)
-        case .object(let value):
-            try container.encode(value)
-        case .array(let value):
-            try container.encode(value)
-        case .bool(let value):
-            try container.encode(value)
-        case .null:
-            try container.encodeNil()
-        }
-    }
-
-    public func decodePayload<T: Decodable & Sendable>(_ type: T.Type) throws -> T {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-
-        let data = try encoder.encode(self)
-        return try decoder.decode(T.self, from: data)
-    }
-}
-
-public struct IMTCPInboundPacket: Decodable, Sendable {
-    public let type: IMTCPPacketType
-    public let requestID: UUID?
-    public let timestamp: Date?
-    public let payload: IMTCPJSONValue
-}
-
-public struct IMTCPPacketEnvelope<Payload: Codable & Sendable>: Codable, Sendable {
-    public let type: IMTCPPacketType
-    public let requestID: UUID?
-    public let timestamp: Date
-    public let payload: Payload
-
-    public init(
-        type: IMTCPPacketType,
-        requestID: UUID? = nil,
-        timestamp: Date = Date(),
-        payload: Payload
-    ) {
-        self.type = type
-        self.requestID = requestID
-        self.timestamp = timestamp
-        self.payload = payload
-    }
-}
-
 public struct IMTCPAuthRequestPayload: Codable, Equatable, Sendable {
     public let accessToken: String
     public let deviceID: String?
@@ -374,7 +289,7 @@ public struct IMTCPClientConfiguration: Equatable, Sendable {
     public init(
         host: String,
         port: UInt16,
-        protocolVersion: Int = 1,
+        protocolVersion: Int = 2,
         deviceID: String? = nil,
         deviceName: String? = nil,
         platform: String? = "ios",
@@ -429,18 +344,18 @@ public struct IMTCPConnection: Sendable {
     public let authentication: IMTCPAuthAcceptedPayload
     public let events: AsyncThrowingStream<IMTCPConnectionEvent, Error>
 
-    private let sendLine: @Sendable (String) async throws -> Void
+    private let sendFrame: @Sendable (Data) async throws -> Void
     private let disconnectHandler: @Sendable () async -> Void
 
     init(
         authentication: IMTCPAuthAcceptedPayload,
         events: AsyncThrowingStream<IMTCPConnectionEvent, Error>,
-        sendLine: @escaping @Sendable (String) async throws -> Void,
+        sendFrame: @escaping @Sendable (Data) async throws -> Void,
         disconnectHandler: @escaping @Sendable () async -> Void
     ) {
         self.authentication = authentication
         self.events = events
-        self.sendLine = sendLine
+        self.sendFrame = sendFrame
         self.disconnectHandler = disconnectHandler
     }
 
@@ -469,10 +384,8 @@ public struct IMTCPConnection: Sendable {
         requestID: UUID?,
         payload: Payload
     ) async throws {
-        let line = try IMTCPPacketCodec.encode(
-            IMTCPPacketEnvelope(type: type, requestID: requestID, payload: payload)
-        )
-        try await sendLine(line)
+        let frame = try IMTCPProtobufCodec.encode(type: type, requestID: requestID, payload: payload)
+        try await sendFrame(frame)
     }
 }
 
@@ -528,8 +441,8 @@ public struct IMTCPClient: Sendable {
 
         let readerTask = Task {
             do {
-                for try await line in transportConnection.lines {
-                    await eventRouter.consume(line: line)
+                for try await frame in transportConnection.frames {
+                    await eventRouter.consume(frame: frame)
                 }
                 await eventRouter.finish(with: nil)
             } catch {
@@ -546,18 +459,15 @@ public struct IMTCPClient: Sendable {
                 appVersion: configuration.appVersion,
                 protocolVersion: configuration.protocolVersion
             )
-            try await send(
-                IMTCPPacketEnvelope(type: .auth, payload: authPayload),
-                via: transportConnection
-            )
+            try await send(type: .auth, requestID: nil, payload: authPayload, via: transportConnection)
 
             let authentication = try await eventRouter.waitForAuthentication()
 
             return IMTCPConnection(
                 authentication: authentication,
                 events: events,
-                sendLine: { line in
-                    try await transportConnection.sendLine(line)
+                sendFrame: { frame in
+                    try await transportConnection.sendFrame(frame)
                 },
                 disconnectHandler: {
                     readerTask.cancel()
@@ -571,36 +481,14 @@ public struct IMTCPClient: Sendable {
         }
     }
 
-    private func send<Payload: Codable & Sendable>(
-        _ envelope: IMTCPPacketEnvelope<Payload>,
+    private func send<Payload: Sendable>(
+        type: IMTCPPacketType,
+        requestID: UUID?,
+        payload: Payload,
         via connection: IMTCPTransportConnection
     ) async throws {
-        let line = try IMTCPPacketCodec.encode(envelope)
-        try await connection.sendLine(line)
-    }
-}
-
-private enum IMTCPPacketCodec {
-    public static func encode<Payload: Codable & Sendable>(_ envelope: IMTCPPacketEnvelope<Payload>) throws -> String {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(envelope)
-
-        guard let line = String(data: data, encoding: .utf8) else {
-            throw IMTCPClientError.invalidPacket
-        }
-
-        return line
-    }
-
-    public static func decode(_ line: String) throws -> IMTCPInboundPacket {
-        guard let data = line.data(using: .utf8) else {
-            throw IMTCPClientError.invalidPacket
-        }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(IMTCPInboundPacket.self, from: data)
+        let frame = try IMTCPProtobufCodec.encode(type: type, requestID: requestID, payload: payload)
+        try await connection.sendFrame(frame)
     }
 }
 
@@ -634,13 +522,13 @@ private actor IMTCPEventRouter {
         }
     }
 
-    public func consume(line: String) {
+    public func consume(frame: Data) {
         guard !finished else {
             return
         }
 
         do {
-            let packet = try IMTCPPacketCodec.decode(line)
+            let packet = try IMTCPProtobufCodec.decode(frame)
             if authenticationResult == nil {
                 handleAuthentication(packet: packet)
             } else {

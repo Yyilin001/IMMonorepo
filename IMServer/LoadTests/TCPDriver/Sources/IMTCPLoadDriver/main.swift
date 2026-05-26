@@ -113,16 +113,238 @@ func login(options: Options, deviceIndex: Int) async throws -> LoginResponse {
     return try JSONDecoder().decode(LoginResponse.self, from: data)
 }
 
-func packet(type: String, payload: [String: Any], requestID: String = UUID().uuidString) throws -> Data {
-    let envelope: [String: Any] = [
-        "type": type,
-        "requestID": requestID,
-        "timestamp": ISO8601DateFormatter().string(from: Date()),
-        "payload": payload
-    ]
-    var data = try JSONSerialization.data(withJSONObject: envelope)
-    data.append(0x0A)
-    return data
+enum RealtimePacketType {
+    case auth
+    case authError
+    case message
+    case ack
+    case kick
+}
+
+struct DecodedRealtimePacket {
+    let type: RealtimePacketType
+    let requestID: String?
+    let payload: [String: String]
+}
+
+enum ProtoWire {
+    static func authFrame(
+        accessToken: String,
+        deviceID: String,
+        deviceName: String,
+        platform: String,
+        appVersion: String,
+        requestID: String = UUID().uuidString
+    ) -> Data {
+        var auth = Data()
+        auth.writeString(field: 1, accessToken)
+        auth.writeString(field: 2, deviceID)
+        auth.writeString(field: 3, deviceName)
+        auth.writeString(field: 4, platform)
+        auth.writeString(field: 5, appVersion)
+        auth.writeVarint(field: 6, 2)
+
+        var packet = packetBase(requestID: requestID)
+        packet.writeMessage(field: 10, auth)
+        return frame(packet)
+    }
+
+    static func messageFrame(
+        conversationID: String,
+        clientMessageID: String,
+        text: String,
+        requestID: String
+    ) -> Data {
+        var textContent = Data()
+        textContent.writeString(field: 1, text)
+        var content = Data()
+        content.writeMessage(field: 1, textContent)
+
+        var message = Data()
+        message.writeString(field: 1, clientMessageID)
+        message.writeString(field: 3, conversationID)
+        message.writeMessage(field: 7, content)
+        message.writeMessage(field: 8, Data())
+
+        var packet = packetBase(requestID: requestID)
+        packet.writeMessage(field: 30, message)
+        return frame(packet)
+    }
+
+    static func decodePacket(_ frame: Data) -> DecodedRealtimePacket? {
+        var requestID: String?
+        var type: RealtimePacketType?
+        var payload: [String: String] = [:]
+        for field in fields(in: frame) {
+            switch field.number {
+            case 1:
+                requestID = field.stringValue
+            case 11:
+                type = type ?? nil
+            case 12:
+                type = .authError
+            case 30:
+                type = .message
+                payload.merge(decodeMessagePayload(field.value)) { current, _ in current }
+            case 31:
+                type = .ack
+                payload.merge(decodeAckPayload(field.value)) { current, _ in current }
+            case 50:
+                type = .kick
+            default:
+                continue
+            }
+        }
+        guard let type else { return nil }
+        return DecodedRealtimePacket(type: type, requestID: requestID, payload: payload)
+    }
+
+    static func frames(from buffer: inout Data) -> [Data] {
+        var frames: [Data] = []
+        while buffer.count >= 4 {
+            let length = buffer.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            let frameLength = Int(length)
+            guard buffer.count >= 4 + frameLength else { break }
+            frames.append(Data(buffer.dropFirst(4).prefix(frameLength)))
+            buffer.removeSubrange(0..<(4 + frameLength))
+        }
+        return frames
+    }
+
+    private static func packetBase(requestID: String) -> Data {
+        var packet = Data()
+        packet.writeString(field: 1, requestID)
+        packet.writeVarint(field: 2, UInt64(Date().timeIntervalSince1970 * 1000))
+        packet.writeVarint(field: 3, 2)
+        return packet
+    }
+
+    private static func frame(_ packet: Data) -> Data {
+        var framed = Data()
+        let length = UInt32(packet.count)
+        framed.append(UInt8((length >> 24) & 0xff))
+        framed.append(UInt8((length >> 16) & 0xff))
+        framed.append(UInt8((length >> 8) & 0xff))
+        framed.append(UInt8(length & 0xff))
+        framed.append(packet)
+        return framed
+    }
+
+    private static func decodeAckPayload(_ data: Data) -> [String: String] {
+        var payload: [String: String] = [:]
+        for field in fields(in: data) {
+            switch field.number {
+            case 1:
+                payload["messageID"] = field.stringValue
+            case 2:
+                payload["conversationID"] = field.stringValue
+            case 3:
+                payload["status"] = field.stringValue
+            default:
+                continue
+            }
+        }
+        return payload
+    }
+
+    private static func decodeMessagePayload(_ data: Data) -> [String: String] {
+        var payload: [String: String] = [:]
+        for field in fields(in: data) {
+            switch field.number {
+            case 1:
+                payload["clientMessageID"] = field.stringValue
+            case 2:
+                payload["messageID"] = field.stringValue
+            case 3:
+                payload["conversationID"] = field.stringValue
+            default:
+                continue
+            }
+        }
+        return payload
+    }
+
+    private static func fields(in data: Data) -> [ProtoField] {
+        var fields: [ProtoField] = []
+        var index = data.startIndex
+        while index < data.endIndex {
+            guard let key = data.readVarint(index: &index) else { break }
+            let number = Int(key >> 3)
+            let wireType = Int(key & 0x7)
+            switch wireType {
+            case 0:
+                guard let value = data.readVarint(index: &index) else { return fields }
+                fields.append(ProtoField(number: number, value: Data(), varint: value))
+            case 2:
+                guard let length = data.readVarint(index: &index) else { return fields }
+                let count = Int(length)
+                guard index + count <= data.endIndex else { return fields }
+                fields.append(ProtoField(number: number, value: Data(data[index..<(index + count)]), varint: nil))
+                index += count
+            default:
+                return fields
+            }
+        }
+        return fields
+    }
+}
+
+struct ProtoField {
+    let number: Int
+    let value: Data
+    let varint: UInt64?
+
+    var stringValue: String? {
+        String(data: value, encoding: .utf8)
+    }
+}
+
+private extension Data {
+    mutating func writeVarint(field: Int, _ value: UInt64) {
+        writeRawVarint(UInt64(field << 3))
+        writeRawVarint(value)
+    }
+
+    mutating func writeString(field: Int, _ value: String) {
+        writeLengthDelimited(field: field, Data(value.utf8))
+    }
+
+    mutating func writeMessage(field: Int, _ value: Data) {
+        writeLengthDelimited(field: field, value)
+    }
+
+    mutating func writeLengthDelimited(field: Int, _ value: Data) {
+        writeRawVarint(UInt64((field << 3) | 2))
+        writeRawVarint(UInt64(value.count))
+        append(value)
+    }
+
+    mutating func writeRawVarint(_ value: UInt64) {
+        var value = value
+        while value >= 0x80 {
+            append(UInt8(value & 0x7f) | 0x80)
+            value >>= 7
+        }
+        append(UInt8(value))
+    }
+
+    func readVarint(index: inout Index) -> UInt64? {
+        var result: UInt64 = 0
+        var shift: UInt64 = 0
+        while index < endIndex {
+            let byte = self[index]
+            index += 1
+            result |= UInt64(byte & 0x7f) << shift
+            if byte & 0x80 == 0 {
+                return result
+            }
+            shift += 7
+            if shift > 63 {
+                return nil
+            }
+        }
+        return nil
+    }
 }
 
 final class ConnectionState: @unchecked Sendable {
@@ -165,33 +387,23 @@ final class ConnectionState: @unchecked Sendable {
         lock.unlock()
     }
 
-    func recordPacketLine(_ line: String) {
-        guard
-            let data = line.data(using: .utf8),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let type = json["type"] as? String
-        else {
-            return
-        }
-
-        let requestID = json["requestID"] as? String
-        let payload = json["payload"] as? [String: Any]
-
+    func recordPacket(_ packet: DecodedRealtimePacket) {
         lock.lock()
-        switch type {
-        case "ack":
+        switch packet.type {
+        case .ack:
+            let requestID = packet.requestID
             if let requestID, let clientID = sentClientIDsByRequestID[requestID], !acknowledgedClientIDs.contains(clientID) {
                 acknowledgedClientIDs.insert(clientID)
                 if let sentAt = sentAtByClientID[clientID] {
                     ackLatenciesMillis.append(Date().timeIntervalSince(sentAt) * 1_000)
                 }
             }
-            if let status = payload?["status"] as? String, status != "accepted" {
+            if let status = packet.payload["status"], status != "accepted" {
                 serverErrors += 1
             }
-        case "message":
+        case .message:
             fanoutMessages += 1
-            if let clientID = payload?["clientMessageID"] as? String,
+            if let clientID = packet.payload["clientMessageID"],
                sentAtByClientID[clientID] != nil {
                 if canonicalClientIDs.contains(clientID) {
                     duplicateCanonicalMessages += 1
@@ -202,9 +414,9 @@ final class ConnectionState: @unchecked Sendable {
                     }
                 }
             }
-        case "auth_error", "kick":
+        case .authError, .kick:
             serverErrors += 1
-        default:
+        case .auth:
             break
         }
         let shouldFinish = acknowledgedClientIDs.count >= expectedOwnMessages
@@ -242,7 +454,7 @@ final class ConnectionState: @unchecked Sendable {
     }
 }
 
-func receiveLines(connection: NWConnection, state: ConnectionState, buffer: Data = Data()) {
+func receiveFrames(connection: NWConnection, state: ConnectionState, buffer: Data = Data()) {
     connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
         if error != nil || isComplete {
             state.finish(success: false)
@@ -252,16 +464,13 @@ func receiveLines(connection: NWConnection, state: ConnectionState, buffer: Data
         var nextBuffer = buffer
         if let data {
             nextBuffer.append(data)
-            while let newline = nextBuffer.firstIndex(of: 0x0A) {
-                let lineData = nextBuffer[..<newline]
-                nextBuffer.removeSubrange(...newline)
-                if let line = String(data: lineData, encoding: .utf8), !line.isEmpty {
-                    state.recordPacketLine(line)
-                }
+            for frame in ProtoWire.frames(from: &nextBuffer) {
+                guard let packet = ProtoWire.decodePacket(frame) else { continue }
+                state.recordPacket(packet)
             }
         }
 
-        receiveLines(connection: connection, state: state, buffer: nextBuffer)
+        receiveFrames(connection: connection, state: state, buffer: nextBuffer)
     }
 }
 
@@ -282,50 +491,39 @@ func runConnection(index: Int, options: Options, auth: LoginResponse, deviceInde
         connection.stateUpdateHandler = { nwState in
             switch nwState {
             case .ready:
-                receiveLines(connection: connection, state: state)
-                do {
-                    let authPacket = try packet(type: "auth", payload: [
-                        "accessToken": auth.accessToken,
-                        "deviceID": "tcp-load-driver-\(deviceIndex)",
-                        "deviceName": "tcp-load-driver-\(deviceIndex)",
-                        "platform": "load-test",
-                        "appVersion": "load-test",
-                        "protocolVersion": 1
-                    ])
-                    connection.send(content: authPacket, completion: .contentProcessed { error in
-                        if error != nil {
-                            state.finish(success: false)
-                            return
-                        }
-                        for messageIndex in 0..<options.messagesPerConnection {
-                            let delay = DispatchTime.now() + .milliseconds(options.sendIntervalMillis * messageIndex)
-                            queue.asyncAfter(deadline: delay) {
-                                let requestID = UUID().uuidString
-                                let clientMessageID = "tcp-\(index)-\(messageIndex)-\(UUID().uuidString)"
-                                let messagePacket = try? packet(type: "message", payload: [
-                                    "clientMessageID": clientMessageID,
-                                    "messageID": NSNull(),
-                                    "conversationID": options.conversationID,
-                                    "senderUserID": NSNull(),
-                                    "serverSequence": NSNull(),
-                                    "serverTimestamp": NSNull(),
-                                    "content": ["type": "text", "text": "tcp load \(index)/\(messageIndex)"],
-                                    "derivedState": ["reactions": [], "editedAt": NSNull(), "recalledAt": NSNull()]
-                                ], requestID: requestID)
-                                if let messagePacket {
-                                    state.recordSent(clientMessageID: clientMessageID, requestID: requestID, at: Date())
-                                    connection.send(content: messagePacket, completion: .contentProcessed { error in
-                                        if error != nil {
-                                            state.finish(success: false)
-                                        }
-                                    })
+                receiveFrames(connection: connection, state: state)
+                let authPacket = ProtoWire.authFrame(
+                    accessToken: auth.accessToken,
+                    deviceID: "tcp-load-driver-\(deviceIndex)",
+                    deviceName: "tcp-load-driver-\(deviceIndex)",
+                    platform: "load-test",
+                    appVersion: "load-test"
+                )
+                connection.send(content: authPacket, completion: .contentProcessed { error in
+                    if error != nil {
+                        state.finish(success: false)
+                        return
+                    }
+                    for messageIndex in 0..<options.messagesPerConnection {
+                        let delay = DispatchTime.now() + .milliseconds(options.sendIntervalMillis * messageIndex)
+                        queue.asyncAfter(deadline: delay) {
+                            let requestID = UUID().uuidString
+                            let clientMessageID = "tcp-\(index)-\(messageIndex)-\(UUID().uuidString)"
+                            let messagePacket = ProtoWire.messageFrame(
+                                conversationID: options.conversationID,
+                                clientMessageID: clientMessageID,
+                                text: "tcp load \(index)/\(messageIndex)",
+                                requestID: requestID
+                            )
+                            state.recordSent(clientMessageID: clientMessageID, requestID: requestID, at: Date())
+                            connection.send(content: messagePacket, completion: .contentProcessed { error in
+                                if error != nil {
+                                    state.finish(success: false)
                                 }
-                            }
+                            })
                         }
-                    })
-                } catch {
-                    state.finish(success: false)
-                }
+                    }
+                })
             case .waiting:
                 state.recordReconnect()
             case .failed, .cancelled:

@@ -15,30 +15,33 @@ struct GatewayRelayController: RouteCollection {
 
     func relayMessage(req: Request) async throws -> HTTPStatus {
         let body = try req.content.decode(GatewayRelayMessageRequest.self)
+        let packet = try packet(from: body.packetBase64)
         await req.application.gatewaySessionService.sendMessage(
-            body.payload,
+            try packet.payload.decodePayload(IMTCPMessagePayload.self),
             toUserIDs: body.recipientUserIDs,
-            requestID: body.requestID
+            requestID: packet.requestID ?? body.requestID
         )
         return .ok
     }
 
     func relayConversationEvent(req: Request) async throws -> HTTPStatus {
         let body = try req.content.decode(GatewayRelayConversationEventRequest.self)
+        let packet = try packet(from: body.packetBase64)
         await req.application.gatewaySessionService.sendConversationEvent(
-            body.payload,
+            try packet.payload.decodePayload(IMTCPConversationEventPayload.self),
             toUserID: body.recipientUserID,
-            requestID: body.requestID
+            requestID: packet.requestID ?? body.requestID
         )
         return .ok
     }
 
     func relayContactEvent(req: Request) async throws -> HTTPStatus {
         let body = try req.content.decode(GatewayRelayContactEventRequest.self)
+        let packet = try packet(from: body.packetBase64)
         await req.application.gatewaySessionService.sendContactEvent(
-            body.payload,
+            try packet.payload.decodePayload(IMTCPContactEventPayload.self),
             toUserID: body.recipientUserID,
-            requestID: body.requestID
+            requestID: packet.requestID ?? body.requestID
         )
         return .ok
     }
@@ -67,6 +70,17 @@ struct GatewayRelayController: RouteCollection {
         let body = try req.content.decode(GatewayRelaySessionCountsRequest.self)
         let counts = await req.application.gatewaySessionService.activeConnectionCounts(forSessionIDs: body.sessionIDs)
         return GatewayRelaySessionCountsResponse(counts: counts)
+    }
+
+    private func packet(from packetBase64: String) throws -> IMTCPInboundPacket {
+        guard let data = Data(base64Encoded: packetBase64) else {
+            throw Abort(.badRequest, reason: "Invalid realtime packet.")
+        }
+        do {
+            return try IMTCPProtobufCodec.decode(data)
+        } catch {
+            throw Abort(.badRequest, reason: "Invalid realtime packet.")
+        }
     }
 }
 
