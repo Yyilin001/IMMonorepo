@@ -403,6 +403,18 @@ struct ConversationOutboxProcessor {
                 }
             }
 
+            group.addTask {
+                do {
+                    let consumer = ConversationRealtimeConsumer(app: app, sourceDB: db)
+                    for envelope in envelopes {
+                        try await consumer.consume(envelope)
+                    }
+                    return ("ConversationRealtimeConsumer", envelopes.last, nil)
+                } catch {
+                    return ("ConversationRealtimeConsumer", envelopes.last, error)
+                }
+            }
+
             for await (consumerName, envelope, error) in group {
                 guard let error else {
                     continue
@@ -435,7 +447,8 @@ struct ConversationOutboxProcessor {
             ]),
             sideEffects: ConversationEventConsumerRegistry(consumers: [
                 ConversationSearchIndexConsumer(app: app, db: db),
-                ConversationNotificationConsumer(app: app)
+                ConversationNotificationConsumer(app: app),
+                ConversationRealtimeConsumer(app: app, sourceDB: db)
             ])
         )
     }

@@ -6,9 +6,6 @@ struct GatewayRelayController: RouteCollection {
             .grouped(InternalGatewayRelaySecretMiddleware())
 
         relayRoutes.post("domain-event", use: relayDomainEvent)
-        relayRoutes.post("message", use: relayMessage)
-        relayRoutes.post("conversation-event", use: relayConversationEvent)
-        relayRoutes.post("contact-event", use: relayContactEvent)
         relayRoutes.post("kick-session", use: relayKickSession)
         relayRoutes.post("kick-user", use: relayKickUser)
         relayRoutes.post("session-counts", use: relaySessionCounts)
@@ -20,39 +17,6 @@ struct GatewayRelayController: RouteCollection {
         await req.application.gatewaySessionService.sendDomainEvent(
             try packet.payload.decodePayload(IMTCPChatDomainEventPayload.self),
             toUserIDs: body.recipientUserIDs,
-            requestID: packet.requestID ?? body.requestID
-        )
-        return .ok
-    }
-
-    func relayMessage(req: Request) async throws -> HTTPStatus {
-        let body = try req.content.decode(GatewayRelayMessageRequest.self)
-        let packet = try packet(from: body.packetBase64)
-        await req.application.gatewaySessionService.sendMessage(
-            try packet.payload.decodePayload(IMTCPMessagePayload.self),
-            toUserIDs: body.recipientUserIDs,
-            requestID: packet.requestID ?? body.requestID
-        )
-        return .ok
-    }
-
-    func relayConversationEvent(req: Request) async throws -> HTTPStatus {
-        let body = try req.content.decode(GatewayRelayConversationEventRequest.self)
-        let packet = try packet(from: body.packetBase64)
-        await req.application.gatewaySessionService.sendConversationEvent(
-            try packet.payload.decodePayload(IMTCPConversationEventPayload.self),
-            toUserID: body.recipientUserID,
-            requestID: packet.requestID ?? body.requestID
-        )
-        return .ok
-    }
-
-    func relayContactEvent(req: Request) async throws -> HTTPStatus {
-        let body = try req.content.decode(GatewayRelayContactEventRequest.self)
-        let packet = try packet(from: body.packetBase64)
-        await req.application.gatewaySessionService.sendContactEvent(
-            try packet.payload.decodePayload(IMTCPContactEventPayload.self),
-            toUserID: body.recipientUserID,
             requestID: packet.requestID ?? body.requestID
         )
         return .ok

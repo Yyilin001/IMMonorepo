@@ -247,6 +247,155 @@ struct ChangesLogConsumer: ConversationEventConsumer {
     }
 }
 
+struct ConversationRealtimeConsumer: ConversationEventConsumer {
+    let app: Application
+    let sourceDB: any Database
+
+    var supportedEventTypes: Set<ConversationDomainEventType> {
+        Set(ConversationDomainEventType.allCases)
+    }
+
+    func consume(_ envelope: ConversationEventEnvelope) async throws {
+        let recipientUserIDs = realtimeRecipientUserIDs(for: envelope)
+        guard !recipientUserIDs.isEmpty else {
+            return
+        }
+
+        let message = try await messageResponse(for: envelope)
+        let eventID = envelope.eventID ?? UUID()
+        let aggregateSequence = UInt64(message?.serverSequence ?? 0)
+
+        for recipientUserID in recipientUserIDs {
+            let conversation = try? await ConversationStrongReadService(app: app).conversationSummary(
+                conversationID: envelope.conversationID,
+                for: recipientUserID
+            )
+            let payload = IMTCPChatDomainEventPayload(
+                eventID: eventID,
+                eventType: envelope.eventType.chatDomainEventType,
+                aggregateType: "conversation",
+                aggregateID: envelope.conversationID,
+                aggregateSequence: aggregateSequence == 0
+                    ? UInt64(max(conversation?.lastMessage?.serverSequence ?? conversation?.lastReadSequence ?? 0, 0))
+                    : aggregateSequence,
+                occurredAt: envelope.event.createdAt,
+                actorUserID: nil,
+                conversation: conversation,
+                body: domainEventBody(for: envelope, message: message)
+            )
+            await app.gatewaySessionService.sendDomainEvent(
+                payload,
+                toUserIDs: [recipientUserID],
+                requestID: eventID
+            )
+        }
+    }
+
+    private func realtimeRecipientUserIDs(for envelope: ConversationEventEnvelope) -> [UUID] {
+        switch envelope.eventType {
+        case .conversationRemovedForUser:
+            return envelope.payload.affectedUserID.map { [$0] } ?? []
+        case .messageCreated,
+             .messageUpdated,
+             .messageRecalled,
+             .readAdvanced,
+             .metadataUpdated,
+             .membershipAdded,
+             .membershipRemoved,
+             .membershipRoleUpdated,
+             .directPeerUpdated,
+             .messageFavoriteChanged,
+             .messageVisibilityChanged,
+             .conversationVisibilityChanged,
+             .conversationSettingsChanged,
+             .inviteChanged:
+            return Array(Set(envelope.payload.recipientUserIDs)).sorted { $0.uuidString < $1.uuidString }
+        }
+    }
+
+    private func messageResponse(for envelope: ConversationEventEnvelope) async throws -> IMMessageResponse? {
+        guard let messageID = envelope.payload.messageID ?? envelope.payload.favoriteChangedMessageID else {
+            return nil
+        }
+        guard let message = try await ConversationMessage.find(messageID, on: sourceDB) else {
+            return nil
+        }
+        return try ConversationMessageService(db: sourceDB).messageResponse(
+            from: message,
+            conversationID: envelope.conversationID
+        )
+    }
+
+    private func domainEventBody(
+        for envelope: ConversationEventEnvelope,
+        message: IMMessageResponse?
+    ) -> IMTCPChatDomainEventBody {
+        switch envelope.eventType {
+        case .messageCreated:
+            if let message {
+                return .messageCreated(message: message, clientMessageID: message.clientMessageID)
+            }
+            return .conversationChanged
+        case .messageUpdated:
+            let body = message.flatMap { richTextBody(from: $0.content) } ?? .plain(message?.content.previewText ?? "")
+            return .messageEdited(
+                messageID: envelope.payload.messageID ?? message?.id ?? UUID(),
+                body: body,
+                editedAt: message?.derivedState.edits.last?.editedAt ?? envelope.event.createdAt,
+                message: message
+            )
+        case .messageRecalled:
+            return .messageRevoked(
+                messageID: envelope.payload.messageID ?? message?.id ?? UUID(),
+                revokedAt: envelope.event.createdAt,
+                revokedByUserID: nil,
+                message: message
+            )
+        case .messageVisibilityChanged:
+            return .messageVisibilityChanged(
+                messageIDs: envelope.payload.messageIDs,
+                message: message,
+                visibilityAction: envelope.payload.visibilityAction
+            )
+        case .messageFavoriteChanged:
+            return .messageFavoriteChanged(
+                messageID: envelope.payload.favoriteChangedMessageID ?? envelope.payload.messageID ?? message?.id ?? UUID(),
+                isFavorited: envelope.payload.isFavorited ?? false
+            )
+        case .conversationRemovedForUser:
+            return .conversationRemovedForSelf
+        case .conversationVisibilityChanged:
+            return .conversationVisibilityChanged(
+                visibilityAction: envelope.payload.visibilityAction ?? .conversationCleared,
+                messageIDs: envelope.payload.messageIDs
+            )
+        case .membershipAdded:
+            return .memberChanged(memberUserIDs: envelope.payload.recipientUserIDs)
+        case .membershipRemoved:
+            return .memberChanged(memberUserIDs: envelope.payload.affectedUserID.map { [$0] } ?? [])
+        case .membershipRoleUpdated:
+            return .memberChanged(memberUserIDs: envelope.payload.affectedUserID.map { [$0] } ?? [])
+        case .metadataUpdated,
+             .directPeerUpdated,
+             .conversationSettingsChanged,
+             .inviteChanged,
+             .readAdvanced:
+            return .conversationChanged
+        }
+    }
+
+    private func richTextBody(from content: IMMessageContent) -> IMRichTextContent? {
+        switch content {
+        case .richText(let body):
+            return body
+        case .reply(_, let body):
+            return body
+        case .image, .audio, .file:
+            return nil
+        }
+    }
+}
+
 struct ConversationNotificationConsumer: ConversationEventConsumer {
     let app: Application
 
@@ -465,6 +614,37 @@ struct ConversationEventConsumerRegistry: Sendable {
 
 private struct ConversationEventConsumerTimeoutError: Error {}
 
+private extension ConversationDomainEventType {
+    var chatDomainEventType: IMTCPChatDomainEventType {
+        switch self {
+        case .messageCreated:
+            return .messageCreated
+        case .messageUpdated:
+            return .messageEdited
+        case .messageRecalled:
+            return .messageRevoked
+        case .messageVisibilityChanged:
+            return .messageVisibilityChanged
+        case .messageFavoriteChanged:
+            return .messageFavoriteChanged
+        case .metadataUpdated, .directPeerUpdated, .readAdvanced:
+            return .conversationUpdated
+        case .membershipAdded:
+            return .memberAdded
+        case .membershipRemoved:
+            return .memberRemoved
+        case .membershipRoleUpdated:
+            return .memberRoleUpdated
+        case .conversationRemovedForUser:
+            return .conversationRemovedForSelf
+        case .conversationVisibilityChanged:
+            return .conversationVisibilityChanged
+        case .conversationSettingsChanged, .inviteChanged:
+            return .conversationSettingsChanged
+        }
+    }
+}
+
 struct SummaryProjectionTarget {
     let readModelDB: any Database
     let recipientUserIDs: [UUID]
@@ -479,24 +659,7 @@ func summaryProjectionTargets(
         return []
     }
 
-    switch app.summaryReadModelConfiguration.projectionWriteMode {
-    case .legacy:
-        return [
-            SummaryProjectionTarget(
-                readModelDB: app.imSummaryDB,
-                recipientUserIDs: uniqueRecipientUserIDs
-            )
-        ]
-    case .sharded:
-        return shardedSummaryProjectionTargets(app: app, recipientUserIDs: uniqueRecipientUserIDs)
-    case .dualWrite:
-        return [
-            SummaryProjectionTarget(
-                readModelDB: app.imSummaryDB,
-                recipientUserIDs: uniqueRecipientUserIDs
-            )
-        ] + shardedSummaryProjectionTargets(app: app, recipientUserIDs: uniqueRecipientUserIDs)
-    }
+    return shardedSummaryProjectionTargets(app: app, recipientUserIDs: uniqueRecipientUserIDs)
 }
 
 private func shardedSummaryProjectionTargets(

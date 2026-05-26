@@ -120,7 +120,7 @@ extension AuthManagerTests {
     @Test func leaveIMConversationRemovesCurrentConversationAndFallsBackToListSelection() async throws {
         let mutationState = IMConversationMutationState()
         let currentConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
-        let fallbackConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+        let restoredConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
 
         let transport = MockHTTPTransport { request in
             switch (request.httpMethod, request.url?.path) {
@@ -130,7 +130,7 @@ extension AuthManagerTests {
                 let summaries = await mutationState.isMutated()
                     ? [
                         IMConversationSummaryResponseBody(
-                            id: fallbackConversationID,
+                            id: restoredConversationID,
                             title: "剩余会话",
                             kind: IMConversationKind.direct.rawValue,
                             memberCount: 2,
@@ -152,7 +152,7 @@ extension AuthManagerTests {
                             updatedAt: Date(timeIntervalSince1970: 1_700_001_000)
                         ),
                         IMConversationSummaryResponseBody(
-                            id: fallbackConversationID,
+                            id: restoredConversationID,
                             title: "剩余会话",
                             kind: IMConversationKind.direct.rawValue,
                             memberCount: 2,
@@ -202,8 +202,8 @@ extension AuthManagerTests {
 
         #expect(didLeave)
         #expect(manager.imConversationStore.conversations.count == 1)
-        #expect(manager.imConversationStore.conversations.first?.id == fallbackConversationID.uuidString)
-        #expect(manager.imConversationStore.selectedConversationID == fallbackConversationID.uuidString)
+        #expect(manager.imConversationStore.conversations.first?.id == restoredConversationID.uuidString)
+        #expect(manager.imConversationStore.selectedConversationID == restoredConversationID.uuidString)
     }
 
 
@@ -212,7 +212,7 @@ extension AuthManagerTests {
         let harness = IMConnectionTestHarness()
         let requestCounter = IMRequestCounter()
         let currentConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
-        let fallbackConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+        let restoredConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
 
         let transport = MockHTTPTransport { request in
             switch (request.httpMethod, request.url?.path, request.url?.query) {
@@ -233,7 +233,7 @@ extension AuthManagerTests {
                                 updatedAt: Date(timeIntervalSince1970: 1_700_300_001)
                             ),
                             IMConversationSummaryResponseBody(
-                                id: fallbackConversationID,
+                                id: restoredConversationID,
                                 title: "Fallback",
                                 memberUserIDs: [Self.user.id],
                                 lastMessage: nil,
@@ -287,7 +287,7 @@ extension AuthManagerTests {
         await harness.yield(
             .conversationEvent(
                 requestID: UUID(uuidString: "66666666-6666-6666-6666-666666666666")!,
-                payload: IMTCPConversationEventPayload(
+                payload: TestConversationEventPayload(
                     eventType: .conversationRemovedForSelf,
                     conversation: IMConversationSummaryResponseBody(
                         id: currentConversationID,
@@ -305,13 +305,13 @@ extension AuthManagerTests {
 
         try await Self.waitUntil {
             await MainActor.run {
-                manager.imConversationStore.selectedConversationID == fallbackConversationID.uuidString
+                manager.imConversationStore.selectedConversationID == restoredConversationID.uuidString
                     && manager.imConversationStore.conversations.count == 1
             }
         }
 
         #expect(await requestCounter.count(for: "conversations") == initialConversationRequests)
-        #expect(manager.imConversationStore.conversations.first?.id == fallbackConversationID.uuidString)
+        #expect(manager.imConversationStore.conversations.first?.id == restoredConversationID.uuidString)
     }
 
 

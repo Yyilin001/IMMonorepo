@@ -3,6 +3,8 @@ syntax = "proto3";
 package im.realtime.v1;
 
 option swift_prefix = "IMRT";
+option java_package = "com.xmtx.imclientkit.generated.im.realtime.v1";
+option java_multiple_files = true;
 
 message Packet {
   optional string request_id = 1;

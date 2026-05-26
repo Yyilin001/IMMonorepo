@@ -553,7 +553,7 @@ extension AuthManagerTests {
 
     @Test func conversationRemovedForSelfOnAnotherDeviceFallsBackSelectionViaSummaryChanges() async throws {
         let removedConversationID = UUID(uuidString: "aaaaaaaa-7777-8888-9999-bbbbbbbbbbbb")!
-        let fallbackConversationID = UUID(uuidString: "bbbbbbbb-7777-8888-9999-cccccccccccc")!
+        let restoredConversationID = UUID(uuidString: "bbbbbbbb-7777-8888-9999-cccccccccccc")!
         let state = IMCrossDeviceConversationListState(
             conversations: [
                 IMConversationSummaryResponseBody(
@@ -575,7 +575,7 @@ extension AuthManagerTests {
                     updatedAt: Date(timeIntervalSince1970: 1_700_900_000)
                 ),
                 IMConversationSummaryResponseBody(
-                    id: fallbackConversationID,
+                    id: restoredConversationID,
                     title: "回退会话",
                     kind: IMConversationKind.group.rawValue,
                     memberCount: 2,
@@ -681,8 +681,8 @@ extension AuthManagerTests {
         await manager.refreshIMConversationSummaryReadModelIfNeeded()
 
         #expect(await requestCounter.count(for: "changes") >= 1)
-        #expect(manager.imConversationStore.conversations.map(\.id) == [fallbackConversationID.uuidString])
-        #expect(manager.imConversationStore.selectedConversationID == fallbackConversationID.uuidString)
+        #expect(manager.imConversationStore.conversations.map(\.id) == [restoredConversationID.uuidString])
+        #expect(manager.imConversationStore.selectedConversationID == restoredConversationID.uuidString)
         #expect(manager.imConversationStore.selectedConversation?.title == "回退会话")
     }
 
@@ -691,9 +691,9 @@ extension AuthManagerTests {
     @Test func removedConversationWithCachedHistoryDoesNotReappearAfterRefreshAndReconnectGapSync() async throws {
         let harness = IMConnectionTestHarness()
         let removedConversationID = UUID(uuidString: "aaaaaaaa-6666-7777-8888-bbbbbbbbbbbb")!
-        let fallbackConversationID = UUID(uuidString: "bbbbbbbb-6666-7777-8888-cccccccccccc")!
+        let restoredConversationID = UUID(uuidString: "bbbbbbbb-6666-7777-8888-cccccccccccc")!
         let removedConversationIDString = removedConversationID.uuidString
-        let fallbackConversationIDString = fallbackConversationID.uuidString
+        let restoredConversationIDString = restoredConversationID.uuidString
         let cache = InMemoryIMConversationCache()
         await cache.seed(
             IMConversationCacheSnapshot(
@@ -742,7 +742,7 @@ extension AuthManagerTests {
                         updatedAt: Date(timeIntervalSince1970: 1_700_920_010)
                     ),
                     IMCachedConversationState(
-                        id: fallbackConversationIDString,
+                        id: restoredConversationIDString,
                         title: "缓存中的回退会话",
                         kind: .group,
                         memberCount: 2,
@@ -750,7 +750,7 @@ extension AuthManagerTests {
                         messages: [
                             IMCachedMessageState(
                                 id: "fallback-cached-1",
-                                conversationID: fallbackConversationIDString,
+                                conversationID: restoredConversationIDString,
                                 clientMessageID: nil,
                                 serverMessageID: "fallback-server-1",
                                 senderUserID: Self.user.id,
@@ -799,7 +799,7 @@ extension AuthManagerTests {
                     updatedAt: Date(timeIntervalSince1970: 1_700_920_010)
                 ),
                 IMConversationSummaryResponseBody(
-                    id: fallbackConversationID,
+                    id: restoredConversationID,
                     title: "服务端回退会话",
                     kind: IMConversationKind.group.rawValue,
                     memberCount: 2,
@@ -829,10 +829,10 @@ extension AuthManagerTests {
                         createdAt: Date(timeIntervalSince1970: 1_700_920_010)
                     )
                 ],
-                fallbackConversationID: [
+                restoredConversationID: [
                     IMConversationMessageResponseBody(
                         id: UUID(uuidString: "33333333-6666-7777-8888-aaaaaaaaaaaa")!,
-                        conversationID: fallbackConversationID,
+                        conversationID: restoredConversationID,
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 1,
@@ -841,7 +841,7 @@ extension AuthManagerTests {
                     ),
                     IMConversationMessageResponseBody(
                         id: UUID(uuidString: "22222222-6666-7777-8888-aaaaaaaaaaaa")!,
-                        conversationID: fallbackConversationID,
+                        conversationID: restoredConversationID,
                         senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                         clientMessageID: nil,
                         serverSequence: 2,
@@ -893,22 +893,22 @@ extension AuthManagerTests {
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
             case ("GET", "/api/im/conversations/\(removedConversationIDString)/members", _):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", "/api/im/conversations/\(fallbackConversationIDString)/members", _):
+            case ("GET", "/api/im/conversations/\(restoredConversationIDString)/members", _):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
             case ("GET", "/api/im/conversations/\(removedConversationIDString)/messages", _):
                 return HTTPFixtures.response(
                     statusCode: 200,
                     body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: removedConversationID))
                 )
-            case ("GET", "/api/im/conversations/\(fallbackConversationIDString)/messages", _):
+            case ("GET", "/api/im/conversations/\(restoredConversationIDString)/messages", _):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: fallbackConversationID))
+                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: restoredConversationID))
                 )
             case ("GET", "/api/im/conversations/\(removedConversationIDString)/messages/since", _):
                 await requestCounter.increment("removedGapSync")
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
-            case ("GET", "/api/im/conversations/\(fallbackConversationIDString)/messages/since", _):
+            case ("GET", "/api/im/conversations/\(restoredConversationIDString)/messages/since", _):
                 await requestCounter.increment("fallbackGapSync")
                 let afterSequence = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?
                     .queryItems?
@@ -918,12 +918,12 @@ extension AuthManagerTests {
                 return HTTPFixtures.response(
                     statusCode: 200,
                     body: try HTTPFixtures.jsonBody(
-                        await state.messagesSinceResponse(for: fallbackConversationID, afterSequence: afterSequence)
+                        await state.messagesSinceResponse(for: restoredConversationID, afterSequence: afterSequence)
                     )
                 )
             case ("POST", "/api/im/conversations/\(removedConversationIDString)/read", _):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
-            case ("POST", "/api/im/conversations/\(fallbackConversationIDString)/read", _):
+            case ("POST", "/api/im/conversations/\(restoredConversationIDString)/read", _):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
             default:
                 return try Self.defaultOrUnexpectedIMResponse(for: request)
@@ -949,25 +949,25 @@ extension AuthManagerTests {
 
         await state.removeConversation(id: removedConversationID)
 
-        if let fallbackSummary = await state.currentSummary(for: fallbackConversationID) {
+        if let fallbackSummary = await state.currentSummary(for: restoredConversationID) {
             manager.imConversationStore.applyConversationSummaryChanges(
                 upserts: [fallbackSummary],
                 removedConversationIDs: [removedConversationID]
             )
         }
 
-        #expect(manager.imConversationStore.selectedConversationID == fallbackConversationIDString)
-        #expect(manager.imConversationStore.conversations.map(\.id) == [fallbackConversationIDString])
+        #expect(manager.imConversationStore.selectedConversationID == restoredConversationIDString)
+        #expect(manager.imConversationStore.conversations.map(\.id) == [restoredConversationIDString])
         #expect(manager.imConversationStore.selectedConversation?.messages.map(\.text) == ["回退历史 1"])
 
         manager.imConversationStore.appendMessages(
-            in: fallbackConversationIDString,
-            messages: await state.messagesSinceResponse(for: fallbackConversationID, afterSequence: 1).messages,
+            in: restoredConversationIDString,
+            messages: await state.messagesSinceResponse(for: restoredConversationID, afterSequence: 1).messages,
             currentUserID: Self.user.id
         )
 
-        #expect(manager.imConversationStore.selectedConversationID == fallbackConversationIDString)
-        #expect(manager.imConversationStore.conversations.map(\.id) == [fallbackConversationIDString])
+        #expect(manager.imConversationStore.selectedConversationID == restoredConversationIDString)
+        #expect(manager.imConversationStore.conversations.map(\.id) == [restoredConversationIDString])
         #expect(manager.imConversationStore.selectedConversation?.messages.map(\.text) == ["回退历史 1", "回退历史 2"])
         #expect(manager.imConversationStore.selectedConversation?.lastMessagePreview == "回退历史 2")
         #expect(manager.imConversationStore.selectedConversation?.serverUnreadCount == 1)
@@ -977,9 +977,9 @@ extension AuthManagerTests {
 
     @Test func rejoinedConversationDoesNotReuseCachedHistoryFromBeforeVisibleWindowReset() async throws {
         let rejoinedConversationID = UUID(uuidString: "aaaaaaaa-1212-3434-5656-bbbbbbbbbbbb")!
-        let fallbackConversationID = UUID(uuidString: "bbbbbbbb-1212-3434-5656-cccccccccccc")!
+        let restoredConversationID = UUID(uuidString: "bbbbbbbb-1212-3434-5656-cccccccccccc")!
         let rejoinedConversationIDString = rejoinedConversationID.uuidString
-        let fallbackConversationIDString = fallbackConversationID.uuidString
+        let restoredConversationIDString = restoredConversationID.uuidString
         let peerUserID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
         let cache = InMemoryIMConversationCache()
 
@@ -1028,7 +1028,7 @@ extension AuthManagerTests {
                         updatedAt: Date(timeIntervalSince1970: 1_700_970_010)
                     ),
                     IMCachedConversationState(
-                        id: fallbackConversationIDString,
+                        id: restoredConversationIDString,
                         title: "备用会话",
                         kind: .group,
                         memberCount: 2,
@@ -1036,7 +1036,7 @@ extension AuthManagerTests {
                         messages: [
                             IMCachedMessageState(
                                 id: "fallback-cached-1",
-                                conversationID: fallbackConversationIDString,
+                                conversationID: restoredConversationIDString,
                                 clientMessageID: nil,
                                 serverMessageID: "fallback-server-1",
                                 senderUserID: peerUserID,
@@ -1066,7 +1066,7 @@ extension AuthManagerTests {
         let state = IMCrossDeviceConversationListState(
             conversations: [
                 IMConversationSummaryResponseBody(
-                    id: fallbackConversationID,
+                    id: restoredConversationID,
                     title: "服务端备用会话",
                     kind: IMConversationKind.group.rawValue,
                     memberCount: 2,
@@ -1085,10 +1085,10 @@ extension AuthManagerTests {
                 )
             ],
             messagesByConversationID: [
-                fallbackConversationID: [
+                restoredConversationID: [
                     IMConversationMessageResponseBody(
                         id: UUID(uuidString: "11111111-1212-3434-5656-aaaaaaaaaaaa")!,
-                        conversationID: fallbackConversationID,
+                        conversationID: restoredConversationID,
                         senderUserID: peerUserID,
                         clientMessageID: nil,
                         serverSequence: 1,
@@ -1133,12 +1133,12 @@ extension AuthManagerTests {
                     statusCode: 200,
                     body: try HTTPFixtures.jsonBody(await state.changesResponse(afterToken: afterToken))
                 )
-            case ("GET", "/api/im/conversations/\(fallbackConversationID.uuidString)/members"):
+            case ("GET", "/api/im/conversations/\(restoredConversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", "/api/im/conversations/\(fallbackConversationID.uuidString)/messages"):
+            case ("GET", "/api/im/conversations/\(restoredConversationID.uuidString)/messages"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: fallbackConversationID))
+                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: restoredConversationID))
                 )
             case ("GET", "/api/im/conversations/\(rejoinedConversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
@@ -1180,7 +1180,7 @@ extension AuthManagerTests {
         try await Self.waitUntil {
             await MainActor.run {
                 !manager.imConversationStore.isLoadingConversations
-                    && manager.imConversationStore.conversations.map(\.id) == [fallbackConversationIDString]
+                    && manager.imConversationStore.conversations.map(\.id) == [restoredConversationIDString]
             }
         }
 
@@ -1274,7 +1274,7 @@ extension AuthManagerTests {
                     id: UUID(uuidString: "22222222-8888-9999-0000-aaaaaaaaaaaa")!,
                     senderUserID: Self.user.id,
                     serverSequence: 1,
-                    content: .system(.legacyText("manager@example.com 创建了群聊")),
+                    content: .richText(.plain("manager@example.com 创建了群聊")),
                     createdAt: Date(timeIntervalSince1970: 1_700_910_000)
                 ),
                 lastReadSequence: 1,
@@ -1353,17 +1353,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 2,
-                        content: .system(
-                            IMSystemEvent(
-                                type: .roleUpdated,
-                                actorUserID: Self.user.id,
-                                actorEmail: Self.user.email,
-                                targetUserID: peerUserID,
-                                targetEmail: "peer@example.com",
-                                previousRole: .member,
-                                newRole: .admin
-                            )
-                        ),
+                        content: .richText(.plain("manager@example.com 将 peer@example.com 设为管理员")),
                         createdAt: Date(timeIntervalSince1970: 1_700_910_100)
                     ),
                     unreadCount: 1,

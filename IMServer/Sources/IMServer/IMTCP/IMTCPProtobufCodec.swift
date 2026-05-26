@@ -277,10 +277,6 @@ extension IMMessageContent {
             content.reference = reference.protobuf
             content.body = body.protobuf
             value.reply = content
-        case .recalled:
-            value.richText = IMRichTextContent.plain("消息已撤回").protobuf
-        case .system(let event):
-            value.richText = IMRichTextContent.plain(event.displayText).protobuf
         case .image(let asset):
             value.image = asset.protobuf
         case .audio(let asset):

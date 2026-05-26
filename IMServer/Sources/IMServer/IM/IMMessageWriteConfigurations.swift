@@ -2,7 +2,6 @@ import Vapor
 
 struct IMSequenceAllocationConfiguration: Sendable {
     enum Mode: String, Sendable {
-        case legacy
         case block
     }
 
@@ -11,8 +10,7 @@ struct IMSequenceAllocationConfiguration: Sendable {
 
     static func load(from environment: Environment) -> IMSequenceAllocationConfiguration {
         IMSequenceAllocationConfiguration(
-            mode: Environment.get("IM_SEQUENCE_ALLOCATION_MODE")
-                .flatMap(Mode.init(rawValue:)) ?? .legacy,
+            mode: .block,
             blockSize: max(1, Environment.get("IM_SEQUENCE_BLOCK_SIZE").flatMap(Int.init(_:)) ?? 256)
         )
     }

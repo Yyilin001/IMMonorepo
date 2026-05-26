@@ -302,13 +302,7 @@ struct ConversationSearchReadSupport {
     }
 
     private var searchService: ConversationSearchService {
-        let allowLegacyFallback: Bool
-        if let sql = db as? any SQLDatabase {
-            allowLegacyFallback = sql.dialect.name == "sqlite"
-        } else {
-            allowLegacyFallback = true
-        }
-        return ConversationSearchService(db: db, allowLegacyFallback: allowLegacyFallback)
+        ConversationSearchService(db: db)
     }
 
     func searchMessages(

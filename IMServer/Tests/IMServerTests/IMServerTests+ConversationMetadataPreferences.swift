@@ -185,7 +185,7 @@ extension IMServerTests {
     }
 
 
-    @Test("IM metadata update persists fields and emits a structured system message")
+    @Test("IM metadata update persists fields without writing a system message")
     func imConversationMetadataUpdatePersistsAndEmitsStructuredSystemMessage() async throws {
         try await withApp(configure: configure) { app in
             let accessToken = try await loginAccessToken(using: app)
@@ -232,13 +232,7 @@ extension IMServerTests {
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
                 let messages = try res.content.decode([IMMessageResponse].self)
-                #expect(messages.count == 1)
-                guard case .richText(let body) = messages[0].content else {
-                    Issue.record("Expected metadata update to emit a rich text notice")
-                    return
-                }
-
-                #expect(body == .plain("demo@example.com 更新了群名称、群公告、群头像"))
+                #expect(messages.isEmpty)
             })
         }
     }
@@ -289,13 +283,7 @@ extension IMServerTests {
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
                 let messages = try res.content.decode([IMMessageResponse].self)
-                #expect(messages.count == 1)
-                guard case .richText(let body) = messages[0].content else {
-                    Issue.record("Expected metadata update to emit a rich text notice")
-                    return
-                }
-
-                #expect(body == .plain("demo@example.com 更新了群公告"))
+                #expect(messages.isEmpty)
             })
         }
     }

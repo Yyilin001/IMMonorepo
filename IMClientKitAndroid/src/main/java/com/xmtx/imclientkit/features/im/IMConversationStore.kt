@@ -32,11 +32,13 @@ class IMConversationStore {
     private val mutableState = MutableStateFlow(ConversationListState())
     private val pendingRequestLocalMessageIDs = mutableMapOf<String, String>()
     private val pendingStreamSnapshotTargets = mutableSetOf<IMActiveMessageStreamTarget>()
+    private val processedDomainEventIDs = mutableSetOf<String>()
     val state: StateFlow<ConversationListState> = mutableState
 
     fun restoreSnapshot(snapshot: ConversationListState) {
         pendingRequestLocalMessageIDs.clear()
         pendingStreamSnapshotTargets.clear()
+        processedDomainEventIDs.clear()
         val selectedConversationID = snapshot.selectedConversationID?.takeIf { selected ->
             snapshot.conversations.any { it.id == selected }
         } ?: snapshot.conversations.firstOrNull()?.id
@@ -194,6 +196,53 @@ class IMConversationStore {
 
     fun receiveIncomingMessage(payload: IMTCPMessagePayload, currentUserID: String) {
         appendDomainMessages(payload.conversationID, listOf(payload.toConversationMessage(currentUserID)))
+    }
+
+    fun applyDomainEvent(payload: IMTCPChatDomainEventPayload, currentUserID: String) {
+        if (!processedDomainEventIDs.add(payload.eventID)) return
+        payload.conversation?.let { applyConversationSummary(it) }
+
+        when (val body = payload.body) {
+            is IMTCPChatDomainEventBody.MessageCreated -> {
+                appendMessages(body.message.conversationID, listOf(body.message), currentUserID)
+            }
+            is IMTCPChatDomainEventBody.MessageUpdated -> {
+                body.message?.let { appendMessages(it.conversationID, listOf(it), currentUserID) }
+            }
+            is IMTCPChatDomainEventBody.MessageRevoked -> {
+                if (body.message != null) {
+                    appendMessages(body.message.conversationID, listOf(body.message), currentUserID)
+                } else {
+                    markMessageRecalled(payload.aggregateID, body.messageID)
+                }
+            }
+            is IMTCPChatDomainEventBody.MessageVisibilityChanged -> {
+                body.message?.let { appendMessages(it.conversationID, listOf(it), currentUserID) }
+            }
+            is IMTCPChatDomainEventBody.MessageFavoriteChanged -> Unit
+            is IMTCPChatDomainEventBody.MessageStream -> {
+                applyMessageStreamEvent(
+                    IMTCPConversationEventPayload(
+                        eventType = payload.eventType,
+                        conversation = payload.conversation ?: return,
+                        message = body.message,
+                        stream = body.stream,
+                        actorUserID = payload.actorUserID,
+                        serverTimestamp = payload.occurredAt,
+                    ),
+                    currentUserID,
+                )
+            }
+            is IMTCPChatDomainEventBody.ConversationChanged -> {
+                if (body.removedForSelf) removeConversation(payload.aggregateID)
+            }
+            is IMTCPChatDomainEventBody.ConversationVisibilityChanged -> {
+                if (body.visibilityAction == "conversation_deleted") removeConversation(payload.aggregateID)
+                if (body.visibilityAction == "conversation_cleared") clearMessages(payload.aggregateID)
+            }
+            is IMTCPChatDomainEventBody.MemberChanged -> Unit
+            is IMTCPChatDomainEventBody.ContactChanged -> Unit
+        }
     }
 
     fun applyMessageStreamEvent(payload: IMTCPConversationEventPayload, currentUserID: String) {
@@ -560,6 +609,28 @@ class IMConversationStore {
                             if (message.id == localMessageID) message.copy(deliveryState = state) else message
                         },
                     )
+                },
+            )
+        }
+    }
+
+    private fun markMessageRecalled(conversationID: String, messageID: String) {
+        mutableState.update { current ->
+            current.copy(
+                conversations = current.conversations.map { conversation ->
+                    if (conversation.id != conversationID) {
+                        conversation
+                    } else {
+                        conversation.copy(
+                            messages = conversation.messages.map { message ->
+                                if (message.id == messageID || message.serverMessageID == messageID) {
+                                    message.copy(derivedState = message.derivedState.withRecallState("recalled"))
+                                } else {
+                                    message
+                                }
+                            },
+                        )
+                    }
                 },
             )
         }

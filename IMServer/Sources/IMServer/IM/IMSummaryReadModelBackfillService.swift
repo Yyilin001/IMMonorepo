@@ -151,10 +151,6 @@ struct IMSummaryReadModelBackfillService {
             )
         }
 
-        let legacySummaryOwnerUserIDs = try await ConversationUserSummary.query(on: app.imSummaryDB)
-            .all()
-            .map(\.ownerUserID)
-
         var shardedSummaryOwnerUserIDs: [UUID] = []
         for shardID in app.summaryShardRouter.shardIDs {
             let database = app.summaryShardRouter.database(forShardID: shardID)
@@ -165,27 +161,15 @@ struct IMSummaryReadModelBackfillService {
             )
         }
 
-        return Array(Set(membershipOwnerUserIDs + legacySummaryOwnerUserIDs + shardedSummaryOwnerUserIDs))
+        return Array(Set(membershipOwnerUserIDs + shardedSummaryOwnerUserIDs))
             .sorted { $0.uuidString < $1.uuidString }
     }
 
     private func projectionReadModelDatabases(for ownerUserID: UUID) -> [any Database] {
-        switch app.summaryReadModelConfiguration.projectionWriteMode {
-        case .legacy:
-            return [app.imSummaryDB]
-        case .sharded:
-            return [app.summaryShardRouter.database(forOwnerUserID: ownerUserID)]
-        case .dualWrite:
-            return [app.imSummaryDB, app.summaryShardRouter.database(forOwnerUserID: ownerUserID)]
-        }
+        [app.summaryShardRouter.database(forOwnerUserID: ownerUserID)]
     }
 
     private func queryReadModelDatabase(for ownerUserID: UUID) -> any Database {
-        switch app.summaryReadModelConfiguration.queryReadSource {
-        case .legacy:
-            return app.imSummaryDB
-        case .sharded:
-            return app.summaryShardRouter.database(forOwnerUserID: ownerUserID)
-        }
+        app.summaryShardRouter.database(forOwnerUserID: ownerUserID)
     }
 }

@@ -114,7 +114,7 @@ enum AIMessageStreamMutationBuilder {
         )
     }
 
-    static func eventType(for state: MessageStreamLifecycleState) -> IMTCPConversationEventType {
+    static func eventType(for state: MessageStreamLifecycleState) -> IMTCPChatDomainEventType {
         switch state {
         case .completed:
             .messageStreamCompleted

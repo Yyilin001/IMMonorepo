@@ -98,8 +98,8 @@ extension AuthManager {
         contactRuntimeController.upsertContact(contact)
     }
 
-    func applyContactEvent(_ payload: IMTCPContactEventPayload) {
-        contactRuntimeController.applyContactEvent(payload)
+    func applyContactDomainEvent(_ payload: IMTCPChatDomainEventPayload) {
+        contactRuntimeController.applyContactDomainEvent(payload)
     }
 
     func replaceContactRequests(_ requests: [ContactRequestResponseBody], currentUserID: UUID) {

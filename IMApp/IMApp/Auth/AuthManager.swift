@@ -375,8 +375,8 @@ final class AuthManager {
             flushContactStateCache: { [weak self] in
                 await self?.flushContactStateCache()
             },
-            applyContactEvent: { [weak self] payload in
-                self?.applyContactEvent(payload)
+            applyContactDomainEvent: { [weak self] payload in
+                self?.applyContactDomainEvent(payload)
             },
             setConnectionStatus: { [weak self] status in
                 self?.setIMConnectionStatus(status)

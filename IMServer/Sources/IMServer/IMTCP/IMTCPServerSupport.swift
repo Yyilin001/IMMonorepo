@@ -226,24 +226,6 @@ actor IMConnectionRegistry {
         sendPacket(type: .domainEvent, payload: payload, toUserIDs: userIDs, requestID: requestID)
     }
 
-    func sendMessage(
-        _ payload: IMTCPMessagePayload,
-        toUserIDs userIDs: [UUID],
-        requestID: UUID? = UUID()
-    ) {}
-
-    func sendConversationEvent(
-        _ payload: IMTCPConversationEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID? = UUID()
-    ) {}
-
-    func sendContactEvent(
-        _ payload: IMTCPContactEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID? = UUID()
-    ) {}
-
     private func sendPacket<Payload: Sendable>(
         type: IMTCPPacketType,
         payload: Payload,

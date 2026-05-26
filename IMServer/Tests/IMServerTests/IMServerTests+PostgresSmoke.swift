@@ -204,7 +204,7 @@ extension IMServerTests {
         #expect(directory.assetID == asset.assetID)
         #expect(directory.shardID == SingleShardConversationShardRouter.defaultShardID)
 
-        try mediaMessage.replaceContent(.recalled)
+        try mediaMessage.replaceDerivedState(.init(recallState: .recalled))
         try await mediaMessage.update(on: app.db)
         let removedReferences = try await ConversationMediaAssetReferenceService(db: app.db).syncMessageReferences(
             conversationID: conversationID,

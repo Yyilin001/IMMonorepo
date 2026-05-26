@@ -12,15 +12,17 @@ extension IMConversationController {
             messageID: messageID,
             userID: userID
         )
-        await IMConversationEventService(app: req.application).publish(
-            eventType: .messageFavoriteChanged,
+        try await ConversationOutboxService(db: db).enqueue(
+            type: .messageFavoriteChanged,
             conversationID: conversationID,
-            recipientUserIDs: [userID],
-            message: message,
-            actorUserID: userID,
-            favoriteChangedMessageID: messageID,
-            isFavorited: true
+            payload: ConversationDomainEventPayload(
+                recipientUserIDs: [userID],
+                messageID: messageID,
+                favoriteChangedMessageID: messageID,
+                isFavorited: true
+            )
         )
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return message
     }
 
@@ -30,14 +32,17 @@ extension IMConversationController {
         let messageID = try messageID(from: req)
         let db = try await req.application.conversationShardRouter.commandDatabase(forConversationID: conversationID)
         try await IMCommonFeatureService(db: db).unfavoriteMessage(messageID: messageID, userID: userID)
-        await IMConversationEventService(app: req.application).publish(
-            eventType: .messageFavoriteChanged,
+        try await ConversationOutboxService(db: db).enqueue(
+            type: .messageFavoriteChanged,
             conversationID: conversationID,
-            recipientUserIDs: [userID],
-            actorUserID: userID,
-            favoriteChangedMessageID: messageID,
-            isFavorited: false
+            payload: ConversationDomainEventPayload(
+                recipientUserIDs: [userID],
+                messageID: messageID,
+                favoriteChangedMessageID: messageID,
+                isFavorited: false
+            )
         )
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return .ok
     }
 
@@ -65,14 +70,16 @@ extension IMConversationController {
             messageIDs: body.messageIDs,
             userID: userID
         )
-        await IMConversationEventService(app: req.application).publish(
-            eventType: .messageVisibilityChanged,
+        try await ConversationOutboxService(db: db).enqueue(
+            type: .messageVisibilityChanged,
             conversationID: conversationID,
-            recipientUserIDs: [userID],
-            actorUserID: userID,
-            messageIDs: body.messageIDs,
-            visibilityAction: .messageHidden
+            payload: ConversationDomainEventPayload(
+                recipientUserIDs: [userID],
+                messageIDs: body.messageIDs,
+                visibilityAction: .messageHidden
+            )
         )
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return .ok
     }
 
@@ -85,13 +92,15 @@ extension IMConversationController {
             userID: userID,
             deleteFromList: false
         )
-        await IMConversationEventService(app: req.application).publish(
-            eventType: .conversationVisibilityChanged,
+        try await ConversationOutboxService(db: db).enqueue(
+            type: .conversationVisibilityChanged,
             conversationID: conversationID,
-            recipientUserIDs: [userID],
-            actorUserID: userID,
-            visibilityAction: .conversationCleared
+            payload: ConversationDomainEventPayload(
+                recipientUserIDs: [userID],
+                visibilityAction: .conversationCleared
+            )
         )
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return .ok
     }
 
@@ -99,22 +108,21 @@ extension IMConversationController {
         let userID = try req.auth.require(User.self).requireID()
         let conversationID = try conversationID(from: req)
         let db = try await req.application.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-        let summary = try? await ConversationSummaryReadSupport(db: db).conversationSummary(
-            conversationID: conversationID,
-            for: userID
-        )
         try await IMCommonFeatureService(db: db).clearConversation(
             conversationID: conversationID,
             userID: userID,
             deleteFromList: true
         )
-        if let summary {
-            await IMConversationEventService(app: req.application).publishRemovedForSelf(
-                conversation: summary,
-                recipientUserID: userID,
-                actorUserID: userID
+        try await ConversationOutboxService(db: db).enqueue(
+            type: .conversationRemovedForUser,
+            conversationID: conversationID,
+            payload: ConversationDomainEventPayload(
+                recipientUserIDs: [userID],
+                affectedUserID: userID,
+                visibilityAction: .conversationDeleted
             )
-        }
+        )
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return .ok
     }
 
@@ -219,12 +227,12 @@ extension IMConversationController {
             .filter(\.$conversation.$id == conversationID)
             .all()
             .map(\.$user.id)
-        await IMConversationEventService(app: req.application).publish(
-            eventType: .inviteChanged,
+        try await ConversationOutboxService(db: db).enqueue(
+            type: .inviteChanged,
             conversationID: conversationID,
-            recipientUserIDs: recipientUserIDs,
-            actorUserID: userID
+            payload: ConversationDomainEventPayload(recipientUserIDs: recipientUserIDs)
         )
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return IMGroupInviteResponse(
             token: token,
             conversationID: conversationID,
@@ -291,12 +299,12 @@ extension IMConversationController {
             .filter(\.$conversation.$id == conversationID)
             .all()
             .map(\.$user.id)
-        await IMConversationEventService(app: req.application).publish(
-            eventType: .inviteChanged,
+        try await ConversationOutboxService(db: db).enqueue(
+            type: .inviteChanged,
             conversationID: conversationID,
-            recipientUserIDs: recipients,
-            actorUserID: userID
+            payload: ConversationDomainEventPayload(recipientUserIDs: recipients)
         )
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return .ok
     }
 

@@ -330,12 +330,6 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                         )
                     }
 
-                    try? await InlineOutboxProjectionRuntime(app: self.application).flushIfAllowed()
-
-                    if result.didCreateMessage {
-                        await IMConversationEventService(app: self.application)
-                            .publishMessageCreated(result, actorUserID: connection.userID)
-                    }
                 } catch AuthError.sessionRevoked, AuthError.sessionExpired, AuthError.invalidToken {
                     channel.eventLoop.execute {
                         self.sendKickAndClose(

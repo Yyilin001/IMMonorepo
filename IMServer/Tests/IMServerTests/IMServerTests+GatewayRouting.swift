@@ -17,7 +17,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 2,
+                protocolVersion: 4,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -81,6 +81,8 @@ extension IMServerTests {
                     #expect(acknowledgement.status == "accepted")
                     #expect(acknowledgement.conversationID == conversationID.uuidString)
 
+                    try await app.processInlineOutboxProjectionIfAllowed()
+
                     let deviceAEvent = try await deviceA.nextPacket(ofType: .domainEvent)
                         .payload.decodePayload(IMTCPChatDomainEventPayload.self)
                     let deviceBEvent = try await deviceB.nextPacket(ofType: .domainEvent)
@@ -113,7 +115,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 2,
+                protocolVersion: 4,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -173,7 +175,7 @@ extension IMServerTests {
                     let page = try res.content.decode(IMConversationPageResponse.self)
                     let summary = try #require(page.items.first { $0.id == conversationID })
                     #expect(summary.memberUserIDs.contains(currentUserID))
-                    #expect(summary.lastReadSequence == 1)
+                    #expect(summary.lastReadSequence == 0)
                     #expect(summary.unreadCount == 2)
                 })
 
@@ -186,19 +188,21 @@ extension IMServerTests {
 
                     try await app.testing().test(.POST, "api/im/conversations/\(conversationID.uuidString)/read", beforeRequest: { req in
                         req.headers.bearerAuthorization = .init(token: deviceAAccessToken)
-                        try req.content.encode(IMConversationReadRequest(readSequence: 3))
+                        try req.content.encode(IMConversationReadRequest(readSequence: 2))
                     }, afterResponse: { res async throws in
                         #expect(res.status == .ok)
                         let response = try res.content.decode(IMConversationReadResponse.self)
-                        #expect(response.lastReadSequence == 3)
+                        #expect(response.lastReadSequence == 2)
                         #expect(response.unreadCount == 0)
                     })
+
+                    try await app.processInlineOutboxProjectionIfAllowed()
 
                     let event = try await deviceB.nextPacket(ofType: .domainEvent)
                         .payload.decodePayload(IMTCPChatDomainEventPayload.self)
                     #expect(event.eventType == .conversationUpdated)
                     #expect(event.conversation?.id == conversationID)
-                    #expect(event.conversation?.lastReadSequence == 3)
+                    #expect(event.conversation?.lastReadSequence == 2)
                     #expect(event.conversation?.unreadCount == 0)
                 }
             }
@@ -213,7 +217,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 2,
+                protocolVersion: 4,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -271,6 +275,7 @@ extension IMServerTests {
                             )
                         )
                         _ = try await deviceA.nextPacket(ofType: .ack)
+                        try await app.processInlineOutboxProjectionIfAllowed()
                         _ = try await deviceA.nextPacket(ofType: .domainEvent)
                     }
 
@@ -285,7 +290,7 @@ extension IMServerTests {
 
                         try await app.testing().test(
                             .GET,
-                            "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=1",
+                            "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=0",
                             beforeRequest: { req in
                                 req.headers.bearerAuthorization = .init(token: deviceBAccessToken)
                             },
@@ -293,15 +298,15 @@ extension IMServerTests {
                                 #expect(res.status == .ok)
                                 let response = try res.content.decode(IMMessageSinceResponse.self)
                                 #expect(response.messages.map(\.clientMessageID) == ["tcp-gap-1", "tcp-gap-2"])
-                                #expect(response.messages.map(\.serverSequence) == [2, 3])
+                                #expect(response.messages.map(\.serverSequence) == [1, 2])
                                 #expect(response.hasMore == false)
-                                #expect(response.nextAfterSequence == 3)
+                                #expect(response.nextAfterSequence == 2)
                             }
                         )
 
                         try await app.testing().test(
                             .GET,
-                            "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=2",
+                            "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=1",
                             beforeRequest: { req in
                                 req.headers.bearerAuthorization = .init(token: deviceBAccessToken)
                             },
@@ -309,7 +314,7 @@ extension IMServerTests {
                                 #expect(res.status == .ok)
                                 let response = try res.content.decode(IMMessageSinceResponse.self)
                                 #expect(response.messages.map(\.clientMessageID) == ["tcp-gap-2"])
-                                #expect(response.messages.map(\.serverSequence) == [3])
+                                #expect(response.messages.map(\.serverSequence) == [2])
                                 #expect(response.hasMore == false)
                             }
                         )
@@ -327,7 +332,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 2,
+                protocolVersion: 4,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -398,7 +403,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 2,
+                protocolVersion: 4,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 0.1,
@@ -882,7 +887,7 @@ private struct IMTCPTestClient: Sendable {
                 deviceName: "Test \(deviceID)",
                 platform: "ios",
                 appVersion: "1.0",
-                protocolVersion: 2
+                protocolVersion: 4
             )
         )
         _ = try await nextPacket(ofType: .authOK)

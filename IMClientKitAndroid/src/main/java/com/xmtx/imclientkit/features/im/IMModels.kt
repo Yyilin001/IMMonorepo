@@ -287,6 +287,12 @@ fun JsonObject.withMessageStreamState(state: IMMessageStreamState): JsonObject =
         )
     }
 
+fun JsonObject.withRecallState(state: String): JsonObject =
+    buildJsonObject {
+        this@withRecallState.forEach { (key, value) -> put(key, value) }
+        put("recallState", JsonPrimitive(state))
+    }
+
 data class IMConversationMessage(
     val id: String,
     val conversationID: String,
@@ -404,6 +410,58 @@ data class IMTCPConversationEventPayload(
     val visibilityAction: String? = null,
 )
 
+data class IMTCPChatDomainEventPayload(
+    val eventID: String,
+    val eventType: String,
+    val aggregateType: String,
+    val aggregateID: String,
+    val aggregateSequence: ULong,
+    val occurredAt: String,
+    val actorUserID: String? = null,
+    val conversation: IMConversationSummaryResponseBody? = null,
+    val body: IMTCPChatDomainEventBody,
+)
+
+sealed interface IMTCPChatDomainEventBody {
+    data class MessageCreated(
+        val message: IMConversationMessageResponseBody,
+        val clientMessageID: String? = null,
+    ) : IMTCPChatDomainEventBody
+
+    data class MessageUpdated(
+        val messageID: String,
+        val message: IMConversationMessageResponseBody? = null,
+    ) : IMTCPChatDomainEventBody
+
+    data class MessageRevoked(
+        val messageID: String,
+        val revokedAt: String,
+        val revokedByUserID: String? = null,
+        val message: IMConversationMessageResponseBody? = null,
+    ) : IMTCPChatDomainEventBody
+
+    data class MessageVisibilityChanged(
+        val messageIDs: List<String>,
+        val message: IMConversationMessageResponseBody? = null,
+        val visibilityAction: String? = null,
+    ) : IMTCPChatDomainEventBody
+
+    data class MessageFavoriteChanged(
+        val messageID: String,
+        val isFavorited: Boolean,
+    ) : IMTCPChatDomainEventBody
+
+    data class MessageStream(
+        val stream: IMTCPMessageStreamPayload,
+        val message: IMConversationMessageResponseBody? = null,
+    ) : IMTCPChatDomainEventBody
+
+    data class ConversationChanged(val removedForSelf: Boolean = false) : IMTCPChatDomainEventBody
+    data class ConversationVisibilityChanged(val visibilityAction: String, val messageIDs: List<String>) : IMTCPChatDomainEventBody
+    data class MemberChanged(val memberUserIDs: List<String>) : IMTCPChatDomainEventBody
+    data class ContactChanged(val request: JsonObject? = null, val contact: JsonObject? = null, val contactUserID: String? = null) : IMTCPChatDomainEventBody
+}
+
 @Serializable
 data class IMTCPMessageStreamPayload(
     val streamID: String,
@@ -499,12 +557,6 @@ sealed interface IMMessageContent {
     }
 
     @Serializable
-    data object Recalled : IMMessageContent {
-        override val previewText: String
-            get() = "Message recalled"
-    }
-
-    @Serializable
     data class Media(
         val type: String,
         val asset: IMMediaAsset,
@@ -515,14 +567,6 @@ sealed interface IMMessageContent {
                 "audio" -> "[Audio] ${asset.filename}"
                 else -> "[File] ${asset.filename}"
             }
-    }
-
-    @Serializable
-    data class System(
-        val event: JsonObject,
-    ) : IMMessageContent {
-        override val previewText: String
-            get() = event["legacyText"]?.jsonPrimitive?.contentOrNull ?: "System message"
     }
 
     data class Unsupported(
@@ -598,12 +642,10 @@ object IMMessageContentSerializer : KSerializer<IMMessageContent> {
                 reference = jsonDecoder.json.decodeFromJsonElement(IMReplyReference.serializer(), raw.required("reference")),
                 body = jsonDecoder.json.decodeFromJsonElement(IMRichTextContent.serializer(), raw.required("body")),
             )
-            "recalled" -> IMMessageContent.Recalled
             "image", "audio", "file" -> IMMessageContent.Media(
                 type = type,
                 asset = jsonDecoder.json.decodeFromJsonElement(IMMediaAsset.serializer(), raw.required("asset")),
             )
-            "system" -> IMMessageContent.System(raw["event"]?.jsonObject ?: buildJsonObject { })
             else -> IMMessageContent.Unsupported(type, raw)
         }
     }
@@ -621,16 +663,9 @@ object IMMessageContentSerializer : KSerializer<IMMessageContent> {
                 put("reference", jsonEncoder.json.encodeToJsonElement(IMReplyReference.serializer(), value.reference))
                 put("body", jsonEncoder.json.encodeToJsonElement(IMRichTextContent.serializer(), value.body))
             }
-            IMMessageContent.Recalled -> buildJsonObject {
-                put("type", JsonPrimitive("recalled"))
-            }
             is IMMessageContent.Media -> buildJsonObject {
                 put("type", JsonPrimitive(value.type))
                 put("asset", jsonEncoder.json.encodeToJsonElement(IMMediaAsset.serializer(), value.asset))
-            }
-            is IMMessageContent.System -> buildJsonObject {
-                put("type", JsonPrimitive("system"))
-                put("event", value.event)
             }
             is IMMessageContent.Unsupported -> value.raw
         }

@@ -11,21 +11,6 @@ protocol GatewaySessionTransport: Sendable {
         toUserIDs userIDs: [UUID],
         requestID: UUID?
     ) async
-    func sendMessage(
-        _ payload: IMTCPMessagePayload,
-        toUserIDs userIDs: [UUID],
-        requestID: UUID?
-    ) async
-    func sendConversationEvent(
-        _ payload: IMTCPConversationEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID?
-    ) async
-    func sendContactEvent(
-        _ payload: IMTCPContactEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID?
-    ) async
     func kickConnections(
         forSessionID sessionID: UUID,
         reason: IMTCPKickReason,
@@ -79,30 +64,6 @@ struct LocalGatewaySessionTransport: GatewaySessionTransport {
         await routingService.sendDomainEvent(payload, toUserIDs: userIDs, requestID: requestID)
     }
 
-    func sendMessage(
-        _ payload: IMTCPMessagePayload,
-        toUserIDs userIDs: [UUID],
-        requestID: UUID?
-    ) async {
-        await routingService.sendMessage(payload, toUserIDs: userIDs, requestID: requestID)
-    }
-
-    func sendConversationEvent(
-        _ payload: IMTCPConversationEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID?
-    ) async {
-        await routingService.sendConversationEvent(payload, toUserID: userID, requestID: requestID)
-    }
-
-    func sendContactEvent(
-        _ payload: IMTCPContactEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID?
-    ) async {
-        await routingService.sendContactEvent(payload, toUserID: userID, requestID: requestID)
-    }
-
     func kickConnections(
         forSessionID sessionID: UUID,
         reason: IMTCPKickReason,
@@ -144,40 +105,6 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
                 requestID: requestID
             )
         )
-    }
-
-    func sendMessage(
-        _ payload: IMTCPMessagePayload,
-        toUserIDs userIDs: [UUID],
-        requestID: UUID?
-    ) async {
-        guard let packetBase64 = packetBase64(type: .sendMessage, requestID: requestID, payload: payload) else {
-            return
-        }
-        await postOrLog(
-            path: "/internal/gateway/realtime/message",
-            payload: GatewayRelayMessageRequest(
-                packetBase64: packetBase64,
-                recipientUserIDs: userIDs,
-                requestID: requestID
-            )
-        )
-    }
-
-    func sendConversationEvent(
-        _ payload: IMTCPConversationEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID?
-    ) async {
-        return
-    }
-
-    func sendContactEvent(
-        _ payload: IMTCPContactEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID?
-    ) async {
-        return
     }
 
     func kickConnections(
@@ -326,26 +253,6 @@ struct LoggingUnavailableGatewaySessionTransport: GatewaySessionTransport {
         logUnavailable()
     }
 
-    func sendMessage(_ payload: IMTCPMessagePayload, toUserIDs userIDs: [UUID], requestID: UUID?) async {
-        logUnavailable()
-    }
-
-    func sendConversationEvent(
-        _ payload: IMTCPConversationEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID?
-    ) async {
-        logUnavailable()
-    }
-
-    func sendContactEvent(
-        _ payload: IMTCPContactEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID?
-    ) async {
-        logUnavailable()
-    }
-
     func kickConnections(
         forSessionID sessionID: UUID,
         reason: IMTCPKickReason,
@@ -395,30 +302,6 @@ struct GatewaySessionService {
         requestID: UUID? = UUID()
     ) async {
         await transport.sendDomainEvent(payload, toUserIDs: userIDs, requestID: requestID)
-    }
-
-    func sendMessage(
-        _ payload: IMTCPMessagePayload,
-        toUserIDs userIDs: [UUID],
-        requestID: UUID? = UUID()
-    ) async {
-        await transport.sendMessage(payload, toUserIDs: userIDs, requestID: requestID)
-    }
-
-    func sendConversationEvent(
-        _ payload: IMTCPConversationEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID? = UUID()
-    ) async {
-        await transport.sendConversationEvent(payload, toUserID: userID, requestID: requestID)
-    }
-
-    func sendContactEvent(
-        _ payload: IMTCPContactEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID? = UUID()
-    ) async {
-        await transport.sendContactEvent(payload, toUserID: userID, requestID: requestID)
     }
 
     func kickConnections(

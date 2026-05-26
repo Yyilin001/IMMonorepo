@@ -101,27 +101,6 @@ struct IMTCPMessagePayload: Codable, Sendable {
     }
 }
 
-enum IMTCPConversationEventType: String, Codable, Sendable {
-    case conversationCreated = "conversation_created"
-    case membersAdded = "members_added"
-    case memberLeft = "member_left"
-    case membersUpdated = "members_updated"
-    case conversationRemovedForSelf = "conversation_removed_for_self"
-    case summaryUpdated = "summary_updated"
-    case messageUpdated = "message_updated"
-    case messageRecalled = "message_recalled"
-    case messageVisibilityChanged = "message_visibility_changed"
-    case messageFavoriteChanged = "message_favorite_changed"
-    case conversationVisibilityChanged = "conversation_visibility_changed"
-    case conversationSettingsChanged = "conversation_settings_changed"
-    case inviteChanged = "invite_changed"
-    case messageStreamStarted = "message_stream_started"
-    case messageStreamChunk = "message_stream_chunk"
-    case messageStreamCompleted = "message_stream_completed"
-    case messageStreamFailed = "message_stream_failed"
-    case messageStreamCancelled = "message_stream_cancelled"
-}
-
 struct IMTCPMessageStreamPayload: Codable, Equatable, Sendable {
     let streamID: String
     let messageID: String
@@ -130,60 +109,6 @@ struct IMTCPMessageStreamPayload: Codable, Equatable, Sendable {
     let deltaText: String?
     let partialTextLength: Int
     let state: MessageStreamLifecycleState
-    let serverTimestamp: Date
-}
-
-struct IMTCPConversationEventPayload: Codable, Sendable {
-    let eventType: IMTCPConversationEventType
-    let conversation: IMConversationResponse
-    let message: IMMessageResponse?
-    let stream: IMTCPMessageStreamPayload?
-    let actorUserID: UUID?
-    let serverTimestamp: Date
-    let messageIDs: [UUID]
-    let favoriteChangedMessageID: UUID?
-    let isFavorited: Bool?
-    let visibilityAction: ConversationVisibilityAction?
-
-    init(
-        eventType: IMTCPConversationEventType,
-        conversation: IMConversationResponse,
-        message: IMMessageResponse?,
-        stream: IMTCPMessageStreamPayload? = nil,
-        actorUserID: UUID?,
-        serverTimestamp: Date,
-        messageIDs: [UUID] = [],
-        favoriteChangedMessageID: UUID? = nil,
-        isFavorited: Bool? = nil,
-        visibilityAction: ConversationVisibilityAction? = nil
-    ) {
-        self.eventType = eventType
-        self.conversation = conversation
-        self.message = message
-        self.stream = stream
-        self.actorUserID = actorUserID
-        self.serverTimestamp = serverTimestamp
-        self.messageIDs = messageIDs
-        self.favoriteChangedMessageID = favoriteChangedMessageID
-        self.isFavorited = isFavorited
-        self.visibilityAction = visibilityAction
-    }
-}
-
-enum IMTCPContactEventType: String, Codable, Sendable {
-    case friendRequestCreated = "friend_request_created"
-    case friendRequestAccepted = "friend_request_accepted"
-    case friendRequestDeclined = "friend_request_declined"
-    case friendRequestCancelled = "friend_request_cancelled"
-    case contactRemoved = "contact_removed"
-}
-
-struct IMTCPContactEventPayload: Codable, Sendable {
-    let eventType: IMTCPContactEventType
-    let request: FriendRequestResponse?
-    let contact: ContactResponse?
-    let contactUserID: UUID?
-    let actorUserID: UUID?
     let serverTimestamp: Date
 }
 

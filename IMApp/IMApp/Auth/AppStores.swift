@@ -365,7 +365,7 @@ final class ContactStore {
     }
 
     func apply(
-        event payload: IMTCPContactEventPayload,
+        domainEvent payload: IMTCPChatDomainEventPayload,
         currentUserID: UUID?,
         isRelevant: (ContactRequestResponseBody, UUID) -> Bool,
         normalize: ([ContactRequestResponseBody], UUID) -> [ContactRequestResponseBody],
@@ -374,13 +374,16 @@ final class ContactStore {
         guard let currentUserID else {
             return .ignored
         }
+        guard case .contactChanged(let request, let contact, let contactUserID) = payload.body else {
+            return .ignored
+        }
 
         switch payload.eventType {
-        case .friendRequestCreated:
-            guard let request = payload.request,
+        case .contactRequestCreated:
+            guard let request,
                   isRelevant(request, currentUserID)
             else {
-                return .needsCorrection("friend_request_created payload is incomplete")
+                return .needsCorrection("contact_request_created payload is incomplete")
             }
 
             upsertRequest(
@@ -395,12 +398,12 @@ final class ContactStore {
             )
             return .applied
 
-        case .friendRequestAccepted:
-            guard let request = payload.request,
+        case .contactRequestAccepted:
+            guard let request,
                   isRelevant(request, currentUserID),
-                  let contact = payload.contact
+                  let contact
             else {
-                return .needsCorrection("friend_request_accepted payload is incomplete")
+                return .needsCorrection("contact_request_accepted payload is incomplete")
             }
 
             upsertRequest(
@@ -416,11 +419,16 @@ final class ContactStore {
             )
             return .applied
 
-        case .friendRequestDeclined, .friendRequestCancelled:
-            guard let request = payload.request,
+        case .contactRequestUpdated:
+            if contact == nil, let contactUserID {
+                removeContact(userID: contactUserID)
+                return .applied
+            }
+
+            guard let request,
                   isRelevant(request, currentUserID)
             else {
-                return .needsCorrection("\(payload.eventType.rawValue) payload is incomplete")
+                return .needsCorrection("contact_request_updated payload is incomplete")
             }
 
             upsertRequest(
@@ -429,19 +437,17 @@ final class ContactStore {
                 isRelevant: isRelevant,
                 normalize: normalize
             )
+            if let contact {
+                upsertContact(contact)
+            }
             recomputeIncomingUnread(
                 currentUserID: currentUserID,
                 sortPendingNewestFirst: sortPendingNewestFirst
             )
             return .applied
 
-        case .contactRemoved:
-            guard let contactUserID = payload.contactUserID else {
-                return .needsCorrection("contact_removed payload is incomplete")
-            }
-
-            removeContact(userID: contactUserID)
-            return .applied
+        default:
+            return .ignored
         }
     }
 

@@ -137,8 +137,8 @@ struct IMConversationStoreTests {
         let store = IMConversationStore()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
 
-        let outcome = store.applyConversationEvent(
-            IMTCPConversationEventPayload(
+        let outcome = store.applyTestConversationEvent(
+            TestConversationEventPayload(
                 eventType: .conversationCreated,
                 conversation: IMConversationSummaryResponseBody(
                     id: conversationID,
@@ -186,7 +186,7 @@ struct IMConversationStoreTests {
                 )
             ]
         )
-        store.receiveIncomingMessage(
+        store.applyTestDomainMessage(
             IMTCPMessagePayload(
                 clientMessageID: nil,
                 messageID: "srv-msg-1",
@@ -200,8 +200,8 @@ struct IMConversationStoreTests {
             currentUserID: Self.currentUserID
         )
 
-        _ = store.applyConversationEvent(
-            IMTCPConversationEventPayload(
+        _ = store.applyTestConversationEvent(
+            TestConversationEventPayload(
                 eventType: .summaryUpdated,
                 conversation: IMConversationSummaryResponseBody(
                     id: conversationID,
@@ -250,7 +250,7 @@ struct IMConversationStoreTests {
                 )
             ]
         )
-        store.receiveIncomingMessage(
+        store.applyTestDomainMessage(
             IMTCPMessagePayload(
                 clientMessageID: nil,
                 messageID: recalledMessageID.uuidString,
@@ -264,8 +264,8 @@ struct IMConversationStoreTests {
             currentUserID: Self.currentUserID
         )
 
-        _ = store.applyConversationEvent(
-            IMTCPConversationEventPayload(
+        _ = store.applyTestConversationEvent(
+            TestConversationEventPayload(
                 eventType: .messageRecalled,
                 conversation: IMConversationSummaryResponseBody(
                     id: conversationID,
@@ -275,8 +275,8 @@ struct IMConversationStoreTests {
                         id: recalledMessageID,
                         senderUserID: Self.peerUserID,
                         serverSequence: 2,
-                        kind: "recalled",
-                        body: [:],
+                        content: .richText(.plain("stale local copy")),
+                        derivedState: MessageDerivedState(recallState: .recalled),
                         createdAt: Date(timeIntervalSince1970: 1_700_300_000)
                     ),
                     lastReadSequence: 0,
@@ -290,8 +290,8 @@ struct IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 2,
-                    kind: "recalled",
-                    body: [:],
+                    content: .richText(.plain("original text")),
+                    derivedState: MessageDerivedState(recallState: .recalled),
                     createdAt: Date(timeIntervalSince1970: 1_700_300_000)
                 ),
                 actorUserID: Self.peerUserID,
@@ -305,7 +305,7 @@ struct IMConversationStoreTests {
         #expect(conversation?.serverUnreadCount == 1)
         #expect(conversation?.localUnreadDelta == 0)
         #expect(conversation?.unreadCount == 1)
-        #expect(conversation?.messages.last?.content == .recalled)
+        #expect(conversation?.messages.last?.derivedState.recallState == .recalled)
     }
 
 
@@ -361,8 +361,8 @@ struct IMConversationStoreTests {
                         id: recalledMessageID,
                         senderUserID: Self.peerUserID,
                         serverSequence: 2,
-                        kind: "recalled",
-                        body: [:],
+                        content: .richText(.plain("stale local copy")),
+                        derivedState: MessageDerivedState(recallState: .recalled),
                         createdAt: Date(timeIntervalSince1970: 1_700_300_000)
                     ),
                     lastReadSequence: 0,
@@ -425,8 +425,8 @@ struct IMConversationStoreTests {
         let editedState = IMMessageDerivedState(
             edits: [.init(editedAt: Date(timeIntervalSince1970: 1_700_300_100), body: .plain("after edit"))]
         )
-        _ = store.applyConversationEvent(
-            IMTCPConversationEventPayload(
+        _ = store.applyTestConversationEvent(
+            TestConversationEventPayload(
                 eventType: .messageUpdated,
                 conversation: IMConversationSummaryResponseBody(
                     id: conversationID,
@@ -487,8 +487,8 @@ struct IMConversationStoreTests {
         )
         store.openConversation(id: conversationID.uuidString)
 
-        _ = store.applyConversationEvent(
-            IMTCPConversationEventPayload(
+        _ = store.applyTestConversationEvent(
+            TestConversationEventPayload(
                 eventType: .messageStreamStarted,
                 conversation: IMConversationSummaryResponseBody(
                     id: conversationID,
@@ -560,8 +560,8 @@ struct IMConversationStoreTests {
                 serverTimestamp: Date(timeIntervalSince1970: 1_700_300_002)
             )
         ] {
-            _ = store.applyConversationEvent(
-                IMTCPConversationEventPayload(
+            _ = store.applyTestConversationEvent(
+                TestConversationEventPayload(
                     eventType: .messageStreamChunk,
                     conversation: IMConversationSummaryResponseBody(
                         id: conversationID,
@@ -592,8 +592,8 @@ struct IMConversationStoreTests {
             )
         ])
 
-        _ = store.applyConversationEvent(
-            IMTCPConversationEventPayload(
+        _ = store.applyTestConversationEvent(
+            TestConversationEventPayload(
                 eventType: .messageStreamChunk,
                 conversation: IMConversationSummaryResponseBody(
                     id: conversationID,
@@ -637,8 +637,8 @@ struct IMConversationStoreTests {
                 updatedAt: completedAt
             )
         )
-        _ = store.applyConversationEvent(
-            IMTCPConversationEventPayload(
+        _ = store.applyTestConversationEvent(
+            TestConversationEventPayload(
                 eventType: .messageStreamCompleted,
                 conversation: IMConversationSummaryResponseBody(
                     id: conversationID,
@@ -686,8 +686,8 @@ struct IMConversationStoreTests {
         #expect(message.derivedState.streamState?.state == .completed)
         #expect(store.activeMessageStreamTargets().isEmpty)
 
-        _ = store.applyConversationEvent(
-            IMTCPConversationEventPayload(
+        _ = store.applyTestConversationEvent(
+            TestConversationEventPayload(
                 eventType: .messageStreamChunk,
                 conversation: IMConversationSummaryResponseBody(
                     id: conversationID,
@@ -765,7 +765,7 @@ struct IMConversationStoreTests {
     @Test func conversationRemovedForSelfEventRemovesConversationAndFallsBackSelection() {
         let store = IMConversationStore()
         let removedConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
-        let fallbackConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+        let restoredConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
 
         store.replaceConversationSummaries(
             [
@@ -778,7 +778,7 @@ struct IMConversationStoreTests {
                     updatedAt: Date(timeIntervalSince1970: 1_700_300_001)
                 ),
                 IMConversationSummaryResponseBody(
-                    id: fallbackConversationID,
+                    id: restoredConversationID,
                     title: "Fallback",
                     memberUserIDs: [Self.currentUserID, Self.peerUserID],
                     lastMessage: nil,
@@ -789,8 +789,8 @@ struct IMConversationStoreTests {
         )
         store.openConversation(id: removedConversationID.uuidString)
 
-        _ = store.applyConversationEvent(
-            IMTCPConversationEventPayload(
+        _ = store.applyTestConversationEvent(
+            TestConversationEventPayload(
                 eventType: .conversationRemovedForSelf,
                 conversation: IMConversationSummaryResponseBody(
                     id: removedConversationID,
@@ -807,8 +807,8 @@ struct IMConversationStoreTests {
         )
 
         #expect(store.conversations.count == 1)
-        #expect(store.conversations.first?.id == fallbackConversationID.uuidString)
-        #expect(store.selectedConversationID == fallbackConversationID.uuidString)
+        #expect(store.conversations.first?.id == restoredConversationID.uuidString)
+        #expect(store.selectedConversationID == restoredConversationID.uuidString)
     }
 
 
@@ -838,7 +838,7 @@ struct IMConversationStoreTests {
             ]
         )
 
-        store.receiveIncomingMessage(
+        store.applyTestDomainMessage(
             IMTCPMessagePayload(
                 clientMessageID: nil,
                 messageID: "srv-unread-1",
@@ -1046,7 +1046,7 @@ struct IMConversationStoreTests {
             currentUserID: Self.currentUserID
         )
 
-        store.receiveIncomingMessage(
+        store.applyTestDomainMessage(
             IMTCPMessagePayload(
                 clientMessageID: nil,
                 messageID: "srv-live-9",
@@ -1115,7 +1115,7 @@ struct IMConversationStoreTests {
             currentUserID: Self.currentUserID
         )
 
-        store.receiveIncomingMessage(
+        store.applyTestDomainMessage(
             IMTCPMessagePayload(
                 clientMessageID: nil,
                 messageID: "srv-live-9",

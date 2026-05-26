@@ -38,11 +38,11 @@ struct AuthConfiguration: Sendable {
     static func load(from environment: Environment) throws -> AuthConfiguration {
         let secrets = try jwtSecrets(for: environment)
         let activeKeyID = try activeJWTKeyID(in: secrets)
-        let legacySecret = secrets.first(where: { $0.keyID == activeKeyID })?.secret ?? secrets[0].secret
+        let activeSecret = secrets.first(where: { $0.keyID == activeKeyID })?.secret ?? secrets[0].secret
 
         return AuthConfiguration(
             issuer: Environment.get("JWT_ISSUER") ?? "vapor-test",
-            jwtSecret: legacySecret,
+            jwtSecret: activeSecret,
             jwtSecrets: secrets,
             activeJWTKeyID: activeKeyID,
             accessTokenTTL: 10 * 60,

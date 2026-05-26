@@ -376,102 +376,6 @@ public final class IMConversationStore {
         conversations[index].serverUnreadCount = max(0, unreadCount)
     }
 
-    public func applyConversationEvent(
-        _ payload: IMTCPConversationEventPayload,
-        currentUserID: UUID
-    ) -> IMConversationEventApplyOutcome {
-        let conversationID = payload.conversation.id.uuidString
-        let selectedConversationIDBeforeApply = selectedConversationID
-
-        switch payload.eventType {
-        case .conversationCreated:
-            applyConversationSummaryContent(payload.conversation)
-            applyServerSummaryReadState(payload.conversation)
-            return IMConversationEventApplyOutcome(
-                shouldReloadMembersForConversationID: selectedConversationIDBeforeApply == conversationID ? conversationID : nil
-            )
-
-        case .membersAdded, .memberLeft, .membersUpdated:
-            applyConversationSummaryContent(payload.conversation)
-            applyServerSummaryReadState(payload.conversation)
-            return IMConversationEventApplyOutcome(
-                shouldReloadMembersForConversationID: selectedConversationIDBeforeApply == conversationID ? conversationID : nil
-            )
-
-        case .conversationRemovedForSelf:
-            removeConversation(id: conversationID)
-            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
-
-        case .messageStreamStarted,
-             .messageStreamChunk,
-             .messageStreamCompleted,
-             .messageStreamFailed,
-             .messageStreamCancelled:
-            applyConversationSummaryContent(payload.conversation)
-            applyServerSummaryReadState(payload.conversation)
-            applyMessageStreamEvent(payload, currentUserID: currentUserID)
-            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
-
-        case .summaryUpdated, .conversationSettingsChanged, .inviteChanged:
-            // summary 与 timeline 允许短暂错位；这里只收敛列表权威字段，不假设消息窗口同步刷新。
-            applyConversationSummaryContent(payload.conversation)
-            applyServerSummaryReadState(payload.conversation)
-            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
-
-        case .messageFavoriteChanged:
-            applyConversationSummaryContent(payload.conversation)
-            applyServerSummaryReadState(payload.conversation)
-            if payload.favoriteChangedMessageID != nil || payload.isFavorited != nil {
-                statusMessage = nil
-            }
-            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
-
-        case .messageVisibilityChanged:
-            applyConversationSummaryContent(payload.conversation)
-            applyServerSummaryReadState(payload.conversation)
-            var eventMessageIDs = Set(payload.messageIDs.map(\.uuidString))
-            if let message = payload.message {
-                eventMessageIDs.insert(message.id.uuidString)
-            }
-            if !eventMessageIDs.isEmpty {
-                removeMessages(
-                    ids: eventMessageIDs,
-                    from: conversationID
-                )
-            }
-            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
-
-        case .conversationVisibilityChanged:
-            switch payload.visibilityAction {
-            case .conversationCleared:
-                applyConversationSummaryContent(payload.conversation)
-                applyServerSummaryReadState(payload.conversation)
-                clearMessages(in: conversationID)
-            case .conversationDeleted:
-                removeConversation(id: conversationID)
-            case .messageHidden, .none:
-                removeConversation(id: conversationID)
-            }
-            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
-
-        case .messageUpdated:
-            applyConversationSummaryContent(payload.conversation)
-            applyServerSummaryReadState(payload.conversation)
-            if let message = payload.message {
-                applyUpdatedMessage(message, currentUserID: currentUserID)
-            }
-            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
-
-        case .messageRecalled:
-            applyConversationSummaryContent(payload.conversation)
-            applyServerSummaryReadState(payload.conversation)
-            if let message = payload.message {
-                applyRecalledMessage(message, currentUserID: currentUserID)
-            }
-            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
-        }
-    }
-
     public func applyDomainEvent(
         _ payload: IMTCPChatDomainEventPayload,
         currentUserID: UUID
@@ -482,124 +386,82 @@ public final class IMConversationStore {
 
         switch payload.body {
         case .messageCreated(let message, let clientMessageID):
-            receiveIncomingMessage(
-                IMTCPMessagePayload(
-                    clientMessageID: clientMessageID ?? message.clientMessageID,
-                    messageID: message.id.uuidString,
-                    conversationID: message.conversationID.uuidString,
-                    senderUserID: message.senderUserID,
-                    serverSequence: UInt64(message.serverSequence),
-                    serverTimestamp: message.createdAt,
-                    content: message.content,
-                    derivedState: message.derivedState
-                ),
+            applyCreatedMessage(
+                message,
+                clientMessageID: clientMessageID ?? message.clientMessageID,
                 currentUserID: currentUserID
             )
-            if let conversation = payload.conversation {
-                applyConversationSummaryContent(conversation)
-                applyServerSummaryReadState(conversation)
+            applySummaryIfPresent(payload.conversation)
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
+        case .messageEdited(_, _, _, let message),
+             .messageRevoked(_, _, _, let message):
+            applySummaryIfPresent(payload.conversation)
+            if let message {
+                applyUpdatedMessage(message, currentUserID: currentUserID)
             }
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
-        case .messageEdited(_, _, _, let message):
-            return applyProjectedConversationEvent(
-                payload,
-                eventType: .messageUpdated,
-                message: message,
-                currentUserID: currentUserID
-            )
-        case .messageRevoked(_, _, _, let message):
-            return applyProjectedConversationEvent(
-                payload,
-                eventType: .messageRecalled,
-                message: message,
-                currentUserID: currentUserID
-            )
         case .messageVisibilityChanged(let messageIDs, let message, let visibilityAction):
-            return applyProjectedConversationEvent(
-                payload,
-                eventType: .messageVisibilityChanged,
-                message: message,
-                messageIDs: messageIDs,
-                visibilityAction: visibilityAction,
-                currentUserID: currentUserID
-            )
-        case .messageFavoriteChanged(let messageID, let isFavorited):
-            return applyProjectedConversationEvent(
-                payload,
-                eventType: .messageFavoriteChanged,
-                favoriteChangedMessageID: messageID,
-                isFavorited: isFavorited,
-                currentUserID: currentUserID
-            )
+            applySummaryIfPresent(payload.conversation)
+            var eventMessageIDs = Set(messageIDs.map(\.uuidString))
+            if let message {
+                eventMessageIDs.insert(message.id.uuidString)
+            }
+            let conversationID = payload.conversation?.id.uuidString ?? message?.conversationID.uuidString ?? payload.aggregateID.uuidString
+            if visibilityAction == .messageHidden, !eventMessageIDs.isEmpty {
+                removeMessages(ids: eventMessageIDs, from: conversationID)
+            }
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
+        case .messageFavoriteChanged:
+            applySummaryIfPresent(payload.conversation)
+            statusMessage = nil
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
         case .messageStream(let stream, let message):
-            return applyProjectedConversationEvent(
-                payload,
-                eventType: payload.eventType.conversationEventType,
-                message: message,
-                stream: stream,
-                currentUserID: currentUserID
-            )
+            applySummaryIfPresent(payload.conversation)
+            applyMessageStreamEvent(stream: stream, message: message, currentUserID: currentUserID)
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
         case .conversationChanged:
-            return applyProjectedConversationEvent(
-                payload,
-                eventType: payload.eventType.conversationEventType,
-                currentUserID: currentUserID
-            )
+            applySummaryIfPresent(payload.conversation)
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
         case .conversationRemovedForSelf:
-            return applyProjectedConversationEvent(
-                payload,
-                eventType: .conversationRemovedForSelf,
-                currentUserID: currentUserID
-            )
+            removeConversation(id: payload.aggregateID.uuidString)
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
         case .conversationVisibilityChanged(let visibilityAction, let messageIDs):
-            return applyProjectedConversationEvent(
-                payload,
-                eventType: .conversationVisibilityChanged,
-                messageIDs: messageIDs,
-                visibilityAction: visibilityAction,
-                currentUserID: currentUserID
-            )
+            let conversationID = payload.conversation?.id.uuidString ?? payload.aggregateID.uuidString
+            switch visibilityAction {
+            case .conversationCleared:
+                applySummaryIfPresent(payload.conversation)
+                clearMessages(in: conversationID)
+            case .conversationDeleted:
+                removeConversation(id: conversationID)
+            case .messageHidden:
+                removeMessages(ids: Set(messageIDs.map(\.uuidString)), from: conversationID)
+            }
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
         case .memberChanged:
-            return applyProjectedConversationEvent(
-                payload,
-                eventType: payload.eventType.conversationEventType,
-                currentUserID: currentUserID
+            let selectedConversationIDBeforeApply = selectedConversationID
+            let conversationID = payload.conversation?.id.uuidString ?? payload.aggregateID.uuidString
+            applySummaryIfPresent(payload.conversation)
+            return IMConversationEventApplyOutcome(
+                shouldReloadMembersForConversationID: selectedConversationIDBeforeApply == conversationID ? conversationID : nil
             )
+
         case .contactChanged:
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
         }
     }
 
-    private func applyProjectedConversationEvent(
-        _ event: IMTCPChatDomainEventPayload,
-        eventType: IMTCPConversationEventType,
-        message: IMConversationMessageResponseBody? = nil,
-        stream: IMTCPMessageStreamPayload? = nil,
-        messageIDs: [UUID] = [],
-        favoriteChangedMessageID: UUID? = nil,
-        isFavorited: Bool? = nil,
-        visibilityAction: IMTCPConversationVisibilityAction? = nil,
-        currentUserID: UUID
-    ) -> IMConversationEventApplyOutcome {
-        guard let conversation = event.conversation else {
-            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
-        }
-        return applyConversationEvent(
-            IMTCPConversationEventPayload(
-                eventType: eventType,
-                conversation: conversation,
-                message: message,
-                stream: stream,
-                actorUserID: event.actorUserID,
-                serverTimestamp: event.occurredAt,
-                messageIDs: messageIDs,
-                favoriteChangedMessageID: favoriteChangedMessageID,
-                isFavorited: isFavorited,
-                visibilityAction: visibilityAction
-            ),
-            currentUserID: currentUserID
-        )
+    private func applySummaryIfPresent(_ conversation: IMConversationSummaryResponseBody?) {
+        guard let conversation else { return }
+        applyConversationSummaryContent(conversation)
+        applyServerSummaryReadState(conversation)
     }
 
     public func replaceMessages(
@@ -1301,22 +1163,29 @@ public final class IMConversationStore {
         }
     }
 
-    public func receiveIncomingMessage(_ payload: IMTCPMessagePayload, currentUserID: UUID) {
-        let index = ensureConversationIndex(for: payload.conversationID)
-        let stableMessageID = payload.messageID ?? payload.clientMessageID ?? UUID().uuidString
-        let effectiveTimestamp = payload.serverTimestamp ?? Date()
+    private func applyCreatedMessage(
+        _ response: IMConversationMessageResponseBody,
+        clientMessageID: String?,
+        currentUserID: UUID
+    ) {
+        let conversationID = response.conversationID.uuidString
+        let serverMessageID = response.id.uuidString
+        let index = ensureConversationIndex(for: conversationID)
+        let effectiveTimestamp = response.createdAt ?? Date()
 
-        if payload.senderUserID == currentUserID,
-           let clientMessageID = payload.clientMessageID,
+        if response.senderUserID == currentUserID,
+           let clientMessageID,
            let existingIndex = conversations[index].messages.firstIndex(where: { $0.clientMessageID == clientMessageID }) {
-            conversations[index].messages[existingIndex].serverMessageID = payload.messageID
-            conversations[index].messages[existingIndex].serverSequence = payload.serverSequence
+            conversations[index].messages[existingIndex].serverMessageID = serverMessageID
+            conversations[index].messages[existingIndex].serverSequence = UInt64(response.serverSequence)
             conversations[index].messages[existingIndex].createdAt = effectiveTimestamp
+            conversations[index].messages[existingIndex].content = response.content
+            conversations[index].messages[existingIndex].derivedState = response.derivedState
             conversations[index].messages[existingIndex].deliveryState = .sent
             conversations[index].updatedAt = effectiveTimestamp
             conversations[index].lastMessagePreviewText = conversations[index].messages[existingIndex].text
             refreshLatestSyncedCursor(
-                for: payload.conversationID,
+                for: conversationID,
                 messages: conversations[index].messages
             )
             sortConversations()
@@ -1324,47 +1193,40 @@ public final class IMConversationStore {
         }
 
         let alreadyExists = conversations[index].messages.contains {
-            $0.id == stableMessageID
-                || ($0.serverMessageID != nil && $0.serverMessageID == payload.messageID)
-                || ($0.clientMessageID != nil && $0.clientMessageID == payload.clientMessageID)
+            $0.id == serverMessageID
+                || $0.serverMessageID == serverMessageID
+                || ($0.clientMessageID != nil && $0.clientMessageID == clientMessageID)
         }
         guard !alreadyExists else {
             return
         }
 
         let message = IMConversationMessage(
-            id: stableMessageID,
-            conversationID: payload.conversationID,
-            clientMessageID: payload.clientMessageID,
-            serverMessageID: payload.messageID,
-            senderUserID: payload.senderUserID,
-            serverSequence: payload.serverSequence,
-            content: payload.content,
-            derivedState: payload.derivedState,
-            direction: payload.senderUserID == currentUserID ? .outgoing : .incoming,
+            id: serverMessageID,
+            conversationID: conversationID,
+            clientMessageID: clientMessageID,
+            serverMessageID: serverMessageID,
+            senderUserID: response.senderUserID,
+            serverSequence: UInt64(response.serverSequence),
+            content: response.content,
+            derivedState: response.derivedState,
+            direction: response.senderUserID == currentUserID ? .outgoing : .incoming,
             createdAt: effectiveTimestamp,
-            deliveryState: payload.senderUserID == currentUserID ? .sent : .received
+            deliveryState: response.senderUserID == currentUserID ? .sent : .received
         )
 
         conversations[index].messages.append(message)
         conversations[index].lastMessagePreviewText = message.text
         conversations[index].updatedAt = message.createdAt
         refreshLatestSyncedCursor(
-            for: payload.conversationID,
+            for: conversationID,
             messages: conversations[index].messages
         )
 
-        applyIncomingMessageUnreadState(for: payload.conversationID)
+        applyIncomingMessageUnreadState(for: conversationID)
 
         statusMessage = nil
         sortConversations()
-    }
-
-    public func applyRecalledMessage(
-        _ response: IMConversationMessageResponseBody,
-        currentUserID: UUID
-    ) {
-        applyUpdatedMessage(response, currentUserID: currentUserID)
     }
 
     public func applyUpdatedMessage(
@@ -1413,15 +1275,12 @@ public final class IMConversationStore {
     }
 
     public func applyMessageStreamEvent(
-        _ payload: IMTCPConversationEventPayload,
+        stream: IMTCPMessageStreamPayload,
+        message: IMConversationMessageResponseBody?,
         currentUserID: UUID
     ) {
-        if let message = payload.message {
+        if let message {
             applyUpdatedMessage(message, currentUserID: currentUserID)
-        }
-
-        guard let stream = payload.stream else {
-            return
         }
 
         let conversationID = stream.conversationID

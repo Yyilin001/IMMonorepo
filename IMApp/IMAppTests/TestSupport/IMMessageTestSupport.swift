@@ -1,4 +1,5 @@
 @testable import IMClientKit
+@testable import IMApp
 import Foundation
 
 func testMessageContent(kind: String, body: [String: String]) -> IMMessageContent {
@@ -14,10 +15,6 @@ func testMessageContent(kind: String, body: [String: String]) -> IMMessageConten
             ),
             body: .plain(body["text"] ?? "")
         )
-    case IMMessageContentType.recalled.rawValue:
-        return .recalled
-    case IMMessageContentType.system.rawValue:
-        return .system(.legacyText(body["text"] ?? ""))
     case IMMessageContentType.image.rawValue:
         return .image(testMediaAsset(kind: .image, body: body))
     case IMMessageContentType.audio.rawValue:
@@ -76,10 +73,6 @@ extension IMTCPMessagePayload {
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText
             ]
-        case .recalled:
-            return [:]
-        case .system(let event):
-            return ["text": event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
             return mediaBody(asset)
         }
@@ -90,10 +83,152 @@ extension IMTCPMessagePayload {
     }
 }
 
+enum TestConversationEventType: String {
+    case conversationCreated = "conversation_created"
+    case membersAdded = "members_added"
+    case memberLeft = "member_left"
+    case membersUpdated = "members_updated"
+    case conversationRemovedForSelf = "conversation_removed_for_self"
+    case summaryUpdated = "summary_updated"
+    case messageUpdated = "message_updated"
+    case messageRecalled = "message_recalled"
+    case messageVisibilityChanged = "message_visibility_changed"
+    case messageFavoriteChanged = "message_favorite_changed"
+    case conversationVisibilityChanged = "conversation_visibility_changed"
+    case conversationSettingsChanged = "conversation_settings_changed"
+    case inviteChanged = "invite_changed"
+    case messageStreamStarted = "message_stream_started"
+    case messageStreamChunk = "message_stream_chunk"
+    case messageStreamCompleted = "message_stream_completed"
+    case messageStreamFailed = "message_stream_failed"
+    case messageStreamCancelled = "message_stream_cancelled"
+}
+
+struct TestConversationEventPayload {
+    let eventType: TestConversationEventType
+    let conversation: IMConversationSummaryResponseBody
+    let message: IMConversationMessageResponseBody?
+    let stream: IMTCPMessageStreamPayload?
+    let actorUserID: UUID?
+    let serverTimestamp: Date
+    let messageIDs: [UUID]
+    let favoriteChangedMessageID: UUID?
+    let isFavorited: Bool?
+    let visibilityAction: IMTCPConversationVisibilityAction?
+
+    init(
+        eventType: TestConversationEventType,
+        conversation: IMConversationSummaryResponseBody,
+        message: IMConversationMessageResponseBody? = nil,
+        stream: IMTCPMessageStreamPayload? = nil,
+        actorUserID: UUID?,
+        serverTimestamp: Date,
+        messageIDs: [UUID] = [],
+        favoriteChangedMessageID: UUID? = nil,
+        isFavorited: Bool? = nil,
+        visibilityAction: IMTCPConversationVisibilityAction? = nil
+    ) {
+        self.eventType = eventType
+        self.conversation = conversation
+        self.message = message
+        self.stream = stream
+        self.actorUserID = actorUserID
+        self.serverTimestamp = serverTimestamp
+        self.messageIDs = messageIDs
+        self.favoriteChangedMessageID = favoriteChangedMessageID
+        self.isFavorited = isFavorited
+        self.visibilityAction = visibilityAction
+    }
+}
+
+enum TestContactEventType {
+    case friendRequestCreated
+    case friendRequestAccepted
+    case friendRequestDeclined
+    case friendRequestCancelled
+    case contactRemoved
+}
+
+struct TestContactEventPayload {
+    let eventType: TestContactEventType
+    let request: ContactRequestResponseBody?
+    let contact: ContactResponseBody?
+    let contactUserID: UUID?
+    let actorUserID: UUID?
+    let serverTimestamp: Date
+
+    init(
+        eventType: TestContactEventType,
+        request: ContactRequestResponseBody?,
+        contact: ContactResponseBody?,
+        contactUserID: UUID?,
+        actorUserID: UUID?,
+        serverTimestamp: Date
+    ) {
+        self.eventType = eventType
+        self.request = request
+        self.contact = contact
+        self.contactUserID = contactUserID
+        self.actorUserID = actorUserID
+        self.serverTimestamp = serverTimestamp
+    }
+
+    var domainEventType: IMTCPChatDomainEventType {
+        switch eventType {
+        case .friendRequestCreated:
+            return .contactRequestCreated
+        case .friendRequestAccepted:
+            return .contactRequestAccepted
+        case .friendRequestDeclined, .friendRequestCancelled, .contactRemoved:
+            return .contactRequestUpdated
+        }
+    }
+
+    var domainEventPayload: IMTCPChatDomainEventPayload {
+        IMTCPChatDomainEventPayload(
+            eventID: UUID(),
+            eventType: domainEventType,
+            aggregateType: "contact",
+            aggregateID: contactUserID
+                ?? contact?.id
+                ?? request?.id
+                ?? actorUserID
+                ?? UUID(),
+            aggregateSequence: 0,
+            occurredAt: serverTimestamp,
+            actorUserID: actorUserID,
+            conversation: nil,
+            body: .contactChanged(
+                request: request,
+                contact: contact,
+                contactUserID: contactUserID
+            )
+        )
+    }
+}
+
+extension ContactStore {
+    func apply(
+        event payload: TestContactEventPayload,
+        currentUserID: UUID?,
+        isRelevant: (ContactRequestResponseBody, UUID) -> Bool,
+        normalize: ([ContactRequestResponseBody], UUID) -> [ContactRequestResponseBody],
+        sortPendingNewestFirst: (ContactRequestResponseBody, ContactRequestResponseBody) -> Bool
+    ) -> ContactStore.EventApplyResult {
+        apply(
+            domainEvent: payload.domainEventPayload,
+            currentUserID: currentUserID,
+            isRelevant: isRelevant,
+            normalize: normalize,
+            sortPendingNewestFirst: sortPendingNewestFirst
+        )
+    }
+}
+
 extension IMTCPConnectionEvent {
     static func conversationEvent(
         requestID: UUID?,
-        payload: IMTCPConversationEventPayload
+        payload: TestConversationEventPayload
     ) -> IMTCPConnectionEvent {
         let eventID = requestID ?? payload.message?.id ?? UUID()
         let body: IMTCPChatDomainEventBody
@@ -245,7 +380,7 @@ private extension IMMessageContent {
     }
 }
 
-private func emptyStreamPayload(_ payload: IMTCPConversationEventPayload) -> IMTCPMessageStreamPayload {
+private func emptyStreamPayload(_ payload: TestConversationEventPayload) -> IMTCPMessageStreamPayload {
     IMTCPMessageStreamPayload(
         streamID: "",
         messageID: payload.message?.id.uuidString ?? "",
@@ -286,10 +421,6 @@ extension IMMessagePreviewResponseBody {
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText
             ]
-        case .recalled:
-            return [:]
-        case .system(let event):
-            return ["text": event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
             return mediaBody(asset)
         }
@@ -333,10 +464,6 @@ extension IMConversationMessageResponseBody {
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText
             ]
-        case .recalled:
-            return [:]
-        case .system(let event):
-            return ["text": event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
             return mediaBody(asset)
         }

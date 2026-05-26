@@ -7,7 +7,7 @@ import VaporTesting
 import Testing
 
 extension IMServerTests {
-    @Test("IM recall endpoint replaces message content and refreshes summaries")
+    @Test("IM recall endpoint marks derived state and refreshes summaries")
     func imRecallMessage() async throws {
         try await withApp(configure: configure) { app in
             let accessToken = try await loginAccessToken(using: app)
@@ -49,7 +49,8 @@ extension IMServerTests {
 
                 let recalled = try res.content.decode(IMMessageResponse.self)
                 #expect(recalled.id == messageID)
-                #expect(recalled.content == .richText(.plain("消息已撤回")))
+                #expect(recalled.content == .richText(.plain("hello recall")))
+                #expect(recalled.derivedState.recallState == .recalled)
             })
 
             try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
@@ -58,7 +59,8 @@ extension IMServerTests {
                 let messages = try res.content.decode([IMMessageResponse].self)
                 #expect(messages.count == 1)
                 #expect(messages[0].id == messageID)
-                #expect(messages[0].content == .richText(.plain("消息已撤回")))
+                #expect(messages[0].content == .richText(.plain("hello recall")))
+                #expect(messages[0].derivedState.recallState == .recalled)
             })
 
             try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
@@ -67,7 +69,8 @@ extension IMServerTests {
                 let conversations = try res.content.decode(IMConversationPageResponse.self).items
                 #expect(conversations.count == 1)
                 #expect(conversations[0].id == conversationID)
-                #expect(conversations[0].lastMessage?.content == .richText(.plain("消息已撤回")))
+                #expect(conversations[0].lastMessage?.content == .richText(.plain("hello recall")))
+                #expect(conversations[0].lastMessage?.derivedState.recallState == .recalled)
             })
         }
     }

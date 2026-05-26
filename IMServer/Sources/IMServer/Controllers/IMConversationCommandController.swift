@@ -15,16 +15,6 @@ extension IMConversationController {
             creatorUserID: creatorUserID
         )
         try await sideEffects.projectInlineOutboxIfAllowed()
-        await sideEffects.publish(
-            eventType: IMTCPConversationEventType.conversationCreated,
-            conversationID: response.id,
-            recipientUserIDs: response.memberUserIDs,
-            actorUserID: creatorUserID
-        )
-        await sideEffects.sendLatestSystemMessageIfNeeded(
-            in: response.id,
-            recipientUserIDs: response.memberUserIDs
-        )
         return response
     }
 
@@ -34,10 +24,7 @@ extension IMConversationController {
         let body = try req.content.decode(IMConversationMemberUpdateRequest.self)
         let requesterUserID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
-        let readService = QueryReadModelFacade(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
-        let previousMembers = try await readService.listMembers(in: conversationID, for: requesterUserID)
-        let previousUserIDs = Set(previousMembers.map(\.id))
 
         let response = try await commandService.addMembers(
             in: conversationID,
@@ -46,27 +33,6 @@ extension IMConversationController {
         )
         await sideEffects.invalidateMemberCacheEverywhere(conversationID: conversationID)
         try await sideEffects.projectInlineOutboxIfAllowed()
-        let updatedUserIDs = Set(response.memberUserIDs)
-        let addedUserIDs = Array(updatedUserIDs.subtracting(previousUserIDs))
-            .sorted { $0.uuidString < $1.uuidString }
-        let existingUserIDs = Array(previousUserIDs).sorted { $0.uuidString < $1.uuidString }
-
-        await sideEffects.publish(
-            eventType: IMTCPConversationEventType.membersAdded,
-            conversationID: conversationID,
-            recipientUserIDs: existingUserIDs,
-            actorUserID: requesterUserID
-        )
-        await sideEffects.publish(
-            eventType: IMTCPConversationEventType.conversationCreated,
-            conversationID: conversationID,
-            recipientUserIDs: addedUserIDs,
-            actorUserID: requesterUserID
-        )
-        await sideEffects.sendLatestSystemMessageIfNeeded(
-            in: conversationID,
-            recipientUserIDs: response.memberUserIDs
-        )
         return response
     }
 
@@ -85,21 +51,6 @@ extension IMConversationController {
         await sideEffects.invalidateMemberCacheEverywhere(conversationID: conversationID)
         try await sideEffects.projectInlineOutboxIfAllowed()
 
-        await sideEffects.publish(
-            eventType: .membersUpdated,
-            conversationID: conversationID,
-            recipientUserIDs: result.remainingUserIDs,
-            actorUserID: requesterUserID
-        )
-        await sideEffects.publishRemovedForSelf(
-            conversation: result.removedConversation,
-            recipientUserID: memberUserID,
-            actorUserID: requesterUserID
-        )
-        await sideEffects.sendLatestSystemMessageIfNeeded(
-            in: conversationID,
-            recipientUserIDs: result.remainingUserIDs
-        )
         return result.requesterConversation
     }
 
@@ -121,16 +72,6 @@ extension IMConversationController {
         await sideEffects.invalidateMemberCacheEverywhere(conversationID: conversationID)
         try await sideEffects.projectInlineOutboxIfAllowed()
 
-        await sideEffects.publish(
-            eventType: .membersUpdated,
-            conversationID: conversationID,
-            recipientUserIDs: response.memberUserIDs,
-            actorUserID: requesterUserID
-        )
-        await sideEffects.sendLatestSystemMessageIfNeeded(
-            in: conversationID,
-            recipientUserIDs: response.memberUserIDs
-        )
         return response
     }
 
@@ -148,16 +89,6 @@ extension IMConversationController {
         )
         try await sideEffects.projectInlineOutboxIfAllowed()
 
-        await sideEffects.publish(
-            eventType: .summaryUpdated,
-            conversationID: conversationID,
-            recipientUserIDs: response.memberUserIDs,
-            actorUserID: requesterUserID
-        )
-        await sideEffects.sendLatestSystemMessageIfNeeded(
-            in: conversationID,
-            recipientUserIDs: response.memberUserIDs
-        )
         return response
     }
 
@@ -167,7 +98,6 @@ extension IMConversationController {
         let body = try req.content.decode(IMConversationPreferencesUpdateRequest.self)
         let requesterUserID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
-        let sideEffects = IMConversationCommandSideEffects(app: req.application)
 
         let response = try await commandService.updateConversationPreferences(
             in: conversationID,
@@ -176,12 +106,6 @@ extension IMConversationController {
             requesterUserID: requesterUserID
         )
 
-        await sideEffects.publish(
-            eventType: .summaryUpdated,
-            conversationID: conversationID,
-            recipientUserIDs: [requesterUserID],
-            actorUserID: requesterUserID
-        )
         return response
     }
 
@@ -202,16 +126,6 @@ extension IMConversationController {
         )
         try await sideEffects.projectInlineOutboxIfAllowed()
 
-        await sideEffects.publish(
-            eventType: .conversationSettingsChanged,
-            conversationID: conversationID,
-            recipientUserIDs: response.memberUserIDs,
-            actorUserID: requesterUserID
-        )
-        await sideEffects.sendLatestSystemMessageIfNeeded(
-            in: conversationID,
-            recipientUserIDs: response.memberUserIDs
-        )
         return response
     }
 
@@ -229,12 +143,6 @@ extension IMConversationController {
         )
         await sideEffects.invalidateMemberCacheEverywhere(conversationID: conversationID)
         try await sideEffects.projectInlineOutboxIfAllowed()
-        await sideEffects.publish(
-            eventType: .conversationSettingsChanged,
-            conversationID: conversationID,
-            recipientUserIDs: response.memberUserIDs,
-            actorUserID: requesterUserID
-        )
         return response
     }
 
@@ -252,12 +160,6 @@ extension IMConversationController {
             readSequence: body.readSequence
         )
         try await sideEffects.projectInlineOutboxIfAllowed()
-        await sideEffects.publish(
-            eventType: IMTCPConversationEventType.summaryUpdated,
-            conversationID: conversationID,
-            recipientUserIDs: [userID],
-            actorUserID: userID
-        )
         return response
     }
 
@@ -273,7 +175,6 @@ extension IMConversationController {
 
         let userID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
-        let strongReadService = QueryReadModelFacade(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
         let message = try await commandService.recallMessage(
             in: conversationID,
@@ -281,18 +182,6 @@ extension IMConversationController {
             requesterUserID: userID
         )
         try await sideEffects.projectInlineOutboxIfAllowed()
-        let conversation = try await strongReadService.conversationSummary(
-            conversationID: conversationID,
-            for: userID
-        )
-
-        await sideEffects.publish(
-            eventType: .messageRecalled,
-            conversationID: conversationID,
-            recipientUserIDs: conversation.memberUserIDs,
-            message: message,
-            actorUserID: userID
-        )
         return message
     }
 
@@ -309,7 +198,6 @@ extension IMConversationController {
         let body = try req.content.decode(IMConversationMessageEditRequest.self)
         let userID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
-        let strongReadService = QueryReadModelFacade(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
         let message = try await commandService.editMessage(
             in: conversationID,
@@ -318,18 +206,6 @@ extension IMConversationController {
             requesterUserID: userID
         )
         try await sideEffects.projectInlineOutboxIfAllowed()
-        let conversation = try await strongReadService.conversationSummary(
-            conversationID: conversationID,
-            for: userID
-        )
-
-        await sideEffects.publish(
-            eventType: .messageUpdated,
-            conversationID: conversationID,
-            recipientUserIDs: conversation.memberUserIDs,
-            message: message,
-            actorUserID: userID
-        )
         return message
     }
 
@@ -346,7 +222,6 @@ extension IMConversationController {
         let body = try req.content.decode(IMConversationMessageReactionRequest.self)
         let userID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
-        let strongReadService = QueryReadModelFacade(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
         let message = try await commandService.toggleReaction(
             in: conversationID,
@@ -355,18 +230,6 @@ extension IMConversationController {
             requesterUserID: userID
         )
         try await sideEffects.projectInlineOutboxIfAllowed()
-        let conversation = try await strongReadService.conversationSummary(
-            conversationID: conversationID,
-            for: userID
-        )
-
-        await sideEffects.publish(
-            eventType: .messageUpdated,
-            conversationID: conversationID,
-            recipientUserIDs: conversation.memberUserIDs,
-            message: message,
-            actorUserID: userID
-        )
         return message
     }
 
@@ -375,14 +238,7 @@ extension IMConversationController {
         let conversationID = try conversationID(from: req)
         let requesterUserID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
-        let strongReadService = QueryReadModelFacade(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
-        let removedConversation = try await strongReadService.conversationSummary(
-            conversationID: conversationID,
-            for: requesterUserID
-        )
-        let remainingUserIDs = removedConversation.memberUserIDs
-            .filter { $0 != requesterUserID }
 
         try await commandService.leaveConversation(
             in: conversationID,
@@ -390,21 +246,6 @@ extension IMConversationController {
         )
         await sideEffects.invalidateMemberCacheEverywhere(conversationID: conversationID)
         try await sideEffects.projectInlineOutboxIfAllowed()
-        await sideEffects.publish(
-            eventType: IMTCPConversationEventType.memberLeft,
-            conversationID: conversationID,
-            recipientUserIDs: remainingUserIDs,
-            actorUserID: requesterUserID
-        )
-        await sideEffects.publishRemovedForSelf(
-            conversation: removedConversation,
-            recipientUserID: requesterUserID,
-            actorUserID: requesterUserID
-        )
-        await sideEffects.sendLatestSystemMessageIfNeeded(
-            in: conversationID,
-            recipientUserIDs: remainingUserIDs
-        )
         return .ok
     }
 }

@@ -47,7 +47,7 @@ extension AuthManagerTests {
         )
 
         let createdResult = store.apply(
-            event: IMTCPContactEventPayload(
+            event: TestContactEventPayload(
                 eventType: .friendRequestCreated,
                 request: pendingRequest,
                 contact: nil,
@@ -84,7 +84,7 @@ extension AuthManagerTests {
         )
 
         let acceptedResult = store.apply(
-            event: IMTCPContactEventPayload(
+            event: TestContactEventPayload(
                 eventType: .friendRequestAccepted,
                 request: acceptedRequest,
                 contact: contact,
@@ -107,7 +107,7 @@ extension AuthManagerTests {
         #expect(store.recentResolvedContactRequests(sort: sortPendingNewestFirst).map(\.id) == [requestID])
 
         let removedResult = store.apply(
-            event: IMTCPContactEventPayload(
+            event: TestContactEventPayload(
                 eventType: .contactRemoved,
                 request: nil,
                 contact: nil,

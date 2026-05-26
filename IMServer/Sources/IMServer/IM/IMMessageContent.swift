@@ -4,8 +4,6 @@ import Vapor
 enum IMMessageContentType: String, Codable, Content, Sendable {
     case richText = "rich_text"
     case reply
-    case recalled
-    case system
     case image
     case audio
     case file
@@ -128,135 +126,9 @@ struct IMMediaAsset: Codable, Equatable, Content, Sendable {
     let previewAssetID: String?
 }
 
-enum IMSystemEventType: String, Codable, Content, Sendable {
-    case legacyText = "legacy_text"
-    case groupCreated = "group_created"
-    case membersAdded = "members_added"
-    case memberRemoved = "member_removed"
-    case memberLeft = "member_left"
-    case roleUpdated = "role_updated"
-    case ownershipTransferred = "ownership_transferred"
-    case metadataUpdated = "metadata_updated"
-}
-
-enum IMConversationMetadataField: String, Codable, Content, Sendable {
-    case title
-    case notice
-    case avatarPreset = "avatar_preset"
-    case muteAll = "mute_all"
-}
-
-struct IMSystemEvent: Codable, Equatable, Content, Sendable {
-    let type: IMSystemEventType
-    let actorUserID: UUID?
-    let actorEmail: String?
-    let targetUserID: UUID?
-    let targetEmail: String?
-    let memberEmails: [String]
-    let previousRole: IMConversationMemberRole?
-    let newRole: IMConversationMemberRole?
-    let updatedFields: [IMConversationMetadataField]
-    let title: String?
-    let notice: String?
-    let avatarPreset: IMConversationAvatarPreset?
-    let legacyText: String?
-
-    init(
-        type: IMSystemEventType,
-        actorUserID: UUID? = nil,
-        actorEmail: String? = nil,
-        targetUserID: UUID? = nil,
-        targetEmail: String? = nil,
-        memberEmails: [String] = [],
-        previousRole: IMConversationMemberRole? = nil,
-        newRole: IMConversationMemberRole? = nil,
-        updatedFields: [IMConversationMetadataField] = [],
-        title: String? = nil,
-        notice: String? = nil,
-        avatarPreset: IMConversationAvatarPreset? = nil,
-        legacyText: String? = nil
-    ) {
-        self.type = type
-        self.actorUserID = actorUserID
-        self.actorEmail = actorEmail
-        self.targetUserID = targetUserID
-        self.targetEmail = targetEmail
-        self.memberEmails = memberEmails
-        self.previousRole = previousRole
-        self.newRole = newRole
-        self.updatedFields = updatedFields
-        self.title = title
-        self.notice = notice
-        self.avatarPreset = avatarPreset
-        self.legacyText = legacyText
-    }
-
-    static func legacyText(_ text: String) -> IMSystemEvent {
-        IMSystemEvent(type: .legacyText, legacyText: text)
-    }
-
-    var displayText: String {
-        let actor = actorEmail ?? "系统"
-        let target = targetEmail ?? "成员"
-
-        switch type {
-        case .legacyText:
-            return legacyText ?? "系统消息"
-        case .groupCreated:
-            return "\(actor) 创建了群聊"
-        case .membersAdded:
-            let names = memberEmails.joined(separator: "、")
-            return names.isEmpty ? "\(actor) 添加了新成员" : "\(actor) 添加了 \(names)"
-        case .memberRemoved:
-            return "\(actor) 移除了 \(target)"
-        case .memberLeft:
-            return "\(actor) 退出了群聊"
-        case .roleUpdated:
-            switch newRole {
-            case .owner:
-                return "\(actor) 已将群主转让给 \(target)"
-            case .admin:
-                return "\(actor) 将 \(target) 设为管理员"
-            case .member:
-                if previousRole == .admin {
-                    return "\(actor) 取消了 \(target) 的管理员身份"
-                }
-                return "\(actor) 更新了 \(target) 的群角色"
-            case nil:
-                return "\(actor) 更新了 \(target) 的群角色"
-            }
-        case .ownershipTransferred:
-            return "\(actor) 已将群主转让给 \(target)"
-        case .metadataUpdated:
-            let labels = updatedFields.map(\.displayLabel)
-            if labels.isEmpty {
-                return "\(actor) 更新了群资料"
-            }
-            return "\(actor) 更新了\(labels.joined(separator: "、"))"
-        }
-    }
-}
-
-private extension IMConversationMetadataField {
-    var displayLabel: String {
-        switch self {
-        case .title:
-            return "群名称"
-        case .notice:
-            return "群公告"
-        case .avatarPreset:
-            return "群头像"
-        case .muteAll:
-            return "全员禁言"
-        }
-    }
-}
-
 enum IMMessageContent: Equatable, Sendable {
     case richText(IMRichTextContent)
     case reply(reference: IMReplyReference, body: IMRichTextContent)
-    case recalled
-    case system(IMSystemEvent)
     case image(IMMediaAsset)
     case audio(IMMediaAsset)
     case file(IMMediaAsset)
@@ -267,10 +139,6 @@ enum IMMessageContent: Equatable, Sendable {
             return .richText
         case .reply:
             return .reply
-        case .recalled:
-            return .recalled
-        case .system:
-            return .system
         case .image:
             return .image
         case .audio:
@@ -309,17 +177,6 @@ extension IMMessageContent: Codable {
             let reference = try container.decode(IMReplyReference.self, forKey: .reference)
             let body = try container.decode(IMRichTextContent.self, forKey: .body)
             self = .reply(reference: reference, body: body)
-        case .recalled:
-            self = .recalled
-        case .system:
-            if let event = try container.decodeIfPresent(IMSystemEvent.self, forKey: .event) {
-                self = .system(event)
-            } else {
-                throw DecodingError.keyNotFound(
-                    CodingKeys.event,
-                    DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing system event.")
-                )
-            }
         case .image:
             self = .image(try container.decode(IMMediaAsset.self, forKey: .asset))
         case .audio:
@@ -339,10 +196,6 @@ extension IMMessageContent: Codable {
         case .reply(let reference, let body):
             try container.encode(reference, forKey: .reference)
             try container.encode(body, forKey: .body)
-        case .recalled:
-            return
-        case .system(let event):
-            try container.encode(event, forKey: .event)
         case .image(let asset), .audio(let asset), .file(let asset):
             try container.encode(asset, forKey: .asset)
         }

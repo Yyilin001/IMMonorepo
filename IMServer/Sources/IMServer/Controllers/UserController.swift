@@ -55,15 +55,17 @@ struct UserController: RouteCollection {
             mergeRecipientUserIDs(refreshed, into: &affectedConversationRecipientUserIDs)
         }
 
-        let conversationEventService = IMConversationEventService(app: req.application)
         for (conversationID, recipientUserIDs) in affectedConversationRecipientUserIDs {
-            await conversationEventService.publish(
-                eventType: .summaryUpdated,
+            let conversationDB = try await req.application.conversationShardRouter.commandDatabase(
+                forConversationID: conversationID
+            )
+            try await ConversationOutboxService(db: conversationDB).enqueue(
+                type: .directPeerUpdated,
                 conversationID: conversationID,
-                recipientUserIDs: recipientUserIDs,
-                actorUserID: userID
+                payload: ConversationDomainEventPayload(recipientUserIDs: recipientUserIDs)
             )
         }
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
 
         return try user.asResponse()
     }
@@ -161,18 +163,24 @@ struct UserController: RouteCollection {
             on: req.db
         )
 
-        let eventService = IMContactEventService(app: req.application)
-        await eventService.publishContactRemoved(
-            recipientUserID: ownerUserID,
+        await publishContactDomainEvent(
+            app: req.application,
+            eventType: .contactRequestUpdated,
+            recipientUserIDs: [ownerUserID],
+            request: nil,
+            contact: nil,
             contactUserID: contactUserID,
             actorUserID: ownerUserID
         )
-        await eventService.publishContactRemoved(
-            recipientUserID: contactUserID,
+        await publishContactDomainEvent(
+            app: req.application,
+            eventType: .contactRequestUpdated,
+            recipientUserIDs: [contactUserID],
+            request: nil,
+            contact: nil,
             contactUserID: ownerUserID,
             actorUserID: ownerUserID
         )
-        let conversationEventService = IMConversationEventService(app: req.application)
         for conversationID in affectedDirectConversationIDs {
             let conversationDB = try await req.application.conversationShardRouter.commandDatabase(
                 forConversationID: conversationID
@@ -183,12 +191,6 @@ struct UserController: RouteCollection {
                 payload: ConversationDomainEventPayload(recipientUserIDs: [ownerUserID, contactUserID])
             )
             try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
-            await conversationEventService.publish(
-                eventType: .summaryUpdated,
-                conversationID: conversationID,
-                recipientUserIDs: [ownerUserID, contactUserID],
-                actorUserID: ownerUserID
-            )
         }
         return .ok
     }
@@ -235,10 +237,11 @@ struct UserController: RouteCollection {
             requestID: response.id,
             on: req.db
         )
-        await IMContactEventService(app: req.application).publishRequestEvent(
-            eventType: .friendRequestCreated,
-            request: response,
+        await publishContactDomainEvent(
+            app: req.application,
+            eventType: .contactRequestCreated,
             recipientUserIDs: [response.requester.id, response.addressee.id],
+            request: response,
             actorUserID: response.requester.id
         )
         return response
@@ -273,15 +276,24 @@ struct UserController: RouteCollection {
             contactUserID: result.request.requester.id,
             on: req.db
         )
-        await IMContactEventService(app: req.application).publishAccepted(
+        await publishContactDomainEvent(
+            app: req.application,
+            eventType: .contactRequestAccepted,
+            recipientUserIDs: [result.request.requester.id],
             request: result.request,
-            contactByRecipientUserID: [
-                result.request.requester.id: result.requesterContact,
-                result.request.addressee.id: result.addresseeContact
-            ],
+            contact: result.requesterContact,
+            contactUserID: result.request.addressee.id,
             actorUserID: result.request.addressee.id
         )
-        let conversationEventService = IMConversationEventService(app: req.application)
+        await publishContactDomainEvent(
+            app: req.application,
+            eventType: .contactRequestAccepted,
+            recipientUserIDs: [result.request.addressee.id],
+            request: result.request,
+            contact: result.addresseeContact,
+            contactUserID: result.request.requester.id,
+            actorUserID: result.request.addressee.id
+        )
         for conversationID in result.affectedDirectConversationIDs {
             let conversationDB = try await req.application.conversationShardRouter.commandDatabase(
                 forConversationID: conversationID
@@ -294,12 +306,6 @@ struct UserController: RouteCollection {
                 )
             )
             try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
-            await conversationEventService.publish(
-                eventType: .summaryUpdated,
-                conversationID: conversationID,
-                recipientUserIDs: [result.request.requester.id, result.request.addressee.id],
-                actorUserID: result.request.addressee.id
-            )
         }
         return result.addresseeContact
     }
@@ -321,10 +327,11 @@ struct UserController: RouteCollection {
             requestID: response.id,
             on: req.db
         )
-        await IMContactEventService(app: req.application).publishRequestEvent(
-            eventType: .friendRequestDeclined,
-            request: response,
+        await publishContactDomainEvent(
+            app: req.application,
+            eventType: .contactRequestUpdated,
             recipientUserIDs: [response.requester.id, response.addressee.id],
+            request: response,
             actorUserID: response.addressee.id
         )
         return response
@@ -347,10 +354,11 @@ struct UserController: RouteCollection {
             requestID: response.id,
             on: req.db
         )
-        await IMContactEventService(app: req.application).publishRequestEvent(
-            eventType: .friendRequestCancelled,
-            request: response,
+        await publishContactDomainEvent(
+            app: req.application,
+            eventType: .contactRequestUpdated,
             recipientUserIDs: [response.requester.id, response.addressee.id],
+            request: response,
             actorUserID: response.requester.id
         )
         return response
@@ -395,16 +403,39 @@ struct UserController: RouteCollection {
     }
 
     private func summaryReadModelDatabases(for app: Application) -> [any Database] {
-        switch app.summaryReadModelConfiguration.projectionWriteMode {
-        case .legacy:
-            return [app.imSummaryDB]
-        case .sharded:
-            return app.summaryShardRouter.shardIDs.map { app.summaryShardRouter.database(forShardID: $0) }
-        case .dualWrite:
-            return [app.imSummaryDB] + app.summaryShardRouter.shardIDs.map {
-                app.summaryShardRouter.database(forShardID: $0)
-            }
-        }
+        app.summaryShardRouter.shardIDs.map { app.summaryShardRouter.database(forShardID: $0) }
+    }
+
+    private func publishContactDomainEvent(
+        app: Application,
+        eventType: IMTCPChatDomainEventType,
+        recipientUserIDs: [UUID],
+        request: FriendRequestResponse?,
+        contact: ContactResponse? = nil,
+        contactUserID: UUID? = nil,
+        actorUserID: UUID?
+    ) async {
+        let eventID = UUID()
+        let aggregateID = request?.id ?? contactUserID ?? actorUserID ?? eventID
+        await app.gatewaySessionService.sendDomainEvent(
+            IMTCPChatDomainEventPayload(
+                eventID: eventID,
+                eventType: eventType,
+                aggregateType: "contact",
+                aggregateID: aggregateID,
+                aggregateSequence: 0,
+                occurredAt: Date(),
+                actorUserID: actorUserID,
+                conversation: nil,
+                body: .contactChanged(
+                    request: request,
+                    contact: contact,
+                    contactUserID: contactUserID
+                )
+            ),
+            toUserIDs: recipientUserIDs,
+            requestID: eventID
+        )
     }
 
     private func mergeRecipientUserIDs(

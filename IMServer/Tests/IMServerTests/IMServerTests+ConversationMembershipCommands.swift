@@ -658,9 +658,9 @@ extension IMServerTests {
                 #expect(conversations[0].id == conversationID)
                 #expect(conversations[0].kind == IMConversationKind.group.rawValue)
                 #expect(conversations[0].memberCount == 2)
-                #expect(conversations[0].lastReadSequence == 1)
-                #expect(conversations[0].unreadCount == 1)
-                #expect(conversations[0].lastMessage?.content.previewText == "\(otherUser.email) 退出了群聊")
+                #expect(conversations[0].lastReadSequence == 0)
+                #expect(conversations[0].unreadCount == 0)
+                #expect(conversations[0].lastMessage == nil)
             })
         }
     }

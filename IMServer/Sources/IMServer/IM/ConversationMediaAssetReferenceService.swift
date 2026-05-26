@@ -38,6 +38,7 @@ struct ConversationMediaAssetReferenceService {
         for messageID in uniqueMessageIDs {
             let recordID = ConversationMediaAssetReference.recordID(messageID: messageID)
             guard let message = messagesByID[messageID],
+                  try !message.decodedDerivedState().isRecalled,
                   let asset = try message.decodedContent().mediaAsset
             else {
                 if existingReferencesByID[recordID] != nil {
@@ -89,7 +90,9 @@ struct ConversationMediaAssetReferenceService {
             return nil
         }
 
-        guard let asset = try message.decodedContent().mediaAsset else {
+        guard try !message.decodedDerivedState().isRecalled,
+              let asset = try message.decodedContent().mediaAsset
+        else {
             try await deleteReference(recordID: recordID, on: database)
             return nil
         }

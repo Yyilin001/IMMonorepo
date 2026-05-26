@@ -14,10 +14,6 @@ func testMessageContent(kind: String, body: [String: String]) -> IMMessageConten
             ),
             body: .plain(body["text"] ?? "")
         )
-    case IMMessageContentType.recalled.rawValue:
-        return .recalled
-    case IMMessageContentType.system.rawValue:
-        return .system(.legacyText(body["text"] ?? ""))
     case IMMessageContentType.image.rawValue:
         return .image(testMediaAsset(kind: .image, body: body))
     case IMMessageContentType.audio.rawValue:
@@ -76,10 +72,6 @@ extension IMTCPMessagePayload {
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText
             ]
-        case .recalled:
-            return [:]
-        case .system(let event):
-            return ["text": event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
             return mediaBody(asset)
         }
@@ -119,10 +111,6 @@ extension IMMessagePreviewResponseBody {
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText
             ]
-        case .recalled:
-            return [:]
-        case .system(let event):
-            return ["text": event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
             return mediaBody(asset)
         }
@@ -166,10 +154,6 @@ extension IMConversationMessageResponseBody {
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText
             ]
-        case .recalled:
-            return [:]
-        case .system(let event):
-            return ["text": event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
             return mediaBody(asset)
         }
@@ -234,5 +218,235 @@ extension IMCachedMessageState {
 extension SessionClient {
     func fetchIMConversations() async throws -> [IMConversationSummaryResponseBody] {
         try await fetchIMConversationSummaries().items
+    }
+}
+
+enum TestConversationEventType: String {
+    case conversationCreated = "conversation_created"
+    case membersAdded = "members_added"
+    case memberLeft = "member_left"
+    case membersUpdated = "members_updated"
+    case conversationRemovedForSelf = "conversation_removed_for_self"
+    case summaryUpdated = "summary_updated"
+    case messageUpdated = "message_updated"
+    case messageRecalled = "message_recalled"
+    case messageVisibilityChanged = "message_visibility_changed"
+    case messageFavoriteChanged = "message_favorite_changed"
+    case conversationVisibilityChanged = "conversation_visibility_changed"
+    case conversationSettingsChanged = "conversation_settings_changed"
+    case inviteChanged = "invite_changed"
+    case messageStreamStarted = "message_stream_started"
+    case messageStreamChunk = "message_stream_chunk"
+    case messageStreamCompleted = "message_stream_completed"
+    case messageStreamFailed = "message_stream_failed"
+    case messageStreamCancelled = "message_stream_cancelled"
+}
+
+struct TestConversationEventPayload {
+    let eventType: TestConversationEventType
+    let conversation: IMConversationSummaryResponseBody
+    let message: IMConversationMessageResponseBody?
+    let stream: IMTCPMessageStreamPayload?
+    let actorUserID: UUID?
+    let serverTimestamp: Date
+    let messageIDs: [UUID]
+    let favoriteChangedMessageID: UUID?
+    let isFavorited: Bool?
+    let visibilityAction: IMTCPConversationVisibilityAction?
+
+    init(
+        eventType: TestConversationEventType,
+        conversation: IMConversationSummaryResponseBody,
+        message: IMConversationMessageResponseBody? = nil,
+        stream: IMTCPMessageStreamPayload? = nil,
+        actorUserID: UUID?,
+        serverTimestamp: Date,
+        messageIDs: [UUID] = [],
+        favoriteChangedMessageID: UUID? = nil,
+        isFavorited: Bool? = nil,
+        visibilityAction: IMTCPConversationVisibilityAction? = nil
+    ) {
+        self.eventType = eventType
+        self.conversation = conversation
+        self.message = message
+        self.stream = stream
+        self.actorUserID = actorUserID
+        self.serverTimestamp = serverTimestamp
+        self.messageIDs = messageIDs
+        self.favoriteChangedMessageID = favoriteChangedMessageID
+        self.isFavorited = isFavorited
+        self.visibilityAction = visibilityAction
+    }
+}
+
+extension IMConversationStore {
+    func applyTestDomainMessage(_ payload: IMTCPMessagePayload, currentUserID: UUID) {
+        guard let conversationID = UUID(uuidString: payload.conversationID),
+              let senderUserID = payload.senderUserID
+        else {
+            return
+        }
+        let messageID = payload.messageID.flatMap(UUID.init(uuidString:)) ?? UUID()
+        let serverSequence = payload.serverSequence ?? 1
+        _ = applyDomainEvent(
+            IMTCPChatDomainEventPayload(
+                eventID: messageID,
+                eventType: .messageCreated,
+                aggregateType: "conversation",
+                aggregateID: conversationID,
+                aggregateSequence: serverSequence,
+                occurredAt: payload.serverTimestamp ?? Date(),
+                actorUserID: senderUserID,
+                conversation: nil,
+                body: .messageCreated(
+                    message: IMConversationMessageResponseBody(
+                        id: messageID,
+                        conversationID: conversationID,
+                        senderUserID: senderUserID,
+                        clientMessageID: payload.clientMessageID,
+                        serverSequence: Int(serverSequence),
+                        content: payload.content,
+                        derivedState: payload.derivedState,
+                        createdAt: payload.serverTimestamp
+                    ),
+                    clientMessageID: payload.clientMessageID
+                )
+            ),
+            currentUserID: currentUserID
+        )
+    }
+
+    func applyTestConversationEvent(
+        _ payload: TestConversationEventPayload,
+        currentUserID: UUID
+    ) -> IMConversationEventApplyOutcome {
+        applyDomainEvent(payload.domainEventPayload(), currentUserID: currentUserID)
+    }
+
+    func applyRecalledMessage(_ response: IMConversationMessageResponseBody, currentUserID: UUID) {
+        applyUpdatedMessage(response, currentUserID: currentUserID)
+    }
+}
+
+private extension TestConversationEventPayload {
+    func domainEventPayload() -> IMTCPChatDomainEventPayload {
+        IMTCPChatDomainEventPayload(
+            eventID: UUID(),
+            eventType: domainEventType,
+            aggregateType: "conversation",
+            aggregateID: conversation.id,
+            aggregateSequence: UInt64(message?.serverSequence ?? conversation.lastMessage?.serverSequence ?? 0),
+            occurredAt: serverTimestamp,
+            actorUserID: actorUserID,
+            conversation: conversation,
+            body: domainEventBody
+        )
+    }
+
+    var domainEventType: IMTCPChatDomainEventType {
+        switch eventType {
+        case .conversationCreated:
+            return .conversationCreated
+        case .membersAdded:
+            return .memberAdded
+        case .memberLeft:
+            return .memberRemoved
+        case .membersUpdated:
+            return .memberRoleUpdated
+        case .conversationRemovedForSelf:
+            return .conversationRemovedForSelf
+        case .summaryUpdated:
+            return .conversationUpdated
+        case .messageUpdated:
+            return .messageEdited
+        case .messageRecalled:
+            return .messageRevoked
+        case .messageVisibilityChanged:
+            return .messageVisibilityChanged
+        case .messageFavoriteChanged:
+            return .messageFavoriteChanged
+        case .conversationVisibilityChanged:
+            return .conversationVisibilityChanged
+        case .conversationSettingsChanged, .inviteChanged:
+            return .conversationSettingsChanged
+        case .messageStreamStarted:
+            return .messageStreamStarted
+        case .messageStreamChunk:
+            return .messageStreamChunk
+        case .messageStreamCompleted:
+            return .messageStreamCompleted
+        case .messageStreamFailed:
+            return .messageStreamFailed
+        case .messageStreamCancelled:
+            return .messageStreamCancelled
+        }
+    }
+
+    var domainEventBody: IMTCPChatDomainEventBody {
+        switch eventType {
+        case .messageUpdated:
+            return .messageEdited(
+                messageID: message?.id ?? UUID(),
+                body: message.flatMap { richTextBody($0.content) } ?? .plain(message?.content.previewText ?? ""),
+                editedAt: message?.derivedState.edits.last?.editedAt ?? serverTimestamp,
+                message: message
+            )
+        case .messageRecalled:
+            return .messageRevoked(
+                messageID: message?.id ?? UUID(),
+                revokedAt: serverTimestamp,
+                revokedByUserID: actorUserID,
+                message: message
+            )
+        case .messageVisibilityChanged:
+            return .messageVisibilityChanged(
+                messageIDs: messageIDs,
+                message: message,
+                visibilityAction: visibilityAction
+            )
+        case .messageFavoriteChanged:
+            return .messageFavoriteChanged(
+                messageID: favoriteChangedMessageID ?? message?.id ?? UUID(),
+                isFavorited: isFavorited ?? false
+            )
+        case .conversationRemovedForSelf:
+            return .conversationRemovedForSelf
+        case .conversationVisibilityChanged:
+            return .conversationVisibilityChanged(
+                visibilityAction: visibilityAction ?? .conversationCleared,
+                messageIDs: messageIDs
+            )
+        case .membersAdded, .memberLeft, .membersUpdated:
+            return .memberChanged(memberUserIDs: conversation.memberUserIDs)
+        case .messageStreamStarted,
+             .messageStreamChunk,
+             .messageStreamCompleted,
+             .messageStreamFailed,
+             .messageStreamCancelled:
+            return .messageStream(stream ?? emptyStreamPayload(), message: message)
+        case .conversationCreated, .summaryUpdated, .conversationSettingsChanged, .inviteChanged:
+            return .conversationChanged
+        }
+    }
+
+    func emptyStreamPayload() -> IMTCPMessageStreamPayload {
+        IMTCPMessageStreamPayload(
+            streamID: "",
+            messageID: message?.id.uuidString ?? "",
+            conversationID: conversation.id.uuidString,
+            chunkIndex: 0,
+            partialTextLength: 0,
+            state: .streaming,
+            serverTimestamp: serverTimestamp
+        )
+    }
+
+    func richTextBody(_ content: IMMessageContent) -> IMRichTextContent? {
+        switch content {
+        case .richText(let body), .reply(_, let body):
+            return body
+        case .image, .audio, .file:
+            return nil
+        }
     }
 }

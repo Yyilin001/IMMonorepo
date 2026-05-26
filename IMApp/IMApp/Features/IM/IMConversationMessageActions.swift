@@ -19,15 +19,13 @@ extension IMConversationMessage {
     }
 
     var canReply: Bool {
-        guard serverSequence != nil else {
+        guard serverSequence != nil, !derivedState.isRecalled else {
             return false
         }
 
         switch content {
         case .richText, .reply, .image, .audio, .file:
             return true
-        case .recalled, .system:
-            return false
         }
     }
 
@@ -39,12 +37,7 @@ extension IMConversationMessage {
             return false
         }
 
-        switch content {
-        case .richText, .reply, .image, .audio, .file:
-            return true
-        case .recalled, .system:
-            return false
-        }
+        return !derivedState.isRecalled
     }
 
     var canEdit: Bool {
@@ -58,7 +51,7 @@ extension IMConversationMessage {
         switch content {
         case .richText, .reply:
             return true
-        case .image, .audio, .file, .recalled, .system:
+        case .image, .audio, .file:
             return false
         }
     }
@@ -71,8 +64,6 @@ extension IMConversationMessage {
         switch content {
         case .richText, .reply, .image, .audio, .file:
             return true
-        case .recalled, .system:
-            return false
         }
     }
 }

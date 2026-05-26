@@ -3,9 +3,16 @@ package com.xmtx.imclientkit
 import com.xmtx.imclientkit.auth.AuthUser
 import com.xmtx.imclientkit.features.im.IMMessageContent
 import com.xmtx.imclientkit.features.im.IMTCPMessagePayload
+import com.xmtx.imclientkit.generated.im.realtime.v1.AuthAccepted
+import com.xmtx.imclientkit.generated.im.realtime.v1.AuthError
+import com.xmtx.imclientkit.generated.im.realtime.v1.ChatDomainEvent
+import com.xmtx.imclientkit.generated.im.realtime.v1.ConversationMessage
+import com.xmtx.imclientkit.generated.im.realtime.v1.MessageContent
+import com.xmtx.imclientkit.generated.im.realtime.v1.MessageCreatedEvent
+import com.xmtx.imclientkit.generated.im.realtime.v1.MessageDerivedState
+import com.xmtx.imclientkit.generated.im.realtime.v1.Packet
+import com.xmtx.imclientkit.generated.im.realtime.v1.RichTextContent
 import com.xmtx.imclientkit.networking.NetworkEnvironment
-import com.xmtx.imclientkit.networking.imtcp.IMTCPAuthAcceptedPayload
-import com.xmtx.imclientkit.networking.imtcp.IMTCPAuthErrorPayload
 import com.xmtx.imclientkit.networking.imtcp.IMTCPClient
 import com.xmtx.imclientkit.networking.imtcp.IMTCPClientConfiguration
 import com.xmtx.imclientkit.networking.imtcp.IMTCPClientError
@@ -32,28 +39,34 @@ import org.junit.Test
 
 class IMTCPClientTests {
     @Test
-    fun packetCodecDecodesMessageEvent() {
-        val line = IMTCPPacketCodec.encode(
-            type = "message",
-            requestID = "request-1",
-            payload = com.xmtx.imclientkit.features.im.IMTCPMessagePayloadWire.fromDomain(
-                IMTCPMessagePayload(
-                    clientMessageID = "client-1",
-                    messageID = "message-1",
-                    conversationID = "conversation-1",
-                    senderUserID = "user-1",
-                    serverSequence = 2UL,
-                    content = IMMessageContent.plain("hello"),
-                ),
-            ),
-        )
+    fun packetCodecDecodesDomainEvent() {
+        val frame = packetBuilder("request-1")
+            .setDomainEvent(
+                ChatDomainEvent.newBuilder()
+                    .setEventId("event-1")
+                    .setEventType("message.created")
+                    .setAggregateType("conversation")
+                    .setAggregateId("conversation-1")
+                    .setAggregateSequence(2UL.toLong())
+                    .setOccurredAtMs(1_768_262_400_000)
+                    .setMessageCreated(
+                        MessageCreatedEvent.newBuilder()
+                            .setClientMessageId("client-1")
+                            .setMessage(messageProto())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build()
+            .toByteArray()
 
-        val event = IMTCPPacketCodec.event(IMTCPPacketCodec.decode(line))
+        val event = IMTCPPacketCodec.event(IMTCPPacketCodec.decode(frame))
 
-        assertTrue(event is IMTCPConnectionEvent.Message)
-        event as IMTCPConnectionEvent.Message
+        assertTrue(event is IMTCPConnectionEvent.DomainEvent)
+        event as IMTCPConnectionEvent.DomainEvent
         assertEquals("request-1", event.requestID)
-        assertEquals("hello", event.payload.content.previewText)
+        val body = event.payload.body as com.xmtx.imclientkit.features.im.IMTCPChatDomainEventBody.MessageCreated
+        assertEquals("hello", body.message.content.previewText)
     }
 
     @Test
@@ -77,9 +90,12 @@ class IMTCPClientTests {
         )
 
         assertEquals("connection-1", connection.authentication.connectionID)
-        assertTrue(transport.sentLines.first().contains("\"type\":\"auth\""))
-        assertTrue(transport.sentLines.first().contains("access-1"))
-        assertTrue(transport.sentLines.last().contains("\"type\":\"message\""))
+        val authPacket = IMTCPPacketCodec.decode(transport.sentFrames.first())
+        val sendPacket = IMTCPPacketCodec.decode(transport.sentFrames.last())
+        assertEquals(Packet.BodyCase.AUTH, authPacket.bodyCase)
+        assertEquals("access-1", authPacket.auth.accessToken)
+        assertEquals(Packet.BodyCase.SEND_MESSAGE, sendPacket.bodyCase)
+        assertEquals("hello", sendPacket.sendMessage.content.richText.text)
     }
 
     @Test
@@ -117,8 +133,8 @@ class IMTCPClientTests {
         val connection = sessionClient.openIMConnection(configuration(), transport)
 
         assertEquals("connection-1", connection.authentication.connectionID)
-        assertTrue(transport.sentLines[0].contains("old-access"))
-        assertTrue(transport.sentLines[1].contains("new-access"))
+        assertEquals("old-access", IMTCPPacketCodec.decode(transport.sentFrames[0]).auth.accessToken)
+        assertEquals("new-access", IMTCPPacketCodec.decode(transport.sentFrames[1]).auth.accessToken)
     }
 
     @Test(expected = IMTCPClientError.AuthRejected::class)
@@ -135,42 +151,64 @@ class IMTCPClientTests {
     private fun configuration(): IMTCPClientConfiguration =
         IMTCPClientConfiguration(host = "test.local", port = 9000)
 
-    private fun authOKLine(): String =
-        IMTCPPacketCodec.encode(
-            type = "auth_ok",
-            requestID = null,
-            payload = IMTCPAuthAcceptedPayload(
-                connectionID = "connection-1",
-                userID = "user-1",
-                sessionID = "session-1",
-                heartbeatIntervalSeconds = 30,
-                serverTime = "2026-05-13T00:00:00Z",
-            ),
-        )
+    private fun authOKLine(): ByteArray =
+        packetBuilder(null)
+            .setAuthOk(
+                AuthAccepted.newBuilder()
+                    .setConnectionId("connection-1")
+                    .setUserId("user-1")
+                    .setSessionId("session-1")
+                    .setHeartbeatIntervalSeconds(30)
+                    .setServerTimeMs(1_768_262_400_000)
+                    .build(),
+            )
+            .build()
+            .toByteArray()
 
-    private fun authErrorLine(): String =
-        IMTCPPacketCodec.encode(
-            type = "auth_error",
-            requestID = null,
-            payload = IMTCPAuthErrorPayload("expired", "expired"),
-        )
+    private fun authErrorLine(): ByteArray =
+        packetBuilder(null)
+            .setAuthError(AuthError.newBuilder().setCode("expired").setMessage("expired").build())
+            .build()
+            .toByteArray()
+
+    private fun packetBuilder(requestID: String?): Packet.Builder =
+        Packet.newBuilder()
+            .also { if (requestID != null) it.requestId = requestID }
+            .setTimestampMs(1_768_262_400_000)
+            .setProtocolVersion(4)
+
+    private fun messageProto(): ConversationMessage =
+        ConversationMessage.newBuilder()
+            .setId("message-1")
+            .setConversationId("conversation-1")
+            .setSenderUserId("user-1")
+            .setClientMessageId("client-1")
+            .setServerSequence(2)
+            .setContent(
+                MessageContent.newBuilder()
+                    .setRichText(RichTextContent.newBuilder().setText("hello").build())
+                    .build(),
+            )
+            .setDerivedState(MessageDerivedState.newBuilder().setRecallState("active").build())
+            .setCreatedAtMs(1_768_262_400_000)
+            .build()
 }
 
 private class FakeIMTCPTransport(
-    firstConnectionLines: List<String> = emptyList(),
-    private val scriptedConnections: List<List<String>> = listOf(firstConnectionLines),
+    firstConnectionFrames: List<ByteArray> = emptyList(),
+    private val scriptedConnections: List<List<ByteArray>> = listOf(firstConnectionFrames),
 ) : IMTCPTransport {
-    val sentLines = mutableListOf<String>()
+    val sentFrames = mutableListOf<ByteArray>()
     private var connectCount = 0
 
     override suspend fun connect(host: String, port: Int): IMTCPTransportConnection {
-        val lines = Channel<String>(Channel.UNLIMITED)
-        scriptedConnections.getOrElse(connectCount) { emptyList() }.forEach { lines.send(it) }
+        val frames = Channel<ByteArray>(Channel.UNLIMITED)
+        scriptedConnections.getOrElse(connectCount) { emptyList() }.forEach { frames.send(it) }
         connectCount += 1
         return IMTCPTransportConnection(
-            lines = lines,
-            sendLineHandler = { sentLines += it },
-            disconnectHandler = { lines.close() },
+            frames = frames,
+            sendFrameHandler = { sentFrames += it },
+            disconnectHandler = { frames.close() },
         )
     }
 }

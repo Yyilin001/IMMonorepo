@@ -48,91 +48,83 @@ struct IMMessageBubble: View {
     let onDeleteDownloadedMedia: () -> Void
 
     var body: some View {
-        if case .system(let event) = message.content {
-            Text(event.displayText)
+        HStack {
+            if message.direction == .outgoing {
+                Spacer(minLength: 24)
+            }
+
+            if isSelectionMode, canSelect {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .frame(width: 28)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                IMMessageContentBody(
+                    message: message,
+                    replyReference: replyReference,
+                    mediaDownloadState: mediaDownloadState,
+                    onJumpToReplyReference: onJumpToReplyReference,
+                    onDownloadMedia: onDownloadMedia,
+                    onCancelMediaDownload: onCancelMediaDownload,
+                    onRetryMediaDownload: onRetryMediaDownload,
+                    onOpenDownloadedMedia: onOpenDownloadedMedia,
+                    onDeleteDownloadedMedia: onDeleteDownloadedMedia
+                )
+
+                if !message.derivedState.reactions.isEmpty {
+                    IMMessageReactionRow(
+                        reactions: message.derivedState.reactions,
+                        currentUserID: currentUserID
+                    )
+                }
+
+                HStack(spacing: 8) {
+                    Text(message.createdAt.formatted(date: .omitted, time: .shortened))
+                    if let deliveryDisplay {
+                        IMMessageDeliveryLabel(display: deliveryDisplay)
+                    }
+                    if !message.derivedState.edits.isEmpty {
+                        Text("已编辑")
+                    }
+                }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.vertical, 6)
-        } else {
-            HStack {
-                if message.direction == .outgoing {
-                    Spacer(minLength: 24)
-                }
 
+                IMMessageSendActionButton(
+                    canCancel: canCancel,
+                    canRecall: canRecall,
+                    canRetry: canRetry,
+                    onCancel: onCancel,
+                    onRecall: onRecall,
+                    onRetry: onRetry
+                )
+            }
+            .padding(12)
+            .background(bubbleColor)
+            .overlay {
+                if isHighlighted {
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.accentColor.opacity(0.45), lineWidth: 2)
+                } else if isSelected {
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.accentColor.opacity(0.75), lineWidth: 2)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .onTapGesture {
                 if isSelectionMode, canSelect {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.title3)
-                        .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-                        .frame(width: 28)
+                    onToggleSelection()
                 }
+            }
+            .contextMenu {
+                contextMenuContent
+            }
+            .accessibilityIdentifier("conversation.message.moreActions")
 
-                VStack(alignment: .leading, spacing: 6) {
-                    IMMessageContentBody(
-                        message: message,
-                        replyReference: replyReference,
-                        mediaDownloadState: mediaDownloadState,
-                        onJumpToReplyReference: onJumpToReplyReference,
-                        onDownloadMedia: onDownloadMedia,
-                        onCancelMediaDownload: onCancelMediaDownload,
-                        onRetryMediaDownload: onRetryMediaDownload,
-                        onOpenDownloadedMedia: onOpenDownloadedMedia,
-                        onDeleteDownloadedMedia: onDeleteDownloadedMedia
-                    )
-
-                    if !message.derivedState.reactions.isEmpty {
-                        IMMessageReactionRow(
-                            reactions: message.derivedState.reactions,
-                            currentUserID: currentUserID
-                        )
-                    }
-
-                    HStack(spacing: 8) {
-                        Text(message.createdAt.formatted(date: .omitted, time: .shortened))
-                        if let deliveryDisplay {
-                            IMMessageDeliveryLabel(display: deliveryDisplay)
-                        }
-                        if !message.derivedState.edits.isEmpty {
-                            Text("已编辑")
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                    IMMessageSendActionButton(
-                        canCancel: canCancel,
-                        canRecall: canRecall,
-                        canRetry: canRetry,
-                        onCancel: onCancel,
-                        onRecall: onRecall,
-                        onRetry: onRetry
-                    )
-                }
-                .padding(12)
-                .background(bubbleColor)
-                .overlay {
-                    if isHighlighted {
-                        RoundedRectangle(cornerRadius: 16)
-                            .stroke(Color.accentColor.opacity(0.45), lineWidth: 2)
-                    } else if isSelected {
-                        RoundedRectangle(cornerRadius: 16)
-                            .stroke(Color.accentColor.opacity(0.75), lineWidth: 2)
-                    }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .onTapGesture {
-                    if isSelectionMode, canSelect {
-                        onToggleSelection()
-                    }
-                }
-                .contextMenu {
-                    contextMenuContent
-                }
-                .accessibilityIdentifier("conversation.message.moreActions")
-
-                if message.direction == .incoming {
-                    Spacer(minLength: 24)
-                }
+            if message.direction == .incoming {
+                Spacer(minLength: 24)
             }
         }
     }

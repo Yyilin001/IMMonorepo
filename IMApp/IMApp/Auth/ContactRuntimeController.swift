@@ -405,9 +405,9 @@ final class ContactRuntimeController {
         }
     }
 
-    func applyContactEvent(_ payload: IMTCPContactEventPayload) {
+    func applyContactDomainEvent(_ payload: IMTCPChatDomainEventPayload) {
         let result = context.contactStore.apply(
-            event: payload,
+            domainEvent: payload,
             currentUserID: context.currentUserProvider()?.id,
             isRelevant: { [context] request, currentUserID in
                 context.sessionFacade.isRequestRelevant(request, to: currentUserID)

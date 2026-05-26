@@ -163,18 +163,11 @@ struct IMServerTests {
     }
 
 
-    @Test("Summary read model store respects configured query read source")
-    func summaryReadModelStoreRespectsConfiguredReadSource() async throws {
+    @Test("Summary read model store uses sharded read source")
+    func summaryReadModelStoreUsesShardedReadSource() async throws {
         try await withApp(configure: configure) { app in
             app.summaryReadModelConfiguration = IMSummaryReadModelConfiguration(
-                projectionWriteMode: .dualWrite,
-                queryReadSource: .legacy
-            )
-            app.summaryReadModelStore = DatabaseSummaryReadModelStore(summaryDB: app.imSummaryDB)
-            #expect(String(reflecting: type(of: app.summaryReadModelStore)).contains("DatabaseSummaryReadModelStore"))
-
-            app.summaryReadModelConfiguration = IMSummaryReadModelConfiguration(
-                projectionWriteMode: .dualWrite,
+                projectionWriteMode: .sharded,
                 queryReadSource: .sharded
             )
             app.summaryReadModelStore = OwnerShardedSummaryReadModelStore(app: app, router: app.summaryShardRouter)

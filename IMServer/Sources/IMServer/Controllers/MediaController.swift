@@ -168,17 +168,6 @@ struct MediaController: RouteCollection {
             return storedAsset
         }
 
-        if req.application.environment == .development || req.application.environment == .testing {
-            if let storedAsset = try await authorizedSharedAssetByShardScanForCompatibility(
-                assetID: assetID,
-                userID: userID,
-                storage: storage,
-                app: req.application
-            ) {
-                return storedAsset
-            }
-        }
-
         throw Abort(.notFound, reason: "附件不存在。")
     }
 
@@ -237,36 +226,6 @@ struct MediaController: RouteCollection {
             }
         }
         return result
-    }
-
-    private func authorizedSharedAssetByShardScanForCompatibility(
-        assetID: String,
-        userID: UUID,
-        storage: MediaStorageService,
-        app: Application
-    ) async throws -> MediaStorageService.StoredAssetFile? {
-        for shardID in app.conversationShardRouter.shardIDs {
-            let shardDB = app.conversationShardRouter.eventualReadDatabase(forShardID: shardID)
-            let references = try await ConversationMediaAssetReferenceService(db: shardDB)
-                .references(assetID: assetID, on: shardDB)
-            for reference in references {
-                guard let membership = try await ConversationMember.query(on: shardDB)
-                    .filter(\.$conversation.$id == reference.conversationID)
-                    .filter(\.$user.$id == userID)
-                    .first(),
-                    reference.serverSequence >= membership.visibleFromSequence
-                else {
-                    continue
-                }
-
-                return try await storage.storedAssetFile(
-                    ownerUserID: reference.ownerUserID,
-                    assetID: assetID
-                )
-            }
-        }
-
-        return nil
     }
 
     private func shouldHonorRangeRequest(req: Request, entityTag: String) -> Bool {

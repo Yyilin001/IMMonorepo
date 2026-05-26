@@ -134,10 +134,6 @@ struct IMFavoritesSheet: View {
             return "text.bubble"
         case .reply:
             return "arrowshape.turn.up.left"
-        case .recalled:
-            return "arrow.uturn.backward"
-        case .system:
-            return "info.circle"
         case .image:
             return "photo"
         case .audio:

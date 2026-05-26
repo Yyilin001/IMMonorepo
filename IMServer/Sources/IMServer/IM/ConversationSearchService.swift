@@ -19,11 +19,9 @@ struct ConversationSearchService {
     }
 
     let db: any Database
-    let allowLegacyFallback: Bool
 
-    init(db: any Database, allowLegacyFallback: Bool = false) {
+    init(db: any Database) {
         self.db = db
-        self.allowLegacyFallback = allowLegacyFallback
     }
 
     func searchMessages(
@@ -39,16 +37,7 @@ struct ConversationSearchService {
         }
 
         guard let sql = db as? any SQLDatabase else {
-            guard allowLegacyFallback else {
-                throw Abort(.serviceUnavailable, reason: "搜索索引不可用。")
-            }
-            return try await legacySearchMessages(
-                in: conversationID,
-                membership: membership,
-                query: query,
-                cursor: rawCursor,
-                limit: requestedLimit
-            )
+            throw Abort(.serviceUnavailable, reason: "搜索索引不可用。")
         }
 
         let limit = try normalizedSearchLimit(requestedLimit)
@@ -86,15 +75,6 @@ struct ConversationSearchService {
         }
 
         let indexedRows = try await sql.raw(queryString).all(decoding: SearchIndexRow.self)
-        if indexedRows.isEmpty, allowLegacyFallback {
-            return try await legacySearchMessages(
-                in: conversationID,
-                membership: membership,
-                query: query,
-                cursor: rawCursor,
-                limit: requestedLimit
-            )
-        }
         let pageRows = Array(indexedRows.prefix(limit))
         let hasMore = indexedRows.count > limit
         let messageIDs = pageRows.map(\.message_id)
@@ -210,79 +190,6 @@ struct ConversationSearchService {
             return candidate
         }
         return nil
-    }
-
-    private func legacySearchMessages(
-        in conversationID: UUID,
-        membership: ConversationMember,
-        query rawQuery: String,
-        cursor rawCursor: String?,
-        limit requestedLimit: Int? = nil
-    ) async throws -> IMConversationMessageSearchPageResponse {
-        let limit = try normalizedSearchLimit(requestedLimit)
-        let cursor = try normalizedSearchCursor(rawCursor)
-        let chunkLimit = max(limit + 1, limit * 4)
-        var searchBeforeSequence = cursor
-        var hits: [IMConversationMessageSearchHitResponse] = []
-        var hasMore = false
-
-        while hits.count < limit + 1 {
-            let builder = ConversationMessage.query(on: db)
-                .filter(\.$conversation.$id == conversationID)
-                .filter(\.$serverSequence >= membership.visibleFromSequence)
-            if let searchBeforeSequence {
-                builder.filter(\.$serverSequence < searchBeforeSequence)
-            }
-
-            let rows = try await builder
-                .sort(\.$serverSequence, .descending)
-                .limit(chunkLimit)
-                .all()
-
-            if rows.isEmpty {
-                break
-            }
-
-            for row in rows {
-                let aggregate = try row.decodedAggregate()
-                let content = try row.decodedContent()
-                guard let snippet = searchSnippet(for: rawQuery, aggregate: aggregate) else {
-                    continue
-                }
-
-                hits.append(
-                    IMConversationMessageSearchHitResponse(
-                        messageID: try row.requireID(),
-                        senderUserID: row.$sender.id,
-                        serverSequence: row.serverSequence,
-                        content: content,
-                        derivedState: aggregate.derivedState,
-                        snippet: snippet,
-                        createdAt: row.createdAt
-                    )
-                )
-                if hits.count > limit {
-                    hasMore = true
-                    break
-                }
-            }
-
-            if rows.count < chunkLimit {
-                break
-            }
-            searchBeforeSequence = rows.last?.serverSequence
-            if hits.count > limit {
-                break
-            }
-        }
-
-        let pageItems = Array(hits.prefix(limit))
-        let nextCursor = hasMore ? String(pageItems.last?.serverSequence ?? 0) : nil
-        return IMConversationMessageSearchPageResponse(
-            items: pageItems,
-            nextCursor: nextCursor,
-            hasMore: hasMore
-        )
     }
 
     private func normalizedSearchLimit(_ requestedLimit: Int?) throws -> Int {

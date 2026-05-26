@@ -96,7 +96,6 @@ struct DirectPolicyBatchContext {
         let directConversationIDs = try await service.directConversationIDsBetween(
             senderUserID,
             peerUserID,
-            fallbackConversationID: conversationID,
             on: database
         )
         guard !directConversationIDs.isEmpty else {
@@ -203,7 +202,6 @@ extension IMRealtimeMessageService {
         let directConversationIDs = try await directConversationIDsBetween(
             senderUserID,
             peerUserID,
-            fallbackConversationID: conversationID,
             on: database
         )
         guard !directConversationIDs.isEmpty else {
@@ -262,167 +260,19 @@ extension IMRealtimeMessageService {
     func directConversationIDsBetween(
         _ lhs: UUID,
         _ rhs: UUID,
-        fallbackConversationID: UUID,
         on database: any Database
     ) async throws -> [UUID] {
         if let app,
            let cached = await app.directConversationPairCache.conversationIDs(lhs: lhs, rhs: rhs) {
-            guard cached.contains(fallbackConversationID) else {
-                return cached + [fallbackConversationID]
-            }
             return cached
         }
 
-        if let directoryConversationIDs = try await directConversationIDsFromDirectory(
-            lhs,
-            rhs,
-            fallbackConversationID: fallbackConversationID,
-            on: database
-        ) {
-            if let app {
-                await app.directConversationPairCache.store(directoryConversationIDs, lhs: lhs, rhs: rhs)
-            }
-            return directoryConversationIDs
-        }
-
-        if let sqlConversationIDs = try await directConversationIDsFromSQL(
-            lhs,
-            rhs,
-            fallbackConversationID: fallbackConversationID,
-            on: database
-        ) {
-            if let app {
-                await app.directConversationPairCache.store(sqlConversationIDs, lhs: lhs, rhs: rhs)
-            }
-            return sqlConversationIDs
-        }
-
-        let lhsConversationIDs = try await ConversationMember.query(on: database)
-            .filter(\.$user.$id == lhs)
-            .all()
-            .map(\.$conversation.id)
-        guard !lhsConversationIDs.isEmpty else {
-            return [fallbackConversationID]
-        }
-
-        let rhsConversationIDs = try await ConversationMember.query(on: database)
-            .filter(\.$user.$id == rhs)
-            .filter(\.$conversation.$id ~~ lhsConversationIDs)
-            .all()
-            .map(\.$conversation.id)
-        guard !rhsConversationIDs.isEmpty else {
-            return [fallbackConversationID]
-        }
-
-        let sharedMemberships = try await ConversationMember.query(on: database)
-            .filter(\.$conversation.$id ~~ rhsConversationIDs)
-            .all()
-        let expectedMemberIDs: Set<UUID> = [lhs, rhs]
-        let exactOneToOneConversationIDs = Dictionary(grouping: sharedMemberships, by: \.$conversation.id)
-            .compactMap { conversationID, memberships -> UUID? in
-                let actualMemberIDs = Set(memberships.map(\.$user.id))
-                return actualMemberIDs == expectedMemberIDs ? conversationID : nil
-            }
-
-        let directConversations = try await Conversation.query(on: database)
-            .filter(\.$id ~~ exactOneToOneConversationIDs)
-            .filter(\.$kind == IMConversationKind.direct.rawValue)
-            .all()
-        let directConversationIDs = try directConversations.map { try $0.requireID() }
-        for conversation in directConversations {
-            let conversationID = try conversation.requireID()
-            try? await DirectConversationPairDirectoryService(db: database).upsert(
-                lhs: lhs,
-                rhs: rhs,
-                conversationID: conversationID,
-                directMessagingState: conversation.directMessagingStateEnum
-            )
-        }
-
-        guard directConversationIDs.contains(fallbackConversationID) else {
-            let result = directConversationIDs + [fallbackConversationID]
-            if let app {
-                await app.directConversationPairCache.store(result, lhs: lhs, rhs: rhs)
-            }
-            return result
-        }
-
+        let directConversationIDs = try await DirectConversationPairDirectoryService(db: database)
+            .conversationIDsBetween(lhs, rhs)
         if let app {
             await app.directConversationPairCache.store(directConversationIDs, lhs: lhs, rhs: rhs)
         }
         return directConversationIDs
-    }
-
-    private func directConversationIDsFromSQL(
-        _ lhs: UUID,
-        _ rhs: UUID,
-        fallbackConversationID: UUID,
-        on database: any Database
-    ) async throws -> [UUID]? {
-        guard let sql = database as? any SQLDatabase else {
-            return nil
-        }
-
-        struct DirectConversationRow: Decodable {
-            let id: UUID
-            let directMessagingState: String?
-
-            enum CodingKeys: String, CodingKey {
-                case id
-                case directMessagingState = "direct_messaging_state"
-            }
-        }
-
-        let rows = try await sql.raw("""
-            SELECT
-                \(ident: "c").\(ident: "id") AS \(ident: "id"),
-                \(ident: "c").\(ident: "direct_messaging_state") AS \(ident: "direct_messaging_state")
-            FROM \(ident: Conversation.schema) AS \(ident: "c")
-            INNER JOIN \(ident: ConversationMember.schema) AS \(ident: "m_pair")
-                ON \(ident: "m_pair").\(ident: "conversation_id") = \(ident: "c").\(ident: "id")
-            WHERE \(ident: "c").\(ident: "kind") = \(bind: IMConversationKind.direct.rawValue)
-              AND \(ident: "m_pair").\(ident: "user_id") IN (\(bind: lhs), \(bind: rhs))
-            GROUP BY \(ident: "c").\(ident: "id"), \(ident: "c").\(ident: "direct_messaging_state")
-            HAVING COUNT(DISTINCT \(ident: "m_pair").\(ident: "user_id")) = 2
-               AND (
-                    SELECT COUNT(*)
-                    FROM \(ident: ConversationMember.schema) AS \(ident: "m_all")
-                    WHERE \(ident: "m_all").\(ident: "conversation_id") = \(ident: "c").\(ident: "id")
-               ) = 2
-            """).all(decoding: DirectConversationRow.self)
-
-        for row in rows {
-            try? await DirectConversationPairDirectoryService(db: database).upsert(
-                lhs: lhs,
-                rhs: rhs,
-                conversationID: row.id,
-                directMessagingState: row.directMessagingState.flatMap(IMDirectMessagingState.init(rawValue:)) ?? .active
-            )
-        }
-
-        let conversationIDs = rows.map(\.id)
-        guard conversationIDs.contains(fallbackConversationID) else {
-            return conversationIDs + [fallbackConversationID]
-        }
-        return conversationIDs
-    }
-
-    private func directConversationIDsFromDirectory(
-        _ lhs: UUID,
-        _ rhs: UUID,
-        fallbackConversationID: UUID,
-        on database: any Database
-    ) async throws -> [UUID]? {
-        let directoryConversationIDs = try await DirectConversationPairDirectoryService(db: database)
-            .conversationIDsBetween(lhs, rhs)
-        guard !directoryConversationIDs.isEmpty else {
-            return nil
-        }
-
-        guard directoryConversationIDs.contains(fallbackConversationID) else {
-            return directoryConversationIDs + [fallbackConversationID]
-        }
-        return directoryConversationIDs
     }
 
     func directMessageSenderIDs(

@@ -311,20 +311,13 @@ extension IMServerTests {
         }
     }
 
-    @Test("Production command API requires block sequence allocation")
-    func productionCommandAPIRequiresBlockSequenceAllocation() async throws {
+    @Test("Production command API uses block sequence allocation by default")
+    func productionCommandAPIUsesBlockSequenceAllocationByDefault() async throws {
         try await withProductionRuntimeEnvironment {
             unsetenv("IM_SEQUENCE_ALLOCATION_MODE")
             let app = try await productionRuntimeValidationApp(role: .commandAPI)
-            do {
-                try IMCommandAPIProductionValidator.validate(app: app)
-                Issue.record("Expected command-api validation to require block sequence allocation")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_SEQUENCE_ALLOCATION_MODE=block"))
-            } catch {
-                Issue.record("Unexpected command-api validation error: \(error)")
-            }
+            #expect(app.sequenceAllocationConfiguration.mode == .block)
+            try IMCommandAPIProductionValidator.validate(app: app)
             try? await app.asyncShutdown()
         }
     }
@@ -560,8 +553,8 @@ extension IMServerTests {
         let app = try await Application.make(.production)
 
         app.summaryReadModelConfiguration = IMSummaryReadModelConfiguration(
-            projectionWriteMode: .legacy,
-            queryReadSource: .legacy
+            projectionWriteMode: .sharded,
+            queryReadSource: .sharded
         )
         app.summaryStoreConfiguration = IMSummaryStoreConfiguration(shardIDs: ["summary-a"])
         app.summaryShardDatabaseIDs = ["summary-a": .psql]
@@ -756,10 +749,10 @@ extension IMServerTests {
             Issue.record("Unexpected database configuration error: \(error)")
         }
 
-        setenv("DATABASE_HOST", "db.internal", 1)
-        setenv("DATABASE_NAME", "imserver", 1)
-        setenv("DATABASE_USERNAME", "imserver", 1)
-        setenv("DATABASE_PASSWORD", "secret", 1)
+        setenv("DATABASE_PRIMARY_HOST", "db.internal", 1)
+        setenv("DATABASE_PRIMARY_NAME", "imserver", 1)
+        setenv("DATABASE_PRIMARY_USERNAME", "imserver", 1)
+        setenv("DATABASE_PRIMARY_PASSWORD", "secret", 1)
         try IMProductionRuntimeValidationSupport.validatePrimaryDatabaseConfiguration()
     }
 
@@ -944,11 +937,15 @@ private func withProductionRuntimeEnvironment(_ body: () async throws -> Void) a
         "MEDIA_STORAGE_S3_BUCKET": "im-media",
         "MEDIA_STORAGE_S3_ACCESS_KEY_ID": "access-key",
         "MEDIA_STORAGE_S3_SECRET_ACCESS_KEY": "secret-key",
-        "DATABASE_HOST": "primary-db",
-        "DATABASE_NAME": "imserver",
-        "DATABASE_USERNAME": "imserver",
-        "DATABASE_PASSWORD": "database-secret",
-        "DATABASE_SUMMARY_HOST": "summary-db"
+        "DATABASE_PRIMARY_HOST": "primary-db",
+        "DATABASE_PRIMARY_NAME": "imserver",
+        "DATABASE_PRIMARY_USERNAME": "imserver",
+        "DATABASE_PRIMARY_PASSWORD": "database-secret",
+        "IM_SUMMARY_SHARD_IDS": "summary-0",
+        "DATABASE_SUMMARY_SUMMARY_0_HOST": "summary-db",
+        "DATABASE_SUMMARY_SUMMARY_0_NAME": "imserver_summary",
+        "DATABASE_SUMMARY_SUMMARY_0_USERNAME": "imserver",
+        "DATABASE_SUMMARY_SUMMARY_0_PASSWORD": "database-secret"
     ]
     let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
     defer {

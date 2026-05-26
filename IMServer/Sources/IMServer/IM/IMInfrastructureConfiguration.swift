@@ -273,13 +273,10 @@ struct IMSummaryStoreConfiguration: Sendable {
 
 struct IMSummaryReadModelConfiguration: Sendable {
     enum ProjectionWriteMode: String, Sendable {
-        case legacy
         case sharded
-        case dualWrite = "dual-write"
     }
 
     enum QueryReadSource: String, Sendable {
-        case legacy
         case sharded
     }
 
@@ -288,12 +285,8 @@ struct IMSummaryReadModelConfiguration: Sendable {
 
     static func load(from environment: Environment) -> IMSummaryReadModelConfiguration {
         IMSummaryReadModelConfiguration(
-            projectionWriteMode: Environment.get("IM_SUMMARY_PROJECTION_WRITE_MODE")
-                .flatMap(ProjectionWriteMode.init(rawValue:))
-                ?? .sharded,
-            queryReadSource: Environment.get("IM_SUMMARY_QUERY_READ_SOURCE")
-                .flatMap(QueryReadSource.init(rawValue:))
-                ?? .sharded
+            projectionWriteMode: .sharded,
+            queryReadSource: .sharded
         )
     }
 }

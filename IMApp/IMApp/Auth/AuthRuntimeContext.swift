@@ -31,7 +31,7 @@ struct AuthRuntimeContext {
     let scheduleConversationCachePersist: () -> Void
     let flushConversationCache: () async -> Void
     let flushContactStateCache: () async -> Void
-    let applyContactEvent: (IMTCPContactEventPayload) -> Void
+    let applyContactDomainEvent: (IMTCPChatDomainEventPayload) -> Void
     let setConnectionStatus: (AuthManager.IMConnectionStatus) -> Void
     let setQueuedFlushActive: (Bool) -> Void
     let backgroundTransferMonitor: any BackgroundTransferMonitoring
@@ -59,7 +59,7 @@ enum ConversationRuntimeFactory {
             scheduleConversationCachePersist: context.scheduleConversationCachePersist,
             flushConversationCache: context.flushConversationCache,
             flushContactStateCache: context.flushContactStateCache,
-            applyContactEvent: context.applyContactEvent,
+            applyContactDomainEvent: context.applyContactDomainEvent,
             setConnectionStatus: context.setConnectionStatus,
             setQueuedFlushActive: context.setQueuedFlushActive,
             backgroundTransferMonitor: context.backgroundTransferMonitor

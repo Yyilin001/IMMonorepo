@@ -340,46 +340,34 @@ class IMRuntimeController(
         when (event) {
             is IMTCPConnectionEvent.HeartbeatAck -> Unit
             is IMTCPConnectionEvent.Ack -> conversationStore.applyOutgoingAcknowledgement(event.requestID, event.payload)
-            is IMTCPConnectionEvent.Message -> handleIncomingMessage(event)
-            is IMTCPConnectionEvent.ConversationEvent -> {
+            is IMTCPConnectionEvent.DomainEvent -> {
                 val userID = currentUserID
-                if (event.payload.eventType.startsWith("message_stream_") && userID != null) {
-                    conversationStore.applyMessageStreamEvent(event.payload, userID)
+                if (event.payload.body is IMTCPChatDomainEventBody.ContactChanged) {
+                    contactEventHandler?.invoke()
+                    return
+                }
+                if (userID != null) {
+                    conversationStore.applyDomainEvent(event.payload, userID)
+                }
+                if (event.payload.eventType.startsWith("message_stream_")) {
                     syncPendingStreamSnapshotsIfNeeded()
-                } else {
-                    conversationStore.applyConversationSummary(event.payload.conversation)
-                    val message = event.payload.message
-                    if (userID != null && message != null) {
-                        conversationStore.appendMessages(message.conversationID, listOf(message), userID)
+                }
+                val created = event.payload.body as? IMTCPChatDomainEventBody.MessageCreated
+                if (created != null && created.message.senderUserID != userID) {
+                    connection?.sendAcknowledgement(
+                        IMTCPAckPayload(
+                            messageID = created.message.id,
+                            conversationID = created.message.conversationID,
+                            status = "received",
+                        ),
+                        requestID = event.requestID,
+                    )
+                    if (created.message.conversationID == conversationStore.state.value.selectedConversationID) {
+                        markConversationRead(created.message.conversationID, created.message.serverSequence.toULong())
                     }
                 }
             }
-            is IMTCPConnectionEvent.ContactEvent -> contactEventHandler?.invoke()
             is IMTCPConnectionEvent.Kick -> invalidateSession(event.payload.message)
-        }
-    }
-
-    private suspend fun handleIncomingMessage(event: IMTCPConnectionEvent.Message) {
-        val userID = currentUserID ?: return
-        val payload = event.payload
-        conversationStore.receiveIncomingMessage(payload, userID)
-        val messageID = payload.messageID
-        if (messageID != null) {
-            connection?.sendAcknowledgement(
-                IMTCPAckPayload(
-                    messageID = messageID,
-                    conversationID = payload.conversationID,
-                    status = "received",
-                ),
-                requestID = event.requestID,
-            )
-        }
-        if (
-            payload.senderUserID != userID &&
-            payload.conversationID == conversationStore.state.value.selectedConversationID &&
-            payload.serverSequence != null
-        ) {
-            markConversationRead(payload.conversationID, payload.serverSequence)
         }
     }
 

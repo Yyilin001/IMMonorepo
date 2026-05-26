@@ -169,12 +169,11 @@ extension IMConversationDetailView {
     }
 
     func replyComposerPreviewText(for message: IMConversationMessage) -> String {
-        switch message.content {
-        case .recalled:
+        if message.derivedState.isRecalled {
             return "原消息已撤回"
-        case .richText, .reply, .system, .image, .audio, .file:
-            let preview = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return preview.isEmpty ? "原消息暂不可用" : preview
         }
+
+        let preview = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return preview.isEmpty ? "原消息暂不可用" : preview
     }
 }

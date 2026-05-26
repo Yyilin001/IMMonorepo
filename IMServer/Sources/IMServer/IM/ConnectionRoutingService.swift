@@ -65,14 +65,6 @@ struct ConnectionRoutingService {
         }
     }
 
-    func sendMessage(
-        _ payload: IMTCPMessagePayload,
-        toUserIDs userIDs: [UUID],
-        requestID: UUID? = UUID()
-    ) async {
-        return
-    }
-
     func sendDomainEvent(
         _ payload: IMTCPChatDomainEventPayload,
         toUserIDs userIDs: [UUID],
@@ -88,22 +80,6 @@ struct ConnectionRoutingService {
             targetUserIDs: userIDs
         )
         await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: userIDs)
-    }
-
-    func sendConversationEvent(
-        _ payload: IMTCPConversationEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID? = UUID()
-    ) async {
-        return
-    }
-
-    func sendContactEvent(
-        _ payload: IMTCPContactEventPayload,
-        toUserID userID: UUID,
-        requestID: UUID? = UUID()
-    ) async {
-        return
     }
 
     func kickConnections(
@@ -163,8 +139,6 @@ struct ConnectionRoutingService {
                 toUserIDs: envelope.targetUserIDs,
                 requestID: envelope.requestID
             )
-        case .message, .conversationEvent, .contactEvent:
-            return
         case .kickSession:
             guard let sessionID = envelope.sessionID,
                   let reason = envelope.kickReason,

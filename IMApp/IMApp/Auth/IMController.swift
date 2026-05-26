@@ -24,7 +24,7 @@ final class ConversationRuntimeController {
     let scheduleConversationCachePersist: () -> Void
     let flushConversationCache: () async -> Void
     let flushContactStateCache: () async -> Void
-    let applyContactEvent: (IMTCPContactEventPayload) -> Void
+    let applyContactDomainEvent: (IMTCPChatDomainEventPayload) -> Void
     let setConnectionStatus: (AuthManager.IMConnectionStatus) -> Void
     let setQueuedFlushActive: (Bool) -> Void
     let backgroundTransferMonitor: any BackgroundTransferMonitoring
@@ -67,7 +67,7 @@ final class ConversationRuntimeController {
         scheduleConversationCachePersist: @escaping () -> Void,
         flushConversationCache: @escaping () async -> Void,
         flushContactStateCache: @escaping () async -> Void,
-        applyContactEvent: @escaping (IMTCPContactEventPayload) -> Void,
+        applyContactDomainEvent: @escaping (IMTCPChatDomainEventPayload) -> Void,
         setConnectionStatus: @escaping (AuthManager.IMConnectionStatus) -> Void,
         setQueuedFlushActive: @escaping (Bool) -> Void,
         backgroundTransferMonitor: any BackgroundTransferMonitoring
@@ -90,7 +90,7 @@ final class ConversationRuntimeController {
         self.scheduleConversationCachePersist = scheduleConversationCachePersist
         self.flushConversationCache = flushConversationCache
         self.flushContactStateCache = flushContactStateCache
-        self.applyContactEvent = applyContactEvent
+        self.applyContactDomainEvent = applyContactDomainEvent
         self.setConnectionStatus = setConnectionStatus
         self.setQueuedFlushActive = setQueuedFlushActive
         self.backgroundTransferMonitor = backgroundTransferMonitor

@@ -5,7 +5,7 @@ import Vapor
 struct AIMessageStreamPublishEnvelope: Sendable {
     let response: IMMessageStreamResponse
     let recipients: [UUID]
-    let eventType: IMTCPConversationEventType
+    let eventType: IMTCPChatDomainEventType
     let actorUserID: UUID
     let shouldPublish: Bool
 }
@@ -95,9 +95,6 @@ protocol AIMessageStreamStateWriting {
 }
 
 protocol AIMessageStreamRepairing {
-    @discardableResult
-    func backfillMissingStreamIndexes(now: Date) async throws -> Int
-
     func auditConsistency() async throws -> [AIMessageStreamConsistencyIssue]
 
     @discardableResult
@@ -175,11 +172,6 @@ struct AIMessageStreamStateStore {
             errorCode: errorCode,
             errorMessage: errorMessage
         )
-    }
-
-    @discardableResult
-    func backfillMissingStreamIndexes(now: Date = Date()) async throws -> Int {
-        try await AIMessageStreamRepairStore(app: app).backfillMissingStreamIndexes(now: now)
     }
 
     func auditConsistency() async throws -> [AIMessageStreamConsistencyIssue] {

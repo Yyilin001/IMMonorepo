@@ -3,19 +3,14 @@ import Vapor
 
 enum IMProductionRuntimeValidationSupport {
     static func validatePrimaryDatabaseConfiguration() throws {
-        let requiredPairs = [
-            ("DATABASE_PRIMARY_HOST", "DATABASE_HOST"),
-            ("DATABASE_PRIMARY_NAME", "DATABASE_NAME"),
-            ("DATABASE_PRIMARY_USERNAME", "DATABASE_USERNAME"),
-            ("DATABASE_PRIMARY_PASSWORD", "DATABASE_PASSWORD")
+        let requiredKeys = [
+            "DATABASE_PRIMARY_HOST",
+            "DATABASE_PRIMARY_NAME",
+            "DATABASE_PRIMARY_USERNAME",
+            "DATABASE_PRIMARY_PASSWORD"
         ]
-        let missing = requiredPairs.compactMap { primaryKey, legacyKey -> String? in
-            let primaryValue = Environment.get(primaryKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let legacyValue = Environment.get(legacyKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if primaryValue?.isEmpty == false || legacyValue?.isEmpty == false {
-                return nil
-            }
-            return "\(primaryKey) or \(legacyKey)"
+        let missing = requiredKeys.filter { key in
+            Environment.get(key)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
         }
 
         guard missing.isEmpty else {
@@ -125,50 +120,11 @@ enum IMProductionRuntimeValidationSupport {
     }
 
     static func validateSummaryReadModelReadConfiguration(_ app: Application) throws {
-        if app.environment == .production,
-           app.summaryReadModelConfiguration.queryReadSource != .sharded,
-           !productionTransitionalReadModelsAllowed(app)
-        {
-            throw Abort(
-                .internalServerError,
-                reason: "Production summary query reads must use IM_SUMMARY_QUERY_READ_SOURCE=sharded. Temporary legacy reads are only allowed for ops with IM_ALLOW_TRANSITIONAL_READ_MODELS=true."
-            )
-        }
-
-        switch app.summaryReadModelConfiguration.queryReadSource {
-        case .legacy:
-            guard app.imSummaryDatabaseEnabled else {
-                throw Abort(.internalServerError, reason: "IM_SUMMARY_QUERY_READ_SOURCE=legacy requires DATABASE_SUMMARY_* to be configured in production.")
-            }
-        case .sharded:
-            try validateSummaryShardDatabasesConfigured(app)
-        }
+        try validateSummaryShardDatabasesConfigured(app)
     }
 
     static func validateSummaryReadModelWriteConfiguration(_ app: Application) throws {
-        if app.environment == .production,
-           app.summaryReadModelConfiguration.projectionWriteMode != .sharded,
-           !productionTransitionalReadModelsAllowed(app)
-        {
-            throw Abort(
-                .internalServerError,
-                reason: "Production summary projection writes must use IM_SUMMARY_PROJECTION_WRITE_MODE=sharded. Temporary legacy or dual-write modes are only allowed for ops with IM_ALLOW_TRANSITIONAL_READ_MODELS=true."
-            )
-        }
-
-        switch app.summaryReadModelConfiguration.projectionWriteMode {
-        case .legacy:
-            guard app.imSummaryDatabaseEnabled else {
-                throw Abort(.internalServerError, reason: "IM_SUMMARY_PROJECTION_WRITE_MODE=legacy requires DATABASE_SUMMARY_* to be configured in production.")
-            }
-        case .sharded:
-            try validateSummaryShardDatabasesConfigured(app)
-        case .dualWrite:
-            guard app.imSummaryDatabaseEnabled else {
-                throw Abort(.internalServerError, reason: "IM_SUMMARY_PROJECTION_WRITE_MODE=dual-write requires DATABASE_SUMMARY_* to be configured in production.")
-            }
-            try validateSummaryShardDatabasesConfigured(app)
-        }
+        try validateSummaryShardDatabasesConfigured(app)
     }
 
     static func validateSummaryShardDatabasesConfigured(_ app: Application) throws {

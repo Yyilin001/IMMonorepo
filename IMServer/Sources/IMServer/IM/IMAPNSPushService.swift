@@ -61,16 +61,12 @@ struct IMAPNSPushService {
                 return
             }
 
-            let content = try message.decodedContent()
-            guard case .system = content else {
-                try await sendMessagePush(
-                    configuration: configuration,
-                    envelope: envelope,
-                    message: message,
-                    content: content
-                )
-                return
-            }
+            try await sendMessagePush(
+                configuration: configuration,
+                envelope: envelope,
+                message: message,
+                content: try message.decodedContent()
+            )
         } catch {
             app.logger.warning(
                 "Failed to prepare APNs push",
@@ -211,10 +207,6 @@ struct IMAPNSPushService {
             return "发来一条语音"
         case .file:
             return "发来一个文件"
-        case .recalled:
-            return "撤回了一条消息"
-        case .system:
-            return "会话有新动态"
         }
     }
 

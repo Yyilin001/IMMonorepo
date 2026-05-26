@@ -15,11 +15,11 @@ import com.xmtx.imclientkit.features.im.IMMessageStreamLifecycleState
 import com.xmtx.imclientkit.features.im.IMMessageStreamState
 import com.xmtx.imclientkit.features.im.IMRuntimeController
 import com.xmtx.imclientkit.features.im.withMessageStreamState
+import com.xmtx.imclientkit.generated.im.realtime.v1.AuthAccepted
+import com.xmtx.imclientkit.generated.im.realtime.v1.Packet
 import com.xmtx.imclientkit.networking.JsonConfiguration
 import com.xmtx.imclientkit.networking.NetworkEnvironment
-import com.xmtx.imclientkit.networking.imtcp.IMTCPAuthAcceptedPayload
 import com.xmtx.imclientkit.networking.imtcp.IMTCPClientConfiguration
-import com.xmtx.imclientkit.networking.imtcp.IMTCPPacketCodec
 import com.xmtx.imclientkit.networking.imtcp.IMTCPTransport
 import com.xmtx.imclientkit.networking.imtcp.IMTCPTransportConnection
 import com.xmtx.imclientkit.persistence.InMemoryTokenStore
@@ -322,24 +322,27 @@ private class StaticIMConversationCache(
 
 private class AuthOKIMTCPTransport : IMTCPTransport {
     override suspend fun connect(host: String, port: Int): IMTCPTransportConnection {
-        val lines = Channel<String>(Channel.UNLIMITED)
-        lines.send(
-            IMTCPPacketCodec.encode(
-                type = "auth_ok",
-                requestID = null,
-                payload = IMTCPAuthAcceptedPayload(
-                    connectionID = "connection-1",
-                    userID = "user-1",
-                    sessionID = "session-1",
-                    heartbeatIntervalSeconds = 30,
-                    serverTime = "2026-05-19T00:00:00Z",
-                ),
-            ),
+        val frames = Channel<ByteArray>(Channel.UNLIMITED)
+        frames.send(
+            Packet.newBuilder()
+                .setTimestampMs(1_768_780_800_000)
+                .setProtocolVersion(4)
+                .setAuthOk(
+                    AuthAccepted.newBuilder()
+                        .setConnectionId("connection-1")
+                        .setUserId("user-1")
+                        .setSessionId("session-1")
+                        .setHeartbeatIntervalSeconds(30)
+                        .setServerTimeMs(1_768_780_800_000)
+                        .build(),
+                )
+                .build()
+                .toByteArray(),
         )
         return IMTCPTransportConnection(
-            lines = lines,
-            sendLineHandler = {},
-            disconnectHandler = { lines.close() },
+            frames = frames,
+            sendFrameHandler = {},
+            disconnectHandler = { frames.close() },
         )
     }
 }

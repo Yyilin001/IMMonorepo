@@ -264,6 +264,7 @@ actor IMCrossDeviceConversationSummaryState {
                 senderUserID: message.senderUserID,
                 serverSequence: message.serverSequence,
                 content: message.content,
+                derivedState: message.derivedState,
                 createdAt: message.createdAt
             ),
             lastReadSequence: lastReadSequence,
@@ -313,14 +314,18 @@ actor IMCrossDeviceConversationSummaryState {
 
         version += 1
         let updatedAt = Date(timeIntervalSince1970: 1_700_700_000 + Double(version))
+        let recalledState = IMMessageDerivedState(recallState: .recalled)
+        var recalledContent = lastMessage.content
         if let messageIndex = messages.firstIndex(where: { $0.id == lastMessage.id }) {
+            recalledContent = messages[messageIndex].content
             messages[messageIndex] = IMConversationMessageResponseBody(
                 id: lastMessage.id,
                 conversationID: summary.id,
                 senderUserID: senderUserID,
                 clientMessageID: messages[messageIndex].clientMessageID,
                 serverSequence: lastMessage.serverSequence,
-                content: .recalled,
+                content: recalledContent,
+                derivedState: recalledState,
                 createdAt: lastMessage.createdAt
             )
         }
@@ -338,7 +343,8 @@ actor IMCrossDeviceConversationSummaryState {
                 id: lastMessage.id,
                 senderUserID: senderUserID,
                 serverSequence: lastMessage.serverSequence,
-                content: .recalled,
+                content: recalledContent,
+                derivedState: recalledState,
                 createdAt: lastMessage.createdAt
             ),
             lastReadSequence: summary.lastReadSequence,
@@ -356,7 +362,8 @@ actor IMCrossDeviceConversationSummaryState {
             senderUserID: senderUserID,
             clientMessageID: nil,
             serverSequence: lastMessage.serverSequence,
-            content: .recalled,
+            content: recalledContent,
+            derivedState: recalledState,
             createdAt: lastMessage.createdAt
         )
     }
@@ -469,10 +476,13 @@ actor IMCrossDeviceConversationListState {
         }
 
         let originalMessage = messages[messageIndex]
+        guard !originalMessage.derivedState.isRecalled else {
+            return nil
+        }
         switch originalMessage.content {
         case .richText, .reply:
             break
-        case .recalled, .system, .image, .audio, .file:
+        case .image, .audio, .file:
             return nil
         }
 
@@ -527,11 +537,12 @@ actor IMCrossDeviceConversationListState {
         }
 
         let originalMessage = messages[messageIndex]
+        guard !originalMessage.derivedState.isRecalled else {
+            return nil
+        }
         switch originalMessage.content {
         case .richText, .reply, .image, .audio, .file:
             break
-        case .recalled, .system:
-            return nil
         }
 
         version += 1
@@ -622,6 +633,7 @@ actor IMCrossDeviceConversationListState {
                 senderUserID: message.senderUserID,
                 serverSequence: message.serverSequence,
                 content: message.content,
+                derivedState: message.derivedState,
                 createdAt: message.createdAt
             ),
             lastReadSequence: lastReadSequence,
@@ -645,15 +657,19 @@ actor IMCrossDeviceConversationListState {
         }
 
         version += 1
+        let recalledState = IMMessageDerivedState(recallState: .recalled)
+        var recalledContent = lastMessage.content
         if var messages = messagesByConversationID[conversationID],
            let messageIndex = messages.firstIndex(where: { $0.id == lastMessage.id }) {
+            recalledContent = messages[messageIndex].content
             messages[messageIndex] = IMConversationMessageResponseBody(
                 id: lastMessage.id,
                 conversationID: conversationID,
                 senderUserID: senderUserID,
                 clientMessageID: messages[messageIndex].clientMessageID,
                 serverSequence: lastMessage.serverSequence,
-                content: .recalled,
+                content: recalledContent,
+                derivedState: recalledState,
                 createdAt: lastMessage.createdAt
             )
             messagesByConversationID[conversationID] = messages
@@ -673,7 +689,8 @@ actor IMCrossDeviceConversationListState {
                 id: lastMessage.id,
                 senderUserID: senderUserID,
                 serverSequence: lastMessage.serverSequence,
-                content: .recalled,
+                content: recalledContent,
+                derivedState: recalledState,
                 createdAt: lastMessage.createdAt
             ),
             lastReadSequence: summary.lastReadSequence,
@@ -691,7 +708,8 @@ actor IMCrossDeviceConversationListState {
             senderUserID: senderUserID,
             clientMessageID: nil,
             serverSequence: lastMessage.serverSequence,
-            content: .recalled,
+            content: recalledContent,
+            derivedState: recalledState,
             createdAt: lastMessage.createdAt
         )
     }
@@ -710,13 +728,20 @@ actor IMCrossDeviceConversationListState {
 
         version += 1
         let originalMessage = messages[messageIndex]
+        let recalledState = IMMessageDerivedState(
+            recallState: .recalled,
+            edits: originalMessage.derivedState.edits,
+            reactions: originalMessage.derivedState.reactions,
+            streamState: originalMessage.derivedState.streamState
+        )
         let recalledMessage = IMConversationMessageResponseBody(
             id: originalMessage.id,
             conversationID: conversationID,
             senderUserID: senderUserID,
             clientMessageID: originalMessage.clientMessageID,
             serverSequence: originalMessage.serverSequence,
-            content: .recalled,
+            content: originalMessage.content,
+            derivedState: recalledState,
             createdAt: originalMessage.createdAt
         )
         messages[messageIndex] = recalledMessage
@@ -745,6 +770,7 @@ actor IMCrossDeviceConversationListState {
                     senderUserID: $0.senderUserID,
                     serverSequence: $0.serverSequence,
                     content: $0.content,
+                    derivedState: $0.derivedState,
                     createdAt: $0.createdAt
                 )
             },
@@ -763,7 +789,8 @@ actor IMCrossDeviceConversationListState {
             senderUserID: senderUserID,
             clientMessageID: originalMessage.clientMessageID,
             serverSequence: originalMessage.serverSequence,
-            content: .recalled,
+            content: originalMessage.content,
+            derivedState: recalledState,
             createdAt: originalMessage.createdAt
         )
     }

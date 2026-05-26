@@ -25,7 +25,7 @@ extension IMConversationStoreTests {
     @Test func removeConversationRemovesSelectionAndFallsBackToRemainingConversation() {
         let store = IMConversationStore()
         let currentConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
-        let fallbackConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+        let restoredConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
 
         store.replaceConversationSummaries(
             [
@@ -40,7 +40,7 @@ extension IMConversationStoreTests {
                     updatedAt: Date(timeIntervalSince1970: 1_700_300_000)
                 ),
                 IMConversationSummaryResponseBody(
-                    id: fallbackConversationID,
+                    id: restoredConversationID,
                     title: "Fallback",
                     kind: IMConversationKind.direct.rawValue,
                     memberCount: 2,
@@ -56,8 +56,8 @@ extension IMConversationStoreTests {
         store.removeConversation(id: currentConversationID.uuidString)
 
         #expect(store.conversations.count == 1)
-        #expect(store.conversations.first?.id == fallbackConversationID.uuidString)
-        #expect(store.selectedConversationID == fallbackConversationID.uuidString)
+        #expect(store.conversations.first?.id == restoredConversationID.uuidString)
+        #expect(store.selectedConversationID == restoredConversationID.uuidString)
     }
 
 

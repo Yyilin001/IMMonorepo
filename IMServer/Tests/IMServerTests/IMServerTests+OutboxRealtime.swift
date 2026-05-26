@@ -415,6 +415,8 @@ extension IMServerTests {
                 .create(on: app.db)
             try await ConversationMember(conversationID: conversationID, userID: try peerUser.requireID())
                 .create(on: app.db)
+            try await DirectConversationPairDirectoryService(db: app.db)
+                .sync(conversationID: conversationID)
 
             let first = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
@@ -482,7 +484,7 @@ extension IMServerTests {
                     serverSequence: sequence,
                     clientMessageID: nil,
                     kind: "rich_text",
-                    body: ["text": "legacy-\(sequence)"]
+                    body: ["text": "indexed-\(sequence)"]
                 ).create(on: app.db)
             }
 
@@ -555,6 +557,8 @@ extension IMServerTests {
                 .create(on: app.db)
             try await ConversationMember(conversationID: conversationID, userID: peerUserID)
                 .create(on: app.db)
+            try await DirectConversationPairDirectoryService(db: app.db)
+                .sync(conversationID: conversationID)
 
             let firstMessage = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(
@@ -667,6 +671,8 @@ extension IMServerTests {
                     .create(on: app.db)
                 try await ConversationMember(conversationID: conversationID, userID: peerUserID)
                     .create(on: app.db)
+                try await DirectConversationPairDirectoryService(db: app.db)
+                    .sync(conversationID: conversationID)
             }
 
             _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
@@ -768,6 +774,8 @@ extension IMServerTests {
                 try await ConversationMember(conversationID: conversationID, userID: peerUserID)
                     .create(on: app.db)
             }
+            try await DirectConversationPairDirectoryService(db: app.db)
+                .sync(conversationID: directConversationID)
 
             _ = try await IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db).persistIncomingMessage(
                 imTCPTextPayload(

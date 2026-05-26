@@ -71,8 +71,6 @@ struct IMMessageContentBody: View {
                 .font(.body)
                 .italic()
                 .foregroundStyle(.secondary)
-        case .system:
-            EmptyView()
         }
     }
 

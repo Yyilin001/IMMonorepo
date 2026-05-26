@@ -161,7 +161,7 @@ extension AuthManagerTests {
             scheduleConversationCachePersist: { },
             flushConversationCache: { },
             flushContactStateCache: { },
-            applyContactEvent: { _ in },
+            applyContactDomainEvent: { _ in },
             setConnectionStatus: { _ in },
             setQueuedFlushActive: { _ in },
             backgroundTransferMonitor: AuthManagerBackgroundTransferMonitor()

@@ -1,17 +1,10 @@
 package com.xmtx.imclientkit.networking.imtcp
 
 import com.xmtx.imclientkit.features.im.IMTCPAckPayload
-import com.xmtx.imclientkit.features.im.IMTCPKickPayload
 import com.xmtx.imclientkit.features.im.IMTCPMessagePayload
-import com.xmtx.imclientkit.features.im.IMTCPMessagePayloadWire
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.consumeAsFlow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.launch
 import java.util.UUID
 
 class IMTCPConnection(
@@ -20,33 +13,15 @@ class IMTCPConnection(
     private val transportConnection: IMTCPTransportConnection,
 ) {
     suspend fun sendHeartbeat(sequence: Int, requestID: String = UUID.randomUUID().toString()) {
-        transportConnection.sendLine(
-            IMTCPPacketCodec.encode(
-                type = "heartbeat",
-                requestID = requestID,
-                payload = IMTCPHeartbeatPayload(sequence),
-            ),
-        )
+        transportConnection.sendFrame(IMTCPPacketCodec.encodeHeartbeat(IMTCPHeartbeatPayload(sequence), requestID))
     }
 
     suspend fun sendMessage(payload: IMTCPMessagePayload, requestID: String = UUID.randomUUID().toString()) {
-        transportConnection.sendLine(
-            IMTCPPacketCodec.encode(
-                type = "message",
-                requestID = requestID,
-                payload = IMTCPMessagePayloadWire.fromDomain(payload),
-            ),
-        )
+        transportConnection.sendFrame(IMTCPPacketCodec.encodeSendMessage(payload, requestID))
     }
 
     suspend fun sendAcknowledgement(payload: IMTCPAckPayload, requestID: String? = UUID.randomUUID().toString()) {
-        transportConnection.sendLine(
-            IMTCPPacketCodec.encode(
-                type = "ack",
-                requestID = requestID,
-                payload = payload,
-            ),
-        )
+        transportConnection.sendFrame(IMTCPPacketCodec.encodeAck(payload, requestID))
     }
 
     suspend fun disconnect() {
@@ -70,52 +45,25 @@ class IMTCPClient(
             appVersion = configuration.appVersion,
             protocolVersion = configuration.protocolVersion,
         )
-        transportConnection.sendLine(
-            IMTCPPacketCodec.encode(
-                type = "auth",
-                requestID = null,
-                payload = authPayload,
-            ),
-        )
+        transportConnection.sendFrame(IMTCPPacketCodec.encodeAuth(authPayload))
 
-        val authLine = transportConnection.lines.receiveCatching().getOrNull() ?: run {
+        val authFrame = transportConnection.frames.receiveCatching().getOrNull() ?: run {
             transportConnection.disconnect()
             throw IMTCPClientError.ConnectionClosed
         }
-        val authPacket = IMTCPPacketCodec.decode(authLine)
-        val authentication = when (authPacket.type) {
-            "auth_ok" -> IMTCPPacketCodec.decodePayload<IMTCPAuthAcceptedPayload>(authPacket)
-            "auth_error" -> {
-                val payload = runCatching {
-                    IMTCPPacketCodec.decodePayload<IMTCPAuthErrorPayload>(authPacket)
-                }.getOrElse { IMTCPAuthErrorPayload("auth_error", "TCP authentication failed.") }
-                transportConnection.disconnect()
-                throw IMTCPClientError.AuthRejected(payload.code, payload.message)
-            }
-            "kick" -> {
-                val payload = runCatching {
-                    IMTCPPacketCodec.decodePayload<IMTCPKickPayload>(authPacket)
-                }.getOrElse { IMTCPKickPayload("protocol_error", "Connection was closed by server.") }
-                transportConnection.disconnect()
-                throw IMTCPClientError.Kicked(payload.reason, payload.message)
-            }
-            else -> {
-                transportConnection.disconnect()
-                throw IMTCPClientError.UnexpectedPacket(authPacket.type)
-            }
+        val authPacket = IMTCPPacketCodec.decode(authFrame)
+        val authentication = try {
+            IMTCPPacketCodec.authAccepted(authPacket)
+        } catch (error: IMTCPClientError) {
+            transportConnection.disconnect()
+            throw error
+        } catch (_: Throwable) {
+            transportConnection.disconnect()
+            throw IMTCPClientError.UnexpectedPacket(authPacket.bodyCase.name)
         }
 
-        val eventLines = Channel<String>(Channel.UNLIMITED)
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        scope.launch {
-            for (line in transportConnection.lines) {
-                eventLines.send(line)
-            }
-            eventLines.close()
-        }
-
-        val events = eventLines.consumeAsFlow().map { line ->
-            val packet = IMTCPPacketCodec.decode(line)
+        val events = transportConnection.frames.consumeAsFlow().map { frame ->
+            val packet = IMTCPPacketCodec.decode(frame)
             IMTCPPacketCodec.event(packet)
         }
 

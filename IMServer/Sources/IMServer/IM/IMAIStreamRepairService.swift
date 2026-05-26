@@ -60,10 +60,6 @@ struct IMAIStreamRepairService {
         skipActiveLeases: Bool = false
     ) async throws -> Int {
         let stateStore = AIMessageStreamStateStore(app: app)
-        if reason == .serverRestarted {
-            try await stateStore.backfillMissingStreamIndexes(now: now)
-        }
-
         var repairedCount = 0
         for shard in app.conversationShardRouter.allCommandDatabases() {
             var offset = 0
@@ -114,11 +110,6 @@ struct IMAIStreamRepairService {
             try await InlineOutboxProjectionRuntime(app: app).flushIfAllowed()
         }
         return repairedCount
-    }
-
-    @discardableResult
-    func backfillMissingStreamIndexes(now: Date = Date()) async throws -> Int {
-        try await AIMessageStreamStateStore(app: app).backfillMissingStreamIndexes(now: now)
     }
 
     func auditConsistency() async throws -> [AIMessageStreamConsistencyIssue] {

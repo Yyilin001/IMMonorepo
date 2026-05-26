@@ -91,21 +91,35 @@ struct AIStreamEventPublisher {
     }
 
     private func publish(
-        eventType: IMTCPConversationEventType,
+        eventType: IMTCPChatDomainEventType,
         conversationID: UUID,
         recipientUserIDs: [UUID],
         message: IMMessageResponse?,
         stream: IMTCPMessageStreamPayload,
         actorUserID: UUID?
     ) async {
-        await IMConversationEventService(app: app).publish(
-            eventType: eventType,
-            conversationID: conversationID,
-            recipientUserIDs: recipientUserIDs,
-            message: message,
-            stream: stream,
-            actorUserID: actorUserID
-        )
+        let eventID = UUID()
+        for recipientUserID in Array(Set(recipientUserIDs)).sorted(by: { $0.uuidString < $1.uuidString }) {
+            let conversation = try? await ConversationStrongReadService(app: app).conversationSummary(
+                conversationID: conversationID,
+                for: recipientUserID
+            )
+            await app.gatewaySessionService.sendDomainEvent(
+                IMTCPChatDomainEventPayload(
+                    eventID: eventID,
+                    eventType: eventType,
+                    aggregateType: "conversation",
+                    aggregateID: conversationID,
+                    aggregateSequence: UInt64(message?.serverSequence ?? stream.chunkIndex),
+                    occurredAt: stream.serverTimestamp,
+                    actorUserID: actorUserID,
+                    conversation: conversation,
+                    body: .messageStream(stream, message: message)
+                ),
+                toUserIDs: [recipientUserID],
+                requestID: eventID
+            )
+        }
     }
 
     private func streamLogMetadata(

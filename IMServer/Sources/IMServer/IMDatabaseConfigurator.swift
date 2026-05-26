@@ -114,8 +114,7 @@ enum IMDatabaseConfigurator {
         let summaryShardPairs: [(String, SQLPostgresConfiguration)] = IMSummaryStoreConfiguration.load(from: environment).shardIDs.compactMap { shardID in
             guard let parameters = summaryShardParameters(
                 shardID: shardID,
-                primaryParameters: primaryParameters,
-                legacySummary: summary
+                primaryParameters: primaryParameters
             ) else {
                 return nil
             }
@@ -182,23 +181,18 @@ enum IMDatabaseConfigurator {
 
     private static func summaryShardParameters(
         shardID: String,
-        primaryParameters: PostgresConnectionParameters,
-        legacySummary: PostgresConnectionParameters?
+        primaryParameters: PostgresConnectionParameters
     ) -> PostgresConnectionParameters? {
         let envComponent = normalizedEnvironmentComponent(shardID)
         let hostKey = "DATABASE_SUMMARY_\(envComponent)_HOST"
         if let host = Environment.get(hostKey) {
             return PostgresConnectionParameters(
                 host: host,
-                port: Environment.get("DATABASE_SUMMARY_\(envComponent)_PORT").flatMap(Int.init(_:)) ?? legacySummary?.port ?? primaryParameters.port,
-                username: Environment.get("DATABASE_SUMMARY_\(envComponent)_USERNAME") ?? legacySummary?.username ?? primaryParameters.username,
-                password: Environment.get("DATABASE_SUMMARY_\(envComponent)_PASSWORD") ?? legacySummary?.password ?? primaryParameters.password,
-                database: Environment.get("DATABASE_SUMMARY_\(envComponent)_NAME") ?? legacySummary?.database ?? primaryParameters.database
+                port: Environment.get("DATABASE_SUMMARY_\(envComponent)_PORT").flatMap(Int.init(_:)) ?? primaryParameters.port,
+                username: Environment.get("DATABASE_SUMMARY_\(envComponent)_USERNAME") ?? primaryParameters.username,
+                password: Environment.get("DATABASE_SUMMARY_\(envComponent)_PASSWORD") ?? primaryParameters.password,
+                database: Environment.get("DATABASE_SUMMARY_\(envComponent)_NAME") ?? primaryParameters.database
             )
-        }
-
-        if shardID == IMSummaryStoreConfiguration.defaultShardID {
-            return legacySummary
         }
 
         return nil

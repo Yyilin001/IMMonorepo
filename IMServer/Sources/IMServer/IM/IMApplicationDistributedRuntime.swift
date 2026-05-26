@@ -159,18 +159,6 @@ struct GatewayRelayMessageRequest: Content {
     let requestID: UUID?
 }
 
-struct GatewayRelayConversationEventRequest: Content {
-    let packetBase64: String
-    let recipientUserID: UUID
-    let requestID: UUID?
-}
-
-struct GatewayRelayContactEventRequest: Content {
-    let packetBase64: String
-    let recipientUserID: UUID
-    let requestID: UUID?
-}
-
 struct GatewayRelayKickSessionRequest: Content {
     let sessionID: UUID
     let reason: IMTCPKickReason

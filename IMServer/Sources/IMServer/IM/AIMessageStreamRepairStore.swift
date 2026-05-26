@@ -6,55 +6,6 @@ struct AIMessageStreamRepairStore {
 
     let app: Application
 
-    @discardableResult
-    func backfillMissingStreamIndexes(now: Date = Date()) async throws -> Int {
-        var backfilledCount = 0
-        for shard in app.conversationShardRouter.allCommandDatabases() {
-            var offset = 0
-            while true {
-                let messages = try await ConversationMessage.query(on: shard.database)
-                    .filter(\.$kind == IMMessageContentType.richText.rawValue)
-                    .sort(\.$createdAt)
-                    .range(offset..<(offset + Self.pageSize))
-                    .all()
-                guard !messages.isEmpty else {
-                    break
-                }
-
-                for message in messages {
-                    guard let messageID = message.id,
-                          let streamState = try message.decodedDerivedState().streamState,
-                          try await AIMessageStreamIndex.find(streamState.streamID, on: shard.database) == nil
-                    else {
-                        continue
-                    }
-
-                    let index = AIMessageStreamIndex(
-                        streamID: streamState.streamID,
-                        messageID: messageID,
-                        conversationID: message.$conversation.id,
-                        userID: message.$sender.id,
-                        state: streamState.state,
-                        lastChunkIndex: streamState.lastChunkIndex,
-                        createdAt: message.createdAt ?? streamState.updatedAt,
-                        updatedAt: streamState.updatedAt,
-                        terminalAt: streamState.state == .streaming ? nil : streamState.updatedAt,
-                        errorCode: streamState.errorCode
-                    )
-                    try await index.create(on: shard.database)
-                    backfilledCount += 1
-                }
-
-                guard messages.count == Self.pageSize else {
-                    break
-                }
-                offset += Self.pageSize
-            }
-        }
-
-        return backfilledCount
-    }
-
     func auditConsistency() async throws -> [AIMessageStreamConsistencyIssue] {
         var issues: [AIMessageStreamConsistencyIssue] = []
         for shard in app.conversationShardRouter.allCommandDatabases() {

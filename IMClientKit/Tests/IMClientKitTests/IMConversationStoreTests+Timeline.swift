@@ -3,11 +3,11 @@ import Testing
 @testable import IMClientKit
 
 extension IMConversationStoreTests {
-    @Test func receiveIncomingMessageAutoSelectsFirstConversationWithoutUnreadIncrement() {
+    @Test func incomingDomainMessageAutoSelectsFirstConversationWithoutUnreadIncrement() {
         let store = IMConversationStore()
         let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
 
-        store.receiveIncomingMessage(
+        store.applyTestDomainMessage(
             IMTCPMessagePayload(
                 clientMessageID: nil,
                 messageID: "srv-first-1",
@@ -56,7 +56,7 @@ extension IMConversationStoreTests {
             ]
         )
 
-        store.receiveIncomingMessage(
+        store.applyTestDomainMessage(
             IMTCPMessagePayload(
                 clientMessageID: nil,
                 messageID: "srv-unread-1",
@@ -301,8 +301,8 @@ extension IMConversationStoreTests {
                 senderUserID: Self.peerUserID,
                 clientMessageID: nil,
                 serverSequence: 1,
-                kind: "recalled",
-                body: [:],
+                content: .richText(.plain("will be recalled")),
+                derivedState: MessageDerivedState(recallState: .recalled),
                 createdAt: Date(timeIntervalSince1970: 1_700_400_000)
             ),
             currentUserID: Self.currentUserID
@@ -366,8 +366,8 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 1,
-                    kind: "recalled",
-                    body: [:],
+                    content: .richText(.plain("original text")),
+                    derivedState: MessageDerivedState(recallState: .recalled),
                     createdAt: Date(timeIntervalSince1970: 1_700_400_000)
                 )
             ],
@@ -400,7 +400,8 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 2,
-                    content: .recalled,
+                    content: .richText(.plain("original text")),
+                    derivedState: MessageDerivedState(recallState: .recalled),
                     createdAt: Date(timeIntervalSince1970: 1_700_450_000)
                 ),
                 IMConversationMessageResponseBody(

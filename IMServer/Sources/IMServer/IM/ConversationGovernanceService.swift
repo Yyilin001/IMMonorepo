@@ -44,25 +44,25 @@ struct ConversationGovernanceService {
     func apply(
         _ changeSet: ConversationMetadataChangeSet,
         to conversation: Conversation
-    ) -> [IMConversationMetadataField] {
-        var updatedFields: [IMConversationMetadataField] = []
+    ) -> Bool {
+        var didUpdate = false
         if changeSet.requestedTitleUpdate, conversation.title != changeSet.normalizedTitle {
             conversation.title = changeSet.normalizedTitle
-            updatedFields.append(.title)
+            didUpdate = true
         }
         if changeSet.requestedNoticeUpdate, conversation.notice != changeSet.normalizedNotice {
             conversation.notice = changeSet.normalizedNotice
-            updatedFields.append(.notice)
+            didUpdate = true
         }
         if let avatarPreset = changeSet.avatarPreset, conversation.avatarPresetEnum != avatarPreset {
             conversation.avatarPresetEnum = avatarPreset
-            updatedFields.append(.avatarPreset)
+            didUpdate = true
         }
         if let muteAll = changeSet.muteAll, conversation.muteAll != muteAll {
             conversation.muteAll = muteAll
-            updatedFields.append(.muteAll)
+            didUpdate = true
         }
-        return updatedFields
+        return didUpdate
     }
 
     func validateMemberRemovalPrivilege(

@@ -93,7 +93,6 @@ public struct MessageReaction: Codable, Equatable, Sendable {
 public enum MessagePrimaryContent: Equatable, Sendable {
     case richText(IMRichTextContent)
     case reply(reference: IMReplyReference, body: IMRichTextContent)
-    case system(IMSystemEvent)
     case image(IMMediaAsset)
     case audio(IMMediaAsset)
     case file(IMMediaAsset)
@@ -131,8 +130,6 @@ public struct MessagePresentation: Equatable, Sendable {
             return effectiveText(fallback: body.text)
         case .reply(_, let body):
             return effectiveText(fallback: body.text)
-        case .system(let event):
-            return event.displayText
         case .image(let asset):
             return "[图片] \(asset.filename)"
         case .audio(let asset):
@@ -154,8 +151,6 @@ public struct MessagePresentation: Equatable, Sendable {
             return effectiveText(fallback: body.text)
         case .reply(_, let body):
             return effectiveText(fallback: body.text)
-        case .system(let event):
-            return event.displayText
         case .image(let asset):
             return "[图片] \(asset.filename)"
         case .audio(let asset):
@@ -178,7 +173,7 @@ public struct MessagePresentation: Equatable, Sendable {
         switch primaryContent {
         case .image(let asset), .audio(let asset), .file(let asset):
             return asset
-        case .richText, .reply, .system, .none:
+        case .richText, .reply, .none:
             return nil
         }
     }
@@ -191,7 +186,7 @@ public struct MessagePresentation: Equatable, Sendable {
         switch primaryContent {
         case .richText, .reply, .image, .audio, .file:
             return true
-        case .system, .none:
+        case .none:
             return false
         }
     }
@@ -206,8 +201,6 @@ public struct MessagePresentation: Equatable, Sendable {
             return [effectiveText(fallback: body.text)]
         case .reply(let reference, let body):
             return [effectiveText(fallback: body.text), reference.previewText]
-        case .system(let event):
-            return [event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
             return [asset.filename, previewText]
         case nil:
@@ -244,21 +237,17 @@ public extension IMMessageContent {
             return .richText(body)
         case .reply(let reference, let body):
             return .reply(reference: reference, body: body)
-        case .system(let event):
-            return .system(event)
         case .image(let asset):
             return .image(asset)
         case .audio(let asset):
             return .audio(asset)
         case .file(let asset):
             return .file(asset)
-        case .recalled:
-            return nil
         }
     }
 
     var derivedState: MessageDerivedState {
-        MessageDerivedState(recallState: self == .recalled ? .recalled : .active)
+        MessageDerivedState()
     }
 
     func aggregate(derivedState override: MessageDerivedState? = nil) -> MessageAggregate {
@@ -280,7 +269,7 @@ public extension IMMessageContent {
         }
 
         return MessageDerivedState(
-            recallState: base.isRecalled ? .recalled : override.recallState,
+            recallState: override.recallState,
             edits: override.edits,
             reactions: override.reactions,
             streamState: override.streamState

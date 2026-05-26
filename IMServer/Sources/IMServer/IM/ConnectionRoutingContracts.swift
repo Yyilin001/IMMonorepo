@@ -4,9 +4,6 @@ import Vapor
 struct NodeMessageDispatchEnvelope: Codable, Sendable {
     enum Action: String, Codable, Sendable {
         case domainEvent
-        case message
-        case conversationEvent
-        case contactEvent
         case kickSession
         case kickUser
     }

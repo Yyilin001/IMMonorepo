@@ -304,7 +304,7 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
                 .filter(\.$id ~~ messageIDs)
                 .all()
             let byID = Dictionary(uniqueKeysWithValues: try messages.map { (try $0.requireID(), $0) })
-            let searchService = ConversationSearchService(db: conversationReadDB, allowLegacyFallback: false)
+            let searchService = ConversationSearchService(db: conversationReadDB)
 
             let items = try pageHits.compactMap { hit -> IMConversationMessageSearchHitResponse? in
                 guard let message = byID[hit.source.messageID] else {
@@ -361,23 +361,10 @@ extension Application {
             if let store = storage[SummaryReadModelStoreStorageKey.self] {
                 return store
             }
-            let store: any SummaryReadModelStore
-            if environment == .production {
-                store = OwnerShardedSummaryReadModelStore(
-                    app: self,
-                    router: summaryShardRouter
-                )
-            } else {
-                switch summaryReadModelConfiguration.queryReadSource {
-                case .legacy:
-                    store = DatabaseSummaryReadModelStore(summaryDB: imSummaryDB)
-                case .sharded:
-                    store = OwnerShardedSummaryReadModelStore(
-                        app: self,
-                        router: summaryShardRouter
-                    )
-                }
-            }
+            let store: any SummaryReadModelStore = OwnerShardedSummaryReadModelStore(
+                app: self,
+                router: summaryShardRouter
+            )
             storage[SummaryReadModelStoreStorageKey.self] = store
             return store
         }
@@ -391,7 +378,7 @@ extension Application {
             }
 
             let adapter: any ConversationSearchAdapter
-            if environment == .production, searchIndexConfiguration.driver == .openSearch {
+            if searchIndexConfiguration.driver == .openSearch {
                 let endpoint = searchIndexConfiguration.endpoint ?? ""
                 adapter = OpenSearchConversationSearchAdapter(
                     app: self,
@@ -400,21 +387,7 @@ extension Application {
                     fallback: nil
                 )
             } else {
-                switch searchIndexConfiguration.driver {
-                case .database:
-                    adapter = DatabaseConversationSearchAdapter(app: self)
-                case .openSearch:
-                    if let endpoint = searchIndexConfiguration.endpoint, !endpoint.isEmpty {
-                        adapter = OpenSearchConversationSearchAdapter(
-                            app: self,
-                            endpoint: endpoint,
-                            indexName: searchIndexConfiguration.indexName,
-                            fallback: DatabaseConversationSearchAdapter(app: self)
-                        )
-                    } else {
-                        adapter = DatabaseConversationSearchAdapter(app: self)
-                    }
-                }
+                adapter = DatabaseConversationSearchAdapter(app: self)
             }
 
             storage[ConversationSearchAdapterStorageKey.self] = adapter

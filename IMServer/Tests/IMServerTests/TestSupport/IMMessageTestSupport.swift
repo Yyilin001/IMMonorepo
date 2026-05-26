@@ -14,10 +14,6 @@ func testMessageContent(kind: String, body: [String: String]) -> IMMessageConten
             ),
             body: .plain(body["text"] ?? "")
         )
-    case IMMessageContentType.recalled.rawValue:
-        return .recalled
-    case IMMessageContentType.system.rawValue:
-        return .system(.legacyText(body["text"] ?? ""))
     case IMMessageContentType.image.rawValue:
         return .image(testMediaAsset(kind: .image, body: body))
     case IMMessageContentType.audio.rawValue:
@@ -97,10 +93,6 @@ extension IMTCPMessagePayload {
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText
             ]
-        case .recalled:
-            return [:]
-        case .system(let event):
-            return ["text": event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
             return mediaBody(asset)
         }
@@ -119,10 +111,6 @@ extension IMMessagePreviewResponse {
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText
             ]
-        case .recalled:
-            return [:]
-        case .system(let event):
-            return ["text": event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
             return mediaBody(asset)
         }
@@ -141,10 +129,6 @@ extension IMMessageResponse {
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText
             ]
-        case .recalled:
-            return [:]
-        case .system(let event):
-            return ["text": event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
             return mediaBody(asset)
         }

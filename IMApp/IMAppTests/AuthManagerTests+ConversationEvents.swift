@@ -305,7 +305,7 @@ extension AuthManagerTests {
         await harness.yield(
             .conversationEvent(
                 requestID: nil,
-                payload: IMTCPConversationEventPayload(
+                payload: TestConversationEventPayload(
                     eventType: .messageUpdated,
                     conversation: updatedSummary,
                     message: updatedMessage,
@@ -504,7 +504,7 @@ extension AuthManagerTests {
         await harness.yield(
             .conversationEvent(
                 requestID: nil,
-                payload: IMTCPConversationEventPayload(
+                payload: TestConversationEventPayload(
                     eventType: .messageUpdated,
                     conversation: updatedSummary,
                     message: updatedMessage,
@@ -705,7 +705,7 @@ extension AuthManagerTests {
                     && selectedConversation?.serverLastReadSequence == 2
                     && selectedConversation?.unreadCount == 0
                     && selectedConversation?.messages.count == 2
-                    && selectedConversation?.messages.last?.content == .recalled
+                    && selectedConversation?.messages.last?.derivedState.isRecalled == true
             }
         }
 
@@ -977,7 +977,7 @@ extension AuthManagerTests {
                     && backgroundConversation.serverLastReadSequence == 3
                     && backgroundConversation.localUnreadDelta == 0
                     && backgroundConversation.unreadCount == 0
-                    && backgroundConversation.messages.last?.content == .recalled
+                    && backgroundConversation.messages.last?.derivedState.isRecalled == true
                     && backgroundConversation.messages.map(\.text) == [
                         "后台实时未读",
                         "撤回了一条消息"
@@ -1552,7 +1552,8 @@ extension AuthManagerTests {
                                 senderUserID: peerUserID,
                                 clientMessageID: nil,
                                 serverSequence: 2,
-                                content: .recalled,
+                                content: .richText(.plain("后台实时未读")),
+                                derivedState: IMMessageDerivedState(recallState: .recalled),
                                 createdAt: Date(timeIntervalSince1970: 1_700_840_200)
                             )
                         ])
@@ -1876,7 +1877,8 @@ extension AuthManagerTests {
                                 senderUserID: peerUserID,
                                 clientMessageID: nil,
                                 serverSequence: 2,
-                                content: .recalled,
+                                content: .richText(.plain("回复跳转目标")),
+                                derivedState: IMMessageDerivedState(recallState: .recalled),
                                 createdAt: Date(timeIntervalSince1970: 1_700_960_200)
                             )
                         ])

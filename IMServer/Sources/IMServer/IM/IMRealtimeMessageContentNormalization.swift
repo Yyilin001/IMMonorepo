@@ -23,8 +23,6 @@ extension IMRealtimeMessageService {
             )
         case .image(let asset), .audio(let asset), .file(let asset):
             return try normalizedMediaContent(content.type, asset: asset)
-        case .recalled, .system:
-            throw IMRealtimeMessageError.unsupportedMessageContent
         }
     }
 
@@ -62,7 +60,7 @@ extension IMRealtimeMessageService {
             return .audio(normalizedAsset)
         case .file:
             return .file(normalizedAsset)
-        case .richText, .reply, .recalled, .system:
+        case .richText, .reply:
             throw IMRealtimeMessageError.unsupportedMessageContent
         }
     }
@@ -74,7 +72,7 @@ extension IMRealtimeMessageService {
             entities = body.entities
         case .reply(_, let body):
             entities = body.entities
-        case .image, .audio, .file, .recalled, .system:
+        case .image, .audio, .file:
             return
         }
 
@@ -112,7 +110,8 @@ extension IMRealtimeMessageService {
         }
 
         let canonicalPreview = try canonicalReplyReferencePreview(
-            for: referencedMessage.decodedContent()
+            for: referencedMessage.decodedContent(),
+            derivedState: referencedMessage.decodedDerivedState()
         )
         guard case .reply(_, let body) = content else {
             return content
@@ -128,14 +127,16 @@ extension IMRealtimeMessageService {
         )
     }
 
-    func canonicalReplyReferencePreview(for content: IMMessageContent) throws -> String {
-        switch content {
-        case .recalled:
+    func canonicalReplyReferencePreview(
+        for content: IMMessageContent,
+        derivedState: IMMessageDerivedState
+    ) throws -> String {
+        if derivedState.isRecalled {
             return "原消息已撤回"
-        case .richText, .reply, .system, .image, .audio, .file:
-            let preview = content.previewText.trimmingCharacters(in: .whitespacesAndNewlines)
-            return preview.isEmpty ? "原消息暂不可用" : preview
         }
+
+        let preview = content.previewText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return preview.isEmpty ? "原消息暂不可用" : preview
     }
 
     private func normalizedRichText(_ body: IMRichTextContent) throws -> IMRichTextContent {

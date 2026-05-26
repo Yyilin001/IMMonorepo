@@ -294,7 +294,7 @@ extension IMConversationStoreTests {
         ))
         let clientMessageID = try #require(request.payload.clientMessageID)
 
-        store.receiveIncomingMessage(
+        store.applyTestDomainMessage(
             IMTCPMessagePayload(
                 clientMessageID: clientMessageID,
                 messageID: "11111111-2222-3333-4444-555555555555",

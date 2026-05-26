@@ -35,17 +35,19 @@ struct ConversationMessageService {
             throw Abort(.badRequest, reason: "消息发送超过 2 分钟后不能撤回。")
         }
 
-        switch try message.decodedContent() {
-        case .richText, .reply, .image, .audio, .file:
-            try message.replaceContent(.recalled)
-            try message.replaceDerivedState(.init(recallState: .recalled))
-            try await message.update(on: database)
-            return message
-        case .recalled:
+        let derivedState = try message.decodedDerivedState()
+        guard !derivedState.isRecalled else {
             throw Abort(.badRequest, reason: "该消息已经撤回。")
-        case .system:
-            throw Abort(.badRequest, reason: "当前消息不支持撤回。")
         }
+
+        try message.replaceDerivedState(.init(
+            recallState: .recalled,
+            edits: derivedState.edits,
+            reactions: derivedState.reactions,
+            streamState: derivedState.streamState
+        ))
+        try await message.update(on: database)
+        return message
     }
 
     func editMessage(
@@ -90,7 +92,7 @@ struct ConversationMessageService {
             guard originalBody != body else {
                 return message
             }
-        case .image, .audio, .file, .recalled, .system:
+        case .image, .audio, .file:
             throw Abort(.badRequest, reason: "当前消息不支持编辑。")
         }
 
@@ -124,17 +126,9 @@ struct ConversationMessageService {
             throw Abort(.notFound, reason: "消息不存在。")
         }
 
-        let content = try message.decodedContent()
         var derivedState = try message.decodedDerivedState()
         guard !derivedState.isRecalled else {
             throw Abort(.badRequest, reason: "已撤回的消息不能添加表情。")
-        }
-
-        switch content {
-        case .richText, .reply, .image, .audio, .file:
-            break
-        case .recalled, .system:
-            throw Abort(.badRequest, reason: "当前消息不支持添加表情。")
         }
 
         var reactions = derivedState.reactions

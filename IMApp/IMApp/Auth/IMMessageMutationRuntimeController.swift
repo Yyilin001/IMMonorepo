@@ -19,7 +19,7 @@ extension ConversationRuntimeController {
                 messageID: trimmedMessageID
             )
             markServerOnline()
-            imConversationStore.applyRecalledMessage(response, currentUserID: currentUserID)
+            imConversationStore.applyUpdatedMessage(response, currentUserID: currentUserID)
             _ = await reconcileConversationSummaryReadModel(force: true)
             scheduleConversationCachePersist()
             return true

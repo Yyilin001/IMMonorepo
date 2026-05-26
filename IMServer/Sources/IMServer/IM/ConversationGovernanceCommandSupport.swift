@@ -10,8 +10,6 @@ struct ConversationGovernanceCommandSupport {
     private var summaryProjectionService: IMConversationSummaryProjectionService { IMConversationSummaryProjectionService(db: db) }
     private var readSupport: ConversationReadSupport { ConversationReadSupport(db: db) }
     private var summaryReadSupport: ConversationSummaryReadSupport { ConversationSummaryReadSupport(db: db) }
-    private var readAdvanceSupport: ConversationReadAdvanceSupport { ConversationReadAdvanceSupport(db: db) }
-    private var systemMessageAppender: ConversationSystemMessageAppender { ConversationSystemMessageAppender(db: db) }
     private var refreshPublisher: ConversationSummaryRefreshPublisher { ConversationSummaryRefreshPublisher(db: db) }
 
     func updateConversationTitle(
@@ -39,8 +37,6 @@ struct ConversationGovernanceCommandSupport {
         guard let normalizedTitle = ConversationCommandNormalizationSupport.normalizedConversationTitle(title) else {
             throw Abort(.badRequest, reason: "群聊名称不能为空。")
         }
-        let requester = try await userLookup.requireUser(id: requesterUserID)
-
         if conversation.title == normalizedTitle {
             return try await readSupport.conversationSummary(
                 conversationID: conversationID,
@@ -55,23 +51,6 @@ struct ConversationGovernanceCommandSupport {
 
             persistedConversation.title = normalizedTitle
             try await persistedConversation.update(on: database)
-
-            let sequence = try await ConversationSystemMessageAppender(db: database).append(
-                in: conversationID,
-                senderUserID: requesterUserID,
-                event: IMSystemEvent(
-                    type: .metadataUpdated,
-                    actorUserID: requesterUserID,
-                    actorEmail: requester.email,
-                    updatedFields: [.title],
-                    title: normalizedTitle
-                )
-            )
-            try await ConversationReadAdvanceSupport(db: database).advanceReadSequenceIfMember(
-                conversationID: conversationID,
-                userID: requesterUserID,
-                readSequence: sequence
-            )
 
             return try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
@@ -119,14 +98,13 @@ struct ConversationGovernanceCommandSupport {
             muteAll: muteAll
         )
 
-        let requester = try await userLookup.requireUser(id: requesterUserID)
         let response = try await db.transaction { database in
             guard let persistedConversation = try await Conversation.find(conversationID, on: database) else {
                 throw Abort(.notFound, reason: "会话不存在。")
             }
 
-            let updatedFields = governanceService.apply(changeSet, to: persistedConversation)
-            if updatedFields.isEmpty {
+            let didUpdate = governanceService.apply(changeSet, to: persistedConversation)
+            if !didUpdate {
                 return try await ConversationSummaryReadSupport(db: database).conversationSummary(
                     conversationID: conversationID,
                     for: requesterUserID
@@ -134,24 +112,6 @@ struct ConversationGovernanceCommandSupport {
             }
 
             try await persistedConversation.update(on: database)
-            let sequence = try await ConversationSystemMessageAppender(db: database).append(
-                in: conversationID,
-                senderUserID: requesterUserID,
-                event: IMSystemEvent(
-                    type: .metadataUpdated,
-                    actorUserID: requesterUserID,
-                    actorEmail: requester.email,
-                    updatedFields: updatedFields,
-                    title: persistedConversation.title,
-                    notice: persistedConversation.notice,
-                    avatarPreset: persistedConversation.avatarPresetEnum
-                )
-            )
-            try await ConversationReadAdvanceSupport(db: database).advanceReadSequenceIfMember(
-                conversationID: conversationID,
-                userID: requesterUserID,
-                readSequence: sequence
-            )
 
             return try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,

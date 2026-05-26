@@ -7,10 +7,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.BufferedWriter
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.net.Socket
 
 interface IMTCPTransport {
@@ -18,12 +16,12 @@ interface IMTCPTransport {
 }
 
 class IMTCPTransportConnection(
-    val lines: Channel<String>,
-    private val sendLineHandler: suspend (String) -> Unit,
+    val frames: Channel<ByteArray>,
+    private val sendFrameHandler: suspend (ByteArray) -> Unit,
     private val disconnectHandler: suspend () -> Unit,
 ) {
-    suspend fun sendLine(line: String) {
-        sendLineHandler(line)
+    suspend fun sendFrame(frame: ByteArray) {
+        sendFrameHandler(frame)
     }
 
     suspend fun disconnect() {
@@ -35,36 +33,44 @@ class SocketIMTCPTransport : IMTCPTransport {
     override suspend fun connect(host: String, port: Int): IMTCPTransportConnection =
         withContext(Dispatchers.IO) {
             val socket = Socket(host, port)
-            val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
-            val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
+            val reader = DataInputStream(socket.getInputStream())
+            val writer = DataOutputStream(socket.getOutputStream())
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-            val lines = Channel<String>(Channel.UNLIMITED)
+            val frames = Channel<ByteArray>(Channel.UNLIMITED)
 
             scope.launch {
                 try {
                     while (!socket.isClosed) {
-                        val line = reader.readLine() ?: break
-                        lines.send(line)
+                        val length = reader.readInt()
+                        if (length <= 0 || length > 64 * 1024) {
+                            throw IMTCPClientError.InvalidPacket
+                        }
+                        val frame = ByteArray(length)
+                        reader.readFully(frame)
+                        frames.send(frame)
                     }
-                    lines.close()
+                    frames.close()
                 } catch (error: Throwable) {
-                    lines.close(error)
+                    frames.close(error)
                 }
             }
 
             IMTCPTransportConnection(
-                lines = lines,
-                sendLineHandler = { line ->
+                frames = frames,
+                sendFrameHandler = { frame ->
                     withContext(Dispatchers.IO) {
-                        writer.write(line)
-                        writer.newLine()
+                        if (frame.size > 64 * 1024) {
+                            throw IMTCPClientError.InvalidPacket
+                        }
+                        writer.writeInt(frame.size)
+                        writer.write(frame)
                         writer.flush()
                     }
                 },
                 disconnectHandler = {
                     scope.cancel()
                     runCatching { socket.close() }
-                    lines.close()
+                    frames.close()
                 },
             )
         }

@@ -6,43 +6,12 @@ import Testing
 private extension IMTCPConnectionEvent {
     static func contactEvent(
         requestID: UUID?,
-        payload: IMTCPContactEventPayload
+        payload: TestContactEventPayload
     ) -> IMTCPConnectionEvent {
         .domainEvent(
             requestID: requestID,
-            payload: IMTCPChatDomainEventPayload(
-                eventID: UUID(),
-                eventType: payload.domainEventType,
-                aggregateType: "contact",
-                aggregateID: payload.contactUserID
-                    ?? payload.contact?.id
-                    ?? payload.request?.id
-                    ?? payload.actorUserID
-                    ?? UUID(),
-                aggregateSequence: 0,
-                occurredAt: payload.serverTimestamp,
-                actorUserID: payload.actorUserID,
-                conversation: nil,
-                body: .contactChanged(
-                    request: payload.request,
-                    contact: payload.contact,
-                    contactUserID: payload.contactUserID
-                )
-            )
+            payload: payload.domainEventPayload
         )
-    }
-}
-
-private extension IMTCPContactEventPayload {
-    var domainEventType: IMTCPChatDomainEventType {
-        switch eventType {
-        case .friendRequestCreated:
-            return .contactRequestCreated
-        case .friendRequestAccepted:
-            return .contactRequestAccepted
-        case .friendRequestDeclined, .friendRequestCancelled, .contactRemoved:
-            return .contactRequestUpdated
-        }
     }
 }
 
@@ -89,7 +58,7 @@ extension AuthManagerTests {
         await harness.yield(
             .contactEvent(
                 requestID: nil,
-                payload: IMTCPContactEventPayload(
+                payload: TestContactEventPayload(
                     eventType: .friendRequestCreated,
                     request: pendingRequest,
                     contact: nil,
@@ -115,7 +84,7 @@ extension AuthManagerTests {
         await harness.yield(
             .contactEvent(
                 requestID: nil,
-                payload: IMTCPContactEventPayload(
+                payload: TestContactEventPayload(
                     eventType: .friendRequestAccepted,
                     request: ContactRequestResponseBody(
                         id: requestID,
@@ -146,7 +115,7 @@ extension AuthManagerTests {
         await harness.yield(
             .contactEvent(
                 requestID: nil,
-                payload: IMTCPContactEventPayload(
+                payload: TestContactEventPayload(
                     eventType: .contactRemoved,
                     request: nil,
                     contact: nil,
@@ -285,7 +254,7 @@ extension AuthManagerTests {
         await harness.yield(
             .contactEvent(
                 requestID: nil,
-                payload: IMTCPContactEventPayload(
+                payload: TestContactEventPayload(
                     eventType: .friendRequestCreated,
                     request: pendingRequest,
                     contact: nil,
@@ -618,7 +587,7 @@ extension AuthManagerTests {
         await harness.yield(
             .contactEvent(
                 requestID: nil,
-                payload: IMTCPContactEventPayload(
+                payload: TestContactEventPayload(
                     eventType: .contactRemoved,
                     request: nil,
                     contact: nil,
@@ -809,7 +778,7 @@ extension AuthManagerTests {
         await harness.yield(
             .contactEvent(
                 requestID: nil,
-                payload: IMTCPContactEventPayload(
+                payload: TestContactEventPayload(
                     eventType: .friendRequestCreated,
                     request: pendingRequest,
                     contact: nil,
@@ -1523,7 +1492,7 @@ extension AuthManagerTests {
         await harness.yield(
             .contactEvent(
                 requestID: nil,
-                payload: IMTCPContactEventPayload(
+                payload: TestContactEventPayload(
                     eventType: .contactRemoved,
                     request: nil,
                     contact: nil,
@@ -1543,7 +1512,7 @@ extension AuthManagerTests {
         await harness.yield(
             .contactEvent(
                 requestID: nil,
-                payload: IMTCPContactEventPayload(
+                payload: TestContactEventPayload(
                     eventType: .friendRequestCreated,
                     request: newRequest,
                     contact: nil,
@@ -1611,7 +1580,7 @@ extension AuthManagerTests {
         await harness.yield(
             .contactEvent(
                 requestID: nil,
-                payload: IMTCPContactEventPayload(
+                payload: TestContactEventPayload(
                     eventType: .contactRemoved,
                     request: nil,
                     contact: nil,

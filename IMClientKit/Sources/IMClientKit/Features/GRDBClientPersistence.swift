@@ -866,10 +866,6 @@ private enum GRDBClientPersistence {
                 reference: IMReplyReference(messageID: "", senderUserID: nil, previewText: ""),
                 body: .plain(textPreview)
             )
-        case .recalled:
-            return .recalled
-        case .system:
-            return .system(.legacyText(textPreview))
         case .image:
             return .image(IMMediaAsset(assetID: "", kind: .image, mimeType: "image/*", byteSize: 0, filename: textPreview))
         case .audio:

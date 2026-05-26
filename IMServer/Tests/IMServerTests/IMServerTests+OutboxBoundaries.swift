@@ -510,7 +510,7 @@ extension IMServerTests {
             #expect(directory.conversationID == conversationID)
             #expect(directory.ownerUserID == senderID)
 
-            try message.replaceContent(.recalled)
+            try message.replaceDerivedState(.init(recallState: .recalled))
             try await message.update(on: app.db)
             let recalledEvent = try ConversationDomainEvent(
                 id: UUID(),

@@ -302,12 +302,12 @@ extension IMServerTests {
         }
     }
 
-    @Test("AI stream startup repair backfills legacy streaming message index")
-    func aiMessageStreamStartupRepairBackfillsLegacyStreamIndex() async throws {
+    @Test("AI stream startup repair does not backfill historical missing stream indexes")
+    func aiMessageStreamStartupRepairDoesNotBackfillHistoricalMissingStreamIndexes() async throws {
         try await withApp(configure: configure) { app in
             let accessToken = try await loginAccessToken(using: app)
             let demoUser = try await user(email: "demo@example.com", on: app)
-            let peerUser = try await makeUser(email: "ai-stream-legacy-repair-peer@example.com", on: app)
+            let peerUser = try await makeUser(email: "ai-stream-repair-peer@example.com", on: app)
 
             var createdConversationID: UUID?
             try await app.testing().test(.POST, "api/im/conversations", beforeRequest: { req in
@@ -315,7 +315,7 @@ extension IMServerTests {
                 try req.content.encode(
                     IMConversationCreateRequest(
                         kind: IMConversationKind.direct.rawValue,
-                        title: "AI Stream Legacy Repair",
+                        title: "AI Stream Missing Index",
                         memberEmails: [peerUser.email]
                     )
                 )
@@ -331,47 +331,28 @@ extension IMServerTests {
                 streamID: streamID,
                 state: .streaming,
                 lastChunkIndex: 2,
-                partialText: "partial legacy",
+                partialText: "partial missing-index",
                 updatedAt: Date()
             )
-            let legacyMessage = try ConversationMessage(
+            let historicalMessage = try ConversationMessage(
                 id: messageID,
                 conversationID: conversationID,
                 senderUserID: userID,
                 serverSequence: 1,
-                content: .richText(.plain("partial legacy")),
+                content: .richText(.plain("partial missing-index")),
                 derivedState: MessageDerivedState(streamState: streamState)
             )
-            try await legacyMessage.create(on: app.db)
+            try await historicalMessage.create(on: app.db)
             #expect(try await AIMessageStreamIndex.find(streamID, on: app.db) == nil)
 
             let repaired = try await IMAIStreamRepairService(app: app).repairStaleStreamingMessages()
-            #expect(repaired == 1)
-
-            let index = try #require(try await AIMessageStreamIndex.find(streamID, on: app.db))
-            #expect(index.messageID == messageID)
-            #expect(index.lifecycleState == .failed)
-            #expect(index.errorCode == "server_restarted")
-
-            try await app.testing().test(
-                .GET,
-                "api/im/conversations/\(conversationID.uuidString)/messages/\(messageID.uuidString)/stream",
-                beforeRequest: { req in
-                    req.headers.bearerAuthorization = .init(token: accessToken)
-                },
-                afterResponse: { res async throws in
-                    #expect(res.status == .ok)
-                    let body = try res.content.decode(IMMessageStreamResponse.self)
-                    #expect(body.stream.streamID == streamID)
-                    #expect(body.stream.state == .failed)
-                    #expect(body.message.derivedState.streamState?.errorCode == "server_restarted")
-                }
-            )
+            #expect(repaired == 0)
+            #expect(try await AIMessageStreamIndex.find(streamID, on: app.db) == nil)
         }
     }
 
-    @Test("AI stream state store audits and repairs message index consistency")
-    func aiMessageStreamStateStoreAuditsAndRepairsConsistency() async throws {
+    @Test("AI stream state store audits missing historical index and repairs runtime index state")
+    func aiMessageStreamStateStoreAuditsMissingHistoricalIndexAndRepairsRuntimeIndexState() async throws {
         try await withApp(configure: configure) { app in
             let demoUser = try await user(email: "demo@example.com", on: app)
             let peerUser = try await makeUser(email: "ai-stream-audit-peer@example.com", on: app)
@@ -405,8 +386,14 @@ extension IMServerTests {
             var issues = try await stateStore.auditConsistency()
             #expect(issues.contains { $0.kind == .missingIndex && $0.streamID == streamID })
 
-            let backfilled = try await stateStore.backfillMissingStreamIndexes()
-            #expect(backfilled == 1)
+            try await AIMessageStreamIndex(
+                streamID: streamID,
+                messageID: messageID,
+                conversationID: conversationID,
+                userID: userID,
+                state: .streaming,
+                lastChunkIndex: 3
+            ).create(on: app.db)
             issues = try await stateStore.auditConsistency()
             #expect(!issues.contains { $0.kind == .missingIndex && $0.streamID == streamID })
 
@@ -492,11 +479,10 @@ extension IMServerTests {
     }
 
 
-    @Test("IM group creation writes a system message into summary and history")
-    func createGroupConversationPersistsSystemMessage() async throws {
+    @Test("IM group creation does not write system message content into summary or history")
+    func createGroupConversationDoesNotPersistSystemMessage() async throws {
         try await withApp(configure: configure) { app in
             let accessToken = try await loginAccessToken(using: app)
-            let demoUser = try await user(email: "demo@example.com", on: app)
             let firstPeer = try await makeUser(email: "group-system-first@example.com", on: app)
             let secondPeer = try await makeUser(email: "group-system-second@example.com", on: app)
             var createdConversationID: UUID?
@@ -515,8 +501,8 @@ extension IMServerTests {
 
                 let conversation = try res.content.decode(IMConversationResponse.self)
                 createdConversationID = conversation.id
-                #expect(conversation.lastMessage?.content.previewText == "\(demoUser.email) 创建了群聊")
-                #expect(conversation.lastReadSequence == 1)
+                #expect(conversation.lastMessage == nil)
+                #expect(conversation.lastReadSequence == 0)
                 #expect(conversation.unreadCount == 0)
             })
 
@@ -527,9 +513,7 @@ extension IMServerTests {
                 #expect(res.status == .ok)
 
                 let messages = try res.content.decode([IMMessageResponse].self)
-                #expect(messages.count == 1)
-                #expect(messages[0].content.previewText == "\(demoUser.email) 创建了群聊")
-                #expect(messages[0].serverSequence == 1)
+                #expect(messages.isEmpty)
             })
         }
     }
@@ -678,8 +662,8 @@ extension IMServerTests {
     }
 
 
-    @Test("IM create conversation endpoint reuses frozen direct conversation")
-    func createDirectConversationReusesFrozenConversation() async throws {
+    @Test("IM create conversation endpoint does not scan memberships when direct index is missing")
+    func createDirectConversationDoesNotScanMembershipsWhenDirectIndexIsMissing() async throws {
         try await withApp(configure: configure) { app in
             let accessToken = try await loginAccessToken(using: app)
             let demoUser = try await user(email: "demo@example.com", on: app)
@@ -706,7 +690,7 @@ extension IMServerTests {
                 try req.content.encode(
                     IMConversationCreateRequest(
                         kind: IMConversationKind.direct.rawValue,
-                        title: "Should Reuse Frozen",
+                        title: "Should Not Scan Frozen",
                         memberEmails: [peerUser.email]
                     )
                 )
@@ -714,23 +698,23 @@ extension IMServerTests {
                 #expect(res.status == .ok)
 
                 let conversation = try res.content.decode(IMConversationResponse.self)
-                #expect(conversation.id == existingConversationID)
+                #expect(conversation.id != existingConversationID)
                 #expect(conversation.kind == IMConversationKind.direct.rawValue)
                 #expect(conversation.title == nil)
-                #expect(conversation.directMessagingState == IMDirectMessagingState.frozenAfterUnfriend.rawValue)
+                #expect(conversation.directMessagingState == IMDirectMessagingState.active.rawValue)
                 #expect(conversation.directPeer == IMDirectPeerResponse(id: peerUserID, email: peerUser.email))
             })
 
             let conversations = try await Conversation.query(on: app.db).all()
-            #expect(conversations.count == 1)
-            #expect(conversations.first?.directMessagingStateEnum == .frozenAfterUnfriend)
+            #expect(conversations.count == 2)
+            #expect(conversations.contains { (try? $0.requireID()) == existingConversationID && $0.directMessagingStateEnum == .frozenAfterUnfriend })
 
             let pairHash = [demoUserID, peerUserID]
                 .map(\.uuidString)
                 .sorted()
                 .joined(separator: ":")
             let directIndexEntry = try await DirectConversationIndexEntry.find(pairHash, on: app.db)
-            #expect(directIndexEntry?.conversationID == existingConversationID)
+            #expect(directIndexEntry?.conversationID != existingConversationID)
         }
     }
 

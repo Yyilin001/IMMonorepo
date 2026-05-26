@@ -63,57 +63,7 @@ struct ConversationDirectReuseSupport {
             .conversationID(forMemberUserIDs: memberUserIDs) {
             return indexedConversationID
         }
-
-        let sharedMemberships = try await ConversationMember.query(on: db)
-            .filter(\.$user.$id ~~ Array(expectedMemberIDs))
-            .all()
-        let sharedConversationIDs = Dictionary(grouping: sharedMemberships, by: \.$conversation.id)
-            .compactMap { conversationID, memberships -> UUID? in
-                let actualMemberIDs = Set(memberships.map(\.$user.id))
-                return actualMemberIDs == expectedMemberIDs ? conversationID : nil
-            }
-
-        guard !sharedConversationIDs.isEmpty else {
-            return nil
-        }
-
-        let allMemberships = try await ConversationMember.query(on: db)
-            .filter(\.$conversation.$id ~~ sharedConversationIDs)
-            .all()
-        let exactOneToOneConversationIDs = Dictionary(grouping: allMemberships, by: \.$conversation.id)
-            .compactMap { conversationID, memberships -> UUID? in
-                let actualMemberIDs = Set(memberships.map(\.$user.id))
-                return actualMemberIDs == expectedMemberIDs ? conversationID : nil
-            }
-
-        guard !exactOneToOneConversationIDs.isEmpty else {
-            return nil
-        }
-
-        let conversations = try await Conversation.query(on: db)
-            .filter(\.$id ~~ exactOneToOneConversationIDs)
-            .filter(\.$kind == IMConversationKind.direct.rawValue)
-            .all()
-        let existingConversationID = try conversations.sorted { lhs, rhs in
-            let lhsDate = lhs.createdAt ?? .distantPast
-            let rhsDate = rhs.createdAt ?? .distantPast
-            if lhsDate == rhsDate {
-                let lhsID = (try? lhs.requireID().uuidString) ?? ""
-                let rhsID = (try? rhs.requireID().uuidString) ?? ""
-                return lhsID < rhsID
-            }
-            return lhsDate < rhsDate
-        }.first?.requireID()
-
-        if let existingConversationID {
-            try await DatabaseDirectConversationIndex(db: db).registerDirectConversation(
-                conversationID: existingConversationID,
-                memberUserIDs: memberUserIDs,
-                shardID: SingleShardConversationShardRouter.defaultShardID
-            )
-        }
-
-        return existingConversationID
+        return nil
     }
 
     func normalizeExistingDirectConversation(conversationID: UUID) async throws {
@@ -311,33 +261,6 @@ enum ConversationPresentationSupport {
             displayName: peerUser.displayName,
             avatarPreset: peerUser.avatarPresetEnum
         )
-    }
-}
-
-struct ConversationSystemMessageAppender {
-    let db: any Database
-
-    func append(
-        in conversationID: UUID,
-        senderUserID: UUID,
-        event: IMSystemEvent,
-        serverSequence: Int? = nil,
-        updatedAt: Date = Date()
-    ) async throws -> Int {
-        let sequence = if let serverSequence {
-            serverSequence
-        } else {
-            try await ConversationSequenceAllocator(db: db)
-                .allocateNextServerSequence(conversationID: conversationID, updatedAt: updatedAt)
-        }
-        let systemMessage = try ConversationMessage(
-            conversationID: conversationID,
-            senderUserID: senderUserID,
-            serverSequence: sequence,
-            content: .system(event)
-        )
-        try await systemMessage.create(on: db)
-        return sequence
     }
 }
 

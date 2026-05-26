@@ -8,9 +8,7 @@ struct ConversationMembershipCommandSupport {
     private var membershipService: ConversationMembershipService { ConversationMembershipService(db: db) }
     private var readSupport: ConversationReadSupport { ConversationReadSupport(db: db) }
     private var summaryReadSupport: ConversationSummaryReadSupport { ConversationSummaryReadSupport(db: db) }
-    private var readAdvanceSupport: ConversationReadAdvanceSupport { ConversationReadAdvanceSupport(db: db) }
     private var governanceService: ConversationGovernanceService { ConversationGovernanceService() }
-    private var systemMessageAppender: ConversationSystemMessageAppender { ConversationSystemMessageAppender(db: db) }
     private var refreshPublisher: ConversationSummaryRefreshPublisher { ConversationSummaryRefreshPublisher(db: db) }
 
     func createConversation(
@@ -88,23 +86,6 @@ struct ConversationMembershipCommandSupport {
                 ).create(on: database)
             }
 
-            if conversationKind == .group {
-                let sequence = try await ConversationSystemMessageAppender(db: database).append(
-                    in: conversationID,
-                    senderUserID: creatorUserID,
-                    event: IMSystemEvent(
-                        type: .groupCreated,
-                        actorUserID: creatorUserID,
-                        actorEmail: creator.email
-                    )
-                )
-                try await ConversationReadAdvanceSupport(db: database).advanceReadSequenceIfMember(
-                    conversationID: conversationID,
-                    userID: creatorUserID,
-                    readSequence: sequence
-                )
-            }
-
             if conversationKind == .direct {
                 try await DatabaseDirectConversationIndex(db: database).registerDirectConversation(
                     conversationID: conversationID,
@@ -164,8 +145,6 @@ struct ConversationMembershipCommandSupport {
             requesterMembership.memberRoleEnum,
             reason: "只有群主或管理员可以添加成员。"
         )
-        let requester = try await userLookup.requireUser(id: requesterUserID)
-
         let users = try await User.query(on: db)
             .filter(\.$email ~~ normalizedEmails)
             .all()
@@ -203,23 +182,6 @@ struct ConversationMembershipCommandSupport {
                     visibleFromSequence: sequence
                 ).create(on: database)
             }
-
-            _ = try await ConversationSystemMessageAppender(db: database).append(
-                in: conversationID,
-                senderUserID: requesterUserID,
-                event: IMSystemEvent(
-                    type: .membersAdded,
-                    actorUserID: requesterUserID,
-                    actorEmail: requester.email,
-                    memberEmails: newUsers.map(\.email).sorted()
-                ),
-                serverSequence: sequence
-            )
-            try await ConversationReadAdvanceSupport(db: database).advanceReadSequenceIfMember(
-                conversationID: conversationID,
-                userID: requesterUserID,
-                readSequence: sequence
-            )
 
             return try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
@@ -275,8 +237,6 @@ struct ConversationMembershipCommandSupport {
             throw Abort(.badRequest, reason: "退出后会话成员不能少于 2 人。")
         }
 
-        let requester = try await userLookup.requireUser(id: requesterUserID)
-        let targetUser = try await userLookup.requireUser(id: memberUserID)
         let removedConversation = try await readSupport.conversationSummary(
             conversationID: conversationID,
             for: memberUserID
@@ -286,27 +246,10 @@ struct ConversationMembershipCommandSupport {
             let revision = Date()
             try await targetMembership.delete(on: database)
 
-            let sequence = try await ConversationSystemMessageAppender(db: database).append(
-                in: conversationID,
-                senderUserID: requesterUserID,
-                event: IMSystemEvent(
-                    type: .memberRemoved,
-                    actorUserID: requesterUserID,
-                    actorEmail: requester.email,
-                    targetUserID: memberUserID,
-                    targetEmail: targetUser.email
-                ),
-                updatedAt: revision
-            )
             if let persistedConversation = try await Conversation.find(conversationID, on: database) {
                 persistedConversation.membershipRevision = revision
                 try await persistedConversation.update(on: database)
             }
-            try await ConversationReadAdvanceSupport(db: database).advanceReadSequenceIfMember(
-                conversationID: conversationID,
-                userID: requesterUserID,
-                readSequence: sequence
-            )
 
             return try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
@@ -365,8 +308,6 @@ struct ConversationMembershipCommandSupport {
             conversationID: conversationID,
             userID: memberUserID
         )
-        let requester = try await userLookup.requireUser(id: requesterUserID)
-        let targetUser = try await userLookup.requireUser(id: memberUserID)
         let previousRole = targetMembership.memberRoleEnum
 
         guard previousRole != role else {
@@ -389,29 +330,10 @@ struct ConversationMembershipCommandSupport {
                 try await targetMembership.update(on: database)
             }
 
-            let sequence = try await ConversationSystemMessageAppender(db: database).append(
-                in: conversationID,
-                senderUserID: requesterUserID,
-                event: IMSystemEvent(
-                    type: role == .owner ? .ownershipTransferred : .roleUpdated,
-                    actorUserID: requesterUserID,
-                    actorEmail: requester.email,
-                    targetUserID: memberUserID,
-                    targetEmail: targetUser.email,
-                    previousRole: previousRole,
-                    newRole: role
-                ),
-                updatedAt: revision
-            )
             if let persistedConversation = try await Conversation.find(conversationID, on: database) {
                 persistedConversation.membershipRevision = revision
                 try await persistedConversation.update(on: database)
             }
-            try await ConversationReadAdvanceSupport(db: database).advanceReadSequenceIfMember(
-                conversationID: conversationID,
-                userID: requesterUserID,
-                readSequence: sequence
-            )
 
             return try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
@@ -431,7 +353,6 @@ struct ConversationMembershipCommandSupport {
         in conversationID: UUID,
         requesterUserID: UUID
     ) async throws {
-        let requester = try await userLookup.requireUser(id: requesterUserID)
         let conversation = try await requireConversationAndMembership(
             conversationID: conversationID,
             userID: requesterUserID
@@ -464,16 +385,6 @@ struct ConversationMembershipCommandSupport {
         try await db.transaction { database in
             let revision = Date()
             try await membership.delete(on: database)
-            _ = try await ConversationSystemMessageAppender(db: database).append(
-                in: conversationID,
-                senderUserID: requesterUserID,
-                event: IMSystemEvent(
-                    type: .memberLeft,
-                    actorUserID: requesterUserID,
-                    actorEmail: requester.email
-                ),
-                updatedAt: revision
-            )
             if let persistedConversation = try await Conversation.find(conversationID, on: database) {
                 persistedConversation.membershipRevision = revision
                 try await persistedConversation.update(on: database)

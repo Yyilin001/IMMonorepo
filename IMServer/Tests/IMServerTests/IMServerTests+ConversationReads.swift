@@ -369,7 +369,7 @@ extension IMServerTests {
     }
 
 
-    @Test("IM conversation search matches text, reply, system, and file content with stable pagination")
+    @Test("IM conversation search matches indexed text, reply, and file content with stable pagination")
     func imConversationSearchMatchesStructuredContentAndPaginates() async throws {
         try await withApp(configure: configure) { app in
             let accessToken = try await loginAccessToken(using: app)
@@ -415,19 +415,6 @@ extension IMServerTests {
             ).create(on: app.db)
             try await ConversationMessage(
                 conversationID: conversationID,
-                senderUserID: try demoUser.requireID(),
-                serverSequence: 3,
-                content: .system(
-                    IMSystemEvent(
-                        type: .metadataUpdated,
-                        actorUserID: try demoUser.requireID(),
-                        actorEmail: demoUser.email,
-                        updatedFields: [.title]
-                    )
-                )
-            ).create(on: app.db)
-            try await ConversationMessage(
-                conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 4,
                 content: .file(
@@ -444,6 +431,11 @@ extension IMServerTests {
                     )
                 )
             ).create(on: app.db)
+            let messageIDs = try await ConversationMessage.query(on: app.db)
+                .filter(\.$conversation.$id == conversationID)
+                .all()
+                .map { try $0.requireID() }
+            try await ConversationSearchIndexWorker(db: app.db).reindexMessages(messageIDs: messageIDs)
 
             try await app.testing().test(
                 .GET,
@@ -494,8 +486,7 @@ extension IMServerTests {
                 afterResponse: { res async throws in
                     #expect(res.status == .ok)
                     let page = try res.content.decode(IMConversationMessageSearchPageResponse.self)
-                    #expect(page.items.map(\.serverSequence) == [3])
-                    #expect(page.items.first?.content.previewText == "\(demoUser.email) 更新了群名称")
+                    #expect(page.items.isEmpty)
                 }
             )
         }
@@ -540,12 +531,16 @@ extension IMServerTests {
                 serverSequence: 2,
                 content: .richText(.plain("visible archive still old"))
             ).create(on: app.db)
-            try await ConversationMessage(
+            let visibleMessage = try ConversationMessage(
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 3,
                 content: .richText(.plain("visible timeline after rejoin"))
-            ).create(on: app.db)
+            )
+            try await visibleMessage.create(on: app.db)
+            try await ConversationSearchIndexWorker(db: app.db).reindexMessage(
+                messageID: try visibleMessage.requireID()
+            )
 
             membership.visibleFromSequence = 3
             membership.lastReadSequence = 2
@@ -635,11 +630,8 @@ extension IMServerTests {
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
                 let messages = try res.content.decode([IMMessageResponse].self)
-                #expect(messages.map(\.serverSequence) == [2, 3])
-                #expect(messages.map(\.content.previewText) == [
-                    "demo@example.com 添加了 visible-new@example.com",
-                    "after join"
-                ])
+                #expect(messages.map(\.serverSequence) == [3])
+                #expect(messages.map(\.content.previewText) == ["after join"])
             })
 
             try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=0", beforeRequest: { req in
@@ -647,7 +639,7 @@ extension IMServerTests {
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
                 let payload = try res.content.decode(IMMessageSinceResponse.self)
-                #expect(payload.messages.map(\.serverSequence) == [2, 3])
+                #expect(payload.messages.map(\.serverSequence) == [3])
                 #expect(payload.nextAfterSequence == 3)
             })
         }

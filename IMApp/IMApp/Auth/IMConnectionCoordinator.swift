@@ -236,22 +236,8 @@ final class IMConnectionCoordinator {
                 return
             }
 
-            if case .contactChanged(let request, let contact, let contactUserID) = payload.body {
-                runtime.applyContactEvent(
-                    IMTCPContactEventPayload(
-                        eventType: contactEventType(
-                            for: payload,
-                            request: request,
-                            contact: contact,
-                            contactUserID: contactUserID
-                        ),
-                        request: request,
-                        contact: contact,
-                        contactUserID: contactUserID,
-                        actorUserID: payload.actorUserID,
-                        serverTimestamp: payload.occurredAt
-                    )
-                )
+            if case .contactChanged = payload.body {
+                runtime.applyContactDomainEvent(payload)
                 return
             }
 
@@ -354,38 +340,6 @@ final class IMConnectionCoordinator {
         "\(message) 正在自动重连。"
     }
 
-    private func contactEventType(
-        for payload: IMTCPChatDomainEventPayload,
-        request: ContactRequestResponseBody?,
-        contact: ContactResponseBody?,
-        contactUserID: UUID?
-    ) -> IMTCPContactEventType {
-        switch payload.eventType {
-        case .contactRequestCreated:
-            return .friendRequestCreated
-        case .contactRequestAccepted:
-            return .friendRequestAccepted
-        case .contactRequestUpdated:
-            if contact == nil, contactUserID != nil {
-                return .contactRemoved
-            }
-
-            switch request?.status {
-            case .declined:
-                return .friendRequestDeclined
-            case .cancelled:
-                return .friendRequestCancelled
-            case .accepted:
-                return .friendRequestAccepted
-            case .pending:
-                return .friendRequestCreated
-            case nil:
-                return .contactRemoved
-            }
-        default:
-            return payload.eventType.contactEventType
-        }
-    }
 }
 
 @MainActor

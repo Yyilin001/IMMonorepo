@@ -350,7 +350,7 @@ extension IMConversationStoreTests {
             ]
         )
 
-        store.receiveIncomingMessage(
+        store.applyTestDomainMessage(
             IMTCPMessagePayload(
                 clientMessageID: nil,
                 messageID: "srv-unread-1",
