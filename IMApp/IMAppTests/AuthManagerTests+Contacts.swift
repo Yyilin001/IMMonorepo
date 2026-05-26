@@ -3,6 +3,49 @@ import Foundation
 import Testing
 @testable import IMApp
 
+private extension IMTCPConnectionEvent {
+    static func contactEvent(
+        requestID: UUID?,
+        payload: IMTCPContactEventPayload
+    ) -> IMTCPConnectionEvent {
+        .domainEvent(
+            requestID: requestID,
+            payload: IMTCPChatDomainEventPayload(
+                eventID: UUID(),
+                eventType: payload.domainEventType,
+                aggregateType: "contact",
+                aggregateID: payload.contactUserID
+                    ?? payload.contact?.id
+                    ?? payload.request?.id
+                    ?? payload.actorUserID
+                    ?? UUID(),
+                aggregateSequence: 0,
+                occurredAt: payload.serverTimestamp,
+                actorUserID: payload.actorUserID,
+                conversation: nil,
+                body: .contactChanged(
+                    request: payload.request,
+                    contact: payload.contact,
+                    contactUserID: payload.contactUserID
+                )
+            )
+        )
+    }
+}
+
+private extension IMTCPContactEventPayload {
+    var domainEventType: IMTCPChatDomainEventType {
+        switch eventType {
+        case .friendRequestCreated:
+            return .contactRequestCreated
+        case .friendRequestAccepted:
+            return .contactRequestAccepted
+        case .friendRequestDeclined, .friendRequestCancelled, .contactRemoved:
+            return .contactRequestUpdated
+        }
+    }
+}
+
 extension AuthManagerTests {
     @Test func contactEventsUpdateRequestsAndContactsInRealtime() async throws {
         let harness = IMConnectionTestHarness()

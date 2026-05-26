@@ -479,19 +479,23 @@ fun IMTCPMessagePayload.toConversationMessage(currentUserID: String): IMConversa
 sealed interface IMMessageContent {
     val previewText: String
 
+    companion object {
+        fun plain(text: String): IMMessageContent = RichText(IMRichTextContent(text = text))
+    }
+
     @Serializable
-    data class Text(val text: String) : IMMessageContent {
+    data class RichText(val body: IMRichTextContent) : IMMessageContent {
         override val previewText: String
-            get() = text
+            get() = body.text
     }
 
     @Serializable
     data class Reply(
         val reference: IMReplyReference,
-        val text: String,
+        val body: IMRichTextContent,
     ) : IMMessageContent {
         override val previewText: String
-            get() = text
+            get() = body.text
     }
 
     @Serializable
@@ -531,6 +535,35 @@ sealed interface IMMessageContent {
 }
 
 @Serializable
+data class IMRichTextContent(
+    val text: String,
+    val entities: List<IMTextEntity> = emptyList(),
+)
+
+@Serializable
+data class IMTextRange(
+    val location: Int,
+    val length: Int,
+)
+
+@Serializable(with = IMTextEntitySerializer::class)
+sealed interface IMTextEntity {
+    val range: IMTextRange
+
+    @Serializable
+    data class Link(override val range: IMTextRange, val url: String) : IMTextEntity
+
+    @Serializable
+    data class Mention(override val range: IMTextRange, val userID: String) : IMTextEntity
+
+    @Serializable
+    data class Hashtag(override val range: IMTextRange, val value: String) : IMTextEntity
+
+    @Serializable
+    data class InlineCode(override val range: IMTextRange) : IMTextEntity
+}
+
+@Serializable
 data class IMReplyReference(
     val messageID: String,
     val senderUserID: String? = null,
@@ -558,10 +591,12 @@ object IMMessageContentSerializer : KSerializer<IMMessageContent> {
             ?: throw SerializationException("IMMessageContent requires JSON decoding.")
         val raw = jsonDecoder.decodeJsonElement().jsonObject
         return when (val type = raw["type"]?.jsonPrimitive?.contentOrNull) {
-            "text" -> IMMessageContent.Text(raw.requiredString("text"))
+            "rich_text" -> IMMessageContent.RichText(
+                jsonDecoder.json.decodeFromJsonElement(IMRichTextContent.serializer(), raw.required("body")),
+            )
             "reply" -> IMMessageContent.Reply(
                 reference = jsonDecoder.json.decodeFromJsonElement(IMReplyReference.serializer(), raw.required("reference")),
-                text = raw.requiredString("text"),
+                body = jsonDecoder.json.decodeFromJsonElement(IMRichTextContent.serializer(), raw.required("body")),
             )
             "recalled" -> IMMessageContent.Recalled
             "image", "audio", "file" -> IMMessageContent.Media(
@@ -577,14 +612,14 @@ object IMMessageContentSerializer : KSerializer<IMMessageContent> {
         val jsonEncoder = encoder as? kotlinx.serialization.json.JsonEncoder
             ?: throw SerializationException("IMMessageContent requires JSON encoding.")
         val element = when (value) {
-            is IMMessageContent.Text -> buildJsonObject {
-                put("type", JsonPrimitive("text"))
-                put("text", JsonPrimitive(value.text))
+            is IMMessageContent.RichText -> buildJsonObject {
+                put("type", JsonPrimitive("rich_text"))
+                put("body", jsonEncoder.json.encodeToJsonElement(IMRichTextContent.serializer(), value.body))
             }
             is IMMessageContent.Reply -> buildJsonObject {
                 put("type", JsonPrimitive("reply"))
                 put("reference", jsonEncoder.json.encodeToJsonElement(IMReplyReference.serializer(), value.reference))
-                put("text", JsonPrimitive(value.text))
+                put("body", jsonEncoder.json.encodeToJsonElement(IMRichTextContent.serializer(), value.body))
             }
             IMMessageContent.Recalled -> buildJsonObject {
                 put("type", JsonPrimitive("recalled"))
@@ -604,6 +639,56 @@ object IMMessageContentSerializer : KSerializer<IMMessageContent> {
 
     private fun JsonObject.required(key: String): JsonElement =
         get(key) ?: throw SerializationException("Missing '$key' in IMMessageContent.")
+
+    private fun JsonObject.requiredString(key: String): String =
+        required(key).jsonPrimitive.content
+}
+
+object IMTextEntitySerializer : KSerializer<IMTextEntity> {
+    override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor
+
+    override fun deserialize(decoder: Decoder): IMTextEntity {
+        val jsonDecoder = decoder as? JsonDecoder
+            ?: throw SerializationException("IMTextEntity requires JSON decoding.")
+        val raw = jsonDecoder.decodeJsonElement().jsonObject
+        val range = jsonDecoder.json.decodeFromJsonElement(IMTextRange.serializer(), raw.required("range"))
+        return when (val kind = raw.requiredString("kind")) {
+            "link" -> IMTextEntity.Link(range, raw.requiredString("url"))
+            "mention" -> IMTextEntity.Mention(range, raw.requiredString("userID"))
+            "hashtag" -> IMTextEntity.Hashtag(range, raw.requiredString("value"))
+            "inline_code" -> IMTextEntity.InlineCode(range)
+            else -> throw SerializationException("Unsupported IMTextEntity kind '$kind'.")
+        }
+    }
+
+    override fun serialize(encoder: Encoder, value: IMTextEntity) {
+        val jsonEncoder = encoder as? kotlinx.serialization.json.JsonEncoder
+            ?: throw SerializationException("IMTextEntity requires JSON encoding.")
+        val element = buildJsonObject {
+            put("range", jsonEncoder.json.encodeToJsonElement(IMTextRange.serializer(), value.range))
+            when (value) {
+                is IMTextEntity.Link -> {
+                    put("kind", JsonPrimitive("link"))
+                    put("url", JsonPrimitive(value.url))
+                }
+                is IMTextEntity.Mention -> {
+                    put("kind", JsonPrimitive("mention"))
+                    put("userID", JsonPrimitive(value.userID))
+                }
+                is IMTextEntity.Hashtag -> {
+                    put("kind", JsonPrimitive("hashtag"))
+                    put("value", JsonPrimitive(value.value))
+                }
+                is IMTextEntity.InlineCode -> {
+                    put("kind", JsonPrimitive("inline_code"))
+                }
+            }
+        }
+        jsonEncoder.encodeJsonElement(element)
+    }
+
+    private fun JsonObject.required(key: String): JsonElement =
+        get(key) ?: throw SerializationException("Missing '$key' in IMTextEntity.")
 
     private fun JsonObject.requiredString(key: String): String =
         required(key).jsonPrimitive.content

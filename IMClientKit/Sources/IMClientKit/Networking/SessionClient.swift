@@ -710,7 +710,7 @@ public actor SessionClient {
         text: String
     ) async throws -> IMConversationMessageResponseBody {
         try await executor.execute(
-            IMRequest.editMessage(conversationID: conversationID, messageID: messageID, text: text)
+            IMRequest.editMessage(conversationID: conversationID, messageID: messageID, body: .plain(text))
         )
     }
 

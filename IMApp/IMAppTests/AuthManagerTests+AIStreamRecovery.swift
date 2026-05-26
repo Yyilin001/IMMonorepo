@@ -193,7 +193,7 @@ extension AuthManagerTests {
                     conversationID: conversationID,
                     senderUserID: Self.user.id,
                     serverSequence: 1,
-                    content: .text("partial"),
+                    content: .richText(.plain("partial")),
                     derivedState: MessageDerivedState(
                         streamState: MessageStreamState(
                             streamID: streamID,
@@ -233,7 +233,7 @@ extension AuthManagerTests {
                     conversationID: conversationID,
                     senderUserID: Self.user.id,
                     serverSequence: 1,
-                    content: .text(text),
+                    content: .richText(.plain(text)),
                     derivedState: derivedState,
                     createdAt: Date(timeIntervalSince1970: 1_700_300_000)
                 ),

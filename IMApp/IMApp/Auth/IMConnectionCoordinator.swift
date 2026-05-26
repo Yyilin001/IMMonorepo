@@ -231,58 +231,62 @@ final class IMConnectionCoordinator {
                 await runtime.loadReceiptSummary(for: conversationID)
             }
             runtime.scheduleConversationCachePersist()
-        case .message(let requestID, let payload):
+        case .domainEvent(let requestID, let payload):
             guard let currentUserID = runtime.currentUserProvider()?.id else {
                 return
             }
 
-            runtime.imConversationStore.receiveIncomingMessage(payload, currentUserID: currentUserID)
-            runtime.scheduleConversationCachePersist()
-
-            if let messageID = payload.messageID, let connection {
-                do {
-                    try await connection.sendAcknowledgement(
-                        IMTCPAckPayload(
-                            messageID: messageID,
-                            conversationID: payload.conversationID,
-                            status: "received"
+            if case .contactChanged(let request, let contact, let contactUserID) = payload.body {
+                runtime.applyContactEvent(
+                    IMTCPContactEventPayload(
+                        eventType: contactEventType(
+                            for: payload,
+                            request: request,
+                            contact: contact,
+                            contactUserID: contactUserID
                         ),
-                        requestID: requestID
+                        request: request,
+                        contact: contact,
+                        contactUserID: contactUserID,
+                        actorUserID: payload.actorUserID,
+                        serverTimestamp: payload.occurredAt
                     )
-                } catch {
-                    await handleFailure(error, generation: targetGeneration)
-                    return
-                }
-            }
-
-            guard payload.senderUserID != currentUserID,
-                  payload.conversationID == runtime.imConversationStore.selectedConversationID,
-                  let readSequence = payload.serverSequence
-            else {
+                )
                 return
             }
 
-            await runtime.markConversationReadInternal(
-                conversationID: payload.conversationID,
-                readSequence: readSequence
-            )
-        case .conversationEvent(_, let payload):
-            guard let currentUserID = runtime.currentUserProvider()?.id else {
-                return
-            }
-
-            let outcome = runtime.imConversationStore.applyConversationEvent(payload, currentUserID: currentUserID)
+            let outcome = runtime.imConversationStore.applyDomainEvent(payload, currentUserID: currentUserID)
             if let conversationID = outcome.shouldReloadMembersForConversationID,
                runtime.imConversationStore.conversations.contains(where: { $0.id == conversationID }) {
                 await runtime.loadConversationMembers(for: conversationID)
             }
-            if payload.conversation.id.uuidString == runtime.imConversationStore.selectedConversationID {
-                await runtime.loadReceiptSummary(for: payload.conversation.id.uuidString)
+            if payload.aggregateID.uuidString == runtime.imConversationStore.selectedConversationID {
+                await runtime.loadReceiptSummary(for: payload.aggregateID.uuidString)
             }
             runtime.syncPendingMessageStreamSnapshotsIfNeeded()
             runtime.scheduleConversationCachePersist()
-        case .contactEvent(_, let payload):
-            runtime.applyContactEvent(payload)
+
+            if case .messageCreated(let message, _) = payload.body,
+               message.senderUserID != currentUserID,
+               message.conversationID.uuidString == runtime.imConversationStore.selectedConversationID,
+               let connection {
+                do {
+                    try await connection.sendAcknowledgement(
+                        IMTCPAckPayload(
+                            messageID: message.id.uuidString,
+                            conversationID: message.conversationID.uuidString,
+                            status: "received"
+                        ),
+                        requestID: requestID
+                    )
+                    await runtime.markConversationReadInternal(
+                        conversationID: message.conversationID.uuidString,
+                        readSequence: UInt64(message.serverSequence)
+                    )
+                } catch {
+                    await handleFailure(error, generation: targetGeneration)
+                }
+            }
         case .kick(let payload):
             await runtime.clearSession(payload.message)
         }
@@ -348,6 +352,39 @@ final class IMConnectionCoordinator {
 
     private func reconnectingStatusMessage(_ message: String) -> String {
         "\(message) 正在自动重连。"
+    }
+
+    private func contactEventType(
+        for payload: IMTCPChatDomainEventPayload,
+        request: ContactRequestResponseBody?,
+        contact: ContactResponseBody?,
+        contactUserID: UUID?
+    ) -> IMTCPContactEventType {
+        switch payload.eventType {
+        case .contactRequestCreated:
+            return .friendRequestCreated
+        case .contactRequestAccepted:
+            return .friendRequestAccepted
+        case .contactRequestUpdated:
+            if contact == nil, contactUserID != nil {
+                return .contactRemoved
+            }
+
+            switch request?.status {
+            case .declined:
+                return .friendRequestDeclined
+            case .cancelled:
+                return .friendRequestCancelled
+            case .accepted:
+                return .friendRequestAccepted
+            case .pending:
+                return .friendRequestCreated
+            case nil:
+                return .contactRemoved
+            }
+        default:
+            return payload.eventType.contactEventType
+        }
     }
 }
 

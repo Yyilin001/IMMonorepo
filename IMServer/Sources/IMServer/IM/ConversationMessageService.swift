@@ -36,7 +36,7 @@ struct ConversationMessageService {
         }
 
         switch try message.decodedContent() {
-        case .text, .reply, .image, .audio, .file:
+        case .richText, .reply, .image, .audio, .file:
             try message.replaceContent(.recalled)
             try message.replaceDerivedState(.init(recallState: .recalled))
             try await message.update(on: database)
@@ -51,14 +51,12 @@ struct ConversationMessageService {
     func editMessage(
         in conversationID: UUID,
         messageID: UUID,
-        text rawText: String,
+        body rawBody: IMRichTextContent,
         requesterUserID: UUID,
         on database: any Database
     ) async throws -> ConversationMessage {
-        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
-            throw Abort(.badRequest, reason: "编辑后的消息不能为空。")
-        }
+        let body = try IMRealtimeMessageService(fixedDatabaseForLowLevelTest: database).normalizedRichTextForCommand(rawBody)
+        try await validateMentionTargets(in: body, conversationID: conversationID, on: database)
 
         guard let message = try await ConversationMessage.query(on: database)
             .filter(\.$id == messageID)
@@ -84,12 +82,12 @@ struct ConversationMessageService {
         }
 
         switch content {
-        case .text(let originalText):
-            guard originalText != text else {
+        case .richText(let originalBody):
+            guard originalBody != body else {
                 return message
             }
-        case .reply(_, let originalText):
-            guard originalText != text else {
+        case .reply(_, let originalBody):
+            guard originalBody != body else {
                 return message
             }
         case .image, .audio, .file, .recalled, .system:
@@ -98,7 +96,7 @@ struct ConversationMessageService {
 
         derivedState = IMMessageDerivedState(
             recallState: derivedState.recallState,
-            edits: derivedState.edits + [.init(editedAt: Date(), text: text)],
+            edits: derivedState.edits + [.init(editedAt: Date(), body: body)],
             reactions: derivedState.reactions
         )
         try message.replaceDerivedState(derivedState)
@@ -133,7 +131,7 @@ struct ConversationMessageService {
         }
 
         switch content {
-        case .text, .reply, .image, .audio, .file:
+        case .richText, .reply, .image, .audio, .file:
             break
         case .recalled, .system:
             throw Abort(.badRequest, reason: "当前消息不支持添加表情。")
@@ -167,6 +165,30 @@ struct ConversationMessageService {
         try message.replaceDerivedState(derivedState)
         try await message.update(on: database)
         return message
+    }
+
+    private func validateMentionTargets(
+        in body: IMRichTextContent,
+        conversationID: UUID,
+        on database: any Database
+    ) async throws {
+        let mentionUserIDs = body.entities.compactMap { entity -> UUID? in
+            if case .mention(_, let userID) = entity {
+                return userID
+            }
+            return nil
+        }
+        guard !mentionUserIDs.isEmpty else {
+            return
+        }
+
+        let memberships = try await ConversationMember.query(on: database)
+            .filter(\.$conversation.$id == conversationID)
+            .filter(\.$user.$id ~~ mentionUserIDs)
+            .all()
+        guard Set(memberships.map(\.$user.id)) == Set(mentionUserIDs) else {
+            throw Abort(.badRequest, reason: "提及的用户不在当前会话中。")
+        }
     }
 
     func makePreview(from message: ConversationMessage) throws -> IMMessagePreviewResponse {

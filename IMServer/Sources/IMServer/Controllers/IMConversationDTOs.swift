@@ -29,7 +29,11 @@ struct IMMessageSinceQuery: Content {
 }
 
 struct IMConversationMessageEditRequest: Content {
-    let text: String
+    let body: IMRichTextContent
+
+    init(body: IMRichTextContent) {
+        self.body = body
+    }
 }
 
 struct IMConversationMessageReactionRequest: Content {

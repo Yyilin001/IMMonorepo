@@ -32,7 +32,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try demoUser.requireID(),
                 serverSequence: 1,
-                content: .text("hello recall")
+                content: .richText(.plain("hello recall"))
             )
             try await message.create(on: app.db)
             let messageID = try message.requireID()
@@ -49,7 +49,7 @@ extension IMServerTests {
 
                 let recalled = try res.content.decode(IMMessageResponse.self)
                 #expect(recalled.id == messageID)
-                #expect(recalled.content == .recalled)
+                #expect(recalled.content == .richText(.plain("消息已撤回")))
             })
 
             try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
@@ -58,7 +58,7 @@ extension IMServerTests {
                 let messages = try res.content.decode([IMMessageResponse].self)
                 #expect(messages.count == 1)
                 #expect(messages[0].id == messageID)
-                #expect(messages[0].content == .recalled)
+                #expect(messages[0].content == .richText(.plain("消息已撤回")))
             })
 
             try await app.testing().test(.GET, "api/im/conversations", beforeRequest: { req in
@@ -67,7 +67,7 @@ extension IMServerTests {
                 let conversations = try res.content.decode(IMConversationPageResponse.self).items
                 #expect(conversations.count == 1)
                 #expect(conversations[0].id == conversationID)
-                #expect(conversations[0].lastMessage?.content == .recalled)
+                #expect(conversations[0].lastMessage?.content == .richText(.plain("消息已撤回")))
             })
         }
     }
@@ -98,7 +98,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try demoUser.requireID(),
                 serverSequence: 1,
-                content: .text("expired recall")
+                content: .richText(.plain("expired recall"))
             )
             try await message.create(on: app.db)
             message.createdAt = Date().addingTimeInterval(-(3 * 60))
@@ -140,7 +140,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try demoUser.requireID(),
                 serverSequence: 1,
-                content: .text("before edit")
+                content: .richText(.plain("before edit"))
             )
             try await message.create(on: app.db)
             let messageID = try message.requireID()
@@ -155,13 +155,13 @@ extension IMServerTests {
                 "api/im/conversations/\(conversationID.uuidString)/messages/\(messageID.uuidString)/edit",
                 beforeRequest: { req in
                     req.headers.bearerAuthorization = .init(token: accessToken)
-                    try req.content.encode(IMConversationMessageEditRequest(text: "after edit"))
+                    try req.content.encode(IMConversationMessageEditRequest(body: .plain("after edit")))
                 },
                 afterResponse: { res async throws in
                     #expect(res.status == .ok)
                     let edited = try res.content.decode(IMMessageResponse.self)
-                    #expect(edited.content == .text("before edit"))
-                    #expect(edited.derivedState.edits.last?.text == "after edit")
+                    #expect(edited.content == .richText(.plain("before edit")))
+                    #expect(edited.derivedState.edits.last?.body.text == "after edit")
                 }
             )
 
@@ -174,8 +174,8 @@ extension IMServerTests {
                 afterResponse: { res async throws in
                     let messages = try res.content.decode([IMMessageResponse].self)
                     #expect(messages.count == 1)
-                    #expect(messages[0].content == .text("before edit"))
-                    #expect(messages[0].derivedState.edits.last?.text == "after edit")
+                    #expect(messages[0].content == .richText(.plain("before edit")))
+                    #expect(messages[0].derivedState.edits.last?.body.text == "after edit")
                 }
             )
 
@@ -195,7 +195,7 @@ extension IMServerTests {
                             ).previewText
                         } == "after edit"
                     )
-                    #expect(conversations[0].lastMessage?.derivedState.edits.last?.text == "after edit")
+                    #expect(conversations[0].lastMessage?.derivedState.edits.last?.body.text == "after edit")
                 }
             )
         }
@@ -227,7 +227,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 1,
-                content: .text("react here")
+                content: .richText(.plain("react here"))
             )
             try await message.create(on: app.db)
             let messageID = try message.requireID()

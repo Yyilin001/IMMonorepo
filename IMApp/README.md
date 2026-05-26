@@ -125,12 +125,15 @@ static let local = AppNetworkConfiguration(
 
 ### 消息协议
 
-消息内容已经从弱类型的 `kind + body` 收紧成强类型 `content`。当前文本消息统一编码为：
+消息内容已经从弱类型的 `kind + body` 收紧成强类型 `content`。当前纯文本也统一表达为富文本消息：
 
 ```json
 {
-  "type": "text",
-  "text": "hello"
+  "type": "rich_text",
+  "body": {
+    "text": "hello",
+    "entities": []
+  }
 }
 ```
 

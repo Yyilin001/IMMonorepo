@@ -31,7 +31,7 @@ struct AIMessageStreamWriteStore {
                     conversationID: conversationID,
                     senderUserID: userID,
                     serverSequence: sequence,
-                    content: .text(""),
+                    content: .richText(.plain("")),
                     derivedState: AIMessageStreamMutationBuilder.initialDerivedState(
                         streamID: streamID,
                         updatedAt: now
@@ -134,7 +134,7 @@ struct AIMessageStreamWriteStore {
                 }
 
                 let now = Date()
-                try message.replaceContent(.text(partialText))
+                try message.replaceContent(.richText(.plain(partialText)))
                 try message.replaceDerivedState(
                     derivedState.withStreamState(
                         AIMessageStreamMutationBuilder.updatedStreamState(
@@ -231,7 +231,7 @@ struct AIMessageStreamWriteStore {
                     errorMessage: errorMessage,
                     updatedAt: now
                 )
-                try message.replaceContent(.text(finalText))
+                try message.replaceContent(.richText(.plain(finalText)))
                 try message.replaceDerivedState(derivedState.withStreamState(terminalState))
                 try await message.update(on: database)
                 if let index = try await AIMessageStreamIndex.find(streamID, on: database) {
@@ -309,7 +309,7 @@ struct AIMessageStreamWriteStore {
                     reason: reason,
                     updatedAt: now
                 )
-                try lockedMessage.replaceContent(.text(currentStream.partialText))
+                try lockedMessage.replaceContent(.richText(.plain(currentStream.partialText)))
                 try lockedMessage.replaceDerivedState(currentState.withStreamState(failedState))
                 try await lockedMessage.update(on: database)
                 lockedIndex.lifecycleState = .failed

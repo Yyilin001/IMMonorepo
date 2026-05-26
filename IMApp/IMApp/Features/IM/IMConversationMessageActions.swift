@@ -24,7 +24,7 @@ extension IMConversationMessage {
         }
 
         switch content {
-        case .text, .reply, .image, .audio, .file:
+        case .richText, .reply, .image, .audio, .file:
             return true
         case .recalled, .system:
             return false
@@ -40,7 +40,7 @@ extension IMConversationMessage {
         }
 
         switch content {
-        case .text, .reply, .image, .audio, .file:
+        case .richText, .reply, .image, .audio, .file:
             return true
         case .recalled, .system:
             return false
@@ -56,7 +56,7 @@ extension IMConversationMessage {
         }
 
         switch content {
-        case .text, .reply:
+        case .richText, .reply:
             return true
         case .image, .audio, .file, .recalled, .system:
             return false
@@ -69,7 +69,7 @@ extension IMConversationMessage {
         }
 
         switch content {
-        case .text, .reply, .image, .audio, .file:
+        case .richText, .reply, .image, .audio, .file:
             return true
         case .recalled, .system:
             return false

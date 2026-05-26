@@ -66,7 +66,7 @@ extension IMServerTests {
                     let requestID = UUID()
                     let clientMessageID = "tcp-client-message-1"
                     try await deviceA.send(
-                        type: .message,
+                        type: .sendMessage,
                         requestID: requestID,
                         payload: imTCPTextPayload(
                             conversationID: conversationID,
@@ -81,19 +81,25 @@ extension IMServerTests {
                     #expect(acknowledgement.status == "accepted")
                     #expect(acknowledgement.conversationID == conversationID.uuidString)
 
-                    let deviceAMessage = try await deviceA.nextPacket(ofType: .message)
-                        .payload.decodePayload(IMTCPMessagePayload.self)
-                    let deviceBMessage = try await deviceB.nextPacket(ofType: .message)
-                        .payload.decodePayload(IMTCPMessagePayload.self)
+                    let deviceAEvent = try await deviceA.nextPacket(ofType: .domainEvent)
+                        .payload.decodePayload(IMTCPChatDomainEventPayload.self)
+                    let deviceBEvent = try await deviceB.nextPacket(ofType: .domainEvent)
+                        .payload.decodePayload(IMTCPChatDomainEventPayload.self)
 
-                    #expect(deviceAMessage.clientMessageID == clientMessageID)
-                    #expect(deviceBMessage.clientMessageID == clientMessageID)
-                    #expect(deviceAMessage.messageID == acknowledgement.messageID)
-                    #expect(deviceBMessage.messageID == acknowledgement.messageID)
+                    guard case .messageCreated(let deviceAMessage, let deviceAClientMessageID) = deviceAEvent.body,
+                          case .messageCreated(let deviceBMessage, let deviceBClientMessageID) = deviceBEvent.body
+                    else {
+                        Issue.record("Expected message_created domain events.")
+                        return
+                    }
+                    #expect(deviceAClientMessageID == clientMessageID)
+                    #expect(deviceBClientMessageID == clientMessageID)
+                    #expect(deviceAMessage.id.uuidString == acknowledgement.messageID)
+                    #expect(deviceBMessage.id.uuidString == acknowledgement.messageID)
                     #expect(deviceAMessage.serverSequence == 1)
                     #expect(deviceBMessage.serverSequence == 1)
-                    #expect(deviceAMessage.content == .text("hello from tcp device a"))
-                    #expect(deviceBMessage.content == .text("hello from tcp device a"))
+                    #expect(deviceAMessage.content == .richText(.plain("hello from tcp device a")))
+                    #expect(deviceBMessage.content == .richText(.plain("hello from tcp device a")))
                 }
             }
         }
@@ -188,12 +194,12 @@ extension IMServerTests {
                         #expect(response.unreadCount == 0)
                     })
 
-                    let event = try await deviceB.nextPacket(ofType: .conversationEvent)
-                        .payload.decodePayload(IMTCPConversationEventPayload.self)
-                    #expect(event.eventType == .summaryUpdated)
-                    #expect(event.conversation.id == conversationID)
-                    #expect(event.conversation.lastReadSequence == 3)
-                    #expect(event.conversation.unreadCount == 0)
+                    let event = try await deviceB.nextPacket(ofType: .domainEvent)
+                        .payload.decodePayload(IMTCPChatDomainEventPayload.self)
+                    #expect(event.eventType == .conversationUpdated)
+                    #expect(event.conversation?.id == conversationID)
+                    #expect(event.conversation?.lastReadSequence == 3)
+                    #expect(event.conversation?.unreadCount == 0)
                 }
             }
         }
@@ -256,7 +262,7 @@ extension IMServerTests {
 
                     for sequence in 1...2 {
                         try await deviceA.send(
-                            type: .message,
+                            type: .sendMessage,
                             requestID: UUID(),
                             payload: imTCPTextPayload(
                                 conversationID: conversationID,
@@ -265,7 +271,7 @@ extension IMServerTests {
                             )
                         )
                         _ = try await deviceA.nextPacket(ofType: .ack)
-                        _ = try await deviceA.nextPacket(ofType: .message)
+                        _ = try await deviceA.nextPacket(ofType: .domainEvent)
                     }
 
                     try await withIMTCPTestClient(
@@ -361,7 +367,7 @@ extension IMServerTests {
                     try await activeSession.update(on: app.db)
 
                     try await client.send(
-                        type: .message,
+                        type: .sendMessage,
                         requestID: UUID(),
                         payload: imTCPTextPayload(
                             conversationID: conversationID,
@@ -595,21 +601,35 @@ extension IMServerTests {
             )
         )
 
-        let payload = IMTCPMessagePayload(
-            clientMessageID: "client-1",
-            messageID: "server-1",
-            conversationID: UUID().uuidString,
-            senderUserID: userID,
-            serverSequence: 1,
-            serverTimestamp: Date(),
-            content: .text("hello")
+        let payload = IMTCPChatDomainEventPayload(
+            eventID: UUID(),
+            eventType: .messageCreated,
+            aggregateType: "conversation",
+            aggregateID: UUID(),
+            aggregateSequence: 1,
+            occurredAt: Date(),
+            actorUserID: userID,
+            conversation: nil,
+            body: .messageCreated(
+                message: IMMessageResponse(
+                    id: UUID(),
+                    conversationID: UUID(),
+                    senderUserID: userID,
+                    clientMessageID: "client-1",
+                    serverSequence: 1,
+                    content: .richText(.plain("hello")),
+                    derivedState: MessageDerivedState(),
+                    createdAt: Date()
+                ),
+                clientMessageID: "client-1"
+            )
         )
-        await routingService.sendMessage(payload, toUserIDs: [userID], requestID: UUID())
+        await routingService.sendDomainEvent(payload, toUserIDs: [userID], requestID: UUID())
 
         let dispatches = await dispatchService.dispatches()
         #expect(dispatches.count == 1)
         #expect(dispatches.first?.nodeID == "node-b")
-        #expect(dispatches.first?.envelope.action == .message)
+        #expect(dispatches.first?.envelope.action == .domainEvent)
         #expect(dispatches.first?.envelope.targetUserIDs == [userID])
 
         try await app.asyncShutdown()
@@ -687,19 +707,23 @@ extension IMServerTests {
             )
         )
 
-        let payload = IMTCPConversationEventPayload(
-            eventType: .summaryUpdated,
-            conversation: conversation,
-            message: nil,
+        let payload = IMTCPChatDomainEventPayload(
+            eventID: UUID(),
+            eventType: .conversationUpdated,
+            aggregateType: "conversation",
+            aggregateID: conversation.id,
+            aggregateSequence: UInt64(conversation.lastReadSequence),
+            occurredAt: Date(timeIntervalSince1970: 1_700_400_001),
             actorUserID: userID,
-            serverTimestamp: Date(timeIntervalSince1970: 1_700_400_001)
+            conversation: conversation,
+            body: .conversationChanged
         )
-        await routingService.sendConversationEvent(payload, toUserID: userID, requestID: UUID())
+        await routingService.sendDomainEvent(payload, toUserIDs: [userID], requestID: UUID())
 
         let dispatches = await dispatchService.dispatches()
         #expect(dispatches.count == 1)
         #expect(dispatches.first?.nodeID == "node-b")
-        #expect(dispatches.first?.envelope.action == .conversationEvent)
+        #expect(dispatches.first?.envelope.action == .domainEvent)
         #expect(dispatches.first?.envelope.targetUserIDs == [userID])
 
         try await app.asyncShutdown()

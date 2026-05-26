@@ -20,7 +20,7 @@ import java.util.UUID
 data class IMTCPClientConfiguration(
     val host: String,
     val port: Int,
-    val protocolVersion: Int = 1,
+    val protocolVersion: Int = 3,
     val deviceID: String? = null,
     val deviceName: String? = null,
     val platform: String? = "android",

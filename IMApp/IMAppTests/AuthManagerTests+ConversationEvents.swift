@@ -18,7 +18,7 @@ extension AuthManagerTests {
                     id: recalledMessageID,
                     senderUserID: Self.user.id,
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "待撤回消息"],
                     createdAt: Date(timeIntervalSince1970: 1_700_600_350)
                 ),
@@ -82,7 +82,7 @@ extension AuthManagerTests {
                                 senderUserID: Self.user.id,
                                 clientMessageID: nil,
                                 serverSequence: 1,
-                                kind: "text",
+                                kind: "rich_text",
                                 body: ["text": "待撤回消息"],
                                 createdAt: Date(timeIntervalSince1970: 1_700_600_350)
                             )
@@ -169,7 +169,7 @@ extension AuthManagerTests {
                         id: messageID,
                         senderUserID: Self.user.id,
                         serverSequence: 1,
-                        content: .text("编辑前正文"),
+                        content: .richText(.plain("编辑前正文")),
                         createdAt: originalTimestamp
                     ),
                     lastReadSequence: 1,
@@ -186,7 +186,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: "client-edit-cross-device",
                         serverSequence: 1,
-                        content: .text("编辑前正文"),
+                        content: .richText(.plain("编辑前正文")),
                         createdAt: originalTimestamp
                     )
                 ]
@@ -248,7 +248,7 @@ extension AuthManagerTests {
                 let response = await state.editMessage(
                     id: messageID,
                     in: conversationID,
-                    text: payload.text
+                    text: payload.body.text
                 )
                 return HTTPFixtures.response(
                     statusCode: 200,
@@ -320,7 +320,7 @@ extension AuthManagerTests {
                 let selectedConversation = secondManager.imConversationStore.selectedConversation
                 return selectedConversation?.lastMessagePreview == "编辑后正文"
                     && selectedConversation?.messages.last?.text == "编辑后正文"
-                    && selectedConversation?.messages.last?.derivedState.edits.last?.text == "编辑后正文"
+                    && selectedConversation?.messages.last?.derivedState.edits.last?.body.text == "编辑后正文"
             }
         }
 
@@ -336,7 +336,7 @@ extension AuthManagerTests {
             await MainActor.run {
                 let selectedConversation = secondManager.imConversationStore.selectedConversation
                 return selectedConversation?.messages.last?.text == "编辑后正文"
-                    && selectedConversation?.messages.last?.derivedState.edits.last?.text == "编辑后正文"
+                    && selectedConversation?.messages.last?.derivedState.edits.last?.body.text == "编辑后正文"
                     && secondManager.imConnectionStatus == .connected
             }
         }
@@ -367,7 +367,7 @@ extension AuthManagerTests {
                         id: messageID,
                         senderUserID: peerUserID,
                         serverSequence: 1,
-                        content: .text("reaction 目标"),
+                        content: .richText(.plain("reaction 目标")),
                         createdAt: originalTimestamp
                     ),
                     lastReadSequence: 1,
@@ -384,7 +384,7 @@ extension AuthManagerTests {
                         senderUserID: peerUserID,
                         clientMessageID: nil,
                         serverSequence: 1,
-                        content: .text("reaction 目标"),
+                        content: .richText(.plain("reaction 目标")),
                         createdAt: originalTimestamp
                     )
                 ]
@@ -558,7 +558,7 @@ extension AuthManagerTests {
                 senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                 clientMessageID: nil,
                 serverSequence: 1,
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "历史中的旧消息"],
                 createdAt: Date(timeIntervalSince1970: 1_700_610_000)
             )
@@ -574,7 +574,7 @@ extension AuthManagerTests {
                     id: historicalMessageID,
                     senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "历史中的旧消息"],
                     createdAt: Date(timeIntervalSince1970: 1_700_610_000)
                 ),
@@ -675,7 +675,7 @@ extension AuthManagerTests {
                 senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                 clientMessageID: nil,
                 serverSequence: 2,
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "稍后会被撤回"],
                 createdAt: Date(timeIntervalSince1970: 1_700_610_100)
             ),
@@ -741,7 +741,7 @@ extension AuthManagerTests {
                         id: UUID(uuidString: "66666666-1111-2222-3333-aaaaaaaaaaaa")!,
                         senderUserID: Self.user.id,
                         serverSequence: 1,
-                        kind: "text",
+                        kind: "rich_text",
                         body: ["text": "当前会话消息"],
                         createdAt: Date(timeIntervalSince1970: 1_700_820_000)
                     ),
@@ -760,7 +760,7 @@ extension AuthManagerTests {
                         id: backgroundHistoryMessageID,
                         senderUserID: peerUserID,
                         serverSequence: 1,
-                        kind: "text",
+                        kind: "rich_text",
                         body: ["text": "后台历史消息"],
                         createdAt: Date(timeIntervalSince1970: 1_700_820_100)
                     ),
@@ -778,7 +778,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 1,
-                        kind: "text",
+                        kind: "rich_text",
                         body: ["text": "当前会话消息"],
                         createdAt: Date(timeIntervalSince1970: 1_700_820_000)
                     )
@@ -790,7 +790,7 @@ extension AuthManagerTests {
                         senderUserID: peerUserID,
                         clientMessageID: nil,
                         serverSequence: 1,
-                        kind: "text",
+                        kind: "rich_text",
                         body: ["text": "后台历史消息"],
                         createdAt: Date(timeIntervalSince1970: 1_700_820_100)
                     )
@@ -902,7 +902,7 @@ extension AuthManagerTests {
                     senderUserID: peerUserID,
                     serverSequence: 2,
                     serverTimestamp: Date(timeIntervalSince1970: 1_700_820_200),
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "后台实时未读"]
                 )
             )
@@ -929,7 +929,7 @@ extension AuthManagerTests {
                 senderUserID: peerUserID,
                 clientMessageID: nil,
                 serverSequence: 3,
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "稍后被另一端撤回"],
                 createdAt: Date(timeIntervalSince1970: 1_700_820_300)
             ),
@@ -1015,7 +1015,7 @@ extension AuthManagerTests {
                         id: selectedMessageID,
                         senderUserID: Self.user.id,
                         serverSequence: 1,
-                        content: .text("当前会话消息"),
+                        content: .richText(.plain("当前会话消息")),
                         createdAt: Date(timeIntervalSince1970: 1_700_830_000)
                     ),
                     lastReadSequence: 1,
@@ -1033,7 +1033,7 @@ extension AuthManagerTests {
                         id: backgroundBaselineMessageID,
                         senderUserID: peerUserID,
                         serverSequence: 1,
-                        content: .text("后台已加载基线"),
+                        content: .richText(.plain("后台已加载基线")),
                         createdAt: Date(timeIntervalSince1970: 1_700_830_100)
                     ),
                     lastReadSequence: 1,
@@ -1050,7 +1050,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 1,
-                        content: .text("当前会话消息"),
+                        content: .richText(.plain("当前会话消息")),
                         createdAt: Date(timeIntervalSince1970: 1_700_830_000)
                     )
                 ],
@@ -1061,7 +1061,7 @@ extension AuthManagerTests {
                         senderUserID: peerUserID,
                         clientMessageID: nil,
                         serverSequence: 1,
-                        content: .text("后台已加载基线"),
+                        content: .richText(.plain("后台已加载基线")),
                         createdAt: Date(timeIntervalSince1970: 1_700_830_100)
                     )
                 ]
@@ -1172,7 +1172,7 @@ extension AuthManagerTests {
                         senderUserID: peerUserID,
                         clientMessageID: nil,
                         serverSequence: 1,
-                        content: .text("后台已加载基线"),
+                        content: .richText(.plain("后台已加载基线")),
                         createdAt: Date(timeIntervalSince1970: 1_700_830_100)
                     )
                 ],
@@ -1192,7 +1192,7 @@ extension AuthManagerTests {
                 senderUserID: peerUserID,
                 clientMessageID: nil,
                 serverSequence: 2,
-                content: .text("稍后会被撤回的引用目标"),
+                content: .richText(.plain("稍后会被撤回的引用目标")),
                 createdAt: Date(timeIntervalSince1970: 1_700_830_200)
             ),
             unreadCount: 1,
@@ -1211,7 +1211,7 @@ extension AuthManagerTests {
                         senderUserID: peerUserID,
                         previewText: "稍后会被撤回的引用目标"
                     ),
-                    text: "后台 reply 正文"
+                    body: .plain("后台 reply 正文")
                 ),
                 createdAt: Date(timeIntervalSince1970: 1_700_830_300)
             ),
@@ -1324,7 +1324,7 @@ extension AuthManagerTests {
                                 serverMessageID: selectedMessageID.uuidString,
                                 senderUserID: Self.user.id,
                                 serverSequence: 1,
-                                content: .text("当前会话消息"),
+                                content: .richText(.plain("当前会话消息")),
                                 direction: .outgoing,
                                 createdAt: Date(timeIntervalSince1970: 1_700_840_000),
                                 deliveryState: .sent
@@ -1359,7 +1359,7 @@ extension AuthManagerTests {
                                         senderUserID: peerUserID,
                                         previewText: "稍后会被撤回的引用目标"
                                     ),
-                                    text: "缓存里的 reply"
+                                    body: .plain("缓存里的 reply")
                                 ),
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_700_840_400),
@@ -1394,7 +1394,7 @@ extension AuthManagerTests {
                         id: selectedMessageID,
                         senderUserID: Self.user.id,
                         serverSequence: 1,
-                        content: .text("当前会话消息"),
+                        content: .richText(.plain("当前会话消息")),
                         createdAt: Date(timeIntervalSince1970: 1_700_840_000)
                     ),
                     lastReadSequence: 1,
@@ -1418,7 +1418,7 @@ extension AuthManagerTests {
                                 senderUserID: peerUserID,
                                 previewText: "稍后会被撤回的引用目标"
                             ),
-                            text: "缓存里的 reply"
+                            body: .plain("缓存里的 reply")
                         ),
                         createdAt: Date(timeIntervalSince1970: 1_700_840_400)
                     ),
@@ -1436,7 +1436,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 1,
-                        content: .text("当前会话消息"),
+                        content: .richText(.plain("当前会话消息")),
                         createdAt: Date(timeIntervalSince1970: 1_700_840_000)
                     )
                 ],
@@ -1447,7 +1447,7 @@ extension AuthManagerTests {
                         senderUserID: peerUserID,
                         clientMessageID: nil,
                         serverSequence: 2,
-                        content: .text("稍后会被撤回的引用目标"),
+                        content: .richText(.plain("稍后会被撤回的引用目标")),
                         createdAt: Date(timeIntervalSince1970: 1_700_840_200)
                     ),
                     IMConversationMessageResponseBody(
@@ -1456,7 +1456,7 @@ extension AuthManagerTests {
                         senderUserID: peerUserID,
                         clientMessageID: nil,
                         serverSequence: 3,
-                        content: .text("中间历史消息"),
+                        content: .richText(.plain("中间历史消息")),
                         createdAt: Date(timeIntervalSince1970: 1_700_840_300)
                     ),
                     IMConversationMessageResponseBody(
@@ -1471,7 +1471,7 @@ extension AuthManagerTests {
                                 senderUserID: peerUserID,
                                 previewText: "稍后会被撤回的引用目标"
                             ),
-                            text: "缓存里的 reply"
+                            body: .plain("缓存里的 reply")
                         ),
                         createdAt: Date(timeIntervalSince1970: 1_700_840_400)
                     )
@@ -1536,7 +1536,7 @@ extension AuthManagerTests {
                                 senderUserID: peerUserID,
                                 clientMessageID: nil,
                                 serverSequence: 3,
-                                content: .text("中间历史消息"),
+                                content: .richText(.plain("中间历史消息")),
                                 createdAt: Date(timeIntervalSince1970: 1_700_840_300)
                             )
                         ])
@@ -1706,7 +1706,7 @@ extension AuthManagerTests {
                 senderUserID: peerUserID,
                 clientMessageID: nil,
                 serverSequence: 5,
-                content: .text("重连后补进的新消息"),
+                content: .richText(.plain("重连后补进的新消息")),
                 createdAt: Date(timeIntervalSince1970: 1_700_840_500)
             ),
             unreadCount: 0,
@@ -1805,7 +1805,7 @@ extension AuthManagerTests {
                                                 senderUserID: peerUserID,
                                                 previewText: "更早的引用目标"
                                             ),
-                                            text: "reply body"
+                                            body: .plain("reply body")
                                         ),
                                         createdAt: Date(timeIntervalSince1970: 1_700_960_400)
                                     ),
@@ -1843,7 +1843,7 @@ extension AuthManagerTests {
                                         senderUserID: peerUserID,
                                         previewText: "更早的引用目标"
                                     ),
-                                    text: "reply body"
+                                    body: .plain("reply body")
                                 ),
                                 createdAt: Date(timeIntervalSince1970: 1_700_960_400)
                             )
@@ -1860,7 +1860,7 @@ extension AuthManagerTests {
                                 senderUserID: peerUserID,
                                 clientMessageID: nil,
                                 serverSequence: 3,
-                                content: .text("中间历史消息"),
+                                content: .richText(.plain("中间历史消息")),
                                 createdAt: Date(timeIntervalSince1970: 1_700_960_300)
                             )
                         ])

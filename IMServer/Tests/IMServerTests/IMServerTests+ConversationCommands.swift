@@ -339,7 +339,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: userID,
                 serverSequence: 1,
-                content: .text("partial legacy"),
+                content: .richText(.plain("partial legacy")),
                 derivedState: MessageDerivedState(streamState: streamState)
             )
             try await legacyMessage.create(on: app.db)
@@ -396,7 +396,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: userID,
                 serverSequence: 1,
-                content: .text("audit partial"),
+                content: .richText(.plain("audit partial")),
                 derivedState: MessageDerivedState(streamState: streamState)
             )
             try await message.create(on: app.db)

@@ -28,7 +28,7 @@ extension IMServerTests {
                     senderUserID: try otherUser.requireID(),
                     serverSequence: sequence,
                     clientMessageID: "client-read-\(sequence)",
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "read-\(sequence)"]
                 ).create(on: app.db)
             }
@@ -133,7 +133,7 @@ extension IMServerTests {
                     senderUserID: try otherUser.requireID(),
                     serverSequence: sequence,
                     clientMessageID: "client-cross-read-\(sequence)",
-                    content: .text("cross-read-\(sequence)")
+                    content: .richText(.plain("cross-read-\(sequence)"))
                 ).create(on: app.db)
             }
             try await IMConversationSummaryProjectionService(db: app.db).refreshConversationSummaries(

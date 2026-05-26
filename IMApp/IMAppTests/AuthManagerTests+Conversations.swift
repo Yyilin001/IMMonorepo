@@ -566,7 +566,7 @@ extension AuthManagerTests {
                         id: UUID(uuidString: "11111111-7777-8888-9999-aaaaaaaaaaaa")!,
                         senderUserID: Self.user.id,
                         serverSequence: 1,
-                        content: .text("当前选中的会话"),
+                        content: .richText(.plain("当前选中的会话")),
                         createdAt: Date(timeIntervalSince1970: 1_700_900_000)
                     ),
                     lastReadSequence: 1,
@@ -584,7 +584,7 @@ extension AuthManagerTests {
                         id: UUID(uuidString: "22222222-7777-8888-9999-aaaaaaaaaaaa")!,
                         senderUserID: Self.user.id,
                         serverSequence: 1,
-                        content: .text("备用摘要"),
+                        content: .richText(.plain("备用摘要")),
                         createdAt: Date(timeIntervalSince1970: 1_700_899_900)
                     ),
                     lastReadSequence: 1,
@@ -601,7 +601,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 1,
-                        content: .text("当前选中的会话"),
+                        content: .richText(.plain("当前选中的会话")),
                         createdAt: Date(timeIntervalSince1970: 1_700_900_000)
                     )
                 ]
@@ -712,7 +712,7 @@ extension AuthManagerTests {
                                 serverMessageID: "removed-server-1",
                                 senderUserID: Self.user.id,
                                 serverSequence: 1,
-                                kind: "text",
+                                kind: "rich_text",
                                 text: "缓存旧历史 1",
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_700_920_000),
@@ -725,7 +725,7 @@ extension AuthManagerTests {
                                 serverMessageID: "removed-server-2",
                                 senderUserID: Self.user.id,
                                 serverSequence: 2,
-                                kind: "text",
+                                kind: "rich_text",
                                 text: "缓存旧历史 2",
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_700_920_010),
@@ -755,7 +755,7 @@ extension AuthManagerTests {
                                 serverMessageID: "fallback-server-1",
                                 senderUserID: Self.user.id,
                                 serverSequence: 1,
-                                kind: "text",
+                                kind: "rich_text",
                                 text: "回退历史 1",
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_700_920_020),
@@ -790,7 +790,7 @@ extension AuthManagerTests {
                         id: UUID(uuidString: "11111111-6666-7777-8888-aaaaaaaaaaaa")!,
                         senderUserID: Self.user.id,
                         serverSequence: 2,
-                        content: .text("缓存旧历史 2"),
+                        content: .richText(.plain("缓存旧历史 2")),
                         createdAt: Date(timeIntervalSince1970: 1_700_920_010)
                     ),
                     lastReadSequence: 2,
@@ -808,7 +808,7 @@ extension AuthManagerTests {
                         id: UUID(uuidString: "22222222-6666-7777-8888-aaaaaaaaaaaa")!,
                         senderUserID: Self.user.id,
                         serverSequence: 2,
-                        content: .text("回退历史 2"),
+                        content: .richText(.plain("回退历史 2")),
                         createdAt: Date(timeIntervalSince1970: 1_700_920_040)
                     ),
                     lastReadSequence: 1,
@@ -825,7 +825,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 2,
-                        content: .text("缓存旧历史 2"),
+                        content: .richText(.plain("缓存旧历史 2")),
                         createdAt: Date(timeIntervalSince1970: 1_700_920_010)
                     )
                 ],
@@ -836,7 +836,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 1,
-                        content: .text("回退历史 1"),
+                        content: .richText(.plain("回退历史 1")),
                         createdAt: Date(timeIntervalSince1970: 1_700_920_020)
                     ),
                     IMConversationMessageResponseBody(
@@ -845,7 +845,7 @@ extension AuthManagerTests {
                         senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                         clientMessageID: nil,
                         serverSequence: 2,
-                        content: .text("回退历史 2"),
+                        content: .richText(.plain("回退历史 2")),
                         createdAt: Date(timeIntervalSince1970: 1_700_920_040)
                     )
                 ]
@@ -1000,7 +1000,7 @@ extension AuthManagerTests {
                                 serverMessageID: "rejoined-server-1",
                                 senderUserID: peerUserID,
                                 serverSequence: 1,
-                                content: .text("重新加入前的旧历史 1"),
+                                content: .richText(.plain("重新加入前的旧历史 1")),
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_700_970_000),
                                 deliveryState: .received
@@ -1012,7 +1012,7 @@ extension AuthManagerTests {
                                 serverMessageID: "rejoined-server-2",
                                 senderUserID: peerUserID,
                                 serverSequence: 2,
-                                content: .text("重新加入前的旧历史 2"),
+                                content: .richText(.plain("重新加入前的旧历史 2")),
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_700_970_010),
                                 deliveryState: .received
@@ -1041,7 +1041,7 @@ extension AuthManagerTests {
                                 serverMessageID: "fallback-server-1",
                                 senderUserID: peerUserID,
                                 serverSequence: 1,
-                                content: .text("备用历史 1"),
+                                content: .richText(.plain("备用历史 1")),
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_700_970_020),
                                 deliveryState: .received
@@ -1075,7 +1075,7 @@ extension AuthManagerTests {
                         id: UUID(uuidString: "11111111-1212-3434-5656-aaaaaaaaaaaa")!,
                         senderUserID: peerUserID,
                         serverSequence: 1,
-                        content: .text("备用历史 1"),
+                        content: .richText(.plain("备用历史 1")),
                         createdAt: Date(timeIntervalSince1970: 1_700_970_020)
                     ),
                     lastReadSequence: 1,
@@ -1092,7 +1092,7 @@ extension AuthManagerTests {
                         senderUserID: peerUserID,
                         clientMessageID: nil,
                         serverSequence: 1,
-                        content: .text("备用历史 1"),
+                        content: .richText(.plain("备用历史 1")),
                         createdAt: Date(timeIntervalSince1970: 1_700_970_020)
                     )
                 ]
@@ -1195,7 +1195,7 @@ extension AuthManagerTests {
                     id: UUID(uuidString: "22222222-1212-3434-5656-aaaaaaaaaaaa")!,
                     senderUserID: peerUserID,
                     serverSequence: 5,
-                    content: .text("重新加入后的可见消息"),
+                    content: .richText(.plain("重新加入后的可见消息")),
                     createdAt: Date(timeIntervalSince1970: 1_700_970_200)
                 ),
                 lastReadSequence: 5,
@@ -1211,7 +1211,7 @@ extension AuthManagerTests {
                 senderUserID: peerUserID,
                 clientMessageID: nil,
                 serverSequence: 5,
-                content: .text("重新加入后的可见消息"),
+                content: .richText(.plain("重新加入后的可见消息")),
                 createdAt: Date(timeIntervalSince1970: 1_700_970_200)
             ),
             unreadCount: 0,

@@ -72,11 +72,11 @@ public enum MessageRecallState: Codable, Equatable, Sendable {
 
 public struct MessageEdit: Codable, Equatable, Sendable {
     public let editedAt: Date?
-    public let text: String
+    public let body: IMRichTextContent
 
-    public init(editedAt: Date?, text: String) {
+    public init(editedAt: Date?, body: IMRichTextContent) {
         self.editedAt = editedAt
-        self.text = text
+        self.body = body
     }
 }
 
@@ -91,8 +91,8 @@ public struct MessageReaction: Codable, Equatable, Sendable {
 }
 
 public enum MessagePrimaryContent: Equatable, Sendable {
-    case text(String)
-    case reply(reference: IMReplyReference, text: String)
+    case richText(IMRichTextContent)
+    case reply(reference: IMReplyReference, body: IMRichTextContent)
     case system(IMSystemEvent)
     case image(IMMediaAsset)
     case audio(IMMediaAsset)
@@ -127,10 +127,10 @@ public struct MessagePresentation: Equatable, Sendable {
         }
 
         switch primaryContent {
-        case .text(let text):
-            return effectiveText(fallback: text)
-        case .reply(_, let text):
-            return effectiveText(fallback: text)
+        case .richText(let body):
+            return effectiveText(fallback: body.text)
+        case .reply(_, let body):
+            return effectiveText(fallback: body.text)
         case .system(let event):
             return event.displayText
         case .image(let asset):
@@ -150,10 +150,10 @@ public struct MessagePresentation: Equatable, Sendable {
         }
 
         switch primaryContent {
-        case .text(let text):
-            return effectiveText(fallback: text)
-        case .reply(_, let text):
-            return effectiveText(fallback: text)
+        case .richText(let body):
+            return effectiveText(fallback: body.text)
+        case .reply(_, let body):
+            return effectiveText(fallback: body.text)
         case .system(let event):
             return event.displayText
         case .image(let asset):
@@ -178,7 +178,7 @@ public struct MessagePresentation: Equatable, Sendable {
         switch primaryContent {
         case .image(let asset), .audio(let asset), .file(let asset):
             return asset
-        case .text, .reply, .system, .none:
+        case .richText, .reply, .system, .none:
             return nil
         }
     }
@@ -189,7 +189,7 @@ public struct MessagePresentation: Equatable, Sendable {
         }
 
         switch primaryContent {
-        case .text, .reply, .image, .audio, .file:
+        case .richText, .reply, .image, .audio, .file:
             return true
         case .system, .none:
             return false
@@ -202,10 +202,10 @@ public struct MessagePresentation: Equatable, Sendable {
         }
 
         switch primaryContent {
-        case .text(let text):
-            return [effectiveText(fallback: text)]
-        case .reply(let reference, let text):
-            return [effectiveText(fallback: text), reference.previewText]
+        case .richText(let body):
+            return [effectiveText(fallback: body.text)]
+        case .reply(let reference, let body):
+            return [effectiveText(fallback: body.text), reference.previewText]
         case .system(let event):
             return [event.displayText]
         case .image(let asset), .audio(let asset), .file(let asset):
@@ -221,7 +221,7 @@ public struct MessagePresentation: Equatable, Sendable {
            !streamState.partialText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return streamState.partialText
         }
-        let latestEditedText = derivedState.edits.last?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let latestEditedText = derivedState.edits.last?.body.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let latestEditedText, !latestEditedText.isEmpty else {
             return fallback
         }
@@ -240,10 +240,10 @@ public typealias IMMessagePresentation = MessagePresentation
 public extension IMMessageContent {
     var primaryContent: MessagePrimaryContent? {
         switch self {
-        case .text(let text):
-            return .text(text)
-        case .reply(let reference, let text):
-            return .reply(reference: reference, text: text)
+        case .richText(let body):
+            return .richText(body)
+        case .reply(let reference, let body):
+            return .reply(reference: reference, body: body)
         case .system(let event):
             return .system(event)
         case .image(let asset):

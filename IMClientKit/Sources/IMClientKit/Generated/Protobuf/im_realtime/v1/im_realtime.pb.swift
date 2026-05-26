@@ -80,12 +80,12 @@ struct IMRTPacket: Sendable {
     set {body = .heartbeatAck(newValue)}
   }
 
-  var message: IMRTMessagePayload {
+  var sendMessage: IMRTSendMessageCommand {
     get {
-      if case .message(let v)? = body {return v}
-      return IMRTMessagePayload()
+      if case .sendMessage(let v)? = body {return v}
+      return IMRTSendMessageCommand()
     }
-    set {body = .message(newValue)}
+    set {body = .sendMessage(newValue)}
   }
 
   var ack: IMRTAck {
@@ -96,20 +96,12 @@ struct IMRTPacket: Sendable {
     set {body = .ack(newValue)}
   }
 
-  var conversationEvent: IMRTConversationEvent {
+  var domainEvent: IMRTChatDomainEvent {
     get {
-      if case .conversationEvent(let v)? = body {return v}
-      return IMRTConversationEvent()
+      if case .domainEvent(let v)? = body {return v}
+      return IMRTChatDomainEvent()
     }
-    set {body = .conversationEvent(newValue)}
-  }
-
-  var contactEvent: IMRTContactEvent {
-    get {
-      if case .contactEvent(let v)? = body {return v}
-      return IMRTContactEvent()
-    }
-    set {body = .contactEvent(newValue)}
+    set {body = .domainEvent(newValue)}
   }
 
   var kick: IMRTKick {
@@ -128,10 +120,9 @@ struct IMRTPacket: Sendable {
     case authError(IMRTAuthError)
     case heartbeat(IMRTHeartbeat)
     case heartbeatAck(IMRTHeartbeat)
-    case message(IMRTMessagePayload)
+    case sendMessage(IMRTSendMessageCommand)
     case ack(IMRTAck)
-    case conversationEvent(IMRTConversationEvent)
-    case contactEvent(IMRTContactEvent)
+    case domainEvent(IMRTChatDomainEvent)
     case kick(IMRTKick)
 
   }
@@ -267,122 +258,73 @@ struct IMRTAck: Sendable {
   fileprivate var _conversationID: String? = nil
 }
 
-struct IMRTMessagePayload: @unchecked Sendable {
+struct IMRTSendMessageCommand: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var clientMessageID: String {
-    get {return _storage._clientMessageID ?? String()}
-    set {_uniqueStorage()._clientMessageID = newValue}
+    get {return _clientMessageID ?? String()}
+    set {_clientMessageID = newValue}
   }
   /// Returns true if `clientMessageID` has been explicitly set.
-  var hasClientMessageID: Bool {return _storage._clientMessageID != nil}
+  var hasClientMessageID: Bool {return self._clientMessageID != nil}
   /// Clears the value of `clientMessageID`. Subsequent reads from it will return its default value.
-  mutating func clearClientMessageID() {_uniqueStorage()._clientMessageID = nil}
+  mutating func clearClientMessageID() {self._clientMessageID = nil}
 
-  var messageID: String {
-    get {return _storage._messageID ?? String()}
-    set {_uniqueStorage()._messageID = newValue}
-  }
-  /// Returns true if `messageID` has been explicitly set.
-  var hasMessageID: Bool {return _storage._messageID != nil}
-  /// Clears the value of `messageID`. Subsequent reads from it will return its default value.
-  mutating func clearMessageID() {_uniqueStorage()._messageID = nil}
-
-  var conversationID: String {
-    get {return _storage._conversationID}
-    set {_uniqueStorage()._conversationID = newValue}
-  }
-
-  var senderUserID: String {
-    get {return _storage._senderUserID ?? String()}
-    set {_uniqueStorage()._senderUserID = newValue}
-  }
-  /// Returns true if `senderUserID` has been explicitly set.
-  var hasSenderUserID: Bool {return _storage._senderUserID != nil}
-  /// Clears the value of `senderUserID`. Subsequent reads from it will return its default value.
-  mutating func clearSenderUserID() {_uniqueStorage()._senderUserID = nil}
-
-  var serverSequence: UInt64 {
-    get {return _storage._serverSequence ?? 0}
-    set {_uniqueStorage()._serverSequence = newValue}
-  }
-  /// Returns true if `serverSequence` has been explicitly set.
-  var hasServerSequence: Bool {return _storage._serverSequence != nil}
-  /// Clears the value of `serverSequence`. Subsequent reads from it will return its default value.
-  mutating func clearServerSequence() {_uniqueStorage()._serverSequence = nil}
-
-  var serverTimestampMs: Int64 {
-    get {return _storage._serverTimestampMs ?? 0}
-    set {_uniqueStorage()._serverTimestampMs = newValue}
-  }
-  /// Returns true if `serverTimestampMs` has been explicitly set.
-  var hasServerTimestampMs: Bool {return _storage._serverTimestampMs != nil}
-  /// Clears the value of `serverTimestampMs`. Subsequent reads from it will return its default value.
-  mutating func clearServerTimestampMs() {_uniqueStorage()._serverTimestampMs = nil}
+  var conversationID: String = String()
 
   var content: IMRTMessageContent {
-    get {return _storage._content ?? IMRTMessageContent()}
-    set {_uniqueStorage()._content = newValue}
+    get {return _content ?? IMRTMessageContent()}
+    set {_content = newValue}
   }
   /// Returns true if `content` has been explicitly set.
-  var hasContent: Bool {return _storage._content != nil}
+  var hasContent: Bool {return self._content != nil}
   /// Clears the value of `content`. Subsequent reads from it will return its default value.
-  mutating func clearContent() {_uniqueStorage()._content = nil}
-
-  var derivedState: IMRTMessageDerivedState {
-    get {return _storage._derivedState ?? IMRTMessageDerivedState()}
-    set {_uniqueStorage()._derivedState = newValue}
-  }
-  /// Returns true if `derivedState` has been explicitly set.
-  var hasDerivedState: Bool {return _storage._derivedState != nil}
-  /// Clears the value of `derivedState`. Subsequent reads from it will return its default value.
-  mutating func clearDerivedState() {_uniqueStorage()._derivedState = nil}
+  mutating func clearContent() {self._content = nil}
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 
-  fileprivate var _storage = _StorageClass.defaultInstance
+  fileprivate var _clientMessageID: String? = nil
+  fileprivate var _content: IMRTMessageContent? = nil
 }
 
-struct IMRTConversationEvent: @unchecked Sendable {
+struct IMRTChatDomainEvent: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
+
+  var eventID: String {
+    get {return _storage._eventID}
+    set {_uniqueStorage()._eventID = newValue}
+  }
 
   var eventType: String {
     get {return _storage._eventType}
     set {_uniqueStorage()._eventType = newValue}
   }
 
-  var conversation: IMRTConversationSummary {
-    get {return _storage._conversation ?? IMRTConversationSummary()}
-    set {_uniqueStorage()._conversation = newValue}
+  var aggregateType: String {
+    get {return _storage._aggregateType}
+    set {_uniqueStorage()._aggregateType = newValue}
   }
-  /// Returns true if `conversation` has been explicitly set.
-  var hasConversation: Bool {return _storage._conversation != nil}
-  /// Clears the value of `conversation`. Subsequent reads from it will return its default value.
-  mutating func clearConversation() {_uniqueStorage()._conversation = nil}
 
-  var message: IMRTConversationMessage {
-    get {return _storage._message ?? IMRTConversationMessage()}
-    set {_uniqueStorage()._message = newValue}
+  var aggregateID: String {
+    get {return _storage._aggregateID}
+    set {_uniqueStorage()._aggregateID = newValue}
   }
-  /// Returns true if `message` has been explicitly set.
-  var hasMessage: Bool {return _storage._message != nil}
-  /// Clears the value of `message`. Subsequent reads from it will return its default value.
-  mutating func clearMessage() {_uniqueStorage()._message = nil}
 
-  var stream: IMRTMessageStreamPayload {
-    get {return _storage._stream ?? IMRTMessageStreamPayload()}
-    set {_uniqueStorage()._stream = newValue}
+  var aggregateSequence: UInt64 {
+    get {return _storage._aggregateSequence}
+    set {_uniqueStorage()._aggregateSequence = newValue}
   }
-  /// Returns true if `stream` has been explicitly set.
-  var hasStream: Bool {return _storage._stream != nil}
-  /// Clears the value of `stream`. Subsequent reads from it will return its default value.
-  mutating func clearStream() {_uniqueStorage()._stream = nil}
+
+  var occurredAtMs: Int64 {
+    get {return _storage._occurredAtMs}
+    set {_uniqueStorage()._occurredAtMs = newValue}
+  }
 
   var actorUserID: String {
     get {return _storage._actorUserID ?? String()}
@@ -393,59 +335,449 @@ struct IMRTConversationEvent: @unchecked Sendable {
   /// Clears the value of `actorUserID`. Subsequent reads from it will return its default value.
   mutating func clearActorUserID() {_uniqueStorage()._actorUserID = nil}
 
-  var serverTimestampMs: Int64 {
-    get {return _storage._serverTimestampMs}
-    set {_uniqueStorage()._serverTimestampMs = newValue}
+  var conversation: IMRTConversationSummary {
+    get {return _storage._conversation ?? IMRTConversationSummary()}
+    set {_uniqueStorage()._conversation = newValue}
+  }
+  /// Returns true if `conversation` has been explicitly set.
+  var hasConversation: Bool {return _storage._conversation != nil}
+  /// Clears the value of `conversation`. Subsequent reads from it will return its default value.
+  mutating func clearConversation() {_uniqueStorage()._conversation = nil}
+
+  var body: OneOf_Body? {
+    get {return _storage._body}
+    set {_uniqueStorage()._body = newValue}
   }
 
-  var messageIds: [String] {
-    get {return _storage._messageIds}
-    set {_uniqueStorage()._messageIds = newValue}
+  var messageCreated: IMRTMessageCreatedEvent {
+    get {
+      if case .messageCreated(let v)? = _storage._body {return v}
+      return IMRTMessageCreatedEvent()
+    }
+    set {_uniqueStorage()._body = .messageCreated(newValue)}
   }
 
-  var favoriteChangedMessageID: String {
-    get {return _storage._favoriteChangedMessageID ?? String()}
-    set {_uniqueStorage()._favoriteChangedMessageID = newValue}
+  var messageEdited: IMRTMessageEditedEvent {
+    get {
+      if case .messageEdited(let v)? = _storage._body {return v}
+      return IMRTMessageEditedEvent()
+    }
+    set {_uniqueStorage()._body = .messageEdited(newValue)}
   }
-  /// Returns true if `favoriteChangedMessageID` has been explicitly set.
-  var hasFavoriteChangedMessageID: Bool {return _storage._favoriteChangedMessageID != nil}
-  /// Clears the value of `favoriteChangedMessageID`. Subsequent reads from it will return its default value.
-  mutating func clearFavoriteChangedMessageID() {_uniqueStorage()._favoriteChangedMessageID = nil}
 
-  var isFavorited: Bool {
-    get {return _storage._isFavorited ?? false}
-    set {_uniqueStorage()._isFavorited = newValue}
+  var messageRevoked: IMRTMessageRevokedEvent {
+    get {
+      if case .messageRevoked(let v)? = _storage._body {return v}
+      return IMRTMessageRevokedEvent()
+    }
+    set {_uniqueStorage()._body = .messageRevoked(newValue)}
   }
-  /// Returns true if `isFavorited` has been explicitly set.
-  var hasIsFavorited: Bool {return _storage._isFavorited != nil}
-  /// Clears the value of `isFavorited`. Subsequent reads from it will return its default value.
-  mutating func clearIsFavorited() {_uniqueStorage()._isFavorited = nil}
 
-  var visibilityAction: String {
-    get {return _storage._visibilityAction ?? String()}
-    set {_uniqueStorage()._visibilityAction = newValue}
+  var messageVisibilityChanged: IMRTMessageVisibilityChangedEvent {
+    get {
+      if case .messageVisibilityChanged(let v)? = _storage._body {return v}
+      return IMRTMessageVisibilityChangedEvent()
+    }
+    set {_uniqueStorage()._body = .messageVisibilityChanged(newValue)}
   }
-  /// Returns true if `visibilityAction` has been explicitly set.
-  var hasVisibilityAction: Bool {return _storage._visibilityAction != nil}
-  /// Clears the value of `visibilityAction`. Subsequent reads from it will return its default value.
-  mutating func clearVisibilityAction() {_uniqueStorage()._visibilityAction = nil}
+
+  var messageFavoriteChanged: IMRTMessageFavoriteChangedEvent {
+    get {
+      if case .messageFavoriteChanged(let v)? = _storage._body {return v}
+      return IMRTMessageFavoriteChangedEvent()
+    }
+    set {_uniqueStorage()._body = .messageFavoriteChanged(newValue)}
+  }
+
+  var messageStreamStarted: IMRTMessageStreamEvent {
+    get {
+      if case .messageStreamStarted(let v)? = _storage._body {return v}
+      return IMRTMessageStreamEvent()
+    }
+    set {_uniqueStorage()._body = .messageStreamStarted(newValue)}
+  }
+
+  var messageStreamChunk: IMRTMessageStreamEvent {
+    get {
+      if case .messageStreamChunk(let v)? = _storage._body {return v}
+      return IMRTMessageStreamEvent()
+    }
+    set {_uniqueStorage()._body = .messageStreamChunk(newValue)}
+  }
+
+  var messageStreamCompleted: IMRTMessageStreamEvent {
+    get {
+      if case .messageStreamCompleted(let v)? = _storage._body {return v}
+      return IMRTMessageStreamEvent()
+    }
+    set {_uniqueStorage()._body = .messageStreamCompleted(newValue)}
+  }
+
+  var messageStreamFailed: IMRTMessageStreamEvent {
+    get {
+      if case .messageStreamFailed(let v)? = _storage._body {return v}
+      return IMRTMessageStreamEvent()
+    }
+    set {_uniqueStorage()._body = .messageStreamFailed(newValue)}
+  }
+
+  var messageStreamCancelled: IMRTMessageStreamEvent {
+    get {
+      if case .messageStreamCancelled(let v)? = _storage._body {return v}
+      return IMRTMessageStreamEvent()
+    }
+    set {_uniqueStorage()._body = .messageStreamCancelled(newValue)}
+  }
+
+  var conversationCreated: IMRTConversationChangedEvent {
+    get {
+      if case .conversationCreated(let v)? = _storage._body {return v}
+      return IMRTConversationChangedEvent()
+    }
+    set {_uniqueStorage()._body = .conversationCreated(newValue)}
+  }
+
+  var conversationUpdated: IMRTConversationChangedEvent {
+    get {
+      if case .conversationUpdated(let v)? = _storage._body {return v}
+      return IMRTConversationChangedEvent()
+    }
+    set {_uniqueStorage()._body = .conversationUpdated(newValue)}
+  }
+
+  var conversationRemovedForSelf: IMRTConversationRemovedForSelfEvent {
+    get {
+      if case .conversationRemovedForSelf(let v)? = _storage._body {return v}
+      return IMRTConversationRemovedForSelfEvent()
+    }
+    set {_uniqueStorage()._body = .conversationRemovedForSelf(newValue)}
+  }
+
+  var conversationSettingsChanged: IMRTConversationChangedEvent {
+    get {
+      if case .conversationSettingsChanged(let v)? = _storage._body {return v}
+      return IMRTConversationChangedEvent()
+    }
+    set {_uniqueStorage()._body = .conversationSettingsChanged(newValue)}
+  }
+
+  var conversationVisibilityChanged: IMRTConversationVisibilityChangedEvent {
+    get {
+      if case .conversationVisibilityChanged(let v)? = _storage._body {return v}
+      return IMRTConversationVisibilityChangedEvent()
+    }
+    set {_uniqueStorage()._body = .conversationVisibilityChanged(newValue)}
+  }
+
+  var memberAdded: IMRTMemberChangedEvent {
+    get {
+      if case .memberAdded(let v)? = _storage._body {return v}
+      return IMRTMemberChangedEvent()
+    }
+    set {_uniqueStorage()._body = .memberAdded(newValue)}
+  }
+
+  var memberRemoved: IMRTMemberChangedEvent {
+    get {
+      if case .memberRemoved(let v)? = _storage._body {return v}
+      return IMRTMemberChangedEvent()
+    }
+    set {_uniqueStorage()._body = .memberRemoved(newValue)}
+  }
+
+  var memberRoleUpdated: IMRTMemberChangedEvent {
+    get {
+      if case .memberRoleUpdated(let v)? = _storage._body {return v}
+      return IMRTMemberChangedEvent()
+    }
+    set {_uniqueStorage()._body = .memberRoleUpdated(newValue)}
+  }
+
+  var contactRequestCreated: IMRTContactChangedEvent {
+    get {
+      if case .contactRequestCreated(let v)? = _storage._body {return v}
+      return IMRTContactChangedEvent()
+    }
+    set {_uniqueStorage()._body = .contactRequestCreated(newValue)}
+  }
+
+  var contactRequestAccepted: IMRTContactChangedEvent {
+    get {
+      if case .contactRequestAccepted(let v)? = _storage._body {return v}
+      return IMRTContactChangedEvent()
+    }
+    set {_uniqueStorage()._body = .contactRequestAccepted(newValue)}
+  }
+
+  var contactRequestUpdated: IMRTContactChangedEvent {
+    get {
+      if case .contactRequestUpdated(let v)? = _storage._body {return v}
+      return IMRTContactChangedEvent()
+    }
+    set {_uniqueStorage()._body = .contactRequestUpdated(newValue)}
+  }
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  enum OneOf_Body: Equatable, Sendable {
+    case messageCreated(IMRTMessageCreatedEvent)
+    case messageEdited(IMRTMessageEditedEvent)
+    case messageRevoked(IMRTMessageRevokedEvent)
+    case messageVisibilityChanged(IMRTMessageVisibilityChangedEvent)
+    case messageFavoriteChanged(IMRTMessageFavoriteChangedEvent)
+    case messageStreamStarted(IMRTMessageStreamEvent)
+    case messageStreamChunk(IMRTMessageStreamEvent)
+    case messageStreamCompleted(IMRTMessageStreamEvent)
+    case messageStreamFailed(IMRTMessageStreamEvent)
+    case messageStreamCancelled(IMRTMessageStreamEvent)
+    case conversationCreated(IMRTConversationChangedEvent)
+    case conversationUpdated(IMRTConversationChangedEvent)
+    case conversationRemovedForSelf(IMRTConversationRemovedForSelfEvent)
+    case conversationSettingsChanged(IMRTConversationChangedEvent)
+    case conversationVisibilityChanged(IMRTConversationVisibilityChangedEvent)
+    case memberAdded(IMRTMemberChangedEvent)
+    case memberRemoved(IMRTMemberChangedEvent)
+    case memberRoleUpdated(IMRTMemberChangedEvent)
+    case contactRequestCreated(IMRTContactChangedEvent)
+    case contactRequestAccepted(IMRTContactChangedEvent)
+    case contactRequestUpdated(IMRTContactChangedEvent)
+
+  }
 
   init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-struct IMRTContactEvent: @unchecked Sendable {
+struct IMRTMessageCreatedEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  var eventType: String {
-    get {return _storage._eventType}
-    set {_uniqueStorage()._eventType = newValue}
+  var message: IMRTConversationMessage {
+    get {return _message ?? IMRTConversationMessage()}
+    set {_message = newValue}
   }
+  /// Returns true if `message` has been explicitly set.
+  var hasMessage: Bool {return self._message != nil}
+  /// Clears the value of `message`. Subsequent reads from it will return its default value.
+  mutating func clearMessage() {self._message = nil}
+
+  var clientMessageID: String {
+    get {return _clientMessageID ?? String()}
+    set {_clientMessageID = newValue}
+  }
+  /// Returns true if `clientMessageID` has been explicitly set.
+  var hasClientMessageID: Bool {return self._clientMessageID != nil}
+  /// Clears the value of `clientMessageID`. Subsequent reads from it will return its default value.
+  mutating func clearClientMessageID() {self._clientMessageID = nil}
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _message: IMRTConversationMessage? = nil
+  fileprivate var _clientMessageID: String? = nil
+}
+
+struct IMRTMessageEditedEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var messageID: String = String()
+
+  var body: IMRTRichTextContent {
+    get {return _body ?? IMRTRichTextContent()}
+    set {_body = newValue}
+  }
+  /// Returns true if `body` has been explicitly set.
+  var hasBody: Bool {return self._body != nil}
+  /// Clears the value of `body`. Subsequent reads from it will return its default value.
+  mutating func clearBody() {self._body = nil}
+
+  var editedAtMs: Int64 = 0
+
+  var message: IMRTConversationMessage {
+    get {return _message ?? IMRTConversationMessage()}
+    set {_message = newValue}
+  }
+  /// Returns true if `message` has been explicitly set.
+  var hasMessage: Bool {return self._message != nil}
+  /// Clears the value of `message`. Subsequent reads from it will return its default value.
+  mutating func clearMessage() {self._message = nil}
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _body: IMRTRichTextContent? = nil
+  fileprivate var _message: IMRTConversationMessage? = nil
+}
+
+struct IMRTMessageRevokedEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var messageID: String = String()
+
+  var revokedAtMs: Int64 = 0
+
+  var revokedByUserID: String {
+    get {return _revokedByUserID ?? String()}
+    set {_revokedByUserID = newValue}
+  }
+  /// Returns true if `revokedByUserID` has been explicitly set.
+  var hasRevokedByUserID: Bool {return self._revokedByUserID != nil}
+  /// Clears the value of `revokedByUserID`. Subsequent reads from it will return its default value.
+  mutating func clearRevokedByUserID() {self._revokedByUserID = nil}
+
+  var message: IMRTConversationMessage {
+    get {return _message ?? IMRTConversationMessage()}
+    set {_message = newValue}
+  }
+  /// Returns true if `message` has been explicitly set.
+  var hasMessage: Bool {return self._message != nil}
+  /// Clears the value of `message`. Subsequent reads from it will return its default value.
+  mutating func clearMessage() {self._message = nil}
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _revokedByUserID: String? = nil
+  fileprivate var _message: IMRTConversationMessage? = nil
+}
+
+struct IMRTMessageVisibilityChangedEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var messageIds: [String] = []
+
+  var message: IMRTConversationMessage {
+    get {return _message ?? IMRTConversationMessage()}
+    set {_message = newValue}
+  }
+  /// Returns true if `message` has been explicitly set.
+  var hasMessage: Bool {return self._message != nil}
+  /// Clears the value of `message`. Subsequent reads from it will return its default value.
+  mutating func clearMessage() {self._message = nil}
+
+  var visibilityAction: String {
+    get {return _visibilityAction ?? String()}
+    set {_visibilityAction = newValue}
+  }
+  /// Returns true if `visibilityAction` has been explicitly set.
+  var hasVisibilityAction: Bool {return self._visibilityAction != nil}
+  /// Clears the value of `visibilityAction`. Subsequent reads from it will return its default value.
+  mutating func clearVisibilityAction() {self._visibilityAction = nil}
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _message: IMRTConversationMessage? = nil
+  fileprivate var _visibilityAction: String? = nil
+}
+
+struct IMRTMessageFavoriteChangedEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var messageID: String = String()
+
+  var isFavorited: Bool = false
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct IMRTMessageStreamEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var stream: IMRTMessageStreamPayload {
+    get {return _stream ?? IMRTMessageStreamPayload()}
+    set {_stream = newValue}
+  }
+  /// Returns true if `stream` has been explicitly set.
+  var hasStream: Bool {return self._stream != nil}
+  /// Clears the value of `stream`. Subsequent reads from it will return its default value.
+  mutating func clearStream() {self._stream = nil}
+
+  var message: IMRTConversationMessage {
+    get {return _message ?? IMRTConversationMessage()}
+    set {_message = newValue}
+  }
+  /// Returns true if `message` has been explicitly set.
+  var hasMessage: Bool {return self._message != nil}
+  /// Clears the value of `message`. Subsequent reads from it will return its default value.
+  mutating func clearMessage() {self._message = nil}
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _stream: IMRTMessageStreamPayload? = nil
+  fileprivate var _message: IMRTConversationMessage? = nil
+}
+
+struct IMRTConversationChangedEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct IMRTConversationRemovedForSelfEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct IMRTConversationVisibilityChangedEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var visibilityAction: String = String()
+
+  var messageIds: [String] = []
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct IMRTMemberChangedEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var memberUserIds: [String] = []
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct IMRTContactChangedEvent: @unchecked Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
 
   var request: IMRTContactRequest {
     get {return _storage._request ?? IMRTContactRequest()}
@@ -473,20 +805,6 @@ struct IMRTContactEvent: @unchecked Sendable {
   var hasContactUserID: Bool {return _storage._contactUserID != nil}
   /// Clears the value of `contactUserID`. Subsequent reads from it will return its default value.
   mutating func clearContactUserID() {_uniqueStorage()._contactUserID = nil}
-
-  var actorUserID: String {
-    get {return _storage._actorUserID ?? String()}
-    set {_uniqueStorage()._actorUserID = newValue}
-  }
-  /// Returns true if `actorUserID` has been explicitly set.
-  var hasActorUserID: Bool {return _storage._actorUserID != nil}
-  /// Clears the value of `actorUserID`. Subsequent reads from it will return its default value.
-  mutating func clearActorUserID() {_uniqueStorage()._actorUserID = nil}
-
-  var serverTimestampMs: Int64 {
-    get {return _storage._serverTimestampMs}
-    set {_uniqueStorage()._serverTimestampMs = newValue}
-  }
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -842,12 +1160,12 @@ struct IMRTMessageContent: Sendable {
 
   var body: IMRTMessageContent.OneOf_Body? = nil
 
-  var text: IMRTTextContent {
+  var richText: IMRTRichTextContent {
     get {
-      if case .text(let v)? = body {return v}
-      return IMRTTextContent()
+      if case .richText(let v)? = body {return v}
+      return IMRTRichTextContent()
     }
-    set {body = .text(newValue)}
+    set {body = .richText(newValue)}
   }
 
   var reply: IMRTReplyContent {
@@ -856,22 +1174,6 @@ struct IMRTMessageContent: Sendable {
       return IMRTReplyContent()
     }
     set {body = .reply(newValue)}
-  }
-
-  var recalled: IMRTRecalledContent {
-    get {
-      if case .recalled(let v)? = body {return v}
-      return IMRTRecalledContent()
-    }
-    set {body = .recalled(newValue)}
-  }
-
-  var system: IMRTSystemContent {
-    get {
-      if case .system(let v)? = body {return v}
-      return IMRTSystemContent()
-    }
-    set {body = .system(newValue)}
   }
 
   var image: IMRTMediaAsset {
@@ -901,10 +1203,8 @@ struct IMRTMessageContent: Sendable {
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   enum OneOf_Body: Equatable, Sendable {
-    case text(IMRTTextContent)
+    case richText(IMRTRichTextContent)
     case reply(IMRTReplyContent)
-    case recalled(IMRTRecalledContent)
-    case system(IMRTSystemContent)
     case image(IMRTMediaAsset)
     case audio(IMRTMediaAsset)
     case file(IMRTMediaAsset)
@@ -914,12 +1214,14 @@ struct IMRTMessageContent: Sendable {
   init() {}
 }
 
-struct IMRTTextContent: Sendable {
+struct IMRTRichTextContent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var text: String = String()
+
+  var entities: [IMRTTextEntity] = []
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -940,16 +1242,137 @@ struct IMRTReplyContent: Sendable {
   /// Clears the value of `reference`. Subsequent reads from it will return its default value.
   mutating func clearReference() {self._reference = nil}
 
-  var text: String = String()
+  var body: IMRTRichTextContent {
+    get {return _body ?? IMRTRichTextContent()}
+    set {_body = newValue}
+  }
+  /// Returns true if `body` has been explicitly set.
+  var hasBody: Bool {return self._body != nil}
+  /// Clears the value of `body`. Subsequent reads from it will return its default value.
+  mutating func clearBody() {self._body = nil}
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 
   fileprivate var _reference: IMRTReplyReference? = nil
+  fileprivate var _body: IMRTRichTextContent? = nil
 }
 
-struct IMRTRecalledContent: Sendable {
+struct IMRTTextRange: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var location: Int32 = 0
+
+  var length: Int32 = 0
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct IMRTTextEntity: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var range: IMRTTextRange {
+    get {return _range ?? IMRTTextRange()}
+    set {_range = newValue}
+  }
+  /// Returns true if `range` has been explicitly set.
+  var hasRange: Bool {return self._range != nil}
+  /// Clears the value of `range`. Subsequent reads from it will return its default value.
+  mutating func clearRange() {self._range = nil}
+
+  var body: IMRTTextEntity.OneOf_Body? = nil
+
+  var link: IMRTLinkEntity {
+    get {
+      if case .link(let v)? = body {return v}
+      return IMRTLinkEntity()
+    }
+    set {body = .link(newValue)}
+  }
+
+  var mention: IMRTMentionEntity {
+    get {
+      if case .mention(let v)? = body {return v}
+      return IMRTMentionEntity()
+    }
+    set {body = .mention(newValue)}
+  }
+
+  var hashtag: IMRTHashtagEntity {
+    get {
+      if case .hashtag(let v)? = body {return v}
+      return IMRTHashtagEntity()
+    }
+    set {body = .hashtag(newValue)}
+  }
+
+  var inlineCode: IMRTInlineCodeEntity {
+    get {
+      if case .inlineCode(let v)? = body {return v}
+      return IMRTInlineCodeEntity()
+    }
+    set {body = .inlineCode(newValue)}
+  }
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  enum OneOf_Body: Equatable, Sendable {
+    case link(IMRTLinkEntity)
+    case mention(IMRTMentionEntity)
+    case hashtag(IMRTHashtagEntity)
+    case inlineCode(IMRTInlineCodeEntity)
+
+  }
+
+  init() {}
+
+  fileprivate var _range: IMRTTextRange? = nil
+}
+
+struct IMRTLinkEntity: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var url: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct IMRTMentionEntity: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var userID: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct IMRTHashtagEntity: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var value: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+struct IMRTInlineCodeEntity: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -957,123 +1380,6 @@ struct IMRTRecalledContent: Sendable {
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
-}
-
-struct IMRTSystemContent: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  var type: String = String()
-
-  var actorUserID: String {
-    get {return _actorUserID ?? String()}
-    set {_actorUserID = newValue}
-  }
-  /// Returns true if `actorUserID` has been explicitly set.
-  var hasActorUserID: Bool {return self._actorUserID != nil}
-  /// Clears the value of `actorUserID`. Subsequent reads from it will return its default value.
-  mutating func clearActorUserID() {self._actorUserID = nil}
-
-  var actorEmail: String {
-    get {return _actorEmail ?? String()}
-    set {_actorEmail = newValue}
-  }
-  /// Returns true if `actorEmail` has been explicitly set.
-  var hasActorEmail: Bool {return self._actorEmail != nil}
-  /// Clears the value of `actorEmail`. Subsequent reads from it will return its default value.
-  mutating func clearActorEmail() {self._actorEmail = nil}
-
-  var targetUserID: String {
-    get {return _targetUserID ?? String()}
-    set {_targetUserID = newValue}
-  }
-  /// Returns true if `targetUserID` has been explicitly set.
-  var hasTargetUserID: Bool {return self._targetUserID != nil}
-  /// Clears the value of `targetUserID`. Subsequent reads from it will return its default value.
-  mutating func clearTargetUserID() {self._targetUserID = nil}
-
-  var targetEmail: String {
-    get {return _targetEmail ?? String()}
-    set {_targetEmail = newValue}
-  }
-  /// Returns true if `targetEmail` has been explicitly set.
-  var hasTargetEmail: Bool {return self._targetEmail != nil}
-  /// Clears the value of `targetEmail`. Subsequent reads from it will return its default value.
-  mutating func clearTargetEmail() {self._targetEmail = nil}
-
-  var memberEmails: [String] = []
-
-  var previousRole: String {
-    get {return _previousRole ?? String()}
-    set {_previousRole = newValue}
-  }
-  /// Returns true if `previousRole` has been explicitly set.
-  var hasPreviousRole: Bool {return self._previousRole != nil}
-  /// Clears the value of `previousRole`. Subsequent reads from it will return its default value.
-  mutating func clearPreviousRole() {self._previousRole = nil}
-
-  var newRole: String {
-    get {return _newRole ?? String()}
-    set {_newRole = newValue}
-  }
-  /// Returns true if `newRole` has been explicitly set.
-  var hasNewRole: Bool {return self._newRole != nil}
-  /// Clears the value of `newRole`. Subsequent reads from it will return its default value.
-  mutating func clearNewRole() {self._newRole = nil}
-
-  var updatedFields: [String] = []
-
-  var title: String {
-    get {return _title ?? String()}
-    set {_title = newValue}
-  }
-  /// Returns true if `title` has been explicitly set.
-  var hasTitle: Bool {return self._title != nil}
-  /// Clears the value of `title`. Subsequent reads from it will return its default value.
-  mutating func clearTitle() {self._title = nil}
-
-  var notice: String {
-    get {return _notice ?? String()}
-    set {_notice = newValue}
-  }
-  /// Returns true if `notice` has been explicitly set.
-  var hasNotice: Bool {return self._notice != nil}
-  /// Clears the value of `notice`. Subsequent reads from it will return its default value.
-  mutating func clearNotice() {self._notice = nil}
-
-  var avatarPreset: String {
-    get {return _avatarPreset ?? String()}
-    set {_avatarPreset = newValue}
-  }
-  /// Returns true if `avatarPreset` has been explicitly set.
-  var hasAvatarPreset: Bool {return self._avatarPreset != nil}
-  /// Clears the value of `avatarPreset`. Subsequent reads from it will return its default value.
-  mutating func clearAvatarPreset() {self._avatarPreset = nil}
-
-  var legacyText: String {
-    get {return _legacyText ?? String()}
-    set {_legacyText = newValue}
-  }
-  /// Returns true if `legacyText` has been explicitly set.
-  var hasLegacyText: Bool {return self._legacyText != nil}
-  /// Clears the value of `legacyText`. Subsequent reads from it will return its default value.
-  mutating func clearLegacyText() {self._legacyText = nil}
-
-  var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  init() {}
-
-  fileprivate var _actorUserID: String? = nil
-  fileprivate var _actorEmail: String? = nil
-  fileprivate var _targetUserID: String? = nil
-  fileprivate var _targetEmail: String? = nil
-  fileprivate var _previousRole: String? = nil
-  fileprivate var _newRole: String? = nil
-  fileprivate var _title: String? = nil
-  fileprivate var _notice: String? = nil
-  fileprivate var _avatarPreset: String? = nil
-  fileprivate var _legacyText: String? = nil
 }
 
 struct IMRTReplyReference: Sendable {
@@ -1203,13 +1509,21 @@ struct IMRTMessageEdit: Sendable {
   /// Clears the value of `editedAtMs`. Subsequent reads from it will return its default value.
   mutating func clearEditedAtMs() {self._editedAtMs = nil}
 
-  var text: String = String()
+  var body: IMRTRichTextContent {
+    get {return _body ?? IMRTRichTextContent()}
+    set {_body = newValue}
+  }
+  /// Returns true if `body` has been explicitly set.
+  var hasBody: Bool {return self._body != nil}
+  /// Clears the value of `body`. Subsequent reads from it will return its default value.
+  mutating func clearBody() {self._body = nil}
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 
   fileprivate var _editedAtMs: Int64? = nil
+  fileprivate var _body: IMRTRichTextContent? = nil
 }
 
 struct IMRTMessageReaction: Sendable {
@@ -1460,7 +1774,7 @@ fileprivate let _protobuf_package = "im.realtime.v1"
 
 extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Packet"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}timestamp_ms\0\u{3}protocol_version\0\u{2}\u{7}auth\0\u{3}auth_ok\0\u{3}auth_error\0\u{2}\u{8}heartbeat\0\u{3}heartbeat_ack\0\u{2}\u{9}message\0\u{1}ack\0\u{4}\u{9}conversation_event\0\u{3}contact_event\0\u{2}\u{9}kick\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}timestamp_ms\0\u{3}protocol_version\0\u{2}\u{7}auth\0\u{3}auth_ok\0\u{3}auth_error\0\u{2}\u{8}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{9}send_message\0\u{1}ack\0\u{4}\u{9}domain_event\0\u{2}\u{a}kick\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1537,16 +1851,16 @@ extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementatio
         }
       }()
       case 30: try {
-        var v: IMRTMessagePayload?
+        var v: IMRTSendMessageCommand?
         var hadOneofValue = false
         if let current = self.body {
           hadOneofValue = true
-          if case .message(let m) = current {v = m}
+          if case .sendMessage(let m) = current {v = m}
         }
         try decoder.decodeSingularMessageField(value: &v)
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .message(v)
+          self.body = .sendMessage(v)
         }
       }()
       case 31: try {
@@ -1563,29 +1877,16 @@ extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementatio
         }
       }()
       case 40: try {
-        var v: IMRTConversationEvent?
+        var v: IMRTChatDomainEvent?
         var hadOneofValue = false
         if let current = self.body {
           hadOneofValue = true
-          if case .conversationEvent(let m) = current {v = m}
+          if case .domainEvent(let m) = current {v = m}
         }
         try decoder.decodeSingularMessageField(value: &v)
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .conversationEvent(v)
-        }
-      }()
-      case 41: try {
-        var v: IMRTContactEvent?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .contactEvent(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .contactEvent(v)
+          self.body = .domainEvent(v)
         }
       }()
       case 50: try {
@@ -1641,21 +1942,17 @@ extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementatio
       guard case .heartbeatAck(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
     }()
-    case .message?: try {
-      guard case .message(let v)? = self.body else { preconditionFailure() }
+    case .sendMessage?: try {
+      guard case .sendMessage(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 30)
     }()
     case .ack?: try {
       guard case .ack(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 31)
     }()
-    case .conversationEvent?: try {
-      guard case .conversationEvent(let v)? = self.body else { preconditionFailure() }
+    case .domainEvent?: try {
+      guard case .domainEvent(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 40)
-    }()
-    case .contactEvent?: try {
-      guard case .contactEvent(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 41)
     }()
     case .kick?: try {
       guard case .kick(let v)? = self.body else { preconditionFailure() }
@@ -1894,19 +2191,64 @@ extension IMRTAck: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBa
   }
 }
 
-extension IMRTMessagePayload: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".MessagePayload"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_message_id\0\u{3}message_id\0\u{3}conversation_id\0\u{3}sender_user_id\0\u{3}server_sequence\0\u{3}server_timestamp_ms\0\u{1}content\0\u{3}derived_state\0")
+extension IMRTSendMessageCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".SendMessageCommand"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_message_id\0\u{4}\u{2}conversation_id\0\u{2}\u{4}content\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self._clientMessageID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.conversationID) }()
+      case 7: try { try decoder.decodeSingularMessageField(value: &self._content) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._clientMessageID {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 1)
+    } }()
+    if !self.conversationID.isEmpty {
+      try visitor.visitSingularStringField(value: self.conversationID, fieldNumber: 3)
+    }
+    try { if let v = self._content {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTSendMessageCommand, rhs: IMRTSendMessageCommand) -> Bool {
+    if lhs._clientMessageID != rhs._clientMessageID {return false}
+    if lhs.conversationID != rhs.conversationID {return false}
+    if lhs._content != rhs._content {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ChatDomainEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_id\0\u{3}event_type\0\u{3}aggregate_type\0\u{3}aggregate_id\0\u{3}aggregate_sequence\0\u{3}occurred_at_ms\0\u{3}actor_user_id\0\u{1}conversation\0\u{4}\u{2}message_created\0\u{3}message_edited\0\u{3}message_revoked\0\u{3}message_visibility_changed\0\u{3}message_favorite_changed\0\u{4}\u{6}message_stream_started\0\u{3}message_stream_chunk\0\u{3}message_stream_completed\0\u{3}message_stream_failed\0\u{3}message_stream_cancelled\0\u{4}\u{6}conversation_created\0\u{3}conversation_updated\0\u{3}conversation_removed_for_self\0\u{3}conversation_settings_changed\0\u{3}conversation_visibility_changed\0\u{4}\u{6}member_added\0\u{3}member_removed\0\u{3}member_role_updated\0\u{4}\u{8}contact_request_created\0\u{3}contact_request_accepted\0\u{3}contact_request_updated\0")
 
   fileprivate class _StorageClass {
-    var _clientMessageID: String? = nil
-    var _messageID: String? = nil
-    var _conversationID: String = String()
-    var _senderUserID: String? = nil
-    var _serverSequence: UInt64? = nil
-    var _serverTimestampMs: Int64? = nil
-    var _content: IMRTMessageContent? = nil
-    var _derivedState: IMRTMessageDerivedState? = nil
+    var _eventID: String = String()
+    var _eventType: String = String()
+    var _aggregateType: String = String()
+    var _aggregateID: String = String()
+    var _aggregateSequence: UInt64 = 0
+    var _occurredAtMs: Int64 = 0
+    var _actorUserID: String? = nil
+    var _conversation: IMRTConversationSummary? = nil
+    var _body: IMRTChatDomainEvent.OneOf_Body?
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -1917,14 +2259,15 @@ extension IMRTMessagePayload: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
     private init() {}
 
     init(copying source: _StorageClass) {
-      _clientMessageID = source._clientMessageID
-      _messageID = source._messageID
-      _conversationID = source._conversationID
-      _senderUserID = source._senderUserID
-      _serverSequence = source._serverSequence
-      _serverTimestampMs = source._serverTimestampMs
-      _content = source._content
-      _derivedState = source._derivedState
+      _eventID = source._eventID
+      _eventType = source._eventType
+      _aggregateType = source._aggregateType
+      _aggregateID = source._aggregateID
+      _aggregateSequence = source._aggregateSequence
+      _occurredAtMs = source._occurredAtMs
+      _actorUserID = source._actorUserID
+      _conversation = source._conversation
+      _body = source._body
     }
   }
 
@@ -1943,14 +2286,287 @@ extension IMRTMessagePayload: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
         // allocates stack space for every case branch when no optimizations are
         // enabled. https://github.com/apple/swift-protobuf/issues/1034
         switch fieldNumber {
-        case 1: try { try decoder.decodeSingularStringField(value: &_storage._clientMessageID) }()
-        case 2: try { try decoder.decodeSingularStringField(value: &_storage._messageID) }()
-        case 3: try { try decoder.decodeSingularStringField(value: &_storage._conversationID) }()
-        case 4: try { try decoder.decodeSingularStringField(value: &_storage._senderUserID) }()
-        case 5: try { try decoder.decodeSingularUInt64Field(value: &_storage._serverSequence) }()
-        case 6: try { try decoder.decodeSingularInt64Field(value: &_storage._serverTimestampMs) }()
-        case 7: try { try decoder.decodeSingularMessageField(value: &_storage._content) }()
-        case 8: try { try decoder.decodeSingularMessageField(value: &_storage._derivedState) }()
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._eventID) }()
+        case 2: try { try decoder.decodeSingularStringField(value: &_storage._eventType) }()
+        case 3: try { try decoder.decodeSingularStringField(value: &_storage._aggregateType) }()
+        case 4: try { try decoder.decodeSingularStringField(value: &_storage._aggregateID) }()
+        case 5: try { try decoder.decodeSingularUInt64Field(value: &_storage._aggregateSequence) }()
+        case 6: try { try decoder.decodeSingularInt64Field(value: &_storage._occurredAtMs) }()
+        case 7: try { try decoder.decodeSingularStringField(value: &_storage._actorUserID) }()
+        case 8: try { try decoder.decodeSingularMessageField(value: &_storage._conversation) }()
+        case 10: try {
+          var v: IMRTMessageCreatedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .messageCreated(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .messageCreated(v)
+          }
+        }()
+        case 11: try {
+          var v: IMRTMessageEditedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .messageEdited(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .messageEdited(v)
+          }
+        }()
+        case 12: try {
+          var v: IMRTMessageRevokedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .messageRevoked(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .messageRevoked(v)
+          }
+        }()
+        case 13: try {
+          var v: IMRTMessageVisibilityChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .messageVisibilityChanged(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .messageVisibilityChanged(v)
+          }
+        }()
+        case 14: try {
+          var v: IMRTMessageFavoriteChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .messageFavoriteChanged(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .messageFavoriteChanged(v)
+          }
+        }()
+        case 20: try {
+          var v: IMRTMessageStreamEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .messageStreamStarted(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .messageStreamStarted(v)
+          }
+        }()
+        case 21: try {
+          var v: IMRTMessageStreamEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .messageStreamChunk(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .messageStreamChunk(v)
+          }
+        }()
+        case 22: try {
+          var v: IMRTMessageStreamEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .messageStreamCompleted(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .messageStreamCompleted(v)
+          }
+        }()
+        case 23: try {
+          var v: IMRTMessageStreamEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .messageStreamFailed(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .messageStreamFailed(v)
+          }
+        }()
+        case 24: try {
+          var v: IMRTMessageStreamEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .messageStreamCancelled(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .messageStreamCancelled(v)
+          }
+        }()
+        case 30: try {
+          var v: IMRTConversationChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .conversationCreated(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .conversationCreated(v)
+          }
+        }()
+        case 31: try {
+          var v: IMRTConversationChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .conversationUpdated(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .conversationUpdated(v)
+          }
+        }()
+        case 32: try {
+          var v: IMRTConversationRemovedForSelfEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .conversationRemovedForSelf(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .conversationRemovedForSelf(v)
+          }
+        }()
+        case 33: try {
+          var v: IMRTConversationChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .conversationSettingsChanged(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .conversationSettingsChanged(v)
+          }
+        }()
+        case 34: try {
+          var v: IMRTConversationVisibilityChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .conversationVisibilityChanged(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .conversationVisibilityChanged(v)
+          }
+        }()
+        case 40: try {
+          var v: IMRTMemberChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .memberAdded(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .memberAdded(v)
+          }
+        }()
+        case 41: try {
+          var v: IMRTMemberChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .memberRemoved(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .memberRemoved(v)
+          }
+        }()
+        case 42: try {
+          var v: IMRTMemberChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .memberRoleUpdated(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .memberRoleUpdated(v)
+          }
+        }()
+        case 50: try {
+          var v: IMRTContactChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .contactRequestCreated(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .contactRequestCreated(v)
+          }
+        }()
+        case 51: try {
+          var v: IMRTContactChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .contactRequestAccepted(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .contactRequestAccepted(v)
+          }
+        }()
+        case 52: try {
+          var v: IMRTContactChangedEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .contactRequestUpdated(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .contactRequestUpdated(v)
+          }
+        }()
         default: break
         }
       }
@@ -1963,47 +2579,135 @@ extension IMRTMessagePayload: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
       // allocates stack space for every if/case branch local when no optimizations
       // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
       // https://github.com/apple/swift-protobuf/issues/1182
-      try { if let v = _storage._clientMessageID {
-        try visitor.visitSingularStringField(value: v, fieldNumber: 1)
-      } }()
-      try { if let v = _storage._messageID {
-        try visitor.visitSingularStringField(value: v, fieldNumber: 2)
-      } }()
-      if !_storage._conversationID.isEmpty {
-        try visitor.visitSingularStringField(value: _storage._conversationID, fieldNumber: 3)
+      if !_storage._eventID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._eventID, fieldNumber: 1)
       }
-      try { if let v = _storage._senderUserID {
-        try visitor.visitSingularStringField(value: v, fieldNumber: 4)
+      if !_storage._eventType.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._eventType, fieldNumber: 2)
+      }
+      if !_storage._aggregateType.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._aggregateType, fieldNumber: 3)
+      }
+      if !_storage._aggregateID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._aggregateID, fieldNumber: 4)
+      }
+      if _storage._aggregateSequence != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._aggregateSequence, fieldNumber: 5)
+      }
+      if _storage._occurredAtMs != 0 {
+        try visitor.visitSingularInt64Field(value: _storage._occurredAtMs, fieldNumber: 6)
+      }
+      try { if let v = _storage._actorUserID {
+        try visitor.visitSingularStringField(value: v, fieldNumber: 7)
       } }()
-      try { if let v = _storage._serverSequence {
-        try visitor.visitSingularUInt64Field(value: v, fieldNumber: 5)
-      } }()
-      try { if let v = _storage._serverTimestampMs {
-        try visitor.visitSingularInt64Field(value: v, fieldNumber: 6)
-      } }()
-      try { if let v = _storage._content {
-        try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
-      } }()
-      try { if let v = _storage._derivedState {
+      try { if let v = _storage._conversation {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
       } }()
+      switch _storage._body {
+      case .messageCreated?: try {
+        guard case .messageCreated(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 10)
+      }()
+      case .messageEdited?: try {
+        guard case .messageEdited(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
+      }()
+      case .messageRevoked?: try {
+        guard case .messageRevoked(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+      }()
+      case .messageVisibilityChanged?: try {
+        guard case .messageVisibilityChanged(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
+      }()
+      case .messageFavoriteChanged?: try {
+        guard case .messageFavoriteChanged(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 14)
+      }()
+      case .messageStreamStarted?: try {
+        guard case .messageStreamStarted(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
+      }()
+      case .messageStreamChunk?: try {
+        guard case .messageStreamChunk(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
+      }()
+      case .messageStreamCompleted?: try {
+        guard case .messageStreamCompleted(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
+      }()
+      case .messageStreamFailed?: try {
+        guard case .messageStreamFailed(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 23)
+      }()
+      case .messageStreamCancelled?: try {
+        guard case .messageStreamCancelled(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 24)
+      }()
+      case .conversationCreated?: try {
+        guard case .conversationCreated(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 30)
+      }()
+      case .conversationUpdated?: try {
+        guard case .conversationUpdated(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 31)
+      }()
+      case .conversationRemovedForSelf?: try {
+        guard case .conversationRemovedForSelf(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 32)
+      }()
+      case .conversationSettingsChanged?: try {
+        guard case .conversationSettingsChanged(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 33)
+      }()
+      case .conversationVisibilityChanged?: try {
+        guard case .conversationVisibilityChanged(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 34)
+      }()
+      case .memberAdded?: try {
+        guard case .memberAdded(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 40)
+      }()
+      case .memberRemoved?: try {
+        guard case .memberRemoved(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 41)
+      }()
+      case .memberRoleUpdated?: try {
+        guard case .memberRoleUpdated(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 42)
+      }()
+      case .contactRequestCreated?: try {
+        guard case .contactRequestCreated(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 50)
+      }()
+      case .contactRequestAccepted?: try {
+        guard case .contactRequestAccepted(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 51)
+      }()
+      case .contactRequestUpdated?: try {
+        guard case .contactRequestUpdated(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 52)
+      }()
+      case nil: break
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  static func ==(lhs: IMRTMessagePayload, rhs: IMRTMessagePayload) -> Bool {
+  static func ==(lhs: IMRTChatDomainEvent, rhs: IMRTChatDomainEvent) -> Bool {
     if lhs._storage !== rhs._storage {
       let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
         let _storage = _args.0
         let rhs_storage = _args.1
-        if _storage._clientMessageID != rhs_storage._clientMessageID {return false}
-        if _storage._messageID != rhs_storage._messageID {return false}
-        if _storage._conversationID != rhs_storage._conversationID {return false}
-        if _storage._senderUserID != rhs_storage._senderUserID {return false}
-        if _storage._serverSequence != rhs_storage._serverSequence {return false}
-        if _storage._serverTimestampMs != rhs_storage._serverTimestampMs {return false}
-        if _storage._content != rhs_storage._content {return false}
-        if _storage._derivedState != rhs_storage._derivedState {return false}
+        if _storage._eventID != rhs_storage._eventID {return false}
+        if _storage._eventType != rhs_storage._eventType {return false}
+        if _storage._aggregateType != rhs_storage._aggregateType {return false}
+        if _storage._aggregateID != rhs_storage._aggregateID {return false}
+        if _storage._aggregateSequence != rhs_storage._aggregateSequence {return false}
+        if _storage._occurredAtMs != rhs_storage._occurredAtMs {return false}
+        if _storage._actorUserID != rhs_storage._actorUserID {return false}
+        if _storage._conversation != rhs_storage._conversation {return false}
+        if _storage._body != rhs_storage._body {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -2013,150 +2717,372 @@ extension IMRTMessagePayload: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension IMRTConversationEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".ConversationEvent"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_type\0\u{1}conversation\0\u{1}message\0\u{1}stream\0\u{3}actor_user_id\0\u{3}server_timestamp_ms\0\u{3}message_ids\0\u{3}favorite_changed_message_id\0\u{3}is_favorited\0\u{3}visibility_action\0")
-
-  fileprivate class _StorageClass {
-    var _eventType: String = String()
-    var _conversation: IMRTConversationSummary? = nil
-    var _message: IMRTConversationMessage? = nil
-    var _stream: IMRTMessageStreamPayload? = nil
-    var _actorUserID: String? = nil
-    var _serverTimestampMs: Int64 = 0
-    var _messageIds: [String] = []
-    var _favoriteChangedMessageID: String? = nil
-    var _isFavorited: Bool? = nil
-    var _visibilityAction: String? = nil
-
-      // This property is used as the initial default value for new instances of the type.
-      // The type itself is protecting the reference to its storage via CoW semantics.
-      // This will force a copy to be made of this reference when the first mutation occurs;
-      // hence, it is safe to mark this as `nonisolated(unsafe)`.
-      static nonisolated(unsafe) let defaultInstance = _StorageClass()
-
-    private init() {}
-
-    init(copying source: _StorageClass) {
-      _eventType = source._eventType
-      _conversation = source._conversation
-      _message = source._message
-      _stream = source._stream
-      _actorUserID = source._actorUserID
-      _serverTimestampMs = source._serverTimestampMs
-      _messageIds = source._messageIds
-      _favoriteChangedMessageID = source._favoriteChangedMessageID
-      _isFavorited = source._isFavorited
-      _visibilityAction = source._visibilityAction
-    }
-  }
-
-  fileprivate mutating func _uniqueStorage() -> _StorageClass {
-    if !isKnownUniquelyReferenced(&_storage) {
-      _storage = _StorageClass(copying: _storage)
-    }
-    return _storage
-  }
+extension IMRTMessageCreatedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".MessageCreatedEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}message\0\u{3}client_message_id\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    _ = _uniqueStorage()
-    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
-      while let fieldNumber = try decoder.nextFieldNumber() {
-        // The use of inline closures is to circumvent an issue where the compiler
-        // allocates stack space for every case branch when no optimizations are
-        // enabled. https://github.com/apple/swift-protobuf/issues/1034
-        switch fieldNumber {
-        case 1: try { try decoder.decodeSingularStringField(value: &_storage._eventType) }()
-        case 2: try { try decoder.decodeSingularMessageField(value: &_storage._conversation) }()
-        case 3: try { try decoder.decodeSingularMessageField(value: &_storage._message) }()
-        case 4: try { try decoder.decodeSingularMessageField(value: &_storage._stream) }()
-        case 5: try { try decoder.decodeSingularStringField(value: &_storage._actorUserID) }()
-        case 6: try { try decoder.decodeSingularInt64Field(value: &_storage._serverTimestampMs) }()
-        case 7: try { try decoder.decodeRepeatedStringField(value: &_storage._messageIds) }()
-        case 8: try { try decoder.decodeSingularStringField(value: &_storage._favoriteChangedMessageID) }()
-        case 9: try { try decoder.decodeSingularBoolField(value: &_storage._isFavorited) }()
-        case 10: try { try decoder.decodeSingularStringField(value: &_storage._visibilityAction) }()
-        default: break
-        }
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._message) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self._clientMessageID) }()
+      default: break
       }
     }
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every if/case branch local when no optimizations
-      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-      // https://github.com/apple/swift-protobuf/issues/1182
-      if !_storage._eventType.isEmpty {
-        try visitor.visitSingularStringField(value: _storage._eventType, fieldNumber: 1)
-      }
-      try { if let v = _storage._conversation {
-        try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
-      } }()
-      try { if let v = _storage._message {
-        try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
-      } }()
-      try { if let v = _storage._stream {
-        try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
-      } }()
-      try { if let v = _storage._actorUserID {
-        try visitor.visitSingularStringField(value: v, fieldNumber: 5)
-      } }()
-      if _storage._serverTimestampMs != 0 {
-        try visitor.visitSingularInt64Field(value: _storage._serverTimestampMs, fieldNumber: 6)
-      }
-      if !_storage._messageIds.isEmpty {
-        try visitor.visitRepeatedStringField(value: _storage._messageIds, fieldNumber: 7)
-      }
-      try { if let v = _storage._favoriteChangedMessageID {
-        try visitor.visitSingularStringField(value: v, fieldNumber: 8)
-      } }()
-      try { if let v = _storage._isFavorited {
-        try visitor.visitSingularBoolField(value: v, fieldNumber: 9)
-      } }()
-      try { if let v = _storage._visibilityAction {
-        try visitor.visitSingularStringField(value: v, fieldNumber: 10)
-      } }()
-    }
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._message {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._clientMessageID {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 2)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  static func ==(lhs: IMRTConversationEvent, rhs: IMRTConversationEvent) -> Bool {
-    if lhs._storage !== rhs._storage {
-      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
-        let _storage = _args.0
-        let rhs_storage = _args.1
-        if _storage._eventType != rhs_storage._eventType {return false}
-        if _storage._conversation != rhs_storage._conversation {return false}
-        if _storage._message != rhs_storage._message {return false}
-        if _storage._stream != rhs_storage._stream {return false}
-        if _storage._actorUserID != rhs_storage._actorUserID {return false}
-        if _storage._serverTimestampMs != rhs_storage._serverTimestampMs {return false}
-        if _storage._messageIds != rhs_storage._messageIds {return false}
-        if _storage._favoriteChangedMessageID != rhs_storage._favoriteChangedMessageID {return false}
-        if _storage._isFavorited != rhs_storage._isFavorited {return false}
-        if _storage._visibilityAction != rhs_storage._visibilityAction {return false}
-        return true
-      }
-      if !storagesAreEqual {return false}
-    }
+  static func ==(lhs: IMRTMessageCreatedEvent, rhs: IMRTMessageCreatedEvent) -> Bool {
+    if lhs._message != rhs._message {return false}
+    if lhs._clientMessageID != rhs._clientMessageID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
 }
 
-extension IMRTContactEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".ContactEvent"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_type\0\u{1}request\0\u{1}contact\0\u{3}contact_user_id\0\u{3}actor_user_id\0\u{3}server_timestamp_ms\0")
+extension IMRTMessageEditedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".MessageEditedEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{1}body\0\u{3}edited_at_ms\0\u{1}message\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._body) }()
+      case 3: try { try decoder.decodeSingularInt64Field(value: &self.editedAtMs) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._message) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.messageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 1)
+    }
+    try { if let v = self._body {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    if self.editedAtMs != 0 {
+      try visitor.visitSingularInt64Field(value: self.editedAtMs, fieldNumber: 3)
+    }
+    try { if let v = self._message {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTMessageEditedEvent, rhs: IMRTMessageEditedEvent) -> Bool {
+    if lhs.messageID != rhs.messageID {return false}
+    if lhs._body != rhs._body {return false}
+    if lhs.editedAtMs != rhs.editedAtMs {return false}
+    if lhs._message != rhs._message {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTMessageRevokedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".MessageRevokedEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}revoked_at_ms\0\u{3}revoked_by_user_id\0\u{1}message\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
+      case 2: try { try decoder.decodeSingularInt64Field(value: &self.revokedAtMs) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._revokedByUserID) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._message) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.messageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 1)
+    }
+    if self.revokedAtMs != 0 {
+      try visitor.visitSingularInt64Field(value: self.revokedAtMs, fieldNumber: 2)
+    }
+    try { if let v = self._revokedByUserID {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    try { if let v = self._message {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTMessageRevokedEvent, rhs: IMRTMessageRevokedEvent) -> Bool {
+    if lhs.messageID != rhs.messageID {return false}
+    if lhs.revokedAtMs != rhs.revokedAtMs {return false}
+    if lhs._revokedByUserID != rhs._revokedByUserID {return false}
+    if lhs._message != rhs._message {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTMessageVisibilityChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".MessageVisibilityChangedEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_ids\0\u{1}message\0\u{3}visibility_action\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedStringField(value: &self.messageIds) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._message) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._visibilityAction) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.messageIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.messageIds, fieldNumber: 1)
+    }
+    try { if let v = self._message {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try { if let v = self._visibilityAction {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTMessageVisibilityChangedEvent, rhs: IMRTMessageVisibilityChangedEvent) -> Bool {
+    if lhs.messageIds != rhs.messageIds {return false}
+    if lhs._message != rhs._message {return false}
+    if lhs._visibilityAction != rhs._visibilityAction {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTMessageFavoriteChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".MessageFavoriteChangedEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}is_favorited\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.isFavorited) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.messageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 1)
+    }
+    if self.isFavorited != false {
+      try visitor.visitSingularBoolField(value: self.isFavorited, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTMessageFavoriteChangedEvent, rhs: IMRTMessageFavoriteChangedEvent) -> Bool {
+    if lhs.messageID != rhs.messageID {return false}
+    if lhs.isFavorited != rhs.isFavorited {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTMessageStreamEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".MessageStreamEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}stream\0\u{1}message\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._stream) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._message) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._stream {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._message {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTMessageStreamEvent, rhs: IMRTMessageStreamEvent) -> Bool {
+    if lhs._stream != rhs._stream {return false}
+    if lhs._message != rhs._message {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTConversationChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ConversationChangedEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap()
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    // Load everything into unknown fields
+    while try decoder.nextFieldNumber() != nil {}
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTConversationChangedEvent, rhs: IMRTConversationChangedEvent) -> Bool {
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTConversationRemovedForSelfEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ConversationRemovedForSelfEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap()
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    // Load everything into unknown fields
+    while try decoder.nextFieldNumber() != nil {}
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTConversationRemovedForSelfEvent, rhs: IMRTConversationRemovedForSelfEvent) -> Bool {
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTConversationVisibilityChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ConversationVisibilityChangedEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}visibility_action\0\u{3}message_ids\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.visibilityAction) }()
+      case 2: try { try decoder.decodeRepeatedStringField(value: &self.messageIds) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.visibilityAction.isEmpty {
+      try visitor.visitSingularStringField(value: self.visibilityAction, fieldNumber: 1)
+    }
+    if !self.messageIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.messageIds, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTConversationVisibilityChangedEvent, rhs: IMRTConversationVisibilityChangedEvent) -> Bool {
+    if lhs.visibilityAction != rhs.visibilityAction {return false}
+    if lhs.messageIds != rhs.messageIds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTMemberChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".MemberChangedEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}member_user_ids\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedStringField(value: &self.memberUserIds) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.memberUserIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.memberUserIds, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTMemberChangedEvent, rhs: IMRTMemberChangedEvent) -> Bool {
+    if lhs.memberUserIds != rhs.memberUserIds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTContactChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ContactChangedEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}request\0\u{1}contact\0\u{3}contact_user_id\0")
 
   fileprivate class _StorageClass {
-    var _eventType: String = String()
     var _request: IMRTContactRequest? = nil
     var _contact: IMRTContact? = nil
     var _contactUserID: String? = nil
-    var _actorUserID: String? = nil
-    var _serverTimestampMs: Int64 = 0
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -2167,12 +3093,9 @@ extension IMRTContactEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     private init() {}
 
     init(copying source: _StorageClass) {
-      _eventType = source._eventType
       _request = source._request
       _contact = source._contact
       _contactUserID = source._contactUserID
-      _actorUserID = source._actorUserID
-      _serverTimestampMs = source._serverTimestampMs
     }
   }
 
@@ -2191,12 +3114,9 @@ extension IMRTContactEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
         // allocates stack space for every case branch when no optimizations are
         // enabled. https://github.com/apple/swift-protobuf/issues/1034
         switch fieldNumber {
-        case 1: try { try decoder.decodeSingularStringField(value: &_storage._eventType) }()
-        case 2: try { try decoder.decodeSingularMessageField(value: &_storage._request) }()
-        case 3: try { try decoder.decodeSingularMessageField(value: &_storage._contact) }()
-        case 4: try { try decoder.decodeSingularStringField(value: &_storage._contactUserID) }()
-        case 5: try { try decoder.decodeSingularStringField(value: &_storage._actorUserID) }()
-        case 6: try { try decoder.decodeSingularInt64Field(value: &_storage._serverTimestampMs) }()
+        case 1: try { try decoder.decodeSingularMessageField(value: &_storage._request) }()
+        case 2: try { try decoder.decodeSingularMessageField(value: &_storage._contact) }()
+        case 3: try { try decoder.decodeSingularStringField(value: &_storage._contactUserID) }()
         default: break
         }
       }
@@ -2209,39 +3129,27 @@ extension IMRTContactEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
       // allocates stack space for every if/case branch local when no optimizations
       // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
       // https://github.com/apple/swift-protobuf/issues/1182
-      if !_storage._eventType.isEmpty {
-        try visitor.visitSingularStringField(value: _storage._eventType, fieldNumber: 1)
-      }
       try { if let v = _storage._request {
-        try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
       } }()
       try { if let v = _storage._contact {
-        try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
       } }()
       try { if let v = _storage._contactUserID {
-        try visitor.visitSingularStringField(value: v, fieldNumber: 4)
+        try visitor.visitSingularStringField(value: v, fieldNumber: 3)
       } }()
-      try { if let v = _storage._actorUserID {
-        try visitor.visitSingularStringField(value: v, fieldNumber: 5)
-      } }()
-      if _storage._serverTimestampMs != 0 {
-        try visitor.visitSingularInt64Field(value: _storage._serverTimestampMs, fieldNumber: 6)
-      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  static func ==(lhs: IMRTContactEvent, rhs: IMRTContactEvent) -> Bool {
+  static func ==(lhs: IMRTContactChangedEvent, rhs: IMRTContactChangedEvent) -> Bool {
     if lhs._storage !== rhs._storage {
       let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
         let _storage = _args.0
         let rhs_storage = _args.1
-        if _storage._eventType != rhs_storage._eventType {return false}
         if _storage._request != rhs_storage._request {return false}
         if _storage._contact != rhs_storage._contact {return false}
         if _storage._contactUserID != rhs_storage._contactUserID {return false}
-        if _storage._actorUserID != rhs_storage._actorUserID {return false}
-        if _storage._serverTimestampMs != rhs_storage._serverTimestampMs {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -2819,7 +3727,7 @@ extension IMRTConversationMessage: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension IMRTMessageContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageContent"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{1}reply\0\u{1}recalled\0\u{1}system\0\u{1}image\0\u{1}audio\0\u{1}file\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}rich_text\0\u{1}reply\0\u{2}\u{3}image\0\u{1}audio\0\u{1}file\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2828,16 +3736,16 @@ extension IMRTMessageContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try {
-        var v: IMRTTextContent?
+        var v: IMRTRichTextContent?
         var hadOneofValue = false
         if let current = self.body {
           hadOneofValue = true
-          if case .text(let m) = current {v = m}
+          if case .richText(let m) = current {v = m}
         }
         try decoder.decodeSingularMessageField(value: &v)
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .text(v)
+          self.body = .richText(v)
         }
       }()
       case 2: try {
@@ -2851,32 +3759,6 @@ extension IMRTMessageContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.body = .reply(v)
-        }
-      }()
-      case 3: try {
-        var v: IMRTRecalledContent?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .recalled(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .recalled(v)
-        }
-      }()
-      case 4: try {
-        var v: IMRTSystemContent?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .system(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .system(v)
         }
       }()
       case 5: try {
@@ -2929,21 +3811,13 @@ extension IMRTMessageContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
     // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
     // https://github.com/apple/swift-protobuf/issues/1182
     switch self.body {
-    case .text?: try {
-      guard case .text(let v)? = self.body else { preconditionFailure() }
+    case .richText?: try {
+      guard case .richText(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
     }()
     case .reply?: try {
       guard case .reply(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
-    }()
-    case .recalled?: try {
-      guard case .recalled(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
-    }()
-    case .system?: try {
-      guard case .system(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
     }()
     case .image?: try {
       guard case .image(let v)? = self.body else { preconditionFailure() }
@@ -2969,9 +3843,9 @@ extension IMRTMessageContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension IMRTTextContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".TextContent"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0")
+extension IMRTRichTextContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".RichTextContent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{1}entities\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2980,6 +3854,7 @@ extension IMRTTextContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplemen
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.entities) }()
       default: break
       }
     }
@@ -2989,11 +3864,15 @@ extension IMRTTextContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplemen
     if !self.text.isEmpty {
       try visitor.visitSingularStringField(value: self.text, fieldNumber: 1)
     }
+    if !self.entities.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.entities, fieldNumber: 2)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  static func ==(lhs: IMRTTextContent, rhs: IMRTTextContent) -> Bool {
+  static func ==(lhs: IMRTRichTextContent, rhs: IMRTRichTextContent) -> Bool {
     if lhs.text != rhs.text {return false}
+    if lhs.entities != rhs.entities {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3001,7 +3880,7 @@ extension IMRTTextContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplemen
 
 extension IMRTReplyContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ReplyContent"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}reference\0\u{1}text\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}reference\0\u{1}body\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3010,7 +3889,7 @@ extension IMRTReplyContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularMessageField(value: &self._reference) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._body) }()
       default: break
       }
     }
@@ -3024,22 +3903,253 @@ extension IMRTReplyContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
     try { if let v = self._reference {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
     } }()
-    if !self.text.isEmpty {
-      try visitor.visitSingularStringField(value: self.text, fieldNumber: 2)
-    }
+    try { if let v = self._body {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: IMRTReplyContent, rhs: IMRTReplyContent) -> Bool {
     if lhs._reference != rhs._reference {return false}
-    if lhs.text != rhs.text {return false}
+    if lhs._body != rhs._body {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
 }
 
-extension IMRTRecalledContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".RecalledContent"
+extension IMRTTextRange: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".TextRange"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}location\0\u{1}length\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularInt32Field(value: &self.location) }()
+      case 2: try { try decoder.decodeSingularInt32Field(value: &self.length) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.location != 0 {
+      try visitor.visitSingularInt32Field(value: self.location, fieldNumber: 1)
+    }
+    if self.length != 0 {
+      try visitor.visitSingularInt32Field(value: self.length, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTTextRange, rhs: IMRTTextRange) -> Bool {
+    if lhs.location != rhs.location {return false}
+    if lhs.length != rhs.length {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTTextEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".TextEntity"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}range\0\u{2}\u{9}link\0\u{1}mention\0\u{1}hashtag\0\u{3}inline_code\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._range) }()
+      case 10: try {
+        var v: IMRTLinkEntity?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .link(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .link(v)
+        }
+      }()
+      case 11: try {
+        var v: IMRTMentionEntity?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .mention(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .mention(v)
+        }
+      }()
+      case 12: try {
+        var v: IMRTHashtagEntity?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .hashtag(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .hashtag(v)
+        }
+      }()
+      case 13: try {
+        var v: IMRTInlineCodeEntity?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .inlineCode(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .inlineCode(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._range {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    switch self.body {
+    case .link?: try {
+      guard case .link(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 10)
+    }()
+    case .mention?: try {
+      guard case .mention(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
+    }()
+    case .hashtag?: try {
+      guard case .hashtag(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 12)
+    }()
+    case .inlineCode?: try {
+      guard case .inlineCode(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTTextEntity, rhs: IMRTTextEntity) -> Bool {
+    if lhs._range != rhs._range {return false}
+    if lhs.body != rhs.body {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTLinkEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".LinkEntity"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}url\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.url) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.url.isEmpty {
+      try visitor.visitSingularStringField(value: self.url, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTLinkEntity, rhs: IMRTLinkEntity) -> Bool {
+    if lhs.url != rhs.url {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTMentionEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".MentionEntity"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.userID) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.userID.isEmpty {
+      try visitor.visitSingularStringField(value: self.userID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTMentionEntity, rhs: IMRTMentionEntity) -> Bool {
+    if lhs.userID != rhs.userID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTHashtagEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".HashtagEntity"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}value\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.value) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.value.isEmpty {
+      try visitor.visitSingularStringField(value: self.value, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTHashtagEntity, rhs: IMRTHashtagEntity) -> Bool {
+    if lhs.value != rhs.value {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTInlineCodeEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".InlineCodeEntity"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap()
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
@@ -3051,101 +4161,7 @@ extension IMRTRecalledContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  static func ==(lhs: IMRTRecalledContent, rhs: IMRTRecalledContent) -> Bool {
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-extension IMRTSystemContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".SystemContent"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}type\0\u{3}actor_user_id\0\u{3}actor_email\0\u{3}target_user_id\0\u{3}target_email\0\u{3}member_emails\0\u{3}previous_role\0\u{3}new_role\0\u{3}updated_fields\0\u{1}title\0\u{1}notice\0\u{3}avatar_preset\0\u{3}legacy_text\0")
-
-  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.type) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self._actorUserID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self._actorEmail) }()
-      case 4: try { try decoder.decodeSingularStringField(value: &self._targetUserID) }()
-      case 5: try { try decoder.decodeSingularStringField(value: &self._targetEmail) }()
-      case 6: try { try decoder.decodeRepeatedStringField(value: &self.memberEmails) }()
-      case 7: try { try decoder.decodeSingularStringField(value: &self._previousRole) }()
-      case 8: try { try decoder.decodeSingularStringField(value: &self._newRole) }()
-      case 9: try { try decoder.decodeRepeatedStringField(value: &self.updatedFields) }()
-      case 10: try { try decoder.decodeSingularStringField(value: &self._title) }()
-      case 11: try { try decoder.decodeSingularStringField(value: &self._notice) }()
-      case 12: try { try decoder.decodeSingularStringField(value: &self._avatarPreset) }()
-      case 13: try { try decoder.decodeSingularStringField(value: &self._legacyText) }()
-      default: break
-      }
-    }
-  }
-
-  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if !self.type.isEmpty {
-      try visitor.visitSingularStringField(value: self.type, fieldNumber: 1)
-    }
-    try { if let v = self._actorUserID {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 2)
-    } }()
-    try { if let v = self._actorEmail {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
-    } }()
-    try { if let v = self._targetUserID {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 4)
-    } }()
-    try { if let v = self._targetEmail {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 5)
-    } }()
-    if !self.memberEmails.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.memberEmails, fieldNumber: 6)
-    }
-    try { if let v = self._previousRole {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 7)
-    } }()
-    try { if let v = self._newRole {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 8)
-    } }()
-    if !self.updatedFields.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.updatedFields, fieldNumber: 9)
-    }
-    try { if let v = self._title {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 10)
-    } }()
-    try { if let v = self._notice {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 11)
-    } }()
-    try { if let v = self._avatarPreset {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 12)
-    } }()
-    try { if let v = self._legacyText {
-      try visitor.visitSingularStringField(value: v, fieldNumber: 13)
-    } }()
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  static func ==(lhs: IMRTSystemContent, rhs: IMRTSystemContent) -> Bool {
-    if lhs.type != rhs.type {return false}
-    if lhs._actorUserID != rhs._actorUserID {return false}
-    if lhs._actorEmail != rhs._actorEmail {return false}
-    if lhs._targetUserID != rhs._targetUserID {return false}
-    if lhs._targetEmail != rhs._targetEmail {return false}
-    if lhs.memberEmails != rhs.memberEmails {return false}
-    if lhs._previousRole != rhs._previousRole {return false}
-    if lhs._newRole != rhs._newRole {return false}
-    if lhs.updatedFields != rhs.updatedFields {return false}
-    if lhs._title != rhs._title {return false}
-    if lhs._notice != rhs._notice {return false}
-    if lhs._avatarPreset != rhs._avatarPreset {return false}
-    if lhs._legacyText != rhs._legacyText {return false}
+  static func ==(lhs: IMRTInlineCodeEntity, rhs: IMRTInlineCodeEntity) -> Bool {
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3320,7 +4336,7 @@ extension IMRTMessageDerivedState: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension IMRTMessageEdit: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageEdit"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}edited_at_ms\0\u{1}text\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}edited_at_ms\0\u{1}body\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3329,7 +4345,7 @@ extension IMRTMessageEdit: SwiftProtobuf.Message, SwiftProtobuf._MessageImplemen
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularInt64Field(value: &self._editedAtMs) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._body) }()
       default: break
       }
     }
@@ -3343,15 +4359,15 @@ extension IMRTMessageEdit: SwiftProtobuf.Message, SwiftProtobuf._MessageImplemen
     try { if let v = self._editedAtMs {
       try visitor.visitSingularInt64Field(value: v, fieldNumber: 1)
     } }()
-    if !self.text.isEmpty {
-      try visitor.visitSingularStringField(value: self.text, fieldNumber: 2)
-    }
+    try { if let v = self._body {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: IMRTMessageEdit, rhs: IMRTMessageEdit) -> Bool {
     if lhs._editedAtMs != rhs._editedAtMs {return false}
-    if lhs.text != rhs.text {return false}
+    if lhs._body != rhs._body {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

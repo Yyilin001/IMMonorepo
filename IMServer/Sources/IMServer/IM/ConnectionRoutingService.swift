@@ -70,11 +70,19 @@ struct ConnectionRoutingService {
         toUserIDs userIDs: [UUID],
         requestID: UUID? = UUID()
     ) async {
+        return
+    }
+
+    func sendDomainEvent(
+        _ payload: IMTCPChatDomainEventPayload,
+        toUserIDs userIDs: [UUID],
+        requestID: UUID? = UUID()
+    ) async {
         await app.routingMetrics.recordUserFanout(targetUserCount: Set(userIDs).count)
-        await app.imConnectionRegistry.sendMessage(payload, toUserIDs: userIDs, requestID: requestID)
+        await app.imConnectionRegistry.sendDomainEvent(payload, toUserIDs: userIDs, requestID: requestID)
         let envelope = try? encodePacketEnvelope(
-            action: .message,
-            packetType: .message,
+            action: .domainEvent,
+            packetType: .domainEvent,
             requestID: requestID,
             payload: payload,
             targetUserIDs: userIDs
@@ -87,15 +95,7 @@ struct ConnectionRoutingService {
         toUserID userID: UUID,
         requestID: UUID? = UUID()
     ) async {
-        await app.imConnectionRegistry.sendConversationEvent(payload, toUserID: userID, requestID: requestID)
-        let envelope = try? encodePacketEnvelope(
-            action: .conversationEvent,
-            packetType: .conversationEvent,
-            requestID: requestID,
-            payload: payload,
-            targetUserIDs: [userID]
-        )
-        await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: [userID])
+        return
     }
 
     func sendContactEvent(
@@ -103,15 +103,7 @@ struct ConnectionRoutingService {
         toUserID userID: UUID,
         requestID: UUID? = UUID()
     ) async {
-        await app.imConnectionRegistry.sendContactEvent(payload, toUserID: userID, requestID: requestID)
-        let envelope = try? encodePacketEnvelope(
-            action: .contactEvent,
-            packetType: .contactEvent,
-            requestID: requestID,
-            payload: payload,
-            targetUserIDs: [userID]
-        )
-        await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: [userID])
+        return
     }
 
     func kickConnections(
@@ -164,23 +156,15 @@ struct ConnectionRoutingService {
 
     func handleRemoteDispatch(_ envelope: NodeMessageDispatchEnvelope) async {
         switch envelope.action {
-        case .message:
-            guard let payload: IMTCPMessagePayload = decodePayload(from: envelope) else { return }
-            await app.imConnectionRegistry.sendMessage(
+        case .domainEvent:
+            guard let payload: IMTCPChatDomainEventPayload = decodePayload(from: envelope) else { return }
+            await app.imConnectionRegistry.sendDomainEvent(
                 payload,
                 toUserIDs: envelope.targetUserIDs,
                 requestID: envelope.requestID
             )
-        case .conversationEvent:
-            guard let userID = envelope.targetUserIDs.first,
-                  let payload: IMTCPConversationEventPayload = decodePayload(from: envelope)
-            else { return }
-            await app.imConnectionRegistry.sendConversationEvent(payload, toUserID: userID, requestID: envelope.requestID)
-        case .contactEvent:
-            guard let userID = envelope.targetUserIDs.first,
-                  let payload: IMTCPContactEventPayload = decodePayload(from: envelope)
-            else { return }
-            await app.imConnectionRegistry.sendContactEvent(payload, toUserID: userID, requestID: envelope.requestID)
+        case .message, .conversationEvent, .contactEvent:
+            return
         case .kickSession:
             guard let sessionID = envelope.sessionID,
                   let reason = envelope.kickReason,

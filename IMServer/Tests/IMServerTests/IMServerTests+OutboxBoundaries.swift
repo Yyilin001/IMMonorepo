@@ -131,7 +131,7 @@ extension IMServerTests {
                 senderUserID: senderID,
                 serverSequence: 1,
                 clientMessageID: "projection-event-message",
-                content: .text("event message")
+                content: .richText(.plain("event message"))
             )
             try await eventMessage.create(on: app.db)
             let eventMessageID = try eventMessage.requireID()
@@ -141,7 +141,7 @@ extension IMServerTests {
                 senderUserID: senderID,
                 serverSequence: 2,
                 clientMessageID: "projection-later-message",
-                content: .text("later message")
+                content: .richText(.plain("later message"))
             )
             try await laterMessage.create(on: app.db)
 
@@ -233,7 +233,7 @@ extension IMServerTests {
                 senderUserID: senderID,
                 serverSequence: 3,
                 clientMessageID: "summary-stable-message",
-                content: .text("new dynamic message")
+                content: .richText(.plain("new dynamic message"))
             )
             try await message.create(on: app.db)
 
@@ -294,7 +294,7 @@ extension IMServerTests {
                 senderUserID: senderID,
                 serverSequence: 10,
                 clientMessageID: "read-advanced-source",
-                content: .text("latest")
+                content: .richText(.plain("latest"))
             )
             try await message.create(on: app.db)
             let messageID = try message.requireID()
@@ -408,7 +408,7 @@ extension IMServerTests {
                 senderUserID: senderID,
                 serverSequence: 8,
                 clientMessageID: "read-advanced-missing-source",
-                content: .text("restored latest")
+                content: .richText(.plain("restored latest"))
             )
             try await message.create(on: app.db)
 
@@ -628,7 +628,7 @@ extension IMServerTests {
                 senderUserID: senderID,
                 serverSequence: 1,
                 clientMessageID: "side-effect-message",
-                content: .text("critical path should finish")
+                content: .richText(.plain("critical path should finish"))
             )
             try await message.create(on: app.db)
             let messageID = try message.requireID()

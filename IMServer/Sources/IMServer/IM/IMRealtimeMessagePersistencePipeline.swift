@@ -56,6 +56,10 @@ struct IMMessagePersistencePipeline {
                     service: service,
                     on: database
                 )
+                try service.validateMentionTargets(
+                    in: prepared.normalizedContent,
+                    memberUserIDs: recipientUserIDSet
+                )
 
                 let serverSequence: Int
                 if let preallocatedServerSequences {

@@ -314,7 +314,7 @@ extension IMConversationController {
         let message = try await commandService.editMessage(
             in: conversationID,
             messageID: messageID,
-            text: body.text,
+            body: body.body,
             requesterUserID: userID
         )
         try await sideEffects.projectInlineOutboxIfAllowed()

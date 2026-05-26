@@ -234,14 +234,14 @@ class IMConversationStore {
                                     )
                                     message
                                 } else {
-                                    val existingText = (message.content as? IMMessageContent.Text)?.text.orEmpty()
+                                    val existingText = (message.content as? IMMessageContent.RichText)?.body?.text.orEmpty()
                                     val nextText = if (incomingState == IMMessageStreamLifecycleState.Streaming) {
                                         existingText + stream.deltaText.orEmpty()
                                     } else {
                                         existingText
                                     }
                                     message.copy(
-                                        content = IMMessageContent.Text(nextText),
+                                        content = IMMessageContent.plain(nextText),
                                         derivedState = message.derivedState.withMessageStreamState(
                                             IMMessageStreamState(
                                                 streamID = stream.streamID,
@@ -286,7 +286,7 @@ class IMConversationStore {
         val requestID = UUID.randomUUID().toString()
         val localMessageID = UUID.randomUUID().toString()
         val clientMessageID = UUID.randomUUID().toString()
-        val content = IMMessageContent.Text(normalizedText)
+        val content = IMMessageContent.plain(normalizedText)
         val localMessage = IMConversationMessage(
             id = localMessageID,
             conversationID = conversationID,

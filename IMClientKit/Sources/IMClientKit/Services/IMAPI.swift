@@ -128,10 +128,10 @@ public struct IMGroupInviteResponseBody: Codable, Equatable, Sendable, APIRespon
 }
 
 public struct IMConversationMessageEditRequestBody: Codable, Sendable {
-    public let text: String
+    public let body: IMRichTextContent
 
-    public init(text: String) {
-        self.text = text
+    public init(body: IMRichTextContent) {
+        self.body = body
     }
 }
 
@@ -1301,12 +1301,12 @@ enum IMRequest {
     public static func editMessage(
         conversationID: String,
         messageID: String,
-        text: String
+        body: IMRichTextContent
     ) -> EditMessage {
         EditMessage(
             conversationID: conversationID,
             messageID: messageID,
-            payload: IMConversationMessageEditRequestBody(text: text)
+            payload: IMConversationMessageEditRequestBody(body: body)
         )
     }
 

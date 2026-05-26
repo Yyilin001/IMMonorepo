@@ -6,9 +6,8 @@ enum IMTCPPacketType: String, Codable, Sendable {
     case authError = "auth_error"
     case heartbeat
     case heartbeatAck = "heartbeat_ack"
-    case message
-    case conversationEvent = "conversation_event"
-    case contactEvent = "contact_event"
+    case sendMessage = "send_message"
+    case domainEvent = "domain_event"
     case ack
     case kick
 }
@@ -186,6 +185,56 @@ struct IMTCPContactEventPayload: Codable, Sendable {
     let contactUserID: UUID?
     let actorUserID: UUID?
     let serverTimestamp: Date
+}
+
+enum IMTCPChatDomainEventType: String, Codable, Sendable {
+    case messageCreated = "message_created"
+    case messageEdited = "message_edited"
+    case messageRevoked = "message_revoked"
+    case messageVisibilityChanged = "message_visibility_changed"
+    case messageFavoriteChanged = "message_favorite_changed"
+    case messageStreamStarted = "message_stream_started"
+    case messageStreamChunk = "message_stream_chunk"
+    case messageStreamCompleted = "message_stream_completed"
+    case messageStreamFailed = "message_stream_failed"
+    case messageStreamCancelled = "message_stream_cancelled"
+    case conversationCreated = "conversation_created"
+    case conversationUpdated = "conversation_updated"
+    case conversationRemovedForSelf = "conversation_removed_for_self"
+    case conversationSettingsChanged = "conversation_settings_changed"
+    case conversationVisibilityChanged = "conversation_visibility_changed"
+    case memberAdded = "member_added"
+    case memberRemoved = "member_removed"
+    case memberRoleUpdated = "member_role_updated"
+    case contactRequestCreated = "contact_request_created"
+    case contactRequestAccepted = "contact_request_accepted"
+    case contactRequestUpdated = "contact_request_updated"
+}
+
+enum IMTCPChatDomainEventBody: Sendable {
+    case messageCreated(message: IMMessageResponse, clientMessageID: String?)
+    case messageEdited(messageID: UUID, body: IMRichTextContent, editedAt: Date, message: IMMessageResponse?)
+    case messageRevoked(messageID: UUID, revokedAt: Date, revokedByUserID: UUID?, message: IMMessageResponse?)
+    case messageVisibilityChanged(messageIDs: [UUID], message: IMMessageResponse?, visibilityAction: ConversationVisibilityAction?)
+    case messageFavoriteChanged(messageID: UUID, isFavorited: Bool)
+    case messageStream(IMTCPMessageStreamPayload, message: IMMessageResponse?)
+    case conversationChanged
+    case conversationRemovedForSelf
+    case conversationVisibilityChanged(visibilityAction: ConversationVisibilityAction, messageIDs: [UUID])
+    case memberChanged(memberUserIDs: [UUID])
+    case contactChanged(request: FriendRequestResponse?, contact: ContactResponse?, contactUserID: UUID?)
+}
+
+struct IMTCPChatDomainEventPayload: Sendable {
+    let eventID: UUID
+    let eventType: IMTCPChatDomainEventType
+    let aggregateType: String
+    let aggregateID: UUID
+    let aggregateSequence: UInt64
+    let occurredAt: Date
+    let actorUserID: UUID?
+    let conversation: IMConversationResponse?
+    let body: IMTCPChatDomainEventBody
 }
 
 enum IMTCPKickReason: String, Codable, Sendable {

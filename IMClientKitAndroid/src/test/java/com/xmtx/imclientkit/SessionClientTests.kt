@@ -117,7 +117,7 @@ class SessionClientTests {
               "conversationID": "conversation-1",
               "senderUserID": "user-1",
               "serverSequence": 7,
-              "content": { "type": "text", "text": "hello" },
+              "content": { "type": "rich_text", "body": { "text": "hello", "entities": [] } },
               "derivedState": {},
               "createdAt": "2026-05-13T00:00:00Z"
             }

@@ -13,7 +13,7 @@ struct AIMessageStreamRepairStore {
             var offset = 0
             while true {
                 let messages = try await ConversationMessage.query(on: shard.database)
-                    .filter(\.$kind == IMMessageContentType.text.rawValue)
+                    .filter(\.$kind == IMMessageContentType.richText.rawValue)
                     .sort(\.$createdAt)
                     .range(offset..<(offset + Self.pageSize))
                     .all()
@@ -105,7 +105,7 @@ struct AIMessageStreamRepairStore {
         var offset = 0
         while true {
             let messages = try await ConversationMessage.query(on: database)
-                .filter(\.$kind == IMMessageContentType.text.rawValue)
+                .filter(\.$kind == IMMessageContentType.richText.rawValue)
                 .sort(\.$createdAt)
                 .range(offset..<(offset + Self.pageSize))
                 .all()

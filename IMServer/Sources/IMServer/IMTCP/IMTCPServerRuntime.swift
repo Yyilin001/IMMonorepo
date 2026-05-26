@@ -295,7 +295,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                 message: IMTCPProtocolError.duplicateAuth.localizedDescription
             )
 
-        case .message:
+        case .sendMessage:
             guard
                 let payload = try? packet.payload.decodePayload(IMTCPMessagePayload.self),
                 case .authenticated(let connection) = state
@@ -332,17 +332,9 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
 
                     try? await InlineOutboxProjectionRuntime(app: self.application).flushIfAllowed()
 
-                    await self.application.connectionRoutingService.sendMessage(
-                        result.message,
-                        toUserIDs: result.recipientUserIDs
-                    )
                     if result.didCreateMessage {
-                        await IMConversationEventService(app: self.application).publish(
-                            eventType: IMTCPConversationEventType.summaryUpdated,
-                            conversationID: result.conversationID,
-                            recipientUserIDs: result.recipientUserIDs,
-                            actorUserID: connection.userID
-                        )
+                        await IMConversationEventService(app: self.application)
+                            .publishMessageCreated(result, actorUserID: connection.userID)
                     }
                 } catch AuthError.sessionRevoked, AuthError.sessionExpired, AuthError.invalidToken {
                     channel.eventLoop.execute {
@@ -394,7 +386,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         case .ack:
             return
 
-        case .authOK, .authError, .heartbeatAck, .conversationEvent, .contactEvent, .kick:
+        case .authOK, .authError, .heartbeatAck, .domainEvent, .kick:
             sendKickAndClose(
                 channel: channel,
                 reason: .protocolError,

@@ -658,7 +658,7 @@ struct IMServerTests {
             senderUserID: nil,
             serverSequence: nil,
             serverTimestamp: nil,
-            kind: "text",
+            kind: "rich_text",
             body: ["text": text]
         )
     }
@@ -696,7 +696,7 @@ struct IMServerTests {
                 id: UUID(),
                 senderUserID: peerUserID,
                 serverSequence: serverSequence,
-                content: .text(title),
+                content: .richText(.plain(title)),
                 createdAt: lastActivityAt
             ),
             lastReadSequence: 0,

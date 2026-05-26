@@ -470,7 +470,7 @@ actor IMCrossDeviceConversationListState {
 
         let originalMessage = messages[messageIndex]
         switch originalMessage.content {
-        case .text, .reply:
+        case .richText, .reply:
             break
         case .recalled, .system, .image, .audio, .file:
             return nil
@@ -482,7 +482,7 @@ actor IMCrossDeviceConversationListState {
             edits: originalMessage.derivedState.edits + [
                 .init(
                     editedAt: Date(timeIntervalSince1970: 1_700_800_000 + Double(version)),
-                    text: text
+                    body: .plain(text)
                 )
             ],
             reactions: originalMessage.derivedState.reactions
@@ -528,7 +528,7 @@ actor IMCrossDeviceConversationListState {
 
         let originalMessage = messages[messageIndex]
         switch originalMessage.content {
-        case .text, .reply, .image, .audio, .file:
+        case .richText, .reply, .image, .audio, .file:
             break
         case .recalled, .system:
             return nil
@@ -939,7 +939,7 @@ actor IMConnectionTestHarness {
     private var continuation: AsyncThrowingStream<IMTCPConnectionEvent, Error>.Continuation?
     private var pendingEvents: [IMTCPConnectionEvent] = []
     private var disconnectCount = 0
-    private var sentLines: [String] = []
+    private var sentFrames: [Data] = []
     private var sendAttemptCount = 0
     private let sendDelayNanoseconds: UInt64
     private let failingSendNumbers: Set<Int>
@@ -968,8 +968,8 @@ actor IMConnectionTestHarness {
                 serverTime: Date(timeIntervalSince1970: 1_700_000_000)
             ),
             events: events,
-            sendLine: { line in
-                try await self.record(line)
+            sendFrame: { frame in
+                try await self.record(frame)
             },
             disconnectHandler: {
                 await self.disconnect()
@@ -989,8 +989,8 @@ actor IMConnectionTestHarness {
         disconnectCount
     }
 
-    func recordedLines() -> [String] {
-        sentLines
+    func recordedLines() -> [Data] {
+        sentFrames
     }
 
     private func disconnect() {
@@ -1000,7 +1000,7 @@ actor IMConnectionTestHarness {
         pendingEvents.removeAll()
     }
 
-    private func record(_ line: String) async throws {
+    private func record(_ frame: Data) async throws {
         if sendDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: sendDelayNanoseconds)
         }
@@ -1008,6 +1008,6 @@ actor IMConnectionTestHarness {
         if failingSendNumbers.contains(sendAttemptCount) {
             throw URLError(.notConnectedToInternet)
         }
-        sentLines.append(line)
+        sentFrames.append(frame)
     }
 }

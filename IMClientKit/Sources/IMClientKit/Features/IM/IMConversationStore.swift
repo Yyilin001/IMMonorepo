@@ -45,6 +45,7 @@ public final class IMConversationStore {
     private let conversationTimelineStore = ConversationTimelineStore()
     private let messageDerivedStateReducer = MessageDerivedStateReducer()
     private var pendingStreamSnapshotTargets: Set<IMActiveMessageStreamTarget> = []
+    private var processedDomainEventIDs: Set<UUID> = []
 
     public init() { }
 
@@ -471,6 +472,136 @@ public final class IMConversationStore {
         }
     }
 
+    public func applyDomainEvent(
+        _ payload: IMTCPChatDomainEventPayload,
+        currentUserID: UUID
+    ) -> IMConversationEventApplyOutcome {
+        guard processedDomainEventIDs.insert(payload.eventID).inserted else {
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+        }
+
+        switch payload.body {
+        case .messageCreated(let message, let clientMessageID):
+            receiveIncomingMessage(
+                IMTCPMessagePayload(
+                    clientMessageID: clientMessageID ?? message.clientMessageID,
+                    messageID: message.id.uuidString,
+                    conversationID: message.conversationID.uuidString,
+                    senderUserID: message.senderUserID,
+                    serverSequence: UInt64(message.serverSequence),
+                    serverTimestamp: message.createdAt,
+                    content: message.content,
+                    derivedState: message.derivedState
+                ),
+                currentUserID: currentUserID
+            )
+            if let conversation = payload.conversation {
+                applyConversationSummaryContent(conversation)
+                applyServerSummaryReadState(conversation)
+            }
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+
+        case .messageEdited(_, _, _, let message):
+            return applyProjectedConversationEvent(
+                payload,
+                eventType: .messageUpdated,
+                message: message,
+                currentUserID: currentUserID
+            )
+        case .messageRevoked(_, _, _, let message):
+            return applyProjectedConversationEvent(
+                payload,
+                eventType: .messageRecalled,
+                message: message,
+                currentUserID: currentUserID
+            )
+        case .messageVisibilityChanged(let messageIDs, let message, let visibilityAction):
+            return applyProjectedConversationEvent(
+                payload,
+                eventType: .messageVisibilityChanged,
+                message: message,
+                messageIDs: messageIDs,
+                visibilityAction: visibilityAction,
+                currentUserID: currentUserID
+            )
+        case .messageFavoriteChanged(let messageID, let isFavorited):
+            return applyProjectedConversationEvent(
+                payload,
+                eventType: .messageFavoriteChanged,
+                favoriteChangedMessageID: messageID,
+                isFavorited: isFavorited,
+                currentUserID: currentUserID
+            )
+        case .messageStream(let stream, let message):
+            return applyProjectedConversationEvent(
+                payload,
+                eventType: payload.eventType.conversationEventType,
+                message: message,
+                stream: stream,
+                currentUserID: currentUserID
+            )
+        case .conversationChanged:
+            return applyProjectedConversationEvent(
+                payload,
+                eventType: payload.eventType.conversationEventType,
+                currentUserID: currentUserID
+            )
+        case .conversationRemovedForSelf:
+            return applyProjectedConversationEvent(
+                payload,
+                eventType: .conversationRemovedForSelf,
+                currentUserID: currentUserID
+            )
+        case .conversationVisibilityChanged(let visibilityAction, let messageIDs):
+            return applyProjectedConversationEvent(
+                payload,
+                eventType: .conversationVisibilityChanged,
+                messageIDs: messageIDs,
+                visibilityAction: visibilityAction,
+                currentUserID: currentUserID
+            )
+        case .memberChanged:
+            return applyProjectedConversationEvent(
+                payload,
+                eventType: payload.eventType.conversationEventType,
+                currentUserID: currentUserID
+            )
+        case .contactChanged:
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+        }
+    }
+
+    private func applyProjectedConversationEvent(
+        _ event: IMTCPChatDomainEventPayload,
+        eventType: IMTCPConversationEventType,
+        message: IMConversationMessageResponseBody? = nil,
+        stream: IMTCPMessageStreamPayload? = nil,
+        messageIDs: [UUID] = [],
+        favoriteChangedMessageID: UUID? = nil,
+        isFavorited: Bool? = nil,
+        visibilityAction: IMTCPConversationVisibilityAction? = nil,
+        currentUserID: UUID
+    ) -> IMConversationEventApplyOutcome {
+        guard let conversation = event.conversation else {
+            return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
+        }
+        return applyConversationEvent(
+            IMTCPConversationEventPayload(
+                eventType: eventType,
+                conversation: conversation,
+                message: message,
+                stream: stream,
+                actorUserID: event.actorUserID,
+                serverTimestamp: event.occurredAt,
+                messageIDs: messageIDs,
+                favoriteChangedMessageID: favoriteChangedMessageID,
+                isFavorited: isFavorited,
+                visibilityAction: visibilityAction
+            ),
+            currentUserID: currentUserID
+        )
+    }
+
     public func replaceMessages(
         in conversationID: String,
         messages responses: [IMConversationMessageResponseBody],
@@ -703,7 +834,7 @@ public final class IMConversationStore {
         prepareOutgoingMessage(
             .reply(
                 reference: reference,
-                text: text.trimmingCharacters(in: .whitespacesAndNewlines)
+                body: .plain(text.trimmingCharacters(in: .whitespacesAndNewlines))
             ),
             conversationID: conversationID,
             senderUserID: senderUserID,
@@ -723,7 +854,7 @@ public final class IMConversationStore {
         prepareOutgoingMessage(
             .reply(
                 reference: reference,
-                text: text.trimmingCharacters(in: .whitespacesAndNewlines)
+                body: .plain(text.trimmingCharacters(in: .whitespacesAndNewlines))
             ),
             conversationID: conversationID,
             senderUserID: senderUserID,
@@ -884,7 +1015,7 @@ public final class IMConversationStore {
         }
 
         return prepareOutgoingMessage(
-            .text(trimmedText),
+            .richText(.plain(trimmedText)),
             conversationID: conversationID,
             senderUserID: senderUserID,
             deliveryState: deliveryState,
@@ -1346,7 +1477,7 @@ public final class IMConversationStore {
             nextText = existingText
         }
 
-        message.content = .text(nextText)
+        message.content = .richText(.plain(nextText))
         message.derivedState = MessageDerivedState(
             recallState: message.derivedState.recallState,
             edits: message.derivedState.edits,

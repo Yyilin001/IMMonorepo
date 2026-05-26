@@ -6,9 +6,8 @@ public enum IMTCPPacketType: String, Codable, Sendable {
     case authError = "auth_error"
     case heartbeat
     case heartbeatAck = "heartbeat_ack"
-    case message
-    case conversationEvent = "conversation_event"
-    case contactEvent = "contact_event"
+    case sendMessage = "send_message"
+    case domainEvent = "domain_event"
     case ack
     case kick
 }
@@ -258,6 +257,132 @@ public struct IMTCPContactEventPayload: Codable, Equatable, Sendable {
     }
 }
 
+public enum IMTCPChatDomainEventType: String, Codable, Equatable, Sendable {
+    case messageCreated = "message_created"
+    case messageEdited = "message_edited"
+    case messageRevoked = "message_revoked"
+    case messageVisibilityChanged = "message_visibility_changed"
+    case messageFavoriteChanged = "message_favorite_changed"
+    case messageStreamStarted = "message_stream_started"
+    case messageStreamChunk = "message_stream_chunk"
+    case messageStreamCompleted = "message_stream_completed"
+    case messageStreamFailed = "message_stream_failed"
+    case messageStreamCancelled = "message_stream_cancelled"
+    case conversationCreated = "conversation_created"
+    case conversationUpdated = "conversation_updated"
+    case conversationRemovedForSelf = "conversation_removed_for_self"
+    case conversationSettingsChanged = "conversation_settings_changed"
+    case conversationVisibilityChanged = "conversation_visibility_changed"
+    case memberAdded = "member_added"
+    case memberRemoved = "member_removed"
+    case memberRoleUpdated = "member_role_updated"
+    case contactRequestCreated = "contact_request_created"
+    case contactRequestAccepted = "contact_request_accepted"
+    case contactRequestUpdated = "contact_request_updated"
+}
+
+public enum IMTCPChatDomainEventBody: Equatable, Sendable {
+    case messageCreated(message: IMConversationMessageResponseBody, clientMessageID: String?)
+    case messageEdited(messageID: UUID, body: IMRichTextContent, editedAt: Date, message: IMConversationMessageResponseBody?)
+    case messageRevoked(messageID: UUID, revokedAt: Date, revokedByUserID: UUID?, message: IMConversationMessageResponseBody?)
+    case messageVisibilityChanged(messageIDs: [UUID], message: IMConversationMessageResponseBody?, visibilityAction: IMTCPConversationVisibilityAction?)
+    case messageFavoriteChanged(messageID: UUID, isFavorited: Bool)
+    case messageStream(IMTCPMessageStreamPayload, message: IMConversationMessageResponseBody?)
+    case conversationChanged
+    case conversationRemovedForSelf
+    case conversationVisibilityChanged(visibilityAction: IMTCPConversationVisibilityAction, messageIDs: [UUID])
+    case memberChanged(memberUserIDs: [UUID])
+    case contactChanged(request: ContactRequestResponseBody?, contact: ContactResponseBody?, contactUserID: UUID?)
+}
+
+public struct IMTCPChatDomainEventPayload: Equatable, Sendable {
+    public let eventID: UUID
+    public let eventType: IMTCPChatDomainEventType
+    public let aggregateType: String
+    public let aggregateID: UUID
+    public let aggregateSequence: UInt64
+    public let occurredAt: Date
+    public let actorUserID: UUID?
+    public let conversation: IMConversationSummaryResponseBody?
+    public let body: IMTCPChatDomainEventBody
+
+    public init(
+        eventID: UUID,
+        eventType: IMTCPChatDomainEventType,
+        aggregateType: String,
+        aggregateID: UUID,
+        aggregateSequence: UInt64,
+        occurredAt: Date,
+        actorUserID: UUID?,
+        conversation: IMConversationSummaryResponseBody?,
+        body: IMTCPChatDomainEventBody
+    ) {
+        self.eventID = eventID
+        self.eventType = eventType
+        self.aggregateType = aggregateType
+        self.aggregateID = aggregateID
+        self.aggregateSequence = aggregateSequence
+        self.occurredAt = occurredAt
+        self.actorUserID = actorUserID
+        self.conversation = conversation
+        self.body = body
+    }
+}
+
+public extension IMTCPChatDomainEventType {
+    var conversationEventType: IMTCPConversationEventType {
+        switch self {
+        case .messageEdited:
+            return .messageUpdated
+        case .messageRevoked:
+            return .messageRecalled
+        case .messageVisibilityChanged:
+            return .messageVisibilityChanged
+        case .messageFavoriteChanged:
+            return .messageFavoriteChanged
+        case .messageStreamStarted:
+            return .messageStreamStarted
+        case .messageStreamChunk:
+            return .messageStreamChunk
+        case .messageStreamCompleted:
+            return .messageStreamCompleted
+        case .messageStreamFailed:
+            return .messageStreamFailed
+        case .messageStreamCancelled:
+            return .messageStreamCancelled
+        case .conversationCreated:
+            return .conversationCreated
+        case .conversationRemovedForSelf:
+            return .conversationRemovedForSelf
+        case .conversationSettingsChanged:
+            return .conversationSettingsChanged
+        case .conversationVisibilityChanged:
+            return .conversationVisibilityChanged
+        case .memberAdded:
+            return .membersAdded
+        case .memberRemoved:
+            return .memberLeft
+        case .memberRoleUpdated:
+            return .membersUpdated
+        case .conversationUpdated, .messageCreated:
+            return .summaryUpdated
+        case .contactRequestCreated, .contactRequestAccepted, .contactRequestUpdated:
+            return .summaryUpdated
+        }
+    }
+
+    var contactEventType: IMTCPContactEventType {
+        switch self {
+        case .contactRequestCreated:
+            return .friendRequestCreated
+        case .contactRequestAccepted:
+            return .friendRequestAccepted
+        default:
+            return .contactRemoved
+        }
+    }
+}
+
 public enum IMTCPKickReason: String, Codable, Equatable, Sendable {
     case sessionRevoked = "session_revoked"
     case logoutCurrent = "logout_current"
@@ -289,7 +414,7 @@ public struct IMTCPClientConfiguration: Equatable, Sendable {
     public init(
         host: String,
         port: UInt16,
-        protocolVersion: Int = 2,
+        protocolVersion: Int = 4,
         deviceID: String? = nil,
         deviceName: String? = nil,
         platform: String? = "ios",
@@ -308,9 +433,7 @@ public struct IMTCPClientConfiguration: Equatable, Sendable {
 public enum IMTCPConnectionEvent: Equatable, Sendable {
     case heartbeatAck(requestID: UUID?, payload: IMTCPHeartbeatPayload)
     case ack(requestID: UUID?, payload: IMTCPAckPayload)
-    case message(requestID: UUID?, payload: IMTCPMessagePayload)
-    case conversationEvent(requestID: UUID?, payload: IMTCPConversationEventPayload)
-    case contactEvent(requestID: UUID?, payload: IMTCPContactEventPayload)
+    case domainEvent(requestID: UUID?, payload: IMTCPChatDomainEventPayload)
     case kick(IMTCPKickPayload)
 }
 
@@ -368,7 +491,7 @@ public struct IMTCPConnection: Sendable {
     }
 
     public func sendMessage(_ payload: IMTCPMessagePayload, requestID: UUID = UUID()) async throws {
-        try await sendPacket(type: .message, requestID: requestID, payload: payload)
+        try await sendPacket(type: .sendMessage, requestID: requestID, payload: payload)
     }
 
     public func sendAcknowledgement(_ payload: IMTCPAckPayload, requestID: UUID? = UUID()) async throws {
@@ -598,28 +721,12 @@ private actor IMTCPEventRouter {
                 finish(with: IMTCPClientError.invalidPayload(.ack))
             }
 
-        case .message:
+        case .domainEvent:
             do {
-                let payload = try packet.payload.decodePayload(IMTCPMessagePayload.self)
-                continuation.yield(.message(requestID: packet.requestID, payload: payload))
+                let payload = try packet.payload.decodePayload(IMTCPChatDomainEventPayload.self)
+                continuation.yield(.domainEvent(requestID: packet.requestID, payload: payload))
             } catch {
-                finish(with: IMTCPClientError.invalidPayload(.message))
-            }
-
-        case .conversationEvent:
-            do {
-                let payload = try packet.payload.decodePayload(IMTCPConversationEventPayload.self)
-                continuation.yield(.conversationEvent(requestID: packet.requestID, payload: payload))
-            } catch {
-                finish(with: IMTCPClientError.invalidPayload(.conversationEvent))
-            }
-
-        case .contactEvent:
-            do {
-                let payload = try packet.payload.decodePayload(IMTCPContactEventPayload.self)
-                continuation.yield(.contactEvent(requestID: packet.requestID, payload: payload))
-            } catch {
-                finish(with: IMTCPClientError.invalidPayload(.contactEvent))
+                finish(with: IMTCPClientError.invalidPayload(.domainEvent))
             }
 
         case .kick:
@@ -629,7 +736,7 @@ private actor IMTCPEventRouter {
             finished = true
             continuation.finish()
 
-        case .auth, .authOK, .authError, .heartbeat:
+        case .auth, .authOK, .authError, .heartbeat, .sendMessage:
             finish(with: IMTCPClientError.unexpectedPacket(packet.type))
         }
     }

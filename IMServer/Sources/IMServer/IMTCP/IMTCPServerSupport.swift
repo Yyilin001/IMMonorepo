@@ -23,7 +23,7 @@ struct IMTCPConfiguration: Sendable {
             enabled: enabled,
             host: Environment.get("IM_TCP_HOST") ?? "0.0.0.0",
             port: Environment.get("IM_TCP_PORT").flatMap(Int.init(_:)) ?? 9000,
-            protocolVersion: Environment.get("IM_TCP_PROTOCOL_VERSION").flatMap(Int.init(_:)) ?? 2,
+            protocolVersion: Environment.get("IM_TCP_PROTOCOL_VERSION").flatMap(Int.init(_:)) ?? 4,
             authTimeout: Environment.get("IM_TCP_AUTH_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 10,
             heartbeatInterval: Environment.get("IM_TCP_HEARTBEAT_INTERVAL").flatMap(TimeInterval.init(_:)) ?? 30,
             idleTimeout: Environment.get("IM_TCP_IDLE_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 90,
@@ -218,29 +218,31 @@ actor IMConnectionRegistry {
         connectionsByID.count
     }
 
+    func sendDomainEvent(
+        _ payload: IMTCPChatDomainEventPayload,
+        toUserIDs userIDs: [UUID],
+        requestID: UUID? = UUID()
+    ) {
+        sendPacket(type: .domainEvent, payload: payload, toUserIDs: userIDs, requestID: requestID)
+    }
+
     func sendMessage(
         _ payload: IMTCPMessagePayload,
         toUserIDs userIDs: [UUID],
         requestID: UUID? = UUID()
-    ) {
-        sendPacket(type: .message, payload: payload, toUserIDs: userIDs, requestID: requestID)
-    }
+    ) {}
 
     func sendConversationEvent(
         _ payload: IMTCPConversationEventPayload,
         toUserID userID: UUID,
         requestID: UUID? = UUID()
-    ) {
-        sendPacket(type: .conversationEvent, payload: payload, toUserIDs: [userID], requestID: requestID)
-    }
+    ) {}
 
     func sendContactEvent(
         _ payload: IMTCPContactEventPayload,
         toUserID userID: UUID,
         requestID: UUID? = UUID()
-    ) {
-        sendPacket(type: .contactEvent, payload: payload, toUserIDs: [userID], requestID: requestID)
-    }
+    ) {}
 
     private func sendPacket<Payload: Sendable>(
         type: IMTCPPacketType,

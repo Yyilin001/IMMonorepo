@@ -15,7 +15,7 @@ extension IMConversationStoreTests {
                 senderUserID: Self.peerUserID,
                 serverSequence: 1,
                 serverTimestamp: Date(timeIntervalSince1970: 1_700_300_000),
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "first live message"]
             ),
             currentUserID: Self.currentUserID
@@ -64,7 +64,7 @@ extension IMConversationStoreTests {
                 senderUserID: Self.peerUserID,
                 serverSequence: 1,
                 serverTimestamp: Date(timeIntervalSince1970: 1_700_300_000),
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "unread"]
             ),
             currentUserID: Self.currentUserID
@@ -78,7 +78,7 @@ extension IMConversationStoreTests {
                     conversationID: backgroundConversationID,
                     senderUserID: Self.peerUserID,
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "unread"],
                     createdAt: Date(timeIntervalSince1970: 1_700_300_000)
                 )
@@ -114,7 +114,7 @@ extension IMConversationStoreTests {
                     conversationID: conversationID,
                     senderUserID: Self.peerUserID,
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "from server"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_000)
                 )
@@ -153,7 +153,7 @@ extension IMConversationStoreTests {
                 senderUserID: Self.peerUserID,
                 previewText: "quoted source"
             ),
-            text: "reply body"
+            body: .plain("reply body")
         ))
         #expect(localMessage.content == .reply(
             reference: IMReplyReference(
@@ -161,7 +161,7 @@ extension IMConversationStoreTests {
                 senderUserID: Self.peerUserID,
                 previewText: "quoted source"
             ),
-            text: "reply body"
+            body: .plain("reply body")
         ))
         #expect(localMessage.text == "reply body")
         #expect(selectedConversation.lastMessagePreview == "reply body")
@@ -222,7 +222,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "referenced from history"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_000)
                 ),
@@ -271,7 +271,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "will be recalled"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_000)
                 ),
@@ -334,7 +334,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "gap target"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_000)
                 ),
@@ -415,7 +415,7 @@ extension IMConversationStoreTests {
                             senderUserID: Self.peerUserID,
                             previewText: "quoted snapshot"
                         ),
-                        text: "jump reply"
+                        body: .plain("jump reply")
                     ),
                     createdAt: Date(timeIntervalSince1970: 1_700_450_100)
                 )
@@ -495,7 +495,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.currentUserID,
                     clientMessageID: clientMessageID,
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "pending local"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_000)
                 )
@@ -524,7 +524,7 @@ extension IMConversationStoreTests {
                     conversationID: conversationID,
                     senderUserID: Self.peerUserID,
                     serverSequence: 3,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "third"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_003)
                 ),
@@ -533,7 +533,7 @@ extension IMConversationStoreTests {
                     conversationID: conversationID,
                     senderUserID: Self.currentUserID,
                     serverSequence: 4,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "fourth"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_004)
                 )
@@ -552,7 +552,7 @@ extension IMConversationStoreTests {
                     conversationID: conversationID,
                     senderUserID: Self.peerUserID,
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "first"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_001)
                 ),
@@ -561,7 +561,7 @@ extension IMConversationStoreTests {
                     conversationID: conversationID,
                     senderUserID: Self.currentUserID,
                     serverSequence: 2,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "second"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_002)
                 )
@@ -601,7 +601,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 3,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "third"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_003)
                 )
@@ -618,7 +618,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.currentUserID,
                     clientMessageID: clientMessageID,
                     serverSequence: 4,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "pending local"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_004)
                 ),
@@ -628,7 +628,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 5,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "fifth"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_005)
                 )

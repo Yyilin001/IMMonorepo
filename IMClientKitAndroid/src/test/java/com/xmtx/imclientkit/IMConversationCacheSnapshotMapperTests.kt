@@ -77,7 +77,7 @@ class IMConversationCacheSnapshotMapperTests {
         serverMessageID = "message-$sequence",
         senderUserID = "user-2",
         serverSequence = sequence,
-        content = IMMessageContent.Text("message $sequence"),
+        content = IMMessageContent.plain("message $sequence"),
         direction = IMMessageDirection.Incoming,
         createdAt = "2026-05-13T00:00:${sequence.toString().padStart(2, '0')}Z",
         deliveryState = deliveryState,

@@ -36,7 +36,7 @@ struct ConversationMessageCommandSupport {
     func editMessage(
         in conversationID: UUID,
         messageID: UUID,
-        text: String,
+        body: IMRichTextContent,
         requesterUserID: UUID
     ) async throws -> IMMessageResponse {
         _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
@@ -45,7 +45,7 @@ struct ConversationMessageCommandSupport {
             try await ConversationMessageService(db: database).editMessage(
                 in: conversationID,
                 messageID: messageID,
-                text: text,
+                body: body,
                 requesterUserID: requesterUserID,
                 on: database
             )

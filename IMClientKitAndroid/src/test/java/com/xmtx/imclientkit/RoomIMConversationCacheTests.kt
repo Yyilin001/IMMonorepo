@@ -121,7 +121,7 @@ class RoomIMConversationCacheTests {
         serverMessageID = "message-$sequence",
         senderUserID = "user-2",
         serverSequence = sequence,
-        content = IMMessageContent.Text("hello"),
+        content = IMMessageContent.plain("hello"),
         direction = IMMessageDirection.Incoming,
         createdAt = "2026-05-13T00:00:00Z",
         deliveryState = IMMessageDeliveryState.Received,

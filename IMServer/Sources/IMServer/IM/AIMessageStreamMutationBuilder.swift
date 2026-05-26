@@ -42,7 +42,7 @@ enum AIMessageStreamMutationBuilder {
         updatedStreamState(
             streamID: streamID,
             state: state,
-            chunkIndex: Int.max,
+            chunkIndex: Int(Int32.max),
             partialText: finalText,
             errorCode: errorCode,
             errorMessage: errorMessage,

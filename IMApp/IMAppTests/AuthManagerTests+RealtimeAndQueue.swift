@@ -116,12 +116,12 @@ extension AuthManagerTests {
                 requestID: requestID,
                 payload: IMTCPMessagePayload(
                     clientMessageID: nil,
-                    messageID: "srv-msg-1",
-                    conversationID: "conv-42",
+                    messageID: "11111111-aaaa-bbbb-cccc-dddddddddddd",
+                    conversationID: "aaaaaaaa-aaaa-bbbb-cccc-dddddddddddd",
                     senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                     serverSequence: 99,
                     serverTimestamp: Date(timeIntervalSince1970: 1_700_000_999),
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "hello from server"]
                 )
             )
@@ -134,7 +134,7 @@ extension AuthManagerTests {
         }
 
         let conversation = manager.imConversationStore.selectedConversation
-        #expect(conversation?.id == "conv-42")
+        #expect(conversation?.id == "aaaaaaaa-aaaa-bbbb-cccc-dddddddddddd")
         #expect(conversation?.messages.first?.text == "hello from server")
         #expect(conversation?.messages.first?.direction == .incoming)
         #expect(conversation?.messages.first?.serverSequence == 99)
@@ -144,8 +144,8 @@ extension AuthManagerTests {
         let ackPacket = try Self.decode(IMTCPPacketEnvelope<IMTCPAckPayload>.self, from: ackLine)
         #expect(ackPacket.type == .ack)
         #expect(ackPacket.requestID == requestID)
-        #expect(ackPacket.payload.messageID == "srv-msg-1")
-        #expect(ackPacket.payload.conversationID == "conv-42")
+        #expect(ackPacket.payload.messageID == "11111111-aaaa-bbbb-cccc-dddddddddddd")
+        #expect(ackPacket.payload.conversationID == "aaaaaaaa-aaaa-bbbb-cccc-dddddddddddd")
         #expect(ackPacket.payload.status == "received")
     }
 
@@ -200,12 +200,12 @@ extension AuthManagerTests {
                 requestID: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
                 payload: IMTCPMessagePayload(
                     clientMessageID: nil,
-                    messageID: "srv-msg-1",
+                    messageID: "11111111-aaaa-bbbb-cccc-dddddddddddd",
                     conversationID: conversationID.uuidString,
                     senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                     serverSequence: 99,
                     serverTimestamp: Date(timeIntervalSince1970: 1_700_000_999),
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "hello from server 1"]
                 )
             )
@@ -215,12 +215,12 @@ extension AuthManagerTests {
                 requestID: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
                 payload: IMTCPMessagePayload(
                     clientMessageID: nil,
-                    messageID: "srv-msg-2",
+                    messageID: "22222222-aaaa-bbbb-cccc-dddddddddddd",
                     conversationID: conversationID.uuidString,
                     senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                     serverSequence: 100,
                     serverTimestamp: Date(timeIntervalSince1970: 1_700_001_000),
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "hello from server 2"]
                 )
             )
@@ -261,13 +261,13 @@ extension AuthManagerTests {
             await MainActor.run { manager.imConnectionStatus == .connected }
         }
 
-        let didSend = await manager.sendIMText("hello client", to: "conv-local")
+        let didSend = await manager.sendIMText("hello client", to: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")
         #expect(didSend)
 
         let messageLine = try await Self.requireRecordedLine(at: 0, from: harness)
         let messagePacket = try Self.decode(IMTCPPacketEnvelope<IMTCPMessagePayload>.self, from: messageLine)
-        #expect(messagePacket.type == .message)
-        #expect(messagePacket.payload.conversationID == "conv-local")
+        #expect(messagePacket.type == .sendMessage)
+        #expect(messagePacket.payload.conversationID == "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")
         #expect(messagePacket.payload.senderUserID == nil)
         #expect(messagePacket.payload.serverSequence == nil)
         #expect(messagePacket.payload.serverTimestamp == nil)
@@ -283,8 +283,8 @@ extension AuthManagerTests {
             .ack(
                 requestID: messagePacket.requestID,
                 payload: IMTCPAckPayload(
-                    messageID: "srv-msg-9001",
-                    conversationID: "conv-local",
+                    messageID: "99999999-aaaa-bbbb-cccc-dddddddddddd",
+                    conversationID: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
                     status: "accepted"
                 )
             )
@@ -301,12 +301,12 @@ extension AuthManagerTests {
                 requestID: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!,
                 payload: IMTCPMessagePayload(
                     clientMessageID: messagePacket.payload.clientMessageID,
-                    messageID: "srv-msg-9001",
-                    conversationID: "conv-local",
+                    messageID: "99999999-aaaa-bbbb-cccc-dddddddddddd",
+                    conversationID: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
                     senderUserID: Self.user.id,
                     serverSequence: 100,
                     serverTimestamp: Date(timeIntervalSince1970: 1_700_001_000),
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "hello client"]
                 )
             )
@@ -321,7 +321,7 @@ extension AuthManagerTests {
 
         let sentMessage = manager.imConversationStore.selectedConversation?.messages.first
         #expect(sentMessage?.direction == .outgoing)
-        #expect(sentMessage?.serverMessageID == "srv-msg-9001")
+        #expect(sentMessage?.serverMessageID == "99999999-aaaa-bbbb-cccc-dddddddddddd")
         #expect(sentMessage?.serverSequence == 100)
         #expect(sentMessage?.createdAt == Date(timeIntervalSince1970: 1_700_001_000))
     }
@@ -474,7 +474,7 @@ extension AuthManagerTests {
 
         let messageLine = try await Self.requireRecordedLine(at: 0, from: harness)
         let messagePacket = try Self.decode(IMTCPPacketEnvelope<IMTCPMessagePayload>.self, from: messageLine)
-        #expect(messagePacket.type == .message)
+        #expect(messagePacket.type == .sendMessage)
         #expect(messagePacket.payload.conversationID == "conv-local")
         #expect(messagePacket.payload.content == .image(
             IMMediaAsset(
@@ -642,7 +642,7 @@ extension AuthManagerTests {
 
         await manager.login(email: Self.user.email, password: "password123")
 
-        var recordedMessageLine: String?
+        var recordedMessageLine: Data?
         for _ in 0..<1_000 {
             let lines = await harness.recordedLines()
             if let firstLine = lines.first {
@@ -653,7 +653,7 @@ extension AuthManagerTests {
         }
         if let messageLine = recordedMessageLine {
             let messagePacket = try Self.decode(IMTCPPacketEnvelope<IMTCPMessagePayload>.self, from: messageLine)
-            #expect(messagePacket.type == .message)
+            #expect(messagePacket.type == .sendMessage)
             #expect(messagePacket.payload.content == .image(
                 IMMediaAsset(
                     assetID: uploadID,
@@ -976,7 +976,7 @@ extension AuthManagerTests {
                                 serverMessageID: nil,
                                 senderUserID: Self.user.id,
                                 serverSequence: nil,
-                                kind: "text",
+                                kind: "rich_text",
                                 text: "恢复后发送",
                                 direction: .outgoing,
                                 createdAt: Date(timeIntervalSince1970: 1_700_100_000),
@@ -1045,7 +1045,7 @@ extension AuthManagerTests {
 
         let messageLine = try await Self.requireRecordedLine(at: 0, from: harness)
         let messagePacket = try Self.decode(IMTCPPacketEnvelope<IMTCPMessagePayload>.self, from: messageLine)
-        #expect(messagePacket.type == .message)
+        #expect(messagePacket.type == .sendMessage)
         #expect(messagePacket.payload.conversationID == conversationIDString)
         #expect(messagePacket.payload.clientMessageID == "queued-client-1")
         #expect(messagePacket.payload.body["text"] == "恢复后发送")
@@ -1074,7 +1074,7 @@ extension AuthManagerTests {
                                 serverMessageID: nil,
                                 senderUserID: Self.user.id,
                                 serverSequence: nil,
-                                kind: "text",
+                                kind: "rich_text",
                                 text: "恢复后发送",
                                 direction: .outgoing,
                                 createdAt: Date(timeIntervalSince1970: 1_700_100_000),
@@ -1177,7 +1177,7 @@ extension AuthManagerTests {
                                 serverMessageID: nil,
                                 senderUserID: Self.user.id,
                                 serverSequence: nil,
-                                kind: "text",
+                                kind: "rich_text",
                                 text: "第一条",
                                 direction: .outgoing,
                                 createdAt: Date(timeIntervalSince1970: 1_700_100_000),
@@ -1190,7 +1190,7 @@ extension AuthManagerTests {
                                 serverMessageID: nil,
                                 senderUserID: Self.user.id,
                                 serverSequence: nil,
-                                kind: "text",
+                                kind: "rich_text",
                                 text: "第二条",
                                 direction: .outgoing,
                                 createdAt: Date(timeIntervalSince1970: 1_700_100_001),

@@ -125,7 +125,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 1,
-                content: .text("delete this index row")
+                content: .richText(.plain("delete this index row"))
             )
             try await message.create(on: app.db)
             let messageID = try message.requireID()
@@ -198,7 +198,7 @@ extension IMServerTests {
                     senderUserID: nil,
                     serverSequence: nil,
                     serverTimestamp: nil,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": " hello from tcp "]
                 ),
                 senderUserID: try demoUser.requireID()
@@ -257,7 +257,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try otherUser.requireID(),
                 serverSequence: 1,
-                content: .text("canonical source")
+                content: .richText(.plain("canonical source"))
             )
             try await referencedMessage.create(on: app.db)
             let referencedMessageID = try referencedMessage.requireID()
@@ -276,7 +276,7 @@ extension IMServerTests {
                             senderUserID: UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
                             previewText: "stale preview"
                         ),
-                        text: "reply body"
+                        body: .plain("reply body")
                     )
                 ),
                 senderUserID: try demoUser.requireID()
@@ -289,7 +289,7 @@ extension IMServerTests {
                     senderUserID: try otherUser.requireID(),
                     previewText: "canonical source"
                 ),
-                text: "reply body"
+                body: .plain("reply body")
             ))
         }
     }
@@ -362,7 +362,7 @@ extension IMServerTests {
                 senderUserID: demoUserID,
                 serverSequence: 1,
                 clientMessageID: "duplicate-reply-client",
-                content: .text("stored original")
+                content: .richText(.plain("stored original"))
             )
             try await existing.create(on: app.db)
             let existingID = try existing.requireID()
@@ -381,7 +381,7 @@ extension IMServerTests {
                             senderUserID: nil,
                             previewText: "stale missing reference"
                         ),
-                        text: "retry body"
+                        body: .plain("retry body")
                     )
                 ),
                 senderUserID: demoUserID
@@ -481,7 +481,7 @@ extension IMServerTests {
                     senderUserID: demoUserID,
                     serverSequence: sequence,
                     clientMessageID: nil,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "legacy-\(sequence)"]
                 ).create(on: app.db)
             }
@@ -518,7 +518,7 @@ extension IMServerTests {
                         senderUserID: nil,
                         serverSequence: nil,
                         serverTimestamp: nil,
-                        kind: "text",
+                        kind: "rich_text",
                         body: ["text": "should fail"]
                     ),
                     senderUserID: try outsider.requireID()

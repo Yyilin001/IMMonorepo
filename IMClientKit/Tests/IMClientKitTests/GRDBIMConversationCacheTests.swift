@@ -40,7 +40,7 @@ struct GRDBIMConversationCacheTests {
                             serverMessageID: "message-2",
                             senderUserID: UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!,
                             serverSequence: 2,
-                            content: .text("second"),
+                            content: .richText(.plain("second")),
                             direction: .incoming,
                             createdAt: Date(timeIntervalSince1970: 1_700_300_002),
                             deliveryState: .received
@@ -52,7 +52,7 @@ struct GRDBIMConversationCacheTests {
                             serverMessageID: "message-1",
                             senderUserID: ownerUserID,
                             serverSequence: 1,
-                            content: .text("first"),
+                            content: .richText(.plain("first")),
                             direction: .outgoing,
                             createdAt: Date(timeIntervalSince1970: 1_700_300_001),
                             deliveryState: .sent,
@@ -193,7 +193,7 @@ struct GRDBIMConversationCacheTests {
                             serverMessageID: "message-\(ownerUserID.uuidString)",
                             senderUserID: ownerUserID,
                             serverSequence: 1,
-                            content: .text("hello"),
+                            content: .richText(.plain("hello")),
                             direction: .incoming,
                             createdAt: Date(timeIntervalSince1970: 1_700_300_001),
                             deliveryState: .received

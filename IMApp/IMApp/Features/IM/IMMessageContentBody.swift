@@ -17,17 +17,17 @@ struct IMMessageContentBody: View {
         let presentation = MessagePresentation(aggregate: aggregate)
 
         switch aggregate.primaryContent {
-        case .text:
-            Text(presentation.textValue ?? message.text)
+        case .richText(let body):
+            Text(attributedText(for: body, fallback: presentation.textValue ?? message.text))
                 .font(.body)
-        case .reply:
+        case .reply(_, let body):
             VStack(alignment: .leading, spacing: 8) {
                 Button(action: onJumpToReplyReference) {
                     IMReplyReferencePreview(replyReference: replyReference)
                 }
                 .buttonStyle(.plain)
 
-                Text(presentation.textValue ?? message.text)
+                Text(attributedText(for: body, fallback: presentation.textValue ?? message.text))
                     .font(.body)
             }
         case .image(let asset):
@@ -74,6 +74,61 @@ struct IMMessageContentBody: View {
         case .system:
             EmptyView()
         }
+    }
+
+    private func attributedText(for body: IMRichTextContent, fallback: String) -> AttributedString {
+        var attributed = AttributedString(fallback)
+        guard fallback == body.text else {
+            return attributed
+        }
+
+        for entity in body.entities {
+            guard let range = attributedRange(for: entity.range, in: body.text, attributed: attributed) else {
+                continue
+            }
+
+            switch entity {
+            case .link(_, let url):
+                if let url = URL(string: url) {
+                    attributed[range].link = url
+                    attributed[range].foregroundColor = .blue
+                    attributed[range].underlineStyle = .single
+                }
+            case .mention:
+                attributed[range].foregroundColor = .accentColor
+            case .hashtag:
+                attributed[range].foregroundColor = .teal
+            case .inlineCode:
+                attributed[range].font = .system(.body, design: .monospaced)
+                attributed[range].backgroundColor = Color.secondary.opacity(0.12)
+            }
+        }
+
+        return attributed
+    }
+
+    private func attributedRange(
+        for range: IMTextRange,
+        in text: String,
+        attributed: AttributedString
+    ) -> Range<AttributedString.Index>? {
+        guard range.location >= 0,
+              range.length > 0,
+              range.location + range.length <= text.utf16.count
+        else {
+            return nil
+        }
+
+        let lowerUTF16 = text.utf16.index(text.utf16.startIndex, offsetBy: range.location)
+        let upperUTF16 = text.utf16.index(text.utf16.startIndex, offsetBy: range.location + range.length)
+        guard let lowerStringIndex = String.Index(lowerUTF16, within: text),
+              let upperStringIndex = String.Index(upperUTF16, within: text),
+              let lower = AttributedString.Index(lowerStringIndex, within: attributed),
+              let upper = AttributedString.Index(upperStringIndex, within: attributed)
+        else {
+            return nil
+        }
+        return lower..<upper
     }
 
     private func mediaSubtitle(for asset: IMMediaAsset) -> String {

@@ -213,7 +213,7 @@ class IMRuntimeControllerTests {
                             serverMessageID = MESSAGE_ID,
                             senderUserID = USER_ID,
                             serverSequence = 1UL,
-                            content = IMMessageContent.Text("partial"),
+                            content = IMMessageContent.plain("partial"),
                             derivedState = buildJsonObject { }.withMessageStreamState(
                                 IMMessageStreamState(
                                     streamID = STREAM_ID,
@@ -270,7 +270,7 @@ class IMRuntimeControllerTests {
             "conversationID": "$CONVERSATION_ID",
             "senderUserID": "$USER_ID",
             "serverSequence": 1,
-            "content": { "type": "text", "text": "completed text" },
+            "content": { "type": "rich_text", "body": { "text": "completed text", "entities": [] } },
             "derivedState": {
               "streamState": {
                 "streamID": "$STREAM_ID",

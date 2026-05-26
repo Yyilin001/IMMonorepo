@@ -99,7 +99,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 3,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "cached message"],
                     createdAt: updatedAt
                 )

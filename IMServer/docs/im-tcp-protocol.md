@@ -1,8 +1,8 @@
-# IM TCP Realtime Protocol v2
+# IM TCP Realtime Protocol v3
 
 ## Scope
 
-HTTP still owns registration, login, refresh, logout, file upload, normal business DTOs, and database outbox JSON payloads. TCP only carries realtime IM presence, delivery, acknowledgements, and server push.
+HTTP still owns registration, login, refresh, logout, file upload, and normal business DTOs. TCP carries realtime IM presence, delivery, acknowledgements, and server push.
 
 TCP clients authenticate with an HTTP-issued access token during the first packet. Refresh tokens are never sent over TCP.
 
@@ -11,7 +11,7 @@ TCP clients authenticate with an HTTP-issued access token during the first packe
 - Protocol: plain TCP behind the existing deployment boundary
 - Framing: 4-byte big-endian unsigned length prefix followed by one Protobuf packet
 - Encoding: `Protocol/im_realtime/v1/im_realtime.proto`
-- Current protocol version: `2`
+- Current protocol version: `3`
 - Direction: full duplex
 
 Each frame is:
@@ -72,7 +72,7 @@ Server to client:
 
 ## Handshake
 
-The client must send `auth` as the first packet before the auth timeout. `AuthRequest.protocol_version` must be `2`; unsupported versions are rejected.
+The client must send `auth` as the first packet before the auth timeout. `AuthRequest.protocol_version` must be `3`; unsupported versions are rejected.
 
 On success, the server binds the TCP channel to the resolved `userID`, `sessionID`, and connection metadata, then sends `auth_ok`. On failure, it sends `auth_error` and closes.
 
@@ -80,7 +80,7 @@ On success, the server binds the TCP channel to the resolved `userID`, `sessionI
 
 Local fanout writes the same PB packet directly to active TCP channels.
 
-Cross-node Redis dispatch and gateway HTTP relay keep a JSON envelope for observability and routing metadata, but realtime payload data is `packetBase64`, a base64 encoded serialized PB `Packet`. HTTP/REST response bodies and database outbox payload JSON are intentionally unchanged.
+Cross-node Redis dispatch and gateway HTTP relay keep a JSON envelope for observability and routing metadata, but realtime payload data is `packetBase64`, a base64 encoded serialized PB `Packet`. Message content is modeled from the protobuf schema; HTTP/REST still transports JSON DTOs with the same rich-text content shape.
 
 ## Server Structure
 

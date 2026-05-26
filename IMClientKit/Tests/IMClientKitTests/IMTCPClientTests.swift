@@ -62,7 +62,7 @@ struct IMTCPClientTests {
         #expect(connection.authentication.heartbeatIntervalSeconds == 30)
     }
 
-    @Test func heartbeatMessageConversationEventAndKickAreDeliveredAsEvents() async throws {
+    @Test func heartbeatDomainEventAndKickAreDeliveredAsEvents() async throws {
         let wire = MockIMTCPWire()
         let transport = MockIMTCPTransport { _, _ in
             await wire.makeConnection()
@@ -115,97 +115,55 @@ struct IMTCPClientTests {
         let heartbeatEvent = try await iterator.next()
         #expect(heartbeatEvent == .heartbeatAck(requestID: heartbeatRequestID, payload: IMTCPHeartbeatPayload(sequence: 7)))
 
-        let messageRequestID = UUID(uuidString: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")!
-        let messagePayload = IMTCPMessagePayload(
-            clientMessageID: nil,
-            messageID: "srv-msg-1",
-            conversationID: "conv-42",
+        let domainEventRequestID = UUID(uuidString: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")!
+        let conversationID = UUID(uuidString: "12121212-3434-5656-7878-909090909090")!
+        let messageID = UUID(uuidString: "13131313-3434-5656-7878-909090909090")!
+        let message = IMConversationMessageResponseBody(
+            id: messageID,
+            conversationID: conversationID,
             senderUserID: Self.userID,
+            clientMessageID: "client-msg-1",
             serverSequence: 7,
-            serverTimestamp: Date(timeIntervalSince1970: 1_700_000_101),
-            content: .text("hello")
+            content: .richText(.plain("hello")),
+            createdAt: Date(timeIntervalSince1970: 1_700_000_101)
         )
-
-        await wire.yieldIncoming(
-            try encodeFrame(
-                type: .message,
-                requestID: messageRequestID,
-                payload: messagePayload
-            )
-        )
-
-        let messageEvent = try await iterator.next()
-        #expect(messageEvent == .message(requestID: messageRequestID, payload: messagePayload))
-
-        let conversationRequestID = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
-        let conversationEventPayload = IMTCPConversationEventPayload(
-            eventType: .summaryUpdated,
+        let domainEventPayload = IMTCPChatDomainEventPayload(
+            eventID: messageID,
+            eventType: .messageCreated,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 7,
+            occurredAt: Date(timeIntervalSince1970: 1_700_000_101),
+            actorUserID: Self.userID,
             conversation: IMConversationSummaryResponseBody(
-                id: UUID(uuidString: "12121212-3434-5656-7878-909090909090")!,
+                id: conversationID,
                 title: "Realtime Conversation",
                 memberUserIDs: [Self.userID],
                 lastMessage: IMMessagePreviewResponseBody(
-                    id: UUID(uuidString: "13131313-3434-5656-7878-909090909090")!,
+                    id: messageID,
                     senderUserID: Self.userID,
-                    serverSequence: 8,
-                    content: .text("summary update"),
-                    createdAt: Date(timeIntervalSince1970: 1_700_000_102)
+                    serverSequence: 7,
+                    content: .richText(.plain("hello")),
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_101)
                 ),
-                lastReadSequence: 8,
+                lastReadSequence: 7,
                 unreadCount: 0,
                 createdAt: Date(timeIntervalSince1970: 1_700_000_000),
-                updatedAt: Date(timeIntervalSince1970: 1_700_000_102)
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_101)
             ),
-            actorUserID: Self.userID,
-            serverTimestamp: Date(timeIntervalSince1970: 1_700_000_102)
+            body: .messageCreated(message: message, clientMessageID: "client-msg-1")
         )
 
         await wire.yieldIncoming(
             try encodeFrame(
-                type: .conversationEvent,
-                requestID: conversationRequestID,
-                payload: conversationEventPayload
+                type: .domainEvent,
+                requestID: domainEventRequestID,
+                payload: domainEventPayload
             )
         )
 
-        let conversationEvent = try await iterator.next()
-        #expect(conversationEvent == .conversationEvent(requestID: conversationRequestID, payload: conversationEventPayload))
-
-        let contactRequestID = UUID(uuidString: "14141414-3434-5656-7878-909090909090")!
-        let contactEventRequestID = UUID(uuidString: "15151515-3434-5656-7878-909090909090")!
-        let contactEventPayload = IMTCPContactEventPayload(
-            eventType: .friendRequestCreated,
-            request: ContactRequestResponseBody(
-                id: contactRequestID,
-                requester: AuthUser(id: Self.userID, email: "sender@example.com"),
-                addressee: AuthUser(
-                    id: UUID(uuidString: "16161616-3434-5656-7878-909090909090")!,
-                    email: "receiver@example.com"
-                ),
-                status: .pending,
-                message: "hi",
-                requesterRemark: "receiver",
-                addresseeRemark: nil,
-                createdAt: Date(timeIntervalSince1970: 1_700_000_103),
-                updatedAt: Date(timeIntervalSince1970: 1_700_000_103),
-                respondedAt: nil
-            ),
-            contact: nil,
-            contactUserID: nil,
-            actorUserID: Self.userID,
-            serverTimestamp: Date(timeIntervalSince1970: 1_700_000_103)
-        )
-
-        await wire.yieldIncoming(
-            try encodeFrame(
-                type: .contactEvent,
-                requestID: contactEventRequestID,
-                payload: contactEventPayload
-            )
-        )
-
-        let contactEvent = try await iterator.next()
-        #expect(contactEvent == .contactEvent(requestID: contactEventRequestID, payload: contactEventPayload))
+        let domainEvent = try await iterator.next()
+        #expect(domainEvent == .domainEvent(requestID: domainEventRequestID, payload: domainEventPayload))
 
         await wire.yieldIncoming(
             try encodeFrame(

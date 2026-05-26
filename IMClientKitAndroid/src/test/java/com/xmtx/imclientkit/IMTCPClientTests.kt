@@ -43,7 +43,7 @@ class IMTCPClientTests {
                     conversationID = "conversation-1",
                     senderUserID = "user-1",
                     serverSequence = 2UL,
-                    content = IMMessageContent.Text("hello"),
+                    content = IMMessageContent.plain("hello"),
                 ),
             ),
         )
@@ -71,7 +71,7 @@ class IMTCPClientTests {
                 clientMessageID = "client-1",
                 conversationID = "conversation-1",
                 senderUserID = "user-1",
-                content = IMMessageContent.Text("hello"),
+                content = IMMessageContent.plain("hello"),
             ),
             requestID = "send-1",
         )

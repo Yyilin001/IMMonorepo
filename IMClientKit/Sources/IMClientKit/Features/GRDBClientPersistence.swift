@@ -858,13 +858,13 @@ private enum GRDBClientPersistence {
             return decoded
         }
 
-        switch IMMessageContentType(rawValue: kind) ?? .text {
-        case .text:
-            return .text(textPreview)
+        switch IMMessageContentType(rawValue: kind) ?? .richText {
+        case .richText:
+            return .richText(.plain(textPreview))
         case .reply:
             return .reply(
                 reference: IMReplyReference(messageID: "", senderUserID: nil, previewText: ""),
-                text: textPreview
+                body: .plain(textPreview)
             )
         case .recalled:
             return .recalled

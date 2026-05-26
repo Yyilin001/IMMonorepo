@@ -206,12 +206,11 @@ final class ConversationMessage: Model, Content, @unchecked Sendable {
     }
 
     func decodedContent() throws -> IMMessageContent {
-        guard let data = bodyJSON.data(using: .utf8) else {
+        guard let data = Data(base64Encoded: bodyJSON) else {
             throw Abort(.internalServerError, reason: "消息内容编码无效。")
         }
 
-        let decoder = JSONDecoder()
-        return try decoder.decode(IMMessageContent.self, from: data)
+        return try IMRTMessageContent(serializedBytes: data).domainValue()
     }
 
     func replaceContent(_ content: IMMessageContent) throws {
@@ -220,12 +219,11 @@ final class ConversationMessage: Model, Content, @unchecked Sendable {
     }
 
     func decodedDerivedState() throws -> IMMessageDerivedState {
-        guard let derivedStateJSON, let data = derivedStateJSON.data(using: .utf8) else {
+        guard let derivedStateJSON, let data = Data(base64Encoded: derivedStateJSON) else {
             return try decodedContent().derivedState
         }
 
-        let decoder = JSONDecoder()
-        return try decoder.decode(IMMessageDerivedState.self, from: data)
+        return try IMRTMessageDerivedState(serializedBytes: data).domainValue()
     }
 
     func replaceDerivedState(_ derivedState: IMMessageDerivedState) throws {
@@ -239,20 +237,10 @@ final class ConversationMessage: Model, Content, @unchecked Sendable {
     }
 
     static func encodeContent(_ content: IMMessageContent) throws -> String {
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(content)
-        guard let json = String(data: data, encoding: .utf8) else {
-            throw Abort(.internalServerError, reason: "消息内容编码失败。")
-        }
-        return json
+        try content.protobuf.serializedData().base64EncodedString()
     }
 
     static func encodeDerivedState(_ derivedState: IMMessageDerivedState) throws -> String {
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(derivedState)
-        guard let json = String(data: data, encoding: .utf8) else {
-            throw Abort(.internalServerError, reason: "消息派生状态编码失败。")
-        }
-        return json
+        try derivedState.protobuf.serializedData().base64EncodedString()
     }
 }

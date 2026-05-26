@@ -172,7 +172,7 @@ extension IMConversationDetailView {
         switch message.content {
         case .recalled:
             return "原消息已撤回"
-        case .text, .reply, .system, .image, .audio, .file:
+        case .richText, .reply, .system, .image, .audio, .file:
             let preview = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
             return preview.isEmpty ? "原消息暂不可用" : preview
         }

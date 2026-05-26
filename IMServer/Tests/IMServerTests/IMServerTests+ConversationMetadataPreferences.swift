@@ -190,7 +190,6 @@ extension IMServerTests {
         try await withApp(configure: configure) { app in
             let accessToken = try await loginAccessToken(using: app)
             let demoUser = try await user(email: "demo@example.com", on: app)
-            let demoUserID = try demoUser.requireID()
             let peerUser = try await makeUser(email: "metadata-peer@example.com", on: app)
             let conversation = Conversation(
                 title: "Original Title",
@@ -234,18 +233,12 @@ extension IMServerTests {
                 #expect(res.status == .ok)
                 let messages = try res.content.decode([IMMessageResponse].self)
                 #expect(messages.count == 1)
-                guard case .system(let event) = messages[0].content else {
-                    Issue.record("Expected metadata update to emit a system message")
+                guard case .richText(let body) = messages[0].content else {
+                    Issue.record("Expected metadata update to emit a rich text notice")
                     return
                 }
 
-                #expect(event.type == .metadataUpdated)
-                #expect(event.actorUserID == demoUserID)
-                #expect(event.actorEmail == "demo@example.com")
-                #expect(event.updatedFields == [.title, .notice, .avatarPreset])
-                #expect(event.title == "Updated Title")
-                #expect(event.notice == "Ship checklist at 18:00")
-                #expect(event.avatarPreset == .forest)
+                #expect(body == .plain("demo@example.com 更新了群名称、群公告、群头像"))
             })
         }
     }
@@ -297,16 +290,12 @@ extension IMServerTests {
                 #expect(res.status == .ok)
                 let messages = try res.content.decode([IMMessageResponse].self)
                 #expect(messages.count == 1)
-                guard case .system(let event) = messages[0].content else {
-                    Issue.record("Expected metadata update to emit a system message")
+                guard case .richText(let body) = messages[0].content else {
+                    Issue.record("Expected metadata update to emit a rich text notice")
                     return
                 }
 
-                #expect(event.type == .metadataUpdated)
-                #expect(event.updatedFields == [.notice])
-                #expect(event.notice == "Only notice changed")
-                #expect(event.title == "Original Title")
-                #expect(event.avatarPreset == .ocean)
+                #expect(body == .plain("demo@example.com 更新了群公告"))
             })
         }
     }

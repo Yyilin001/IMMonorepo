@@ -130,7 +130,7 @@ struct IMFavoritesSheet: View {
 
     func iconName(for content: IMMessageContent) -> String {
         switch content {
-        case .text:
+        case .richText:
             return "text.bubble"
         case .reply:
             return "arrowshape.turn.up.left"

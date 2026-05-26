@@ -603,7 +603,7 @@ extension AuthManagerTests {
                                 senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                                 clientMessageID: "client-gap-2",
                                 serverSequence: 2,
-                                kind: "text",
+                                kind: "rich_text",
                                 body: ["text": "gap-2"],
                                 createdAt: Date(timeIntervalSince1970: 1_700_001_100)
                             )
@@ -625,7 +625,7 @@ extension AuthManagerTests {
                                 senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                                 clientMessageID: "client-gap-3",
                                 serverSequence: 3,
-                                kind: "text",
+                                kind: "rich_text",
                                 body: ["text": "gap-3"],
                                 createdAt: Date(timeIntervalSince1970: 1_700_001_200)
                             )
@@ -1214,7 +1214,7 @@ extension AuthManagerTests {
                                     id: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!,
                                     senderUserID: Self.user.id,
                                     serverSequence: 1,
-                                    kind: "text",
+                                    kind: "rich_text",
                                     body: ["text": "selected preview"],
                                     createdAt: Date(timeIntervalSince1970: 1_700_001_000)
                                 ),
@@ -1231,7 +1231,7 @@ extension AuthManagerTests {
                                     id: UUID(uuidString: "dddddddd-1111-2222-3333-eeeeeeeeeeee")!,
                                     senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                                     serverSequence: 8,
-                                    kind: "text",
+                                    kind: "rich_text",
                                     body: ["text": "background preview"],
                                     createdAt: Date(timeIntervalSince1970: 1_700_001_500)
                                 ),
@@ -1311,7 +1311,7 @@ extension AuthManagerTests {
                                 serverMessageID: "cached-server-1",
                                 senderUserID: Self.user.id,
                                 serverSequence: 7,
-                                kind: "text",
+                                kind: "rich_text",
                                 text: "来自缓存",
                                 direction: .outgoing,
                                 createdAt: Date(timeIntervalSince1970: 1_700_100_000),
@@ -1356,7 +1356,7 @@ extension AuthManagerTests {
                                     id: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!,
                                     senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                                     serverSequence: 8,
-                                    kind: "text",
+                                    kind: "rich_text",
                                     body: ["text": "服务端预览"],
                                     createdAt: Date(timeIntervalSince1970: 1_700_100_200)
                                 ),
@@ -1405,7 +1405,7 @@ extension AuthManagerTests {
                     id: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!,
                     senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                     serverSequence: 8,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "服务端预览"],
                     createdAt: Date(timeIntervalSince1970: 1_700_100_200)
                 ),

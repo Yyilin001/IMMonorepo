@@ -1,13 +1,104 @@
 import Foundation
 
 public enum IMMessageContentType: String, Codable, Equatable, Sendable {
-    case text
+    case richText = "rich_text"
     case reply
     case recalled
     case system
     case image
     case audio
     case file
+}
+
+public struct IMRichTextContent: Codable, Equatable, Sendable {
+    public let text: String
+    public let entities: [IMTextEntity]
+
+    public init(text: String, entities: [IMTextEntity] = []) {
+        self.text = text
+        self.entities = entities
+    }
+
+    public static func plain(_ text: String) -> IMRichTextContent {
+        IMRichTextContent(text: text)
+    }
+}
+
+public struct IMTextRange: Codable, Equatable, Sendable {
+    public let location: Int
+    public let length: Int
+
+    public init(location: Int, length: Int) {
+        self.location = location
+        self.length = length
+    }
+}
+
+public enum IMTextEntity: Equatable, Sendable {
+    case link(range: IMTextRange, url: String)
+    case mention(range: IMTextRange, userID: UUID)
+    case hashtag(range: IMTextRange, value: String)
+    case inlineCode(range: IMTextRange)
+
+    public var range: IMTextRange {
+        switch self {
+        case .link(let range, _), .mention(let range, _), .hashtag(let range, _), .inlineCode(let range):
+            return range
+        }
+    }
+}
+
+extension IMTextEntity: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case range
+        case url
+        case userID
+        case value
+    }
+
+    private enum Kind: String, Codable {
+        case link
+        case mention
+        case hashtag
+        case inlineCode = "inline_code"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(Kind.self, forKey: .kind)
+        let range = try container.decode(IMTextRange.self, forKey: .range)
+
+        switch kind {
+        case .link:
+            self = .link(range: range, url: try container.decode(String.self, forKey: .url))
+        case .mention:
+            self = .mention(range: range, userID: try container.decode(UUID.self, forKey: .userID))
+        case .hashtag:
+            self = .hashtag(range: range, value: try container.decode(String.self, forKey: .value))
+        case .inlineCode:
+            self = .inlineCode(range: range)
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(range, forKey: .range)
+
+        switch self {
+        case .link(_, let url):
+            try container.encode(Kind.link, forKey: .kind)
+            try container.encode(url, forKey: .url)
+        case .mention(_, let userID):
+            try container.encode(Kind.mention, forKey: .kind)
+            try container.encode(userID, forKey: .userID)
+        case .hashtag(_, let value):
+            try container.encode(Kind.hashtag, forKey: .kind)
+            try container.encode(value, forKey: .value)
+        case .inlineCode:
+            try container.encode(Kind.inlineCode, forKey: .kind)
+        }
+    }
 }
 
 public enum IMConversationAvatarPreset: String, Codable, Equatable, Sendable, CaseIterable {
@@ -191,8 +282,8 @@ public extension IMConversationMetadataField {
 }
 
 public enum IMMessageContent: Equatable, Sendable {
-    case text(String)
-    case reply(reference: IMReplyReference, text: String)
+    case richText(IMRichTextContent)
+    case reply(reference: IMReplyReference, body: IMRichTextContent)
     case recalled
     case system(IMSystemEvent)
     case image(IMMediaAsset)
@@ -201,8 +292,8 @@ public enum IMMessageContent: Equatable, Sendable {
 
     public var type: IMMessageContentType {
         switch self {
-        case .text:
-            return .text
+        case .richText:
+            return .richText
         case .reply:
             return .reply
         case .recalled:
@@ -242,7 +333,7 @@ public enum IMMessageContent: Equatable, Sendable {
 extension IMMessageContent: Codable {
     private enum CodingKeys: String, CodingKey {
         case type
-        case text
+        case body
         case reference
         case event
         case asset
@@ -253,21 +344,22 @@ extension IMMessageContent: Codable {
         let type = try container.decode(IMMessageContentType.self, forKey: .type)
 
         switch type {
-        case .text:
-            let text = try container.decode(String.self, forKey: .text)
-            self = .text(text)
+        case .richText:
+            self = .richText(try container.decode(IMRichTextContent.self, forKey: .body))
         case .reply:
             let reference = try container.decode(IMReplyReference.self, forKey: .reference)
-            let text = try container.decode(String.self, forKey: .text)
-            self = .reply(reference: reference, text: text)
+            let body = try container.decode(IMRichTextContent.self, forKey: .body)
+            self = .reply(reference: reference, body: body)
         case .recalled:
             self = .recalled
         case .system:
             if let event = try container.decodeIfPresent(IMSystemEvent.self, forKey: .event) {
                 self = .system(event)
             } else {
-                let text = try container.decode(String.self, forKey: .text)
-                self = .system(.legacyText(text))
+                throw DecodingError.keyNotFound(
+                    CodingKeys.event,
+                    DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing system event.")
+                )
             }
         case .image:
             self = .image(try container.decode(IMMediaAsset.self, forKey: .asset))
@@ -283,11 +375,11 @@ extension IMMessageContent: Codable {
         try container.encode(type, forKey: .type)
 
         switch self {
-        case .text(let text):
-            try container.encode(text, forKey: .text)
-        case .reply(let reference, let text):
+        case .richText(let body):
+            try container.encode(body, forKey: .body)
+        case .reply(let reference, let body):
             try container.encode(reference, forKey: .reference)
-            try container.encode(text, forKey: .text)
+            try container.encode(body, forKey: .body)
         case .recalled:
             return
         case .system(let event):

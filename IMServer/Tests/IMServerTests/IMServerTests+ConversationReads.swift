@@ -38,7 +38,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try otherUser.requireID(),
                 serverSequence: 1,
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "hello from history"]
             ).create(on: app.db)
             try await IMConversationSummaryProjectionService(db: app.db)
@@ -95,7 +95,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: peerID,
                 serverSequence: 1,
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "needs rebuild"]
             ).create(on: app.db)
 
@@ -316,7 +316,7 @@ extension IMServerTests {
                 senderUserID: try demoUser.requireID(),
                 serverSequence: 1,
                 clientMessageID: "client-history-1",
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "first"]
             ).create(on: app.db)
             try await ConversationMessage(
@@ -324,7 +324,7 @@ extension IMServerTests {
                 senderUserID: try otherUser.requireID(),
                 serverSequence: 2,
                 clientMessageID: "client-history-2",
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "second"]
             ).create(on: app.db)
             try await IMConversationSummaryProjectionService(db: app.db)
@@ -398,7 +398,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 1,
-                content: .text("alpha release notes")
+                content: .richText(.plain("alpha release notes"))
             ).create(on: app.db)
             try await ConversationMessage(
                 conversationID: conversationID,
@@ -410,7 +410,7 @@ extension IMServerTests {
                         senderUserID: try peerUser.requireID(),
                         previewText: "alpha sprint preview"
                     ),
-                    text: "beta reply"
+                    body: .plain("beta reply")
                 )
             ).create(on: app.db)
             try await ConversationMessage(
@@ -532,19 +532,19 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 1,
-                content: .text("visible archive before rejoin")
+                content: .richText(.plain("visible archive before rejoin"))
             ).create(on: app.db)
             try await ConversationMessage(
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 2,
-                content: .text("visible archive still old")
+                content: .richText(.plain("visible archive still old"))
             ).create(on: app.db)
             try await ConversationMessage(
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 3,
-                content: .text("visible timeline after rejoin")
+                content: .richText(.plain("visible timeline after rejoin"))
             ).create(on: app.db)
 
             membership.visibleFromSequence = 3
@@ -766,7 +766,7 @@ extension IMServerTests {
                     senderUserID: senderID,
                     serverSequence: sequence,
                     clientMessageID: "client-since-\(sequence)",
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "since-\(sequence)"]
                 ).create(on: app.db)
             }
@@ -850,7 +850,7 @@ extension IMServerTests {
                     senderUserID: senderID,
                     serverSequence: sequence,
                     clientMessageID: "client-limit-\(sequence)",
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "limit-\(sequence)"]
                 ).create(on: app.db)
             }
@@ -913,7 +913,7 @@ extension IMServerTests {
                     conversationID: conversationID,
                     senderUserID: senderID,
                     serverSequence: sequence,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "message-\(sequence)"]
                 ).create(on: app.db)
             }

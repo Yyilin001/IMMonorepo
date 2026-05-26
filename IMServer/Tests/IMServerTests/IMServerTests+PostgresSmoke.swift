@@ -116,7 +116,7 @@ extension IMServerTests {
             conversationID: conversationID,
             senderUserID: senderID,
             serverSequence: 7,
-            content: .text("existing")
+            content: .richText(.plain("existing"))
         )
         try await existingMessage.create(on: app.db)
 
@@ -171,7 +171,7 @@ extension IMServerTests {
             conversationID: conversationID,
             senderUserID: senderID,
             serverSequence: 2,
-            content: .text("not media")
+            content: .richText(.plain("not media"))
         )
         try await textMessage.create(on: app.db)
         let mediaMessageID = try mediaMessage.requireID()
@@ -242,21 +242,21 @@ extension IMServerTests {
             conversationID: conversationID,
             senderUserID: senderID,
             serverSequence: 1,
-            content: .text("indexed")
+            content: .richText(.plain("indexed"))
         )
         try await indexed.create(on: app.db)
         let stale = try ConversationMessage(
             conversationID: conversationID,
             senderUserID: senderID,
             serverSequence: 2,
-            content: .text("stale")
+            content: .richText(.plain("stale"))
         )
         try await stale.create(on: app.db)
         let missing = try ConversationMessage(
             conversationID: conversationID,
             senderUserID: senderID,
             serverSequence: 3,
-            content: .text("missing")
+            content: .richText(.plain("missing"))
         )
         try await missing.create(on: app.db)
 

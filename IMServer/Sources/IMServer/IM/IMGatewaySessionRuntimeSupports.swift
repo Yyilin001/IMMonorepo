@@ -6,6 +6,11 @@ import Vapor
 
 
 protocol GatewaySessionTransport: Sendable {
+    func sendDomainEvent(
+        _ payload: IMTCPChatDomainEventPayload,
+        toUserIDs userIDs: [UUID],
+        requestID: UUID?
+    ) async
     func sendMessage(
         _ payload: IMTCPMessagePayload,
         toUserIDs userIDs: [UUID],
@@ -66,6 +71,14 @@ struct ConnectionRoutingGatewayDispatchBus: GatewayDispatchBus {
 struct LocalGatewaySessionTransport: GatewaySessionTransport {
     let routingService: ConnectionRoutingService
 
+    func sendDomainEvent(
+        _ payload: IMTCPChatDomainEventPayload,
+        toUserIDs userIDs: [UUID],
+        requestID: UUID?
+    ) async {
+        await routingService.sendDomainEvent(payload, toUserIDs: userIDs, requestID: requestID)
+    }
+
     func sendMessage(
         _ payload: IMTCPMessagePayload,
         toUserIDs userIDs: [UUID],
@@ -115,12 +128,30 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
     let app: Application
     let configuration: IMGatewayRelayConfiguration
 
+    func sendDomainEvent(
+        _ payload: IMTCPChatDomainEventPayload,
+        toUserIDs userIDs: [UUID],
+        requestID: UUID?
+    ) async {
+        guard let packetBase64 = packetBase64(type: .domainEvent, requestID: requestID, payload: payload) else {
+            return
+        }
+        await postOrLog(
+            path: "/internal/gateway/realtime/domain-event",
+            payload: GatewayRelayMessageRequest(
+                packetBase64: packetBase64,
+                recipientUserIDs: userIDs,
+                requestID: requestID
+            )
+        )
+    }
+
     func sendMessage(
         _ payload: IMTCPMessagePayload,
         toUserIDs userIDs: [UUID],
         requestID: UUID?
     ) async {
-        guard let packetBase64 = packetBase64(type: .message, requestID: requestID, payload: payload) else {
+        guard let packetBase64 = packetBase64(type: .sendMessage, requestID: requestID, payload: payload) else {
             return
         }
         await postOrLog(
@@ -138,17 +169,7 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         toUserID userID: UUID,
         requestID: UUID?
     ) async {
-        guard let packetBase64 = packetBase64(type: .conversationEvent, requestID: requestID, payload: payload) else {
-            return
-        }
-        await postOrLog(
-            path: "/internal/gateway/realtime/conversation-event",
-            payload: GatewayRelayConversationEventRequest(
-                packetBase64: packetBase64,
-                recipientUserID: userID,
-                requestID: requestID
-            )
-        )
+        return
     }
 
     func sendContactEvent(
@@ -156,17 +177,7 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         toUserID userID: UUID,
         requestID: UUID?
     ) async {
-        guard let packetBase64 = packetBase64(type: .contactEvent, requestID: requestID, payload: payload) else {
-            return
-        }
-        await postOrLog(
-            path: "/internal/gateway/realtime/contact-event",
-            payload: GatewayRelayContactEventRequest(
-                packetBase64: packetBase64,
-                recipientUserID: userID,
-                requestID: requestID
-            )
-        )
+        return
     }
 
     func kickConnections(
@@ -307,6 +318,14 @@ struct LoggingUnavailableGatewaySessionTransport: GatewaySessionTransport {
     let logger: Logger
     let role: IMRuntimeRole
 
+    func sendDomainEvent(
+        _ payload: IMTCPChatDomainEventPayload,
+        toUserIDs userIDs: [UUID],
+        requestID: UUID?
+    ) async {
+        logUnavailable()
+    }
+
     func sendMessage(_ payload: IMTCPMessagePayload, toUserIDs userIDs: [UUID], requestID: UUID?) async {
         logUnavailable()
     }
@@ -368,6 +387,14 @@ struct GatewaySessionService {
         if let transport = transport as? LocalGatewaySessionTransport {
             await transport.routingService.remove(connectionID: connectionID)
         }
+    }
+
+    func sendDomainEvent(
+        _ payload: IMTCPChatDomainEventPayload,
+        toUserIDs userIDs: [UUID],
+        requestID: UUID? = UUID()
+    ) async {
+        await transport.sendDomainEvent(payload, toUserIDs: userIDs, requestID: requestID)
     }
 
     func sendMessage(

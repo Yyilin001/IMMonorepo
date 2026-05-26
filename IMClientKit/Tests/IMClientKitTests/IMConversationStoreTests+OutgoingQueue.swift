@@ -269,7 +269,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.currentUserID,
                     clientMessageID: clientMessageID,
                     serverSequence: 7,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "unknown and merged"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_007)
                 )
@@ -302,7 +302,7 @@ extension IMConversationStoreTests {
                 senderUserID: Self.currentUserID,
                 serverSequence: 8,
                 serverTimestamp: Date(timeIntervalSince1970: 1_700_400_008),
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "echo before ack"]
             ),
             currentUserID: Self.currentUserID
@@ -509,7 +509,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.currentUserID,
                     clientMessageID: clientMessageID,
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "queued and merged"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_001)
                 )
@@ -621,7 +621,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.currentUserID,
                     clientMessageID: clientMessageID,
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "retry and merge"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_001)
                 )
@@ -664,7 +664,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 7,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "seven"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_007)
                 ),
@@ -674,7 +674,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.currentUserID,
                     clientMessageID: nil,
                     serverSequence: 9,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "nine"],
                     createdAt: Date(timeIntervalSince1970: 1_700_400_009)
                 )

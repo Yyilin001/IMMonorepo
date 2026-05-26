@@ -3,8 +3,8 @@ import Foundation
 
 func testMessageContent(kind: String, body: [String: String]) -> IMMessageContent {
     switch kind {
-    case IMMessageContentType.text.rawValue:
-        return .text(body["text"] ?? "")
+    case IMMessageContentType.richText.rawValue:
+        return .richText(.plain(body["text"] ?? ""))
     case IMMessageContentType.reply.rawValue:
         return .reply(
             reference: IMReplyReference(
@@ -12,7 +12,7 @@ func testMessageContent(kind: String, body: [String: String]) -> IMMessageConten
                 senderUserID: body["referenceSenderUserID"].flatMap(UUID.init(uuidString:)),
                 previewText: body["referencePreviewText"] ?? ""
             ),
-            text: body["text"] ?? ""
+            body: .plain(body["text"] ?? "")
         )
     case IMMessageContentType.recalled.rawValue:
         return .recalled
@@ -25,7 +25,7 @@ func testMessageContent(kind: String, body: [String: String]) -> IMMessageConten
     case IMMessageContentType.file.rawValue:
         return .file(testMediaAsset(kind: .file, body: body))
     default:
-        return .text(body["text"] ?? "")
+        return .richText(.plain(body["text"] ?? ""))
     }
 }
 
@@ -67,11 +67,11 @@ extension IMTCPMessagePayload {
 
     var body: [String: String] {
         switch content {
-        case .text(let text):
-            return ["text": text]
-        case .reply(let reference, let text):
+        case .richText(let body):
+            return ["text": body.text]
+        case .reply(let reference, let body):
             return [
-                "text": text,
+                "text": body.text,
                 "referenceMessageID": reference.messageID,
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText
@@ -110,11 +110,11 @@ extension IMMessagePreviewResponseBody {
 
     var body: [String: String] {
         switch content {
-        case .text(let text):
-            return ["text": text]
-        case .reply(let reference, let text):
+        case .richText(let body):
+            return ["text": body.text]
+        case .reply(let reference, let body):
             return [
-                "text": text,
+                "text": body.text,
                 "referenceMessageID": reference.messageID,
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText
@@ -157,11 +157,11 @@ extension IMConversationMessageResponseBody {
 
     var body: [String: String] {
         switch content {
-        case .text(let text):
-            return ["text": text]
-        case .reply(let reference, let text):
+        case .richText(let body):
+            return ["text": body.text]
+        case .reply(let reference, let body):
             return [
-                "text": text,
+                "text": body.text,
                 "referenceMessageID": reference.messageID,
                 "referenceSenderUserID": reference.senderUserID?.uuidString ?? "",
                 "referencePreviewText": reference.previewText

@@ -614,7 +614,7 @@ struct AuthManagerTests {
                             id: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!,
                             senderUserID: user.id,
                             serverSequence: latestServerSequence,
-                            kind: "text",
+                            kind: "rich_text",
                             body: ["text": latestServerSequence == 1 ? "来自历史接口" : "服务端摘要更新"],
                             createdAt: Date(timeIntervalSince1970: 1_700_001_000 + Double(latestServerSequence - 1))
                         ),
@@ -660,7 +660,7 @@ struct AuthManagerTests {
                 id: UUID(),
                 senderUserID: user.id,
                 serverSequence: latestServerSequence,
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": title],
                 createdAt: updatedAt
             ),
@@ -678,7 +678,7 @@ struct AuthManagerTests {
                     senderUserID: user.id,
                     clientMessageID: "client-history-1",
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "来自历史接口"],
                     createdAt: Date(timeIntervalSince1970: 1_700_001_000)
                 )
@@ -695,7 +695,7 @@ struct AuthManagerTests {
                     senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                     clientMessageID: "client-gap-2",
                     serverSequence: 2,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "来自补洞接口"],
                     createdAt: Date(timeIntervalSince1970: 1_700_001_100)
                 )
@@ -714,7 +714,7 @@ struct AuthManagerTests {
             senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
             clientMessageID: "client-gap-\(serverSequence)",
             serverSequence: serverSequence,
-            kind: "text",
+            kind: "rich_text",
             body: ["text": "gap-\(serverSequence)"],
             createdAt: Date(timeIntervalSince1970: 1_700_001_000 + Double(serverSequence))
         )
@@ -758,7 +758,7 @@ struct AuthManagerTests {
                 serverMessageID: nil,
                 senderUserID: user.id,
                 serverSequence: nil,
-                kind: "text",
+                kind: "rich_text",
                 text: "排队消息-\(index + 1)",
                 direction: .outgoing,
                 createdAt: Date(timeIntervalSince1970: 1_700_100_000 + Double(index)),
@@ -819,7 +819,7 @@ struct AuthManagerTests {
     nonisolated static func requireRecordedLine(
         at index: Int,
         from harness: IMConnectionTestHarness
-    ) async throws -> String {
+    ) async throws -> Data {
         for _ in 0..<1_000 {
             let lines = await harness.recordedLines()
             if lines.indices.contains(index) {
@@ -831,9 +831,21 @@ struct AuthManagerTests {
         Issue.record("等待第 \(index) 条 IM 发送数据超时。")
         throw IMTCPClientError.connectionClosed
     }
-    nonisolated static func decode<T: Decodable>(_ type: T.Type, from line: String) throws -> T {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(type, from: Data(line.utf8))
+    nonisolated static func decode<Payload: Sendable>(
+        _: IMTCPPacketEnvelope<Payload>.Type,
+        from frame: Data
+    ) throws -> IMTCPPacketEnvelope<Payload> {
+        let packet = try IMTCPProtobufCodec.decode(frame)
+        return IMTCPPacketEnvelope(
+            type: packet.type,
+            requestID: packet.requestID,
+            payload: try packet.payload.decodePayload(Payload.self)
+        )
     }
+}
+
+struct IMTCPPacketEnvelope<Payload: Sendable> {
+    let type: IMTCPPacketType
+    let requestID: UUID?
+    let payload: Payload
 }

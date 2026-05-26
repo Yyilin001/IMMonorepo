@@ -1114,7 +1114,7 @@ struct SessionClientTests {
                     senderUserID: userID,
                     clientMessageID: "client-history-1",
                     serverSequence: 1,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "first"],
                     createdAt: Date(timeIntervalSince1970: 1_700_200_000)
                 ),
@@ -1124,7 +1124,7 @@ struct SessionClientTests {
                     senderUserID: userID,
                     clientMessageID: "client-history-2",
                     serverSequence: 2,
-                    kind: "text",
+                    kind: "rich_text",
                     body: ["text": "second"],
                     createdAt: Date(timeIntervalSince1970: 1_700_200_100)
                 )
@@ -1142,7 +1142,7 @@ struct SessionClientTests {
                         senderUserID: userID,
                         clientMessageID: "client-history-1",
                         serverSequence: 1,
-                        kind: "text",
+                        kind: "rich_text",
                         body: ["text": "first"],
                         createdAt: Date(timeIntervalSince1970: 1_700_200_000)
                     ),
@@ -1152,7 +1152,7 @@ struct SessionClientTests {
                         senderUserID: userID,
                         clientMessageID: "client-history-2",
                         serverSequence: 2,
-                        kind: "text",
+                        kind: "rich_text",
                         body: ["text": "second"],
                         createdAt: Date(timeIntervalSince1970: 1_700_200_100)
                     )
@@ -1241,7 +1241,7 @@ struct SessionClientTests {
                 id: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!,
                 senderUserID: userID,
                 serverSequence: 2,
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "hello"],
                 createdAt: Date(timeIntervalSince1970: 1_700_200_000)
             ),

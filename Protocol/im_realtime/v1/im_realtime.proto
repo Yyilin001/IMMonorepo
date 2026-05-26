@@ -15,10 +15,9 @@ message Packet {
     AuthError auth_error = 12;
     Heartbeat heartbeat = 20;
     Heartbeat heartbeat_ack = 21;
-    MessagePayload message = 30;
+    SendMessageCommand send_message = 30;
     Ack ack = 31;
-    ConversationEvent conversation_event = 40;
-    ContactEvent contact_event = 41;
+    ChatDomainEvent domain_event = 40;
     Kick kick = 50;
   }
 }
@@ -55,37 +54,100 @@ message Ack {
   string status = 3;
 }
 
-message MessagePayload {
+message SendMessageCommand {
   optional string client_message_id = 1;
-  optional string message_id = 2;
   string conversation_id = 3;
-  optional string sender_user_id = 4;
-  optional uint64 server_sequence = 5;
-  optional int64 server_timestamp_ms = 6;
   MessageContent content = 7;
-  MessageDerivedState derived_state = 8;
 }
 
-message ConversationEvent {
-  string event_type = 1;
-  ConversationSummary conversation = 2;
-  optional ConversationMessage message = 3;
-  optional MessageStreamPayload stream = 4;
-  optional string actor_user_id = 5;
-  int64 server_timestamp_ms = 6;
-  repeated string message_ids = 7;
-  optional string favorite_changed_message_id = 8;
-  optional bool is_favorited = 9;
-  optional string visibility_action = 10;
+message ChatDomainEvent {
+  string event_id = 1;
+  string event_type = 2;
+  string aggregate_type = 3;
+  string aggregate_id = 4;
+  uint64 aggregate_sequence = 5;
+  int64 occurred_at_ms = 6;
+  optional string actor_user_id = 7;
+
+  optional ConversationSummary conversation = 8;
+
+  oneof body {
+    MessageCreatedEvent message_created = 10;
+    MessageEditedEvent message_edited = 11;
+    MessageRevokedEvent message_revoked = 12;
+    MessageVisibilityChangedEvent message_visibility_changed = 13;
+    MessageFavoriteChangedEvent message_favorite_changed = 14;
+    MessageStreamEvent message_stream_started = 20;
+    MessageStreamEvent message_stream_chunk = 21;
+    MessageStreamEvent message_stream_completed = 22;
+    MessageStreamEvent message_stream_failed = 23;
+    MessageStreamEvent message_stream_cancelled = 24;
+    ConversationChangedEvent conversation_created = 30;
+    ConversationChangedEvent conversation_updated = 31;
+    ConversationRemovedForSelfEvent conversation_removed_for_self = 32;
+    ConversationChangedEvent conversation_settings_changed = 33;
+    ConversationVisibilityChangedEvent conversation_visibility_changed = 34;
+    MemberChangedEvent member_added = 40;
+    MemberChangedEvent member_removed = 41;
+    MemberChangedEvent member_role_updated = 42;
+    ContactChangedEvent contact_request_created = 50;
+    ContactChangedEvent contact_request_accepted = 51;
+    ContactChangedEvent contact_request_updated = 52;
+  }
 }
 
-message ContactEvent {
-  string event_type = 1;
-  optional ContactRequest request = 2;
-  optional Contact contact = 3;
-  optional string contact_user_id = 4;
-  optional string actor_user_id = 5;
-  int64 server_timestamp_ms = 6;
+message MessageCreatedEvent {
+  ConversationMessage message = 1;
+  optional string client_message_id = 2;
+}
+
+message MessageEditedEvent {
+  string message_id = 1;
+  RichTextContent body = 2;
+  int64 edited_at_ms = 3;
+  optional ConversationMessage message = 4;
+}
+
+message MessageRevokedEvent {
+  string message_id = 1;
+  int64 revoked_at_ms = 2;
+  optional string revoked_by_user_id = 3;
+  optional ConversationMessage message = 4;
+}
+
+message MessageVisibilityChangedEvent {
+  repeated string message_ids = 1;
+  optional ConversationMessage message = 2;
+  optional string visibility_action = 3;
+}
+
+message MessageFavoriteChangedEvent {
+  string message_id = 1;
+  bool is_favorited = 2;
+}
+
+message MessageStreamEvent {
+  MessageStreamPayload stream = 1;
+  optional ConversationMessage message = 2;
+}
+
+message ConversationChangedEvent {}
+
+message ConversationRemovedForSelfEvent {}
+
+message ConversationVisibilityChangedEvent {
+  string visibility_action = 1;
+  repeated string message_ids = 2;
+}
+
+message MemberChangedEvent {
+  repeated string member_user_ids = 1;
+}
+
+message ContactChangedEvent {
+  optional ContactRequest request = 1;
+  optional Contact contact = 2;
+  optional string contact_user_id = 3;
 }
 
 message Kick {
@@ -154,42 +216,53 @@ message ConversationMessage {
 
 message MessageContent {
   oneof body {
-    TextContent text = 1;
+    RichTextContent rich_text = 1;
     ReplyContent reply = 2;
-    RecalledContent recalled = 3;
-    SystemContent system = 4;
     MediaAsset image = 5;
     MediaAsset audio = 6;
     MediaAsset file = 7;
   }
 }
 
-message TextContent {
+message RichTextContent {
   string text = 1;
+  repeated TextEntity entities = 2;
 }
 
 message ReplyContent {
   ReplyReference reference = 1;
-  string text = 2;
+  RichTextContent body = 2;
 }
 
-message RecalledContent {}
-
-message SystemContent {
-  string type = 1;
-  optional string actor_user_id = 2;
-  optional string actor_email = 3;
-  optional string target_user_id = 4;
-  optional string target_email = 5;
-  repeated string member_emails = 6;
-  optional string previous_role = 7;
-  optional string new_role = 8;
-  repeated string updated_fields = 9;
-  optional string title = 10;
-  optional string notice = 11;
-  optional string avatar_preset = 12;
-  optional string legacy_text = 13;
+message TextRange {
+  int32 location = 1;
+  int32 length = 2;
 }
+
+message TextEntity {
+  TextRange range = 1;
+
+  oneof body {
+    LinkEntity link = 10;
+    MentionEntity mention = 11;
+    HashtagEntity hashtag = 12;
+    InlineCodeEntity inline_code = 13;
+  }
+}
+
+message LinkEntity {
+  string url = 1;
+}
+
+message MentionEntity {
+  string user_id = 1;
+}
+
+message HashtagEntity {
+  string value = 1;
+}
+
+message InlineCodeEntity {}
 
 message ReplyReference {
   string message_id = 1;
@@ -218,7 +291,7 @@ message MessageDerivedState {
 
 message MessageEdit {
   optional int64 edited_at_ms = 1;
-  string text = 2;
+  RichTextContent body = 2;
 }
 
 message MessageReaction {

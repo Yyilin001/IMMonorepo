@@ -152,14 +152,14 @@ struct ConversationSearchService {
             guard let senderUserID = row.sender_user_id,
                   let contentJSON = row.content_json,
                   let derivedStateJSON = row.derived_state_json,
-                  let contentData = contentJSON.data(using: .utf8),
-                  let derivedStateData = derivedStateJSON.data(using: .utf8)
+                  let contentData = Data(base64Encoded: contentJSON),
+                  let derivedStateData = Data(base64Encoded: derivedStateJSON)
             else {
                 return nil
             }
 
-            let content = try JSONDecoder().decode(IMMessageContent.self, from: contentData)
-            let derivedState = try JSONDecoder().decode(IMMessageDerivedState.self, from: derivedStateData)
+            let content = try IMRTMessageContent(serializedBytes: contentData).domainValue()
+            let derivedState = try IMRTMessageDerivedState(serializedBytes: derivedStateData).domainValue()
             items.append(
                 IMConversationMessageSearchHitResponse(
                     messageID: row.message_id,

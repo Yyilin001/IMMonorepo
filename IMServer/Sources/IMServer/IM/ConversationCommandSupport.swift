@@ -159,13 +159,13 @@ struct ConversationCommandSupport {
     func editMessage(
         in conversationID: UUID,
         messageID: UUID,
-        text: String,
+        body: IMRichTextContent,
         requesterUserID: UUID
     ) async throws -> IMMessageResponse {
         try await messageMutateSupport.editMessage(
             in: conversationID,
             messageID: messageID,
-            text: text,
+            body: body,
             requesterUserID: requesterUserID
         )
     }

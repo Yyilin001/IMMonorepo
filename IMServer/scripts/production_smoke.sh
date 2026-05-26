@@ -230,7 +230,7 @@ print(json.dumps({
         "senderUserID": None,
         "serverSequence": None,
         "serverTimestamp": None,
-        "content": {"type": "text", "text": sys.argv[4]},
+        "content": {"type": "rich_text", "body": {"text": sys.argv[4], "entities": []}},
         "derivedState": {"recallState": "active", "edits": [], "reactions": []}
     }
 }))

@@ -5,12 +5,24 @@ struct GatewayRelayController: RouteCollection {
         let relayRoutes = routes.grouped("internal", "gateway", "realtime")
             .grouped(InternalGatewayRelaySecretMiddleware())
 
+        relayRoutes.post("domain-event", use: relayDomainEvent)
         relayRoutes.post("message", use: relayMessage)
         relayRoutes.post("conversation-event", use: relayConversationEvent)
         relayRoutes.post("contact-event", use: relayContactEvent)
         relayRoutes.post("kick-session", use: relayKickSession)
         relayRoutes.post("kick-user", use: relayKickUser)
         relayRoutes.post("session-counts", use: relaySessionCounts)
+    }
+
+    func relayDomainEvent(req: Request) async throws -> HTTPStatus {
+        let body = try req.content.decode(GatewayRelayMessageRequest.self)
+        let packet = try packet(from: body.packetBase64)
+        await req.application.gatewaySessionService.sendDomainEvent(
+            try packet.payload.decodePayload(IMTCPChatDomainEventPayload.self),
+            toUserIDs: body.recipientUserIDs,
+            requestID: packet.requestID ?? body.requestID
+        )
+        return .ok
     }
 
     func relayMessage(req: Request) async throws -> HTTPStatus {

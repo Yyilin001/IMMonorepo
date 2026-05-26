@@ -203,7 +203,7 @@ struct IMAPNSPushService {
 
     private func pushPreview(for content: IMMessageContent) -> String {
         switch content {
-        case .text, .reply:
+        case .richText, .reply:
             return "发来一条消息"
         case .image:
             return "发来一张图片"

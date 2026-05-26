@@ -18,7 +18,7 @@ extension IMConversationStoreTests {
                         id: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!,
                         senderUserID: Self.peerUserID,
                         serverSequence: 10,
-                        kind: "text",
+                        kind: "rich_text",
                         body: ["text": "preview text"],
                         createdAt: Date(timeIntervalSince1970: 1_700_300_000)
                     ),
@@ -148,7 +148,7 @@ extension IMConversationStoreTests {
                         id: UUID(),
                         senderUserID: Self.peerUserID,
                         serverSequence: 8,
-                        content: .text("regular preview"),
+                        content: .richText(.plain("regular preview")),
                         createdAt: Date(timeIntervalSince1970: 1_700_410_100)
                     ),
                     lastReadSequence: 5,
@@ -164,7 +164,7 @@ extension IMConversationStoreTests {
                         id: UUID(),
                         senderUserID: Self.peerUserID,
                         serverSequence: 4,
-                        content: .text("muted preview"),
+                        content: .richText(.plain("muted preview")),
                         createdAt: Date(timeIntervalSince1970: 1_700_410_050)
                     ),
                     lastReadSequence: 0,
@@ -205,7 +205,7 @@ extension IMConversationStoreTests {
                         id: UUID(),
                         senderUserID: Self.peerUserID,
                         serverSequence: 2,
-                        content: .text("sync notes"),
+                        content: .richText(.plain("sync notes")),
                         createdAt: Date(timeIntervalSince1970: 1_700_420_100)
                     ),
                     createdAt: Date(timeIntervalSince1970: 1_700_420_000),
@@ -219,7 +219,7 @@ extension IMConversationStoreTests {
                         id: UUID(),
                         senderUserID: Self.peerUserID,
                         serverSequence: 1,
-                        content: .text("lunch?"),
+                        content: .richText(.plain("lunch?")),
                         createdAt: Date(timeIntervalSince1970: 1_700_420_050)
                     ),
                     createdAt: Date(timeIntervalSince1970: 1_700_420_000),
@@ -358,7 +358,7 @@ extension IMConversationStoreTests {
                 senderUserID: Self.peerUserID,
                 serverSequence: 10,
                 serverTimestamp: Date(timeIntervalSince1970: 1_700_300_000),
-                kind: "text",
+                kind: "rich_text",
                 body: ["text": "live unread"]
             ),
             currentUserID: Self.currentUserID
@@ -374,7 +374,7 @@ extension IMConversationStoreTests {
                         id: UUID(uuidString: "dddddddd-1111-2222-3333-eeeeeeeeeeee")!,
                         senderUserID: Self.peerUserID,
                         serverSequence: 10,
-                        kind: "text",
+                        kind: "rich_text",
                         body: ["text": "server preview"],
                         createdAt: Date(timeIntervalSince1970: 1_700_300_000)
                     ),

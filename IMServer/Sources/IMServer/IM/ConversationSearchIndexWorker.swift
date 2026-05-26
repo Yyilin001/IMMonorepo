@@ -149,12 +149,12 @@ struct ConversationSearchIndexWorker {
             """).run()
     }
 
-    private static func encode<T: Encodable>(_ value: T) throws -> String {
-        let data = try JSONEncoder().encode(value)
-        guard let json = String(data: data, encoding: .utf8) else {
-            throw ConversationProjectionCodingError.invalidJSON
-        }
-        return json
+    private static func encode(_ content: IMMessageContent) throws -> String {
+        try content.protobuf.serializedData().base64EncodedString()
+    }
+
+    private static func encode(_ derivedState: IMMessageDerivedState) throws -> String {
+        try derivedState.protobuf.serializedData().base64EncodedString()
     }
 }
 

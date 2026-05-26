@@ -101,7 +101,7 @@ class IMConversationStoreTests {
                 senderUserID = "user-2",
                 serverSequence = 3UL,
                 serverTimestamp = "2026-05-13T00:00:00Z",
-                content = IMMessageContent.Text("incoming"),
+                content = IMMessageContent.plain("incoming"),
             ),
             currentUserID = "user-1",
         )
@@ -126,7 +126,7 @@ class IMConversationStoreTests {
                 senderUserID = "user-1",
                 serverSequence = 9UL,
                 serverTimestamp = "2026-05-13T00:00:01Z",
-                content = IMMessageContent.Text("hello from device a"),
+                content = IMMessageContent.plain("hello from device a"),
             ),
             currentUserID = "user-1",
         )
@@ -153,7 +153,7 @@ class IMConversationStoreTests {
                 senderUserID = "user-1",
                 serverSequence = 9UL,
                 serverTimestamp = "2026-05-13T00:00:01Z",
-                content = IMMessageContent.Text("hello from device a"),
+                content = IMMessageContent.plain("hello from device a"),
             ),
             currentUserID = "user-1",
         )
@@ -200,7 +200,7 @@ class IMConversationStoreTests {
                 senderUserID = "user-2",
                 serverSequence = 2UL,
                 serverTimestamp = "2026-05-13T00:00:02Z",
-                content = IMMessageContent.Text("new unread"),
+                content = IMMessageContent.plain("new unread"),
             ),
             currentUserID = "user-1",
         )
@@ -233,7 +233,7 @@ class IMConversationStoreTests {
                     conversationID = "conversation-1",
                     senderUserID = "user-2",
                     serverSequence = 4,
-                    content = IMMessageContent.Text("loaded"),
+                    content = IMMessageContent.plain("loaded"),
                     createdAt = "2026-05-13T00:00:00Z",
                 ),
             ),
@@ -260,7 +260,7 @@ class IMConversationStoreTests {
                     conversationID = "conversation-1",
                     senderUserID = "user-1",
                     serverSequence = 2,
-                    content = IMMessageContent.Text(""),
+                    content = IMMessageContent.plain(""),
                     createdAt = "2026-05-13T00:00:00Z",
                 ),
                 stream = IMTCPMessageStreamPayload(
@@ -376,7 +376,7 @@ class IMConversationStoreTests {
                     conversationID = "conversation-1",
                     senderUserID = "user-1",
                     serverSequence = 2,
-                    content = IMMessageContent.Text("AI response"),
+                    content = IMMessageContent.plain("AI response"),
                     createdAt = "2026-05-13T00:00:00Z",
                 ),
                 stream = IMTCPMessageStreamPayload(
