@@ -33,7 +33,7 @@ struct AuthManagerTests {
         let transport = MockHTTPTransport { request in
             switch (request.httpMethod, request.url?.path) {
             case ("POST", "/api/auth/register"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+                return HTTPFixtures.response(statusCode: 200, body: try Self.registerSignedInBody())
             default:
                 return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
@@ -446,6 +446,23 @@ struct AuthManagerTests {
                 refreshToken: refreshToken,
                 refreshExpiresIn: 30 * 24 * 60 * 60,
                 user: user
+            )
+        )
+    }
+    nonisolated static func registerSignedInBody() throws -> Data {
+        try HTTPFixtures.jsonBody(
+            RegisterResponseBody(
+                state: .signedIn,
+                auth: AuthResponseBody(
+                    accessToken: "access-1",
+                    expiresIn: 600,
+                    refreshToken: "refresh-1",
+                    refreshExpiresIn: 30 * 24 * 60 * 60,
+                    user: user
+                ),
+                email: nil,
+                expiresIn: nil,
+                message: nil
             )
         )
     }

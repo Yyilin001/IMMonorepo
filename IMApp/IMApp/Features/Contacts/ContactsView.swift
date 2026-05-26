@@ -4,60 +4,68 @@ import IMClientKit
 struct ContactsView: View {
     let contactStore: ContactStore
     let currentUserID: UUID?
+    let currentUserEmail: String?
     let reloadContacts: () async -> Void
     let reloadContactRequests: () async -> Void
-    let loadBlockedUsers: () async -> Void
     let markIncomingContactRequestsSeen: () -> Void
-    let sendContactRequest: (String, String, String) async -> Bool
-    let acceptContactRequest: (UUID, String) async -> Bool
-    let declineContactRequest: (UUID) async -> Bool
-    let cancelContactRequest: (UUID) async -> Bool
-    let updateContactRemark: (UUID, String) async -> Bool
-    let deleteContact: (UUID) async -> Bool
-    let blockUser: (UUID) async -> Bool
-    let unblockUser: (UUID) async -> Bool
-    let createDirectConversation: (String) async -> String?
+    let sendContactRequest: (String, String, String) async -> ContactOperationResult
 
-    let onOpenConversation: (String) -> Void
+    let onOpenRequests: () -> Void
+    let onOpenBlockedUsers: () -> Void
+    let onOpenContact: (UUID) -> Void
 
     @State private var isPresentingAddContact = false
-    @State private var isPresentingNewContactRequests = false
-    @State private var pendingConversationContactID: UUID?
     @State private var searchText = ""
-    @State private var editingContact: ContactResponseBody?
-    @State private var isPresentingBlockedUsers = false
+    @State private var taskBag = ContactTaskBag()
+    @State private var requestClock = ContactRequestClock()
 
     var body: some View {
         List {
-            if let message = contactStore.contactsMessage, !message.isEmpty {
+            if let notice = contactStore.notice(for: .contactsHome), !notice.message.isEmpty {
                 Section {
-                    ContactsInlineStatusBanner(message: message)
+                    AppStatusBanner(message: notice.message, tone: notice.tone.appStatusTone)
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                         .listRowBackground(Color.clear)
+                        .accessibilityIdentifier("contacts.status")
                 }
             }
 
-            if let message = contactStore.contactRequestsLoadMessage, !message.isEmpty {
+            if let notice = contactStore.notice(for: .requests), !notice.message.isEmpty {
                 Section {
-                    ContactsInlineStatusBanner(message: message)
+                    AppStatusBanner(message: notice.message, tone: notice.tone.appStatusTone)
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                         .listRowBackground(Color.clear)
+                        .accessibilityIdentifier("contacts.requestsStatus")
                 }
             }
 
             Section {
                 Button {
-                    isPresentingNewContactRequests = true
+                    onOpenRequests()
                 } label: {
                     NewContactRequestsEntryRow(
                         pendingCount: totalPendingContactRequestCount,
+                        outgoingPendingCount: outgoingPendingContactRequestCount,
+                        expiredCount: expiredContactRequestCount,
                         unseenCount: contactStore.unseenIncomingContactRequestCount,
                         isLoading: contactStore.isLoadingContactRequests
                     )
                 }
                 .buttonStyle(.plain)
-            } footer: {
-                Text("新的朋友会集中展示收到和发出的好友申请，进入后只清除红点，不会移除待处理申请。")
+                .accessibilityIdentifier("contacts.newFriends.row")
+
+                Button {
+                    onOpenBlockedUsers()
+                } label: {
+                    AppListActionRow(
+                        title: "黑名单",
+                        subtitle: blockedUsersSubtitle,
+                        systemImage: "hand.raised.fill",
+                        tint: .red
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("contacts.blockedUsers.row")
             }
 
             Section {
@@ -68,130 +76,95 @@ struct ContactsView: View {
                     .listRowInsets(EdgeInsets(top: 20, leading: 16, bottom: 20, trailing: 16))
                     .listRowBackground(Color.clear)
                 } else if filteredContacts.isEmpty {
-                    ContactsNoSearchResultState(searchText: searchText)
+                    ContactsNoSearchResultState(
+                        searchText: searchText,
+                        onClear: {
+                            searchText = ""
+                        }
+                    )
                         .listRowInsets(EdgeInsets(top: 20, leading: 16, bottom: 20, trailing: 16))
                         .listRowBackground(Color.clear)
                 } else {
                     ForEach(filteredContacts) { contact in
-                        ContactRow(
-                            contact: contact,
-                            isStartingConversation: pendingConversationContactID == contact.id,
-                            onStartConversation: {
-                                startConversation(with: contact)
-                            },
-                            onEdit: {
-                                editingContact = contact
-                            },
-                            onDelete: {
-                                delete(contact)
-                            },
-                            onBlock: {
-                                block(contact)
-                            }
-                        )
+                        Button {
+                            onOpenContact(contact.id)
+                        } label: {
+                            ContactRow(contact: contact)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("contacts.row.\(contact.id.uuidString)")
                     }
                 }
             } header: {
-                HStack {
-                    Text("联系人")
-
-                    Spacer()
-
-                    if contactStore.isLoadingContacts || contactStore.isLoadingContactRequests {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
-            } footer: {
-                Text("通讯录只展示已通过验证的好友，可以编辑备注、删除好友或发起私聊。")
+                AppSectionHeader(
+                    title: "联系人",
+                    detail: contactStore.isLoadingContacts || contactStore.isLoadingContactRequests ? "同步中" : contactCountText
+                )
             }
         }
         .listStyle(.insetGrouped)
-        .searchable(text: $searchText, prompt: "搜索邮箱或备注")
+        .searchable(text: $searchText, prompt: "搜索昵称、邮箱或备注")
         .navigationTitle("通讯录")
-        .background(Color(.systemGroupedBackground))
+        .background(AppSurface.groupedBackground)
         .task {
-            if contactStore.contacts.isEmpty {
-                await reloadContacts()
+            contactStore.clearNotice(scope: .contactsHome)
+            await refreshIfNeeded()
+        }
+        .task {
+            requestClock.update()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(ContactRequestClock.refreshInterval * 1_000_000_000))
+                guard !Task.isCancelled else {
+                    return
+                }
+                requestClock.update()
             }
-            if contactStore.contactRequests.isEmpty {
-                await reloadContactRequests()
-            }
-            if contactStore.blockedUsers.isEmpty {
-                await loadBlockedUsers()
-            }
+        }
+        .onDisappear {
+            taskBag.cancelAll()
         }
         .refreshable {
             await reloadContacts()
             await reloadContactRequests()
-            await loadBlockedUsers()
         }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
-                    Task {
+                    guard runTask(.refresh("contacts-toolbar"), operation: {
                         await reloadContacts()
+                        guard !Task.isCancelled else {
+                            return
+                        }
                         await reloadContactRequests()
-                    }
+                    }) else { return }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .disabled(contactStore.isLoadingContacts || contactStore.isLoadingContactRequests)
-
-                Button {
-                    isPresentingBlockedUsers = true
-                } label: {
-                    Image(systemName: "hand.raised.fill")
-                }
+                .accessibilityIdentifier("contacts.refreshButton")
 
                 Button {
                     isPresentingAddContact = true
                 } label: {
                     Image(systemName: "person.badge.plus")
                 }
+                .accessibilityIdentifier("contacts.addButton")
             }
         }
         .sheet(isPresented: $isPresentingAddContact) {
             NavigationStack {
                 SendContactRequestSheet(
                     contactStore: contactStore,
-                    sendContactRequest: sendContactRequest
-                )
-            }
-            .presentationDetents([.medium])
-        }
-        .sheet(isPresented: $isPresentingNewContactRequests) {
-            NavigationStack {
-                NewContactRequestsView(
-                    contactStore: contactStore,
                     currentUserID: currentUserID,
-                    markIncomingContactRequestsSeen: markIncomingContactRequestsSeen,
-                    reloadContactRequests: reloadContactRequests,
-                    acceptContactRequest: acceptContactRequest,
-                    declineContactRequest: declineContactRequest,
-                    cancelContactRequest: cancelContactRequest,
-                    createDirectConversation: createDirectConversation,
-                    onOpenConversation: onOpenConversation
-                )
-            }
-            .presentationDetents([.large])
-        }
-        .sheet(isPresented: $isPresentingBlockedUsers) {
-            NavigationStack {
-                BlockedUsersSheet(
-                    contactStore: contactStore,
-                    loadBlockedUsers: loadBlockedUsers,
-                    unblockUser: unblockUser
-                )
-            }
-            .presentationDetents([.medium, .large])
-        }
-        .sheet(item: $editingContact) { contact in
-            NavigationStack {
-                EditContactRemarkSheet(
-                    contactStore: contactStore,
-                    contact: contact,
-                    updateContactRemark: updateContactRemark
+                    currentUserEmail: currentUserEmail,
+                    sendContactRequest: sendContactRequest,
+                    refreshContactState: {
+                        await reloadContacts()
+                        guard !Task.isCancelled else {
+                            return
+                        }
+                        await reloadContactRequests()
+                    }
                 )
             }
             .presentationDetents([.medium])
@@ -199,67 +172,55 @@ struct ContactsView: View {
     }
 
     private var filteredContacts: [ContactResponseBody] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
-            return contactStore.contacts
-        }
+        contactStore.filteredContacts(query: searchText)
+    }
 
-        return contactStore.contacts.filter { contact in
-            contact.email.localizedCaseInsensitiveContains(query)
-                || contact.displayName.localizedCaseInsensitiveContains(query)
+    private var contactCountText: String? {
+        guard !filteredContacts.isEmpty else {
+            return nil
         }
+        return "\(filteredContacts.count) 位"
+    }
+
+    private var blockedUsersSubtitle: String {
+        if contactStore.blockedUsers.isEmpty {
+            return "管理已拉黑的用户"
+        }
+        return "\(contactStore.blockedUsers.count) 位用户"
     }
 
     private var totalPendingContactRequestCount: Int {
-        incomingPendingContactRequests.count + outgoingPendingContactRequests.count
+        contactStore.totalPendingCount(currentUserID: currentUserID, now: requestClock.now)
     }
 
-    private var incomingPendingContactRequests: [ContactRequestResponseBody] {
-        contactStore.incomingPendingContactRequests(
-            currentUserID: currentUserID,
-            sort: sortContactRequestsNewestFirst
-        )
+    private var outgoingPendingContactRequestCount: Int {
+        contactStore.pendingOutgoingCount(currentUserID: currentUserID, now: requestClock.now)
     }
 
-    private var outgoingPendingContactRequests: [ContactRequestResponseBody] {
-        contactStore.outgoingPendingContactRequests(
-            currentUserID: currentUserID,
-            sort: sortContactRequestsNewestFirst
-        )
+    private var expiredContactRequestCount: Int {
+        contactStore.expiredRequestCount(currentUserID: currentUserID, now: requestClock.now)
     }
 
-    private func sortContactRequestsNewestFirst(
-        _ lhs: ContactRequestResponseBody,
-        _ rhs: ContactRequestResponseBody
+    private func refreshIfNeeded() async {
+        guard contactStore.contacts.isEmpty
+            || contactStore.contactRequests.isEmpty
+            || contactStore.shouldRefreshContactState()
+        else {
+            return
+        }
+
+        await reloadContacts()
+        guard !Task.isCancelled else {
+            return
+        }
+        await reloadContactRequests()
+    }
+
+    @discardableResult
+    private func runTask(
+        _ key: ContactViewTaskKey,
+        operation: @escaping @MainActor () async -> Void
     ) -> Bool {
-        let leftDate = lhs.updatedAt ?? lhs.createdAt ?? .distantPast
-        let rightDate = rhs.updatedAt ?? rhs.createdAt ?? .distantPast
-        if leftDate == rightDate {
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
-        return leftDate > rightDate
-    }
-
-    private func startConversation(with contact: ContactResponseBody) {
-        pendingConversationContactID = contact.id
-        Task {
-            let conversationID = await createDirectConversation(contact.email)
-            pendingConversationContactID = nil
-            if let conversationID {
-                onOpenConversation(conversationID)
-            }
-        }
-    }
-
-    private func delete(_ contact: ContactResponseBody) {
-        Task {
-            _ = await deleteContact(contact.id)
-        }
-    }
-
-    private func block(_ contact: ContactResponseBody) {
-        Task {
-            _ = await blockUser(contact.id)
-        }
+        taskBag.run(key, operation: operation)
     }
 }

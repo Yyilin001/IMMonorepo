@@ -5,21 +5,39 @@ struct LoginView: View {
         case email
         case password
         case confirmPassword
+        case code
+        case newPassword
+        case confirmNewPassword
+    }
+
+    private enum AuxiliaryFlow: Equatable {
+        case credentials
+        case emailVerification
+        case passwordResetRequest
+        case passwordResetConfirm
     }
 
     private let sessionStore: AppSessionStore
     private let authentication: AuthenticationFacade
 
     @State private var mode: LoginFormMode = .signIn
-    @State private var email = "demo@example.com"
-    @State private var password = "password1234"
+    @State private var flow: AuxiliaryFlow = .credentials
+    @State private var email = LoginDefaults.email
+    @State private var password = LoginDefaults.password
     @State private var confirmPassword = ""
+    @State private var verificationCode = ""
+    @State private var newPassword = ""
+    @State private var confirmNewPassword = ""
     @State private var showsPassword = false
     @State private var showsConfirmPassword = false
+    @State private var showsNewPassword = false
+    @State private var showsConfirmNewPassword = false
     @State private var localMessage: String?
     @FocusState private var focusedField: Field?
 
+    #if DEBUG
     private let demoAccounts = DemoLoginAccount.defaults
+    #endif
 
     init(authentication: AuthenticationFacade) {
         self.authentication = authentication
@@ -29,9 +47,11 @@ struct LoginView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 28) {
+                VStack(spacing: AppSpacing.xLarge) {
                     header
-                    modePicker
+                    if flow == .credentials {
+                        modePicker
+                    }
                     form
                     notice
                     primaryAction
@@ -40,35 +60,77 @@ struct LoginView: View {
                 .frame(maxWidth: 420)
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 24)
-                .padding(.vertical, 40)
+                .padding(.top, 64)
+                .padding(.bottom, 36)
             }
-            .background(Color(.systemGroupedBackground))
+            .background(AppSurface.groupedBackground)
             .scrollDismissesKeyboard(.interactively)
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .onChange(of: authentication.notice) { _, notice in
+            if notice?.code == .emailVerificationRequired {
+                flow = .emailVerification
+                password = ""
+                confirmPassword = ""
+                verificationCode = ""
+                focusedField = .code
+            }
         }
     }
 
     private var header: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "bubble.left.and.bubble.right.fill")
-                .font(.title.weight(.semibold))
+        VStack(spacing: AppSpacing.large) {
+            Image(systemName: headerIcon)
+                .font(.system(size: 30, weight: .semibold))
                 .imageScale(.large)
-                .foregroundStyle(Color.accentColor)
-                .padding(18)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+                .foregroundStyle(.white)
+                .frame(width: 68, height: 68)
+                .background(
+                    LinearGradient(
+                        colors: [Color.accentColor, Color.blue.opacity(0.82)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 22)
+                )
                 .accessibilityHidden(true)
 
-            VStack(spacing: 6) {
-                Text(mode.title)
+            VStack(spacing: AppSpacing.xSmall) {
+                Text("IMApp")
                     .font(.largeTitle.weight(.semibold))
                     .multilineTextAlignment(.center)
 
-                Text("使用 IMApp 账号继续")
+                Text(headerSubtitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var headerIcon: String {
+        switch flow {
+        case .credentials:
+            return "bubble.left.and.bubble.right.fill"
+        case .emailVerification:
+            return "envelope.badge.shield.half.filled"
+        case .passwordResetRequest, .passwordResetConfirm:
+            return "lock.rotation"
+        }
+    }
+
+    private var headerSubtitle: String {
+        switch flow {
+        case .credentials:
+            return mode == .signIn ? "登录后继续聊天" : "创建账号并绑定当前设备"
+        case .emailVerification:
+            return "输入邮箱验证码完成账号验证"
+        case .passwordResetRequest:
+            return "输入账号邮箱获取重置验证码"
+        case .passwordResetConfirm:
+            return "输入验证码并设置新密码"
+        }
     }
 
     private var modePicker: some View {
@@ -89,57 +151,110 @@ struct LoginView: View {
 
     private var form: some View {
         VStack(spacing: 0) {
-            fieldRow(systemImage: "envelope") {
-                TextField("邮箱", text: $email)
-                    .keyboardType(.emailAddress)
-                    .textInputAutocapitalization(.never)
-                    .textContentType(.username)
-                    .autocorrectionDisabled()
-                    .submitLabel(.next)
-                    .focused($focusedField, equals: .email)
-                    .onSubmit { focusedField = .password }
-                    .accessibilityIdentifier("auth.emailField")
-            }
+            emailRow
 
-            Divider()
-                .padding(.leading, 52)
-
-            passwordRow(
-                title: "密码",
-                systemImage: "lock",
-                text: $password,
-                isVisible: $showsPassword,
-                field: .password,
-                submitLabel: mode == .signIn ? .go : .next,
-                accessibilityIdentifier: "auth.passwordField",
-                onSubmit: {
-                    if mode == .signIn {
-                        submit()
-                    } else {
-                        focusedField = .confirmPassword
-                    }
-                }
-            )
-
-            if mode == .register {
-                Divider()
-                    .padding(.leading, 52)
-
+            switch flow {
+            case .credentials:
+                credentialsRows
+            case .emailVerification:
+                codeRows(accessibilityIdentifier: "auth.verificationCodeField")
+            case .passwordResetRequest:
+                EmptyView()
+            case .passwordResetConfirm:
+                codeRows(accessibilityIdentifier: "auth.passwordResetCodeField")
+                Divider().padding(.leading, 52)
                 passwordRow(
-                    title: "确认密码",
+                    title: "新密码",
+                    systemImage: "lock",
+                    text: $newPassword,
+                    isVisible: $showsNewPassword,
+                    field: .newPassword,
+                    submitLabel: .next,
+                    accessibilityIdentifier: "auth.newPasswordField",
+                    onSubmit: { focusedField = .confirmNewPassword }
+                )
+                Divider().padding(.leading, 52)
+                passwordRow(
+                    title: "确认新密码",
                     systemImage: "checkmark.shield",
-                    text: $confirmPassword,
-                    isVisible: $showsConfirmPassword,
-                    field: .confirmPassword,
+                    text: $confirmNewPassword,
+                    isVisible: $showsConfirmNewPassword,
+                    field: .confirmNewPassword,
                     submitLabel: .go,
-                    accessibilityIdentifier: "auth.confirmPasswordField",
+                    accessibilityIdentifier: "auth.confirmNewPasswordField",
                     onSubmit: submit
                 )
-                .transition(.opacity)
             }
         }
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
         .animation(.snappy(duration: 0.18), value: mode)
+        .animation(.snappy(duration: 0.18), value: flow)
+        .accessibilityIdentifier("auth.form")
+    }
+
+    private var emailRow: some View {
+        fieldRow(systemImage: "envelope") {
+            TextField("邮箱", text: $email)
+                .keyboardType(.emailAddress)
+                .textInputAutocapitalization(.never)
+                .textContentType(.username)
+                .autocorrectionDisabled()
+                .submitLabel(.next)
+                .focused($focusedField, equals: .email)
+                .onSubmit { focusedField = nextFieldAfterEmail }
+                .accessibilityIdentifier("auth.emailField")
+        }
+    }
+
+    @ViewBuilder
+    private var credentialsRows: some View {
+        Divider().padding(.leading, 52)
+        passwordRow(
+            title: "密码",
+            systemImage: "lock",
+            text: $password,
+            isVisible: $showsPassword,
+            field: .password,
+            submitLabel: mode == .signIn ? .go : .next,
+            accessibilityIdentifier: "auth.passwordField",
+            onSubmit: {
+                if mode == .signIn {
+                    submit()
+                } else {
+                    focusedField = .confirmPassword
+                }
+            }
+        )
+
+        if mode == .register {
+            Divider().padding(.leading, 52)
+            passwordRow(
+                title: "确认密码",
+                systemImage: "checkmark.shield",
+                text: $confirmPassword,
+                isVisible: $showsConfirmPassword,
+                field: .confirmPassword,
+                submitLabel: .go,
+                accessibilityIdentifier: "auth.confirmPasswordField",
+                onSubmit: submit
+            )
+            .transition(.opacity)
+        }
+    }
+
+    private func codeRows(accessibilityIdentifier: String) -> some View {
+        Group {
+            Divider().padding(.leading, 52)
+            fieldRow(systemImage: "number") {
+                TextField("验证码", text: $verificationCode)
+                    .keyboardType(.numberPad)
+                    .textContentType(.oneTimeCode)
+                    .submitLabel(.next)
+                    .focused($focusedField, equals: .code)
+                    .onSubmit { focusedField = flow == .passwordResetConfirm ? .newPassword : nil }
+                    .accessibilityIdentifier(accessibilityIdentifier)
+            }
+        }
     }
 
     @ViewBuilder
@@ -160,7 +275,6 @@ struct LoginView: View {
                         .tint(.white)
                         .accessibilityHidden(true)
                 }
-
                 Text(submitTitle)
                     .fontWeight(.semibold)
             }
@@ -169,38 +283,81 @@ struct LoginView: View {
         .buttonStyle(.borderedProminent)
         .buttonBorderShape(.roundedRectangle(radius: 12))
         .controlSize(.large)
-        .disabled(isBusy)
+        .disabled(isBusy || !isSubmittable)
         .accessibilityIdentifier("auth.submitButton")
     }
 
     private var secondaryArea: some View {
-        VStack(spacing: 12) {
-            if mode == .signIn {
-                Menu {
-                    ForEach(demoAccounts) { account in
-                        Button(account.email) {
-                            selectDemoAccount(account)
-                        }
-                        .accessibilityIdentifier("auth.demoAccount.\(account.id)")
-                    }
+        VStack(spacing: AppSpacing.medium) {
+            switch flow {
+            case .credentials:
+                credentialsSecondaryArea
+            case .emailVerification:
+                Button {
+                    submitResendVerification()
                 } label: {
-                    Label("使用测试账号", systemImage: "person.crop.circle")
-                        .font(.subheadline)
+                    Label("重新发送验证码", systemImage: "paperplane")
                 }
-                .controlSize(.regular)
-                .disabled(isBusy)
+                .buttonStyle(.borderless)
+                .disabled(isBusy || normalizedEmail.isEmpty)
+                .accessibilityIdentifier("auth.resendVerificationButton")
 
-                Text("开发环境默认密码：password1234")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("注册成功后会立即登录，并绑定当前设备。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                Button("返回登录") {
+                    switchToCredentials()
+                }
+                .buttonStyle(.borderless)
+            case .passwordResetRequest:
+                Button("返回登录") {
+                    switchToCredentials()
+                }
+                .buttonStyle(.borderless)
+            case .passwordResetConfirm:
+                Button("返回登录") {
+                    switchToCredentials()
+                }
+                .buttonStyle(.borderless)
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var credentialsSecondaryArea: some View {
+        if mode == .signIn {
+            Button("忘记密码") {
+                flow = .passwordResetRequest
+                localMessage = nil
+                focusedField = .email
+            }
+            .font(.subheadline)
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier("auth.forgotPasswordButton")
+
+            #if DEBUG
+            Menu {
+                ForEach(demoAccounts) { account in
+                    Button(account.email) {
+                        selectDemoAccount(account)
+                    }
+                    .accessibilityIdentifier("auth.demoAccount.\(account.id)")
+                }
+            } label: {
+                Label("使用测试账号", systemImage: "person.crop.circle")
+                    .font(.subheadline)
+            }
+            .controlSize(.regular)
+            .disabled(isBusy)
+
+            Text("测试账号仅用于本地开发环境")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            #endif
+        } else {
+            Text("注册后需要完成邮箱验证，再使用账号登录。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
     }
 
     private func fieldRow<Content: View>(
@@ -262,8 +419,11 @@ struct LoginView: View {
         }
     }
 
+    #if DEBUG
     private func selectDemoAccount(_ account: DemoLoginAccount) {
         localMessage = nil
+        flow = .credentials
+        mode = .signIn
         email = account.email
         password = account.password
         confirmPassword = ""
@@ -272,6 +432,7 @@ struct LoginView: View {
             await authentication.login(email: account.email, password: account.password)
         }
     }
+    #endif
 
     private var displayNotice: AuthNotice? {
         if let localMessage {
@@ -292,47 +453,167 @@ struct LoginView: View {
                 return "正在登录"
             case .authenticating(.register):
                 return "正在创建"
+            case .verifyingEmail:
+                return "正在验证"
+            case .resettingPassword:
+                return "正在处理"
             default:
                 return "正在处理"
             }
         }
-        return mode.submitTitle
+
+        switch flow {
+        case .credentials:
+            return mode.submitTitle
+        case .emailVerification:
+            return "完成验证"
+        case .passwordResetRequest:
+            return "获取验证码"
+        case .passwordResetConfirm:
+            return "重置密码"
+        }
     }
 
     private var isBusy: Bool {
         sessionStore.authOperationState.isBusy
     }
 
-    private var formInput: LoginFormInput {
+    private var normalizedEmail: String {
+        LoginFormInput(mode: mode, email: email, password: password, confirmPassword: confirmPassword).normalizedEmail
+    }
+
+    private var nextFieldAfterEmail: Field? {
+        switch flow {
+        case .credentials:
+            return .password
+        case .emailVerification, .passwordResetConfirm:
+            return .code
+        case .passwordResetRequest:
+            return nil
+        }
+    }
+
+    private var isSubmittable: Bool {
+        validationMessage == nil
+    }
+
+    private var validationMessage: String? {
+        switch flow {
+        case .credentials:
+            return LoginFormInput(
+                mode: mode,
+                email: email,
+                password: password,
+                confirmPassword: confirmPassword
+            ).validationMessage
+        case .emailVerification:
+            return validateEmailAndCode()
+        case .passwordResetRequest:
+            return validateEmail()
+        case .passwordResetConfirm:
+            if let message = validateEmailAndCode() {
+                return message
+            }
+            return LoginFormInput(
+                mode: .register,
+                email: email,
+                password: newPassword,
+                confirmPassword: confirmNewPassword
+            ).validationMessage
+        }
+    }
+
+    private func validateEmail() -> String? {
         LoginFormInput(
-            mode: mode,
+            mode: .signIn,
             email: email,
-            password: password,
-            confirmPassword: confirmPassword
-        )
+            password: "password123",
+            confirmPassword: ""
+        ).validationMessage.flatMap { message in
+            message.contains("密码") ? nil : message
+        }
+    }
+
+    private func validateEmailAndCode() -> String? {
+        if let message = validateEmail() {
+            return message
+        }
+        if verificationCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "请输入验证码。"
+        }
+        return nil
     }
 
     private func submit() {
         localMessage = nil
-
-        let input = formInput
-        if let validationMessage = input.validationMessage {
+        if let validationMessage {
             localMessage = validationMessage
             return
         }
 
         focusedField = nil
         Task {
-            switch mode {
-            case .signIn:
-                await authentication.login(email: input.normalizedEmail, password: input.trimmedPassword)
-            case .register:
-                await authentication.register(email: input.normalizedEmail, password: input.trimmedPassword)
+            switch flow {
+            case .credentials:
+                switch mode {
+                case .signIn:
+                    await authentication.login(email: normalizedEmail, password: password.trimmingCharacters(in: .whitespacesAndNewlines))
+                case .register:
+                    await authentication.register(email: normalizedEmail, password: password.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+            case .emailVerification:
+                await authentication.confirmEmailVerification(email: normalizedEmail, code: verificationCode)
+            case .passwordResetRequest:
+                await authentication.requestPasswordReset(email: normalizedEmail)
+                flow = .passwordResetConfirm
+                verificationCode = ""
+                focusedField = .code
+            case .passwordResetConfirm:
+                await authentication.confirmPasswordReset(
+                    email: normalizedEmail,
+                    code: verificationCode,
+                    newPassword: newPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+                if authentication.notice?.severity == .info {
+                    switchToCredentials()
+                }
             }
         }
     }
+
+    private func submitResendVerification() {
+        localMessage = nil
+        if let message = validateEmail() {
+            localMessage = message
+            return
+        }
+        Task {
+            await authentication.resendEmailVerification(email: normalizedEmail)
+        }
+    }
+
+    private func switchToCredentials() {
+        flow = .credentials
+        mode = .signIn
+        localMessage = nil
+        verificationCode = ""
+        newPassword = ""
+        confirmNewPassword = ""
+        focusedField = .email
+    }
 }
 
+private enum LoginDefaults {
+    #if DEBUG
+    static let email = "demo@example.com"
+    static let password = "password1234"
+    #else
+    static let email = ""
+    static let password = ""
+    #endif
+}
+
+#if DEBUG
 private struct DemoLoginAccount: Identifiable {
     let name: String
     let email: String
@@ -348,6 +629,7 @@ private struct DemoLoginAccount: Identifiable {
         DemoLoginAccount(name: "Dave", email: "dave@example.com", password: "password1234")
     ]
 }
+#endif
 
 private struct AuthNoticeBanner: View {
     let notice: AuthNotice

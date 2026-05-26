@@ -58,8 +58,12 @@ struct LoginFormInput: Equatable {
             return "请输入密码。"
         }
 
-        if trimmedPassword.count < 8 {
-            return "密码至少需要 8 位。"
+        if trimmedPassword.count < 10 {
+            return "密码至少需要 10 位。"
+        }
+
+        if Self.isCommonWeakPassword(trimmedPassword) {
+            return "请使用更安全的密码。"
         }
 
         if mode == .register, password != confirmPassword {
@@ -83,5 +87,10 @@ struct LoginFormInput: Equatable {
         }
 
         return !email.contains(" ")
+    }
+
+    private static func isCommonWeakPassword(_ password: String) -> Bool {
+        let normalized = password.lowercased()
+        return ["password", "1234567890", "qwerty12345"].contains(normalized)
     }
 }

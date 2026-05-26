@@ -20,6 +20,35 @@ enum IMConversationDestructiveAction: Identifiable {
     }
 }
 
+struct IMConversationListPendingAction: Identifiable {
+    let id = UUID()
+    let conversationID: String
+    let title: String
+    let action: IMConversationRowAction
+
+    var confirmationMessage: String {
+        switch action {
+        case .clearHistory:
+            return "清空「\(title)」的聊天记录？"
+        case .delete:
+            return "删除「\(title)」会话？"
+        case .pin, .mute, .markRead, .markUnread:
+            return ""
+        }
+    }
+
+    var confirmationButtonTitle: String {
+        switch action {
+        case .clearHistory:
+            return "清空聊天记录"
+        case .delete:
+            return "删除会话"
+        case .pin, .mute, .markRead, .markUnread:
+            return "确认"
+        }
+    }
+}
+
 enum IMSelectionActionState: Equatable {
     case idle
     case forwarding
@@ -27,8 +56,19 @@ enum IMSelectionActionState: Equatable {
     case deleting
 }
 
+enum IMConversationRelationshipActionKey: Hashable, Sendable {
+    case sendRequest(String)
+    case accept(String)
+    case decline(String)
+    case cancel(String)
+    case block(UUID)
+    case unblock(UUID)
+    case report(UUID)
+}
+
 enum IMConversationListFilter: String, CaseIterable, Identifiable {
     case all
+    case unread
     case groups
 
     var id: String { rawValue }
@@ -37,6 +77,8 @@ enum IMConversationListFilter: String, CaseIterable, Identifiable {
         switch self {
         case .all:
             return "全部"
+        case .unread:
+            return "未读"
         case .groups:
             return "群聊"
         }
@@ -44,10 +86,21 @@ enum IMConversationListFilter: String, CaseIterable, Identifiable {
 
     var conversationKind: IMConversationKind? {
         switch self {
-        case .all:
+        case .all, .unread:
             return nil
         case .groups:
             return .group
+        }
+    }
+
+    var accessibilityIdentifier: String {
+        switch self {
+        case .all:
+            return "messages.filter.all"
+        case .unread:
+            return "messages.filter.unread"
+        case .groups:
+            return "messages.filter.groups"
         }
     }
 }
@@ -62,117 +115,21 @@ struct IMConversationView: View {
     @State var isPresentingCreateConversation = false
     @State var isPresentingFavorites = false
     @State var conversationListFilter: IMConversationListFilter = .all
+    @State var pendingListAction: IMConversationListPendingAction?
 
     var body: some View {
+        conversationList
+    }
+
+    var conversationList: some View {
         List {
-            Section {
-                IMConnectionSummaryCard(
-                    title: connectionTitle,
-                    message: connectionMessage,
-                    icon: connectionIcon,
-                    tint: connectionColor
-                )
-                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-                .listRowBackground(Color.clear)
-
-                if let message = conversationStore.statusMessage, !message.isEmpty {
-                    IMInlineStatusBanner(message: message)
-                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 8, trailing: 16))
-                        .listRowBackground(Color.clear)
-                }
-            }
-
-            Section {
-                Picker("会话类型", selection: $conversationListFilter) {
-                    ForEach(IMConversationListFilter.allCases) { filter in
-                        Text(filter.title).tag(filter)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-                .listRowBackground(Color.clear)
-
-                if conversationStore.filteredConversations.isEmpty {
-                    IMConversationEmptyState {
-                        isPresentingCreateConversation = true
-                    }
-                    .listRowInsets(EdgeInsets(top: 20, leading: 16, bottom: 20, trailing: 16))
-                    .listRowBackground(Color.clear)
-                } else {
-                    Button {
-                        isPresentingCreateConversation = true
-                    } label: {
-                        Label("新建私聊或群聊", systemImage: "square.and.pencil")
-                            .font(.body.weight(.semibold))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.regular)
-                    .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-
-                    ForEach(conversationStore.filteredConversations) { conversation in
-                        Button {
-                            onOpenConversation(conversation.id)
-                        } label: {
-                            IMConversationRow(
-                                conversation: conversation,
-                                identity: presentationStore.conversationIdentityPresentation(for: conversation),
-                                isActive: conversation.id == conversationStore.selectedConversationID
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    if conversationStore.isLoadingMoreConversationSummaries {
-                        HStack {
-                            Spacer()
-                            ProgressView()
-                                .controlSize(.small)
-                            Spacer()
-                        }
-                        .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-                    } else if conversationStore.hasMoreConversationSummaries {
-                        Button {
-                            loadMoreHistoricalConversations()
-                        } label: {
-                            Label("加载更多历史会话", systemImage: "clock.arrow.circlepath")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(conversationStore.isLoadingMoreConversationSummaries)
-                        .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-                            .onAppear {
-                                loadMoreHistoricalConversations()
-                            }
-                    }
-                }
-            } header: {
-                HStack {
-                    Text("会话")
-
-                    Spacer()
-
-                    if conversationStore.isLoadingConversations {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-
-                    Button {
-                        isPresentingCreateConversation = true
-                    } label: {
-                        Image(systemName: "plus.circle.fill")
-                    }
-                    .accessibilityLabel("新建会话")
-                }
-            } footer: {
-                if !conversationStore.conversations.isEmpty {
-                    Text("下拉可刷新会话列表，点进会话后再查看历史消息和发送内容。")
-                }
-            }
+            connectionStatusSection
+            storeStatusSection
+            conversationsSection
         }
         .listStyle(.insetGrouped)
         .navigationTitle("消息")
-        .background(Color(.systemGroupedBackground))
+        .background(AppSurface.groupedBackground)
         .searchable(
             text: Binding(
                 get: { conversationStore.searchText },
@@ -182,45 +139,35 @@ struct IMConversationView: View {
         )
         .task {
             if conversationStore.conversations.isEmpty {
-                await runtimeStore.reloadConversations(
-                    force: true,
-                    kind: conversationListFilter.conversationKind
-                )
+                await reloadConversationsForCurrentFilter()
             }
         }
         .refreshable {
-            await runtimeStore.reloadConversations(
-                force: true,
-                kind: conversationListFilter.conversationKind
-            )
+            await reloadConversationsForCurrentFilter()
         }
         .onChange(of: conversationListFilter) { _, newValue in
             Task {
-                await runtimeStore.reloadConversations(
-                    force: true,
-                    kind: newValue.conversationKind
-                )
+                await reloadConversations(for: newValue)
             }
         }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
                     Task {
-                        await runtimeStore.reloadConversations(
-                            force: true,
-                            kind: conversationListFilter.conversationKind
-                        )
+                        await reloadConversationsForCurrentFilter()
                     }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .disabled(conversationStore.isLoadingConversations)
+                .accessibilityIdentifier("messages.refreshButton")
 
                 Button {
                     isPresentingCreateConversation = true
                 } label: {
                     Image(systemName: "square.and.pencil")
                 }
+                .accessibilityIdentifier("messages.createConversationButton")
 
                 Button {
                     isPresentingFavorites = true
@@ -228,6 +175,7 @@ struct IMConversationView: View {
                     Image(systemName: "star.fill")
                 }
                 .accessibilityLabel("我的收藏")
+                .accessibilityIdentifier("messages.favoritesButton")
             }
         }
         .sheet(isPresented: $isPresentingCreateConversation) {
@@ -256,6 +204,126 @@ struct IMConversationView: View {
             }
             .presentationDetents([.medium, .large])
         }
+        .confirmationDialog(
+            pendingListAction?.confirmationMessage ?? "",
+            isPresented: pendingListActionIsPresented,
+            titleVisibility: .visible
+        ) {
+            if let pendingListAction {
+                Button(pendingListAction.confirmationButtonTitle, role: .destructive) {
+                    Task {
+                        await performConfirmedConversationAction(pendingListAction)
+                    }
+                }
+            }
+            Button("取消", role: .cancel) { }
+        }
+    }
+
+    var pendingListActionIsPresented: Binding<Bool> {
+        Binding(
+            get: { pendingListAction != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingListAction = nil
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    var connectionStatusSection: some View {
+        if presentationStore.imConnectionStatus != .connected {
+            Section {
+                AppStatusBanner(
+                    message: connectionMessage,
+                    tone: connectionBannerTone,
+                    systemImage: connectionIcon
+                )
+                .accessibilityIdentifier("messages.connectionStatus")
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                .listRowBackground(Color.clear)
+            }
+        }
+    }
+
+    @ViewBuilder
+    var storeStatusSection: some View {
+        if let message = conversationStore.statusMessage, !message.isEmpty {
+            Section {
+                AppStatusBanner(message: message, tone: .info)
+                    .accessibilityIdentifier("messages.status")
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                    .listRowBackground(Color.clear)
+            }
+        }
+    }
+
+    var conversationsSection: some View {
+        Section {
+            conversationFilterPicker
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("messages.filterPicker")
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                .listRowBackground(Color.clear)
+
+            if displayedConversations.isEmpty {
+                conversationEmptyState
+                    .listRowInsets(EdgeInsets(top: 20, leading: 16, bottom: 20, trailing: 16))
+                    .listRowBackground(Color.clear)
+            } else {
+                conversationRows
+                historicalConversationLoader
+            }
+        } header: {
+            AppSectionHeader(
+                title: "最近会话",
+                detail: conversationStore.isLoadingConversations ? "同步中" : conversationCountText
+            )
+        }
+    }
+
+    var conversationRows: some View {
+        ForEach(displayedConversations) { conversation in
+            IMConversationRowButton(
+                conversation: conversation,
+                identity: presentationStore.conversationIdentityPresentation(for: conversation),
+                queueSummary: conversationStore.queueSummary(for: conversation.id),
+                isActive: conversation.id == conversationStore.selectedConversationID,
+                onOpen: {
+                    onOpenConversation(conversation.id)
+                },
+                onAction: { action in
+                    handleConversationRowAction(action, for: conversation)
+                }
+            )
+        }
+    }
+
+    @ViewBuilder
+    var historicalConversationLoader: some View {
+        if conversationStore.isLoadingMoreConversationSummaries {
+            HStack {
+                Spacer()
+                ProgressView()
+                    .controlSize(.small)
+                Spacer()
+            }
+            .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+        } else if conversationStore.hasMoreConversationSummaries {
+            Button {
+                loadMoreHistoricalConversations()
+            } label: {
+                Label("加载更多历史会话", systemImage: "clock.arrow.circlepath")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .disabled(conversationStore.isLoadingMoreConversationSummaries)
+            .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+            .onAppear {
+                loadMoreHistoricalConversations()
+            }
+        }
     }
 
     func loadMoreHistoricalConversations() {
@@ -265,6 +333,116 @@ struct IMConversationView: View {
                 anchorConversationID: anchorConversationID,
                 kind: conversationListFilter.conversationKind
             )
+        }
+    }
+
+    func reloadConversationsForCurrentFilter() async {
+        await reloadConversations(for: conversationListFilter)
+    }
+
+    func reloadConversations(for filter: IMConversationListFilter) async {
+        await runtimeStore.reloadConversations(
+            force: true,
+            kind: filter.conversationKind
+        )
+    }
+
+    var conversationFilterPicker: some View {
+        Picker("会话类型", selection: $conversationListFilter) {
+            Text(IMConversationListFilter.all.title)
+                .tag(IMConversationListFilter.all)
+                .accessibilityIdentifier(IMConversationListFilter.all.accessibilityIdentifier)
+            Text(IMConversationListFilter.unread.title)
+                .tag(IMConversationListFilter.unread)
+                .accessibilityIdentifier(IMConversationListFilter.unread.accessibilityIdentifier)
+            Text(IMConversationListFilter.groups.title)
+                .tag(IMConversationListFilter.groups)
+                .accessibilityIdentifier(IMConversationListFilter.groups.accessibilityIdentifier)
+        }
+    }
+
+    var displayedConversations: [IMConversation] {
+        let conversations = conversationStore.filteredConversations
+        switch conversationListFilter {
+        case .all, .groups:
+            return conversations
+        case .unread:
+            return conversations.filter { $0.unreadCount > 0 }
+        }
+    }
+
+    var conversationCountText: String? {
+        guard !displayedConversations.isEmpty else {
+            return nil
+        }
+        return "\(displayedConversations.count) 个"
+    }
+
+    @ViewBuilder
+    var conversationEmptyState: some View {
+        if !conversationStore.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            AppEmptyState(
+                title: "没有找到会话",
+                message: "当前搜索没有匹配的联系人、群名或消息预览。",
+                systemImage: "magnifyingglass",
+                actionTitle: "清除搜索",
+                actionSystemImage: "xmark.circle",
+                action: {
+                    conversationStore.setConversationSearchText("")
+                }
+            )
+        } else if conversationListFilter == .unread {
+            AppEmptyState(
+                title: "没有未读消息",
+                message: "新的未读消息会显示在这里。",
+                systemImage: "checkmark.message"
+            )
+        } else {
+            IMConversationEmptyState {
+                isPresentingCreateConversation = true
+            }
+        }
+    }
+
+    func handleConversationRowAction(_ action: IMConversationRowAction, for conversation: IMConversation) {
+        switch action {
+        case .pin:
+            Task {
+                _ = await runtimeStore.updateConversationPreferences(
+                    conversation.id,
+                    isPinned: !conversation.isPinned
+                )
+            }
+        case .mute:
+            Task {
+                _ = await runtimeStore.updateConversationPreferences(
+                    conversation.id,
+                    isMuted: !conversation.isMuted
+                )
+            }
+        case .markRead:
+            Task {
+                await runtimeStore.markConversationRead(conversation.id)
+            }
+        case .markUnread:
+            runtimeStore.markConversationUnread(conversation.id)
+        case .clearHistory, .delete:
+            pendingListAction = IMConversationListPendingAction(
+                conversationID: conversation.id,
+                title: presentationStore.conversationIdentityPresentation(for: conversation).title,
+                action: action
+            )
+        }
+    }
+
+    func performConfirmedConversationAction(_ pendingAction: IMConversationListPendingAction) async {
+        switch pendingAction.action {
+        case .clearHistory:
+            _ = await runtimeStore.clearConversationForSelf(pendingAction.conversationID)
+        case .delete:
+            _ = await runtimeStore.deleteConversationForSelf(pendingAction.conversationID)
+        case .pin, .mute, .markRead, .markUnread:
+            break
         }
     }
 
@@ -319,6 +497,19 @@ struct IMConversationView: View {
             return .orange
         }
     }
+
+    var connectionBannerTone: AppStatusBanner.Tone {
+        switch presentationStore.imConnectionStatus {
+        case .disconnected:
+            return .warning
+        case .connecting:
+            return .info
+        case .connected:
+            return .success
+        case .failed:
+            return .error
+        }
+    }
 }
 
 struct IMConversationDetailView: View {
@@ -340,6 +531,7 @@ struct IMConversationDetailView: View {
     @State var isPresentingSearch = false
     @State var isPresentingMediaImporter = false
     @State var isPresentingBatchSender = false
+    @State var isPresentingGroupSettings = false
     @State var isPresentingForwardPicker = false
     @State var isSelectionMode = false
     @State var selectedMessageIDs: Set<String> = []
@@ -350,9 +542,13 @@ struct IMConversationDetailView: View {
     @State var replyTarget: IMConversationMessage?
     @State var editingTarget: IMConversationMessage?
     @State var highlightedMessageID: String?
+    @State var isNearBottom = true
+    @State var unseenNewMessageCount = 0
+    @State var lastObservedMessageID: String?
     @State var mediaDownloadStates: [String: IMMediaDownloadState] = [:]
     @State var mediaDownloadTasks: [String: Task<Void, Never>] = [:]
     @State var previewedMediaItem: IMDownloadedMediaPreviewItem?
+    @State var runningRelationshipActions: Set<IMConversationRelationshipActionKey> = []
 
     var body: some View {
         detailContent
@@ -368,7 +564,22 @@ struct IMConversationDetailView: View {
         applyingDraftStateHandlers(
             to: applyingPresentationModifiers(
                 to: applyingScrollStateHandlers(
-                    to: detailBaseView,
+                    to: detailBaseView
+                        .overlay(alignment: .bottomTrailing) {
+                            ConversationNewMessagePill(
+                                unseenCount: unseenNewMessageCount,
+                                showsJumpOnly: !isNearBottom && unseenNewMessageCount == 0,
+                                onTap: {
+                                    Task {
+                                        await scrollToLatestMessage(proxy: proxy, animated: true)
+                                        unseenNewMessageCount = 0
+                                        isNearBottom = true
+                                    }
+                                }
+                            )
+                            .padding(.trailing, 16)
+                            .padding(.bottom, 92)
+                        },
                     proxy: proxy
                 )
             )
@@ -377,7 +588,7 @@ struct IMConversationDetailView: View {
 
     var detailBaseView: some View {
         detailScrollView
-            .navigationTitle(conversationIdentity.title)
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .task(id: conversationID) {
                 await runtimeStore.openConversation(conversationID)
@@ -386,6 +597,7 @@ struct IMConversationDetailView: View {
             .onDisappear {
                 pauseAllMediaDownloads()
                 resetSelection()
+                runningRelationshipActions.removeAll()
             }
             .toolbar {
                 detailToolbarContent

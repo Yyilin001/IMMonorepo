@@ -1,4 +1,5 @@
 import Fluent
+import Crypto
 import JWTKit
 import SQLKit
 import Vapor
@@ -14,11 +15,15 @@ struct AuthService {
         app.authConfiguration
     }
 
+    private var securityConfig: AuthSecurityConfiguration {
+        app.authSecurityConfiguration
+    }
+
     private var now: Date {
         Date()
     }
 
-    func register(request: RegisterRequest, clientIPAddress: String?) async throws -> AuthResponse {
+    func register(request: RegisterRequest, clientIPAddress: String?, userAgent: String?) async throws -> RegisterResponse {
         let normalizedEmail = User.normalize(request.email)
         let attempt = try await app.authLoginRateLimiter.beginRegistrationAttempt(
             ipAddress: clientIPAddress,
@@ -27,17 +32,17 @@ struct AuthService {
         )
 
         do {
-            guard request.password.count >= 8 else {
-                throw AuthError.weakPassword
-            }
+            try PasswordPolicy.validate(password: request.password, email: normalizedEmail)
 
             // 先完成密码哈希，再写库，避免重复邮箱和新邮箱在耗时上过于可区分。
             let passwordHash = try Bcrypt.hash(request.password)
+            let now = now
 
             let user = User(
                 email: normalizedEmail,
                 passwordHash: passwordHash,
-                status: .active
+                status: .active,
+                emailVerifiedAt: securityConfig.emailVerificationRequired ? nil : now
             )
 
             do {
@@ -52,10 +57,51 @@ struct AuthService {
                 throw AuthError.invalidRegistration
             }
 
+            if securityConfig.emailVerificationRequired {
+                let expiresIn = try await issueEmailVerificationChallenge(
+                    for: user,
+                    email: normalizedEmail,
+                    clientIPAddress: clientIPAddress,
+                    userAgent: userAgent
+                )
+                await audit(
+                    eventType: "register",
+                    user: user,
+                    email: normalizedEmail,
+                    sessionID: nil,
+                    deviceID: request.device?.deviceID,
+                    ipAddress: clientIPAddress,
+                    succeeded: true,
+                    failureReason: nil
+                )
+                await app.authLoginRateLimiter.completeRegistrationAttempt(attempt, succeeded: true, now: now)
+                return .verificationRequired(email: normalizedEmail, expiresIn: expiresIn)
+            }
+
             let response = try await createSessionAndResponse(for: user, device: request.device)
+            await audit(
+                eventType: "register",
+                user: user,
+                email: normalizedEmail,
+                sessionID: nil,
+                deviceID: request.device?.deviceID,
+                ipAddress: clientIPAddress,
+                succeeded: true,
+                failureReason: nil
+            )
             await app.authLoginRateLimiter.completeRegistrationAttempt(attempt, succeeded: true, now: now)
-            return response
+            return .signedIn(response)
         } catch {
+            await audit(
+                eventType: "register",
+                user: nil,
+                email: normalizedEmail,
+                sessionID: nil,
+                deviceID: request.device?.deviceID,
+                ipAddress: clientIPAddress,
+                succeeded: false,
+                failureReason: String(describing: error)
+            )
             await app.authLoginRateLimiter.completeRegistrationAttempt(attempt, succeeded: false, now: now)
             throw error
         }
@@ -87,16 +133,41 @@ struct AuthService {
                 throw AuthError.invalidCredentials
             }
 
+            guard !securityConfig.emailVerificationRequired || user.emailVerifiedAt != nil else {
+                throw AuthError.emailVerificationRequired
+            }
+
             let response = try await createSessionAndResponse(for: user, device: request.device)
+            await audit(
+                eventType: "login",
+                user: user,
+                email: normalizedEmail,
+                sessionID: nil,
+                deviceID: request.device?.deviceID,
+                ipAddress: clientIPAddress,
+                succeeded: true,
+                failureReason: nil
+            )
             await app.authLoginRateLimiter.completeLoginAttempt(attempt, succeeded: true, now: now)
             return response
         } catch {
+            await audit(
+                eventType: "login",
+                user: nil,
+                email: normalizedEmail,
+                sessionID: nil,
+                deviceID: request.device?.deviceID,
+                ipAddress: clientIPAddress,
+                succeeded: false,
+                failureReason: String(describing: error)
+            )
             await app.authLoginRateLimiter.completeLoginAttempt(attempt, succeeded: false, now: now)
             throw error
         }
     }
 
-    func refresh(refreshToken: String) async throws -> AuthResponse {
+    func refresh(refreshToken: String, clientIPAddress: String? = nil) async throws -> AuthResponse {
+        try await app.authLoginRateLimiter.checkRefreshAttempt(ipAddress: clientIPAddress, account: nil, now: now)
         let payload = try await app.jwtKeys.verify(refreshToken, as: RefreshTokenPayload.self)
         try validate(payload: payload, tokenKind: .refresh)
         let now = now
@@ -125,6 +196,7 @@ struct AuthService {
 
         guard session.refreshExpiresAt > now else {
             session.revokedAt = now
+            session.revokedReason = AuthSessionRevocationReason.sessionRevoked.rawValue
             try await session.update(on: db)
             await kickRevokedSession(
                 sessionID: payload.sid,
@@ -146,13 +218,215 @@ struct AuthService {
 
         // 旧 token 超出 grace period 仍被使用，视为 reuse/replay，直接吊销该 session。
         session.revokedAt = now
+        session.revokedReason = AuthSessionRevocationReason.refreshTokenReuse.rawValue
         try await session.update(on: db)
+        await audit(
+            eventType: "refresh_reuse_detected",
+            user: user,
+            email: user.email,
+            sessionID: payload.sid,
+            deviceID: session.deviceID,
+            ipAddress: clientIPAddress,
+            succeeded: false,
+            failureReason: AuthError.refreshTokenReuseDetected.reason
+        )
         await kickRevokedSession(
             sessionID: payload.sid,
             reason: .sessionRevoked,
             message: "Current login is invalid. Please sign in again."
         )
         throw AuthError.refreshTokenReuseDetected
+    }
+
+    func resendEmailVerification(
+        request: EmailVerificationResendRequest,
+        clientIPAddress: String?,
+        userAgent: String?
+    ) async throws -> AuthChallengeResponse {
+        let normalizedEmail = User.normalize(request.email)
+        try await app.authLoginRateLimiter.checkVerificationResendAttempt(
+            ipAddress: clientIPAddress,
+            account: normalizedEmail,
+            now: now
+        )
+
+        if let user = try await User.query(on: db).filter(\.$email == normalizedEmail).first(),
+           user.emailVerifiedAt == nil
+        {
+            let expiresIn = try await issueEmailVerificationChallenge(
+                for: user,
+                email: normalizedEmail,
+                clientIPAddress: clientIPAddress,
+                userAgent: userAgent
+            )
+            await audit(
+                eventType: "email_verification_sent",
+                user: user,
+                email: normalizedEmail,
+                sessionID: nil,
+                deviceID: nil,
+                ipAddress: clientIPAddress,
+                succeeded: true,
+                failureReason: nil
+            )
+            return AuthChallengeResponse(
+                email: normalizedEmail,
+                expiresIn: expiresIn,
+                message: "验证码已发送。"
+            )
+        }
+
+        return AuthChallengeResponse(
+            email: normalizedEmail,
+            expiresIn: Int(securityConfig.verificationCodeTTL),
+            message: "如果账号需要验证，验证码会发送到该邮箱。"
+        )
+    }
+
+    func confirmEmailVerification(
+        request: EmailVerificationConfirmRequest,
+        clientIPAddress: String?
+    ) async throws -> AuthGenericResponse {
+        let normalizedEmail = User.normalize(request.email)
+        try await app.authLoginRateLimiter.checkVerificationConfirmAttempt(
+            ipAddress: clientIPAddress,
+            account: normalizedEmail,
+            now: now
+        )
+
+        guard let challenge = try await AuthEmailVerificationChallenge.query(on: db)
+            .filter(\.$email == normalizedEmail)
+            .filter(\.$consumedAt == nil)
+            .sort(\.$createdAt, .descending)
+            .first(),
+            let user = try await User.find(challenge.$user.id, on: db)
+        else {
+            throw AuthError.invalidVerificationCode
+        }
+
+        try await validate(challenge: challenge, code: request.code)
+
+        challenge.consumedAt = now
+        user.emailVerifiedAt = now
+        try await db.transaction { transaction in
+            try await challenge.update(on: transaction)
+            try await user.update(on: transaction)
+        }
+        await audit(
+            eventType: "email_verification_completed",
+            user: user,
+            email: normalizedEmail,
+            sessionID: nil,
+            deviceID: nil,
+            ipAddress: clientIPAddress,
+            succeeded: true,
+            failureReason: nil
+        )
+        return AuthGenericResponse(message: "邮箱验证已完成，请登录。")
+    }
+
+    func requestPasswordReset(
+        request: PasswordResetRequest,
+        clientIPAddress: String?,
+        userAgent: String?
+    ) async throws -> AuthChallengeResponse {
+        let normalizedEmail = User.normalize(request.email)
+        try await app.authLoginRateLimiter.checkPasswordResetAttempt(
+            ipAddress: clientIPAddress,
+            account: normalizedEmail,
+            now: now
+        )
+
+        if let user = try await User.query(on: db)
+            .filter(\.$email == normalizedEmail)
+            .first(),
+           user.statusEnum == .active
+        {
+            let expiresIn = try await issuePasswordResetChallenge(
+                for: user,
+                email: normalizedEmail,
+                clientIPAddress: clientIPAddress,
+                userAgent: userAgent
+            )
+            await audit(
+                eventType: "password_reset_requested",
+                user: user,
+                email: normalizedEmail,
+                sessionID: nil,
+                deviceID: nil,
+                ipAddress: clientIPAddress,
+                succeeded: true,
+                failureReason: nil
+            )
+            return AuthChallengeResponse(
+                email: normalizedEmail,
+                expiresIn: expiresIn,
+                message: "如果账号存在，重置验证码会发送到该邮箱。"
+            )
+        }
+
+        return AuthChallengeResponse(
+            email: normalizedEmail,
+            expiresIn: Int(securityConfig.passwordResetCodeTTL),
+            message: "如果账号存在，重置验证码会发送到该邮箱。"
+        )
+    }
+
+    func confirmPasswordReset(
+        request: PasswordResetConfirmRequest,
+        clientIPAddress: String?
+    ) async throws -> AuthGenericResponse {
+        let normalizedEmail = User.normalize(request.email)
+        try await app.authLoginRateLimiter.checkVerificationConfirmAttempt(
+            ipAddress: clientIPAddress,
+            account: normalizedEmail,
+            now: now
+        )
+        try PasswordPolicy.validate(password: request.newPassword, email: normalizedEmail)
+
+        guard let challenge = try await AuthPasswordResetChallenge.query(on: db)
+            .filter(\.$email == normalizedEmail)
+            .filter(\.$consumedAt == nil)
+            .sort(\.$createdAt, .descending)
+            .first(),
+            let user = try await User.find(challenge.$user.id, on: db)
+        else {
+            throw AuthError.passwordResetFailed
+        }
+
+        try await validate(challenge: challenge, code: request.code)
+        let newPasswordHash = try Bcrypt.hash(request.newPassword)
+        let revokedSessionIDs = try await db.transaction { transaction in
+            challenge.consumedAt = now
+            user.passwordHash = newPasswordHash
+            try await challenge.update(on: transaction)
+            try await user.update(on: transaction)
+            return try await AuthService(app: app, db: transaction)
+                .revokeAllActiveSessions(
+                    for: try user.requireID(),
+                    at: now,
+                    reason: .passwordReset
+                )
+        }
+
+        for sessionID in revokedSessionIDs {
+            await kickRevokedSession(
+                sessionID: sessionID,
+                reason: .sessionRevoked,
+                message: "Your password was reset. Please sign in again."
+            )
+        }
+        await audit(
+            eventType: "password_reset_completed",
+            user: user,
+            email: normalizedEmail,
+            sessionID: nil,
+            deviceID: nil,
+            ipAddress: clientIPAddress,
+            succeeded: true,
+            failureReason: nil
+        )
+        return AuthGenericResponse(message: "密码已重置，请使用新密码登录。")
     }
 
     func authenticateAccessToken(_ token: String) async throws -> (User, SessionContext) {
@@ -182,6 +456,7 @@ struct AuthService {
         }
 
         session.revokedAt = now
+        session.revokedReason = AuthSessionRevocationReason.logoutCurrent.rawValue
         try await session.update(on: db)
         await app.gatewaySessionService.kickConnections(
             forSessionID: sessionID,
@@ -198,6 +473,7 @@ struct AuthService {
         }
 
         session.revokedAt = now
+        session.revokedReason = AuthSessionRevocationReason.sessionRevoked.rawValue
         try await session.update(on: db)
         await app.gatewaySessionService.kickConnections(
             forSessionID: sessionID,
@@ -260,6 +536,7 @@ struct AuthService {
             .filter(\.$user.$id == userID)
             .filter(\.$revokedAt == nil)
             .set(\.$revokedAt, to: revokedAt)
+            .set(\.$revokedReason, to: AuthSessionRevocationReason.logoutAll.rawValue)
             .update()
 
         await app.gatewaySessionService.kickConnections(
@@ -285,7 +562,8 @@ struct AuthService {
                     revokedSessionIDs = try await AuthService(app: app, db: transaction).revokeActiveSessions(
                         for: userID,
                         deviceID: deviceID,
-                        at: now
+                        at: now,
+                        reason: .duplicateDeviceLogin
                     )
                 }
 
@@ -325,7 +603,12 @@ struct AuthService {
         }
     }
 
-    private func revokeActiveSessions(for userID: UUID, deviceID: String, at revokedAt: Date) async throws -> [UUID] {
+    private func revokeActiveSessions(
+        for userID: UUID,
+        deviceID: String,
+        at revokedAt: Date,
+        reason: AuthSessionRevocationReason
+    ) async throws -> [UUID] {
         let activeSessions = try await AuthSession.query(on: db)
             .filter(\.$user.$id == userID)
             .filter(\.$deviceID == deviceID)
@@ -341,6 +624,30 @@ struct AuthService {
             .filter(\.$deviceID == deviceID)
             .filter(\.$revokedAt == nil)
             .set(\.$revokedAt, to: revokedAt)
+            .set(\.$revokedReason, to: reason.rawValue)
+            .update()
+        return revokedSessionIDs
+    }
+
+    private func revokeAllActiveSessions(
+        for userID: UUID,
+        at revokedAt: Date,
+        reason: AuthSessionRevocationReason
+    ) async throws -> [UUID] {
+        let activeSessions = try await AuthSession.query(on: db)
+            .filter(\.$user.$id == userID)
+            .filter(\.$revokedAt == nil)
+            .all()
+        let revokedSessionIDs = activeSessions.compactMap(\.id)
+        guard !revokedSessionIDs.isEmpty else {
+            return []
+        }
+
+        try await AuthSession.query(on: db)
+            .filter(\.$user.$id == userID)
+            .filter(\.$revokedAt == nil)
+            .set(\.$revokedAt, to: revokedAt)
+            .set(\.$revokedReason, to: reason.rawValue)
             .update()
         return revokedSessionIDs
     }
@@ -379,7 +686,8 @@ struct AuthService {
                 iss: config.issuer,
                 exp: now.addingTimeInterval(config.accessTokenTTL).unixTimestamp,
                 typ: .access
-            )
+            ),
+            kid: config.activeJWTKeyID.map { JWKIdentifier(string: $0) }
         )
 
         let refreshToken = try await app.jwtKeys.sign(
@@ -390,7 +698,8 @@ struct AuthService {
                 iss: config.issuer,
                 exp: session.refreshExpiresAt.unixTimestamp,
                 typ: .refresh
-            )
+            ),
+            kid: config.activeJWTKeyID.map { JWKIdentifier(string: $0) }
         )
 
         return try AuthResponse(
@@ -441,6 +750,7 @@ struct AuthService {
         if session.refreshExpiresAt <= now {
             if shouldRevokeExpired {
                 session.revokedAt = now
+                session.revokedReason = AuthSessionRevocationReason.sessionRevoked.rawValue
                 try await session.update(on: db)
                 await kickRevokedSession(
                     sessionID: sessionID,
@@ -530,6 +840,136 @@ struct AuthService {
             message: message
         )
     }
+
+    private func issueEmailVerificationChallenge(
+        for user: User,
+        email: String,
+        clientIPAddress: String?,
+        userAgent: String?
+    ) async throws -> Int {
+        let code = TokenValueGenerator.makeNumericCode()
+        let expiresIn = Int(securityConfig.verificationCodeTTL)
+        let challenge = try AuthEmailVerificationChallenge(
+            userID: user.requireID(),
+            email: email,
+            codeHash: TokenValueGenerator.hash(code),
+            expiresAt: now.addingTimeInterval(securityConfig.verificationCodeTTL),
+            createdIP: clientIPAddress,
+            createdUserAgent: userAgent?.nilIfBlank
+        )
+        try await challenge.create(on: db)
+        try await app.authEmailSender.sendEmailVerificationCode(
+            email: email,
+            code: code,
+            expiresIn: securityConfig.verificationCodeTTL
+        )
+        return expiresIn
+    }
+
+    private func issuePasswordResetChallenge(
+        for user: User,
+        email: String,
+        clientIPAddress: String?,
+        userAgent: String?
+    ) async throws -> Int {
+        let code = TokenValueGenerator.makeNumericCode(digits: 8)
+        let expiresIn = Int(securityConfig.passwordResetCodeTTL)
+        let challenge = try AuthPasswordResetChallenge(
+            userID: user.requireID(),
+            email: email,
+            codeHash: TokenValueGenerator.hash(code),
+            expiresAt: now.addingTimeInterval(securityConfig.passwordResetCodeTTL),
+            createdIP: clientIPAddress,
+            createdUserAgent: userAgent?.nilIfBlank
+        )
+        try await challenge.create(on: db)
+        try await app.authEmailSender.sendPasswordResetCode(
+            email: email,
+            code: code,
+            expiresIn: securityConfig.passwordResetCodeTTL
+        )
+        return expiresIn
+    }
+
+    private func validate(challenge: AuthEmailVerificationChallenge, code: String) async throws {
+        try await validateChallenge(
+            expiresAt: challenge.expiresAt,
+            attemptCount: challenge.attemptCount,
+            expectedHash: challenge.codeHash,
+            code: code,
+            incrementAttempt: {
+                challenge.attemptCount += 1
+                try await challenge.update(on: db)
+            }
+        )
+    }
+
+    private func validate(challenge: AuthPasswordResetChallenge, code: String) async throws {
+        try await validateChallenge(
+            expiresAt: challenge.expiresAt,
+            attemptCount: challenge.attemptCount,
+            expectedHash: challenge.codeHash,
+            code: code,
+            incrementAttempt: {
+                challenge.attemptCount += 1
+                try await challenge.update(on: db)
+            }
+        )
+    }
+
+    private func validateChallenge(
+        expiresAt: Date,
+        attemptCount: Int,
+        expectedHash: String,
+        code: String,
+        incrementAttempt: () async throws -> Void
+    ) async throws {
+        guard expiresAt > now else {
+            throw AuthError.verificationCodeExpired
+        }
+
+        guard attemptCount < securityConfig.verificationAttemptLimit else {
+            throw AuthError.invalidVerificationCode
+        }
+
+        guard TokenValueGenerator.hash(code.normalizedCode) == expectedHash else {
+            try await incrementAttempt()
+            throw AuthError.invalidVerificationCode
+        }
+    }
+
+    private func audit(
+        eventType: String,
+        user: User?,
+        email: String?,
+        sessionID: UUID?,
+        deviceID: String?,
+        ipAddress: String?,
+        succeeded: Bool,
+        failureReason: String?
+    ) async {
+        let userID: UUID?
+        if let user {
+            userID = try? user.requireID()
+        } else {
+            userID = nil
+        }
+        let event = AuthSecurityEvent(
+            eventType: eventType,
+            userID: userID,
+            email: email,
+            sessionID: sessionID,
+            deviceID: deviceID,
+            ipAddress: ipAddress,
+            succeeded: succeeded,
+            failureReason: failureReason
+        )
+        do {
+            try await event.create(on: db)
+        } catch {
+            app.logger.warning("Failed to persist auth security event", metadata: ["error": "\(error)"])
+        }
+    }
 }
 
 enum TokenValueGenerator {
@@ -540,6 +980,39 @@ enum TokenValueGenerator {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+
+    static func makeNumericCode(digits: Int = 6) -> String {
+        let lower = Int(pow(10.0, Double(max(1, digits - 1))))
+        let upper = Int(pow(10.0, Double(max(1, digits)))) - 1
+        return String(Int.random(in: lower...upper))
+    }
+
+    static func hash(_ value: String) -> String {
+        let digest = SHA256.hash(data: Data(value.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+enum PasswordPolicy {
+    static func validate(password: String, email: String) throws {
+        let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 10 else {
+            throw AuthError.weakPassword
+        }
+
+        let lowercased = trimmed.lowercased()
+        let blocked = ["password", "1234567890", "qwerty12345"]
+        guard !blocked.contains(lowercased) else {
+            throw AuthError.weakPassword
+        }
+
+        if let localPart = email.split(separator: "@").first,
+           localPart.count >= 3,
+           lowercased.contains(localPart.lowercased())
+        {
+            throw AuthError.weakPassword
+        }
     }
 }
 
@@ -553,5 +1026,9 @@ private extension String {
     var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var normalizedCode: String {
+        trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -181,7 +181,7 @@ extension AuthManagerTests {
         try await Self.waitUntil {
             let contactCount = await requestCounter.count(for: "contacts")
             let contactRequestCount = await requestCounter.count(for: "contactRequests")
-            return contactCount >= 2 && contactRequestCount >= 2
+                return contactCount >= 1 && contactRequestCount >= 1
         }
     }
 
@@ -234,7 +234,7 @@ extension AuthManagerTests {
         try await Self.waitUntil {
             let contactCount = await requestCounter.count(for: "contacts")
             let contactRequestCount = await requestCounter.count(for: "contactRequests")
-            return contactCount >= 2 && contactRequestCount >= 2
+            return contactCount >= 1 && contactRequestCount >= 1
         }
         let contactCount = await requestCounter.count(for: "contacts")
         let contactRequestCount = await requestCounter.count(for: "contactRequests")
@@ -323,9 +323,9 @@ extension AuthManagerTests {
             }
         }
 
-        let didAccept = await manager.acceptContactRequest(id: requestID, remark: "peer")
+        let acceptResult = await manager.acceptContactRequestResult(id: requestID, remark: "peer")
 
-        #expect(didAccept)
+        #expect(acceptResult.succeeded)
         #expect(manager.acceptingRequestIDs.isEmpty)
         try await Self.waitUntil {
             await MainActor.run {
@@ -342,6 +342,76 @@ extension AuthManagerTests {
         }
     }
 
+    @Test func contactRequestResultUpdatesRequestsWithoutWritingNotices() async throws {
+        let requestID = UUID(uuidString: "cdcdcdcd-9999-2222-3333-444444444444")!
+        let peer = AuthUser(
+            id: UUID(uuidString: "abababab-9999-2222-3333-444444444444")!,
+            email: "peer@example.com"
+        )
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("POST", "/api/contact-requests"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        ContactRequestResponseBody(
+                            id: requestID,
+                            requester: Self.user,
+                            addressee: peer,
+                            status: .pending,
+                            message: "hi",
+                            requesterRemark: "remark",
+                            addresseeRemark: nil,
+                            createdAt: Date(timeIntervalSince1970: 1_700_226_000),
+                            updatedAt: Date(timeIntervalSince1970: 1_700_226_000),
+                            respondedAt: nil
+                        )
+                    )
+                )
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+        let manager = makeManager(transport: transport)
+
+        await manager.login(email: Self.user.email, password: "password123")
+        manager.contactStore.setNotice("request notice", scope: .requests, tone: .info)
+        manager.contactStore.setNotice("form notice", scope: .form, tone: .warning)
+
+        let result = await manager.sendContactRequestResult(email: peer.email, message: "hi", remark: "remark")
+
+        #expect(result == .success("好友申请已发送。"))
+        #expect(manager.contactRequests.map(\.id) == [requestID])
+        #expect(manager.contactStore.notice(for: .requests)?.message == "request notice")
+        #expect(manager.contactStore.notice(for: .form)?.message == "form notice")
+        #expect(manager.contactStore.notice(for: .form)?.message == "form notice")
+    }
+
+    @Test func contactRequestResultFailureDoesNotWriteRequestNotice() async throws {
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("POST", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 500)
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+        let manager = makeManager(transport: transport)
+
+        await manager.login(email: Self.user.email, password: "password123")
+        manager.contactStore.setNotice("request notice", scope: .requests, tone: .info)
+
+        let result = await manager.sendContactRequestResult(email: "peer@example.com")
+
+        #expect(result.succeeded == false)
+        #expect(result.tone == .error)
+        #expect(result.message.isEmpty == false)
+        #expect(manager.contactStore.notice(for: .requests)?.message == "request notice")
+    }
 
     @Test func cancelContactRequestMovesOutgoingPendingIntoResolvedHistory() async throws {
         let harness = IMConnectionTestHarness()
@@ -411,9 +481,9 @@ extension AuthManagerTests {
             }
         }
 
-        let didCancel = await manager.cancelContactRequest(id: requestID)
+        let cancelResult = await manager.cancelContactRequestResult(id: requestID)
 
-        #expect(didCancel)
+        #expect(cancelResult.succeeded)
         #expect(manager.cancellingRequestIDs.isEmpty)
         try await Self.waitUntil {
             await MainActor.run {
@@ -491,7 +561,7 @@ extension AuthManagerTests {
         try await Self.waitUntil {
             let contactCount = await requestCounter.count(for: "contacts")
             let contactRequestCount = await requestCounter.count(for: "contactRequests")
-            return contactCount >= 2 && contactRequestCount >= 2
+            return contactCount >= 1 && contactRequestCount >= 1
         }
         let contactCount = await requestCounter.count(for: "contacts")
         let contactRequestCount = await requestCounter.count(for: "contactRequests")
@@ -946,12 +1016,17 @@ extension AuthManagerTests {
             )
         ])
         manager.imConversationStore.openConversation(id: conversationID.uuidString)
+        manager.contactStore.setNotice("request notice", scope: .requests, tone: .info)
+        manager.contactStore.setNotice("form notice", scope: .form, tone: .warning)
 
-        let didSend = await manager.sendDirectConversationFriendRequest(conversationID: conversationID.uuidString)
+        let sendResult = await manager.sendDirectConversationFriendRequestResult(conversationID: conversationID.uuidString)
 
-        #expect(didSend)
-        #expect(manager.contactRequestActionMessage == nil)
-        #expect(manager.directConversationRelationshipActionMessage(for: conversationID.uuidString) == "好友申请已发送。")
+        #expect(sendResult.succeeded)
+        #expect(manager.contactStore.notice(for: .requests)?.message == "request notice")
+        #expect(manager.contactStore.notice(for: .form)?.message == "form notice")
+        #expect(manager.contactStore.notice(for: .form)?.message == "form notice")
+        #expect(manager.directRelationshipNotice(for: conversationID.uuidString)?.message == "好友申请已发送。")
+        #expect(manager.contactStore.directRelationshipNotices[conversationID.uuidString]?.tone == .success)
         #expect(manager.directPeerRelationshipPresentation(for: conversationID.uuidString)?.state == .outgoingPending)
     }
 
@@ -1040,19 +1115,170 @@ extension AuthManagerTests {
             )
         ])
         manager.imConversationStore.openConversation(id: conversationID.uuidString)
-        manager.contactRequests = [incomingRequest]
+        manager.contactRequests = []
+        manager.contactStore.setNotice("request notice", scope: .requests, tone: .info)
+        manager.contactStore.setNotice("form notice", scope: .form, tone: .warning)
 
-        let didAccept = await manager.acceptDirectConversationFriendRequest(conversationID: conversationID.uuidString)
+        let acceptResult = await manager.acceptDirectConversationFriendRequestResult(conversationID: conversationID.uuidString)
 
-        #expect(didAccept)
-        #expect(manager.contactRequestActionMessage == nil)
-        #expect(manager.directConversationRelationshipActionMessage(for: conversationID.uuidString) == "已添加好友。")
+        #expect(acceptResult.succeeded)
+        #expect(manager.contactStore.notice(for: .requests)?.message == "request notice")
+        #expect(manager.contactStore.notice(for: .form)?.message == "form notice")
+        #expect(manager.contactStore.notice(for: .form)?.message == "form notice")
+        #expect(manager.directRelationshipNotice(for: conversationID.uuidString)?.message == "已添加好友。")
+        #expect(manager.contactStore.directRelationshipNotices[conversationID.uuidString]?.tone == .success)
         try await Self.waitUntil {
             await MainActor.run {
                 manager.contacts.map(\.id) == [peer.id]
                     && manager.directPeerRelationshipPresentation(for: conversationID.uuidString)?.state == .friend
             }
         }
+    }
+
+    @Test func declineAndCancelDirectConversationFriendRequestsDoNotPolluteRequestNotices() async throws {
+        let incomingConversationID = UUID(uuidString: "aaaaaaaa-2222-2222-3333-bbbbbbbbbbbb")!
+        let outgoingConversationID = UUID(uuidString: "aaaaaaaa-3333-2222-3333-bbbbbbbbbbbb")!
+        let incomingPeer = AuthUser(
+            id: UUID(uuidString: "44444444-5555-4444-4444-444444444444")!,
+            email: "incoming@example.com"
+        )
+        let outgoingPeer = AuthUser(
+            id: UUID(uuidString: "55555555-5555-4444-4444-444444444444")!,
+            email: "outgoing@example.com"
+        )
+        let incomingRequestID = UUID(uuidString: "cccccccc-2222-2222-3333-dddddddddddd")!
+        let outgoingRequestID = UUID(uuidString: "cccccccc-3333-2222-3333-dddddddddddd")!
+        let incomingRequest = ContactRequestResponseBody(
+            id: incomingRequestID,
+            requester: incomingPeer,
+            addressee: Self.user,
+            status: .pending,
+            message: nil,
+            requesterRemark: nil,
+            addresseeRemark: nil,
+            createdAt: Date(timeIntervalSince1970: 1_700_260_200),
+            updatedAt: Date(timeIntervalSince1970: 1_700_260_200),
+            respondedAt: nil
+        )
+        let outgoingRequest = ContactRequestResponseBody(
+            id: outgoingRequestID,
+            requester: Self.user,
+            addressee: outgoingPeer,
+            status: .pending,
+            message: nil,
+            requesterRemark: nil,
+            addresseeRemark: nil,
+            createdAt: Date(timeIntervalSince1970: 1_700_260_300),
+            updatedAt: Date(timeIntervalSince1970: 1_700_260_300),
+            respondedAt: nil
+        )
+        let conversationSummaries = [
+            IMConversationSummaryResponseBody(
+                id: incomingConversationID,
+                title: "收到申请会话",
+                kind: IMConversationKind.direct.rawValue,
+                directMessagingState: IMDirectMessagingState.frozenAfterUnfriend.rawValue,
+                directPeer: IMDirectPeerResponseBody(id: incomingPeer.id, email: incomingPeer.email),
+                memberUserIDs: [Self.user.id, incomingPeer.id],
+                lastMessage: nil,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_001_000)
+            ),
+            IMConversationSummaryResponseBody(
+                id: outgoingConversationID,
+                title: "发出申请会话",
+                kind: IMConversationKind.direct.rawValue,
+                directMessagingState: IMDirectMessagingState.frozenAfterUnfriend.rawValue,
+                directPeer: IMDirectPeerResponseBody(id: outgoingPeer.id, email: outgoingPeer.email),
+                memberUserIDs: [Self.user.id, outgoingPeer.id],
+                lastMessage: nil,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_001_000)
+            )
+        ]
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody([incomingRequest, outgoingRequest])
+                )
+            case ("GET", "/api/blocks"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([UserBlockResponseBody]()))
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationSummaryPageBody(
+                        items: conversationSummaries,
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-direct-contact-actions"
+                    )
+                )
+            case ("POST", "/api/contact-requests/\(incomingRequestID.uuidString)/decline"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(ContactRequestResponseBody(
+                        id: incomingRequest.id,
+                        requester: incomingRequest.requester,
+                        addressee: incomingRequest.addressee,
+                        status: .declined,
+                        message: incomingRequest.message,
+                        requesterRemark: incomingRequest.requesterRemark,
+                        addresseeRemark: incomingRequest.addresseeRemark,
+                        createdAt: incomingRequest.createdAt,
+                        updatedAt: Date(timeIntervalSince1970: 1_700_260_400),
+                        respondedAt: Date(timeIntervalSince1970: 1_700_260_400)
+                    ))
+                )
+            case ("POST", "/api/contact-requests/\(outgoingRequestID.uuidString)/cancel"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(ContactRequestResponseBody(
+                        id: outgoingRequest.id,
+                        requester: outgoingRequest.requester,
+                        addressee: outgoingRequest.addressee,
+                        status: .cancelled,
+                        message: outgoingRequest.message,
+                        requesterRemark: outgoingRequest.requesterRemark,
+                        addresseeRemark: outgoingRequest.addresseeRemark,
+                        createdAt: outgoingRequest.createdAt,
+                        updatedAt: Date(timeIntervalSince1970: 1_700_260_500),
+                        respondedAt: Date(timeIntervalSince1970: 1_700_260_500)
+                    ))
+                )
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+        let manager = makeManager(transport: transport, wrapDefaultIMResponses: false)
+
+        await manager.login(email: Self.user.email, password: "password123")
+        manager.imConversationStore.replaceConversationSummaries(conversationSummaries)
+        manager.contactRequests = [incomingRequest, outgoingRequest]
+        try await Self.waitUntil {
+            await MainActor.run {
+                Set(manager.contactRequests.map(\.id)) == Set([incomingRequestID, outgoingRequestID])
+            }
+        }
+        manager.contactStore.setNotice("request notice", scope: .requests, tone: .info)
+        manager.contactStore.setNotice("form notice", scope: .form, tone: .warning)
+
+        let declineResult = await manager.declineDirectConversationFriendRequestResult(conversationID: incomingConversationID.uuidString)
+        let cancelResult = await manager.cancelDirectConversationFriendRequestResult(conversationID: outgoingConversationID.uuidString)
+
+        #expect(declineResult.succeeded)
+        #expect(cancelResult.succeeded)
+        #expect(manager.contactStore.notice(for: .requests)?.message == "request notice")
+        #expect(manager.contactStore.notice(for: .form)?.message == "form notice")
+        #expect(manager.directRelationshipNotice(for: incomingConversationID.uuidString)?.message == "已拒绝好友申请。")
+        #expect(manager.directRelationshipNotice(for: outgoingConversationID.uuidString)?.message == "好友申请已取消。")
+        #expect(manager.contactStore.directRelationshipNotices[incomingConversationID.uuidString]?.tone == .success)
+        #expect(manager.contactStore.directRelationshipNotices[outgoingConversationID.uuidString]?.tone == .success)
     }
 
 
@@ -1490,6 +1716,64 @@ extension AuthManagerTests {
         await manager.logout()
 
         #expect(await contactCache.latestSnapshot(for: Self.user.id) == nil)
+    }
+
+    @Test func blockUserRemovesContactFromLocalStore() async throws {
+        let peer = AuthUser(
+            id: UUID(uuidString: "aaaaaaaa-9999-bbbb-cccc-dddddddddddd")!,
+            email: "blocked@example.com"
+        )
+        let contact = ContactResponseBody(
+            id: peer.id,
+            email: peer.email,
+            displayName: "Blocked User",
+            avatarPreset: nil,
+            remark: "将被拉黑",
+            createdAt: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/contacts"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([contact]))
+            case ("GET", "/api/contact-requests"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
+            case ("GET", "/api/blocks"):
+                return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([UserBlockResponseBody]()))
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyConversationsBody())
+            case ("POST", "/api/users/\(peer.id.uuidString)/block"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try HTTPFixtures.jsonBody(
+                        UserBlockResponseBody(
+                            blockedUserID: peer.id,
+                            reason: nil,
+                            createdAt: Date(timeIntervalSince1970: 1_800_000_100)
+                        )
+                    )
+                )
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+        let manager = makeManager(transport: transport, wrapDefaultIMResponses: false)
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run { manager.contacts.map(\.id) == [peer.id] }
+        }
+        manager.contactStore.setNotice("home", scope: .contactsHome, tone: .info)
+
+        let blockResult = await manager.blockUserResult(peer.id)
+
+        #expect(blockResult.succeeded)
+        #expect(blockResult.message == "已拉入黑名单。")
+        #expect(manager.contactStore.notice(for: .contactsHome)?.message == "home")
+        #expect(manager.contacts.isEmpty)
+        #expect(manager.blockedUsers.map(\.blockedUserID) == [peer.id])
+        #expect(manager.contactStore.knownUserDisplay(for: peer.id)?.displayName == "将被拉黑")
     }
 
 }

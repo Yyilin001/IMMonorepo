@@ -8,7 +8,21 @@ extension IMConversationDetailView {
         proxy: ScrollViewProxy
     ) -> some View {
         content
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                let distanceFromBottom = geometry.contentSize.height
+                    - geometry.containerSize.height
+                    - geometry.contentOffset.y
+                return distanceFromBottom < 120
+            } action: { _, newValue in
+                isNearBottom = newValue
+                if newValue {
+                    unseenNewMessageCount = 0
+                }
+            }
             .task(id: conversationID) {
+                lastObservedMessageID = latestMessageID
+                unseenNewMessageCount = 0
+                isNearBottom = true
                 await scrollToLatestMessage(proxy: proxy, animated: false)
             }
             .onChange(of: latestMessageID) { _, latestMessageID in
@@ -17,7 +31,13 @@ extension IMConversationDetailView {
                 }
 
                 Task {
-                    await scrollToLatestMessage(proxy: proxy, animated: true)
+                    if isNearBottom {
+                        await scrollToLatestMessage(proxy: proxy, animated: true)
+                        unseenNewMessageCount = 0
+                    } else if latestMessageID != lastObservedMessageID {
+                        unseenNewMessageCount += 1
+                    }
+                    lastObservedMessageID = latestMessageID
                 }
             }
             .onChange(of: conversationStore.replyJumpMatchedMessageID) { _, matchedMessageID in
@@ -95,6 +115,42 @@ extension IMConversationDetailView {
                     )
                 }
                 .presentationDetents([.medium])
+            }
+            .sheet(isPresented: $isPresentingGroupSettings) {
+                NavigationStack {
+                    GroupSettingsView(
+                        conversation: conversation,
+                        identity: conversationIdentity,
+                        currentRole: currentGroupRole,
+                        canRenameConversation: canRenameConversation,
+                        canAddMembers: canAddMembers,
+                        canManageMembers: canManageMembers,
+                        onRename: { isPresentingRenameGroup = true },
+                        onEditMetadata: { isPresentingEditMetadata = true },
+                        onInvites: { isPresentingInvites = true },
+                        onMemberNickname: { isPresentingMemberNickname = true },
+                        onAddMembers: { isPresentingAddMembers = true },
+                        onManageMembers: { isPresentingManageMembers = true },
+                        onLeave: { isPresentingLeaveConfirmation = true },
+                        onTogglePinned: {
+                            Task {
+                                _ = await runtimeStore.updateConversationPreferences(
+                                    conversationID,
+                                    isPinned: !(conversation?.isPinned ?? false)
+                                )
+                            }
+                        },
+                        onToggleMuted: {
+                            Task {
+                                _ = await runtimeStore.updateConversationPreferences(
+                                    conversationID,
+                                    isMuted: !(conversation?.isMuted ?? false)
+                                )
+                            }
+                        }
+                    )
+                }
+                .presentationDetents([.medium, .large])
             }
             .sheet(isPresented: $isPresentingForwardPicker) {
                 NavigationStack {
@@ -306,69 +362,82 @@ extension IMConversationDetailView {
         conversationStore.queueSummary(for: conversationID)
     }
 
-    var conversationSummaryCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                conversationAvatar(size: 42)
+    @ViewBuilder
+    var conversationContextStrip: some View {
+        if shouldShowConversationContextStrip {
+            VStack(alignment: .leading, spacing: AppSpacing.small) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: AppSpacing.small) {
+                        conversationContextBadge(
+                            title: conversationKindText,
+                            systemImage: conversationKindIcon,
+                            tint: .secondary
+                        )
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(conversationIdentity.title)
-                        .font(.headline)
+                        conversationContextBadge(
+                            title: "成员 \(conversation?.memberCount ?? conversation?.memberUserIDs.count ?? 0)",
+                            systemImage: "person.2",
+                            tint: .secondary
+                        )
 
-                    Text(conversationIdentity.detailSummary)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        if let currentGroupRole {
+                            conversationContextBadge(
+                                title: currentGroupRole.displayName,
+                                systemImage: "person.badge.shield.checkmark",
+                                tint: .secondary
+                            )
+                        }
+
+                        if conversation?.isPinned == true {
+                            conversationContextBadge(title: "已置顶", systemImage: "pin.fill", tint: .orange)
+                        }
+
+                        if conversation?.isMuted == true {
+                            conversationContextBadge(title: "免打扰", systemImage: "bell.slash.fill", tint: .secondary)
+                        }
+
+                        if conversation?.muteAll == true {
+                            conversationContextBadge(title: "全员禁言", systemImage: "mic.slash.fill", tint: .orange)
+                        }
+
+                        if conversationStore.isLoadingMembers || conversationStore.isLoadingMessages {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
                 }
 
-                Spacer()
+                if let notice = conversation?.notice, !notice.isEmpty {
+                    AppStatusBanner(message: notice, tone: .info, systemImage: "text.quote")
+                        .accessibilityIdentifier("conversation.notice")
+                }
 
-                if conversationStore.isLoadingMembers || conversationStore.isLoadingMessages {
-                    ProgressView()
-                        .controlSize(.small)
+                if let directMessagingStatusMessage {
+                    AppStatusBanner(message: directMessagingStatusMessage, tone: .warning, systemImage: "lock.fill")
+                        .accessibilityIdentifier("conversation.directMessagingStatus")
                 }
             }
-
-            HStack(spacing: 8) {
-                Label(conversationKindText, systemImage: conversationKindIcon)
-                Text("成员 \(conversation?.memberCount ?? conversation?.memberUserIDs.count ?? 0) 人")
-                if let currentGroupRole {
-                    Text(currentGroupRole.displayName)
-                }
-                if conversation?.isPinned == true {
-                    Text("已置顶")
-                }
-                if conversation?.isMuted == true {
-                    Text("免打扰")
-                }
-                if conversation?.muteAll == true {
-                    Text("全员禁言")
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-
-            if let notice = conversation?.notice, !notice.isEmpty {
-                Label(notice, systemImage: "text.quote")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            if let directMessagingStatusMessage {
-                Label(directMessagingStatusMessage, systemImage: "lock.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-
-            Label(connectionStatusText, systemImage: connectionStatusIcon)
-                .font(.caption)
-                .foregroundStyle(connectionStatusColor)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 18))
+    }
+
+    var shouldShowConversationContextStrip: Bool {
+        conversation?.kind == .group
+            || conversation?.notice?.isEmpty == false
+            || directMessagingStatusMessage != nil
+            || conversation?.isPinned == true
+            || conversation?.isMuted == true
+            || conversation?.muteAll == true
+            || conversationStore.isLoadingMembers
+            || conversationStore.isLoadingMessages
+    }
+
+    func conversationContextBadge(title: String, systemImage: String, tint: Color) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(tint.opacity(0.10), in: Capsule())
     }
 
     @ViewBuilder

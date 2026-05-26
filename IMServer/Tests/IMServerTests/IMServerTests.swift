@@ -6,7 +6,7 @@ import Vapor
 import VaporTesting
 import Testing
 
-@Suite("App Tests")
+@Suite("App Tests", .serialized)
 struct IMServerTests {
     let loginRequest = LoginRequest(
         email: "demo@example.com",
@@ -532,10 +532,11 @@ struct IMServerTests {
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let payload = try res.content.decode(AuthResponse.self)
-                #expect(payload.user.email == "fresh@example.com")
-                #expect(!payload.accessToken.isEmpty)
-                #expect(!payload.refreshToken.isEmpty)
+                let payload = try res.content.decode(RegisterResponse.self)
+                #expect(payload.state == .signedIn)
+                #expect(payload.auth?.user.email == "fresh@example.com")
+                #expect(payload.auth?.accessToken.isEmpty == false)
+                #expect(payload.auth?.refreshToken.isEmpty == false)
             })
         }
     }

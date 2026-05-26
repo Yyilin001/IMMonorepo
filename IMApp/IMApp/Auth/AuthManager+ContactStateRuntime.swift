@@ -13,14 +13,6 @@ extension AuthManager {
         contactRuntimeController.scheduleCorrection(force: force)
     }
 
-    func setDirectConversationRelationshipActionMessage(_ message: String?, for conversationID: String) {
-        if let message, !message.isEmpty {
-            directConversationRelationshipActionMessages[conversationID] = message
-        } else {
-            directConversationRelationshipActionMessages.removeValue(forKey: conversationID)
-        }
-    }
-
     func normalizedConversationTitle(_ title: String, conversationID: String) -> String {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {

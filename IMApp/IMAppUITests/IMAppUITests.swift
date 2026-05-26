@@ -39,3 +39,43 @@ final class IMAppUITests: XCTestCase {
         }
     }
 }
+
+extension XCUIApplication {
+    func contactRequestRow(id: String) -> XCUIElement {
+        descendants(matching: .any)["contacts.request.row.\(id)"]
+    }
+
+    func blockedUserRow(id: String) -> XCUIElement {
+        descendants(matching: .any)["contacts.blocked.row.\(id)"]
+    }
+}
+
+extension XCUIElement {
+    func contactRequestAction(_ identifier: String) -> XCUIElement {
+        descendants(matching: .any)[identifier]
+    }
+
+    var contactRequestAcceptButton: XCUIElement {
+        contactRequestAction("contacts.request.accept")
+    }
+
+    var contactRequestRejectButton: XCUIElement {
+        contactRequestAction("contacts.request.reject")
+    }
+
+    var contactRequestCancelButton: XCUIElement {
+        contactRequestAction("contacts.request.cancel")
+    }
+
+    var contactRequestResendButton: XCUIElement {
+        contactRequestAction("contacts.request.resend")
+    }
+
+    var contactRequestMessageButton: XCUIElement {
+        contactRequestAction("contacts.request.message")
+    }
+
+    var blockedUserUnblockButton: XCUIElement {
+        descendants(matching: .any)["contacts.blocked.unblock"]
+    }
+}

@@ -108,6 +108,22 @@ public actor SessionClient {
         try await coordinator.register(email: email, password: password, device: device)
     }
 
+    public func resendEmailVerification(email: String) async throws -> AuthChallengeResponseBody {
+        try await coordinator.resendEmailVerification(email: email)
+    }
+
+    public func confirmEmailVerification(email: String, code: String) async throws -> AuthGenericResponseBody {
+        try await coordinator.confirmEmailVerification(email: email, code: code)
+    }
+
+    public func requestPasswordReset(email: String) async throws -> AuthChallengeResponseBody {
+        try await coordinator.requestPasswordReset(email: email)
+    }
+
+    public func confirmPasswordReset(email: String, code: String, newPassword: String) async throws -> AuthGenericResponseBody {
+        try await coordinator.confirmPasswordReset(email: email, code: code, newPassword: newPassword)
+    }
+
     public func restoreSession() async -> RestoreResult {
         await coordinator.restoreSession()
     }

@@ -46,23 +46,9 @@ extension AuthManager {
         imConversationStore.reset()
         sessions = []
         sessionsMessage = nil
-        contacts = []
-        contactsMessage = nil
-        isLoadingContacts = false
-        contactRequests = []
-        unseenIncomingContactRequestCount = 0
-        contactRequestsLoadMessage = nil
-        contactRequestActionMessage = nil
+        contactStore.resetForSignedOut()
         isUpdatingProfile = false
         profileMessage = nil
-        directConversationRelationshipActionMessages = [:]
-        isLoadingContactRequests = false
-        acceptingRequestIDs = []
-        decliningRequestIDs = []
-        cancellingRequestIDs = []
-        sendingDirectConversationFriendRequestConversationIDs = []
-        blockedUsers = []
-        isLoadingBlockedUsers = false
         serverStatus = .unknown
         setIMConnectionStatus(.disconnected)
     }

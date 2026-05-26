@@ -324,6 +324,10 @@ public enum APIError: LocalizedError {
     case validationFailed(String)
     case payloadTooLarge(String)
     case rateLimited(retryAfter: TimeInterval?, message: String)
+    case emailVerificationRequired(email: String?, message: String)
+    case verificationCodeInvalid(String)
+    case verificationCodeExpired(String)
+    case passwordPolicyFailed(String)
     case server(statusCode: Int, message: String)
     case decodingFailed(String)
     case encodingFailed(String)
@@ -352,7 +356,9 @@ public enum APIError: LocalizedError {
             return true
         case .server(let statusCode, _):
             return 500..<600 ~= statusCode
-        case .invalidResponse, .unauthorized, .forbidden, .validationFailed, .decodingFailed, .encodingFailed, .unsupported:
+        case .invalidResponse, .unauthorized, .forbidden, .validationFailed, .emailVerificationRequired,
+             .verificationCodeInvalid, .verificationCodeExpired, .passwordPolicyFailed, .decodingFailed,
+             .encodingFailed, .unsupported:
             return false
         }
     }
@@ -382,6 +388,14 @@ public enum APIError: LocalizedError {
             if let retryAfter {
                 return "\(message) 请在 \(Int(retryAfter)) 秒后重试。"
             }
+            return message
+        case .emailVerificationRequired(_, let message):
+            return message
+        case .verificationCodeInvalid(let message):
+            return message
+        case .verificationCodeExpired(let message):
+            return message
+        case .passwordPolicyFailed(let message):
             return message
         case .server(_, let message):
             return message

@@ -113,8 +113,8 @@ extension IMConversationDetailView {
         presentationStore.directPeerRelationshipPresentation(for: conversationID)
     }
 
-    var directConversationRelationshipActionMessage: String? {
-        presentationStore.directConversationRelationshipActionMessage(for: conversationID)
+    var directRelationshipNotice: DirectRelationshipNotice? {
+        presentationStore.directRelationshipNotice(for: conversationID)
     }
 
     var connectionStatusText: String {

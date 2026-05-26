@@ -22,6 +22,8 @@ enum AuthOperationState: Equatable {
     case authenticating(AuthSubmissionKind)
     case restoring
     case signingOut
+    case verifyingEmail
+    case resettingPassword
     case loadingSessions
     case updatingProfile
 
@@ -45,6 +47,10 @@ enum AuthNoticeCode: Equatable {
     case sessionExpired
     case sessionRevoked
     case refreshTokenReuseDetected
+    case emailVerificationRequired
+    case verificationCodeInvalid
+    case verificationCodeExpired
+    case passwordResetCompleted
     case forbidden
     case unknown
 }
@@ -122,6 +128,14 @@ enum AuthClientErrorMapper {
             code = self.code(for: message)
         case .rateLimited:
             code = .rateLimited
+        case .emailVerificationRequired:
+            code = .emailVerificationRequired
+        case .verificationCodeInvalid:
+            code = .verificationCodeInvalid
+        case .verificationCodeExpired:
+            code = .verificationCodeExpired
+        case .passwordPolicyFailed:
+            code = .weakPassword
         case .server:
             code = .serverUnavailable
         case .timeout, .connectivity:
@@ -175,6 +189,18 @@ enum AuthClientErrorMapper {
         if message.contains("密码长度至少") || message.localizedCaseInsensitiveContains("weak") {
             return .weakPassword
         }
+        if message.contains("邮箱尚未验证") || message.localizedCaseInsensitiveContains("verification required") {
+            return .emailVerificationRequired
+        }
+        if message.contains("验证码无效") {
+            return .verificationCodeInvalid
+        }
+        if message.contains("验证码已过期") {
+            return .verificationCodeExpired
+        }
+        if message.contains("密码已重置") {
+            return .passwordResetCompleted
+        }
         if message.contains("邮箱或密码错误") || message.localizedCaseInsensitiveContains("invalid credentials") {
             return .invalidCredentials
         }
@@ -208,6 +234,8 @@ enum AuthClientErrorMapper {
         switch code {
         case .offline, .serverUnavailable, .rateLimited:
             return .warning
+        case .passwordResetCompleted:
+            return .info
         default:
             return .error
         }
@@ -215,7 +243,8 @@ enum AuthClientErrorMapper {
 
     private static func isRecoverable(code: AuthNoticeCode) -> Bool {
         switch code {
-        case .offline, .serverUnavailable, .rateLimited:
+        case .offline, .serverUnavailable, .rateLimited, .emailVerificationRequired, .verificationCodeInvalid,
+             .verificationCodeExpired:
             return true
         default:
             return false

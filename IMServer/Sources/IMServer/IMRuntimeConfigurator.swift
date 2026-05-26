@@ -29,7 +29,13 @@ enum IMRuntimeConfigurator {
     private static func configureHTTPRuntimeBase(_ app: Application) async throws {
         app.middleware.use(IMHTTPMetricsMiddleware())
         app.middleware.use(FileMiddleware(publicDirectory: app.directory.publicDirectory))
-        await app.jwtKeys.add(hmac: HMACKey(from: app.authConfiguration.jwtSecret), digestAlgorithm: .sha256)
+        for secret in app.authConfiguration.jwtSecrets {
+            await app.jwtKeys.add(
+                hmac: HMACKey(from: secret.secret),
+                digestAlgorithm: .sha256,
+                kid: secret.keyID.map { JWKIdentifier(string: $0) }
+            )
+        }
     }
 
     private static func configureGatewayRuntime(_ app: Application) async throws {

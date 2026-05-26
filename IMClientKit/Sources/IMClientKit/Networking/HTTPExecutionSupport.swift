@@ -98,6 +98,9 @@ public enum HTTPResponseProcessor {
 
             switch response.statusCode {
             case 403:
+                if message.contains("邮箱尚未验证") {
+                    throw APIError.emailVerificationRequired(email: nil, message: message)
+                }
                 throw APIError.forbidden(message)
             case 413:
                 throw APIError.payloadTooLarge(message)
@@ -106,6 +109,17 @@ public enum HTTPResponseProcessor {
             case 429:
                 let retryAfter = response.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
                 throw APIError.rateLimited(retryAfter: retryAfter, message: message)
+            case 400:
+                if message.contains("验证码已过期") {
+                    throw APIError.verificationCodeExpired(message)
+                }
+                if message.contains("验证码无效") {
+                    throw APIError.verificationCodeInvalid(message)
+                }
+                if message.contains("密码") {
+                    throw APIError.passwordPolicyFailed(message)
+                }
+                throw APIError.validationFailed(message)
             default:
                 throw APIError.server(statusCode: response.statusCode, message: message)
             }

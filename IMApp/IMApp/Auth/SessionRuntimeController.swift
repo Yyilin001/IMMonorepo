@@ -46,6 +46,115 @@ final class SessionRuntimeController {
         )
     }
 
+    func resendEmailVerification(email: String) async {
+        guard !context.sessionStore.authOperationState.isBusy else {
+            return
+        }
+
+        context.sessionStore.setOperation(.verifyingEmail)
+        defer { context.sessionStore.setOperation(.idle) }
+
+        do {
+            let response = try await context.sessionFacade.resendEmailVerification(email: email)
+            context.markServerOnline()
+            context.sessionStore.setSignedOut(notice: AuthNotice(
+                code: .emailVerificationRequired,
+                message: response.message,
+                severity: .info,
+                isRecoverable: true
+            ))
+        } catch {
+            let notice = AuthClientErrorMapper.notice(for: error)
+            if await context.shouldPreserveSession(error) {
+                await context.markServerUnavailableIfNeeded(error)
+            }
+            context.sessionStore.setSignedOut(notice: notice)
+        }
+    }
+
+    func confirmEmailVerification(email: String, code: String) async {
+        guard !context.sessionStore.authOperationState.isBusy else {
+            return
+        }
+
+        context.sessionStore.setOperation(.verifyingEmail)
+        defer { context.sessionStore.setOperation(.idle) }
+
+        do {
+            let response = try await context.sessionFacade.confirmEmailVerification(email: email, code: code)
+            context.markServerOnline()
+            context.sessionStore.setSignedOut(notice: AuthNotice(
+                code: .emailVerificationRequired,
+                message: response.message,
+                severity: .info,
+                isRecoverable: true
+            ))
+        } catch {
+            let notice = AuthClientErrorMapper.notice(for: error)
+            if await context.shouldPreserveSession(error) {
+                await context.markServerUnavailableIfNeeded(error)
+            }
+            context.sessionStore.setSignedOut(notice: notice)
+        }
+    }
+
+    func requestPasswordReset(email: String) async {
+        guard !context.sessionStore.authOperationState.isBusy else {
+            return
+        }
+
+        context.sessionStore.setOperation(.resettingPassword)
+        defer { context.sessionStore.setOperation(.idle) }
+
+        do {
+            let response = try await context.sessionFacade.requestPasswordReset(email: email)
+            context.markServerOnline()
+            context.sessionStore.setSignedOut(notice: AuthNotice(
+                code: .unknown,
+                message: response.message,
+                severity: .info,
+                isRecoverable: true
+            ))
+        } catch {
+            let notice = AuthClientErrorMapper.notice(for: error)
+            if await context.shouldPreserveSession(error) {
+                await context.markServerUnavailableIfNeeded(error)
+            }
+            context.sessionStore.setSignedOut(notice: notice)
+        }
+    }
+
+    func confirmPasswordReset(email: String, code: String, newPassword: String) async {
+        guard !context.sessionStore.authOperationState.isBusy else {
+            return
+        }
+
+        context.sessionStore.setOperation(.resettingPassword)
+        defer { context.sessionStore.setOperation(.idle) }
+
+        do {
+            let response = try await context.sessionFacade.confirmPasswordReset(
+                email: email,
+                code: code,
+                newPassword: newPassword
+            )
+            context.markServerOnline()
+            await context.sessionFacade.clearSession()
+            context.sessionStore.setSignedOut(notice: AuthNotice(
+                code: .passwordResetCompleted,
+                message: response.message,
+                severity: .info,
+                isRecoverable: true
+            ))
+        } catch {
+            let notice = AuthClientErrorMapper.notice(for: error)
+            if await context.shouldPreserveSession(error) {
+                await context.markServerUnavailableIfNeeded(error)
+            }
+            context.sessionStore.setSignedOut(notice: notice)
+        }
+    }
+
     func logout() async {
         invalidateRestoreSession()
         context.sessionStore.setOperation(.signingOut)

@@ -34,7 +34,7 @@ struct LoginFormModelTests {
             confirmPassword: ""
         )
 
-        #expect(input.validationMessage == "密码至少需要 8 位。")
+        #expect(input.validationMessage == "密码至少需要 10 位。")
         #expect(!input.isSubmittable)
     }
 

@@ -24,6 +24,12 @@ final class ContactRuntimeController {
     private let context: ContactRuntimeContext
     private var correctionTask: Task<Void, Never>?
     private var cachePersistTask: Task<Void, Never>?
+    private var contactRefreshTask: Task<Void, Never>?
+    private var contactRequestsRefreshTask: Task<Void, Never>?
+    private var blockedUsersRefreshTask: Task<Void, Never>?
+    private var contactRefreshToken: UUID?
+    private var contactRequestsRefreshToken: UUID?
+    private var blockedUsersRefreshToken: UUID?
 
     init(context: ContactRuntimeContext) {
         self.context = context
@@ -40,6 +46,25 @@ final class ContactRuntimeController {
     }
 
     func reloadContacts() async {
+        if let contactRefreshTask {
+            await contactRefreshTask.value
+            return
+        }
+
+        let token = UUID()
+        contactRefreshToken = token
+        let task = Task { @MainActor [weak self] in
+            await self?.reloadContactsImmediately()
+            if self?.contactRefreshToken == token {
+                self?.contactRefreshTask = nil
+                self?.contactRefreshToken = nil
+            }
+        }
+        contactRefreshTask = task
+        await task.value
+    }
+
+    private func reloadContactsImmediately() async {
         guard let user = context.currentUserProvider() else {
             context.contactStore.contacts = []
             return
@@ -50,13 +75,15 @@ final class ContactRuntimeController {
 
         do {
             let snapshot = try await context.sessionFacade.fetchContacts()
+            guard !Task.isCancelled else {
+                return
+            }
             guard context.currentUserProvider()?.id == user.id else {
                 return
             }
 
             context.markServerOnline()
             context.contactStore.contacts = snapshot.contacts
-            context.contactStore.contactsMessage = nil
             context.contactStore.lastContactStateRefreshAt = snapshot.lastRefreshAt
             scheduleCachePersist()
         } catch {
@@ -65,6 +92,25 @@ final class ContactRuntimeController {
     }
 
     func reloadContactRequests() async {
+        if let contactRequestsRefreshTask {
+            await contactRequestsRefreshTask.value
+            return
+        }
+
+        let token = UUID()
+        contactRequestsRefreshToken = token
+        let task = Task { @MainActor [weak self] in
+            await self?.reloadContactRequestsImmediately()
+            if self?.contactRequestsRefreshToken == token {
+                self?.contactRequestsRefreshTask = nil
+                self?.contactRequestsRefreshToken = nil
+            }
+        }
+        contactRequestsRefreshTask = task
+        await task.value
+    }
+
+    private func reloadContactRequestsImmediately() async {
         guard let user = context.currentUserProvider() else {
             context.contactStore.contactRequests = []
             context.contactStore.unseenIncomingContactRequestCount = 0
@@ -76,13 +122,15 @@ final class ContactRuntimeController {
 
         do {
             let snapshot = try await context.sessionFacade.fetchContactRequests()
+            guard !Task.isCancelled else {
+                return
+            }
             guard context.currentUserProvider()?.id == user.id else {
                 return
             }
 
             context.markServerOnline()
             replaceContactRequests(snapshot.requests, currentUserID: user.id)
-            context.contactStore.contactRequestsLoadMessage = nil
             context.contactStore.lastContactStateRefreshAt = snapshot.lastRefreshAt
             scheduleCachePersist()
         } catch {
@@ -90,40 +138,38 @@ final class ContactRuntimeController {
         }
     }
 
-    func sendContactRequest(email: String, message: String? = nil, remark: String? = nil) async -> Bool {
+    func sendContactRequestResult(email: String, message: String? = nil, remark: String? = nil) async -> ContactOperationResult {
         let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let normalizedMessage = context.sessionFacade.normalizedRequestMessage(message)
         let normalizedRemark = context.sessionFacade.normalizedRemark(remark)
         guard !normalizedEmail.isEmpty else {
-            context.contactStore.contactRequestActionMessage = "好友邮箱不能为空。"
-            return false
+            return .warning("好友邮箱不能为空。")
         }
 
-        context.contactStore.contactRequestActionMessage = nil
         do {
             let request = try await context.sessionFacade.sendContactRequest(
                 email: normalizedEmail,
                 message: normalizedMessage,
                 remark: normalizedRemark
             )
+            guard !Task.isCancelled else {
+                return .failure("")
+            }
             context.markServerOnline()
             upsertContactRequest(request)
-            context.contactStore.contactRequestActionMessage = "好友申请已发送。"
             scheduleCachePersist()
-            return true
+            return .success("好友申请已发送。")
         } catch {
-            await handleContactRequestsActionError(error)
-            return false
+            return await contactActionFailureResult(error)
         }
     }
 
-    func acceptContactRequest(id requestID: UUID, remark: String? = nil) async -> Bool {
+    func acceptContactRequestResult(id requestID: UUID, remark: String? = nil) async -> ContactOperationResult {
         guard !context.contactStore.acceptingRequestIDs.contains(requestID) else {
-            return false
+            return .warning("好友申请正在处理。")
         }
 
         context.contactStore.acceptingRequestIDs.insert(requestID)
-        context.contactStore.contactRequestActionMessage = nil
         defer { context.contactStore.acceptingRequestIDs.remove(requestID) }
 
         do {
@@ -131,6 +177,9 @@ final class ContactRuntimeController {
                 id: requestID,
                 remark: context.sessionFacade.normalizedRemark(remark)
             )
+            guard !Task.isCancelled else {
+                return .failure("")
+            }
             context.markServerOnline()
             upsertContact(contact)
             updateContactRequestStatus(
@@ -138,126 +187,171 @@ final class ContactRuntimeController {
                 status: .accepted,
                 respondedAt: Date()
             )
-            context.contactStore.contactRequestActionMessage = "已添加好友。"
             scheduleCachePersist()
-            await reloadContacts()
-            return true
+            await reloadContactsAfterContactAction()
+            return .success("已添加好友。")
         } catch {
-            await handleContactRequestsActionError(error)
-            return false
+            return await contactActionFailureResult(error)
         }
     }
 
-    func declineContactRequest(id requestID: UUID) async -> Bool {
+    func declineContactRequestResult(id requestID: UUID) async -> ContactOperationResult {
         guard !context.contactStore.decliningRequestIDs.contains(requestID) else {
-            return false
+            return .warning("好友申请正在处理。")
         }
 
         context.contactStore.decliningRequestIDs.insert(requestID)
-        context.contactStore.contactRequestActionMessage = nil
         defer { context.contactStore.decliningRequestIDs.remove(requestID) }
 
         do {
             _ = try await context.sessionFacade.declineContactRequest(id: requestID)
+            guard !Task.isCancelled else {
+                return .failure("")
+            }
             context.markServerOnline()
             updateContactRequestStatus(
                 id: requestID,
                 status: .declined,
                 respondedAt: Date()
             )
-            context.contactStore.contactRequestActionMessage = "已拒绝好友申请。"
             scheduleCachePersist()
-            return true
+            return .success("已拒绝好友申请。")
         } catch {
-            await handleContactRequestsActionError(error)
-            return false
+            return await contactActionFailureResult(error)
         }
     }
 
-    func cancelContactRequest(id requestID: UUID) async -> Bool {
+    func cancelContactRequestResult(id requestID: UUID) async -> ContactOperationResult {
         guard !context.contactStore.cancellingRequestIDs.contains(requestID) else {
-            return false
+            return .warning("好友申请正在处理。")
         }
 
         context.contactStore.cancellingRequestIDs.insert(requestID)
-        context.contactStore.contactRequestActionMessage = nil
         defer { context.contactStore.cancellingRequestIDs.remove(requestID) }
 
         do {
             _ = try await context.sessionFacade.cancelContactRequest(id: requestID)
+            guard !Task.isCancelled else {
+                return .failure("")
+            }
             context.markServerOnline()
             updateContactRequestStatus(
                 id: requestID,
                 status: .cancelled,
                 respondedAt: Date()
             )
-            context.contactStore.contactRequestActionMessage = "好友申请已取消。"
             scheduleCachePersist()
-            return true
+            return .success("好友申请已取消。")
         } catch {
-            await handleContactRequestsActionError(error)
-            return false
+            return await contactActionFailureResult(error)
         }
     }
 
-    func updateContactRemark(contactUserID: UUID, remark: String) async -> Bool {
+    func updateContactRemarkResult(contactUserID: UUID, remark: String) async -> ContactOperationResult {
         do {
             let contact = try await context.sessionFacade.updateContact(
                 contactUserID: contactUserID,
                 remark: context.sessionFacade.normalizedRemark(remark)
             )
+            guard !Task.isCancelled else {
+                return .failure("")
+            }
             context.markServerOnline()
             upsertContact(contact)
-            context.contactStore.contactsMessage = "联系人备注已更新。"
             scheduleCachePersist()
-            return true
+            return .success("联系人备注已更新。")
         } catch {
-            await handleContactRequestError(error)
-            return false
+            guard !(error is CancellationError) else {
+                return .failure("")
+            }
+            await handleSessionError(error)
+            return .failure(ContactOperationErrorMapper.message(for: error))
         }
     }
 
-    func deleteContact(_ contactUserID: UUID) async -> Bool {
+    func deleteContactResult(_ contactUserID: UUID) async -> ContactOperationResult {
         do {
             try await context.sessionFacade.deleteContact(contactUserID: contactUserID)
+            guard !Task.isCancelled else {
+                return .failure("")
+            }
             context.markServerOnline()
             context.contactStore.contacts.removeAll { $0.id == contactUserID }
-            context.contactStore.contactsMessage = "已删除联系人。"
             scheduleCachePersist()
-            return true
+            return .success("已删除联系人。")
         } catch {
-            await handleContactRequestError(error)
-            return false
+            guard !(error is CancellationError) else {
+                return .failure("")
+            }
+            await handleSessionError(error)
+            return .failure(ContactOperationErrorMapper.message(for: error))
         }
     }
 
-    func blockUser(_ userID: UUID, reason: String? = nil) async -> Bool {
+    func blockUserResult(_ userID: UUID, reason: String? = nil) async -> ContactOperationResult {
         do {
+            let display = context.contactStore.knownUserDisplay(for: userID)
             let block = try await context.sessionClient.blockUser(userID: userID, reason: reason)
+            guard !Task.isCancelled else {
+                return .failure("")
+            }
+            if let display {
+                context.contactStore.cacheKnownUserDisplay(display)
+            }
             context.contactStore.blockedUsers.removeAll { $0.blockedUserID == block.blockedUserID }
             context.contactStore.blockedUsers.append(block)
             context.contactStore.blockedUsers.sort { $0.createdAt > $1.createdAt }
+            context.contactStore.removeContact(userID: block.blockedUserID)
             context.markServerOnline()
-            return true
+            scheduleCachePersist()
+            return .success("已拉入黑名单。")
         } catch {
+            guard !(error is CancellationError) else {
+                return .failure("")
+            }
             await context.handleIMDataRequestError(error)
-            return false
+            return .failure(ContactOperationErrorMapper.message(for: error))
         }
     }
 
-    func unblockUser(_ userID: UUID) async -> Bool {
+    func unblockUserResult(_ userID: UUID) async -> ContactOperationResult {
         do {
             _ = try await context.sessionClient.unblockUser(userID: userID)
+            guard !Task.isCancelled else {
+                return .failure("")
+            }
             context.contactStore.blockedUsers.removeAll { $0.blockedUserID == userID }
             context.markServerOnline()
-            return true
+            return .success("已解除黑名单，可重新添加好友。")
         } catch {
+            guard !(error is CancellationError) else {
+                return .failure("")
+            }
             await context.handleIMDataRequestError(error)
-            return false
+            return .failure(ContactOperationErrorMapper.message(for: error))
         }
     }
 
     func loadBlockedUsers() async {
+        if let blockedUsersRefreshTask {
+            await blockedUsersRefreshTask.value
+            return
+        }
+
+        let token = UUID()
+        blockedUsersRefreshToken = token
+        let task = Task { @MainActor [weak self] in
+            await self?.loadBlockedUsersImmediately()
+            if self?.blockedUsersRefreshToken == token {
+                self?.blockedUsersRefreshTask = nil
+                self?.blockedUsersRefreshToken = nil
+            }
+        }
+        blockedUsersRefreshTask = task
+        await task.value
+    }
+
+    private func loadBlockedUsersImmediately() async {
         guard context.currentUserProvider() != nil else {
             return
         }
@@ -268,10 +362,17 @@ final class ContactRuntimeController {
         }
 
         do {
-            context.contactStore.blockedUsers = try await context.sessionClient.fetchBlocks()
+            let blockedUsers = try await context.sessionClient.fetchBlocks()
+            guard !Task.isCancelled else {
+                return
+            }
+            context.contactStore.blockedUsers = blockedUsers
                 .sorted { $0.createdAt > $1.createdAt }
             context.markServerOnline()
         } catch {
+            guard !(error is CancellationError) else {
+                return
+            }
             await context.handleIMDataRequestError(error)
         }
     }
@@ -280,6 +381,12 @@ final class ContactRuntimeController {
         do {
             let snapshot = try await context.sessionFacade.loadContactStateCacheSnapshot(for: user.id)
             guard context.currentUserProvider()?.id == user.id else {
+                return
+            }
+
+            guard context.contactStore.contacts.isEmpty,
+                  context.contactStore.contactRequests.isEmpty
+            else {
                 return
             }
 
@@ -361,17 +468,10 @@ final class ContactRuntimeController {
         status: ContactRequestStatus,
         respondedAt: Date
     ) {
-        guard let currentUserID = context.currentUserProvider()?.id else {
-            return
-        }
         context.contactStore.updateRequestStatus(
             id: requestID,
             status: status,
-            respondedAt: respondedAt,
-            currentUserID: currentUserID,
-            normalize: { [context] requests, currentUserID in
-                context.sessionFacade.normalizeRequests(requests, currentUserID: currentUserID)
-            }
+            respondedAt: respondedAt
         )
         recomputeIncomingUnreadState()
     }
@@ -434,6 +534,15 @@ final class ContactRuntimeController {
         correctionTask = nil
         cachePersistTask?.cancel()
         cachePersistTask = nil
+        contactRefreshTask?.cancel()
+        contactRefreshTask = nil
+        contactRefreshToken = nil
+        contactRequestsRefreshTask?.cancel()
+        contactRequestsRefreshTask = nil
+        contactRequestsRefreshToken = nil
+        blockedUsersRefreshTask?.cancel()
+        blockedUsersRefreshTask = nil
+        blockedUsersRefreshToken = nil
     }
 
     func markIncomingRequestsSeen() {
@@ -491,18 +600,54 @@ final class ContactRuntimeController {
         context.contactStore.recentResolvedContactRequests(sort: context.sessionFacade.sortResolvedNewestFirst)
     }
 
+    private func contactActionFailureResult(_ error: Error) async -> ContactOperationResult {
+        guard !(error is CancellationError) else {
+            return .failure("")
+        }
+        await handleSessionError(error)
+        return .failure(ContactOperationErrorMapper.message(for: error))
+    }
+
+    private func reloadContactsAfterContactAction() async {
+        guard let user = context.currentUserProvider() else {
+            context.contactStore.contacts = []
+            return
+        }
+
+        do {
+            let snapshot = try await context.sessionFacade.fetchContacts()
+            guard !Task.isCancelled else {
+                return
+            }
+            guard context.currentUserProvider()?.id == user.id else {
+                return
+            }
+
+            context.markServerOnline()
+            context.contactStore.contacts = snapshot.contacts
+            context.contactStore.lastContactStateRefreshAt = snapshot.lastRefreshAt
+            scheduleCachePersist()
+        } catch {
+            guard !(error is CancellationError) else {
+                return
+            }
+            await handleSessionError(error)
+        }
+    }
+
     private func handleContactRequestError(_ error: Error) async {
-        context.contactStore.contactsMessage = error.localizedDescription
+        guard !(error is CancellationError) else {
+            return
+        }
+        context.contactStore.setNotice(ContactOperationErrorMapper.message(for: error), scope: .contactsHome, tone: .error)
         await handleSessionError(error)
     }
 
     private func handleContactRequestsLoadError(_ error: Error) async {
-        context.contactStore.contactRequestsLoadMessage = error.localizedDescription
-        await handleSessionError(error)
-    }
-
-    private func handleContactRequestsActionError(_ error: Error) async {
-        context.contactStore.contactRequestActionMessage = error.localizedDescription
+        guard !(error is CancellationError) else {
+            return
+        }
+        context.contactStore.setNotice(ContactOperationErrorMapper.message(for: error), scope: .requests, tone: .error)
         await handleSessionError(error)
     }
 

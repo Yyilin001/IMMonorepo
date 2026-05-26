@@ -1,5 +1,8 @@
 import IMClientKit
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct IMMessageDeliveryDisplay {
     let icon: String
@@ -36,6 +39,7 @@ struct IMMessageBubble: View {
     let onRetry: () -> Void
     let onForward: () -> Void
     let onToggleFavorite: () -> Void
+    let onDelete: () -> Void
     let onToggleReaction: (String) -> Void
     let onDownloadMedia: () -> Void
     let onCancelMediaDownload: () -> Void
@@ -124,6 +128,7 @@ struct IMMessageBubble: View {
                 .contextMenu {
                     contextMenuContent
                 }
+                .accessibilityIdentifier("conversation.message.moreActions")
 
                 if message.direction == .incoming {
                     Spacer(minLength: 24)
@@ -190,6 +195,12 @@ struct IMMessageBubble: View {
                 }
             }
 
+            if copyableText != nil {
+                Button("复制", systemImage: "doc.on.doc") {
+                    copyMessageText()
+                }
+            }
+
             if canSelect {
                 Button("转发", systemImage: "arrowshape.turn.up.right") {
                     onForward()
@@ -197,6 +208,10 @@ struct IMMessageBubble: View {
 
                 Button(isFavorited ? "取消收藏" : "收藏", systemImage: isFavorited ? "star.slash" : "star") {
                     onToggleFavorite()
+                }
+
+                Button("删除", systemImage: "trash", role: .destructive) {
+                    onDelete()
                 }
             }
 
@@ -229,6 +244,23 @@ struct IMMessageBubble: View {
         }
         return "\(prefix): \(trimmedDetail)"
     }
+
+    private var copyableText: String? {
+        let text = MessagePresentation(aggregate: message.aggregate).textValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let text, !text.isEmpty else {
+            return nil
+        }
+        return text
+    }
+
+    private func copyMessageText() {
+        #if canImport(UIKit)
+        if let copyableText {
+            UIPasteboard.general.string = copyableText
+        }
+        #endif
+    }
 }
 
 private struct IMMessageDeliveryLabel: View {
@@ -260,6 +292,7 @@ private struct IMMessageSendActionButton: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .accessibilityIdentifier("conversation.message.cancelSend")
         } else if canRecall {
             Button {
                 onRecall()
@@ -278,6 +311,7 @@ private struct IMMessageSendActionButton: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .accessibilityIdentifier("conversation.message.retry")
         }
     }
 }

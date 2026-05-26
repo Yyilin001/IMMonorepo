@@ -3,34 +3,18 @@ import IMClientKit
 
 struct NewContactRequestsEntryRow: View {
     let pendingCount: Int
+    let outgoingPendingCount: Int
+    let expiredCount: Int
     let unseenCount: Int
     let isLoading: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
-            requestAvatar(systemImage: "person.crop.circle.badge.plus", color: .orange)
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text("新的朋友")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(.primary)
-
-                    if unseenCount > 0 {
-                        Circle()
-                            .fill(Color.red)
-                            .frame(width: 8, height: 8)
-                    }
-                }
-
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            Spacer()
-
+        AppListActionRow(
+            title: "新的朋友",
+            subtitle: subtitle,
+            systemImage: "person.crop.circle.badge.plus",
+            tint: .orange
+        ) {
             if isLoading {
                 ProgressView()
                     .controlSize(.small)
@@ -44,13 +28,9 @@ struct NewContactRequestsEntryRow: View {
                         Capsule()
                             .fill((unseenCount > 0 ? Color.red : Color.secondary).opacity(0.12))
                     )
+                    .accessibilityIdentifier("contacts.newFriends.badge")
             }
-
-            Image(systemName: "chevron.right")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 6)
     }
 
     private var subtitle: String {
@@ -59,7 +39,14 @@ struct NewContactRequestsEntryRow: View {
         }
 
         if pendingCount > 0 {
+            if outgoingPendingCount == pendingCount {
+                return "有 \(pendingCount) 条发出的申请等待验证"
+            }
             return "有 \(pendingCount) 条待处理申请"
+        }
+
+        if expiredCount > 0 {
+            return "有 \(expiredCount) 条已过期申请记录"
         }
 
         return "暂时没有新的好友申请"
@@ -70,22 +57,12 @@ struct ContactsInlineStatusBanner: View {
     let message: String
 
     var body: some View {
-        Label(message, systemImage: "info.circle.fill")
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        AppStatusBanner(message: message, tone: .info)
     }
 }
 
 struct ContactRow: View {
     let contact: ContactResponseBody
-    let isStartingConversation: Bool
-    let onStartConversation: () -> Void
-    let onEdit: () -> Void
-    let onDelete: () -> Void
-    let onBlock: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -110,42 +87,11 @@ struct ContactRow: View {
 
             Spacer()
 
-            Button {
-                onStartConversation()
-            } label: {
-                if isStartingConversation {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: "message.fill")
-                        .font(.body.weight(.semibold))
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .disabled(isStartingConversation)
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 6)
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(role: .destructive) {
-                onDelete()
-            } label: {
-                Label("删除", systemImage: "trash")
-            }
-
-            Button {
-                onEdit()
-            } label: {
-                Label("备注", systemImage: "pencil")
-            }
-            .tint(.blue)
-
-            Button(role: .destructive) {
-                onBlock()
-            } label: {
-                Label("拉黑", systemImage: "hand.raised.fill")
-            }
-        }
     }
 
     private var subtitle: String {
@@ -153,86 +99,43 @@ struct ContactRow: View {
     }
 }
 
-private func requestAvatar(systemImage: String, color: Color) -> some View {
-    Circle()
-        .fill(color.opacity(0.14))
-        .frame(width: 42, height: 42)
-        .overlay {
-            Image(systemName: systemImage)
-                .font(.body.weight(.semibold))
-                .foregroundStyle(color)
-        }
-}
-
 struct ContactsEmptyState: View {
     let onAdd: () -> Void
 
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "person.2.crop.square.stack")
-                .font(.system(size: 42, weight: .semibold))
-                .foregroundStyle(.teal)
-
-            VStack(spacing: 6) {
-                Text("还没有联系人")
-                    .font(.headline)
-
-                Text("发送好友申请并通过验证后，可以从通讯录直接发起私聊。")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-
-            Button {
-                onAdd()
-            } label: {
-                Label("发送好友申请", systemImage: "person.badge.plus")
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 20)
+        AppEmptyState(
+            title: "还没有联系人",
+            message: "发送好友申请并通过验证后，可以直接从通讯录发起私聊。",
+            systemImage: "person.2.crop.square.stack",
+            actionTitle: "添加联系人",
+            actionSystemImage: "person.badge.plus",
+            action: onAdd
+        )
     }
 }
 
 struct NewContactRequestsEmptyState: View {
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "person.crop.circle.badge.checkmark")
-                .font(.system(size: 38, weight: .semibold))
-                .foregroundStyle(.orange)
-
-            Text("暂时没有新的好友申请")
-                .font(.headline)
-
-            Text("收到新的好友申请时，这里会第一时间显示。")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 20)
+        AppEmptyState(
+            title: "没有新的好友申请",
+            message: "收到的好友申请会显示在这里。",
+            systemImage: "person.crop.circle.badge.checkmark"
+        )
     }
 }
 
 struct ContactsNoSearchResultState: View {
     let searchText: String
+    let onClear: () -> Void
 
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 34, weight: .semibold))
-                .foregroundStyle(.secondary)
-
-            Text("没有找到匹配联系人")
-                .font(.headline)
-
-            Text("当前搜索：\(searchText)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 20)
+        AppEmptyState(
+            title: "没有找到联系人",
+            message: "当前搜索：\(searchText)",
+            systemImage: "magnifyingglass",
+            actionTitle: "清除搜索",
+            actionSystemImage: "xmark.circle",
+            action: onClear
+        )
     }
 }

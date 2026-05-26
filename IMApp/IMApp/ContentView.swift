@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import IMClientKit
 
 struct ContentView: View {
     let authManager: AuthManager
@@ -75,43 +76,52 @@ struct ContentView: View {
                         authManager.markIncomingContactRequestsSeen()
                     },
                     sendContactRequest: { email, message, remark in
-                        await authManager.sendContactRequest(
+                        await authManager.sendContactRequestResult(
                             email: email,
                             message: message,
                             remark: remark
                         )
                     },
                     acceptContactRequest: { requestID, remark in
-                        await authManager.acceptContactRequest(
+                        await authManager.acceptContactRequestResult(
                             id: requestID,
                             remark: remark
                         )
                     },
                     declineContactRequest: { requestID in
-                        await authManager.declineContactRequest(id: requestID)
+                        await authManager.declineContactRequestResult(id: requestID)
                     },
                     cancelContactRequest: { requestID in
-                        await authManager.cancelContactRequest(id: requestID)
+                        await authManager.cancelContactRequestResult(id: requestID)
                     },
                     updateContactRemark: { contactID, remark in
-                        await authManager.updateContactRemark(
+                        await authManager.updateContactRemarkResult(
                             contactUserID: contactID,
                             remark: remark
                         )
                     },
                     deleteContact: { contactID in
-                        await authManager.deleteContact(contactID)
+                        await authManager.deleteContactResult(contactID)
                     },
                     blockUser: { userID in
-                        await authManager.blockUser(userID)
+                        await authManager.blockUserResult(userID)
                     },
                     unblockUser: { userID in
-                        await authManager.unblockUser(userID)
+                        await authManager.unblockUserResult(userID)
+                    },
+                    reportUser: { userID, reason, detail in
+                        await authManager.createReportResult(
+                            targetType: "user",
+                            targetID: userID.uuidString,
+                            reason: reason,
+                            detail: detail
+                        )
                     },
                     createDirectConversation: { memberEmail in
                         await authManager.createDirectIMConversation(memberEmail: memberEmail)
                     }
                 )
+                .id(user.id)
             }
         }
         .background(Color(.systemGroupedBackground))

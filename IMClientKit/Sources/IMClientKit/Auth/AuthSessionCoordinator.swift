@@ -41,8 +41,35 @@ public actor AuthSessionCoordinator {
 
     public func register(email: String, password: String, device: DeviceMetadataPayload?) async throws -> AuthUser {
         let response = try await authAPI.register(email: email, password: password, device: device)
-        try persist(response)
-        return response.user
+        switch response.state {
+        case .signedIn:
+            guard let auth = response.auth else {
+                throw APIError.invalidResponse
+            }
+            try persist(auth)
+            return auth.user
+        case .verificationRequired:
+            throw APIError.emailVerificationRequired(
+                email: response.email,
+                message: response.message ?? "邮箱尚未验证，请先完成邮箱验证。"
+            )
+        }
+    }
+
+    public func resendEmailVerification(email: String) async throws -> AuthChallengeResponseBody {
+        try await authAPI.resendEmailVerification(email: email)
+    }
+
+    public func confirmEmailVerification(email: String, code: String) async throws -> AuthGenericResponseBody {
+        try await authAPI.confirmEmailVerification(email: email, code: code)
+    }
+
+    public func requestPasswordReset(email: String) async throws -> AuthChallengeResponseBody {
+        try await authAPI.requestPasswordReset(email: email)
+    }
+
+    public func confirmPasswordReset(email: String, code: String, newPassword: String) async throws -> AuthGenericResponseBody {
+        try await authAPI.confirmPasswordReset(email: email, code: code, newPassword: newPassword)
     }
 
     public func restoreSession() async -> RestoreResult {

@@ -28,6 +28,9 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
     @OptionalField(key: "avatar_preset")
     var avatarPreset: String?
 
+    @OptionalField(key: "email_verified_at")
+    var emailVerifiedAt: Date?
+
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
 
@@ -45,7 +48,8 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
         passwordHash: String,
         status: UserStatus,
         displayName: String? = nil,
-        avatarPreset: UserAvatarPreset? = nil
+        avatarPreset: UserAvatarPreset? = nil,
+        emailVerifiedAt: Date? = nil
     ) {
         self.id = id
         self.email = email
@@ -53,6 +57,7 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
         self.status = status.rawValue
         self.displayName = displayName
         self.avatarPreset = avatarPreset?.rawValue
+        self.emailVerifiedAt = emailVerifiedAt
     }
 
     var statusEnum: UserStatus {

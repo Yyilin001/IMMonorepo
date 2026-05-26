@@ -124,13 +124,13 @@ extension AuthManagerTests {
         #expect(removedResult == .applied)
         #expect(store.contacts.isEmpty)
 
-        store.contactsMessage = "cached"
+        store.setNotice("cached", scope: .contactsHome, tone: .info)
         store.acceptingRequestIDs = [requestID]
         store.resetForSignedOut()
 
         #expect(store.contactRequests.isEmpty)
         #expect(store.contacts.isEmpty)
-        #expect(store.contactsMessage == nil)
+        #expect(store.notice(for: .contactsHome) == nil)
         #expect(store.acceptingRequestIDs.isEmpty)
         #expect(store.unseenIncomingContactRequestCount == 0)
     }
@@ -157,11 +157,65 @@ extension AuthManagerTests {
         #expect(manager.contactStore.unseenIncomingContactRequestCount == 2)
 
         manager.sessionStore.profileMessage = "updated"
-        manager.contactStore.contactsMessage = "loaded"
+        manager.contactStore.setNotice("loaded", scope: .contactsHome, tone: .info)
 
         #expect(manager.profileMessage == "updated")
-        #expect(manager.contactsMessage == "loaded")
+        #expect(manager.contactStore.notice(for: .contactsHome)?.message == "loaded")
         #expect(manager.currentUser == Self.user)
+    }
+
+    @Test func contactStoreNoticeScopesClearIndependently() {
+        let store = ContactStore()
+        store.setNotice("home", scope: .contactsHome, tone: .success)
+        store.setNotice("requests", scope: .requests, tone: .error)
+
+        #expect(store.notice(for: .contactsHome)?.message == "home")
+        #expect(store.notice(for: .requests)?.tone == .error)
+
+        store.clearNotice(scope: .contactsHome)
+
+        #expect(store.notice(for: .contactsHome) == nil)
+        #expect(store.notice(for: .requests)?.message == "requests")
+    }
+
+    @Test func contactStoreRefreshTTLUsesLastRefreshAt() {
+        let store = ContactStore()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        #expect(store.shouldRefreshContactState(now: now))
+
+        store.lastContactStateRefreshAt = now.addingTimeInterval(-59)
+        #expect(store.shouldRefreshContactState(now: now) == false)
+
+        store.lastContactStateRefreshAt = now.addingTimeInterval(-60)
+        #expect(store.shouldRefreshContactState(now: now))
+    }
+
+    @Test func directRelationshipNoticesDoNotPolluteRequestNotices() {
+        let store = ContactStore()
+        store.setNotice("request", scope: .requests, tone: .info)
+        store.setDirectRelationshipNotice(
+            "conversation one",
+            conversationID: "conversation-1",
+            tone: .success,
+            createdAt: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        store.setDirectRelationshipNotice(
+            "conversation two",
+            conversationID: "conversation-2",
+            tone: .error,
+            createdAt: Date(timeIntervalSince1970: 1_800_000_001)
+        )
+
+        #expect(store.notice(for: .requests)?.message == "request")
+        #expect(store.directRelationshipNotices["conversation-1"]?.message == "conversation one")
+        #expect(store.directRelationshipNotices["conversation-2"]?.tone == .error)
+
+        store.clearDirectRelationshipNotice(conversationID: "conversation-1")
+
+        #expect(store.notice(for: .requests)?.message == "request")
+        #expect(store.directRelationshipNotices["conversation-1"] == nil)
+        #expect(store.directRelationshipNotices["conversation-2"]?.message == "conversation two")
     }
 
     private func contactRequest(

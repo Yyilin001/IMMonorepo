@@ -45,6 +45,22 @@ final class SessionFacade {
         await authSessionController.restoreSession()
     }
 
+    func resendEmailVerification(email: String) async throws -> AuthChallengeResponseBody {
+        try await authSessionController.resendEmailVerification(email: email)
+    }
+
+    func confirmEmailVerification(email: String, code: String) async throws -> AuthGenericResponseBody {
+        try await authSessionController.confirmEmailVerification(email: email, code: code)
+    }
+
+    func requestPasswordReset(email: String) async throws -> AuthChallengeResponseBody {
+        try await authSessionController.requestPasswordReset(email: email)
+    }
+
+    func confirmPasswordReset(email: String, code: String, newPassword: String) async throws -> AuthGenericResponseBody {
+        try await authSessionController.confirmPasswordReset(email: email, code: code, newPassword: newPassword)
+    }
+
     func fetchProfile() async throws -> AuthUser {
         try await authSessionController.fetchProfile()
     }

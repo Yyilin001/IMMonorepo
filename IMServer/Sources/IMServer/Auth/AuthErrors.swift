@@ -12,11 +12,17 @@ enum AuthError: AbortError {
     case userDisabled
     case weakPassword
     case sessionNotFound
+    case emailVerificationRequired
+    case invalidVerificationCode
+    case verificationCodeExpired
+    case passwordResetFailed
 
     var status: HTTPResponseStatus {
         switch self {
-        case .invalidRegistration, .weakPassword:
+        case .invalidRegistration, .weakPassword, .invalidVerificationCode, .verificationCodeExpired, .passwordResetFailed:
             return .badRequest
+        case .emailVerificationRequired:
+            return .forbidden
         case .sessionNotFound:
             return .notFound
         default:
@@ -45,9 +51,17 @@ enum AuthError: AbortError {
         case .userDisabled:
             return "账号已被禁用。"
         case .weakPassword:
-            return "密码长度至少需要 8 位。"
+            return "密码长度至少需要 10 位。"
         case .sessionNotFound:
             return "设备会话不存在。"
+        case .emailVerificationRequired:
+            return "邮箱尚未验证，请先完成邮箱验证。"
+        case .invalidVerificationCode:
+            return "验证码无效。"
+        case .verificationCodeExpired:
+            return "验证码已过期，请重新获取。"
+        case .passwordResetFailed:
+            return "密码重置失败，请重新获取验证码。"
         }
     }
 }

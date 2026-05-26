@@ -17,6 +17,7 @@ private func configureShared(_ app: Application) async throws {
     try IMProductionRuntimeValidator.validateRole(app: app)
 
     let authConfiguration = try AuthConfiguration.load(from: app.environment)
+    let authSecurityConfiguration = try AuthSecurityConfiguration.load(from: app.environment)
     let imTCPConfiguration = IMTCPConfiguration.load(from: app.environment)
     app.authClientIPResolver = AuthClientIPResolver.load(from: app.environment)
     app.gatewayRelayConfiguration = IMGatewayRelayConfiguration.load(from: app.environment)
@@ -42,6 +43,9 @@ private func configureShared(_ app: Application) async throws {
     try IMProductionRuntimeValidator.validate(app: app)
     try await app.configureAIStreamLeaseStoreIfNeeded()
     app.authConfiguration = authConfiguration
+    app.authSecurityConfiguration = authSecurityConfiguration
+    app.authLoginRateLimiter = try await AuthRateLimiterFactory.make(app: app, configuration: authSecurityConfiguration)
+    app.authEmailSender = try AuthEmailSenderFactory.make(app: app, configuration: authSecurityConfiguration)
     app.imTCPConfiguration = imTCPConfiguration
     app.lifecycle.use(ConversationEventStreamProducerLifecycle())
     app.lifecycle.use(IMConsistencyRepairLifecycle())

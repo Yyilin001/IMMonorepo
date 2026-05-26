@@ -175,7 +175,7 @@ extension AuthManager {
         )
     }
 
-    func directConversationRelationshipActionMessage(for conversationID: String) -> String? {
-        directConversationRelationshipActionMessages[conversationID]
+    func directRelationshipNotice(for conversationID: String) -> DirectRelationshipNotice? {
+        contactStore.directRelationshipNotices[conversationID]
     }
 }

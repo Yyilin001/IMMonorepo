@@ -50,9 +50,7 @@ struct ContactStateStore {
         requestID: UUID,
         status: ContactRequestStatus,
         respondedAt: Date,
-        currentUserID: UUID,
-        contactRequests: inout [ContactRequestResponseBody],
-        normalize: ([ContactRequestResponseBody], UUID) -> [ContactRequestResponseBody]
+        contactRequests: inout [ContactRequestResponseBody]
     ) {
         guard let index = contactRequests.firstIndex(where: { $0.id == requestID }) else {
             return
@@ -71,7 +69,6 @@ struct ContactStateStore {
             updatedAt: respondedAt,
             respondedAt: respondedAt
         )
-        contactRequests = normalize(contactRequests, currentUserID)
     }
 
     func unseenIncomingRequestCount(

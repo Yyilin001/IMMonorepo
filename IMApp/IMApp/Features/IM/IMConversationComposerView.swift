@@ -3,20 +3,11 @@ import IMClientKit
 
 extension IMConversationDetailView {
     var composerBar: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 0) {
             if let directMessagingStatusMessage {
-                HStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-
-                    Text(directMessagingStatusMessage)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
+                AppStatusBanner(message: directMessagingStatusMessage, tone: .warning)
+                    .padding(.horizontal, AppSpacing.large)
+                    .padding(.top, AppSpacing.medium)
             }
 
             if isDirectPeerBlocked, let peer = directPeer {
@@ -30,59 +21,75 @@ extension IMConversationDetailView {
 
                     Spacer(minLength: 0)
 
-                    Button("解除") {
-                        Task {
-                            _ = await runtimeStore.unblockUser(peer.id)
+                    Button {
+                        runRelationshipAction(.unblock(peer.id)) {
+                            await runtimeStore.unblockUser(peer.id)
+                        }
+                    } label: {
+                        if relationshipActionIsRunning(.unblock(peer.id)) {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("解除")
                         }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .disabled(relationshipActionIsRunning(.unblock(peer.id)))
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, directMessagingStatusMessage == nil ? 12 : 0)
+                .padding(.horizontal, AppSpacing.large)
+                .padding(.top, AppSpacing.small)
             }
 
             if let directRelationshipPresentation {
                 DirectPeerRelationshipActionPanel(
                     presentation: directRelationshipPresentation,
-                    actionMessage: directConversationRelationshipActionMessage,
+                    notice: directRelationshipNotice,
+                    isSendRequestRunning: relationshipActionIsRunning(.sendRequest(conversationID)),
+                    isAcceptRunning: relationshipActionIsRunning(.accept(conversationID)),
+                    isDeclineRunning: relationshipActionIsRunning(.decline(conversationID)),
+                    isCancelRunning: relationshipActionIsRunning(.cancel(conversationID)),
                     onSendRequest: {
-                        Task {
+                        runRelationshipAction(.sendRequest(conversationID)) {
                             await runtimeStore.sendDirectConversationFriendRequest(conversationID: conversationID)
                         }
                     },
                     onAccept: {
-                        Task {
+                        runRelationshipAction(.accept(conversationID)) {
                             await runtimeStore.acceptDirectConversationFriendRequest(conversationID: conversationID)
                         }
                     },
                     onDecline: {
-                        Task {
+                        runRelationshipAction(.decline(conversationID)) {
                             await runtimeStore.declineDirectConversationFriendRequest(conversationID: conversationID)
                         }
                     },
                     onCancelRequest: {
-                        Task {
+                        runRelationshipAction(.cancel(conversationID)) {
                             await runtimeStore.cancelDirectConversationFriendRequest(conversationID: conversationID)
                         }
                     }
                 )
-                .padding(.horizontal, 16)
+                .padding(.horizontal, AppSpacing.large)
+                .padding(.top, AppSpacing.small)
             }
 
             Divider()
 
-            HStack(alignment: .bottom, spacing: 12) {
+            ConversationComposerSurface {
                 Button {
                     isPresentingMediaImporter = true
                 } label: {
-                    Image(systemName: "paperclip.circle.fill")
-                        .font(.system(size: 26))
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 27))
+                        .frame(width: 34, height: 38)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(canSendMessages ? Color.accentColor : .secondary)
                 .disabled(!canSendMessages)
-
+                .accessibilityLabel("添加附件")
+                .accessibilityIdentifier("conversation.composer.attachButton")
+            } content: {
                 VStack(alignment: .leading, spacing: 8) {
                     if let editingTarget {
                         HStack(alignment: .top, spacing: 10) {
@@ -106,9 +113,11 @@ extension IMConversationDetailView {
                                     .foregroundStyle(.secondary)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("取消编辑")
+                            .accessibilityIdentifier("conversation.editBar.cancel")
                         }
                         .padding(.horizontal, 14)
-                        .padding(.top, 12)
+                        .padding(.top, 10)
                     } else if let replyTarget {
                         HStack(alignment: .top, spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
@@ -130,9 +139,11 @@ extension IMConversationDetailView {
                                     .foregroundStyle(.secondary)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("取消回复")
+                            .accessibilityIdentifier("conversation.replyBar.cancel")
                         }
                         .padding(.horizontal, 14)
-                        .padding(.top, 12)
+                        .padding(.top, 10)
                     }
 
                     if let composerDisabledReason {
@@ -140,7 +151,7 @@ extension IMConversationDetailView {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 14)
-                            .padding(.top, (replyTarget == nil && editingTarget == nil) ? 12 : 0)
+                            .padding(.top, (replyTarget == nil && editingTarget == nil) ? 10 : 0)
                     }
 
                     TextField(composerDisabledReason ?? "输入消息", text: $composerText, axis: .vertical)
@@ -148,12 +159,12 @@ extension IMConversationDetailView {
                         .textInputAutocapitalization(.sentences)
                         .disabled(!canSendMessages)
                         .padding(.horizontal, 14)
-                        .padding(.bottom, 12)
-                        .padding(.top, (replyTarget == nil && editingTarget == nil && composerDisabledReason == nil) ? 12 : 0)
+                        .padding(.bottom, 10)
+                        .padding(.top, (replyTarget == nil && editingTarget == nil && composerDisabledReason == nil) ? 10 : 0)
+                        .accessibilityIdentifier("conversation.composer.textEditor")
                 }
-                .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 18))
-
+                .background(AppSurface.primaryGrouped, in: RoundedRectangle(cornerRadius: AppCornerRadius.large))
+            } trailing: {
                 Button {
                     Task {
                         let didSend: Bool
@@ -182,15 +193,38 @@ extension IMConversationDetailView {
                 } label: {
                     Image(systemName: editingTarget == nil ? "paperplane.fill" : "square.and.arrow.down.fill")
                         .font(.headline)
-                        .frame(width: 44, height: 44)
+                        .frame(width: 42, height: 42)
                 }
                 .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.roundedRectangle(radius: 21))
                 .disabled(!canSendMessages || composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityLabel(editingTarget == nil ? "发送消息" : "保存编辑")
+                .accessibilityIdentifier("conversation.composer.sendButton")
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 12)
         }
-        .background(.thinMaterial)
+    }
+
+    func relationshipActionIsRunning(_ key: IMConversationRelationshipActionKey) -> Bool {
+        runningRelationshipActions.contains(key)
+    }
+
+    func runRelationshipAction(
+        _ key: IMConversationRelationshipActionKey,
+        operation: @escaping @MainActor () async -> ContactOperationResult
+    ) {
+        guard !runningRelationshipActions.contains(key) else {
+            return
+        }
+        runningRelationshipActions.insert(key)
+
+        Task { @MainActor in
+            let result = await operation()
+            guard !Task.isCancelled else {
+                return
+            }
+            runningRelationshipActions.remove(key)
+            runtimeStore.setDirectRelationshipNotice(result, conversationID: conversationID)
+        }
     }
 
     var selectionToolbar: some View {

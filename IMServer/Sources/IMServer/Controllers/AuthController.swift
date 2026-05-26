@@ -9,6 +9,10 @@ struct AuthController: RouteCollection {
         auth.post("register", use: register)
         auth.post("login", use: login)
         auth.post("refresh", use: refresh)
+        auth.post("email-verifications", "resend", use: resendEmailVerification)
+        auth.post("email-verifications", "confirm", use: confirmEmailVerification)
+        auth.post("password-resets", "request", use: requestPasswordReset)
+        auth.post("password-resets", "confirm", use: confirmPasswordReset)
 
         // refresh 之外的会话管理接口都要求 access token 已经通过鉴权。
         let protected = auth.grouped(
@@ -22,11 +26,15 @@ struct AuthController: RouteCollection {
         protected.delete("sessions", ":sessionID", use: logoutSession)
     }
 
-    func register(req: Request) async throws -> AuthResponse {
+    func register(req: Request) async throws -> RegisterResponse {
         let request = try req.content.decode(RegisterRequest.self)
         let clientIPAddress = req.application.authClientIPResolver.resolveClientIPAddress(for: req)
         return try await AuthService(app: req.application, db: req.db)
-            .register(request: request, clientIPAddress: clientIPAddress)
+            .register(
+                request: request,
+                clientIPAddress: clientIPAddress,
+                userAgent: req.headers.first(name: .userAgent)
+            )
     }
 
     func login(req: Request) async throws -> AuthResponse {
@@ -38,7 +46,45 @@ struct AuthController: RouteCollection {
 
     func refresh(req: Request) async throws -> AuthResponse {
         let request = try req.content.decode(RefreshRequest.self)
-        return try await AuthService(app: req.application, db: req.db).refresh(refreshToken: request.refreshToken)
+        let clientIPAddress = req.application.authClientIPResolver.resolveClientIPAddress(for: req)
+        return try await AuthService(app: req.application, db: req.db)
+            .refresh(refreshToken: request.refreshToken, clientIPAddress: clientIPAddress)
+    }
+
+    func resendEmailVerification(req: Request) async throws -> AuthChallengeResponse {
+        let request = try req.content.decode(EmailVerificationResendRequest.self)
+        let clientIPAddress = req.application.authClientIPResolver.resolveClientIPAddress(for: req)
+        return try await AuthService(app: req.application, db: req.db)
+            .resendEmailVerification(
+                request: request,
+                clientIPAddress: clientIPAddress,
+                userAgent: req.headers.first(name: .userAgent)
+            )
+    }
+
+    func confirmEmailVerification(req: Request) async throws -> AuthGenericResponse {
+        let request = try req.content.decode(EmailVerificationConfirmRequest.self)
+        let clientIPAddress = req.application.authClientIPResolver.resolveClientIPAddress(for: req)
+        return try await AuthService(app: req.application, db: req.db)
+            .confirmEmailVerification(request: request, clientIPAddress: clientIPAddress)
+    }
+
+    func requestPasswordReset(req: Request) async throws -> AuthChallengeResponse {
+        let request = try req.content.decode(PasswordResetRequest.self)
+        let clientIPAddress = req.application.authClientIPResolver.resolveClientIPAddress(for: req)
+        return try await AuthService(app: req.application, db: req.db)
+            .requestPasswordReset(
+                request: request,
+                clientIPAddress: clientIPAddress,
+                userAgent: req.headers.first(name: .userAgent)
+            )
+    }
+
+    func confirmPasswordReset(req: Request) async throws -> AuthGenericResponse {
+        let request = try req.content.decode(PasswordResetConfirmRequest.self)
+        let clientIPAddress = req.application.authClientIPResolver.resolveClientIPAddress(for: req)
+        return try await AuthService(app: req.application, db: req.db)
+            .confirmPasswordReset(request: request, clientIPAddress: clientIPAddress)
     }
 
     func sessions(req: Request) async throws -> [AuthSessionResponse] {
@@ -86,6 +132,33 @@ struct RegisterRequest: Content {
     let device: DeviceMetadata?
 }
 
+enum RegisterResponseState: String, Content {
+    case signedIn
+    case verificationRequired
+}
+
+struct RegisterResponse: Content {
+    let state: RegisterResponseState
+    let auth: AuthResponse?
+    let email: String?
+    let expiresIn: Int?
+    let message: String?
+
+    static func signedIn(_ auth: AuthResponse) -> RegisterResponse {
+        RegisterResponse(state: .signedIn, auth: auth, email: nil, expiresIn: nil, message: nil)
+    }
+
+    static func verificationRequired(email: String, expiresIn: Int) -> RegisterResponse {
+        RegisterResponse(
+            state: .verificationRequired,
+            auth: nil,
+            email: email,
+            expiresIn: expiresIn,
+            message: "验证码已发送，请完成邮箱验证后登录。"
+        )
+    }
+}
+
 struct LoginRequest: Content {
     let email: String
     let password: String
@@ -101,6 +174,35 @@ struct DeviceMetadata: Content {
 
 struct RefreshRequest: Content {
     let refreshToken: String
+}
+
+struct EmailVerificationResendRequest: Content {
+    let email: String
+}
+
+struct EmailVerificationConfirmRequest: Content {
+    let email: String
+    let code: String
+}
+
+struct PasswordResetRequest: Content {
+    let email: String
+}
+
+struct PasswordResetConfirmRequest: Content {
+    let email: String
+    let code: String
+    let newPassword: String
+}
+
+struct AuthChallengeResponse: Content {
+    let email: String
+    let expiresIn: Int
+    let message: String
+}
+
+struct AuthGenericResponse: Content {
+    let message: String
 }
 
 struct AuthResponse: Content {

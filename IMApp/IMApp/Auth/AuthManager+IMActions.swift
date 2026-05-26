@@ -13,26 +13,26 @@ extension AuthManager {
     }
 
 
-    func blockUser(_ userID: UUID, reason: String? = nil) async -> Bool {
-        await contactRuntimeController.blockUser(userID, reason: reason)
+    func blockUserResult(_ userID: UUID, reason: String? = nil) async -> ContactOperationResult {
+        await contactRuntimeController.blockUserResult(userID, reason: reason)
     }
 
-    func unblockUser(_ userID: UUID) async -> Bool {
-        await contactRuntimeController.unblockUser(userID)
+    func unblockUserResult(_ userID: UUID) async -> ContactOperationResult {
+        await contactRuntimeController.unblockUserResult(userID)
     }
 
     func loadBlockedUsers() async {
         await contactRuntimeController.loadBlockedUsers()
     }
 
-    func createReport(
+    func createReportResult(
         targetType: String,
         targetID: String,
         conversationID: UUID? = nil,
         messageID: UUID? = nil,
         reason: String,
         detail: String? = nil
-    ) async -> Bool {
+    ) async -> ContactOperationResult {
         do {
             _ = try await sessionClient.createReport(
                 targetType: targetType,
@@ -42,11 +42,17 @@ extension AuthManager {
                 reason: reason,
                 detail: detail
             )
+            guard !Task.isCancelled else {
+                return .failure("")
+            }
             markServerOnline()
-            return true
+            return .success("举报已提交。")
         } catch {
+            guard !(error is CancellationError) else {
+                return .failure("")
+            }
             await handleIMDataRequestError(error)
-            return false
+            return .failure(ContactOperationErrorMapper.message(for: error))
         }
     }
 

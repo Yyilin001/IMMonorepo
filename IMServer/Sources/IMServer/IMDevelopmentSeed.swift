@@ -40,7 +40,8 @@ enum IMDevelopmentSeed {
                 email: normalizedEmail,
                 passwordHash: try Bcrypt.hash(defaultPassword),
                 status: .active,
-                displayName: defaultDisplayName(for: normalizedEmail)
+                displayName: defaultDisplayName(for: normalizedEmail),
+                emailVerifiedAt: Date()
             )
             try await user.create(on: app.imWriteDB)
             seededEmails.append(normalizedEmail)

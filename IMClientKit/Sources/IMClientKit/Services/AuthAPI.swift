@@ -15,7 +15,7 @@ public struct AuthAPI: Sendable {
         )
     }
 
-    public func register(email: String, password: String, device: DeviceMetadataPayload?) async throws -> AuthResponseBody {
+    public func register(email: String, password: String, device: DeviceMetadataPayload?) async throws -> RegisterResponseBody {
         try await client.execute(
             AuthRequest.register(
                 CredentialsRequestBody(email: email, password: password, device: device)
@@ -26,6 +26,30 @@ public struct AuthAPI: Sendable {
     public func refresh(refreshToken: String) async throws -> AuthResponseBody {
         try await client.execute(
             AuthRequest.refresh(RefreshRequestBody(refreshToken: refreshToken))
+        )
+    }
+
+    public func resendEmailVerification(email: String) async throws -> AuthChallengeResponseBody {
+        try await client.execute(AuthRequest.resendEmailVerification(EmailRequestBody(email: email)))
+    }
+
+    public func confirmEmailVerification(email: String, code: String) async throws -> AuthGenericResponseBody {
+        try await client.execute(
+            AuthRequest.confirmEmailVerification(
+                EmailVerificationConfirmRequestBody(email: email, code: code)
+            )
+        )
+    }
+
+    public func requestPasswordReset(email: String) async throws -> AuthChallengeResponseBody {
+        try await client.execute(AuthRequest.requestPasswordReset(EmailRequestBody(email: email)))
+    }
+
+    public func confirmPasswordReset(email: String, code: String, newPassword: String) async throws -> AuthGenericResponseBody {
+        try await client.execute(
+            AuthRequest.confirmPasswordReset(
+                PasswordResetConfirmRequestBody(email: email, code: code, newPassword: newPassword)
+            )
         )
     }
 }
@@ -47,7 +71,7 @@ enum AuthRequest {
     }
 
     public struct Register: Endpoint {
-        public typealias Response = AuthResponseBody
+        public typealias Response = RegisterResponseBody
 
         let body: CredentialsRequestBody
         let requestSpec = HTTPRequestSpec(path: "api/auth/register", method: .post)
@@ -66,6 +90,66 @@ enum AuthRequest {
 
         let body: RefreshRequestBody
         let requestSpec = HTTPRequestSpec(path: "api/auth/refresh", method: .post)
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            do {
+                return try encoder.encode(body)
+            } catch {
+                throw APIError.encodingFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    public struct ResendEmailVerification: Endpoint {
+        public typealias Response = AuthChallengeResponseBody
+
+        let body: EmailRequestBody
+        let requestSpec = HTTPRequestSpec(path: "api/auth/email-verifications/resend", method: .post)
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            do {
+                return try encoder.encode(body)
+            } catch {
+                throw APIError.encodingFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    public struct ConfirmEmailVerification: Endpoint {
+        public typealias Response = AuthGenericResponseBody
+
+        let body: EmailVerificationConfirmRequestBody
+        let requestSpec = HTTPRequestSpec(path: "api/auth/email-verifications/confirm", method: .post)
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            do {
+                return try encoder.encode(body)
+            } catch {
+                throw APIError.encodingFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    public struct RequestPasswordReset: Endpoint {
+        public typealias Response = AuthChallengeResponseBody
+
+        let body: EmailRequestBody
+        let requestSpec = HTTPRequestSpec(path: "api/auth/password-resets/request", method: .post)
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            do {
+                return try encoder.encode(body)
+            } catch {
+                throw APIError.encodingFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    public struct ConfirmPasswordReset: Endpoint {
+        public typealias Response = AuthGenericResponseBody
+
+        let body: PasswordResetConfirmRequestBody
+        let requestSpec = HTTPRequestSpec(path: "api/auth/password-resets/confirm", method: .post)
 
         public func makeBody(using encoder: JSONEncoder) throws -> Data? {
             do {
@@ -123,6 +207,22 @@ enum AuthRequest {
 
     public static func refresh(_ body: RefreshRequestBody) -> Refresh {
         Refresh(body: body)
+    }
+
+    public static func resendEmailVerification(_ body: EmailRequestBody) -> ResendEmailVerification {
+        ResendEmailVerification(body: body)
+    }
+
+    public static func confirmEmailVerification(_ body: EmailVerificationConfirmRequestBody) -> ConfirmEmailVerification {
+        ConfirmEmailVerification(body: body)
+    }
+
+    public static func requestPasswordReset(_ body: EmailRequestBody) -> RequestPasswordReset {
+        RequestPasswordReset(body: body)
+    }
+
+    public static func confirmPasswordReset(_ body: PasswordResetConfirmRequestBody) -> ConfirmPasswordReset {
+        ConfirmPasswordReset(body: body)
     }
 
     public static let sessions = Sessions()

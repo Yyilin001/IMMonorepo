@@ -20,7 +20,7 @@ extension AuthManager {
     }
 
     func handleContactRequestError(_ error: Error) async {
-        contactsMessage = error.localizedDescription
+        contactStore.setNotice(ContactOperationErrorMapper.message(for: error), scope: .contactsHome, tone: .error)
 
         if await shouldPreserveSession(for: error) {
             await markServerUnavailableIfNeeded(for: error)
@@ -30,17 +30,7 @@ extension AuthManager {
     }
 
     func handleContactRequestsLoadError(_ error: Error) async {
-        contactRequestsLoadMessage = error.localizedDescription
-
-        if await shouldPreserveSession(for: error) {
-            await markServerUnavailableIfNeeded(for: error)
-        } else {
-            await clearSession(message: error.localizedDescription)
-        }
-    }
-
-    func handleContactRequestsActionError(_ error: Error) async {
-        contactRequestActionMessage = error.localizedDescription
+        contactStore.setNotice(ContactOperationErrorMapper.message(for: error), scope: .requests, tone: .error)
 
         if await shouldPreserveSession(for: error) {
             await markServerUnavailableIfNeeded(for: error)

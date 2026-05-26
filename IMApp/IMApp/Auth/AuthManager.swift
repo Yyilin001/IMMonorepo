@@ -77,11 +77,6 @@ final class AuthManager {
         set { contactStore.isLoadingContacts = newValue }
     }
 
-    var contactsMessage: String? {
-        get { contactStore.contactsMessage }
-        set { contactStore.contactsMessage = newValue }
-    }
-
     var contactRequests: [ContactRequestResponseBody] {
         get { contactStore.contactRequests }
         set { contactStore.contactRequests = newValue }
@@ -95,16 +90,6 @@ final class AuthManager {
     var isLoadingContactRequests: Bool {
         get { contactStore.isLoadingContactRequests }
         set { contactStore.isLoadingContactRequests = newValue }
-    }
-
-    var contactRequestsLoadMessage: String? {
-        get { contactStore.contactRequestsLoadMessage }
-        set { contactStore.contactRequestsLoadMessage = newValue }
-    }
-
-    var contactRequestActionMessage: String? {
-        get { contactStore.contactRequestActionMessage }
-        set { contactStore.contactRequestActionMessage = newValue }
     }
 
     var isUpdatingProfile: Bool {
@@ -130,11 +115,6 @@ final class AuthManager {
     var cancellingRequestIDs: Set<UUID> {
         get { contactStore.cancellingRequestIDs }
         set { contactStore.cancellingRequestIDs = newValue }
-    }
-
-    var directConversationRelationshipActionMessages: [String: String] {
-        get { contactStore.directConversationRelationshipActionMessages }
-        set { contactStore.directConversationRelationshipActionMessages = newValue }
     }
 
     var sendingDirectConversationFriendRequestConversationIDs: Set<String> {

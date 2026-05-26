@@ -62,6 +62,44 @@ public struct AuthResponseBody: Codable, Sendable, APIResponseBody {
     public let user: AuthUser
 }
 
+public enum RegisterResponseState: String, Codable, Sendable {
+    case signedIn
+    case verificationRequired
+}
+
+public struct RegisterResponseBody: Codable, Sendable, APIResponseBody {
+    public let state: RegisterResponseState
+    public let auth: AuthResponseBody?
+    public let email: String?
+    public let expiresIn: Int?
+    public let message: String?
+}
+
+public struct EmailRequestBody: Encodable, Sendable {
+    public let email: String
+}
+
+public struct EmailVerificationConfirmRequestBody: Encodable, Sendable {
+    public let email: String
+    public let code: String
+}
+
+public struct PasswordResetConfirmRequestBody: Encodable, Sendable {
+    public let email: String
+    public let code: String
+    public let newPassword: String
+}
+
+public struct AuthChallengeResponseBody: Codable, Sendable, APIResponseBody {
+    public let email: String
+    public let expiresIn: Int
+    public let message: String
+}
+
+public struct AuthGenericResponseBody: Codable, Sendable, APIResponseBody {
+    public let message: String
+}
+
 public struct SessionSnapshot: Decodable, Identifiable, Equatable, Sendable, APIResponseBody {
     public let id: UUID
     public let deviceID: String?

@@ -247,6 +247,19 @@ public final class IMConversationStore {
         resetUnreadState(for: index)
     }
 
+    public func markConversationUnread(id: String) {
+        let trimmedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty,
+              let index = conversations.firstIndex(where: { $0.id == trimmedID })
+        else {
+            return
+        }
+
+        if conversations[index].unreadCount == 0 {
+            conversations[index].localUnreadDelta = 1
+        }
+    }
+
     public func applyServerSummaryReadState(
         lastReadSequence: UInt64,
         unreadCount: Int,

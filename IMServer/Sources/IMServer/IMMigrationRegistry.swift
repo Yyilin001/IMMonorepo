@@ -13,6 +13,7 @@ enum IMMigrationRegistry {
         app.migrations.add(CreateFriendRequest())
         app.migrations.add(CreateContactChangesLog())
         app.migrations.add(CreateAuthSession())
+        app.migrations.add(AddAuthSecuritySchema())
         app.migrations.add(AddAuthIndexes())
         app.migrations.add(EnforceSingleActiveDeviceSession())
         app.migrations.add(CreateConversation())

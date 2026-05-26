@@ -13,6 +13,22 @@ extension AuthManager {
         await sessionRuntimeController.register(email: email, password: password)
     }
 
+    func resendEmailVerification(email: String) async {
+        await sessionRuntimeController.resendEmailVerification(email: email)
+    }
+
+    func confirmEmailVerification(email: String, code: String) async {
+        await sessionRuntimeController.confirmEmailVerification(email: email, code: code)
+    }
+
+    func requestPasswordReset(email: String) async {
+        await sessionRuntimeController.requestPasswordReset(email: email)
+    }
+
+    func confirmPasswordReset(email: String, code: String, newPassword: String) async {
+        await sessionRuntimeController.confirmPasswordReset(email: email, code: code, newPassword: newPassword)
+    }
+
     func logout() async {
         await sessionRuntimeController.logout()
     }
@@ -44,36 +60,32 @@ extension AuthManager {
         await contactRuntimeController.reloadContacts()
     }
 
-    func addContact(email: String, remark: String? = nil) async -> Bool {
-        await sendContactRequest(email: email, message: nil, remark: remark)
-    }
-
     func reloadContactRequests() async {
         await contactRuntimeController.reloadContactRequests()
     }
 
-    func sendContactRequest(email: String, message: String? = nil, remark: String? = nil) async -> Bool {
-        await contactRuntimeController.sendContactRequest(email: email, message: message, remark: remark)
+    func sendContactRequestResult(email: String, message: String? = nil, remark: String? = nil) async -> ContactOperationResult {
+        await contactRuntimeController.sendContactRequestResult(email: email, message: message, remark: remark)
     }
 
-    func acceptContactRequest(id requestID: UUID, remark: String? = nil) async -> Bool {
-        await contactRuntimeController.acceptContactRequest(id: requestID, remark: remark)
+    func acceptContactRequestResult(id requestID: UUID, remark: String? = nil) async -> ContactOperationResult {
+        await contactRuntimeController.acceptContactRequestResult(id: requestID, remark: remark)
     }
 
-    func declineContactRequest(id requestID: UUID) async -> Bool {
-        await contactRuntimeController.declineContactRequest(id: requestID)
+    func declineContactRequestResult(id requestID: UUID) async -> ContactOperationResult {
+        await contactRuntimeController.declineContactRequestResult(id: requestID)
     }
 
-    func cancelContactRequest(id requestID: UUID) async -> Bool {
-        await contactRuntimeController.cancelContactRequest(id: requestID)
+    func cancelContactRequestResult(id requestID: UUID) async -> ContactOperationResult {
+        await contactRuntimeController.cancelContactRequestResult(id: requestID)
     }
 
-    func updateContactRemark(contactUserID: UUID, remark: String) async -> Bool {
-        await contactRuntimeController.updateContactRemark(contactUserID: contactUserID, remark: remark)
+    func updateContactRemarkResult(contactUserID: UUID, remark: String) async -> ContactOperationResult {
+        await contactRuntimeController.updateContactRemarkResult(contactUserID: contactUserID, remark: remark)
     }
 
-    func deleteContact(_ contactUserID: UUID) async -> Bool {
-        await contactRuntimeController.deleteContact(contactUserID)
+    func deleteContactResult(_ contactUserID: UUID) async -> ContactOperationResult {
+        await contactRuntimeController.deleteContactResult(contactUserID)
     }
 
     func signOutCurrentDevice() async {

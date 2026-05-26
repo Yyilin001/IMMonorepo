@@ -28,6 +28,9 @@ final class AuthSession: Model, Content, @unchecked Sendable {
     @OptionalField(key: "revoked_at")
     var revokedAt: Date?
 
+    @OptionalField(key: "revoked_reason")
+    var revokedReason: String?
+
     @OptionalField(key: "device_id")
     var deviceID: String?
 
@@ -60,7 +63,8 @@ final class AuthSession: Model, Content, @unchecked Sendable {
         deviceName: String?,
         platform: String?,
         appVersion: String?,
-        lastSeenAt: Date?
+        lastSeenAt: Date?,
+        revokedReason: AuthSessionRevocationReason? = nil
     ) {
         self.id = id
         self.$user.id = userID
@@ -71,5 +75,6 @@ final class AuthSession: Model, Content, @unchecked Sendable {
         self.platform = platform
         self.appVersion = appVersion
         self.lastSeenAt = lastSeenAt
+        self.revokedReason = revokedReason?.rawValue
     }
 }

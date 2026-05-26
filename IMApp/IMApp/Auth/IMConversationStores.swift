@@ -8,7 +8,7 @@ protocol IMConversationPresentationProviding: AnyObject {
 
     func conversationIdentityPresentation(for conversation: IMConversation) -> IMConversationIdentityPresentation
     func directPeerRelationshipPresentation(for conversationID: String) -> DirectPeerRelationshipPresentation?
-    func directConversationRelationshipActionMessage(for conversationID: String) -> String?
+    func directRelationshipNotice(for conversationID: String) -> DirectRelationshipNotice?
 }
 
 @MainActor
@@ -26,6 +26,7 @@ protocol IMConversationRuntimeProviding: AnyObject {
     func loadOlderIMMessages() async
     func jumpToReferencedIMMessage(_ messageID: String, in conversationID: String) async
     func jumpToIMMessage(_ messageID: String, in conversationID: String) async
+    func markIMConversationReadUpToLatestLoadedSequence(for conversationID: String) async
     func cancelQueuedIMTextMessage(localMessageID: String, in conversationID: String) -> Bool
     func recallIMMessage(messageID: String, in conversationID: String) async -> Bool
     func retryIMTextMessage(localMessageID: String, in conversationID: String) async -> Bool
@@ -77,20 +78,21 @@ protocol IMConversationRuntimeProviding: AnyObject {
     func fetchIMGroupInvites(conversationID: String) async -> [IMGroupInviteResponseBody]
     func createIMGroupInvite(conversationID: String, expiresInSeconds: Int?) async -> IMGroupInviteResponseBody?
     func revokeIMGroupInvite(conversationID: String, token: String) async -> Bool
-    func blockUser(_ userID: UUID, reason: String?) async -> Bool
-    func unblockUser(_ userID: UUID) async -> Bool
-    func createReport(
+    func blockUserResult(_ userID: UUID, reason: String?) async -> ContactOperationResult
+    func unblockUserResult(_ userID: UUID) async -> ContactOperationResult
+    func createReportResult(
         targetType: String,
         targetID: String,
         conversationID: UUID?,
         messageID: UUID?,
         reason: String,
         detail: String?
-    ) async -> Bool
-    func sendDirectConversationFriendRequest(conversationID: String) async -> Bool
-    func acceptDirectConversationFriendRequest(conversationID: String, remark: String?) async -> Bool
-    func declineDirectConversationFriendRequest(conversationID: String) async -> Bool
-    func cancelDirectConversationFriendRequest(conversationID: String) async -> Bool
+    ) async -> ContactOperationResult
+    func sendDirectConversationFriendRequestResult(conversationID: String) async -> ContactOperationResult
+    func acceptDirectConversationFriendRequestResult(conversationID: String, remark: String?) async -> ContactOperationResult
+    func declineDirectConversationFriendRequestResult(conversationID: String) async -> ContactOperationResult
+    func cancelDirectConversationFriendRequestResult(conversationID: String) async -> ContactOperationResult
+    func setDirectRelationshipNotice(_ result: ContactOperationResult, conversationID: String)
     func persistIMConversationCacheSoon()
     func startBackgroundIMMediaDownload(_ asset: IMMediaAsset, to destinationURL: URL) async throws
     func cancelBackgroundIMMediaDownload(_ reference: IMMessageBackgroundTransferReference) async
@@ -127,8 +129,8 @@ final class IMConversationPresentationStore {
         provider?.directPeerRelationshipPresentation(for: conversationID)
     }
 
-    func directConversationRelationshipActionMessage(for conversationID: String) -> String? {
-        provider?.directConversationRelationshipActionMessage(for: conversationID)
+    func directRelationshipNotice(for conversationID: String) -> DirectRelationshipNotice? {
+        provider?.directRelationshipNotice(for: conversationID)
     }
 }
 
@@ -194,6 +196,15 @@ final class IMConversationRuntimeStore {
 
     func jumpToMessage(_ messageID: String, in conversationID: String) async {
         await provider?.jumpToIMMessage(messageID, in: conversationID)
+    }
+
+    func markConversationRead(_ conversationID: String) async {
+        await provider?.markIMConversationReadUpToLatestLoadedSequence(for: conversationID)
+    }
+
+    func markConversationUnread(_ conversationID: String) {
+        provider?.imConversationStore.markConversationUnread(id: conversationID)
+        provider?.persistIMConversationCacheSoon()
     }
 
     func cancelQueuedTextMessage(localMessageID: String, in conversationID: String) -> Bool {
@@ -368,39 +379,47 @@ final class IMConversationRuntimeStore {
         await provider?.revokeIMGroupInvite(conversationID: conversationID, token: token) ?? false
     }
 
-    func blockUser(_ userID: UUID, reason: String? = nil) async -> Bool {
-        await provider?.blockUser(userID, reason: reason) ?? false
+    func blockUser(_ userID: UUID, reason: String? = nil) async -> ContactOperationResult {
+        await provider?.blockUserResult(userID, reason: reason) ?? .failure("操作失败，请稍后重试。")
     }
 
-    func unblockUser(_ userID: UUID) async -> Bool {
-        await provider?.unblockUser(userID) ?? false
+    func unblockUser(_ userID: UUID) async -> ContactOperationResult {
+        await provider?.unblockUserResult(userID) ?? .failure("操作失败，请稍后重试。")
     }
 
-    func reportUser(_ userID: UUID, conversationID: String) async -> Bool {
-        await provider?.createReport(
+    func reportUser(_ userID: UUID, conversationID: String) async -> ContactOperationResult {
+        await provider?.createReportResult(
             targetType: "user",
             targetID: userID.uuidString,
             conversationID: UUID(uuidString: conversationID),
             messageID: nil,
             reason: "inappropriate_behavior",
             detail: nil
-        ) ?? false
+        ) ?? .failure("操作失败，请稍后重试。")
     }
 
-    func sendDirectConversationFriendRequest(conversationID: String) async {
-        _ = await provider?.sendDirectConversationFriendRequest(conversationID: conversationID)
+    func sendDirectConversationFriendRequest(conversationID: String) async -> ContactOperationResult {
+        await provider?.sendDirectConversationFriendRequestResult(conversationID: conversationID)
+            ?? .failure("操作失败，请稍后重试。")
     }
 
-    func acceptDirectConversationFriendRequest(conversationID: String) async {
-        _ = await provider?.acceptDirectConversationFriendRequest(conversationID: conversationID, remark: nil)
+    func acceptDirectConversationFriendRequest(conversationID: String) async -> ContactOperationResult {
+        await provider?.acceptDirectConversationFriendRequestResult(conversationID: conversationID, remark: nil)
+            ?? .failure("操作失败，请稍后重试。")
     }
 
-    func declineDirectConversationFriendRequest(conversationID: String) async {
-        _ = await provider?.declineDirectConversationFriendRequest(conversationID: conversationID)
+    func declineDirectConversationFriendRequest(conversationID: String) async -> ContactOperationResult {
+        await provider?.declineDirectConversationFriendRequestResult(conversationID: conversationID)
+            ?? .failure("操作失败，请稍后重试。")
     }
 
-    func cancelDirectConversationFriendRequest(conversationID: String) async {
-        _ = await provider?.cancelDirectConversationFriendRequest(conversationID: conversationID)
+    func cancelDirectConversationFriendRequest(conversationID: String) async -> ContactOperationResult {
+        await provider?.cancelDirectConversationFriendRequestResult(conversationID: conversationID)
+            ?? .failure("操作失败，请稍后重试。")
+    }
+
+    func setDirectRelationshipNotice(_ result: ContactOperationResult, conversationID: String) {
+        provider?.setDirectRelationshipNotice(result, conversationID: conversationID)
     }
 
     func setStatusMessage(_ message: String) {

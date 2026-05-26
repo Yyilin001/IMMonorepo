@@ -1,18 +1,48 @@
 import SwiftUI
 import IMClientKit
 
+struct ConversationNewMessagePill: View {
+    let unseenCount: Int
+    let showsJumpOnly: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        if unseenCount > 0 || showsJumpOnly {
+            Button {
+                onTap()
+            } label: {
+                Label(title, systemImage: "arrow.down.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
+            .shadow(radius: 8, y: 3)
+            .accessibilityIdentifier(unseenCount > 0 ? "conversation.newMessagePill" : "conversation.jumpLatestButton")
+        }
+    }
+
+    private var title: String {
+        if unseenCount > 0 {
+            return unseenCount == 1 ? "1 条新消息" : "\(unseenCount) 条新消息"
+        }
+        return "回到底部"
+    }
+}
+
 extension IMConversationDetailView {
     var detailScrollView: some View {
         ScrollView {
             detailMessageStack
         }
         .defaultScrollAnchor(.bottom)
-        .background(Color(.systemGroupedBackground))
+        .background(AppSurface.groupedBackground)
     }
 
     var detailMessageStack: some View {
         LazyVStack(alignment: .leading, spacing: 14) {
-            conversationSummaryCard
+            conversationContextStrip
 
             if queueSummary.hasPendingWork {
                 IMConversationQueueBanner(
@@ -22,7 +52,8 @@ extension IMConversationDetailView {
             }
 
             if let message = conversationStore.statusMessage, !message.isEmpty {
-                IMInlineStatusBanner(message: message)
+                AppStatusBanner(message: message, tone: .info)
+                    .accessibilityIdentifier("conversation.status")
             }
 
             detailMessagesContent
@@ -53,6 +84,7 @@ extension IMConversationDetailView {
                 }
                 .buttonStyle(.bordered)
                 .disabled(conversationStore.isLoadingMessages)
+                .accessibilityIdentifier("conversation.loadOlderMessagesButton")
             }
 
             ForEach(messages) { message in
@@ -154,6 +186,14 @@ extension IMConversationDetailView {
                 }
                 Task {
                     await toggleFavorite(messageID: selectableID)
+                }
+            },
+            onDelete: {
+                guard let selectableID else {
+                    return
+                }
+                Task {
+                    _ = await runtimeStore.deleteMessagesForSelf(messageIDs: [selectableID], in: conversationID)
                 }
             },
             onToggleReaction: { emoji in

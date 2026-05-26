@@ -1,13 +1,39 @@
 import IMClientKit
 import SwiftUI
 
+struct IMConversationRowButton: View {
+    let conversation: IMConversation
+    let identity: IMConversationIdentityPresentation
+    let queueSummary: IMConversationQueueSummary
+    let isActive: Bool
+    let onOpen: () -> Void
+    let onAction: (IMConversationRowAction) -> Void
+
+    var body: some View {
+        Button {
+            onOpen()
+        } label: {
+            IMConversationRow(
+                conversation: conversation,
+                identity: identity,
+                queueSummary: queueSummary,
+                isActive: isActive
+            )
+        }
+        .buttonStyle(.plain)
+        .conversationRowActions(conversation: conversation, onAction: onAction)
+        .accessibilityIdentifier("messages.conversationRow.\(conversation.id)")
+    }
+}
+
 struct IMConversationRow: View {
     let conversation: IMConversation
     let identity: IMConversationIdentityPresentation
+    let queueSummary: IMConversationQueueSummary
     let isActive: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: AppSpacing.medium) {
             if conversation.kind == .direct {
                 UserAvatarView(
                     displayName: identity.title,
@@ -20,13 +46,13 @@ struct IMConversationRow: View {
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(.white)
                     .frame(width: 48, height: 48)
-                    .background(Circle().fill(avatarColor))
+                    .background(Circle().fill(avatarColor.gradient))
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+            VStack(alignment: .leading, spacing: AppSpacing.xSmall) {
+                HStack(alignment: .firstTextBaseline, spacing: AppSpacing.small) {
                     Text(identity.title)
-                        .font(.body.weight(isActive ? .semibold : .regular))
+                        .font(.body.weight(conversation.unreadCount > 0 || isActive ? .semibold : .regular))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
 
@@ -43,16 +69,16 @@ struct IMConversationRow: View {
                     }
 
                     Spacer()
-
-                    Text(conversation.updatedAt.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
 
-                Text(conversation.lastMessagePreview)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                HStack(alignment: .firstTextBaseline, spacing: AppSpacing.small) {
+                    Text(primaryPreviewText)
+                        .font(.subheadline)
+                        .foregroundStyle(primaryPreviewColor)
+                        .lineLimit(2)
+
+                    Spacer(minLength: 0)
+                }
 
                 if conversation.isDirectMessagingFrozen {
                     Text("已冻结")
@@ -70,22 +96,22 @@ struct IMConversationRow: View {
                 }
             }
 
-            VStack(alignment: .trailing, spacing: 8) {
-                if conversation.unreadCount > 0 {
-                    Text("\(conversation.unreadCount)")
-                        .font(.caption2.bold())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(Color.red))
-                }
+            VStack(alignment: .trailing, spacing: AppSpacing.small) {
+                Text(conversation.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                ConversationUnreadBadge(count: conversation.unreadCount)
 
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
+            .frame(minWidth: 52, alignment: .trailing)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, AppSpacing.small)
+        .contentShape(Rectangle())
     }
 
     private var avatarText: String {
@@ -116,6 +142,118 @@ struct IMConversationRow: View {
         }
 
         return isActive ? .blue : Color(.systemGray3)
+    }
+
+    private var primaryPreviewText: String {
+        let draft = conversation.draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !draft.isEmpty {
+            return "草稿: \(draft)"
+        }
+
+        if queueSummary.retryableIssueCount > 0 {
+            return "发送失败，点进会话重试"
+        }
+
+        let preview = conversation.lastMessagePreview.trimmingCharacters(in: .whitespacesAndNewlines)
+        if preview.isEmpty {
+            return conversation.kind == .group ? "\(conversation.memberCount) 位成员" : "暂无消息"
+        }
+        return preview
+    }
+
+    private var primaryPreviewColor: Color {
+        let draft = conversation.draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !draft.isEmpty {
+            return .orange
+        }
+        if queueSummary.retryableIssueCount > 0 {
+            return .red
+        }
+        return conversation.unreadCount > 0 ? .primary : .secondary
+    }
+}
+
+enum IMConversationRowAction: Equatable, Sendable {
+    case pin
+    case mute
+    case markRead
+    case markUnread
+    case clearHistory
+    case delete
+}
+
+struct IMConversationRowSwipeActions: ViewModifier {
+    let conversation: IMConversation
+    let onAction: (IMConversationRowAction) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                Button {
+                    onAction(.pin)
+                } label: {
+                    Label(conversation.isPinned ? "取消置顶" : "置顶", systemImage: conversation.isPinned ? "pin.slash" : "pin.fill")
+                }
+                .tint(.orange)
+                .accessibilityIdentifier("messages.row.action.pin")
+
+                Button {
+                    onAction(.mute)
+                } label: {
+                    Label(conversation.isMuted ? "取消免打扰" : "免打扰", systemImage: conversation.isMuted ? "bell" : "bell.slash")
+                }
+                .tint(.gray)
+                .accessibilityIdentifier("messages.row.action.mute")
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                Button(role: .destructive) {
+                    onAction(.delete)
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+                .accessibilityIdentifier("messages.row.action.delete")
+
+                Button(role: .destructive) {
+                    onAction(.clearHistory)
+                } label: {
+                    Label("清空", systemImage: "eraser")
+                }
+                .tint(.red.opacity(0.85))
+
+                Button {
+                    onAction(conversation.unreadCount > 0 ? .markRead : .markUnread)
+                } label: {
+                    Label(conversation.unreadCount > 0 ? "已读" : "未读", systemImage: conversation.unreadCount > 0 ? "envelope.open" : "envelope.badge")
+                }
+                .tint(.blue)
+                .accessibilityIdentifier("messages.row.action.markRead")
+            }
+            .contextMenu {
+                Button(conversation.isPinned ? "取消置顶" : "置顶会话", systemImage: conversation.isPinned ? "pin.slash" : "pin.fill") {
+                    onAction(.pin)
+                }
+                Button(conversation.isMuted ? "取消免打扰" : "免打扰", systemImage: conversation.isMuted ? "bell" : "bell.slash") {
+                    onAction(.mute)
+                }
+                Button(conversation.unreadCount > 0 ? "标为已读" : "标为未读", systemImage: conversation.unreadCount > 0 ? "envelope.open" : "envelope.badge") {
+                    onAction(conversation.unreadCount > 0 ? .markRead : .markUnread)
+                }
+                Button("清空聊天记录", systemImage: "eraser", role: .destructive) {
+                    onAction(.clearHistory)
+                }
+                Button("删除会话", systemImage: "trash", role: .destructive) {
+                    onAction(.delete)
+                }
+            }
+    }
+}
+
+extension View {
+    func conversationRowActions(
+        conversation: IMConversation,
+        onAction: @escaping (IMConversationRowAction) -> Void
+    ) -> some View {
+        modifier(IMConversationRowSwipeActions(conversation: conversation, onAction: onAction))
     }
 }
 
@@ -151,28 +289,13 @@ struct IMConversationEmptyState: View {
     let onCreateConversation: () -> Void
 
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "message.badge.circle")
-                .font(.system(size: 42))
-                .foregroundStyle(.secondary)
-
-            Text("还没有可用会话")
-                .font(.headline)
-
-            Text("这里会直接展示服务端会话列表。先创建一个会话，或者下拉刷新等待后端返回数据。")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
-            Button("创建会话") {
-                onCreateConversation()
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(24)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 20))
+        AppEmptyState(
+            title: "没有会话",
+            message: "发起私聊或创建群聊后，会话会显示在这里。",
+            systemImage: "message.badge.circle",
+            actionTitle: "新建会话",
+            actionSystemImage: "square.and.pencil",
+            action: onCreateConversation
+        )
     }
 }
-
