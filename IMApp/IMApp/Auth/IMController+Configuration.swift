@@ -1,7 +1,7 @@
 import Foundation
 
 extension ConversationRuntimeController {
-    // 运行时收敛顺序固定为：实时 timeline -> summary changes -> messages/since 补洞。
+    // 运行时收敛顺序固定为：实时 timeline -> summary changes -> timeline/since 补洞。
     // 不允许在这里重新引入“写后 summary 立即一致”的客户端假设。
     enum HistoryConfig {
         static let latestHistoryLimit = 100

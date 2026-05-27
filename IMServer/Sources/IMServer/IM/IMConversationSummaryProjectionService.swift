@@ -313,7 +313,7 @@ struct IMConversationSummaryProjectionService {
             memberCount: row.memberCount,
             memberUserIDs: row.memberUserIDs.sorted { $0.uuidString < $1.uuidString },
             lastMessage: row.lastMessage,
-            lastReadSequence: row.lastReadSequence,
+            lastReadSequence: UInt64(row.lastReadSequence),
             unreadCount: row.unreadCount,
             isPinned: row.isPinned,
             pinnedAt: row.pinnedAt,

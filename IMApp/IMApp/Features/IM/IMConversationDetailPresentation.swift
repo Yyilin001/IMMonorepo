@@ -323,16 +323,19 @@ extension IMConversationDetailView {
         conversation?.messages ?? []
     }
 
+    var timelineItems: [IMConversationTimelineItem] {
+        conversation?.timelineItems ?? []
+    }
+
     func deliveryOverrideText(for message: IMConversationMessage) -> String? {
         guard message.direction == .outgoing,
-              message.serverSequence != nil,
               message.deliveryState == .sent
         else {
             return nil
         }
 
-        guard let sequence = message.serverSequence,
-              let summary = conversationStore.receiptSummary(for: conversationID)
+        let sequence = message.serverSequence
+        guard let summary = conversationStore.receiptSummary(for: conversationID)
         else {
             return "已发送"
         }

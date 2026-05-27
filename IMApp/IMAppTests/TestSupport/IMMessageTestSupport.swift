@@ -98,7 +98,6 @@ enum TestConversationEventType: String {
     case conversationSettingsChanged = "conversation_settings_changed"
     case inviteChanged = "invite_changed"
     case messageStreamStarted = "message_stream_started"
-    case messageStreamChunk = "message_stream_chunk"
     case messageStreamCompleted = "message_stream_completed"
     case messageStreamFailed = "message_stream_failed"
     case messageStreamCancelled = "message_stream_cancelled"
@@ -298,9 +297,6 @@ extension IMTCPConnectionEvent {
         case .messageStreamStarted:
             eventType = .messageStreamStarted
             body = .messageStream(payload.stream ?? emptyStreamPayload(payload), message: payload.message)
-        case .messageStreamChunk:
-            eventType = .messageStreamChunk
-            body = .messageStream(payload.stream ?? emptyStreamPayload(payload), message: payload.message)
         case .messageStreamCompleted:
             eventType = .messageStreamCompleted
             body = .messageStream(payload.stream ?? emptyStreamPayload(payload), message: payload.message)
@@ -322,7 +318,7 @@ extension IMTCPConnectionEvent {
                 eventType: eventType,
                 aggregateType: "conversation",
                 aggregateID: payload.conversation.id,
-                aggregateSequence: UInt64(payload.message?.serverSequence ?? 0),
+                aggregateSequence: max(payload.message?.serverSequence ?? 1, 1),
                 occurredAt: payload.serverTimestamp,
                 actorUserID: payload.actorUserID,
                 conversation: payload.conversation,
@@ -339,12 +335,14 @@ extension IMTCPConnectionEvent {
         let conversationID = UUID(uuidString: payload.conversationID) ?? UUID()
         let senderUserID = payload.senderUserID ?? UUID()
         let occurredAt = payload.serverTimestamp ?? Date()
+        let sequence = payload.serverSequence ?? 1
         let message = IMConversationMessageResponseBody(
             id: messageID,
             conversationID: conversationID,
             senderUserID: senderUserID,
             clientMessageID: payload.clientMessageID,
-            serverSequence: Int(payload.serverSequence ?? 0),
+            serverSequence: sequence,
+            timelineSequence: sequence,
             content: payload.content,
             derivedState: payload.derivedState,
             createdAt: occurredAt
@@ -357,7 +355,7 @@ extension IMTCPConnectionEvent {
                 eventType: .messageCreated,
                 aggregateType: "conversation",
                 aggregateID: conversationID,
-                aggregateSequence: payload.serverSequence ?? 0,
+                aggregateSequence: sequence,
                 occurredAt: occurredAt,
                 actorUserID: payload.senderUserID,
                 conversation: nil,
@@ -396,7 +394,7 @@ extension IMMessagePreviewResponseBody {
     init(
         id: UUID,
         senderUserID: UUID,
-        serverSequence: Int,
+        serverSequence: UInt64,
         kind: String,
         body: [String: String],
         createdAt: Date?
@@ -405,6 +403,7 @@ extension IMMessagePreviewResponseBody {
             id: id,
             senderUserID: senderUserID,
             serverSequence: serverSequence,
+            timelineSequence: serverSequence,
             content: testMessageContent(kind: kind, body: body),
             createdAt: createdAt
         )
@@ -437,7 +436,7 @@ extension IMConversationMessageResponseBody {
         conversationID: UUID,
         senderUserID: UUID,
         clientMessageID: String? = nil,
-        serverSequence: Int,
+        serverSequence: UInt64,
         kind: String,
         body: [String: String],
         createdAt: Date?
@@ -448,6 +447,7 @@ extension IMConversationMessageResponseBody {
             senderUserID: senderUserID,
             clientMessageID: clientMessageID,
             serverSequence: serverSequence,
+            timelineSequence: serverSequence,
             content: testMessageContent(kind: kind, body: body),
             createdAt: createdAt
         )
@@ -501,24 +501,48 @@ extension IMCachedMessageState {
         id: String,
         conversationID: String,
         clientMessageID: String?,
-        serverMessageID: String?,
-        senderUserID: UUID?,
-        serverSequence: UInt64?,
+        serverMessageID: String,
+        senderUserID: UUID,
+        serverSequence: UInt64,
         kind: String,
         text: String,
         direction: IMMessageDirection,
         createdAt: Date,
         deliveryState: IMMessageDeliveryState
     ) {
-        self.init(
+        try! self.init(
             id: id,
             conversationID: conversationID,
             clientMessageID: clientMessageID,
             serverMessageID: serverMessageID,
             senderUserID: senderUserID,
             serverSequence: serverSequence,
+            timelineSequence: serverSequence,
             content: testMessageContent(kind: kind, body: ["text": text]),
             direction: direction,
+            createdAt: createdAt,
+            deliveryState: deliveryState
+        )
+    }
+}
+
+extension IMCachedPendingMessageState {
+    init(
+        id: String,
+        conversationID: String,
+        clientMessageID: String? = nil,
+        senderUserID: UUID,
+        kind: String,
+        text: String,
+        createdAt: Date,
+        deliveryState: IMMessageDeliveryState
+    ) {
+        self.init(
+            localMessageID: id,
+            clientMessageID: clientMessageID ?? id,
+            conversationID: conversationID,
+            senderUserID: senderUserID,
+            content: testMessageContent(kind: kind, body: ["text": text]),
             createdAt: createdAt,
             deliveryState: deliveryState
         )
@@ -543,8 +567,8 @@ extension IMConversationCacheSnapshot {
                 IMSyncCursorState(
                     conversationID: conversation.id,
                     hasLoadedMessages: conversation.hasLoadedMessages,
-                    latestSyncedServerSequence: conversation.latestSyncedServerSequence,
-                    oldestLoadedServerSequence: conversation.oldestLoadedServerSequence
+                    latestLoadedTimelineSequence: conversation.latestLoadedTimelineSequence,
+                    oldestLoadedTimelineSequence: conversation.oldestLoadedTimelineSequence
                 )
             }
         )

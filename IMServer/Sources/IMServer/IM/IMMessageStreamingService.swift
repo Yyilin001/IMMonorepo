@@ -114,12 +114,6 @@ struct IMMessageStreamingService {
             userID: userID
         )
         try await InlineOutboxProjectionRuntime(app: app).flushIfAllowed()
-        await AIStreamEventPublisher(app: app).publishStarted(
-            initial: initial,
-            streamID: streamID,
-            conversationID: conversationID,
-            userID: userID
-        )
         return initial
     }
 }

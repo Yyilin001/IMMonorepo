@@ -891,10 +891,10 @@ extension AuthManagerTests {
                 )
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             default:
                 return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
@@ -973,10 +973,10 @@ extension AuthManagerTests {
                 )
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationMembersBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             case ("POST", "/api/contact-requests"):
                 let body = try JSONDecoder().decode(
                     ContactRequestCreateRequestBody.self,
@@ -1092,10 +1092,10 @@ extension AuthManagerTests {
                 )
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationMembersBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             case ("POST", "/api/contact-requests/\(requestID.uuidString)/accept"):
                 await mutationState.markMutated()
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody(contact))
@@ -1325,10 +1325,10 @@ extension AuthManagerTests {
                         directPeer: IMDirectPeerResponseBody(id: peer.id, email: peer.email)
                     )
                 )
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             default:
                 return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
@@ -1381,10 +1381,10 @@ extension AuthManagerTests {
                         directPeer: IMDirectPeerResponseBody(id: peer.id, email: peer.email)
                     )
                 )
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             default:
                 return try Self.defaultOrUnexpectedIMResponse(for: request)
             }

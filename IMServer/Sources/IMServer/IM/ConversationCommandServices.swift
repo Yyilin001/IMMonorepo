@@ -419,24 +419,24 @@ struct ConversationEventualReadService {
             )
     }
 
-    func listMessages(
+    func listTimeline(
         in conversationID: UUID,
         for userID: UUID,
         beforeSequence: Int?,
         limit: Int?
-    ) async throws -> [IMMessageResponse] {
+    ) async throws -> IMTimelinePageResponse {
         try await ConversationTimelineReadSupport(db: database(forConversationID: conversationID))
-            .listMessages(in: conversationID, for: userID, beforeSequence: beforeSequence, limit: limit)
+            .listTimeline(in: conversationID, for: userID, beforeSequence: beforeSequence, limit: limit)
     }
 
-    func listMessagesSince(
+    func listTimelineSince(
         in conversationID: UUID,
         for userID: UUID,
         afterSequence: Int,
         limit: Int?
-    ) async throws -> IMMessageSinceResponse {
+    ) async throws -> IMTimelinePageResponse {
         try await ConversationTimelineReadSupport(db: database(forConversationID: conversationID))
-            .listMessagesSince(in: conversationID, for: userID, afterSequence: afterSequence, limit: limit)
+            .listTimelineSince(in: conversationID, for: userID, afterSequence: afterSequence, limit: limit)
     }
 
     func searchMessages(

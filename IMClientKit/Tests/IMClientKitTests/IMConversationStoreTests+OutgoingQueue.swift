@@ -20,7 +20,7 @@ extension IMConversationStoreTests {
             message: "IM 长连接未建立，消息没有发送出去。"
         )
 
-        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        let failedMessage = try #require(store.selectedConversation?.pendingMessages.first)
         #expect(store.isRetryableFailure(failedMessage))
 
         let retryRequest = try #require(
@@ -33,8 +33,8 @@ extension IMConversationStoreTests {
         #expect(retryRequest.localMessageID == failedMessage.id)
         #expect(retryRequest.payload.clientMessageID == originalClientMessageID)
         #expect(retryRequest.payload.body["text"] == "retry me")
-        #expect(store.selectedConversation?.messages.count == 1)
-        #expect(store.selectedConversation?.messages.first?.deliveryState == .sending)
+        #expect(store.selectedConversation?.pendingMessages.count == 1)
+        #expect(store.selectedConversation?.pendingMessages.first?.deliveryState == .sending)
     }
 
 
@@ -54,7 +54,7 @@ extension IMConversationStoreTests {
         let restoredStore = IMConversationStore()
         restoredStore.restoreCacheSnapshot(snapshot)
 
-        let restoredMessage = try #require(restoredStore.selectedConversation?.messages.first)
+        let restoredMessage = try #require(restoredStore.selectedConversation?.pendingMessages.first)
         #expect(restoredMessage.deliveryState == .unknown(message: "发送状态未确认，请重试。"))
         #expect(restoredStore.isRetryableFailure(restoredMessage))
 
@@ -67,7 +67,7 @@ extension IMConversationStoreTests {
 
         #expect(retryRequest.localMessageID == restoredMessage.id)
         #expect(retryRequest.payload.clientMessageID == originalClientMessageID)
-        #expect(restoredStore.selectedConversation?.messages.first?.deliveryState == .sending)
+        #expect(restoredStore.selectedConversation?.pendingMessages.first?.deliveryState == .sending)
     }
 
 
@@ -82,8 +82,8 @@ extension IMConversationStoreTests {
         )
 
         #expect(didQueue)
-        let queuedMessage = try #require(store.selectedConversation?.messages.first)
-        let clientMessageID = try #require(queuedMessage.clientMessageID)
+        let queuedMessage = try #require(store.selectedConversation?.pendingMessages.first)
+        let clientMessageID = queuedMessage.clientMessageID
         #expect(queuedMessage.deliveryState == .queued(message: "等待 IM 长连接恢复后发送。"))
         #expect(store.isRetryableFailure(queuedMessage))
 
@@ -93,7 +93,7 @@ extension IMConversationStoreTests {
         #expect(requests[0].localMessageID == queuedMessage.id)
         #expect(requests[0].payload.clientMessageID == clientMessageID)
         #expect(requests[0].payload.body["text"] == "queued text")
-        #expect(store.selectedConversation?.messages.first?.deliveryState == .sending)
+        #expect(store.selectedConversation?.pendingMessages.first?.deliveryState == .sending)
 
         store.applyOutgoingAcknowledgement(
             requestID: requests[0].requestID,
@@ -104,7 +104,7 @@ extension IMConversationStoreTests {
             )
         )
 
-        #expect(store.selectedConversation?.messages.first?.deliveryState == .sent)
+        #expect(store.selectedConversation?.pendingMessages.first?.deliveryState == .sending)
     }
 
 
@@ -136,9 +136,8 @@ extension IMConversationStoreTests {
             )
         )
 
-        let message = try #require(store.selectedConversation?.messages.first)
-        #expect(message.serverMessageID == "server-1")
-        #expect(message.deliveryState == .sent)
+        let message = try #require(store.selectedConversation?.pendingMessages.first)
+        #expect(message.deliveryState == .sending)
         #expect(store.statusMessage == nil)
     }
 
@@ -164,8 +163,7 @@ extension IMConversationStoreTests {
             )
         )
 
-        let message = try #require(store.selectedConversation?.messages.first)
-        #expect(message.serverMessageID == nil)
+        let message = try #require(store.selectedConversation?.pendingMessages.first)
         #expect(message.deliveryState == .failed(message: "TCP 连接已关闭。"))
         #expect(store.statusMessage == "TCP 连接已关闭。")
     }
@@ -184,7 +182,8 @@ extension IMConversationStoreTests {
                         kind: .direct,
                         memberCount: 2,
                         memberUserIDs: [Self.currentUserID, Self.peerUserID],
-                        messages: [
+                        messages: [],
+                        pendingMessages: [
                             Self.cachedQueuedMessage(id: "queued-2", conversationID: conversationID, text: "second", createdAt: 2),
                             Self.cachedQueuedMessage(id: "queued-1", conversationID: conversationID, text: "first", createdAt: 1),
                             Self.cachedQueuedMessage(id: "queued-3", conversationID: conversationID, text: "third", createdAt: 3)
@@ -192,8 +191,8 @@ extension IMConversationStoreTests {
                         hasLoadedMessages: false,
                         lastMessagePreviewText: "third",
                         hasMoreHistory: false,
-                        latestSyncedServerSequence: nil,
-                        oldestLoadedServerSequence: nil,
+                        latestLoadedTimelineSequence: nil,
+                        oldestLoadedTimelineSequence: nil,
                         serverLastReadSequence: 0,
                         serverUnreadCount: 0,
                         updatedAt: Date(timeIntervalSince1970: 3)
@@ -206,7 +205,7 @@ extension IMConversationStoreTests {
         let requests = store.queuedOutgoingMessageRequests(limit: 2)
 
         #expect(requests.map { $0.payload.body["text"] } == ["first", "second"])
-        #expect(store.selectedConversation?.messages.map(\.deliveryState) == [
+        #expect(store.selectedConversation?.pendingMessages.map(\.deliveryState) == [
             .sending,
             .sending,
             .queued(message: "等待 IM 长连接恢复后发送。")
@@ -227,7 +226,7 @@ extension IMConversationStoreTests {
 
         store.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
 
-        let messagesAfterDisconnect = try #require(store.selectedConversation?.messages)
+        let messagesAfterDisconnect = try #require(store.selectedConversation?.pendingMessages)
         #expect(messagesAfterDisconnect.map(\.deliveryState) == [
             .unknown(message: "发送状态未确认，请重试。"),
             .queued(message: "等待 IM 长连接恢复后发送。")
@@ -260,7 +259,7 @@ extension IMConversationStoreTests {
         let clientMessageID = try #require(request.payload.clientMessageID)
         store.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
 
-        store.appendMessages(
+        store.appendTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -321,7 +320,7 @@ extension IMConversationStoreTests {
         store.queueOutgoingText("first queued", conversationID: conversationID, senderUserID: Self.currentUserID)
         store.queueOutgoingText("second queued", conversationID: conversationID, senderUserID: Self.currentUserID)
 
-        let messages = try #require(store.selectedConversation?.messages)
+        let messages = try #require(store.selectedConversation?.pendingMessages)
         #expect(messages.count == 2)
         #expect(store.selectedConversation?.lastMessagePreview == "second queued")
 
@@ -331,7 +330,7 @@ extension IMConversationStoreTests {
         )
 
         #expect(didCancelLatest)
-        #expect(store.selectedConversation?.messages.map(\.text) == ["first queued"])
+        #expect(store.selectedConversation?.pendingMessages.map(\.text) == ["first queued"])
         #expect(store.selectedConversation?.lastMessagePreview == "first queued")
         #expect(store.queueSummary(for: conversationID).queuedCount == 1)
         #expect(store.totalQueueSummary().queuedCount == 1)
@@ -342,7 +341,7 @@ extension IMConversationStoreTests {
         )
 
         #expect(didCancelRemaining)
-        #expect(store.selectedConversation?.messages.isEmpty == true)
+        #expect(store.selectedConversation?.pendingMessages.isEmpty == true)
         #expect(store.selectedConversation?.lastMessagePreview == "")
         #expect(!store.queueSummary(for: conversationID).hasPendingWork)
         #expect(store.queuedOutgoingMessageRequests(limit: 10).isEmpty)
@@ -350,7 +349,7 @@ extension IMConversationStoreTests {
         let snapshot = store.makeCacheSnapshot(lastSummaryRefreshAt: nil)
         let restoredStore = IMConversationStore()
         restoredStore.restoreCacheSnapshot(snapshot)
-        #expect(restoredStore.selectedConversation?.messages.isEmpty == true)
+        #expect(restoredStore.selectedConversation?.pendingMessages.isEmpty == true)
     }
 
 
@@ -383,15 +382,14 @@ extension IMConversationStoreTests {
         ))
         store.markOutgoingFailure(requestID: failedRequest.requestID, message: "TCP 连接已关闭。")
 
-        let messages = try #require(store.selectedConversation?.messages)
-        let sentMessage = try #require(messages.first(where: { $0.text == "sent" }))
-        let sendingMessage = try #require(messages.first(where: { $0.id == sendingRequest.localMessageID }))
-        let failedMessage = try #require(messages.first(where: { $0.text == "failed" }))
+        let pendingMessages = try #require(store.selectedConversation?.pendingMessages)
+        let sendingMessage = try #require(pendingMessages.first(where: { $0.id == sendingRequest.localMessageID }))
+        let failedMessage = try #require(pendingMessages.first(where: { $0.text == "failed" }))
 
-        #expect(!store.cancelQueuedOutgoingMessage(localMessageID: sentMessage.id, conversationID: conversationID))
+        #expect(store.selectedConversation?.pendingMessages.first(where: { $0.text == "sent" })?.deliveryState == .sending)
         #expect(!store.cancelQueuedOutgoingMessage(localMessageID: sendingMessage.id, conversationID: conversationID))
         #expect(!store.cancelQueuedOutgoingMessage(localMessageID: failedMessage.id, conversationID: conversationID))
-        #expect(store.selectedConversation?.messages.count == 4)
+        #expect(store.selectedConversation?.pendingMessages.count == 4)
     }
 
 
@@ -414,7 +412,7 @@ extension IMConversationStoreTests {
             )
         )
 
-        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        let failedMessage = try #require(store.selectedConversation?.pendingMessages.first)
         #expect(failedMessage.deliveryState == .failed(
             message: "你们还不是好友，对方回复前只能发送一条消息。"
         ))
@@ -441,7 +439,7 @@ extension IMConversationStoreTests {
             )
         )
 
-        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        let failedMessage = try #require(store.selectedConversation?.pendingMessages.first)
         #expect(failedMessage.deliveryState == .failed(
             message: "你们已不是好友，当前会话不能继续发送消息。"
         ))
@@ -497,10 +495,10 @@ extension IMConversationStoreTests {
             conversationID: conversationIDString,
             senderUserID: Self.currentUserID
         )
-        let queuedMessage = try #require(store.selectedConversation?.messages.first)
-        let clientMessageID = try #require(queuedMessage.clientMessageID)
+        let queuedMessage = try #require(store.selectedConversation?.pendingMessages.first)
+        let clientMessageID = queuedMessage.clientMessageID
 
-        store.appendMessages(
+        store.appendTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -544,7 +542,7 @@ extension IMConversationStoreTests {
             )
         )
 
-        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        let failedMessage = try #require(store.selectedConversation?.pendingMessages.first)
         #expect(!store.isRetryableFailure(failedMessage))
         #expect(
             store.retryOutgoingMessage(
@@ -552,7 +550,7 @@ extension IMConversationStoreTests {
                 conversationID: conversationID
             ) == nil
         )
-        #expect(store.selectedConversation?.messages.first?.deliveryState == .failed(
+        #expect(store.selectedConversation?.pendingMessages.first?.deliveryState == .failed(
             message: "你们还不是好友，对方回复前只能发送一条消息。"
         ))
     }
@@ -578,7 +576,7 @@ extension IMConversationStoreTests {
             )
         )
 
-        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        let failedMessage = try #require(store.selectedConversation?.pendingMessages.first)
         #expect(!store.isRetryableFailure(failedMessage))
         #expect(
             store.retryOutgoingMessage(
@@ -586,7 +584,7 @@ extension IMConversationStoreTests {
                 conversationID: conversationID
             ) == nil
         )
-        #expect(store.selectedConversation?.messages.first?.deliveryState == .failed(
+        #expect(store.selectedConversation?.pendingMessages.first?.deliveryState == .failed(
             message: "你们已不是好友，当前会话不能继续发送消息。"
         ))
     }
@@ -606,13 +604,13 @@ extension IMConversationStoreTests {
         let clientMessageID = try #require(originalRequest.payload.clientMessageID)
 
         store.markOutgoingFailure(requestID: originalRequest.requestID, message: "IM 连接已断开。")
-        let failedMessage = try #require(store.selectedConversation?.messages.first)
+        let failedMessage = try #require(store.selectedConversation?.pendingMessages.first)
         _ = store.retryOutgoingMessage(
             localMessageID: failedMessage.id,
             conversationID: conversationIDString
         )
 
-        store.appendMessages(
+        store.appendTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -644,7 +642,7 @@ extension IMConversationStoreTests {
         let loadedConversationIDString = loadedConversationID.uuidString
 
         store.openConversation(id: emptyConversationID)
-        #expect(store.latestLoadedServerSequence(for: emptyConversationID) == nil)
+        #expect(store.latestLoadedMessageSequence(for: emptyConversationID) == nil)
 
         store.openConversation(id: pendingConversationID)
         _ = store.prepareOutgoingText(
@@ -652,10 +650,10 @@ extension IMConversationStoreTests {
             conversationID: pendingConversationID,
             senderUserID: Self.currentUserID
         )
-        #expect(store.latestLoadedServerSequence(for: pendingConversationID) == nil)
+        #expect(store.latestLoadedMessageSequence(for: pendingConversationID) == nil)
 
         store.openConversation(id: loadedConversationIDString)
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: loadedConversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -682,7 +680,7 @@ extension IMConversationStoreTests {
             currentUserID: Self.currentUserID
         )
 
-        #expect(store.latestLoadedServerSequence(for: loadedConversationIDString) == 9)
+        #expect(store.latestLoadedMessageSequence(for: loadedConversationIDString) == 9)
     }
 
 
@@ -703,17 +701,17 @@ extension IMConversationStoreTests {
         ]
         store.replaceConversationSummaries(summaries)
 
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: equalConversationID.uuidString,
             messages: [Self.messageResponse(conversationID: equalConversationID, serverSequence: 3)],
             currentUserID: Self.currentUserID
         )
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: staleConversationID.uuidString,
             messages: [Self.messageResponse(conversationID: staleConversationID, serverSequence: 4)],
             currentUserID: Self.currentUserID
         )
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: laterStaleConversationID.uuidString,
             messages: [Self.messageResponse(conversationID: laterStaleConversationID, serverSequence: 7)],
             currentUserID: Self.currentUserID

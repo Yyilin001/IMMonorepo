@@ -17,7 +17,7 @@ struct IMTCPClientTests {
         let configuration = IMTCPClientConfiguration(
             host: "127.0.0.1",
             port: 9000,
-            protocolVersion: 2,
+            protocolVersion: IMRealtimeProtocolVersion.currentInt,
             deviceID: "device-1",
             deviceName: "iPhone",
             platform: "ios",
@@ -40,7 +40,7 @@ struct IMTCPClientTests {
         #expect(authPayload.deviceName == "iPhone")
         #expect(authPayload.platform == "ios")
         #expect(authPayload.appVersion == "1.0.0")
-        #expect(authPayload.protocolVersion == 2)
+        #expect(authPacket.protocolVersion == IMRealtimeProtocolVersion.current)
 
         await wire.yieldIncoming(
             try encodeFrame(
@@ -124,6 +124,7 @@ struct IMTCPClientTests {
             senderUserID: Self.userID,
             clientMessageID: "client-msg-1",
             serverSequence: 7,
+            timelineSequence: 7,
             content: .richText(.plain("hello")),
             createdAt: Date(timeIntervalSince1970: 1_700_000_101)
         )
@@ -143,6 +144,7 @@ struct IMTCPClientTests {
                     id: messageID,
                     senderUserID: Self.userID,
                     serverSequence: 7,
+                    timelineSequence: 7,
                     content: .richText(.plain("hello")),
                     createdAt: Date(timeIntervalSince1970: 1_700_000_101)
                 ),
@@ -151,6 +153,8 @@ struct IMTCPClientTests {
                 createdAt: Date(timeIntervalSince1970: 1_700_000_000),
                 updatedAt: Date(timeIntervalSince1970: 1_700_000_101)
             ),
+            ownerCursor: 1,
+            ownerAggregateSequence: 1,
             body: .messageCreated(message: message, clientMessageID: "client-msg-1")
         )
 

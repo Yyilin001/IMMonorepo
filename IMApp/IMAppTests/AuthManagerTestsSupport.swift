@@ -3,10 +3,16 @@ import Foundation
 import Testing
 @testable import IMApp
 
-import Foundation
-@testable import IMClientKit
-import Testing
-@testable import IMApp
+private func testTimelineItem(
+    for message: IMConversationMessageResponseBody
+) -> IMTimelineItemResponseBody {
+    IMTimelineItemResponseBody(
+        type: .message,
+        timelineSequence: message.timelineSequence,
+        message: message,
+        notice: nil
+    )
+}
 
 actor RestoreGate {
     private var hasStarted = false
@@ -103,17 +109,17 @@ actor IMConversationMutationState {
 }
 
 actor IMSummarySequenceState {
-    private var latestServerSequence: Int
+    private var latestServerSequence: UInt64
 
-    init(latestServerSequence: Int = 1) {
+    init(latestServerSequence: UInt64 = 1) {
         self.latestServerSequence = latestServerSequence
     }
 
-    func setLatestServerSequence(_ sequence: Int) {
+    func setLatestServerSequence(_ sequence: UInt64) {
         latestServerSequence = sequence
     }
 
-    func currentLatestServerSequence() -> Int {
+    func currentLatestServerSequence() -> UInt64 {
         latestServerSequence
     }
 }
@@ -224,20 +230,28 @@ actor IMCrossDeviceConversationSummaryState {
         messages
     }
 
-    func messagesSinceResponse(afterSequence: UInt64?) -> IMConversationMessagesSinceResponseBody {
+    func timelineResponse() -> IMConversationTimelineResponseBody {
+        IMConversationTimelineResponseBody(
+            items: messages.map(testTimelineItem),
+            hasMore: false,
+            nextAfterSequence: messages.last?.timelineSequence
+        )
+    }
+
+    func messagesSinceResponse(afterSequence: UInt64?) -> IMConversationTimelineResponseBody {
         let minimumSequence = afterSequence.map(Int.init) ?? 0
         let filteredMessages = messages.filter { $0.serverSequence > minimumSequence }
-        return IMConversationMessagesSinceResponseBody(
-            messages: filteredMessages,
+        return IMConversationTimelineResponseBody(
+            items: filteredMessages.map(testTimelineItem),
             hasMore: false,
-            nextAfterSequence: filteredMessages.last?.serverSequence
+            nextAfterSequence: filteredMessages.last?.timelineSequence
         )
     }
 
     func appendMessage(
         _ message: IMConversationMessageResponseBody,
         unreadCount: Int,
-        lastReadSequence: Int
+        lastReadSequence: UInt64
     ) {
         version += 1
         messages.removeAll { $0.id == message.id }
@@ -263,6 +277,7 @@ actor IMCrossDeviceConversationSummaryState {
                 id: message.id,
                 senderUserID: message.senderUserID,
                 serverSequence: message.serverSequence,
+                timelineSequence: message.serverSequence,
                 content: message.content,
                 derivedState: message.derivedState,
                 createdAt: message.createdAt
@@ -278,7 +293,7 @@ actor IMCrossDeviceConversationSummaryState {
     }
 
     func updateReadState(
-        lastReadSequence: Int,
+        lastReadSequence: UInt64,
         unreadCount: Int
     ) -> IMConversationSummaryResponseBody {
         version += 1
@@ -324,6 +339,7 @@ actor IMCrossDeviceConversationSummaryState {
                 senderUserID: senderUserID,
                 clientMessageID: messages[messageIndex].clientMessageID,
                 serverSequence: lastMessage.serverSequence,
+                timelineSequence: lastMessage.serverSequence,
                 content: recalledContent,
                 derivedState: recalledState,
                 createdAt: lastMessage.createdAt
@@ -343,6 +359,7 @@ actor IMCrossDeviceConversationSummaryState {
                 id: lastMessage.id,
                 senderUserID: senderUserID,
                 serverSequence: lastMessage.serverSequence,
+                timelineSequence: lastMessage.serverSequence,
                 content: recalledContent,
                 derivedState: recalledState,
                 createdAt: lastMessage.createdAt
@@ -362,6 +379,7 @@ actor IMCrossDeviceConversationSummaryState {
             senderUserID: senderUserID,
             clientMessageID: nil,
             serverSequence: lastMessage.serverSequence,
+            timelineSequence: lastMessage.serverSequence,
             content: recalledContent,
             derivedState: recalledState,
             createdAt: lastMessage.createdAt
@@ -445,17 +463,26 @@ actor IMCrossDeviceConversationListState {
             }
     }
 
+    func timelineResponse(for conversationID: UUID) -> IMConversationTimelineResponseBody {
+        let messages = messagesResponse(for: conversationID)
+        return IMConversationTimelineResponseBody(
+            items: messages.map(testTimelineItem),
+            hasMore: false,
+            nextAfterSequence: messages.last?.timelineSequence
+        )
+    }
+
     func messagesSinceResponse(
         for conversationID: UUID,
         afterSequence: UInt64?
-    ) -> IMConversationMessagesSinceResponseBody {
+    ) -> IMConversationTimelineResponseBody {
         let minimumSequence = afterSequence.map(Int.init) ?? 0
         let filteredMessages = messagesResponse(for: conversationID)
-            .filter { $0.serverSequence > minimumSequence }
-        return IMConversationMessagesSinceResponseBody(
-            messages: filteredMessages,
+            .filter { $0.timelineSequence > minimumSequence }
+        return IMConversationTimelineResponseBody(
+            items: filteredMessages.map(testTimelineItem),
             hasMore: false,
-            nextAfterSequence: filteredMessages.last?.serverSequence
+            nextAfterSequence: filteredMessages.last?.timelineSequence
             )
     }
 
@@ -503,6 +530,7 @@ actor IMCrossDeviceConversationListState {
             senderUserID: originalMessage.senderUserID,
             clientMessageID: originalMessage.clientMessageID,
             serverSequence: originalMessage.serverSequence,
+            timelineSequence: originalMessage.serverSequence,
             content: originalMessage.content,
             derivedState: editedState,
             createdAt: originalMessage.createdAt
@@ -577,6 +605,7 @@ actor IMCrossDeviceConversationListState {
             senderUserID: originalMessage.senderUserID,
             clientMessageID: originalMessage.clientMessageID,
             serverSequence: originalMessage.serverSequence,
+            timelineSequence: originalMessage.serverSequence,
             content: originalMessage.content,
             derivedState: updatedState,
             createdAt: originalMessage.createdAt
@@ -600,7 +629,7 @@ actor IMCrossDeviceConversationListState {
     func appendMessage(
         _ message: IMConversationMessageResponseBody,
         unreadCount: Int,
-        lastReadSequence: Int
+        lastReadSequence: UInt64
     ) {
         version += 1
         var messages = messagesByConversationID[message.conversationID, default: []]
@@ -632,6 +661,7 @@ actor IMCrossDeviceConversationListState {
                 id: message.id,
                 senderUserID: message.senderUserID,
                 serverSequence: message.serverSequence,
+                timelineSequence: message.serverSequence,
                 content: message.content,
                 derivedState: message.derivedState,
                 createdAt: message.createdAt
@@ -668,6 +698,7 @@ actor IMCrossDeviceConversationListState {
                 senderUserID: senderUserID,
                 clientMessageID: messages[messageIndex].clientMessageID,
                 serverSequence: lastMessage.serverSequence,
+                timelineSequence: lastMessage.serverSequence,
                 content: recalledContent,
                 derivedState: recalledState,
                 createdAt: lastMessage.createdAt
@@ -689,6 +720,7 @@ actor IMCrossDeviceConversationListState {
                 id: lastMessage.id,
                 senderUserID: senderUserID,
                 serverSequence: lastMessage.serverSequence,
+                timelineSequence: lastMessage.serverSequence,
                 content: recalledContent,
                 derivedState: recalledState,
                 createdAt: lastMessage.createdAt
@@ -708,6 +740,7 @@ actor IMCrossDeviceConversationListState {
             senderUserID: senderUserID,
             clientMessageID: nil,
             serverSequence: lastMessage.serverSequence,
+            timelineSequence: lastMessage.serverSequence,
             content: recalledContent,
             derivedState: recalledState,
             createdAt: lastMessage.createdAt
@@ -740,6 +773,7 @@ actor IMCrossDeviceConversationListState {
             senderUserID: senderUserID,
             clientMessageID: originalMessage.clientMessageID,
             serverSequence: originalMessage.serverSequence,
+            timelineSequence: originalMessage.serverSequence,
             content: originalMessage.content,
             derivedState: recalledState,
             createdAt: originalMessage.createdAt
@@ -769,6 +803,7 @@ actor IMCrossDeviceConversationListState {
                     id: $0.id,
                     senderUserID: $0.senderUserID,
                     serverSequence: $0.serverSequence,
+                    timelineSequence: $0.serverSequence,
                     content: $0.content,
                     derivedState: $0.derivedState,
                     createdAt: $0.createdAt
@@ -789,6 +824,7 @@ actor IMCrossDeviceConversationListState {
             senderUserID: senderUserID,
             clientMessageID: originalMessage.clientMessageID,
             serverSequence: originalMessage.serverSequence,
+            timelineSequence: originalMessage.serverSequence,
             content: originalMessage.content,
             derivedState: recalledState,
             createdAt: originalMessage.createdAt
@@ -797,7 +833,7 @@ actor IMCrossDeviceConversationListState {
 
     func updateReadState(
         for conversationID: UUID,
-        lastReadSequence: Int,
+        lastReadSequence: UInt64,
         unreadCount: Int
     ) {
         version += 1
@@ -850,6 +886,7 @@ actor IMCrossDeviceConversationListState {
                     id: $0.id,
                     senderUserID: $0.senderUserID,
                     serverSequence: $0.serverSequence,
+                    timelineSequence: $0.serverSequence,
                     content: $0.content,
                     derivedState: $0.derivedState,
                     createdAt: $0.createdAt

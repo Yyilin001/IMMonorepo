@@ -397,10 +397,10 @@ struct AuthManagerTests {
             return HTTPFixtures.response(statusCode: 200, body: try Self.emptyConversationChangesBody())
         case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/members") == true:
             return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-        case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/messages/since") == true:
-            return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
-        case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/messages") == true:
-            return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
+        case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/timeline/since") == true:
+            return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+        case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/timeline") == true:
+            return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
         case ("POST", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/read") == true:
             return HTTPFixtures.response(
                 statusCode: 200,
@@ -476,8 +476,14 @@ struct AuthManagerTests {
             )
         )
     }
-    nonisolated static func emptyMessagesBody() throws -> Data {
-        try HTTPFixtures.jsonBody([IMConversationMessageResponseBody]())
+    nonisolated static func emptyTimelineBody() throws -> Data {
+        try HTTPFixtures.jsonBody(
+            IMConversationTimelineResponseBody(
+                items: [],
+                hasMore: false,
+                nextAfterSequence: nil
+            )
+        )
     }
     nonisolated static func emptyConversationChangesBody() throws -> Data {
         try HTTPFixtures.jsonBody(
@@ -505,15 +511,6 @@ struct AuthManagerTests {
             )
         )
     }
-    nonisolated static func emptyMessagesSinceBody() throws -> Data {
-        try HTTPFixtures.jsonBody(
-            IMConversationMessagesSinceResponseBody(
-                messages: [],
-                hasMore: false,
-                nextAfterSequence: nil
-            )
-        )
-    }
     nonisolated static func emptyMembersBody() throws -> Data {
         try imConversationMembersPageBody([])
     }
@@ -534,7 +531,7 @@ struct AuthManagerTests {
     }
     nonisolated static func imConversationReadBody(
         conversationID: UUID,
-        lastReadSequence: Int,
+        lastReadSequence: UInt64,
         unreadCount: Int = 0
     ) throws -> Data {
         try HTTPFixtures.jsonBody(
@@ -565,7 +562,7 @@ struct AuthManagerTests {
         )
         return try imConversationReadBody(
             conversationID: conversationID,
-            lastReadSequence: Int(payload.readSequence)
+            lastReadSequence: payload.readSequence
         )
     }
 
@@ -594,7 +591,7 @@ struct AuthManagerTests {
     }
     nonisolated static func imConversationsBody(
         conversationID: UUID,
-        latestServerSequence: Int = 1,
+        latestServerSequence: UInt64 = 1,
         kind: IMConversationKind = .group,
         directMessagingState: String? = nil,
         memberUserIDs: [UUID] = [user.id],
@@ -646,7 +643,7 @@ struct AuthManagerTests {
     }
     nonisolated static func imConversationSummary(
         id: UUID,
-        latestServerSequence: Int,
+        latestServerSequence: UInt64,
         updatedAt: Date,
         title: String,
         kind: IMConversationKind = .group
@@ -669,10 +666,8 @@ struct AuthManagerTests {
             updatedAt: updatedAt
         )
     }
-    nonisolated static func imMessagesBody(conversationID: UUID) throws -> Data {
-        try HTTPFixtures.jsonBody(
-            [
-                IMConversationMessageResponseBody(
+    nonisolated static func imTimelineBody(conversationID: UUID) throws -> Data {
+        let message = IMConversationMessageResponseBody(
                     id: UUID(uuidString: "dddddddd-1111-2222-3333-eeeeeeeeeeee")!,
                     conversationID: conversationID,
                     senderUserID: user.id,
@@ -682,11 +677,15 @@ struct AuthManagerTests {
                     body: ["text": "来自历史接口"],
                     createdAt: Date(timeIntervalSince1970: 1_700_001_000)
                 )
-            ]
+        return try imTimelinePageBody(
+            conversationID: conversationID,
+            messages: [message],
+            hasMore: false,
+            nextAfterSequence: message.timelineSequence
         )
     }
-    nonisolated static func imMessagesSinceBody(conversationID: UUID) throws -> Data {
-        try imMessagesSincePageBody(
+    nonisolated static func imTimelineSinceBody(conversationID: UUID) throws -> Data {
+        try imTimelinePageBody(
             conversationID: conversationID,
             messages: [
                 IMConversationMessageResponseBody(
@@ -706,7 +705,7 @@ struct AuthManagerTests {
     }
     nonisolated static func gapMessage(
         conversationID: UUID,
-        serverSequence: Int
+        serverSequence: UInt64
     ) -> IMConversationMessageResponseBody {
         IMConversationMessageResponseBody(
             id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", serverSequence)) ?? UUID(),
@@ -719,22 +718,29 @@ struct AuthManagerTests {
             createdAt: Date(timeIntervalSince1970: 1_700_001_000 + Double(serverSequence))
         )
     }
-    nonisolated static func imMessagesSincePageBody(
+    nonisolated static func imTimelinePageBody(
         conversationID: UUID,
         messages: [IMConversationMessageResponseBody],
         hasMore: Bool,
-        nextAfterSequence: Int?
+        nextAfterSequence: UInt64?
     ) throws -> Data {
         _ = conversationID
         return try HTTPFixtures.jsonBody(
-            IMConversationMessagesSinceResponseBody(
-                messages: messages,
+            IMConversationTimelineResponseBody(
+                items: messages.map { message in
+                    IMTimelineItemResponseBody(
+                        type: .message,
+                        timelineSequence: message.timelineSequence,
+                        message: message,
+                        notice: nil
+                    )
+                },
                 hasMore: hasMore,
                 nextAfterSequence: nextAfterSequence
             )
         )
     }
-    nonisolated static func afterSequence(from request: URLRequest) -> Int? {
+    nonisolated static func afterSequence(from request: URLRequest) -> UInt64? {
         guard let url = request.url,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else {
@@ -744,23 +750,20 @@ struct AuthManagerTests {
         return components.queryItems?
             .first(where: { $0.name == "afterSequence" })?
             .value
-            .flatMap(Int.init)
+            .flatMap(UInt64.init)
     }
     nonisolated static func queuedConversationCacheSnapshot(
         conversationID: String,
         messageCount: Int
     ) -> IMConversationCacheSnapshot {
         let queuedMessages = (0..<messageCount).map { index in
-            IMCachedMessageState(
+            IMCachedPendingMessageState(
                 id: "queued-client-\(index + 1)",
                 conversationID: conversationID,
                 clientMessageID: "queued-client-\(index + 1)",
-                serverMessageID: nil,
                 senderUserID: user.id,
-                serverSequence: nil,
                 kind: "rich_text",
                 text: "排队消息-\(index + 1)",
-                direction: .outgoing,
                 createdAt: Date(timeIntervalSince1970: 1_700_100_000 + Double(index)),
                 deliveryState: .queued(message: "等待 IM 长连接恢复后发送。")
             )
@@ -774,12 +777,13 @@ struct AuthManagerTests {
                     kind: .direct,
                     memberCount: 2,
                     memberUserIDs: [user.id],
-                    messages: queuedMessages,
+                    messages: [],
+                    pendingMessages: queuedMessages,
                     hasLoadedMessages: true,
-                    lastMessagePreviewText: queuedMessages.last?.text ?? "",
+                    lastMessagePreviewText: queuedMessages.last?.content.previewText ?? "",
                     hasMoreHistory: false,
-                    latestSyncedServerSequence: nil,
-                    oldestLoadedServerSequence: nil,
+                    latestLoadedTimelineSequence: nil,
+                    oldestLoadedTimelineSequence: nil,
                     serverLastReadSequence: 0,
                     serverUnreadCount: 0,
                     updatedAt: queuedMessages.last?.createdAt ?? Date(timeIntervalSince1970: 1_700_100_000)

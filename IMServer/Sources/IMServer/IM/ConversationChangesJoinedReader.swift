@@ -172,7 +172,7 @@ struct JoinedConversationChangeRow: Decodable {
             memberCount: memberCount,
             memberUserIDs: memberUserIDs.sorted { $0.uuidString < $1.uuidString },
             lastMessage: lastMessage,
-            lastReadSequence: lastReadSequence,
+            lastReadSequence: UInt64(lastReadSequence),
             unreadCount: unreadCount,
             isPinned: isPinned,
             pinnedAt: summaryPinnedAt,

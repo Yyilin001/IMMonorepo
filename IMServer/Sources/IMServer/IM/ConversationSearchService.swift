@@ -106,7 +106,7 @@ struct ConversationSearchService {
             return IMConversationMessageSearchHitResponse(
                 messageID: row.message_id,
                 senderUserID: message.$sender.id,
-                serverSequence: message.serverSequence,
+                serverSequence: try imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence"),
                 content: content,
                 derivedState: aggregate.derivedState,
                 snippet: snippet,
@@ -144,7 +144,7 @@ struct ConversationSearchService {
                 IMConversationMessageSearchHitResponse(
                     messageID: row.message_id,
                     senderUserID: senderUserID,
-                    serverSequence: row.server_sequence,
+                    serverSequence: try imPositiveUInt64Sequence(row.server_sequence, field: "server_sequence"),
                     content: content,
                     derivedState: derivedState,
                     snippet: searchSnippet(for: query, searchableText: row.searchable_text),

@@ -19,7 +19,7 @@ struct ConversationListReadModel {
     func queueSummary(
         in conversations: [IMConversation],
         for conversationID: String,
-        summarize: ([IMConversationMessage]) -> IMConversationQueueSummary
+        summarize: ([IMPendingConversationMessage]) -> IMConversationQueueSummary
     ) -> IMConversationQueueSummary {
         let trimmedID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedID.isEmpty,
@@ -28,15 +28,15 @@ struct ConversationListReadModel {
             return IMConversationQueueSummary(queuedCount: 0, sendingCount: 0, retryableIssueCount: 0)
         }
 
-        return summarize(conversation.messages)
+        return summarize(conversation.pendingMessages)
     }
 
     func totalQueueSummary(
         in conversations: [IMConversation],
-        summarize: ([IMConversationMessage]) -> IMConversationQueueSummary
+        summarize: ([IMPendingConversationMessage]) -> IMConversationQueueSummary
     ) -> IMConversationQueueSummary {
         conversations.reduce(IMConversationQueueSummary(queuedCount: 0, sendingCount: 0, retryableIssueCount: 0)) {
-            let next = summarize($1.messages)
+            let next = summarize($1.pendingMessages)
             return IMConversationQueueSummary(
                 queuedCount: $0.queuedCount + next.queuedCount,
                 sendingCount: $0.sendingCount + next.sendingCount,

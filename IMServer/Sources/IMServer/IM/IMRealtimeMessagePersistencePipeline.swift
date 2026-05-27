@@ -130,6 +130,7 @@ struct IMMessagePersistencePipeline {
             conversationID: conversationID,
             senderUserID: prepared.senderUserID,
             serverSequence: serverSequence,
+            timelineSequence: serverSequence,
             clientMessageID: prepared.normalizedClientMessageID,
             content: canonicalContent
         )
@@ -143,9 +144,10 @@ struct IMMessagePersistencePipeline {
         try await ConversationOutboxService(db: database).enqueue(
             type: .messageCreated,
             conversationID: conversationID,
-            payload: ConversationDomainEventPayload(
-                recipientUserIDs: recipientUserIDs,
-                messageID: try message.requireID()
+            actorUserID: prepared.senderUserID,
+            payload: .messageCreated(
+                messageID: try message.requireID(),
+                recipientUserIDs: recipientUserIDs
             )
         )
         return message

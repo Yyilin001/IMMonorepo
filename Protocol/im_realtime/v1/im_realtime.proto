@@ -20,6 +20,7 @@ message Packet {
     SendMessageCommand send_message = 30;
     Ack ack = 31;
     ChatDomainEvent domain_event = 40;
+    MessageStreamSignal stream_signal = 41;
     Kick kick = 50;
   }
 }
@@ -30,7 +31,6 @@ message AuthRequest {
   optional string device_name = 3;
   optional string platform = 4;
   optional string app_version = 5;
-  uint32 protocol_version = 6;
 }
 
 message AuthAccepted {
@@ -67,11 +67,15 @@ message ChatDomainEvent {
   string event_type = 2;
   string aggregate_type = 3;
   string aggregate_id = 4;
-  uint64 aggregate_sequence = 5;
+  optional uint64 aggregate_sequence = 5;
   int64 occurred_at_ms = 6;
   optional string actor_user_id = 7;
 
   optional ConversationSummary conversation = 8;
+  optional TimelineNotice timeline_notice = 9;
+  optional uint64 owner_cursor = 60;
+  optional uint64 owner_aggregate_sequence = 61;
+  bool requires_timeline_notice = 62;
 
   oneof body {
     MessageCreatedEvent message_created = 10;
@@ -80,7 +84,6 @@ message ChatDomainEvent {
     MessageVisibilityChangedEvent message_visibility_changed = 13;
     MessageFavoriteChangedEvent message_favorite_changed = 14;
     MessageStreamEvent message_stream_started = 20;
-    MessageStreamEvent message_stream_chunk = 21;
     MessageStreamEvent message_stream_completed = 22;
     MessageStreamEvent message_stream_failed = 23;
     MessageStreamEvent message_stream_cancelled = 24;
@@ -133,6 +136,11 @@ message MessageStreamEvent {
   optional ConversationMessage message = 2;
 }
 
+message MessageStreamSignal {
+  MessageStreamPayload stream = 1;
+  optional ConversationMessage message = 2;
+}
+
 message ConversationChangedEvent {}
 
 message ConversationRemovedForSelfEvent {}
@@ -150,6 +158,19 @@ message ContactChangedEvent {
   optional ContactRequest request = 1;
   optional Contact contact = 2;
   optional string contact_user_id = 3;
+}
+
+message TimelineNotice {
+  string id = 1;
+  string conversation_id = 2;
+  optional uint64 timeline_sequence = 3;
+  string event_type = 4;
+  optional string actor_user_id = 5;
+  repeated string target_user_ids = 6;
+  string notice_kind = 7;
+  map<string, string> params = 8;
+  string fallback_text = 9;
+  int64 created_at_ms = 10;
 }
 
 message Kick {
@@ -180,7 +201,7 @@ message ConversationSummary {
   int32 member_count = 9;
   repeated string member_user_ids = 10;
   optional MessagePreview last_message = 11;
-  int32 last_read_sequence = 12;
+  optional uint64 last_read_sequence = 12;
   int32 unread_count = 13;
   bool is_pinned = 14;
   optional int64 pinned_at_ms = 15;
@@ -199,10 +220,11 @@ message DirectPeer {
 message MessagePreview {
   string id = 1;
   string sender_user_id = 2;
-  int32 server_sequence = 3;
+  optional uint64 server_sequence = 3;
   MessageContent content = 4;
   MessageDerivedState derived_state = 5;
   optional int64 created_at_ms = 6;
+  optional uint64 timeline_sequence = 7;
 }
 
 message ConversationMessage {
@@ -210,10 +232,11 @@ message ConversationMessage {
   string conversation_id = 2;
   string sender_user_id = 3;
   optional string client_message_id = 4;
-  int32 server_sequence = 5;
+  optional uint64 server_sequence = 5;
   MessageContent content = 6;
   MessageDerivedState derived_state = 7;
   optional int64 created_at_ms = 8;
+  optional uint64 timeline_sequence = 9;
 }
 
 message MessageContent {

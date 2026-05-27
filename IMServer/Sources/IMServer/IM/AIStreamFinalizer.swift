@@ -67,12 +67,16 @@ struct AIStreamFinalizer {
 
         if envelope.shouldPublish {
             try await InlineOutboxProjectionRuntime(app: app).flushIfAllowed()
-            await AIStreamEventPublisher(app: app).publishFinalized(
-                envelope: envelope,
-                streamID: streamID,
-                conversationID: conversationID,
-                userID: userID,
-                state: state
+            await app.aiStreamMetrics.recordFinished(state: state)
+            app.logger.info(
+                "AI stream finalized",
+                metadata: [
+                    "streamID": .string(streamID),
+                    "messageID": .string(messageID.uuidString),
+                    "conversationID": .string(conversationID.uuidString),
+                    "userID": .string(userID.uuidString),
+                    "nodeID": .string(app.imNodeID)
+                ]
             )
         }
         return envelope.response

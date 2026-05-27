@@ -23,15 +23,17 @@ struct ConversationReplayService {
 
         var replayedCount = 0
         for record in records {
-            let envelope = ConversationEventStreamEnvelope(
-                eventID: record.eventID,
-                conversationID: record.conversationID,
-                eventType: record.eventType,
-                payload: record.payload,
-                occurredAt: record.createdAt,
-                producerShard: record.producerShard
-            )
             do {
+                let payload = try record.decodedPayload()
+                let envelope = ConversationEventStreamEnvelope(
+                    eventID: record.eventID,
+                    conversationID: record.conversationID,
+                    aggregateSequence: record.aggregateSequence,
+                    eventType: record.eventType,
+                    payload: payload,
+                    occurredAt: record.createdAt,
+                    producerShard: record.producerShard
+                )
                 try await app.conversationEventStreamProducer.publish(envelope)
                 record.replayedAt = Date()
                 record.updatedAt = record.replayedAt ?? Date()

@@ -115,7 +115,7 @@ final class ConversationRuntimeController {
             await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
             syncActiveMessageStreamSnapshots()
         case .incomplete:
-            enqueueConversationGapSyncBackfill(for: conversationID, prioritize: true)
+            enqueueConversationGapSyncCatchUp(for: conversationID, prioritize: true)
             await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
             syncActiveMessageStreamSnapshots()
         case .failed:
@@ -337,7 +337,6 @@ final class ConversationRuntimeController {
             .first(where: { $0.id == trimmedConversationID })
         let loadedMessageCount = cachedConversation?
             .messages
-            .filter { $0.serverSequence != nil }
             .count ?? 0
         let hasLoadedMessages = imConversationStore.hasLoadedMessages(for: trimmedConversationID)
         let shouldExpandCachedHistory = hasLoadedMessages
@@ -363,7 +362,7 @@ final class ConversationRuntimeController {
         guard let user = currentUserProvider(),
               let conversationID = imConversationStore.selectedConversationID,
               imConversationStore.canLoadOlderMessages(for: conversationID),
-              let beforeSequence = imConversationStore.oldestLoadedServerSequence(for: conversationID)
+              let beforeSequence = imConversationStore.oldestLoadedTimelineSequence(for: conversationID)
         else {
             return
         }
@@ -403,7 +402,7 @@ final class ConversationRuntimeController {
         }
 
         while imConversationStore.canLoadOlderMessages(for: trimmedConversationID),
-              let beforeSequence = imConversationStore.oldestLoadedServerSequence(for: trimmedConversationID)
+              let beforeSequence = imConversationStore.oldestLoadedTimelineSequence(for: trimmedConversationID)
         {
             let previousOldestSequence = beforeSequence
             await loadMessagesPage(
@@ -424,7 +423,7 @@ final class ConversationRuntimeController {
                 return
             }
 
-            let currentOldestSequence = imConversationStore.oldestLoadedServerSequence(for: trimmedConversationID)
+            let currentOldestSequence = imConversationStore.oldestLoadedTimelineSequence(for: trimmedConversationID)
             if currentOldestSequence == previousOldestSequence {
                 imConversationStore.clearReplyJump()
                 return
@@ -670,7 +669,7 @@ final class ConversationRuntimeController {
             }
 
             do {
-                let messages = try await self.sessionClient.fetchIMMessages(
+                let response = try await self.sessionClient.fetchIMTimeline(
                     conversationID: conversationID,
                     beforeSequence: beforeSequence,
                     limit: HistoryConfig.latestHistoryLimit
@@ -686,15 +685,15 @@ final class ConversationRuntimeController {
 
                 switch mergeMode {
                 case .replace:
-                    self.imConversationStore.replaceMessages(
+                    self.imConversationStore.mergeTimelinePage(
                         in: conversationID,
-                        messages: messages,
+                        response: response,
                         currentUserID: currentUserID
                     )
                 case .prepend:
-                    self.imConversationStore.prependMessages(
+                    self.imConversationStore.prependTimelinePage(
                         in: conversationID,
-                        messages: messages,
+                        response: response,
                         currentUserID: currentUserID
                     )
                 }

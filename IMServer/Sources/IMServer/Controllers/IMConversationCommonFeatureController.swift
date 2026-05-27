@@ -6,22 +6,8 @@ extension IMConversationController {
         let userID = try req.auth.require(User.self).requireID()
         let conversationID = try conversationID(from: req)
         let messageID = try messageID(from: req)
-        let db = try await req.application.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-        let message = try await IMCommonFeatureService(db: db).favoriteMessage(
-            conversationID: conversationID,
-            messageID: messageID,
-            userID: userID
-        )
-        try await ConversationOutboxService(db: db).enqueue(
-            type: .messageFavoriteChanged,
-            conversationID: conversationID,
-            payload: ConversationDomainEventPayload(
-                recipientUserIDs: [userID],
-                messageID: messageID,
-                favoriteChangedMessageID: messageID,
-                isFavorited: true
-            )
-        )
+        let message = try await ConversationCommonFeatureCommandService(app: req.application)
+            .favoriteMessage(userID: userID, conversationID: conversationID, messageID: messageID)
         try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return message
     }
@@ -30,18 +16,8 @@ extension IMConversationController {
         let userID = try req.auth.require(User.self).requireID()
         let conversationID = try conversationID(from: req)
         let messageID = try messageID(from: req)
-        let db = try await req.application.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-        try await IMCommonFeatureService(db: db).unfavoriteMessage(messageID: messageID, userID: userID)
-        try await ConversationOutboxService(db: db).enqueue(
-            type: .messageFavoriteChanged,
-            conversationID: conversationID,
-            payload: ConversationDomainEventPayload(
-                recipientUserIDs: [userID],
-                messageID: messageID,
-                favoriteChangedMessageID: messageID,
-                isFavorited: false
-            )
-        )
+        try await ConversationCommonFeatureCommandService(app: req.application)
+            .unfavoriteMessage(userID: userID, conversationID: conversationID, messageID: messageID)
         try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return .ok
     }
@@ -64,21 +40,8 @@ extension IMConversationController {
         let userID = try req.auth.require(User.self).requireID()
         let conversationID = try conversationID(from: req)
         let body = try req.content.decode(IMMessageDeleteRequest.self)
-        let db = try await req.application.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-        try await IMCommonFeatureService(db: db).hideMessages(
-            conversationID: conversationID,
-            messageIDs: body.messageIDs,
-            userID: userID
-        )
-        try await ConversationOutboxService(db: db).enqueue(
-            type: .messageVisibilityChanged,
-            conversationID: conversationID,
-            payload: ConversationDomainEventPayload(
-                recipientUserIDs: [userID],
-                messageIDs: body.messageIDs,
-                visibilityAction: .messageHidden
-            )
-        )
+        try await ConversationCommonFeatureCommandService(app: req.application)
+            .hideMessages(userID: userID, conversationID: conversationID, messageIDs: body.messageIDs)
         try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return .ok
     }
@@ -86,20 +49,8 @@ extension IMConversationController {
     func clearConversationForSelf(req: Request) async throws -> HTTPStatus {
         let userID = try req.auth.require(User.self).requireID()
         let conversationID = try conversationID(from: req)
-        let db = try await req.application.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-        try await IMCommonFeatureService(db: db).clearConversation(
-            conversationID: conversationID,
-            userID: userID,
-            deleteFromList: false
-        )
-        try await ConversationOutboxService(db: db).enqueue(
-            type: .conversationVisibilityChanged,
-            conversationID: conversationID,
-            payload: ConversationDomainEventPayload(
-                recipientUserIDs: [userID],
-                visibilityAction: .conversationCleared
-            )
-        )
+        try await ConversationCommonFeatureCommandService(app: req.application)
+            .clearConversation(userID: userID, conversationID: conversationID, deleteFromList: false)
         try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return .ok
     }
@@ -107,21 +58,8 @@ extension IMConversationController {
     func deleteConversationForSelf(req: Request) async throws -> HTTPStatus {
         let userID = try req.auth.require(User.self).requireID()
         let conversationID = try conversationID(from: req)
-        let db = try await req.application.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-        try await IMCommonFeatureService(db: db).clearConversation(
-            conversationID: conversationID,
-            userID: userID,
-            deleteFromList: true
-        )
-        try await ConversationOutboxService(db: db).enqueue(
-            type: .conversationRemovedForUser,
-            conversationID: conversationID,
-            payload: ConversationDomainEventPayload(
-                recipientUserIDs: [userID],
-                affectedUserID: userID,
-                visibilityAction: .conversationDeleted
-            )
-        )
+        try await ConversationCommonFeatureCommandService(app: req.application)
+            .clearConversation(userID: userID, conversationID: conversationID, deleteFromList: true)
         try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return .ok
     }
@@ -130,51 +68,12 @@ extension IMConversationController {
         let userID = try req.auth.require(User.self).requireID()
         let sourceConversationID = try conversationID(from: req)
         let body = try req.content.decode(IMMessageForwardRequest.self)
-        let sourceDB = try await req.application.conversationShardRouter.strongReadDatabase(forConversationID: sourceConversationID)
-        let sourceFeatureService = IMCommonFeatureService(db: sourceDB)
-        let sourceMessages = try await body.messageIDs.asyncMap {
-            try await sourceFeatureService.requireVisibleMessage(
-                conversationID: sourceConversationID,
-                messageID: $0,
-                userID: userID
-            )
-        }
-        guard !sourceMessages.isEmpty, !body.targetConversationIDs.isEmpty else {
-            throw Abort(.badRequest, reason: "转发目标或消息不能为空。")
-        }
-
-        var responses: [IMMessageResponse] = []
-        for targetConversationID in Array(Set(body.targetConversationIDs)) {
-            let targetDB = try await req.application.conversationShardRouter.commandDatabase(forConversationID: targetConversationID)
-            _ = try await ConversationMembershipService(db: targetDB).requireMembershipRecord(
-                conversationID: targetConversationID,
-                userID: userID
-            )
-            for sourceMessage in sourceMessages {
-                let now = Date()
-                let sequence = try await ConversationSequenceAllocator(db: targetDB).allocateNextServerSequence(
-                    conversationID: targetConversationID,
-                    updatedAt: now
-                )
-                let forwarded = try ConversationMessage(
-                    conversationID: targetConversationID,
-                    senderUserID: userID,
-                    serverSequence: sequence,
-                    content: sourceMessage.decodedContent(),
-                    derivedState: sourceMessage.decodedDerivedState()
-                )
-                try await forwarded.create(on: targetDB)
-                responses.append(try ConversationMessageService(db: targetDB).messageResponse(
-                    from: forwarded,
-                    conversationID: targetConversationID
-                ))
-            }
-            try await ConversationOutboxService(db: targetDB).enqueue(
-                type: .messageCreated,
-                conversationID: targetConversationID,
-                payload: ConversationDomainEventPayload(recipientUserIDs: [])
-            )
-        }
+        let responses = try await ConversationCommonFeatureCommandService(app: req.application).forwardMessages(
+            userID: userID,
+            sourceConversationID: sourceConversationID,
+            messageIDs: body.messageIDs,
+            targetConversationIDs: body.targetConversationIDs
+        )
         try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return responses
     }
@@ -204,43 +103,10 @@ extension IMConversationController {
         let userID = try req.auth.require(User.self).requireID()
         let conversationID = try conversationID(from: req)
         let body = try? req.content.decode(IMGroupInviteCreateRequest.self)
-        let db = try await req.application.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-        let conversation = try await ConversationMembershipService(db: db)
-            .requireConversationAndMembership(conversationID: conversationID, userID: userID)
-        try ConversationMembershipGuard.requireGroup(conversation, reason: "只有群聊支持邀请链接。")
-        let membership = try await ConversationMembershipService(db: db).requireMembershipRecord(
-            conversationID: conversationID,
-            userID: userID
-        )
-        try ConversationMembershipGuard.requireOwnerOrAdmin(membership.memberRoleEnum, reason: "只有群主或管理员可以创建邀请链接。")
-
-        let expiresIn = min(max(body?.expiresInSeconds ?? 7 * 24 * 60 * 60, 60), 30 * 24 * 60 * 60)
-        let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        let invite = GroupInvite(
-            token: token,
-            conversationID: conversationID,
-            creatorUserID: userID,
-            expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn))
-        )
-        try await invite.create(on: req.application.imWriteDB)
-        let recipientUserIDs = try await ConversationMember.query(on: db)
-            .filter(\.$conversation.$id == conversationID)
-            .all()
-            .map(\.$user.id)
-        try await ConversationOutboxService(db: db).enqueue(
-            type: .inviteChanged,
-            conversationID: conversationID,
-            payload: ConversationDomainEventPayload(recipientUserIDs: recipientUserIDs)
-        )
+        let response = try await ConversationCommonFeatureCommandService(app: req.application)
+            .createInvite(userID: userID, conversationID: conversationID, expiresInSeconds: body?.expiresInSeconds)
         try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
-        return IMGroupInviteResponse(
-            token: token,
-            conversationID: conversationID,
-            inviteURL: "imapp://group-invites/\(token)",
-            expiresAt: invite.expiresAt,
-            useCount: invite.useCount,
-            revokedAt: invite.revokedAt
-        )
+        return response
     }
 
     func listInvites(req: Request) async throws -> [IMGroupInviteResponse] {
@@ -279,31 +145,8 @@ extension IMConversationController {
         guard let token = req.parameters.get("token"), !token.isEmpty else {
             throw Abort(.badRequest, reason: "邀请 token 无效。")
         }
-        let db = try await req.application.conversationShardRouter.strongReadDatabase(forConversationID: conversationID)
-        let conversation = try await ConversationMembershipService(db: db)
-            .requireConversationAndMembership(conversationID: conversationID, userID: userID)
-        try ConversationMembershipGuard.requireGroup(conversation, reason: "只有群聊支持邀请链接。")
-        let membership = try await ConversationMembershipService(db: db).requireMembershipRecord(
-            conversationID: conversationID,
-            userID: userID
-        )
-        try ConversationMembershipGuard.requireOwnerOrAdmin(membership.memberRoleEnum, reason: "只有群主或管理员可以撤销邀请链接。")
-        guard let invite = try await GroupInvite.find(token, on: req.application.imWriteDB),
-              invite.conversationID == conversationID
-        else {
-            throw Abort(.notFound, reason: "邀请链接不存在。")
-        }
-        invite.revokedAt = invite.revokedAt ?? Date()
-        try await invite.update(on: req.application.imWriteDB)
-        let recipients = try await ConversationMember.query(on: db)
-            .filter(\.$conversation.$id == conversationID)
-            .all()
-            .map(\.$user.id)
-        try await ConversationOutboxService(db: db).enqueue(
-            type: .inviteChanged,
-            conversationID: conversationID,
-            payload: ConversationDomainEventPayload(recipientUserIDs: recipients)
-        )
+        try await ConversationCommonFeatureCommandService(app: req.application)
+            .revokeInvite(userID: userID, conversationID: conversationID, token: token)
         try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return .ok
     }

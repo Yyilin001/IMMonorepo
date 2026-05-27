@@ -573,11 +573,7 @@ extension IMServerTests {
             indexName: "conversation-message-search"
         )
 
-        if let adapter = app.conversationSearchAdapter as? OpenSearchConversationSearchAdapter {
-            #expect(adapter.fallback == nil)
-        } else {
-            Issue.record("Expected production search adapter to resolve to OpenSearchConversationSearchAdapter")
-        }
+        #expect(app.conversationSearchAdapter is OpenSearchConversationSearchAdapter)
         try await app.asyncShutdown()
     }
 

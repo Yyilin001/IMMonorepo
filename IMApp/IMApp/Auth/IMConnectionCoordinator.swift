@@ -56,7 +56,7 @@ final class IMConnectionCoordinator {
 
     func disconnect(flushCache: Bool = true) async {
         generation &+= 1
-        runtime?.cancelConversationGapSyncBackfill()
+        runtime?.cancelConversationGapSyncCatchUp()
         runtime?.cancelQueuedTextMessageFlush()
         runtime?.cancelMessageStreamSnapshotSync()
 
@@ -120,7 +120,7 @@ final class IMConnectionCoordinator {
             return
         }
 
-        runtime.cancelConversationGapSyncBackfill()
+        runtime.cancelConversationGapSyncCatchUp()
         runtime.cancelQueuedTextMessageFlush()
         for task in runtime.mediaUploadRecoveryTasks.values {
             task.cancel()
@@ -184,10 +184,11 @@ final class IMConnectionCoordinator {
         reconnectAttempt = 0
         runtime.setConnectionStatus(.connected)
         startEventLoop(newConnection, generation: targetGeneration)
+        await runtime.syncDomainEventsAfterConnection()
         await runtime.syncConversationGapsAfterConnection()
         await runtime.syncContactStateAfterConnection()
         await runtime.flushQueuedTextMessagesAfterConnection(limit: ConversationRuntimeController.HistoryConfig.queuedFlushLimit)
-        runtime.startConversationGapSyncBackfillIfNeeded()
+        runtime.startConversationGapSyncCatchUpIfNeeded()
         runtime.syncActiveMessageStreamSnapshots()
         runtime.scheduleConversationCachePersist()
     }
@@ -238,10 +239,14 @@ final class IMConnectionCoordinator {
 
             if case .contactChanged = payload.body {
                 runtime.applyContactDomainEvent(payload)
+                _ = runtime.imConversationStore.applyDomainEvent(payload, currentUserID: currentUserID)
                 return
             }
 
             let outcome = runtime.imConversationStore.applyDomainEvent(payload, currentUserID: currentUserID)
+            if outcome.shouldFetchDomainEvents {
+                await runtime.syncDomainEventsAfterConnection()
+            }
             if let conversationID = outcome.shouldReloadMembersForConversationID,
                runtime.imConversationStore.conversations.contains(where: { $0.id == conversationID }) {
                 await runtime.loadConversationMembers(for: conversationID)
@@ -273,6 +278,13 @@ final class IMConnectionCoordinator {
                     await handleFailure(error, generation: targetGeneration)
                 }
             }
+        case .streamSignal(_, let payload):
+            guard let currentUserID = runtime.currentUserProvider()?.id else {
+                return
+            }
+            runtime.imConversationStore.applyStreamSignal(payload, currentUserID: currentUserID)
+            runtime.syncPendingMessageStreamSnapshotsIfNeeded()
+            runtime.scheduleConversationCachePersist()
         case .kick(let payload):
             await runtime.clearSession(payload.message)
         }

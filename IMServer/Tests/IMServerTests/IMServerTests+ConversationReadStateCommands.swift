@@ -27,6 +27,7 @@ extension IMServerTests {
                     conversationID: conversationID,
                     senderUserID: try otherUser.requireID(),
                     serverSequence: sequence,
+                    timelineSequence: sequence,
                     clientMessageID: "client-read-\(sequence)",
                     kind: "rich_text",
                     body: ["text": "read-\(sequence)"]
@@ -132,6 +133,7 @@ extension IMServerTests {
                     conversationID: conversationID,
                     senderUserID: try otherUser.requireID(),
                     serverSequence: sequence,
+                    timelineSequence: sequence,
                     clientMessageID: "client-cross-read-\(sequence)",
                     content: .richText(.plain("cross-read-\(sequence)"))
                 ).create(on: app.db)

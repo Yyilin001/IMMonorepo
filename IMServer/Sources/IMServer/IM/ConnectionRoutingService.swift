@@ -39,14 +39,12 @@ struct ConnectionRoutingService {
         }
 
         let envelope = NodeMessageDispatchEnvelope(
-            action: .kickSession,
-            packetType: nil,
             requestID: nil,
-            packetBase64: nil,
-            targetUserIDs: [],
-            sessionID: sessionID,
-            kickReason: .duplicateConnection,
-            kickMessage: "This session opened a new realtime connection."
+            payload: .kickSession(
+                sessionID: sessionID,
+                reason: .duplicateConnection,
+                message: "This session opened a new realtime connection."
+            )
         )
         await dispatchRemoteEnvelopeIfNeeded(envelope, forSessionIDs: [sessionID], includeLocalNode: false)
     }
@@ -65,21 +63,67 @@ struct ConnectionRoutingService {
         }
     }
 
-    func sendDomainEvent(
-        _ payload: IMTCPChatDomainEventPayload,
+    func sendDomainEventDelivery(
+        ownerUserID: UUID,
+        eventID: UUID,
+        requestID: UUID? = UUID()
+    ) async {
+        let deliveryService = OwnerDomainEventDeliveryService(
+            db: app.summaryShardRouter.database(forOwnerUserID: ownerUserID)
+        )
+        let payload: IMTCPChatDomainEventPayload
+        do {
+            guard let delivery = try await deliveryService.find(ownerUserID: ownerUserID, eventID: eventID) else {
+                await app.routingMetrics.recordRealtimeDeliveryMissingRow()
+                app.logger.warning("Skipping realtime domain event because owner delivery row is missing.", metadata: [
+                    "owner_user_id": .string(ownerUserID.uuidString),
+                    "event_id": .string(eventID.uuidString),
+                    "requestID": .string(requestID?.uuidString ?? "")
+                ])
+                return
+            }
+            payload = try deliveryService.decodePayload(from: delivery)
+        } catch {
+            await app.routingMetrics.recordCrossNodeDispatchFailed()
+            app.logger.warning("Skipping realtime domain event because owner delivery payload is invalid.", metadata: [
+                "owner_user_id": .string(ownerUserID.uuidString),
+                "event_id": .string(eventID.uuidString),
+                "requestID": .string(requestID?.uuidString ?? ""),
+                "error": .string(String(describing: error))
+            ])
+            return
+        }
+        await app.routingMetrics.recordUserFanout(targetUserCount: 1)
+        await app.imConnectionRegistry.sendDomainEvent(payload, toUserIDs: [ownerUserID], requestID: requestID)
+        let envelope = NodeMessageDispatchEnvelope(
+            requestID: requestID,
+            payload: .domainEvent(ownerUserID: ownerUserID, eventID: eventID)
+        )
+        await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: [ownerUserID])
+    }
+
+    func sendStreamSignal(
+        _ payload: IMTCPMessageStreamSignalPayload,
         toUserIDs userIDs: [UUID],
         requestID: UUID? = UUID()
     ) async {
         await app.routingMetrics.recordUserFanout(targetUserCount: Set(userIDs).count)
-        await app.imConnectionRegistry.sendDomainEvent(payload, toUserIDs: userIDs, requestID: requestID)
-        let envelope = try? encodePacketEnvelope(
-            action: .domainEvent,
-            packetType: .domainEvent,
-            requestID: requestID,
-            payload: payload,
-            targetUserIDs: userIDs
-        )
-        await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: userIDs)
+        await app.imConnectionRegistry.sendStreamSignal(payload, toUserIDs: userIDs, requestID: requestID)
+        do {
+            let envelope = try encodePacketEnvelope(
+                requestID: requestID,
+                payload: payload,
+                targetUserIDs: userIDs
+            )
+            await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: userIDs)
+        } catch {
+            await app.routingMetrics.recordCrossNodeDispatchFailed()
+            app.logger.warning("Stream-signal dispatch encode failed.", metadata: [
+                "requestID": .string(requestID?.uuidString ?? ""),
+                "target_user_count": .stringConvertible(Set(userIDs).count),
+                "error": .string(String(describing: error))
+            ])
+        }
     }
 
     func kickConnections(
@@ -94,14 +138,8 @@ struct ConnectionRoutingService {
             message: message
         )
         let envelope = NodeMessageDispatchEnvelope(
-            action: .kickSession,
-            packetType: nil,
             requestID: nil,
-            packetBase64: nil,
-            targetUserIDs: [],
-            sessionID: sessionID,
-            kickReason: reason,
-            kickMessage: message
+            payload: .kickSession(sessionID: sessionID, reason: reason, message: message)
         )
         await dispatchRemoteEnvelopeIfNeeded(envelope, forSessionIDs: [sessionID], includeLocalNode: false)
     }
@@ -118,38 +156,61 @@ struct ConnectionRoutingService {
         let removedConnections = await kickLocalConnections(forUserID: userID, reason: reason, message: message)
         await app.routingMetrics.recordSessionKick(targetSessionCount: max(removedConnections.count, 1))
         let envelope = NodeMessageDispatchEnvelope(
-            action: .kickUser,
-            packetType: nil,
             requestID: nil,
-            packetBase64: nil,
-            targetUserIDs: [userID],
-            sessionID: nil,
-            kickReason: reason,
-            kickMessage: message
+            payload: .kickUser(userID: userID, reason: reason, message: message)
         )
         await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: [userID], includeLocalNode: false)
     }
 
     func handleRemoteDispatch(_ envelope: NodeMessageDispatchEnvelope) async {
-        switch envelope.action {
-        case .domainEvent:
-            guard let payload: IMTCPChatDomainEventPayload = decodePayload(from: envelope) else { return }
+        switch envelope.payload {
+        case .domainEvent(let ownerUserID, let eventID):
+            let deliveryService = OwnerDomainEventDeliveryService(
+                db: app.summaryShardRouter.database(forOwnerUserID: ownerUserID)
+            )
+            let payload: IMTCPChatDomainEventPayload
+            do {
+                guard let delivery = try await deliveryService.find(ownerUserID: ownerUserID, eventID: eventID) else {
+                    await app.routingMetrics.recordRealtimeDeliveryMissingRow()
+                    app.logger.warning("Remote domain-event dispatch skipped missing owner delivery row.", metadata: [
+                        "ownerUserID": .string(ownerUserID.uuidString),
+                        "eventID": .string(eventID.uuidString),
+                        "requestID": .string(envelope.requestID?.uuidString ?? "")
+                    ])
+                    return
+                }
+                payload = try deliveryService.decodePayload(from: delivery)
+            } catch {
+                app.logger.warning("Remote domain-event dispatch failed to decode owner delivery payload.", metadata: [
+                    "ownerUserID": .string(ownerUserID.uuidString),
+                    "eventID": .string(eventID.uuidString),
+                    "requestID": .string(envelope.requestID?.uuidString ?? ""),
+                    "error": .string(String(describing: error))
+                ])
+                return
+            }
             await app.imConnectionRegistry.sendDomainEvent(
+                payload,
+                toUserIDs: [ownerUserID],
+                requestID: envelope.requestID
+            )
+        case .streamSignal:
+            guard let payload: IMTCPMessageStreamSignalPayload = decodePayload(from: envelope) else {
+                await app.routingMetrics.recordCrossNodeDispatchFailed()
+                app.logger.warning("Remote stream-signal dispatch failed to decode payload.", metadata: [
+                    "requestID": .string(envelope.requestID?.uuidString ?? ""),
+                    "targetUserIDs": .array(envelope.targetUserIDs.map { .string($0.uuidString) })
+                ])
+                return
+            }
+            await app.imConnectionRegistry.sendStreamSignal(
                 payload,
                 toUserIDs: envelope.targetUserIDs,
                 requestID: envelope.requestID
             )
-        case .kickSession:
-            guard let sessionID = envelope.sessionID,
-                  let reason = envelope.kickReason,
-                  let message = envelope.kickMessage
-            else { return }
+        case .kickSession(let sessionID, let reason, let message):
             await kickLocalConnections(forSessionID: sessionID, reason: reason, message: message)
-        case .kickUser:
-            guard let userID = envelope.targetUserIDs.first,
-                  let reason = envelope.kickReason,
-                  let message = envelope.kickMessage
-            else { return }
+        case .kickUser(let userID, let reason, let message):
             await kickLocalConnections(forUserID: userID, reason: reason, message: message)
         }
     }
@@ -348,16 +409,7 @@ struct ConnectionRoutingService {
             await withTaskGroup(of: (String, Int, (any Error)?).self) { group in
                 for (remoteNodeID, targetSessionIDs) in targetSessionIDsByNodeID {
                     for targetSessionID in targetSessionIDs {
-                        let routedEnvelope = NodeMessageDispatchEnvelope(
-                            action: envelope.action,
-                            packetType: envelope.packetType,
-                            requestID: envelope.requestID,
-                            packetBase64: envelope.packetBase64,
-                            targetUserIDs: envelope.targetUserIDs,
-                            sessionID: targetSessionID,
-                            kickReason: envelope.kickReason,
-                            kickMessage: envelope.kickMessage
-                        )
+                        let routedEnvelope = envelope.withSessionID(targetSessionID)
                         group.addTask {
                             do {
                                 try await dispatchWithTimeout(
@@ -410,27 +462,19 @@ struct ConnectionRoutingService {
     }
 
     private func encodePacketEnvelope<Payload: Sendable>(
-        action: NodeMessageDispatchEnvelope.Action,
-        packetType: IMTCPPacketType,
         requestID: UUID?,
         payload: Payload,
         targetUserIDs: [UUID]
     ) throws -> NodeMessageDispatchEnvelope {
-        let data = try IMTCPProtobufCodec.encode(type: packetType, requestID: requestID, payload: payload)
+        let data = try IMTCPProtobufCodec.encode(type: .streamSignal, requestID: requestID, payload: payload)
         return NodeMessageDispatchEnvelope(
-            action: action,
-            packetType: packetType,
             requestID: requestID,
-            packetBase64: data.base64EncodedString(),
-            targetUserIDs: targetUserIDs,
-            sessionID: nil,
-            kickReason: nil,
-            kickMessage: nil
+            payload: .streamSignal(packetBase64: data.base64EncodedString(), targetUserIDs: targetUserIDs)
         )
     }
 
     private func decodePayload<Payload: Sendable>(from envelope: NodeMessageDispatchEnvelope) -> Payload? {
-        guard let packetBase64 = envelope.packetBase64,
+        guard case .streamSignal(let packetBase64, _) = envelope.payload,
               let packetData = Data(base64Encoded: packetBase64)
         else {
             return nil

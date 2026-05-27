@@ -8,16 +8,86 @@ struct ConversationOutboxService {
     func enqueue(
         type: ConversationDomainEventType,
         conversationID: UUID,
+        actorUserID: UUID? = nil,
         payload: ConversationDomainEventPayload,
         on database: (any Database)? = nil
     ) async throws {
         let database = database ?? db
+        let aggregateSequence = try await ConversationDomainEventSequenceAllocator(db: database).allocate(
+            conversationID: conversationID,
+            on: database
+        )
+        let aggregateSequenceValue = try imIntSequence(aggregateSequence.rawValue, field: "aggregate_sequence")
         let event = try ConversationDomainEvent(
             conversationID: conversationID,
             eventType: type,
+            aggregateSequence: aggregateSequenceValue,
+            actorUserID: actorUserID,
             payload: payload
         )
         try await event.create(on: database)
+        if type == .messageCreated, let messageID = payload.messageID,
+           let message = try await ConversationMessage.find(messageID, on: database)
+        {
+            message.timelineSequence = aggregateSequenceValue
+            try await message.update(on: database)
+        }
+    }
+
+    @discardableResult
+    func enqueueOnce(
+        sideEffectKey: String,
+        type: ConversationDomainEventType,
+        conversationID: UUID,
+        actorUserID: UUID? = nil,
+        payload: ConversationDomainEventPayload,
+        on database: (any Database)? = nil
+    ) async throws -> ConversationDomainEvent {
+        let database = database ?? db
+        let normalizedKey = sideEffectKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedKey.isEmpty else {
+            throw Abort(.internalServerError, reason: "幂等事件缺少 side effect key。")
+        }
+
+        return try await database.transaction { tx in
+            if let existingClaim = try await ConversationDomainEventSideEffect.find(normalizedKey, on: tx),
+               let existingEvent = try await ConversationDomainEvent.find(existingClaim.eventID, on: tx)
+            {
+                return existingEvent
+            }
+
+            let eventID = UUID()
+            do {
+                try await ConversationDomainEventSideEffect(
+                    sideEffectKey: normalizedKey,
+                    eventID: eventID
+                ).create(on: tx)
+            } catch {
+                if let existingClaim = try await ConversationDomainEventSideEffect.find(normalizedKey, on: tx),
+                   let existingEvent = try await ConversationDomainEvent.find(existingClaim.eventID, on: tx)
+                {
+                    return existingEvent
+                }
+                throw error
+            }
+
+            let aggregateSequence = try await ConversationDomainEventSequenceAllocator(db: tx).allocate(
+                conversationID: conversationID,
+                on: tx
+            )
+            let aggregateSequenceValue = try imIntSequence(aggregateSequence.rawValue, field: "aggregate_sequence")
+            let event = try ConversationDomainEvent(
+                id: eventID,
+                conversationID: conversationID,
+                eventType: type,
+                aggregateSequence: aggregateSequenceValue,
+                sideEffectKey: normalizedKey,
+                actorUserID: actorUserID,
+                payload: payload
+            )
+            try await event.create(on: tx)
+            return event
+        }
     }
 
     @discardableResult

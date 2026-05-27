@@ -159,7 +159,7 @@ struct ConversationSummaryReadSupport {
             memberCount: memberUserIDs.count,
             memberUserIDs: memberUserIDs,
             lastMessage: lastMessage,
-            lastReadSequence: readState.lastReadSequence,
+            lastReadSequence: UInt64(readState.lastReadSequence),
             unreadCount: readState.unreadCount,
             isPinned: preferences.isPinned,
             pinnedAt: preferences.pinnedAt,
@@ -189,7 +189,7 @@ struct ConversationSummaryReadSupport {
             memberCount: row.memberCount,
             memberUserIDs: row.memberUserIDs.sorted { $0.uuidString < $1.uuidString },
             lastMessage: row.lastMessage,
-            lastReadSequence: row.lastReadSequence,
+            lastReadSequence: UInt64(row.lastReadSequence),
             unreadCount: row.unreadCount,
             isPinned: row.isPinned,
             pinnedAt: row.pinnedAt,
@@ -223,74 +223,161 @@ struct ConversationTimelineReadSupport {
         return try messageService.messageResponse(from: message, conversationID: conversationID)
     }
 
-    func listMessages(
+    func listTimeline(
         in conversationID: UUID,
         for userID: UUID,
         beforeSequence: Int? = nil,
         limit requestedLimit: Int? = nil
-    ) async throws -> [IMMessageResponse] {
+    ) async throws -> IMTimelinePageResponse {
         let membership = try await membershipService.requireMembershipRecord(
             conversationID: conversationID,
             userID: userID
         )
         let limit = try ConversationReadPaginationSupport.normalizedHistoryLimit(requestedLimit)
-
-        let builder = ConversationMessage.query(on: db)
-            .filter(\.$conversation.$id == conversationID)
-            .filter(\.$serverSequence >= membership.visibleFromSequence)
-        if let beforeSequence {
-            guard beforeSequence > 0 else {
-                throw Abort(.badRequest, reason: "分页游标无效。")
-            }
-            builder.filter(\.$serverSequence < beforeSequence)
+        let upperBound = beforeSequence ?? Int.max
+        if upperBound <= 0 {
+            throw Abort(.badRequest, reason: "分页游标无效。")
         }
 
-        let messages = try await builder
-            .sort(\.$serverSequence, .descending)
-            .limit(limit)
+        let messages = try await ConversationMessage.query(on: db)
+            .filter(\.$conversation.$id == conversationID)
+            .filter(\.$serverSequence >= membership.visibleFromSequence)
+            .filter(\.$timelineSequence < upperBound)
+            .sort(\.$timelineSequence, .descending)
+            .limit(limit + 1)
             .all()
-            .reversed()
-        let visibleMessageRows = try await IMCommonFeatureService(db: db)
-            .filterVisible(Array(messages), for: userID)
-        let visibleMessages = visibleMessageRows.prefix(limit)
+        let visibleMessages = try await IMCommonFeatureService(db: db).filterVisible(messages, for: userID)
+        let notices = try visibleNotices(
+            try await ConversationTimelineNotice.query(on: db)
+            .filter(\.$conversationID == conversationID)
+            .filter(\.$timelineSequence < upperBound)
+            .sort(\.$timelineSequence, .descending)
+            .limit(limit + 1)
+            .all(),
+            for: userID
+        )
 
-        return try visibleMessages.map { try messageService.messageResponse(from: $0, conversationID: conversationID) }
+        var items = try makeTimelineItems(messages: visibleMessages, notices: notices, conversationID: conversationID)
+            .sorted { lhs, rhs in
+                if lhs.timelineSequence == rhs.timelineSequence {
+                    return lhs.type.rawValue < rhs.type.rawValue
+                }
+                return lhs.timelineSequence > rhs.timelineSequence
+            }
+        let hasMore = items.count > limit
+        if hasMore {
+            items = Array(items.prefix(limit))
+        }
+        items.reverse()
+        return IMTimelinePageResponse(
+            items: items,
+            hasMore: hasMore,
+            nextAfterSequence: items.last?.timelineSequence
+        )
     }
 
-    func listMessagesSince(
+    func listTimelineSince(
         in conversationID: UUID,
         for userID: UUID,
         afterSequence: Int,
         limit requestedLimit: Int? = nil
-    ) async throws -> IMMessageSinceResponse {
+    ) async throws -> IMTimelinePageResponse {
         let membership = try await membershipService.requireMembershipRecord(
             conversationID: conversationID,
             userID: userID
         )
-
         guard afterSequence >= 0 else {
             throw Abort(.badRequest, reason: "增量游标无效。")
         }
-
         let limit = try ConversationReadPaginationSupport.normalizedIncrementalLimit(requestedLimit)
-        var rows = try await ConversationMessage.query(on: db)
+        let messages = try await ConversationMessage.query(on: db)
             .filter(\.$conversation.$id == conversationID)
-            .filter(\.$serverSequence > max(afterSequence, membership.visibleFromSequence - 1))
-            .sort(\.$serverSequence, .ascending)
+            .filter(\.$serverSequence >= membership.visibleFromSequence)
+            .filter(\.$timelineSequence > afterSequence)
+            .sort(\.$timelineSequence, .ascending)
             .limit(limit + 1)
             .all()
-        rows = try await IMCommonFeatureService(db: db).filterVisible(rows, for: userID)
-        let hasMore = rows.count > limit
-        if hasMore {
-            rows.removeLast()
-        }
-
-        let messages = try rows.map { try messageService.messageResponse(from: $0, conversationID: conversationID) }
-        return IMMessageSinceResponse(
-            messages: messages,
-            hasMore: hasMore,
-            nextAfterSequence: messages.last?.serverSequence
+        let visibleMessages = try await IMCommonFeatureService(db: db).filterVisible(messages, for: userID)
+        let notices = try visibleNotices(
+            try await ConversationTimelineNotice.query(on: db)
+            .filter(\.$conversationID == conversationID)
+            .filter(\.$timelineSequence > afterSequence)
+            .sort(\.$timelineSequence, .ascending)
+            .limit(limit + 1)
+            .all(),
+            for: userID
         )
+
+        var items = try makeTimelineItems(messages: visibleMessages, notices: notices, conversationID: conversationID)
+            .sorted { lhs, rhs in
+                if lhs.timelineSequence == rhs.timelineSequence {
+                    return lhs.type.rawValue < rhs.type.rawValue
+                }
+                return lhs.timelineSequence < rhs.timelineSequence
+            }
+        let hasMore = items.count > limit
+        if hasMore {
+            items = Array(items.prefix(limit))
+        }
+        let nextAfterSequence: UInt64
+        if let lastItem = items.last {
+            nextAfterSequence = lastItem.timelineSequence
+        } else {
+            nextAfterSequence = UInt64(afterSequence)
+        }
+        return IMTimelinePageResponse(
+            items: items,
+            hasMore: hasMore,
+            nextAfterSequence: nextAfterSequence
+        )
+    }
+
+    private func makeTimelineItems(
+        messages: [ConversationMessage],
+        notices: [ConversationTimelineNotice],
+        conversationID: UUID
+    ) throws -> [IMTimelineItemResponse] {
+        let messageItems = try messages.map { message in
+            let response = try messageService.messageResponse(from: message, conversationID: conversationID)
+            return IMTimelineItemResponse(
+                type: .message,
+                timelineSequence: response.timelineSequence,
+                message: response,
+                notice: nil
+            )
+        }
+        let noticeItems = try notices.map { notice -> IMTimelineItemResponse in
+            guard let eventID = notice.eventID else {
+                throw Abort(.internalServerError, reason: "Timeline notice 缺少 event_id。")
+            }
+            return IMTimelineItemResponse(
+                type: .notice,
+                timelineSequence: try imPositiveUInt64Sequence(notice.timelineSequence, field: "timeline_sequence"),
+                message: nil,
+                notice: IMTimelineNoticeResponse(
+                    id: eventID,
+                    conversationID: notice.conversationID,
+                    timelineSequence: try imPositiveUInt64Sequence(notice.timelineSequence, field: "timeline_sequence"),
+                    eventType: notice.eventType,
+                    actorUserID: notice.actorUserID,
+                    targetUserIDs: try notice.targetUserIDs,
+                    noticeKind: notice.noticeKind,
+                    params: try notice.params,
+                    fallbackText: notice.fallbackText,
+                    createdAt: notice.createdAt
+                )
+            )
+        }
+        return messageItems + noticeItems
+    }
+
+    private func visibleNotices(
+        _ notices: [ConversationTimelineNotice],
+        for userID: UUID
+    ) throws -> [ConversationTimelineNotice] {
+        try notices.filter { notice in
+            try notice.targetUserIDs.contains(userID)
+        }
     }
 }
 
@@ -421,13 +508,13 @@ struct ConversationReadSupport {
         )
     }
 
-    func listMessages(
+    func listTimeline(
         in conversationID: UUID,
         for userID: UUID,
         beforeSequence: Int? = nil,
         limit requestedLimit: Int? = nil
-    ) async throws -> [IMMessageResponse] {
-        try await timelineReadSupport.listMessages(
+    ) async throws -> IMTimelinePageResponse {
+        try await timelineReadSupport.listTimeline(
             in: conversationID,
             for: userID,
             beforeSequence: beforeSequence,
@@ -435,13 +522,13 @@ struct ConversationReadSupport {
         )
     }
 
-    func listMessagesSince(
+    func listTimelineSince(
         in conversationID: UUID,
         for userID: UUID,
         afterSequence: Int,
         limit requestedLimit: Int? = nil
-    ) async throws -> IMMessageSinceResponse {
-        try await timelineReadSupport.listMessagesSince(
+    ) async throws -> IMTimelinePageResponse {
+        try await timelineReadSupport.listTimelineSince(
             in: conversationID,
             for: userID,
             afterSequence: afterSequence,

@@ -1,7 +1,7 @@
 import Vapor
 
 struct IMMessageHistoryQuery: Content {
-    let beforeSequence: Int?
+    let beforeSequence: UInt64?
     let limit: Int?
 }
 
@@ -23,8 +23,13 @@ struct IMConversationChangesQuery: Content {
     let limit: Int?
 }
 
-struct IMMessageSinceQuery: Content {
-    let afterSequence: Int
+struct IMDomainEventChangesQuery: Content {
+    let after: UInt64?
+    let limit: Int?
+}
+
+struct IMTimelineSinceQuery: Content {
+    let afterSequence: UInt64
     let limit: Int?
 }
 
@@ -56,7 +61,7 @@ struct IMConversationCreateRequest: Content {
 }
 
 struct IMConversationReadRequest: Content {
-    let readSequence: Int
+    let readSequence: UInt64
 }
 
 struct IMConversationMemberUpdateRequest: Content {
@@ -192,7 +197,7 @@ struct IMConversationResponse: Content, Equatable {
     let memberCount: Int
     let memberUserIDs: [UUID]
     let lastMessage: IMMessagePreviewResponse?
-    let lastReadSequence: Int
+    let lastReadSequence: UInt64
     let unreadCount: Int
     let isPinned: Bool
     let pinnedAt: Date?
@@ -212,7 +217,7 @@ struct IMConversationResponse: Content, Equatable {
         memberCount: Int? = nil,
         memberUserIDs: [UUID],
         lastMessage: IMMessagePreviewResponse?,
-        lastReadSequence: Int = 0,
+        lastReadSequence: UInt64 = 0,
         unreadCount: Int = 0,
         isPinned: Bool = false,
         pinnedAt: Date? = nil,
@@ -277,14 +282,15 @@ struct IMDirectPeerResponse: Content, Equatable, Sendable {
 
 struct IMConversationReadResponse: Content, Equatable {
     let conversationID: UUID
-    let lastReadSequence: Int
+    let lastReadSequence: UInt64
     let unreadCount: Int
 }
 
 struct IMMessagePreviewResponse: Content, Equatable {
     let id: UUID
     let senderUserID: UUID
-    let serverSequence: Int
+    let serverSequence: UInt64
+    let timelineSequence: UInt64
     let content: IMMessageContent
     let derivedState: IMMessageDerivedState
     let createdAt: Date?
@@ -292,7 +298,8 @@ struct IMMessagePreviewResponse: Content, Equatable {
     init(
         id: UUID,
         senderUserID: UUID,
-        serverSequence: Int,
+        serverSequence: UInt64,
+        timelineSequence: UInt64,
         content: IMMessageContent,
         derivedState: IMMessageDerivedState = IMMessageDerivedState(),
         createdAt: Date?
@@ -300,6 +307,7 @@ struct IMMessagePreviewResponse: Content, Equatable {
         self.id = id
         self.senderUserID = senderUserID
         self.serverSequence = serverSequence
+        self.timelineSequence = timelineSequence
         self.content = content
         self.derivedState = derivedState
         self.createdAt = createdAt
@@ -311,7 +319,8 @@ struct IMMessageResponse: Content, Equatable {
     let conversationID: UUID
     let senderUserID: UUID
     let clientMessageID: String?
-    let serverSequence: Int
+    let serverSequence: UInt64
+    let timelineSequence: UInt64
     let content: IMMessageContent
     let derivedState: IMMessageDerivedState
     let createdAt: Date?
@@ -321,7 +330,8 @@ struct IMMessageResponse: Content, Equatable {
         conversationID: UUID,
         senderUserID: UUID,
         clientMessageID: String? = nil,
-        serverSequence: Int,
+        serverSequence: UInt64,
+        timelineSequence: UInt64,
         content: IMMessageContent,
         derivedState: IMMessageDerivedState = IMMessageDerivedState(),
         createdAt: Date?
@@ -331,22 +341,48 @@ struct IMMessageResponse: Content, Equatable {
         self.senderUserID = senderUserID
         self.clientMessageID = clientMessageID
         self.serverSequence = serverSequence
+        self.timelineSequence = timelineSequence
         self.content = content
         self.derivedState = derivedState
         self.createdAt = createdAt
     }
 }
 
-struct IMMessageSinceResponse: Content, Equatable {
-    let messages: [IMMessageResponse]
+struct IMTimelineNoticeResponse: Content, Equatable {
+    let id: UUID
+    let conversationID: UUID
+    let timelineSequence: UInt64
+    let eventType: String
+    let actorUserID: UUID?
+    let targetUserIDs: [UUID]
+    let noticeKind: String
+    let params: [String: String]
+    let fallbackText: String
+    let createdAt: Date
+}
+
+enum IMTimelineItemKind: String, Content, Equatable {
+    case message
+    case notice
+}
+
+struct IMTimelineItemResponse: Content, Equatable {
+    let type: IMTimelineItemKind
+    let timelineSequence: UInt64
+    let message: IMMessageResponse?
+    let notice: IMTimelineNoticeResponse?
+}
+
+struct IMTimelinePageResponse: Content, Equatable {
+    let items: [IMTimelineItemResponse]
     let hasMore: Bool
-    let nextAfterSequence: Int?
+    let nextAfterSequence: UInt64?
 }
 
 struct IMConversationMessageSearchHitResponse: Content, Equatable {
     let messageID: UUID
     let senderUserID: UUID
-    let serverSequence: Int
+    let serverSequence: UInt64
     let content: IMMessageContent
     let derivedState: IMMessageDerivedState
     let snippet: String

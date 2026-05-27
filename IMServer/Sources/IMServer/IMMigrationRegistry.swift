@@ -37,6 +37,11 @@ enum IMMigrationRegistry {
         app.migrations.add(AddConversationDomainEventStreamPublicationFields())
         app.migrations.add(AddConversationDomainEventStreamClaimFields())
         app.migrations.add(AddConversationDomainEventIndexes())
+        app.migrations.add(AddConversationDomainEventActor())
+        app.migrations.add(AddConversationDomainEventSideEffectKey())
+        app.migrations.add(CreateContactDomainEvent())
+        app.migrations.add(CreateOwnerDomainEventDelivery())
+        app.migrations.add(CreateDomainEventSequencesAndTimelineNotices())
         app.migrations.add(CreateConversationRoutingDirectories())
         app.migrations.add(CreateDirectConversationPairDirectory())
         app.migrations.add(CreateConversationMessageSearchIndex())
@@ -57,6 +62,7 @@ enum IMMigrationRegistry {
         app.migrations.add(CreateIMCommonFeatureTables())
         app.migrations.add(AddReportSnapshotFields())
         app.migrations.add(CreateAIMessageStreamIndex())
+        app.migrations.add(EnforceV8SequenceInvariants())
     }
 
     static func resetIMSchemaIfRequested(_ app: Application) async throws {
@@ -89,6 +95,14 @@ enum IMMigrationRegistry {
             UserReport.schema,
             UserBlock.schema,
             ContactChangeLogEntry.schema,
+            ContactDomainEvent.schema,
+            OwnerDomainEventDelivery.schema,
+            ConversationDomainEventSideEffect.schema,
+            OwnerDomainEventAggregateSequence.schema,
+            OwnerDomainEventDeliveryCursor.schema,
+            OwnerContactEventSequence.schema,
+            ConversationDomainEventSequence.schema,
+            ConversationTimelineNotice.schema,
             ConversationVisibilityOverride.schema,
             MessageVisibilityOverride.schema,
             MessageFavorite.schema,
@@ -169,7 +183,11 @@ private let imMigrationNames: [String] = [
     "AddConversationDomainEventRetryCount",
     "AddConversationDomainEventStreamPublicationFields",
     "AddConversationDomainEventStreamClaimFields",
-    "AddConversationDomainEventIndexes",
+            "AddConversationDomainEventIndexes",
+            "AddConversationDomainEventActor",
+            "AddConversationDomainEventSideEffectKey",
+            "CreateContactDomainEvent",
+    "CreateOwnerDomainEventDelivery",
     "CreateDirectConversationPairDirectory",
     "CreateConversationMessageSearchIndex",
     "AddConversationMessageSearchResultFields",

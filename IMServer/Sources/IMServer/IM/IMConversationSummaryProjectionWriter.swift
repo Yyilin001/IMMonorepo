@@ -88,23 +88,28 @@ extension IMConversationSummaryProjectionService {
                 continue
             }
 
+            let messageServerSequence = try imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence")
             let currentLastSequence = summary.lastMessage?.serverSequence ?? 0
-            if message.serverSequence >= currentLastSequence {
+            if messageServerSequence >= currentLastSequence {
                 summary.lastMessage = messagePreview
                 summary.lastActivityAt = message.createdAt ?? updatedAt
             }
 
+            let visibleLowerBound = max(0, membership.visibleFromSequence - 1)
             let effectiveLastReadSequence = max(
                 membership.lastReadSequence,
-                max(0, membership.visibleFromSequence - 1)
+                visibleLowerBound
             )
             let latestVisibleSequence = max(
-                message.serverSequence,
+                messageServerSequence,
                 currentLastSequence,
-                max(0, membership.visibleFromSequence - 1)
+                UInt64(visibleLowerBound)
             )
             summary.lastReadSequence = effectiveLastReadSequence
-            summary.unreadCount = max(0, latestVisibleSequence - effectiveLastReadSequence)
+            let unreadCount = latestVisibleSequence > UInt64(effectiveLastReadSequence)
+                ? latestVisibleSequence - UInt64(effectiveLastReadSequence)
+                : 0
+            summary.unreadCount = try imIntSequence(unreadCount, field: "unread_count")
             summary.updatedAt = updatedAt
             summary.isRemoved = false
             summariesToUpdate.append(summary)
@@ -296,17 +301,21 @@ extension IMConversationSummaryProjectionService {
             return false
         }
 
+        let visibleLowerBound = max(0, membership.visibleFromSequence - 1)
         let latestVisibleSequence = max(
             summary.lastMessage?.serverSequence ?? 0,
-            max(0, membership.visibleFromSequence - 1)
+            UInt64(visibleLowerBound)
         )
         let effectiveLastReadSequence = max(
             membership.lastReadSequence,
-            max(0, membership.visibleFromSequence - 1)
+            visibleLowerBound
         )
         let updatedAt = Date()
         summary.lastReadSequence = effectiveLastReadSequence
-        summary.unreadCount = max(0, latestVisibleSequence - effectiveLastReadSequence)
+        let unreadCount = latestVisibleSequence > UInt64(effectiveLastReadSequence)
+            ? latestVisibleSequence - UInt64(effectiveLastReadSequence)
+            : 0
+        summary.unreadCount = try imIntSequence(unreadCount, field: "unread_count")
         summary.updatedAt = updatedAt
         summary.isRemoved = false
         try await save(summary, on: readModelDatabase)

@@ -6,16 +6,39 @@ struct GatewayRelayController: RouteCollection {
             .grouped(InternalGatewayRelaySecretMiddleware())
 
         relayRoutes.post("domain-event", use: relayDomainEvent)
+        relayRoutes.post("stream-signal", use: relayStreamSignal)
         relayRoutes.post("kick-session", use: relayKickSession)
         relayRoutes.post("kick-user", use: relayKickUser)
         relayRoutes.post("session-counts", use: relaySessionCounts)
     }
 
     func relayDomainEvent(req: Request) async throws -> HTTPStatus {
+        let body = try req.content.decode(GatewayRelayDomainEventDeliveryRequest.self)
+        let db = req.application.summaryShardRouter.database(forOwnerUserID: body.ownerUserID)
+        guard let delivery = try await OwnerDomainEventDeliveryService(db: db).find(
+            ownerUserID: body.ownerUserID,
+            eventID: body.eventID
+        ) else {
+            req.application.logger.warning("Gateway relay skipped missing owner delivery row.", metadata: [
+                "owner_user_id": .string(body.ownerUserID.uuidString),
+                "event_id": .string(body.eventID.uuidString)
+            ])
+            return .ok
+        }
+        _ = try OwnerDomainEventDeliveryService(db: db).decodePayload(from: delivery)
+        await req.application.gatewaySessionService.sendDomainEventDelivery(
+            ownerUserID: body.ownerUserID,
+            eventID: body.eventID,
+            requestID: body.requestID ?? body.eventID
+        )
+        return .ok
+    }
+
+    func relayStreamSignal(req: Request) async throws -> HTTPStatus {
         let body = try req.content.decode(GatewayRelayMessageRequest.self)
         let packet = try packet(from: body.packetBase64)
-        await req.application.gatewaySessionService.sendDomainEvent(
-            try packet.payload.decodePayload(IMTCPChatDomainEventPayload.self),
+        await req.application.gatewaySessionService.sendStreamSignal(
+            try packet.payload.decodePayload(IMTCPMessageStreamSignalPayload.self),
             toUserIDs: body.recipientUserIDs,
             requestID: packet.requestID ?? body.requestID
         )

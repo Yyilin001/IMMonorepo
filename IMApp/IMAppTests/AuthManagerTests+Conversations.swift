@@ -21,10 +21,10 @@ extension AuthManagerTests {
                     statusCode: 200,
                     body: try Self.imConversationMembersBody()
                 )
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try Self.imMessagesBody(conversationID: conversationID)
+                    body: try Self.imTimelineBody(conversationID: conversationID)
                 )
             case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
                 return HTTPFixtures.response(
@@ -99,10 +99,10 @@ extension AuthManagerTests {
                     statusCode: 200,
                     body: try Self.imConversationMembersBody()
                 )
-            case ("GET", "/api/im/conversations/\(firstConversationID.uuidString)/messages"):
+            case ("GET", "/api/im/conversations/\(firstConversationID.uuidString)/timeline"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try Self.imMessagesBody(conversationID: firstConversationID)
+                    body: try Self.imTimelineBody(conversationID: firstConversationID)
                 )
             case ("POST", "/api/im/conversations/\(firstConversationID.uuidString)/read"):
                 return HTTPFixtures.response(
@@ -233,10 +233,10 @@ extension AuthManagerTests {
                     statusCode: 200,
                     body: try Self.imConversationMembersBody()
                 )
-            case ("GET", "/api/im/conversations/\(firstConversationID.uuidString)/messages"):
+            case ("GET", "/api/im/conversations/\(firstConversationID.uuidString)/timeline"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try Self.imMessagesBody(conversationID: firstConversationID)
+                    body: try Self.imTimelineBody(conversationID: firstConversationID)
                 )
             case ("POST", "/api/im/conversations/\(firstConversationID.uuidString)/read"):
                 return HTTPFixtures.response(
@@ -379,18 +379,18 @@ extension AuthManagerTests {
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
             case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/members") == true:
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/messages/since") == true:
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
-            case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/messages") == true:
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
+            case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/timeline/since") == true:
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/timeline") == true:
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             case ("POST", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/read") == true:
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
             default:
@@ -499,18 +499,18 @@ extension AuthManagerTests {
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
             case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/members") == true:
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/messages/since") == true:
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
-            case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/messages") == true:
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
+            case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/timeline/since") == true:
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/timeline") == true:
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             case ("POST", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/read") == true:
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
             default:
@@ -566,6 +566,7 @@ extension AuthManagerTests {
                         id: UUID(uuidString: "11111111-7777-8888-9999-aaaaaaaaaaaa")!,
                         senderUserID: Self.user.id,
                         serverSequence: 1,
+                        timelineSequence: 1,
                         content: .richText(.plain("当前选中的会话")),
                         createdAt: Date(timeIntervalSince1970: 1_700_900_000)
                     ),
@@ -584,6 +585,7 @@ extension AuthManagerTests {
                         id: UUID(uuidString: "22222222-7777-8888-9999-aaaaaaaaaaaa")!,
                         senderUserID: Self.user.id,
                         serverSequence: 1,
+                        timelineSequence: 1,
                         content: .richText(.plain("备用摘要")),
                         createdAt: Date(timeIntervalSince1970: 1_700_899_900)
                     ),
@@ -601,6 +603,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 1,
+                        timelineSequence: 1,
                         content: .richText(.plain("当前选中的会话")),
                         createdAt: Date(timeIntervalSince1970: 1_700_900_000)
                     )
@@ -645,13 +648,13 @@ extension AuthManagerTests {
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
             case ("GET", "/api/im/conversations/\(removedConversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", "/api/im/conversations/\(removedConversationID.uuidString)/messages"):
+            case ("GET", "/api/im/conversations/\(removedConversationID.uuidString)/timeline"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: removedConversationID))
+                    body: try HTTPFixtures.jsonBody(await state.timelineResponse(for: removedConversationID))
                 )
-            case ("GET", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/messages/since"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/timeline/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             case ("POST", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/read"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
             default:
@@ -705,7 +708,7 @@ extension AuthManagerTests {
                         memberCount: 2,
                         memberUserIDs: [Self.user.id],
                         messages: [
-                            IMCachedMessageState(
+                            try! IMCachedMessageState(
                                 id: "removed-cached-1",
                                 conversationID: removedConversationIDString,
                                 clientMessageID: nil,
@@ -718,7 +721,7 @@ extension AuthManagerTests {
                                 createdAt: Date(timeIntervalSince1970: 1_700_920_000),
                                 deliveryState: .sent
                             ),
-                            IMCachedMessageState(
+                            try! IMCachedMessageState(
                                 id: "removed-cached-2",
                                 conversationID: removedConversationIDString,
                                 clientMessageID: nil,
@@ -735,8 +738,8 @@ extension AuthManagerTests {
                         hasLoadedMessages: true,
                         lastMessagePreviewText: "缓存旧历史 2",
                         hasMoreHistory: false,
-                        latestSyncedServerSequence: 2,
-                        oldestLoadedServerSequence: 1,
+                        latestLoadedTimelineSequence: 2,
+                        oldestLoadedTimelineSequence: 1,
                         serverLastReadSequence: 2,
                         serverUnreadCount: 0,
                         updatedAt: Date(timeIntervalSince1970: 1_700_920_010)
@@ -748,7 +751,7 @@ extension AuthManagerTests {
                         memberCount: 2,
                         memberUserIDs: [Self.user.id],
                         messages: [
-                            IMCachedMessageState(
+                            try! IMCachedMessageState(
                                 id: "fallback-cached-1",
                                 conversationID: restoredConversationIDString,
                                 clientMessageID: nil,
@@ -765,8 +768,8 @@ extension AuthManagerTests {
                         hasLoadedMessages: true,
                         lastMessagePreviewText: "回退历史 1",
                         hasMoreHistory: true,
-                        latestSyncedServerSequence: 1,
-                        oldestLoadedServerSequence: 1,
+                        latestLoadedTimelineSequence: 1,
+                        oldestLoadedTimelineSequence: 1,
                         serverLastReadSequence: 1,
                         serverUnreadCount: 0,
                         updatedAt: Date(timeIntervalSince1970: 1_700_920_020)
@@ -790,6 +793,7 @@ extension AuthManagerTests {
                         id: UUID(uuidString: "11111111-6666-7777-8888-aaaaaaaaaaaa")!,
                         senderUserID: Self.user.id,
                         serverSequence: 2,
+                        timelineSequence: 2,
                         content: .richText(.plain("缓存旧历史 2")),
                         createdAt: Date(timeIntervalSince1970: 1_700_920_010)
                     ),
@@ -808,6 +812,7 @@ extension AuthManagerTests {
                         id: UUID(uuidString: "22222222-6666-7777-8888-aaaaaaaaaaaa")!,
                         senderUserID: Self.user.id,
                         serverSequence: 2,
+                        timelineSequence: 2,
                         content: .richText(.plain("回退历史 2")),
                         createdAt: Date(timeIntervalSince1970: 1_700_920_040)
                     ),
@@ -825,6 +830,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 2,
+                        timelineSequence: 2,
                         content: .richText(.plain("缓存旧历史 2")),
                         createdAt: Date(timeIntervalSince1970: 1_700_920_010)
                     )
@@ -836,6 +842,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 1,
+                        timelineSequence: 1,
                         content: .richText(.plain("回退历史 1")),
                         createdAt: Date(timeIntervalSince1970: 1_700_920_020)
                     ),
@@ -845,6 +852,7 @@ extension AuthManagerTests {
                         senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                         clientMessageID: nil,
                         serverSequence: 2,
+                        timelineSequence: 2,
                         content: .richText(.plain("回退历史 2")),
                         createdAt: Date(timeIntervalSince1970: 1_700_920_040)
                     )
@@ -895,20 +903,20 @@ extension AuthManagerTests {
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
             case ("GET", "/api/im/conversations/\(restoredConversationIDString)/members", _):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", "/api/im/conversations/\(removedConversationIDString)/messages", _):
+            case ("GET", "/api/im/conversations/\(removedConversationIDString)/timeline", _):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: removedConversationID))
+                    body: try HTTPFixtures.jsonBody(await state.timelineResponse(for: removedConversationID))
                 )
-            case ("GET", "/api/im/conversations/\(restoredConversationIDString)/messages", _):
+            case ("GET", "/api/im/conversations/\(restoredConversationIDString)/timeline", _):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: restoredConversationID))
+                    body: try HTTPFixtures.jsonBody(await state.timelineResponse(for: restoredConversationID))
                 )
-            case ("GET", "/api/im/conversations/\(removedConversationIDString)/messages/since", _):
+            case ("GET", "/api/im/conversations/\(removedConversationIDString)/timeline/since", _):
                 await requestCounter.increment("removedGapSync")
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
-            case ("GET", "/api/im/conversations/\(restoredConversationIDString)/messages/since", _):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", "/api/im/conversations/\(restoredConversationIDString)/timeline/since", _):
                 await requestCounter.increment("fallbackGapSync")
                 let afterSequence = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?
                     .queryItems?
@@ -960,9 +968,10 @@ extension AuthManagerTests {
         #expect(manager.imConversationStore.conversations.map(\.id) == [restoredConversationIDString])
         #expect(manager.imConversationStore.selectedConversation?.messages.map(\.text) == ["回退历史 1"])
 
-        manager.imConversationStore.appendMessages(
+        let timelinePage = await state.messagesSinceResponse(for: restoredConversationID, afterSequence: 1)
+        manager.imConversationStore.appendTimelineItems(
             in: restoredConversationIDString,
-            messages: await state.messagesSinceResponse(for: restoredConversationID, afterSequence: 1).messages,
+            messages: timelinePage.items.compactMap(\.message),
             currentUserID: Self.user.id
         )
 
@@ -993,25 +1002,27 @@ extension AuthManagerTests {
                         memberCount: 2,
                         memberUserIDs: [Self.user.id, peerUserID],
                         messages: [
-                            IMCachedMessageState(
+                            try! IMCachedMessageState(
                                 id: "rejoined-cached-1",
                                 conversationID: rejoinedConversationIDString,
                                 clientMessageID: nil,
                                 serverMessageID: "rejoined-server-1",
                                 senderUserID: peerUserID,
                                 serverSequence: 1,
+                                timelineSequence: 1,
                                 content: .richText(.plain("重新加入前的旧历史 1")),
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_700_970_000),
                                 deliveryState: .received
                             ),
-                            IMCachedMessageState(
+                            try! IMCachedMessageState(
                                 id: "rejoined-cached-2",
                                 conversationID: rejoinedConversationIDString,
                                 clientMessageID: nil,
                                 serverMessageID: "rejoined-server-2",
                                 senderUserID: peerUserID,
                                 serverSequence: 2,
+                                timelineSequence: 2,
                                 content: .richText(.plain("重新加入前的旧历史 2")),
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_700_970_010),
@@ -1021,8 +1032,8 @@ extension AuthManagerTests {
                         hasLoadedMessages: true,
                         lastMessagePreviewText: "重新加入前的旧历史 2",
                         hasMoreHistory: false,
-                        latestSyncedServerSequence: 2,
-                        oldestLoadedServerSequence: 1,
+                        latestLoadedTimelineSequence: 2,
+                        oldestLoadedTimelineSequence: 1,
                         serverLastReadSequence: 2,
                         serverUnreadCount: 0,
                         updatedAt: Date(timeIntervalSince1970: 1_700_970_010)
@@ -1034,13 +1045,14 @@ extension AuthManagerTests {
                         memberCount: 2,
                         memberUserIDs: [Self.user.id, peerUserID],
                         messages: [
-                            IMCachedMessageState(
+                            try! IMCachedMessageState(
                                 id: "fallback-cached-1",
                                 conversationID: restoredConversationIDString,
                                 clientMessageID: nil,
                                 serverMessageID: "fallback-server-1",
                                 senderUserID: peerUserID,
                                 serverSequence: 1,
+                                timelineSequence: 1,
                                 content: .richText(.plain("备用历史 1")),
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_700_970_020),
@@ -1050,8 +1062,8 @@ extension AuthManagerTests {
                         hasLoadedMessages: true,
                         lastMessagePreviewText: "备用历史 1",
                         hasMoreHistory: false,
-                        latestSyncedServerSequence: 1,
-                        oldestLoadedServerSequence: 1,
+                        latestLoadedTimelineSequence: 1,
+                        oldestLoadedTimelineSequence: 1,
                         serverLastReadSequence: 1,
                         serverUnreadCount: 0,
                         updatedAt: Date(timeIntervalSince1970: 1_700_970_020)
@@ -1075,6 +1087,7 @@ extension AuthManagerTests {
                         id: UUID(uuidString: "11111111-1212-3434-5656-aaaaaaaaaaaa")!,
                         senderUserID: peerUserID,
                         serverSequence: 1,
+                        timelineSequence: 1,
                         content: .richText(.plain("备用历史 1")),
                         createdAt: Date(timeIntervalSince1970: 1_700_970_020)
                     ),
@@ -1092,6 +1105,7 @@ extension AuthManagerTests {
                         senderUserID: peerUserID,
                         clientMessageID: nil,
                         serverSequence: 1,
+                        timelineSequence: 1,
                         content: .richText(.plain("备用历史 1")),
                         createdAt: Date(timeIntervalSince1970: 1_700_970_020)
                     )
@@ -1135,21 +1149,21 @@ extension AuthManagerTests {
                 )
             case ("GET", "/api/im/conversations/\(restoredConversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", "/api/im/conversations/\(restoredConversationID.uuidString)/messages"):
+            case ("GET", "/api/im/conversations/\(restoredConversationID.uuidString)/timeline"):
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: restoredConversationID))
+                    body: try HTTPFixtures.jsonBody(await state.timelineResponse(for: restoredConversationID))
                 )
             case ("GET", "/api/im/conversations/\(rejoinedConversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", "/api/im/conversations/\(rejoinedConversationID.uuidString)/messages"):
+            case ("GET", "/api/im/conversations/\(rejoinedConversationID.uuidString)/timeline"):
                 await requestCounter.increment("messagesRejoined")
                 return HTTPFixtures.response(
                     statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(await state.messagesResponse(for: rejoinedConversationID))
+                    body: try HTTPFixtures.jsonBody(await state.timelineResponse(for: rejoinedConversationID))
                 )
-            case ("GET", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/messages/since"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/timeline/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             case ("POST", let path?) where path.hasPrefix("/api/im/conversations/") && path.hasSuffix("/read"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
             case ("GET", "/api/contacts"):
@@ -1195,6 +1209,7 @@ extension AuthManagerTests {
                     id: UUID(uuidString: "22222222-1212-3434-5656-aaaaaaaaaaaa")!,
                     senderUserID: peerUserID,
                     serverSequence: 5,
+                    timelineSequence: 5,
                     content: .richText(.plain("重新加入后的可见消息")),
                     createdAt: Date(timeIntervalSince1970: 1_700_970_200)
                 ),
@@ -1211,6 +1226,7 @@ extension AuthManagerTests {
                 senderUserID: peerUserID,
                 clientMessageID: nil,
                 serverSequence: 5,
+                timelineSequence: 5,
                 content: .richText(.plain("重新加入后的可见消息")),
                 createdAt: Date(timeIntervalSince1970: 1_700_970_200)
             ),
@@ -1237,7 +1253,7 @@ extension AuthManagerTests {
         #expect(rejoinedSummary.messages.isEmpty)
         #expect(rejoinedSummary.lastMessagePreview == "重新加入后的可见消息")
 
-        manager.imConversationStore.replaceMessages(
+        manager.imConversationStore.replaceTimelineItems(
             in: rejoinedConversationIDString,
             messages: await state.messagesResponse(for: rejoinedConversationID),
             currentUserID: Self.user.id
@@ -1274,6 +1290,7 @@ extension AuthManagerTests {
                     id: UUID(uuidString: "22222222-8888-9999-0000-aaaaaaaaaaaa")!,
                     senderUserID: Self.user.id,
                     serverSequence: 1,
+                    timelineSequence: 1,
                     content: .richText(.plain("manager@example.com 创建了群聊")),
                     createdAt: Date(timeIntervalSince1970: 1_700_910_000)
                 ),
@@ -1333,10 +1350,10 @@ extension AuthManagerTests {
                     statusCode: 200,
                     body: try Self.imConversationMembersPageBody(await membersState.membersResponse(for: conversationID))
                 )
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
             case ("POST", "/api/im/conversations/\(conversationID.uuidString)/members/\(peerUserID.uuidString)/role"):
@@ -1353,6 +1370,7 @@ extension AuthManagerTests {
                         senderUserID: Self.user.id,
                         clientMessageID: nil,
                         serverSequence: 2,
+                        timelineSequence: 2,
                         content: .richText(.plain("manager@example.com 将 peer@example.com 设为管理员")),
                         createdAt: Date(timeIntervalSince1970: 1_700_910_100)
                     ),
@@ -1430,8 +1448,8 @@ extension AuthManagerTests {
                         hasLoadedMessages: false,
                         lastMessagePreviewText: "",
                         hasMoreHistory: false,
-                        latestSyncedServerSequence: nil,
-                        oldestLoadedServerSequence: nil,
+                        latestLoadedTimelineSequence: nil,
+                        oldestLoadedTimelineSequence: nil,
                         serverLastReadSequence: 0,
                         serverUnreadCount: 0,
                         draftText: "只在本地的草稿",
@@ -1460,10 +1478,10 @@ extension AuthManagerTests {
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactRequestResponseBody]()))
             case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesBody())
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages/since"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMessagesSinceBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
                 return HTTPFixtures.response(statusCode: 200, body: try Self.imConversationReadBody(for: request))
             default:

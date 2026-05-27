@@ -9,12 +9,14 @@ struct DatabaseOutboxConversationEventBus: ConversationEventBus {
     func publish(
         type: ConversationDomainEventType,
         conversationID: UUID,
+        actorUserID: UUID?,
         payload: ConversationDomainEventPayload,
         on database: (any Database)? = nil
     ) async throws {
         try await ConversationOutboxService(db: db).enqueue(
             type: type,
             conversationID: conversationID,
+            actorUserID: actorUserID,
             payload: payload,
             on: database
         )
@@ -73,6 +75,8 @@ struct ConversationOutboxRelay {
                 let envelope = ConversationEventStreamEnvelope(
                     eventID: eventID,
                     conversationID: event.conversationID,
+                    actorUserID: event.actorUserID,
+                    aggregateSequence: event.aggregateSequence,
                     eventType: event.eventType,
                     payload: payload,
                     occurredAt: event.createdAt,

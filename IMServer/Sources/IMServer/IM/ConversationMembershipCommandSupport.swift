@@ -102,17 +102,19 @@ struct ConversationMembershipCommandSupport {
                 }
             }
 
-            return try await ConversationSummaryReadSupport(db: database).conversationSummary(
+            let response = try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
                 for: creatorUserID
             )
+            try await ConversationSummaryRefreshPublisher(db: database).publish(
+                .membershipAdded,
+                conversationID: response.id,
+                actorUserID: creatorUserID,
+                recipientUserIDs: response.memberUserIDs,
+                on: database
+            )
+            return response
         }
-
-        try await refreshPublisher.publish(
-            .membershipAdded,
-            conversationID: response.id,
-            recipientUserIDs: response.memberUserIDs
-        )
 
         return response
     }
@@ -183,17 +185,19 @@ struct ConversationMembershipCommandSupport {
                 ).create(on: database)
             }
 
-            return try await ConversationSummaryReadSupport(db: database).conversationSummary(
+            let response = try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
                 for: requesterUserID
             )
+            try await ConversationSummaryRefreshPublisher(db: database).publish(
+                .membershipAdded,
+                conversationID: conversationID,
+                actorUserID: requesterUserID,
+                recipientUserIDs: response.memberUserIDs,
+                on: database
+            )
+            return response
         }
-
-        try await refreshPublisher.publish(
-            .membershipAdded,
-            conversationID: conversationID,
-            recipientUserIDs: response.memberUserIDs
-        )
 
         return response
     }
@@ -251,23 +255,29 @@ struct ConversationMembershipCommandSupport {
                 try await persistedConversation.update(on: database)
             }
 
-            return try await ConversationSummaryReadSupport(db: database).conversationSummary(
+            let requesterConversation = try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
                 for: requesterUserID
             )
+            let remainingUserIDs = requesterConversation.memberUserIDs
+            let publisher = ConversationSummaryRefreshPublisher(db: database)
+            try await publisher.publishConversationRemoved(
+                conversationID: conversationID,
+                actorUserID: requesterUserID,
+                affectedUserID: memberUserID,
+                on: database
+            )
+            try await publisher.publish(
+                .membershipRemoved,
+                conversationID: conversationID,
+                actorUserID: requesterUserID,
+                recipientUserIDs: remainingUserIDs,
+                on: database
+            )
+            return requesterConversation
         }
 
         let remainingUserIDs = requesterConversation.memberUserIDs
-        try await refreshPublisher.publishConversationRemoved(
-            conversationID: conversationID,
-            affectedUserID: memberUserID
-        )
-        try await refreshPublisher.publish(
-            .membershipRemoved,
-            conversationID: conversationID,
-            recipientUserIDs: remainingUserIDs
-        )
-
         return ConversationMemberRemovalResult(
             requesterConversation: requesterConversation,
             removedConversation: removedConversation,
@@ -335,17 +345,20 @@ struct ConversationMembershipCommandSupport {
                 try await persistedConversation.update(on: database)
             }
 
-            return try await ConversationSummaryReadSupport(db: database).conversationSummary(
+            let response = try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
                 for: requesterUserID
             )
+            try await ConversationSummaryRefreshPublisher(db: database).publish(
+                .membershipRoleUpdated,
+                conversationID: conversationID,
+                actorUserID: requesterUserID,
+                recipientUserIDs: response.memberUserIDs,
+                on: database
+            )
+            return response
         }
 
-        try await refreshPublisher.publish(
-            .membershipRoleUpdated,
-            conversationID: conversationID,
-            recipientUserIDs: response.memberUserIDs
-        )
         return response
     }
 
@@ -389,17 +402,21 @@ struct ConversationMembershipCommandSupport {
                 persistedConversation.membershipRevision = revision
                 try await persistedConversation.update(on: database)
             }
+            let publisher = ConversationSummaryRefreshPublisher(db: database)
+            try await publisher.publishConversationRemoved(
+                conversationID: conversationID,
+                actorUserID: requesterUserID,
+                affectedUserID: requesterUserID,
+                on: database
+            )
+            try await publisher.publish(
+                .membershipRemoved,
+                conversationID: conversationID,
+                actorUserID: requesterUserID,
+                recipientUserIDs: remainingUserIDs,
+                on: database
+            )
         }
-
-        try await refreshPublisher.publishConversationRemoved(
-            conversationID: conversationID,
-            affectedUserID: requesterUserID
-        )
-        try await refreshPublisher.publish(
-            .membershipRemoved,
-            conversationID: conversationID,
-            recipientUserIDs: remainingUserIDs
-        )
     }
 
     private func requireMembershipRecord(

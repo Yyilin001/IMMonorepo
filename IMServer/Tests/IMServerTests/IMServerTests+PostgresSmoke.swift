@@ -116,6 +116,7 @@ extension IMServerTests {
             conversationID: conversationID,
             senderUserID: senderID,
             serverSequence: 7,
+            timelineSequence: 7,
             content: .richText(.plain("existing"))
         )
         try await existingMessage.create(on: app.db)
@@ -164,6 +165,7 @@ extension IMServerTests {
             conversationID: conversationID,
             senderUserID: senderID,
             serverSequence: 1,
+            timelineSequence: 1,
             content: .file(asset)
         )
         try await mediaMessage.create(on: app.db)
@@ -171,6 +173,7 @@ extension IMServerTests {
             conversationID: conversationID,
             senderUserID: senderID,
             serverSequence: 2,
+            timelineSequence: 2,
             content: .richText(.plain("not media"))
         )
         try await textMessage.create(on: app.db)
@@ -242,6 +245,7 @@ extension IMServerTests {
             conversationID: conversationID,
             senderUserID: senderID,
             serverSequence: 1,
+            timelineSequence: 1,
             content: .richText(.plain("indexed"))
         )
         try await indexed.create(on: app.db)
@@ -249,6 +253,7 @@ extension IMServerTests {
             conversationID: conversationID,
             senderUserID: senderID,
             serverSequence: 2,
+            timelineSequence: 2,
             content: .richText(.plain("stale"))
         )
         try await stale.create(on: app.db)
@@ -256,6 +261,7 @@ extension IMServerTests {
             conversationID: conversationID,
             senderUserID: senderID,
             serverSequence: 3,
+            timelineSequence: 3,
             content: .richText(.plain("missing"))
         )
         try await missing.create(on: app.db)

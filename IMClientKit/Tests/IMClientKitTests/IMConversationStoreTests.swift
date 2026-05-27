@@ -25,7 +25,7 @@ struct IMConversationStoreTests {
                 IMMessagePreviewResponseBody(
                     id: UUID(),
                     senderUserID: Self.peerUserID,
-                    serverSequence: sequence,
+                    serverSequence: UInt64(sequence),
                     kind: "rich_text",
                     body: ["text": "summary \(sequence)"],
                     createdAt: updatedAt
@@ -45,7 +45,7 @@ struct IMConversationStoreTests {
             conversationID: conversationID,
             senderUserID: Self.peerUserID,
             clientMessageID: nil,
-            serverSequence: serverSequence,
+            serverSequence: UInt64(serverSequence),
             kind: "rich_text",
             body: ["text": "local \(serverSequence)"],
             createdAt: Date(timeIntervalSince1970: 1_700_500_000 + Double(serverSequence))
@@ -57,17 +57,13 @@ struct IMConversationStoreTests {
         conversationID: String,
         text: String,
         createdAt: TimeInterval
-    ) -> IMCachedMessageState {
-        IMCachedMessageState(
-            id: id,
-            conversationID: conversationID,
+    ) -> IMCachedPendingMessageState {
+        IMCachedPendingMessageState(
+            localMessageID: id,
             clientMessageID: id,
-            serverMessageID: nil,
+            conversationID: conversationID,
             senderUserID: Self.currentUserID,
-            serverSequence: nil,
-            kind: "rich_text",
-            text: text,
-            direction: .outgoing,
+            content: testMessageContent(kind: "rich_text", body: ["text": text]),
             createdAt: Date(timeIntervalSince1970: createdAt),
             deliveryState: .queued(message: "等待 IM 长连接恢复后发送。")
         )
@@ -275,6 +271,7 @@ struct IMConversationStoreTests {
                         id: recalledMessageID,
                         senderUserID: Self.peerUserID,
                         serverSequence: 2,
+                        timelineSequence: 2,
                         content: .richText(.plain("stale local copy")),
                         derivedState: MessageDerivedState(recallState: .recalled),
                         createdAt: Date(timeIntervalSince1970: 1_700_300_000)
@@ -290,6 +287,7 @@ struct IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 2,
+                    timelineSequence: 2,
                     content: .richText(.plain("original text")),
                     derivedState: MessageDerivedState(recallState: .recalled),
                     createdAt: Date(timeIntervalSince1970: 1_700_300_000)
@@ -334,7 +332,7 @@ struct IMConversationStoreTests {
             ]
         )
         store.openConversation(id: conversationID.uuidString)
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationID.uuidString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -361,6 +359,7 @@ struct IMConversationStoreTests {
                         id: recalledMessageID,
                         senderUserID: Self.peerUserID,
                         serverSequence: 2,
+                        timelineSequence: 2,
                         content: .richText(.plain("stale local copy")),
                         derivedState: MessageDerivedState(recallState: .recalled),
                         createdAt: Date(timeIntervalSince1970: 1_700_300_000)
@@ -397,6 +396,7 @@ struct IMConversationStoreTests {
                         id: messageID,
                         senderUserID: Self.currentUserID,
                         serverSequence: 2,
+                        timelineSequence: 2,
                         content: .richText(.plain("before edit")),
                         createdAt: createdAt
                     ),
@@ -406,7 +406,7 @@ struct IMConversationStoreTests {
             ]
         )
         store.openConversation(id: conversationID.uuidString)
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationID.uuidString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -415,6 +415,7 @@ struct IMConversationStoreTests {
                     senderUserID: Self.currentUserID,
                     clientMessageID: "client-edit-1",
                     serverSequence: 2,
+                    timelineSequence: 2,
                     content: .richText(.plain("before edit")),
                     createdAt: createdAt
                 )
@@ -436,6 +437,7 @@ struct IMConversationStoreTests {
                         id: messageID,
                         senderUserID: Self.currentUserID,
                         serverSequence: 2,
+                        timelineSequence: 2,
                         content: .richText(.plain("before edit")),
                         derivedState: editedState,
                         createdAt: createdAt
@@ -449,6 +451,7 @@ struct IMConversationStoreTests {
                     senderUserID: Self.currentUserID,
                     clientMessageID: "client-edit-1",
                     serverSequence: 2,
+                    timelineSequence: 2,
                     content: .richText(.plain("before edit")),
                     derivedState: editedState,
                     createdAt: createdAt
@@ -503,6 +506,7 @@ struct IMConversationStoreTests {
                     conversationID: conversationID,
                     senderUserID: Self.currentUserID,
                     serverSequence: 2,
+                    timelineSequence: 2,
                     content: .richText(.plain("")),
                     derivedState: IMMessageDerivedState(
                         streamState: MessageStreamState(
@@ -560,23 +564,7 @@ struct IMConversationStoreTests {
                 serverTimestamp: Date(timeIntervalSince1970: 1_700_300_002)
             )
         ] {
-            _ = store.applyTestConversationEvent(
-                TestConversationEventPayload(
-                    eventType: .messageStreamChunk,
-                    conversation: IMConversationSummaryResponseBody(
-                        id: conversationID,
-                        title: "AI Conversation",
-                        memberUserIDs: [Self.currentUserID, Self.peerUserID],
-                        lastMessage: nil,
-                        createdAt: Date(timeIntervalSince1970: 1_700_200_000),
-                        updatedAt: chunk.serverTimestamp
-                    ),
-                    stream: chunk,
-                    actorUserID: Self.currentUserID,
-                    serverTimestamp: chunk.serverTimestamp
-                ),
-                currentUserID: Self.currentUserID
-            )
+            store.applyStreamSignal(.init(stream: chunk), currentUserID: Self.currentUserID)
         }
 
         var conversation = try #require(store.selectedConversation)
@@ -592,17 +580,8 @@ struct IMConversationStoreTests {
             )
         ])
 
-        _ = store.applyTestConversationEvent(
-            TestConversationEventPayload(
-                eventType: .messageStreamChunk,
-                conversation: IMConversationSummaryResponseBody(
-                    id: conversationID,
-                    title: "AI Conversation",
-                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
-                    lastMessage: nil,
-                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
-                    updatedAt: Date(timeIntervalSince1970: 1_700_300_004)
-                ),
+        store.applyStreamSignal(
+            .init(
                 stream: IMTCPMessageStreamPayload(
                     streamID: streamID,
                     messageID: messageID.uuidString,
@@ -612,9 +591,7 @@ struct IMConversationStoreTests {
                     partialTextLength: 15,
                     state: .streaming,
                     serverTimestamp: Date(timeIntervalSince1970: 1_700_300_004)
-                ),
-                actorUserID: Self.currentUserID,
-                serverTimestamp: Date(timeIntervalSince1970: 1_700_300_004)
+                )
             ),
             currentUserID: Self.currentUserID
         )
@@ -648,6 +625,7 @@ struct IMConversationStoreTests {
                         id: messageID,
                         senderUserID: Self.currentUserID,
                         serverSequence: 2,
+                        timelineSequence: 2,
                         content: .richText(.plain("AI response")),
                         derivedState: completedState,
                         createdAt: createdAt
@@ -660,6 +638,7 @@ struct IMConversationStoreTests {
                     conversationID: conversationID,
                     senderUserID: Self.currentUserID,
                     serverSequence: 2,
+                    timelineSequence: 2,
                     content: .richText(.plain("AI response")),
                     derivedState: completedState,
                     createdAt: createdAt
@@ -686,17 +665,8 @@ struct IMConversationStoreTests {
         #expect(message.derivedState.streamState?.state == .completed)
         #expect(store.activeMessageStreamTargets().isEmpty)
 
-        _ = store.applyTestConversationEvent(
-            TestConversationEventPayload(
-                eventType: .messageStreamChunk,
-                conversation: IMConversationSummaryResponseBody(
-                    id: conversationID,
-                    title: "AI Conversation",
-                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
-                    lastMessage: nil,
-                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
-                    updatedAt: Date(timeIntervalSince1970: 1_700_300_005)
-                ),
+        store.applyStreamSignal(
+            .init(
                 stream: IMTCPMessageStreamPayload(
                     streamID: streamID,
                     messageID: messageID.uuidString,
@@ -706,9 +676,7 @@ struct IMConversationStoreTests {
                     partialTextLength: 16,
                     state: .streaming,
                     serverTimestamp: Date(timeIntervalSince1970: 1_700_300_005)
-                ),
-                actorUserID: Self.currentUserID,
-                serverTimestamp: Date(timeIntervalSince1970: 1_700_300_005)
+                )
             ),
             currentUserID: Self.currentUserID
         )
@@ -750,6 +718,7 @@ struct IMConversationStoreTests {
                 senderUserID: Self.peerUserID,
                 clientMessageID: nil,
                 serverSequence: 2,
+                timelineSequence: 2,
                 content: .richText(.plain("react here")),
                 derivedState: reactionState,
                 createdAt: createdAt
@@ -1021,7 +990,7 @@ struct IMConversationStoreTests {
                 )
             ]
         )
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: backgroundConversationID.uuidString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -1030,6 +999,7 @@ struct IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 6,
+                    timelineSequence: 6,
                     content: .richText(.plain("six")),
                     createdAt: Date(timeIntervalSince1970: 1_700_200_006)
                 ),
@@ -1039,6 +1009,7 @@ struct IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 8,
+                    timelineSequence: 8,
                     content: .richText(.plain("eight")),
                     createdAt: Date(timeIntervalSince1970: 1_700_200_008)
                 )
@@ -1099,7 +1070,7 @@ struct IMConversationStoreTests {
                 )
             ]
         )
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: backgroundConversationID.uuidString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -1108,6 +1079,7 @@ struct IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 8,
+                    timelineSequence: 8,
                     content: .richText(.plain("eight")),
                     createdAt: Date(timeIntervalSince1970: 1_700_200_008)
                 )

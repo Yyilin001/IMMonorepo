@@ -25,11 +25,12 @@ struct IMConversationController: RouteCollection {
 
         protected.get("conversations", use: conversations)
         protected.get("conversations", "changes", use: conversationChanges)
+        protected.get("domain-events", use: domainEventChanges)
         protected.get("conversations", ":conversationID", "members", use: members)
-        protected.get("conversations", ":conversationID", "messages", use: messages)
+        protected.get("conversations", ":conversationID", "timeline", use: timeline)
+        protected.get("conversations", ":conversationID", "timeline", "since", use: timelineSince)
         protected.get("conversations", ":conversationID", "receipts", "summary", use: receiptSummary)
         protected.get("conversations", ":conversationID", "search", use: searchMessages)
-        protected.get("conversations", ":conversationID", "messages", "since", use: messagesSince)
         protected.get("conversations", ":conversationID", "messages", ":messageID", "stream", use: messageStreamSnapshot)
         protected.get("favorites", use: favorites)
     }

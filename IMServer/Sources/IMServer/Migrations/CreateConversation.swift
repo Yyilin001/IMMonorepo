@@ -45,6 +45,7 @@ struct CreateConversationMessage: AsyncMigration {
             .field("conversation_id", .uuid, .required, .references(Conversation.schema, "id", onDelete: .cascade))
             .field("sender_user_id", .uuid, .required, .references(User.schema, "id", onDelete: .restrict))
             .field("server_sequence", .int, .required)
+            .field("timeline_sequence", .int, .required)
             .field("kind", .string, .required)
             .field("body_json", .string, .required)
             .field("created_at", .datetime)

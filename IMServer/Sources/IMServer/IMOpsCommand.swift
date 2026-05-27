@@ -67,7 +67,7 @@ struct IMOpsCommand: AsyncCommand {
         }
 
         if signature.verifySummaryShards {
-            let result = try await IMSummaryReadModelBackfillService(app: context.application).verifyAllSummaries()
+            let result = try await IMSummaryReadModelRepairService(app: context.application).verifyAllSummaries()
             context.console.print(
                 "summary_shards owner_users=\(result.ownerUserCount) missing=\(result.missingSummaryCount) stale=\(result.staleActiveSummaryCount) latest_message_mismatch=\(result.latestVisibleMessageMismatchCount) unread_mismatch=\(result.unreadMismatchCount)"
             )

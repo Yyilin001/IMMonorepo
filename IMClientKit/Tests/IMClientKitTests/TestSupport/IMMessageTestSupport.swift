@@ -86,7 +86,7 @@ extension IMMessagePreviewResponseBody {
     init(
         id: UUID,
         senderUserID: UUID,
-        serverSequence: Int,
+        serverSequence: UInt64,
         kind: String,
         body: [String: String],
         createdAt: Date?
@@ -95,6 +95,7 @@ extension IMMessagePreviewResponseBody {
             id: id,
             senderUserID: senderUserID,
             serverSequence: serverSequence,
+            timelineSequence: serverSequence,
             content: testMessageContent(kind: kind, body: body),
             createdAt: createdAt
         )
@@ -127,7 +128,8 @@ extension IMConversationMessageResponseBody {
         conversationID: UUID,
         senderUserID: UUID,
         clientMessageID: String? = nil,
-        serverSequence: Int,
+        serverSequence: UInt64,
+        timelineSequence: UInt64? = nil,
         kind: String,
         body: [String: String],
         createdAt: Date?
@@ -138,6 +140,12 @@ extension IMConversationMessageResponseBody {
             senderUserID: senderUserID,
             clientMessageID: clientMessageID,
             serverSequence: serverSequence,
+            timelineSequence: {
+                if let timelineSequence {
+                    return timelineSequence
+                }
+                return serverSequence
+            }(),
             content: testMessageContent(kind: kind, body: body),
             createdAt: createdAt
         )
@@ -191,22 +199,23 @@ extension IMCachedMessageState {
         id: String,
         conversationID: String,
         clientMessageID: String?,
-        serverMessageID: String?,
-        senderUserID: UUID?,
-        serverSequence: UInt64?,
+        serverMessageID: String,
+        senderUserID: UUID,
+        serverSequence: UInt64,
         kind: String,
         text: String,
         direction: IMMessageDirection,
         createdAt: Date,
         deliveryState: IMMessageDeliveryState
     ) {
-        self.init(
+        try! self.init(
             id: id,
             conversationID: conversationID,
             clientMessageID: clientMessageID,
             serverMessageID: serverMessageID,
             senderUserID: senderUserID,
             serverSequence: serverSequence,
+            timelineSequence: serverSequence,
             content: testMessageContent(kind: kind, body: ["text": text]),
             direction: direction,
             createdAt: createdAt,
@@ -236,7 +245,6 @@ enum TestConversationEventType: String {
     case conversationSettingsChanged = "conversation_settings_changed"
     case inviteChanged = "invite_changed"
     case messageStreamStarted = "message_stream_started"
-    case messageStreamChunk = "message_stream_chunk"
     case messageStreamCompleted = "message_stream_completed"
     case messageStreamFailed = "message_stream_failed"
     case messageStreamCancelled = "message_stream_cancelled"
@@ -304,7 +312,8 @@ extension IMConversationStore {
                         conversationID: conversationID,
                         senderUserID: senderUserID,
                         clientMessageID: payload.clientMessageID,
-                        serverSequence: Int(serverSequence),
+                        serverSequence: serverSequence,
+                        timelineSequence: serverSequence,
                         content: payload.content,
                         derivedState: payload.derivedState,
                         createdAt: payload.serverTimestamp
@@ -371,8 +380,6 @@ private extension TestConversationEventPayload {
             return .conversationSettingsChanged
         case .messageStreamStarted:
             return .messageStreamStarted
-        case .messageStreamChunk:
-            return .messageStreamChunk
         case .messageStreamCompleted:
             return .messageStreamCompleted
         case .messageStreamFailed:
@@ -419,7 +426,6 @@ private extension TestConversationEventPayload {
         case .membersAdded, .memberLeft, .membersUpdated:
             return .memberChanged(memberUserIDs: conversation.memberUserIDs)
         case .messageStreamStarted,
-             .messageStreamChunk,
              .messageStreamCompleted,
              .messageStreamFailed,
              .messageStreamCancelled:

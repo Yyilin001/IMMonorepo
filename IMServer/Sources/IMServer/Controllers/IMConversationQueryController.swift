@@ -25,6 +25,18 @@ extension IMConversationController {
             )
     }
 
+    func domainEventChanges(req: Request) async throws -> DomainEventChangesResponse {
+        let user = try req.auth.require(User.self)
+        let query = try req.query.decode(IMDomainEventChangesQuery.self)
+        return try await OwnerDomainEventDeliveryService(
+            db: req.application.summaryShardRouter.database(forOwnerUserID: try user.requireID())
+        ).list(
+            ownerUserID: try user.requireID(),
+            afterCursor: query.after ?? 0,
+            limit: query.limit
+        )
+    }
+
     func members(req: Request) async throws -> IMConversationMemberPageResponse {
         let user = try req.auth.require(User.self)
         let query = try req.query.decode(IMConversationMemberPageQuery.self)
@@ -45,20 +57,6 @@ extension IMConversationController {
             )
     }
 
-    func messages(req: Request) async throws -> [IMMessageResponse] {
-        let user = try req.auth.require(User.self)
-        let conversationID = try conversationID(from: req)
-        let query = try req.query.decode(IMMessageHistoryQuery.self)
-
-        return try await QueryReadModelFacade(app: req.application)
-            .listMessages(
-                in: conversationID,
-                for: try user.requireID(),
-                beforeSequence: query.beforeSequence,
-                limit: query.limit
-            )
-    }
-
     func searchMessages(req: Request) async throws -> IMConversationMessageSearchPageResponse {
         let user = try req.auth.require(User.self)
         let conversationID = try conversationID(from: req)
@@ -74,16 +72,32 @@ extension IMConversationController {
             )
     }
 
-    func messagesSince(req: Request) async throws -> IMMessageSinceResponse {
+    func timeline(req: Request) async throws -> IMTimelinePageResponse {
         let user = try req.auth.require(User.self)
         let conversationID = try conversationID(from: req)
-        let query = try req.query.decode(IMMessageSinceQuery.self)
+        let query = try req.query.decode(IMMessageHistoryQuery.self)
 
         return try await QueryReadModelFacade(app: req.application)
-            .listMessagesSince(
+            .listTimeline(
                 in: conversationID,
                 for: try user.requireID(),
-                afterSequence: query.afterSequence,
+                beforeSequence: try query.beforeSequence.map {
+                    try imIntSequence($0, field: "beforeSequence")
+                },
+                limit: query.limit
+            )
+    }
+
+    func timelineSince(req: Request) async throws -> IMTimelinePageResponse {
+        let user = try req.auth.require(User.self)
+        let conversationID = try conversationID(from: req)
+        let query = try req.query.decode(IMTimelineSinceQuery.self)
+
+        return try await QueryReadModelFacade(app: req.application)
+            .listTimelineSince(
+                in: conversationID,
+                for: try user.requireID(),
+                afterSequence: try imIntSequence(query.afterSequence, field: "afterSequence"),
                 limit: query.limit
             )
     }

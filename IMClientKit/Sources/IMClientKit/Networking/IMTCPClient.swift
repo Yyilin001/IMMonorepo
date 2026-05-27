@@ -8,6 +8,7 @@ public enum IMTCPPacketType: String, Codable, Sendable {
     case heartbeatAck = "heartbeat_ack"
     case sendMessage = "send_message"
     case domainEvent = "domain_event"
+    case streamSignal = "stream_signal"
     case ack
     case kick
 }
@@ -18,7 +19,6 @@ public struct IMTCPAuthRequestPayload: Codable, Equatable, Sendable {
     public let deviceName: String?
     public let platform: String?
     public let appVersion: String?
-    public let protocolVersion: Int
 }
 
 public struct IMTCPAuthAcceptedPayload: Codable, Equatable, Sendable {
@@ -136,6 +136,16 @@ public struct IMTCPMessageStreamPayload: Codable, Equatable, Sendable {
     }
 }
 
+public struct IMTCPMessageStreamSignalPayload: Codable, Equatable, Sendable {
+    public let stream: IMTCPMessageStreamPayload
+    public let message: IMConversationMessageResponseBody?
+
+    public init(stream: IMTCPMessageStreamPayload, message: IMConversationMessageResponseBody? = nil) {
+        self.stream = stream
+        self.message = message
+    }
+}
+
 public enum IMTCPChatDomainEventType: String, Codable, Equatable, Sendable {
     case messageCreated = "message_created"
     case messageEdited = "message_edited"
@@ -143,7 +153,6 @@ public enum IMTCPChatDomainEventType: String, Codable, Equatable, Sendable {
     case messageVisibilityChanged = "message_visibility_changed"
     case messageFavoriteChanged = "message_favorite_changed"
     case messageStreamStarted = "message_stream_started"
-    case messageStreamChunk = "message_stream_chunk"
     case messageStreamCompleted = "message_stream_completed"
     case messageStreamFailed = "message_stream_failed"
     case messageStreamCancelled = "message_stream_cancelled"
@@ -183,6 +192,10 @@ public struct IMTCPChatDomainEventPayload: Equatable, Sendable {
     public let occurredAt: Date
     public let actorUserID: UUID?
     public let conversation: IMConversationSummaryResponseBody?
+    public let timelineNotice: IMTimelineNoticeResponseBody?
+    public let requiresTimelineNotice: Bool
+    public let ownerCursor: UInt64?
+    public let ownerAggregateSequence: UInt64?
     public let body: IMTCPChatDomainEventBody
 
     public init(
@@ -194,6 +207,10 @@ public struct IMTCPChatDomainEventPayload: Equatable, Sendable {
         occurredAt: Date,
         actorUserID: UUID?,
         conversation: IMConversationSummaryResponseBody?,
+        timelineNotice: IMTimelineNoticeResponseBody? = nil,
+        requiresTimelineNotice: Bool = false,
+        ownerCursor: UInt64? = nil,
+        ownerAggregateSequence: UInt64? = nil,
         body: IMTCPChatDomainEventBody
     ) {
         self.eventID = eventID
@@ -204,6 +221,10 @@ public struct IMTCPChatDomainEventPayload: Equatable, Sendable {
         self.occurredAt = occurredAt
         self.actorUserID = actorUserID
         self.conversation = conversation
+        self.timelineNotice = timelineNotice
+        self.requiresTimelineNotice = requiresTimelineNotice
+        self.ownerCursor = ownerCursor
+        self.ownerAggregateSequence = ownerAggregateSequence
         self.body = body
     }
 }
@@ -239,7 +260,7 @@ public struct IMTCPClientConfiguration: Equatable, Sendable {
     public init(
         host: String,
         port: UInt16,
-        protocolVersion: Int = 4,
+        protocolVersion: Int = IMRealtimeProtocolVersion.currentInt,
         deviceID: String? = nil,
         deviceName: String? = nil,
         platform: String? = "ios",
@@ -259,12 +280,13 @@ public enum IMTCPConnectionEvent: Equatable, Sendable {
     case heartbeatAck(requestID: UUID?, payload: IMTCPHeartbeatPayload)
     case ack(requestID: UUID?, payload: IMTCPAckPayload)
     case domainEvent(requestID: UUID?, payload: IMTCPChatDomainEventPayload)
+    case streamSignal(requestID: UUID?, payload: IMTCPMessageStreamSignalPayload)
     case kick(IMTCPKickPayload)
 }
 
 public enum IMTCPClientError: LocalizedError, Equatable, Sendable {
     case invalidPacket
-    case invalidPayload(IMTCPPacketType)
+    case invalidPayload(IMTCPPacketType, reason: String? = nil)
     case unexpectedPacket(IMTCPPacketType)
     case authRejected(code: String, message: String)
     case kicked(reason: IMTCPKickReason, message: String)
@@ -274,7 +296,10 @@ public enum IMTCPClientError: LocalizedError, Equatable, Sendable {
         switch self {
         case .invalidPacket:
             return "TCP 数据包格式无效。"
-        case .invalidPayload(let packetType):
+        case .invalidPayload(let packetType, let reason):
+            if let reason, !reason.isEmpty {
+                return "收到的 \(packetType.rawValue) payload 无法解析：\(reason)。"
+            }
             return "收到的 \(packetType.rawValue) payload 无法解析。"
         case .unexpectedPacket(let packetType):
             return "收到未预期的 \(packetType.rawValue) 数据包。"
@@ -404,8 +429,7 @@ public struct IMTCPClient: Sendable {
                 deviceID: configuration.deviceID,
                 deviceName: configuration.deviceName,
                 platform: configuration.platform,
-                appVersion: configuration.appVersion,
-                protocolVersion: configuration.protocolVersion
+                appVersion: configuration.appVersion
             )
             try await send(type: .auth, requestID: nil, payload: authPayload, via: transportConnection)
 
@@ -552,6 +576,14 @@ private actor IMTCPEventRouter {
                 continuation.yield(.domainEvent(requestID: packet.requestID, payload: payload))
             } catch {
                 finish(with: IMTCPClientError.invalidPayload(.domainEvent))
+            }
+
+        case .streamSignal:
+            do {
+                let payload = try packet.payload.decodePayload(IMTCPMessageStreamSignalPayload.self)
+                continuation.yield(.streamSignal(requestID: packet.requestID, payload: payload))
+            } catch {
+                finish(with: IMTCPClientError.invalidPayload(.streamSignal))
             }
 
         case .kick:

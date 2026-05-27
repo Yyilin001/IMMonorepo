@@ -23,7 +23,7 @@ struct IMTCPConfiguration: Sendable {
             enabled: enabled,
             host: Environment.get("IM_TCP_HOST") ?? "0.0.0.0",
             port: Environment.get("IM_TCP_PORT").flatMap(Int.init(_:)) ?? 9000,
-            protocolVersion: Environment.get("IM_TCP_PROTOCOL_VERSION").flatMap(Int.init(_:)) ?? 4,
+            protocolVersion: IMRealtimeProtocolVersion.currentInt,
             authTimeout: Environment.get("IM_TCP_AUTH_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 10,
             heartbeatInterval: Environment.get("IM_TCP_HEARTBEAT_INTERVAL").flatMap(TimeInterval.init(_:)) ?? 30,
             idleTimeout: Environment.get("IM_TCP_IDLE_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 90,
@@ -224,6 +224,14 @@ actor IMConnectionRegistry {
         requestID: UUID? = UUID()
     ) {
         sendPacket(type: .domainEvent, payload: payload, toUserIDs: userIDs, requestID: requestID)
+    }
+
+    func sendStreamSignal(
+        _ payload: IMTCPMessageStreamSignalPayload,
+        toUserIDs userIDs: [UUID],
+        requestID: UUID? = UUID()
+    ) {
+        sendPacket(type: .streamSignal, payload: payload, toUserIDs: userIDs, requestID: requestID)
     }
 
     private func sendPacket<Payload: Sendable>(

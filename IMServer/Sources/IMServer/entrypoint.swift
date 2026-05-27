@@ -23,7 +23,7 @@ enum Entrypoint {
         do {
             app.shouldResetIMSchema = env.arguments.contains("--reset-im-schema")
             try await configure(app)
-            let summaryBackfillService = IMSummaryReadModelBackfillService(app: app)
+            let summaryRepairService = IMSummaryReadModelRepairService(app: app)
             let shouldRebuildConversationSummaries = env.arguments.contains("--rebuild-conversation-summaries")
             let shouldVerifyConversationSummaries = env.arguments.contains("--verify-conversation-summaries")
             let shouldRequeueFailedConversationEvents = env.arguments.contains("--requeue-failed-conversation-events")
@@ -34,9 +34,9 @@ enum Entrypoint {
                 .first
 
             if shouldRebuildConversationSummaries {
-                let rebuiltUserCount = try await summaryBackfillService.rebuildAllSummaries()
+                let rebuiltUserCount = try await summaryRepairService.rebuildAllSummaries()
                 app.logger.notice(
-                    "Conversation summary backfill completed",
+                    "Conversation summary repair completed",
                     metadata: ["rebuilt_user_count": .stringConvertible(rebuiltUserCount)]
                 )
                 if !shouldVerifyConversationSummaries {
@@ -46,7 +46,7 @@ enum Entrypoint {
             }
 
             if shouldVerifyConversationSummaries {
-                let verificationResult = try await summaryBackfillService.verifyAllSummaries()
+                let verificationResult = try await summaryRepairService.verifyAllSummaries()
                 app.logger.notice(
                     "Conversation summary verification completed",
                     metadata: [
@@ -72,7 +72,7 @@ enum Entrypoint {
                     return
                 }
 
-                try await summaryBackfillService.rebuildSummaries(for: ownerUserID)
+                try await summaryRepairService.rebuildSummaries(for: ownerUserID)
                 app.logger.notice(
                     "Conversation summary owner repair completed",
                     metadata: ["owner_user_id": .string(ownerUserID.uuidString)]

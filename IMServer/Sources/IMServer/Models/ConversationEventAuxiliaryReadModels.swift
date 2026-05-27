@@ -49,9 +49,12 @@ final class ConversationNotificationEntry: Model, @unchecked Sendable {
         self.updatedAt = updatedAt
     }
 
-    var payload: ConversationDomainEventPayload {
-        get { (try? Self.decode(payloadJSON)) ?? .init() }
-        set { payloadJSON = (try? Self.encode(newValue)) ?? "{}" }
+    func decodedPayload() throws -> ConversationDomainEventPayload {
+        try Self.decode(payloadJSON)
+    }
+
+    func replacePayload(_ payload: ConversationDomainEventPayload) throws {
+        payloadJSON = try Self.encode(payload)
     }
 
     static func recordID(ownerUserID: UUID, eventID: UUID) -> String {
@@ -101,6 +104,9 @@ final class ConversationReplayRecord: Model, @unchecked Sendable {
     @Field(key: "event_type")
     var eventType: String
 
+    @Field(key: "aggregate_sequence")
+    var aggregateSequence: Int
+
     @Field(key: "producer_shard")
     var producerShard: String
 
@@ -133,6 +139,7 @@ final class ConversationReplayRecord: Model, @unchecked Sendable {
         sourceTopic: String,
         conversationID: UUID,
         eventType: String,
+        aggregateSequence: Int,
         producerShard: String,
         payload: ConversationDomainEventPayload,
         status: ConversationReplayStatus = .pending,
@@ -148,6 +155,7 @@ final class ConversationReplayRecord: Model, @unchecked Sendable {
         self.sourceTopic = sourceTopic
         self.conversationID = conversationID
         self.eventType = eventType
+        self.aggregateSequence = aggregateSequence
         self.producerShard = producerShard
         self.payloadJSON = try Self.encode(payload)
         self.status = status.rawValue
@@ -163,9 +171,12 @@ final class ConversationReplayRecord: Model, @unchecked Sendable {
         set { status = newValue.rawValue }
     }
 
-    var payload: ConversationDomainEventPayload {
-        get { (try? Self.decode(payloadJSON)) ?? .init() }
-        set { payloadJSON = (try? Self.encode(newValue)) ?? "{}" }
+    func decodedPayload() throws -> ConversationDomainEventPayload {
+        try Self.decode(payloadJSON)
+    }
+
+    func replacePayload(_ payload: ConversationDomainEventPayload) throws {
+        payloadJSON = try Self.encode(payload)
     }
 
     static func recordID(consumerGroupID: String, eventID: UUID) -> String {

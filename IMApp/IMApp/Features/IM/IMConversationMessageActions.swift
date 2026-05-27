@@ -19,7 +19,7 @@ extension IMConversationMessage {
     }
 
     var canReply: Bool {
-        guard serverSequence != nil, !derivedState.isRecalled else {
+        guard !derivedState.isRecalled else {
             return false
         }
 
@@ -31,7 +31,6 @@ extension IMConversationMessage {
 
     var canRecall: Bool {
         guard direction == .outgoing,
-              serverMessageID != nil || serverSequence != nil,
               Date().timeIntervalSince(createdAt) <= RecallRule.window
         else {
             return false
@@ -42,7 +41,6 @@ extension IMConversationMessage {
 
     var canEdit: Bool {
         guard direction == .outgoing,
-              serverMessageID != nil || serverSequence != nil,
               !derivedState.isRecalled
         else {
             return false
@@ -57,7 +55,7 @@ extension IMConversationMessage {
     }
 
     var canReact: Bool {
-        guard serverMessageID != nil || serverSequence != nil, !derivedState.isRecalled else {
+        guard !derivedState.isRecalled else {
             return false
         }
 
@@ -65,5 +63,19 @@ extension IMConversationMessage {
         case .richText, .reply, .image, .audio, .file:
             return true
         }
+    }
+}
+
+extension IMPendingConversationMessage {
+    var canCancelQueuedSend: Bool {
+        guard direction == .outgoing, content.isUserComposable else {
+            return false
+        }
+
+        if case .queued = deliveryState {
+            return true
+        }
+
+        return false
     }
 }

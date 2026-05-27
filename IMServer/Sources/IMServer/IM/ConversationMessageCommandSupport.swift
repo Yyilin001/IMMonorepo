@@ -6,8 +6,6 @@ struct ConversationMessageCommandSupport {
 
     private var membershipService: ConversationMembershipService { ConversationMembershipService(db: db) }
     private var messageService: ConversationMessageService { ConversationMessageService(db: db) }
-    private var messageEventPublisher: ConversationMessageEventPublisher { ConversationMessageEventPublisher(db: db) }
-
     func recallMessage(
         in conversationID: UUID,
         messageID: UUID,
@@ -16,20 +14,22 @@ struct ConversationMessageCommandSupport {
         _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
 
         let recalledMessage = try await db.transaction { database in
-            try await ConversationMessageService(db: database).recallMessage(
+            let message = try await ConversationMessageService(db: database).recallMessage(
                 in: conversationID,
                 messageID: messageID,
                 requesterUserID: requesterUserID,
                 on: database
             )
+            try await publishMessageEvent(
+                .messageRecalled,
+                conversationID: conversationID,
+                requesterUserID: requesterUserID,
+                messageID: try message.requireID(),
+                on: database
+            )
+            return message
         }
 
-        try await messageEventPublisher.publish(
-            .messageRecalled,
-            conversationID: conversationID,
-            requesterUserID: requesterUserID,
-            messageID: try recalledMessage.requireID()
-        )
         return try messageService.messageResponse(from: recalledMessage, conversationID: conversationID)
     }
 
@@ -42,21 +42,23 @@ struct ConversationMessageCommandSupport {
         _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
 
         let editedMessage = try await db.transaction { database in
-            try await ConversationMessageService(db: database).editMessage(
+            let message = try await ConversationMessageService(db: database).editMessage(
                 in: conversationID,
                 messageID: messageID,
                 body: body,
                 requesterUserID: requesterUserID,
                 on: database
             )
+            try await publishMessageEvent(
+                .messageUpdated,
+                conversationID: conversationID,
+                requesterUserID: requesterUserID,
+                messageID: try message.requireID(),
+                on: database
+            )
+            return message
         }
 
-        try await messageEventPublisher.publish(
-            .messageUpdated,
-            conversationID: conversationID,
-            requesterUserID: requesterUserID,
-            messageID: try editedMessage.requireID()
-        )
         return try messageService.messageResponse(from: editedMessage, conversationID: conversationID)
     }
 
@@ -69,23 +71,44 @@ struct ConversationMessageCommandSupport {
         _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
 
         let updatedMessage = try await db.transaction { database in
-            try await ConversationMessageService(db: database).toggleReaction(
+            let message = try await ConversationMessageService(db: database).toggleReaction(
                 in: conversationID,
                 messageID: messageID,
                 emoji: emoji,
                 requesterUserID: requesterUserID,
                 on: database
             )
+            try await publishMessageEvent(
+                .messageUpdated,
+                conversationID: conversationID,
+                requesterUserID: requesterUserID,
+                messageID: try message.requireID(),
+                on: database
+            )
+            return message
         }
 
-        try await messageEventPublisher.publish(
-            .messageUpdated,
-            conversationID: conversationID,
-            requesterUserID: requesterUserID,
-            messageID: try updatedMessage.requireID()
-        )
-
         return try messageService.messageResponse(from: updatedMessage, conversationID: conversationID)
+    }
+
+    private func publishMessageEvent(
+        _ type: ConversationDomainEventType,
+        conversationID: UUID,
+        requesterUserID: UUID,
+        messageID: UUID,
+        on database: any Database
+    ) async throws {
+        let recipientUserIDs = try await ConversationMembershipService(db: database)
+            .listMemberResponses(in: conversationID, for: requesterUserID)
+            .map(\.id)
+        try await ConversationOutboxEnqueuer(db: database).enqueueMessageEvent(
+            type: type,
+            conversationID: conversationID,
+            actorUserID: requesterUserID,
+            recipientUserIDs: recipientUserIDs,
+            messageID: messageID,
+            on: database
+        )
     }
 
     private func requireConversationAndMembership(

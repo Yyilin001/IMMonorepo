@@ -31,7 +31,7 @@ struct ConversationNotificationBatchWriter {
                     existing.eventID = row.eventID
                     existing.conversationID = row.conversationID
                     existing.eventType = row.eventType
-                    existing.payload = row.payload
+                    try existing.replacePayload(row.payload)
                     existing.updatedAt = row.updatedAt
                     try await existing.update(on: database)
                 } else {

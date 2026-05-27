@@ -104,6 +104,14 @@ struct IMRTPacket: Sendable {
     set {body = .domainEvent(newValue)}
   }
 
+  var streamSignal: IMRTMessageStreamSignal {
+    get {
+      if case .streamSignal(let v)? = body {return v}
+      return IMRTMessageStreamSignal()
+    }
+    set {body = .streamSignal(newValue)}
+  }
+
   var kick: IMRTKick {
     get {
       if case .kick(let v)? = body {return v}
@@ -123,6 +131,7 @@ struct IMRTPacket: Sendable {
     case sendMessage(IMRTSendMessageCommand)
     case ack(IMRTAck)
     case domainEvent(IMRTChatDomainEvent)
+    case streamSignal(IMRTMessageStreamSignal)
     case kick(IMRTKick)
 
   }
@@ -174,8 +183,6 @@ struct IMRTAuthRequest: Sendable {
   var hasAppVersion: Bool {return self._appVersion != nil}
   /// Clears the value of `appVersion`. Subsequent reads from it will return its default value.
   mutating func clearAppVersion() {self._appVersion = nil}
-
-  var protocolVersion: UInt32 = 0
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -317,9 +324,13 @@ struct IMRTChatDomainEvent: @unchecked Sendable {
   }
 
   var aggregateSequence: UInt64 {
-    get {return _storage._aggregateSequence}
+    get {return _storage._aggregateSequence ?? 0}
     set {_uniqueStorage()._aggregateSequence = newValue}
   }
+  /// Returns true if `aggregateSequence` has been explicitly set.
+  var hasAggregateSequence: Bool {return _storage._aggregateSequence != nil}
+  /// Clears the value of `aggregateSequence`. Subsequent reads from it will return its default value.
+  mutating func clearAggregateSequence() {_uniqueStorage()._aggregateSequence = nil}
 
   var occurredAtMs: Int64 {
     get {return _storage._occurredAtMs}
@@ -343,6 +354,38 @@ struct IMRTChatDomainEvent: @unchecked Sendable {
   var hasConversation: Bool {return _storage._conversation != nil}
   /// Clears the value of `conversation`. Subsequent reads from it will return its default value.
   mutating func clearConversation() {_uniqueStorage()._conversation = nil}
+
+  var timelineNotice: IMRTTimelineNotice {
+    get {return _storage._timelineNotice ?? IMRTTimelineNotice()}
+    set {_uniqueStorage()._timelineNotice = newValue}
+  }
+  /// Returns true if `timelineNotice` has been explicitly set.
+  var hasTimelineNotice: Bool {return _storage._timelineNotice != nil}
+  /// Clears the value of `timelineNotice`. Subsequent reads from it will return its default value.
+  mutating func clearTimelineNotice() {_uniqueStorage()._timelineNotice = nil}
+
+  var ownerCursor: UInt64 {
+    get {return _storage._ownerCursor ?? 0}
+    set {_uniqueStorage()._ownerCursor = newValue}
+  }
+  /// Returns true if `ownerCursor` has been explicitly set.
+  var hasOwnerCursor: Bool {return _storage._ownerCursor != nil}
+  /// Clears the value of `ownerCursor`. Subsequent reads from it will return its default value.
+  mutating func clearOwnerCursor() {_uniqueStorage()._ownerCursor = nil}
+
+  var ownerAggregateSequence: UInt64 {
+    get {return _storage._ownerAggregateSequence ?? 0}
+    set {_uniqueStorage()._ownerAggregateSequence = newValue}
+  }
+  /// Returns true if `ownerAggregateSequence` has been explicitly set.
+  var hasOwnerAggregateSequence: Bool {return _storage._ownerAggregateSequence != nil}
+  /// Clears the value of `ownerAggregateSequence`. Subsequent reads from it will return its default value.
+  mutating func clearOwnerAggregateSequence() {_uniqueStorage()._ownerAggregateSequence = nil}
+
+  var requiresTimelineNotice: Bool {
+    get {return _storage._requiresTimelineNotice}
+    set {_uniqueStorage()._requiresTimelineNotice = newValue}
+  }
 
   var body: OneOf_Body? {
     get {return _storage._body}
@@ -395,14 +438,6 @@ struct IMRTChatDomainEvent: @unchecked Sendable {
       return IMRTMessageStreamEvent()
     }
     set {_uniqueStorage()._body = .messageStreamStarted(newValue)}
-  }
-
-  var messageStreamChunk: IMRTMessageStreamEvent {
-    get {
-      if case .messageStreamChunk(let v)? = _storage._body {return v}
-      return IMRTMessageStreamEvent()
-    }
-    set {_uniqueStorage()._body = .messageStreamChunk(newValue)}
   }
 
   var messageStreamCompleted: IMRTMessageStreamEvent {
@@ -526,7 +561,6 @@ struct IMRTChatDomainEvent: @unchecked Sendable {
     case messageVisibilityChanged(IMRTMessageVisibilityChangedEvent)
     case messageFavoriteChanged(IMRTMessageFavoriteChangedEvent)
     case messageStreamStarted(IMRTMessageStreamEvent)
-    case messageStreamChunk(IMRTMessageStreamEvent)
     case messageStreamCompleted(IMRTMessageStreamEvent)
     case messageStreamFailed(IMRTMessageStreamEvent)
     case messageStreamCancelled(IMRTMessageStreamEvent)
@@ -728,6 +762,37 @@ struct IMRTMessageStreamEvent: Sendable {
   fileprivate var _message: IMRTConversationMessage? = nil
 }
 
+struct IMRTMessageStreamSignal: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var stream: IMRTMessageStreamPayload {
+    get {return _stream ?? IMRTMessageStreamPayload()}
+    set {_stream = newValue}
+  }
+  /// Returns true if `stream` has been explicitly set.
+  var hasStream: Bool {return self._stream != nil}
+  /// Clears the value of `stream`. Subsequent reads from it will return its default value.
+  mutating func clearStream() {self._stream = nil}
+
+  var message: IMRTConversationMessage {
+    get {return _message ?? IMRTConversationMessage()}
+    set {_message = newValue}
+  }
+  /// Returns true if `message` has been explicitly set.
+  var hasMessage: Bool {return self._message != nil}
+  /// Clears the value of `message`. Subsequent reads from it will return its default value.
+  mutating func clearMessage() {self._message = nil}
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _stream: IMRTMessageStreamPayload? = nil
+  fileprivate var _message: IMRTConversationMessage? = nil
+}
+
 struct IMRTConversationChangedEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -811,6 +876,53 @@ struct IMRTContactChangedEvent: @unchecked Sendable {
   init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+struct IMRTTimelineNotice: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var id: String = String()
+
+  var conversationID: String = String()
+
+  var timelineSequence: UInt64 {
+    get {return _timelineSequence ?? 0}
+    set {_timelineSequence = newValue}
+  }
+  /// Returns true if `timelineSequence` has been explicitly set.
+  var hasTimelineSequence: Bool {return self._timelineSequence != nil}
+  /// Clears the value of `timelineSequence`. Subsequent reads from it will return its default value.
+  mutating func clearTimelineSequence() {self._timelineSequence = nil}
+
+  var eventType: String = String()
+
+  var actorUserID: String {
+    get {return _actorUserID ?? String()}
+    set {_actorUserID = newValue}
+  }
+  /// Returns true if `actorUserID` has been explicitly set.
+  var hasActorUserID: Bool {return self._actorUserID != nil}
+  /// Clears the value of `actorUserID`. Subsequent reads from it will return its default value.
+  mutating func clearActorUserID() {self._actorUserID = nil}
+
+  var targetUserIds: [String] = []
+
+  var noticeKind: String = String()
+
+  var params: Dictionary<String,String> = [:]
+
+  var fallbackText: String = String()
+
+  var createdAtMs: Int64 = 0
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _timelineSequence: UInt64? = nil
+  fileprivate var _actorUserID: String? = nil
 }
 
 struct IMRTKick: Sendable {
@@ -946,10 +1058,14 @@ struct IMRTConversationSummary: @unchecked Sendable {
   /// Clears the value of `lastMessage`. Subsequent reads from it will return its default value.
   mutating func clearLastMessage() {_uniqueStorage()._lastMessage = nil}
 
-  var lastReadSequence: Int32 {
-    get {return _storage._lastReadSequence}
+  var lastReadSequence: UInt64 {
+    get {return _storage._lastReadSequence ?? 0}
     set {_uniqueStorage()._lastReadSequence = newValue}
   }
+  /// Returns true if `lastReadSequence` has been explicitly set.
+  var hasLastReadSequence: Bool {return _storage._lastReadSequence != nil}
+  /// Clears the value of `lastReadSequence`. Subsequent reads from it will return its default value.
+  mutating func clearLastReadSequence() {_uniqueStorage()._lastReadSequence = nil}
 
   var unreadCount: Int32 {
     get {return _storage._unreadCount}
@@ -1046,10 +1162,14 @@ struct IMRTMessagePreview: @unchecked Sendable {
     set {_uniqueStorage()._senderUserID = newValue}
   }
 
-  var serverSequence: Int32 {
-    get {return _storage._serverSequence}
+  var serverSequence: UInt64 {
+    get {return _storage._serverSequence ?? 0}
     set {_uniqueStorage()._serverSequence = newValue}
   }
+  /// Returns true if `serverSequence` has been explicitly set.
+  var hasServerSequence: Bool {return _storage._serverSequence != nil}
+  /// Clears the value of `serverSequence`. Subsequent reads from it will return its default value.
+  mutating func clearServerSequence() {_uniqueStorage()._serverSequence = nil}
 
   var content: IMRTMessageContent {
     get {return _storage._content ?? IMRTMessageContent()}
@@ -1077,6 +1197,15 @@ struct IMRTMessagePreview: @unchecked Sendable {
   var hasCreatedAtMs: Bool {return _storage._createdAtMs != nil}
   /// Clears the value of `createdAtMs`. Subsequent reads from it will return its default value.
   mutating func clearCreatedAtMs() {_uniqueStorage()._createdAtMs = nil}
+
+  var timelineSequence: UInt64 {
+    get {return _storage._timelineSequence ?? 0}
+    set {_uniqueStorage()._timelineSequence = newValue}
+  }
+  /// Returns true if `timelineSequence` has been explicitly set.
+  var hasTimelineSequence: Bool {return _storage._timelineSequence != nil}
+  /// Clears the value of `timelineSequence`. Subsequent reads from it will return its default value.
+  mutating func clearTimelineSequence() {_uniqueStorage()._timelineSequence = nil}
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1114,10 +1243,14 @@ struct IMRTConversationMessage: @unchecked Sendable {
   /// Clears the value of `clientMessageID`. Subsequent reads from it will return its default value.
   mutating func clearClientMessageID() {_uniqueStorage()._clientMessageID = nil}
 
-  var serverSequence: Int32 {
-    get {return _storage._serverSequence}
+  var serverSequence: UInt64 {
+    get {return _storage._serverSequence ?? 0}
     set {_uniqueStorage()._serverSequence = newValue}
   }
+  /// Returns true if `serverSequence` has been explicitly set.
+  var hasServerSequence: Bool {return _storage._serverSequence != nil}
+  /// Clears the value of `serverSequence`. Subsequent reads from it will return its default value.
+  mutating func clearServerSequence() {_uniqueStorage()._serverSequence = nil}
 
   var content: IMRTMessageContent {
     get {return _storage._content ?? IMRTMessageContent()}
@@ -1145,6 +1278,15 @@ struct IMRTConversationMessage: @unchecked Sendable {
   var hasCreatedAtMs: Bool {return _storage._createdAtMs != nil}
   /// Clears the value of `createdAtMs`. Subsequent reads from it will return its default value.
   mutating func clearCreatedAtMs() {_uniqueStorage()._createdAtMs = nil}
+
+  var timelineSequence: UInt64 {
+    get {return _storage._timelineSequence ?? 0}
+    set {_uniqueStorage()._timelineSequence = newValue}
+  }
+  /// Returns true if `timelineSequence` has been explicitly set.
+  var hasTimelineSequence: Bool {return _storage._timelineSequence != nil}
+  /// Clears the value of `timelineSequence`. Subsequent reads from it will return its default value.
+  mutating func clearTimelineSequence() {_uniqueStorage()._timelineSequence = nil}
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1774,7 +1916,7 @@ fileprivate let _protobuf_package = "im.realtime.v1"
 
 extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Packet"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}timestamp_ms\0\u{3}protocol_version\0\u{2}\u{7}auth\0\u{3}auth_ok\0\u{3}auth_error\0\u{2}\u{8}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{9}send_message\0\u{1}ack\0\u{4}\u{9}domain_event\0\u{2}\u{a}kick\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}timestamp_ms\0\u{3}protocol_version\0\u{2}\u{7}auth\0\u{3}auth_ok\0\u{3}auth_error\0\u{2}\u{8}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{9}send_message\0\u{1}ack\0\u{4}\u{9}domain_event\0\u{3}stream_signal\0\u{2}\u{9}kick\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1889,6 +2031,19 @@ extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementatio
           self.body = .domainEvent(v)
         }
       }()
+      case 41: try {
+        var v: IMRTMessageStreamSignal?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .streamSignal(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .streamSignal(v)
+        }
+      }()
       case 50: try {
         var v: IMRTKick?
         var hadOneofValue = false
@@ -1954,6 +2109,10 @@ extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementatio
       guard case .domainEvent(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 40)
     }()
+    case .streamSignal?: try {
+      guard case .streamSignal(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 41)
+    }()
     case .kick?: try {
       guard case .kick(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 50)
@@ -1975,7 +2134,7 @@ extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementatio
 
 extension IMRTAuthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AuthRequest"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}access_token\0\u{3}device_id\0\u{3}device_name\0\u{1}platform\0\u{3}app_version\0\u{3}protocol_version\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}access_token\0\u{3}device_id\0\u{3}device_name\0\u{1}platform\0\u{3}app_version\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1988,7 +2147,6 @@ extension IMRTAuthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplemen
       case 3: try { try decoder.decodeSingularStringField(value: &self._deviceName) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self._platform) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self._appVersion) }()
-      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.protocolVersion) }()
       default: break
       }
     }
@@ -2014,9 +2172,6 @@ extension IMRTAuthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplemen
     try { if let v = self._appVersion {
       try visitor.visitSingularStringField(value: v, fieldNumber: 5)
     } }()
-    if self.protocolVersion != 0 {
-      try visitor.visitSingularUInt32Field(value: self.protocolVersion, fieldNumber: 6)
-    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2026,7 +2181,6 @@ extension IMRTAuthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplemen
     if lhs._deviceName != rhs._deviceName {return false}
     if lhs._platform != rhs._platform {return false}
     if lhs._appVersion != rhs._appVersion {return false}
-    if lhs.protocolVersion != rhs.protocolVersion {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2237,17 +2391,21 @@ extension IMRTSendMessageCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageI
 
 extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ChatDomainEvent"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_id\0\u{3}event_type\0\u{3}aggregate_type\0\u{3}aggregate_id\0\u{3}aggregate_sequence\0\u{3}occurred_at_ms\0\u{3}actor_user_id\0\u{1}conversation\0\u{4}\u{2}message_created\0\u{3}message_edited\0\u{3}message_revoked\0\u{3}message_visibility_changed\0\u{3}message_favorite_changed\0\u{4}\u{6}message_stream_started\0\u{3}message_stream_chunk\0\u{3}message_stream_completed\0\u{3}message_stream_failed\0\u{3}message_stream_cancelled\0\u{4}\u{6}conversation_created\0\u{3}conversation_updated\0\u{3}conversation_removed_for_self\0\u{3}conversation_settings_changed\0\u{3}conversation_visibility_changed\0\u{4}\u{6}member_added\0\u{3}member_removed\0\u{3}member_role_updated\0\u{4}\u{8}contact_request_created\0\u{3}contact_request_accepted\0\u{3}contact_request_updated\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_id\0\u{3}event_type\0\u{3}aggregate_type\0\u{3}aggregate_id\0\u{3}aggregate_sequence\0\u{3}occurred_at_ms\0\u{3}actor_user_id\0\u{1}conversation\0\u{3}timeline_notice\0\u{3}message_created\0\u{3}message_edited\0\u{3}message_revoked\0\u{3}message_visibility_changed\0\u{3}message_favorite_changed\0\u{4}\u{6}message_stream_started\0\u{4}\u{2}message_stream_completed\0\u{3}message_stream_failed\0\u{3}message_stream_cancelled\0\u{4}\u{6}conversation_created\0\u{3}conversation_updated\0\u{3}conversation_removed_for_self\0\u{3}conversation_settings_changed\0\u{3}conversation_visibility_changed\0\u{4}\u{6}member_added\0\u{3}member_removed\0\u{3}member_role_updated\0\u{4}\u{8}contact_request_created\0\u{3}contact_request_accepted\0\u{3}contact_request_updated\0\u{4}\u{8}owner_cursor\0\u{3}owner_aggregate_sequence\0\u{3}requires_timeline_notice\0")
 
   fileprivate class _StorageClass {
     var _eventID: String = String()
     var _eventType: String = String()
     var _aggregateType: String = String()
     var _aggregateID: String = String()
-    var _aggregateSequence: UInt64 = 0
+    var _aggregateSequence: UInt64? = nil
     var _occurredAtMs: Int64 = 0
     var _actorUserID: String? = nil
     var _conversation: IMRTConversationSummary? = nil
+    var _timelineNotice: IMRTTimelineNotice? = nil
+    var _ownerCursor: UInt64? = nil
+    var _ownerAggregateSequence: UInt64? = nil
+    var _requiresTimelineNotice: Bool = false
     var _body: IMRTChatDomainEvent.OneOf_Body?
 
       // This property is used as the initial default value for new instances of the type.
@@ -2267,6 +2425,10 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
       _occurredAtMs = source._occurredAtMs
       _actorUserID = source._actorUserID
       _conversation = source._conversation
+      _timelineNotice = source._timelineNotice
+      _ownerCursor = source._ownerCursor
+      _ownerAggregateSequence = source._ownerAggregateSequence
+      _requiresTimelineNotice = source._requiresTimelineNotice
       _body = source._body
     }
   }
@@ -2294,6 +2456,7 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
         case 6: try { try decoder.decodeSingularInt64Field(value: &_storage._occurredAtMs) }()
         case 7: try { try decoder.decodeSingularStringField(value: &_storage._actorUserID) }()
         case 8: try { try decoder.decodeSingularMessageField(value: &_storage._conversation) }()
+        case 9: try { try decoder.decodeSingularMessageField(value: &_storage._timelineNotice) }()
         case 10: try {
           var v: IMRTMessageCreatedEvent?
           var hadOneofValue = false
@@ -2370,19 +2533,6 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
           if let v = v {
             if hadOneofValue {try decoder.handleConflictingOneOf()}
             _storage._body = .messageStreamStarted(v)
-          }
-        }()
-        case 21: try {
-          var v: IMRTMessageStreamEvent?
-          var hadOneofValue = false
-          if let current = _storage._body {
-            hadOneofValue = true
-            if case .messageStreamChunk(let m) = current {v = m}
-          }
-          try decoder.decodeSingularMessageField(value: &v)
-          if let v = v {
-            if hadOneofValue {try decoder.handleConflictingOneOf()}
-            _storage._body = .messageStreamChunk(v)
           }
         }()
         case 22: try {
@@ -2567,6 +2717,9 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
             _storage._body = .contactRequestUpdated(v)
           }
         }()
+        case 60: try { try decoder.decodeSingularUInt64Field(value: &_storage._ownerCursor) }()
+        case 61: try { try decoder.decodeSingularUInt64Field(value: &_storage._ownerAggregateSequence) }()
+        case 62: try { try decoder.decodeSingularBoolField(value: &_storage._requiresTimelineNotice) }()
         default: break
         }
       }
@@ -2591,9 +2744,9 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
       if !_storage._aggregateID.isEmpty {
         try visitor.visitSingularStringField(value: _storage._aggregateID, fieldNumber: 4)
       }
-      if _storage._aggregateSequence != 0 {
-        try visitor.visitSingularUInt64Field(value: _storage._aggregateSequence, fieldNumber: 5)
-      }
+      try { if let v = _storage._aggregateSequence {
+        try visitor.visitSingularUInt64Field(value: v, fieldNumber: 5)
+      } }()
       if _storage._occurredAtMs != 0 {
         try visitor.visitSingularInt64Field(value: _storage._occurredAtMs, fieldNumber: 6)
       }
@@ -2602,6 +2755,9 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
       } }()
       try { if let v = _storage._conversation {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+      } }()
+      try { if let v = _storage._timelineNotice {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
       } }()
       switch _storage._body {
       case .messageCreated?: try {
@@ -2627,10 +2783,6 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
       case .messageStreamStarted?: try {
         guard case .messageStreamStarted(let v)? = _storage._body else { preconditionFailure() }
         try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
-      }()
-      case .messageStreamChunk?: try {
-        guard case .messageStreamChunk(let v)? = _storage._body else { preconditionFailure() }
-        try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
       }()
       case .messageStreamCompleted?: try {
         guard case .messageStreamCompleted(let v)? = _storage._body else { preconditionFailure() }
@@ -2690,6 +2842,15 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
       }()
       case nil: break
       }
+      try { if let v = _storage._ownerCursor {
+        try visitor.visitSingularUInt64Field(value: v, fieldNumber: 60)
+      } }()
+      try { if let v = _storage._ownerAggregateSequence {
+        try visitor.visitSingularUInt64Field(value: v, fieldNumber: 61)
+      } }()
+      if _storage._requiresTimelineNotice != false {
+        try visitor.visitSingularBoolField(value: _storage._requiresTimelineNotice, fieldNumber: 62)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -2707,6 +2868,10 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
         if _storage._occurredAtMs != rhs_storage._occurredAtMs {return false}
         if _storage._actorUserID != rhs_storage._actorUserID {return false}
         if _storage._conversation != rhs_storage._conversation {return false}
+        if _storage._timelineNotice != rhs_storage._timelineNotice {return false}
+        if _storage._ownerCursor != rhs_storage._ownerCursor {return false}
+        if _storage._ownerAggregateSequence != rhs_storage._ownerAggregateSequence {return false}
+        if _storage._requiresTimelineNotice != rhs_storage._requiresTimelineNotice {return false}
         if _storage._body != rhs_storage._body {return false}
         return true
       }
@@ -2972,6 +3137,45 @@ extension IMRTMessageStreamEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
+extension IMRTMessageStreamSignal: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".MessageStreamSignal"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}stream\0\u{1}message\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._stream) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._message) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._stream {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._message {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTMessageStreamSignal, rhs: IMRTMessageStreamSignal) -> Bool {
+    if lhs._stream != rhs._stream {return false}
+    if lhs._message != rhs._message {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension IMRTConversationChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ConversationChangedEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap()
@@ -3159,6 +3363,85 @@ extension IMRTContactChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
+extension IMRTTimelineNotice: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".TimelineNotice"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}conversation_id\0\u{3}timeline_sequence\0\u{3}event_type\0\u{3}actor_user_id\0\u{3}target_user_ids\0\u{3}notice_kind\0\u{1}params\0\u{3}fallback_text\0\u{3}created_at_ms\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.conversationID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self._timelineSequence) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.eventType) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self._actorUserID) }()
+      case 6: try { try decoder.decodeRepeatedStringField(value: &self.targetUserIds) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.noticeKind) }()
+      case 8: try { try decoder.decodeMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: &self.params) }()
+      case 9: try { try decoder.decodeSingularStringField(value: &self.fallbackText) }()
+      case 10: try { try decoder.decodeSingularInt64Field(value: &self.createdAtMs) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.id.isEmpty {
+      try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
+    }
+    if !self.conversationID.isEmpty {
+      try visitor.visitSingularStringField(value: self.conversationID, fieldNumber: 2)
+    }
+    try { if let v = self._timelineSequence {
+      try visitor.visitSingularUInt64Field(value: v, fieldNumber: 3)
+    } }()
+    if !self.eventType.isEmpty {
+      try visitor.visitSingularStringField(value: self.eventType, fieldNumber: 4)
+    }
+    try { if let v = self._actorUserID {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 5)
+    } }()
+    if !self.targetUserIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.targetUserIds, fieldNumber: 6)
+    }
+    if !self.noticeKind.isEmpty {
+      try visitor.visitSingularStringField(value: self.noticeKind, fieldNumber: 7)
+    }
+    if !self.params.isEmpty {
+      try visitor.visitMapField(fieldType: SwiftProtobuf._ProtobufMap<SwiftProtobuf.ProtobufString,SwiftProtobuf.ProtobufString>.self, value: self.params, fieldNumber: 8)
+    }
+    if !self.fallbackText.isEmpty {
+      try visitor.visitSingularStringField(value: self.fallbackText, fieldNumber: 9)
+    }
+    if self.createdAtMs != 0 {
+      try visitor.visitSingularInt64Field(value: self.createdAtMs, fieldNumber: 10)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTTimelineNotice, rhs: IMRTTimelineNotice) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs.conversationID != rhs.conversationID {return false}
+    if lhs._timelineSequence != rhs._timelineSequence {return false}
+    if lhs.eventType != rhs.eventType {return false}
+    if lhs._actorUserID != rhs._actorUserID {return false}
+    if lhs.targetUserIds != rhs.targetUserIds {return false}
+    if lhs.noticeKind != rhs.noticeKind {return false}
+    if lhs.params != rhs.params {return false}
+    if lhs.fallbackText != rhs.fallbackText {return false}
+    if lhs.createdAtMs != rhs.createdAtMs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension IMRTKick: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Kick"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}reason\0\u{1}message\0")
@@ -3279,7 +3562,7 @@ extension IMRTConversationSummary: SwiftProtobuf.Message, SwiftProtobuf._Message
     var _memberCount: Int32 = 0
     var _memberUserIds: [String] = []
     var _lastMessage: IMRTMessagePreview? = nil
-    var _lastReadSequence: Int32 = 0
+    var _lastReadSequence: UInt64? = nil
     var _unreadCount: Int32 = 0
     var _isPinned: Bool = false
     var _pinnedAtMs: Int64? = nil
@@ -3343,7 +3626,7 @@ extension IMRTConversationSummary: SwiftProtobuf.Message, SwiftProtobuf._Message
         case 9: try { try decoder.decodeSingularInt32Field(value: &_storage._memberCount) }()
         case 10: try { try decoder.decodeRepeatedStringField(value: &_storage._memberUserIds) }()
         case 11: try { try decoder.decodeSingularMessageField(value: &_storage._lastMessage) }()
-        case 12: try { try decoder.decodeSingularInt32Field(value: &_storage._lastReadSequence) }()
+        case 12: try { try decoder.decodeSingularUInt64Field(value: &_storage._lastReadSequence) }()
         case 13: try { try decoder.decodeSingularInt32Field(value: &_storage._unreadCount) }()
         case 14: try { try decoder.decodeSingularBoolField(value: &_storage._isPinned) }()
         case 15: try { try decoder.decodeSingularInt64Field(value: &_storage._pinnedAtMs) }()
@@ -3395,9 +3678,9 @@ extension IMRTConversationSummary: SwiftProtobuf.Message, SwiftProtobuf._Message
       try { if let v = _storage._lastMessage {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
       } }()
-      if _storage._lastReadSequence != 0 {
-        try visitor.visitSingularInt32Field(value: _storage._lastReadSequence, fieldNumber: 12)
-      }
+      try { if let v = _storage._lastReadSequence {
+        try visitor.visitSingularUInt64Field(value: v, fieldNumber: 12)
+      } }()
       if _storage._unreadCount != 0 {
         try visitor.visitSingularInt32Field(value: _storage._unreadCount, fieldNumber: 13)
       }
@@ -3503,15 +3786,16 @@ extension IMRTDirectPeer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplement
 
 extension IMRTMessagePreview: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessagePreview"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}sender_user_id\0\u{3}server_sequence\0\u{1}content\0\u{3}derived_state\0\u{3}created_at_ms\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}sender_user_id\0\u{3}server_sequence\0\u{1}content\0\u{3}derived_state\0\u{3}created_at_ms\0\u{3}timeline_sequence\0")
 
   fileprivate class _StorageClass {
     var _id: String = String()
     var _senderUserID: String = String()
-    var _serverSequence: Int32 = 0
+    var _serverSequence: UInt64? = nil
     var _content: IMRTMessageContent? = nil
     var _derivedState: IMRTMessageDerivedState? = nil
     var _createdAtMs: Int64? = nil
+    var _timelineSequence: UInt64? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -3528,6 +3812,7 @@ extension IMRTMessagePreview: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
       _content = source._content
       _derivedState = source._derivedState
       _createdAtMs = source._createdAtMs
+      _timelineSequence = source._timelineSequence
     }
   }
 
@@ -3548,10 +3833,11 @@ extension IMRTMessagePreview: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
         switch fieldNumber {
         case 1: try { try decoder.decodeSingularStringField(value: &_storage._id) }()
         case 2: try { try decoder.decodeSingularStringField(value: &_storage._senderUserID) }()
-        case 3: try { try decoder.decodeSingularInt32Field(value: &_storage._serverSequence) }()
+        case 3: try { try decoder.decodeSingularUInt64Field(value: &_storage._serverSequence) }()
         case 4: try { try decoder.decodeSingularMessageField(value: &_storage._content) }()
         case 5: try { try decoder.decodeSingularMessageField(value: &_storage._derivedState) }()
         case 6: try { try decoder.decodeSingularInt64Field(value: &_storage._createdAtMs) }()
+        case 7: try { try decoder.decodeSingularUInt64Field(value: &_storage._timelineSequence) }()
         default: break
         }
       }
@@ -3570,9 +3856,9 @@ extension IMRTMessagePreview: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
       if !_storage._senderUserID.isEmpty {
         try visitor.visitSingularStringField(value: _storage._senderUserID, fieldNumber: 2)
       }
-      if _storage._serverSequence != 0 {
-        try visitor.visitSingularInt32Field(value: _storage._serverSequence, fieldNumber: 3)
-      }
+      try { if let v = _storage._serverSequence {
+        try visitor.visitSingularUInt64Field(value: v, fieldNumber: 3)
+      } }()
       try { if let v = _storage._content {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
       } }()
@@ -3581,6 +3867,9 @@ extension IMRTMessagePreview: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
       } }()
       try { if let v = _storage._createdAtMs {
         try visitor.visitSingularInt64Field(value: v, fieldNumber: 6)
+      } }()
+      try { if let v = _storage._timelineSequence {
+        try visitor.visitSingularUInt64Field(value: v, fieldNumber: 7)
       } }()
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -3597,6 +3886,7 @@ extension IMRTMessagePreview: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
         if _storage._content != rhs_storage._content {return false}
         if _storage._derivedState != rhs_storage._derivedState {return false}
         if _storage._createdAtMs != rhs_storage._createdAtMs {return false}
+        if _storage._timelineSequence != rhs_storage._timelineSequence {return false}
         return true
       }
       if !storagesAreEqual {return false}
@@ -3608,17 +3898,18 @@ extension IMRTMessagePreview: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
 
 extension IMRTConversationMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ConversationMessage"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}conversation_id\0\u{3}sender_user_id\0\u{3}client_message_id\0\u{3}server_sequence\0\u{1}content\0\u{3}derived_state\0\u{3}created_at_ms\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}conversation_id\0\u{3}sender_user_id\0\u{3}client_message_id\0\u{3}server_sequence\0\u{1}content\0\u{3}derived_state\0\u{3}created_at_ms\0\u{3}timeline_sequence\0")
 
   fileprivate class _StorageClass {
     var _id: String = String()
     var _conversationID: String = String()
     var _senderUserID: String = String()
     var _clientMessageID: String? = nil
-    var _serverSequence: Int32 = 0
+    var _serverSequence: UInt64? = nil
     var _content: IMRTMessageContent? = nil
     var _derivedState: IMRTMessageDerivedState? = nil
     var _createdAtMs: Int64? = nil
+    var _timelineSequence: UInt64? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -3637,6 +3928,7 @@ extension IMRTConversationMessage: SwiftProtobuf.Message, SwiftProtobuf._Message
       _content = source._content
       _derivedState = source._derivedState
       _createdAtMs = source._createdAtMs
+      _timelineSequence = source._timelineSequence
     }
   }
 
@@ -3659,10 +3951,11 @@ extension IMRTConversationMessage: SwiftProtobuf.Message, SwiftProtobuf._Message
         case 2: try { try decoder.decodeSingularStringField(value: &_storage._conversationID) }()
         case 3: try { try decoder.decodeSingularStringField(value: &_storage._senderUserID) }()
         case 4: try { try decoder.decodeSingularStringField(value: &_storage._clientMessageID) }()
-        case 5: try { try decoder.decodeSingularInt32Field(value: &_storage._serverSequence) }()
+        case 5: try { try decoder.decodeSingularUInt64Field(value: &_storage._serverSequence) }()
         case 6: try { try decoder.decodeSingularMessageField(value: &_storage._content) }()
         case 7: try { try decoder.decodeSingularMessageField(value: &_storage._derivedState) }()
         case 8: try { try decoder.decodeSingularInt64Field(value: &_storage._createdAtMs) }()
+        case 9: try { try decoder.decodeSingularUInt64Field(value: &_storage._timelineSequence) }()
         default: break
         }
       }
@@ -3687,9 +3980,9 @@ extension IMRTConversationMessage: SwiftProtobuf.Message, SwiftProtobuf._Message
       try { if let v = _storage._clientMessageID {
         try visitor.visitSingularStringField(value: v, fieldNumber: 4)
       } }()
-      if _storage._serverSequence != 0 {
-        try visitor.visitSingularInt32Field(value: _storage._serverSequence, fieldNumber: 5)
-      }
+      try { if let v = _storage._serverSequence {
+        try visitor.visitSingularUInt64Field(value: v, fieldNumber: 5)
+      } }()
       try { if let v = _storage._content {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
       } }()
@@ -3698,6 +3991,9 @@ extension IMRTConversationMessage: SwiftProtobuf.Message, SwiftProtobuf._Message
       } }()
       try { if let v = _storage._createdAtMs {
         try visitor.visitSingularInt64Field(value: v, fieldNumber: 8)
+      } }()
+      try { if let v = _storage._timelineSequence {
+        try visitor.visitSingularUInt64Field(value: v, fieldNumber: 9)
       } }()
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -3716,6 +4012,7 @@ extension IMRTConversationMessage: SwiftProtobuf.Message, SwiftProtobuf._Message
         if _storage._content != rhs_storage._content {return false}
         if _storage._derivedState != rhs_storage._derivedState {return false}
         if _storage._createdAtMs != rhs_storage._createdAtMs {return false}
+        if _storage._timelineSequence != rhs_storage._timelineSequence {return false}
         return true
       }
       if !storagesAreEqual {return false}

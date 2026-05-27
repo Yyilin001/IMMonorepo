@@ -50,6 +50,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 1,
+                timelineSequence: 1,
                 content: .file(
                     IMMediaAsset(
                         assetID: "asset-outbox",
@@ -70,10 +71,7 @@ extension IMServerTests {
             try await ConversationOutboxService(db: app.db).enqueue(
                 type: .messageCreated,
                 conversationID: conversationID,
-                payload: ConversationDomainEventPayload(
-                    recipientUserIDs: [try demoUser.requireID(), try peerUser.requireID()],
-                    messageID: messageID
-                )
+                payload: .messageCreated(messageID: messageID, recipientUserIDs: [try demoUser.requireID(), try peerUser.requireID()])
             )
 
             let processedCount = try await ConversationOutboxService(db: app.db)
@@ -125,6 +123,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 1,
+                timelineSequence: 1,
                 content: .richText(.plain("delete this index row"))
             )
             try await message.create(on: app.db)
@@ -143,10 +142,7 @@ extension IMServerTests {
             try await ConversationOutboxService(db: app.db).enqueue(
                 type: .messageUpdated,
                 conversationID: conversationID,
-                payload: ConversationDomainEventPayload(
-                    recipientUserIDs: [try demoUser.requireID(), try peerUser.requireID()],
-                    messageID: messageID
-                )
+                payload: .messageUpdated(messageID: messageID, recipientUserIDs: [try demoUser.requireID(), try peerUser.requireID()])
             )
 
             let processedCount = try await ConversationOutboxService(db: app.db)
@@ -224,14 +220,16 @@ extension IMServerTests {
                 #expect(conversations[0].unreadCount == 0)
             })
 
-            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/timeline", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let messages = try res.content.decode([IMMessageResponse].self)
+                let timeline = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = timeline.items.compactMap(\.message)
                 #expect(messages.count == 1)
                 #expect(messages[0].serverSequence == 1)
+                #expect(messages[0].timelineSequence == 2)
                 #expect(messages[0].clientMessageID == "client-msg-1")
                 #expect(messages[0].body["text"] == "hello from tcp")
             })
@@ -257,6 +255,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try otherUser.requireID(),
                 serverSequence: 1,
+                timelineSequence: 1,
                 content: .richText(.plain("canonical source"))
             )
             try await referencedMessage.create(on: app.db)
@@ -361,6 +360,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: demoUserID,
                 serverSequence: 1,
+                timelineSequence: 1,
                 clientMessageID: "duplicate-reply-client",
                 content: .richText(.plain("stored original"))
             )
@@ -482,6 +482,7 @@ extension IMServerTests {
                     conversationID: conversationID,
                     senderUserID: demoUserID,
                     serverSequence: sequence,
+                    timelineSequence: sequence,
                     clientMessageID: nil,
                     kind: "rich_text",
                     body: ["text": "indexed-\(sequence)"]

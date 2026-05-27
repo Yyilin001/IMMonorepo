@@ -115,7 +115,8 @@ extension IMConversationSummaryProjectionService {
         return IMMessagePreviewResponse(
             id: try message.requireID(),
             senderUserID: message.$sender.id,
-            serverSequence: message.serverSequence,
+            serverSequence: try imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence"),
+            timelineSequence: try imPositiveUInt64Sequence(message.timelineSequence, field: "timeline_sequence"),
             content: content,
             derivedState: derivedState,
             createdAt: message.createdAt

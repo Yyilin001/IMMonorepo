@@ -157,46 +157,112 @@ struct ConversationOutboxEnqueuer {
     func enqueueSummaryRefreshEvent(
         type: ConversationDomainEventType,
         conversationID: UUID,
-        recipientUserIDs: [UUID]
+        actorUserID: UUID?,
+        recipientUserIDs: [UUID],
+        on database: (any Database)? = nil
     ) async throws {
         try await eventBus.publish(
             type: type,
             conversationID: conversationID,
-            payload: ConversationDomainEventPayload(recipientUserIDs: recipientUserIDs),
-            on: db
+            actorUserID: actorUserID,
+            payload: summaryRefreshPayload(type: type, recipientUserIDs: recipientUserIDs, actorUserID: actorUserID),
+            on: database ?? db
         )
     }
 
     func enqueueConversationRemovedEvent(
         conversationID: UUID,
-        affectedUserID: UUID
+        actorUserID: UUID?,
+        affectedUserID: UUID,
+        on database: (any Database)? = nil
     ) async throws {
         try await eventBus.publish(
             type: .conversationRemovedForUser,
             conversationID: conversationID,
-            payload: ConversationDomainEventPayload(
-                recipientUserIDs: [],
-                affectedUserID: affectedUserID
-            ),
-            on: db
+            actorUserID: actorUserID,
+            payload: .conversationRemovedForSelf(ownerUserID: affectedUserID),
+            on: database ?? db
         )
     }
 
     func enqueueMessageEvent(
         type: ConversationDomainEventType,
         conversationID: UUID,
+        actorUserID: UUID,
         recipientUserIDs: [UUID],
-        messageID: UUID
+        messageID: UUID,
+        on database: (any Database)? = nil
     ) async throws {
         try await eventBus.publish(
             type: type,
             conversationID: conversationID,
-            payload: ConversationDomainEventPayload(
-                recipientUserIDs: recipientUserIDs,
-                messageID: messageID
-            ),
-            on: db
+            actorUserID: actorUserID,
+            payload: messagePayload(type: type, messageID: messageID, recipientUserIDs: recipientUserIDs),
+            on: database ?? db
         )
+    }
+
+    private func summaryRefreshPayload(
+        type: ConversationDomainEventType,
+        recipientUserIDs: [UUID],
+        actorUserID: UUID?
+    ) throws -> ConversationDomainEventPayload {
+        switch type {
+        case .metadataUpdated:
+            return .metadataUpdated(recipientUserIDs: recipientUserIDs)
+        case .directPeerUpdated:
+            return .directPeerUpdated(recipientUserIDs: recipientUserIDs)
+        case .conversationSettingsChanged:
+            guard let actorUserID else {
+                throw Abort(.internalServerError, reason: "会话设置事件缺少 actor。")
+            }
+            return .settingsChanged(ownerUserID: actorUserID)
+        case .inviteChanged:
+            return .inviteChanged(recipientUserIDs: recipientUserIDs)
+        case .readAdvanced:
+            guard let actorUserID else {
+                throw Abort(.internalServerError, reason: "已读事件缺少 actor。")
+            }
+            return .readAdvanced(ownerUserID: actorUserID)
+        case .membershipAdded:
+            return .memberAdded(memberUserIDs: recipientUserIDs, recipientUserIDs: recipientUserIDs)
+        case .membershipRemoved:
+            return .memberRemoved(memberUserIDs: recipientUserIDs, recipientUserIDs: recipientUserIDs)
+        case .membershipRoleUpdated:
+            guard let actorUserID else {
+                throw Abort(.internalServerError, reason: "成员角色事件缺少 actor。")
+            }
+            return .memberRoleUpdated(memberUserID: actorUserID, recipientUserIDs: recipientUserIDs)
+        case .messageCreated,
+             .messageUpdated,
+             .messageRecalled,
+             .messageStreamStarted,
+             .messageStreamCompleted,
+             .messageStreamFailed,
+             .messageStreamCancelled,
+             .conversationRemovedForUser,
+             .messageVisibilityChanged,
+             .messageFavoriteChanged,
+             .conversationVisibilityChanged:
+            throw Abort(.internalServerError, reason: "事件类型不能使用 summary refresh payload。")
+        }
+    }
+
+    private func messagePayload(
+        type: ConversationDomainEventType,
+        messageID: UUID,
+        recipientUserIDs: [UUID]
+    ) throws -> ConversationDomainEventPayload {
+        switch type {
+        case .messageCreated:
+            return .messageCreated(messageID: messageID, recipientUserIDs: recipientUserIDs)
+        case .messageUpdated:
+            return .messageUpdated(messageID: messageID, recipientUserIDs: recipientUserIDs)
+        case .messageRecalled:
+            return .messageRecalled(messageID: messageID, recipientUserIDs: recipientUserIDs)
+        default:
+            throw Abort(.internalServerError, reason: "事件类型不能使用 message payload。")
+        }
     }
 }
 
@@ -319,22 +385,30 @@ struct ConversationSummaryRefreshPublisher {
     func publish(
         _ type: ConversationDomainEventType,
         conversationID: UUID,
-        recipientUserIDs: [UUID]
+        actorUserID: UUID?,
+        recipientUserIDs: [UUID],
+        on database: (any Database)? = nil
     ) async throws {
         try await outboxEnqueuer.enqueueSummaryRefreshEvent(
             type: type,
             conversationID: conversationID,
-            recipientUserIDs: recipientUserIDs
+            actorUserID: actorUserID,
+            recipientUserIDs: recipientUserIDs,
+            on: database
         )
     }
 
     func publishConversationRemoved(
         conversationID: UUID,
-        affectedUserID: UUID
+        actorUserID: UUID?,
+        affectedUserID: UUID,
+        on database: (any Database)? = nil
     ) async throws {
         try await outboxEnqueuer.enqueueConversationRemovedEvent(
             conversationID: conversationID,
-            affectedUserID: affectedUserID
+            actorUserID: actorUserID,
+            affectedUserID: affectedUserID,
+            on: database
         )
     }
 }
@@ -363,6 +437,7 @@ struct ConversationMessageEventPublisher {
         try await outboxEnqueuer.enqueueMessageEvent(
             type: type,
             conversationID: conversationID,
+            actorUserID: requesterUserID,
             recipientUserIDs: recipientUserIDs,
             messageID: messageID
         )

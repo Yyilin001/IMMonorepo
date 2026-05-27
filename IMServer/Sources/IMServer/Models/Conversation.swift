@@ -169,6 +169,9 @@ final class ConversationMessage: Model, Content, @unchecked Sendable {
     @Field(key: "server_sequence")
     var serverSequence: Int
 
+    @Field(key: "timeline_sequence")
+    var timelineSequence: Int
+
     @Field(key: "kind")
     var kind: String
 
@@ -191,14 +194,19 @@ final class ConversationMessage: Model, Content, @unchecked Sendable {
         conversationID: UUID,
         senderUserID: UUID,
         serverSequence: Int,
+        timelineSequence: Int,
         clientMessageID: String? = nil,
         content: IMMessageContent,
         derivedState: IMMessageDerivedState? = nil
     ) throws {
+        guard serverSequence > 0, timelineSequence > 0 else {
+            throw Abort(.internalServerError, reason: "server_sequence 和 timeline_sequence 必须是正数。")
+        }
         self.id = id
         self.$conversation.id = conversationID
         self.$sender.id = senderUserID
         self.serverSequence = serverSequence
+        self.timelineSequence = timelineSequence
         self.clientMessageID = clientMessageID
         self.kind = content.type.rawValue
         self.bodyJSON = try Self.encodeContent(content)

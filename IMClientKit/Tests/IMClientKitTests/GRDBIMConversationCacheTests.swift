@@ -33,25 +33,27 @@ struct GRDBIMConversationCacheTests {
                         UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!,
                     ],
                     messages: [
-                        IMCachedMessageState(
+                        try! IMCachedMessageState(
                             id: "message-2",
                             conversationID: conversationID,
                             clientMessageID: nil,
                             serverMessageID: "message-2",
                             senderUserID: UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!,
                             serverSequence: 2,
+                            timelineSequence: 2,
                             content: .richText(.plain("second")),
                             direction: .incoming,
                             createdAt: Date(timeIntervalSince1970: 1_700_300_002),
                             deliveryState: .received
                         ),
-                        IMCachedMessageState(
+                        try! IMCachedMessageState(
                             id: "message-1",
                             conversationID: conversationID,
                             clientMessageID: "client-1",
                             serverMessageID: "message-1",
                             senderUserID: ownerUserID,
                             serverSequence: 1,
+                            timelineSequence: 1,
                             content: .richText(.plain("first")),
                             direction: .outgoing,
                             createdAt: Date(timeIntervalSince1970: 1_700_300_001),
@@ -62,8 +64,8 @@ struct GRDBIMConversationCacheTests {
                     hasLoadedMessages: true,
                     lastMessagePreviewText: "second",
                     hasMoreHistory: true,
-                    latestSyncedServerSequence: 2,
-                    oldestLoadedServerSequence: 1,
+                    latestLoadedTimelineSequence: 2,
+                    oldestLoadedTimelineSequence: 1,
                     serverLastReadSequence: 1,
                     serverUnreadCount: 1,
                     isPinned: true,
@@ -78,8 +80,8 @@ struct GRDBIMConversationCacheTests {
                 IMSyncCursorState(
                     conversationID: conversationID,
                     hasLoadedMessages: true,
-                    latestSyncedServerSequence: 2,
-                    oldestLoadedServerSequence: 1
+                    latestLoadedTimelineSequence: 2,
+                    oldestLoadedTimelineSequence: 1
                 )
             ],
             transferSnapshots: [
@@ -186,13 +188,14 @@ struct GRDBIMConversationCacheTests {
                     memberCount: 1,
                     memberUserIDs: [ownerUserID],
                     messages: [
-                        IMCachedMessageState(
+                        try! IMCachedMessageState(
                             id: "message-\(ownerUserID.uuidString)",
                             conversationID: conversationID,
                             clientMessageID: nil,
                             serverMessageID: "message-\(ownerUserID.uuidString)",
                             senderUserID: ownerUserID,
                             serverSequence: 1,
+                            timelineSequence: 1,
                             content: .richText(.plain("hello")),
                             direction: .incoming,
                             createdAt: Date(timeIntervalSince1970: 1_700_300_001),
@@ -202,8 +205,8 @@ struct GRDBIMConversationCacheTests {
                     hasLoadedMessages: true,
                     lastMessagePreviewText: "hello",
                     hasMoreHistory: false,
-                    latestSyncedServerSequence: 1,
-                    oldestLoadedServerSequence: 1,
+                    latestLoadedTimelineSequence: 1,
+                    oldestLoadedTimelineSequence: 1,
                     serverLastReadSequence: 0,
                     serverUnreadCount: 0,
                     updatedAt: Date(timeIntervalSince1970: 1_700_300_001)
@@ -213,8 +216,8 @@ struct GRDBIMConversationCacheTests {
                 IMSyncCursorState(
                     conversationID: conversationID,
                     hasLoadedMessages: true,
-                    latestSyncedServerSequence: 1,
-                    oldestLoadedServerSequence: 1
+                    latestLoadedTimelineSequence: 1,
+                    oldestLoadedTimelineSequence: 1
                 )
             ]
         )

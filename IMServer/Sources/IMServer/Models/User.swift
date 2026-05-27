@@ -28,6 +28,9 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
     @OptionalField(key: "avatar_preset")
     var avatarPreset: String?
 
+    @Field(key: "profile_revision")
+    var profileRevision: Int
+
     @OptionalField(key: "email_verified_at")
     var emailVerifiedAt: Date?
 
@@ -57,6 +60,7 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
         self.status = status.rawValue
         self.displayName = displayName
         self.avatarPreset = avatarPreset?.rawValue
+        self.profileRevision = 0
         self.emailVerifiedAt = emailVerifiedAt
     }
 

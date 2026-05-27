@@ -159,6 +159,12 @@ struct GatewayRelayMessageRequest: Content {
     let requestID: UUID?
 }
 
+struct GatewayRelayDomainEventDeliveryRequest: Content {
+    let ownerUserID: UUID
+    let eventID: UUID
+    let requestID: UUID?
+}
+
 struct GatewayRelayKickSessionRequest: Content {
     let sessionID: UUID
     let reason: IMTCPKickReason

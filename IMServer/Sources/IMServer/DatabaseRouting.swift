@@ -207,9 +207,10 @@ struct DirectoryBackedConversationShardRouter: ConversationShardRouter {
             await shardCache.store(storedShardID, for: conversationID)
             return storedShardID
         }
-        let fallbackShardID = stableShardID(for: conversationID, shardIDs: shardIDs)
-        await shardCache.store(fallbackShardID, for: conversationID)
-        return fallbackShardID
+        throw Abort(
+            .internalServerError,
+            reason: "Conversation shard directory references unknown shard \(storedShardID) for conversation \(conversationID)."
+        )
     }
 
     func commandDatabase(forConversationID conversationID: UUID) async throws -> any Database {

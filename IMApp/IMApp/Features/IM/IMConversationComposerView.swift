@@ -170,7 +170,7 @@ extension IMConversationDetailView {
                         let didSend: Bool
                         if let editingTarget {
                             didSend = await runtimeStore.editMessage(
-                                messageID: editingTarget.serverMessageID ?? editingTarget.id,
+                                messageID: editingTarget.serverMessageID,
                                 text: composerText,
                                 in: conversationID
                             )
@@ -282,14 +282,10 @@ extension IMConversationDetailView {
     }
 
     func selectableMessageID(for message: IMConversationMessage) -> String? {
-        if let serverMessageID = message.serverMessageID,
-           UUID(uuidString: serverMessageID) != nil {
-            return serverMessageID
+        if UUID(uuidString: message.serverMessageID) != nil {
+            return message.serverMessageID
         }
-        if UUID(uuidString: message.id) != nil {
-            return message.id
-        }
-        return nil
+        return UUID(uuidString: message.id) == nil ? nil : message.id
     }
 
     func toggleSelectedMessage(_ messageID: String) {

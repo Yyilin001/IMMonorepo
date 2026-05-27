@@ -17,7 +17,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 4,
+                protocolVersion: IMRealtimeProtocolVersion.currentInt,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -115,7 +115,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 4,
+                protocolVersion: IMRealtimeProtocolVersion.currentInt,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -217,7 +217,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 4,
+                protocolVersion: IMRealtimeProtocolVersion.currentInt,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -290,31 +290,35 @@ extension IMServerTests {
 
                         try await app.testing().test(
                             .GET,
-                            "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=0",
+                            "api/im/conversations/\(conversationID.uuidString)/timeline/since?afterSequence=0",
                             beforeRequest: { req in
                                 req.headers.bearerAuthorization = .init(token: deviceBAccessToken)
                             },
                             afterResponse: { res async throws in
                                 #expect(res.status == .ok)
-                                let response = try res.content.decode(IMMessageSinceResponse.self)
-                                #expect(response.messages.map(\.clientMessageID) == ["tcp-gap-1", "tcp-gap-2"])
-                                #expect(response.messages.map(\.serverSequence) == [1, 2])
+                                let response = try res.content.decode(IMTimelinePageResponse.self)
+                                let messages = response.items.compactMap(\.message)
+                                #expect(messages.map(\.clientMessageID) == ["tcp-gap-1", "tcp-gap-2"])
+                                #expect(messages.map(\.serverSequence) == [1, 2])
+                                #expect(messages.map(\.timelineSequence) == [2, 3])
                                 #expect(response.hasMore == false)
-                                #expect(response.nextAfterSequence == 2)
+                                #expect(response.nextAfterSequence == 3)
                             }
                         )
 
                         try await app.testing().test(
                             .GET,
-                            "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=1",
+                            "api/im/conversations/\(conversationID.uuidString)/timeline/since?afterSequence=2",
                             beforeRequest: { req in
                                 req.headers.bearerAuthorization = .init(token: deviceBAccessToken)
                             },
                             afterResponse: { res async throws in
                                 #expect(res.status == .ok)
-                                let response = try res.content.decode(IMMessageSinceResponse.self)
-                                #expect(response.messages.map(\.clientMessageID) == ["tcp-gap-2"])
-                                #expect(response.messages.map(\.serverSequence) == [2])
+                                let response = try res.content.decode(IMTimelinePageResponse.self)
+                                let messages = response.items.compactMap(\.message)
+                                #expect(messages.map(\.clientMessageID) == ["tcp-gap-2"])
+                                #expect(messages.map(\.serverSequence) == [2])
+                                #expect(messages.map(\.timelineSequence) == [3])
                                 #expect(response.hasMore == false)
                             }
                         )
@@ -332,7 +336,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 4,
+                protocolVersion: IMRealtimeProtocolVersion.currentInt,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 90,
@@ -403,7 +407,7 @@ extension IMServerTests {
                 enabled: true,
                 host: "127.0.0.1",
                 port: 0,
-                protocolVersion: 4,
+                protocolVersion: IMRealtimeProtocolVersion.currentInt,
                 authTimeout: 2,
                 heartbeatInterval: 30,
                 idleTimeout: 0.1,
@@ -592,9 +596,11 @@ extension IMServerTests {
     @Test("Connection routing fans out user packets only to routed remote nodes")
     func connectionRoutingFansOutUserPacketsToRoutedRemoteNodes() async throws {
         let app = try await Application.make(.testing)
+        try await configure(app)
         app.imNodeID = "node-a"
 
-        let userID = UUID()
+        let owner = try await user(email: "demo@example.com", on: app)
+        let userID = try owner.requireID()
         let presenceStore = FakePresenceStore()
         await presenceStore.setUserRoutes([userID: ["node-a", "node-b"]])
         let dispatchService = FakeNodeMessageDispatchService()
@@ -606,8 +612,9 @@ extension IMServerTests {
             )
         )
 
+        let eventID = UUID()
         let payload = IMTCPChatDomainEventPayload(
-            eventID: UUID(),
+            eventID: eventID,
             eventType: .messageCreated,
             aggregateType: "conversation",
             aggregateID: UUID(),
@@ -615,6 +622,8 @@ extension IMServerTests {
             occurredAt: Date(),
             actorUserID: userID,
             conversation: nil,
+            ownerCursor: 1,
+            ownerAggregateSequence: 1,
             body: .messageCreated(
                 message: IMMessageResponse(
                     id: UUID(),
@@ -622,6 +631,7 @@ extension IMServerTests {
                     senderUserID: userID,
                     clientMessageID: "client-1",
                     serverSequence: 1,
+                    timelineSequence: 1,
                     content: .richText(.plain("hello")),
                     derivedState: MessageDerivedState(),
                     createdAt: Date()
@@ -629,13 +639,25 @@ extension IMServerTests {
                 clientMessageID: "client-1"
             )
         )
-        await routingService.sendDomainEvent(payload, toUserIDs: [userID], requestID: UUID())
+        _ = try await OwnerDomainEventDeliveryService(db: app.db).record(
+            payload: payload,
+            ownerUserID: userID,
+            sourceType: .conversation,
+            sourceEventID: eventID
+        )
+        await routingService.sendDomainEventDelivery(ownerUserID: userID, eventID: eventID, requestID: UUID())
 
         let dispatches = await dispatchService.dispatches()
         #expect(dispatches.count == 1)
         #expect(dispatches.first?.nodeID == "node-b")
         #expect(dispatches.first?.envelope.action == .domainEvent)
         #expect(dispatches.first?.envelope.targetUserIDs == [userID])
+        guard case .domainEvent(let ownerUserID, let dispatchedEventID) = dispatches.first?.envelope.payload else {
+            Issue.record("Expected delivery identity domain event dispatch.")
+            return
+        }
+        #expect(ownerUserID == userID)
+        #expect(dispatchedEventID == eventID)
 
         try await app.asyncShutdown()
     }
@@ -679,9 +701,11 @@ extension IMServerTests {
     @Test("Connection routing forwards conversation events only to routed remote user nodes")
     func connectionRoutingForwardsConversationEventsToRoutedRemoteUserNodes() async throws {
         let app = try await Application.make(.testing)
+        try await configure(app)
         app.imNodeID = "node-a"
 
-        let userID = UUID()
+        let owner = try await user(email: "demo@example.com", on: app)
+        let userID = try owner.requireID()
         let conversation = IMConversationResponse(
             id: UUID(),
             title: "Remote Read",
@@ -712,8 +736,9 @@ extension IMServerTests {
             )
         )
 
+        let eventID = UUID()
         let payload = IMTCPChatDomainEventPayload(
-            eventID: UUID(),
+            eventID: eventID,
             eventType: .conversationUpdated,
             aggregateType: "conversation",
             aggregateID: conversation.id,
@@ -721,15 +746,29 @@ extension IMServerTests {
             occurredAt: Date(timeIntervalSince1970: 1_700_400_001),
             actorUserID: userID,
             conversation: conversation,
+            ownerCursor: 1,
+            ownerAggregateSequence: 1,
             body: .conversationChanged
         )
-        await routingService.sendDomainEvent(payload, toUserIDs: [userID], requestID: UUID())
+        _ = try await OwnerDomainEventDeliveryService(db: app.db).record(
+            payload: payload,
+            ownerUserID: userID,
+            sourceType: .conversation,
+            sourceEventID: eventID
+        )
+        await routingService.sendDomainEventDelivery(ownerUserID: userID, eventID: eventID, requestID: UUID())
 
         let dispatches = await dispatchService.dispatches()
         #expect(dispatches.count == 1)
         #expect(dispatches.first?.nodeID == "node-b")
         #expect(dispatches.first?.envelope.action == .domainEvent)
         #expect(dispatches.first?.envelope.targetUserIDs == [userID])
+        guard case .domainEvent(let ownerUserID, let dispatchedEventID) = dispatches.first?.envelope.payload else {
+            Issue.record("Expected delivery identity domain event dispatch.")
+            return
+        }
+        #expect(ownerUserID == userID)
+        #expect(dispatchedEventID == eventID)
 
         try await app.asyncShutdown()
     }
@@ -886,8 +925,7 @@ private struct IMTCPTestClient: Sendable {
                 deviceID: deviceID,
                 deviceName: "Test \(deviceID)",
                 platform: "ios",
-                appVersion: "1.0",
-                protocolVersion: 4
+                appVersion: "1.0"
             )
         )
         _ = try await nextPacket(ofType: .authOK)

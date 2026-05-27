@@ -89,7 +89,7 @@ struct DatabaseSummaryReadModelStore: SummaryReadModelStore {
             memberCount: row.memberCount,
             memberUserIDs: row.memberUserIDs.sorted { $0.uuidString < $1.uuidString },
             lastMessage: row.lastMessage,
-            lastReadSequence: row.lastReadSequence,
+            lastReadSequence: UInt64(row.lastReadSequence),
             unreadCount: row.unreadCount,
             isPinned: row.isPinned,
             pinnedAt: row.pinnedAt,
@@ -248,7 +248,6 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
     let app: Application
     let endpoint: String
     let indexName: String
-    let fallback: DatabaseConversationSearchAdapter?
 
     func searchMessages(
         in conversationID: UUID,
@@ -315,7 +314,7 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
                 return IMConversationMessageSearchHitResponse(
                     messageID: hit.source.messageID,
                     senderUserID: message.$sender.id,
-                    serverSequence: message.serverSequence,
+                    serverSequence: try imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence"),
                     content: content,
                     derivedState: aggregate.derivedState,
                     snippet: searchService.searchSnippet(for: query, aggregate: aggregate) ?? "",
@@ -329,20 +328,7 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
                 hasMore: hasMore
             )
         } catch {
-            guard let fallback else {
-                throw error
-            }
-            app.logger.warning(
-                "OpenSearch adapter failed; falling back to database search",
-                metadata: ["error": .string(String(describing: error))]
-            )
-            return try await fallback.searchMessages(
-                in: conversationID,
-                for: userID,
-                query: query,
-                cursor: cursor,
-                limit: limit
-            )
+            throw error
         }
     }
 }
@@ -383,8 +369,7 @@ extension Application {
                 adapter = OpenSearchConversationSearchAdapter(
                     app: self,
                     endpoint: endpoint,
-                    indexName: searchIndexConfiguration.indexName,
-                    fallback: nil
+                    indexName: searchIndexConfiguration.indexName
                 )
             } else {
                 adapter = DatabaseConversationSearchAdapter(app: self)

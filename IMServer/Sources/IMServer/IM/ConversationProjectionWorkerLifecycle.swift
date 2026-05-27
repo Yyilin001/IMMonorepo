@@ -17,6 +17,10 @@ final class ConversationProjectionWorkerLifecycle: LifecycleHandler, @unchecked 
                 while !Task.isCancelled {
                     do {
                         var processedCount = 0
+                        processedCount += try await ContactOutboxProcessor(db: application.imWriteDB).processPendingBatch(
+                            app: application,
+                            configuration: configuration
+                        )
                         for shard in application.conversationShardRouter.allCommandDatabases() {
                             processedCount += try await ConversationOutboxProcessor(db: shard.database).processPendingBatch(
                                 app: application,

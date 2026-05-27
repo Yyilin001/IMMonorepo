@@ -190,6 +190,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                 try beginAuthentication(
                     payload: payload,
                     requestID: packet.requestID,
+                    protocolVersion: packet.protocolVersion,
                     channel: channel
                 )
             } catch {
@@ -219,10 +220,11 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
     private func beginAuthentication(
         payload: IMTCPAuthRequestPayload,
         requestID: UUID?,
+        protocolVersion: Int,
         channel: any Channel
     ) throws {
-        guard payload.protocolVersion == application.imTCPConfiguration.protocolVersion else {
-            throw IMTCPProtocolError.unsupportedProtocolVersion(payload.protocolVersion)
+        guard protocolVersion == application.imTCPConfiguration.protocolVersion else {
+            throw IMTCPProtocolError.unsupportedProtocolVersion(protocolVersion)
         }
 
         state = .authenticating
@@ -380,7 +382,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         case .ack:
             return
 
-        case .authOK, .authError, .heartbeatAck, .domainEvent, .kick:
+        case .authOK, .authError, .heartbeatAck, .domainEvent, .streamSignal, .kick:
             sendKickAndClose(
                 channel: channel,
                 reason: .protocolError,

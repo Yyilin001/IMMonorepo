@@ -2,7 +2,7 @@ import Fluent
 import Foundation
 import Vapor
 
-struct IMSummaryReadModelBackfillService {
+struct IMSummaryReadModelRepairService {
     private struct RoutedMembership: Sendable {
         let shardID: String
         let membership: ConversationMember

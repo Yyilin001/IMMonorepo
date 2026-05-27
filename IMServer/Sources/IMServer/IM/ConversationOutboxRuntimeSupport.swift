@@ -153,6 +153,10 @@ extension Application {
             return
         }
 
+        _ = try await ContactOutboxService(db: imWriteDB).processPendingBatch(
+            app: self,
+            configuration: conversationOutboxConfiguration
+        )
         for shard in conversationShardRouter.allCommandDatabases() {
             _ = try await ConversationOutboxService(db: shard.database).processPendingBatch(
                 app: self,

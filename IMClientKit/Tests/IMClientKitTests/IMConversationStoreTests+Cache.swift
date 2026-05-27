@@ -3,6 +3,270 @@ import Testing
 @testable import IMClientKit
 
 extension IMConversationStoreTests {
+    @Test func domainEventBatchStopsBeforeMissingRequiredNoticeAndDoesNotAdvanceCursorPastIt() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let messageID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+        let firstEvent = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            eventType: .messageCreated,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 1,
+            occurredAt: Date(timeIntervalSince1970: 1_700_900_001),
+            actorUserID: Self.peerUserID,
+            conversation: nil,
+            ownerCursor: 1,
+            ownerAggregateSequence: 1,
+            body: .messageCreated(
+                message: IMConversationMessageResponseBody(
+                    id: messageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    serverSequence: 1,
+                    timelineSequence: 1,
+                    content: .richText(.plain("first")),
+                    createdAt: Date(timeIntervalSince1970: 1_700_900_001)
+                ),
+                clientMessageID: nil
+            )
+        )
+        let missingNoticeEvent = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+            eventType: .memberAdded,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 2,
+            occurredAt: Date(timeIntervalSince1970: 1_700_900_002),
+            actorUserID: Self.peerUserID,
+            conversation: nil,
+            requiresTimelineNotice: true,
+            ownerCursor: 2,
+            ownerAggregateSequence: 2,
+            body: .memberChanged(memberUserIDs: [Self.peerUserID])
+        )
+        let thirdEvent = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
+            eventType: .messageCreated,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 3,
+            occurredAt: Date(timeIntervalSince1970: 1_700_900_003),
+            actorUserID: Self.peerUserID,
+            conversation: nil,
+            ownerCursor: 3,
+            ownerAggregateSequence: 3,
+            body: .messageCreated(
+                message: IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    serverSequence: 2,
+                    timelineSequence: 3,
+                    content: .richText(.plain("third")),
+                    createdAt: Date(timeIntervalSince1970: 1_700_900_003)
+                ),
+                clientMessageID: nil
+            )
+        )
+
+        let outcome = store.applyDomainEvents(
+            [
+                Self.envelope(cursor: 1, payload: firstEvent),
+                Self.envelope(cursor: 2, payload: missingNoticeEvent),
+                Self.envelope(cursor: 3, payload: thirdEvent)
+            ],
+            nextCursor: 3,
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(outcome.shouldFetchDomainEvents == true)
+        #expect(store.domainEventSyncCursor == 1)
+        #expect(store.domainEventDebugMetrics.missingRequiredNotice == 1)
+        #expect(store.conversations.first?.messages.map(\.text) == ["first"])
+    }
+
+    @Test func deferredOutOfOrderEventAllowsCursorAdvanceAndPersistsDeferredEnvelope() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let missingMessageID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+        let editEvent = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
+            eventType: .messageEdited,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 2,
+            occurredAt: Date(timeIntervalSince1970: 1_700_900_010),
+            actorUserID: Self.peerUserID,
+            conversation: nil,
+            ownerCursor: 1,
+            ownerAggregateSequence: 1,
+            body: .messageEdited(
+                messageID: missingMessageID,
+                body: .plain("edited"),
+                editedAt: Date(timeIntervalSince1970: 1_700_900_011),
+                message: nil
+            )
+        )
+
+        let outcome = store.applyDomainEvents(
+            [Self.envelope(cursor: 1, payload: editEvent)],
+            nextCursor: 1,
+            currentUserID: Self.currentUserID
+        )
+        let snapshot = store.makeCacheSnapshot(lastSummaryRefreshAt: nil)
+
+        #expect(outcome.shouldFetchDomainEvents == true)
+        #expect(store.domainEventSyncCursor == 1)
+        #expect(snapshot.domainEventState.deferredEvents.map(\.eventID) == [editEvent.eventID])
+    }
+
+    @Test func domainEventBatchStopsAtOwnerCursorGap() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let firstEvent = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "77777777-7777-7777-7777-777777777777")!,
+            eventType: .messageCreated,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 1,
+            occurredAt: Date(timeIntervalSince1970: 1_700_900_030),
+            actorUserID: Self.peerUserID,
+            conversation: nil,
+            ownerCursor: 1,
+            ownerAggregateSequence: 1,
+            body: .messageCreated(
+                message: IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "dddddddd-1111-2222-3333-eeeeeeeeeeee")!,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    serverSequence: 1,
+                    timelineSequence: 1,
+                    content: .richText(.plain("first")),
+                    createdAt: Date(timeIntervalSince1970: 1_700_900_030)
+                ),
+                clientMessageID: nil
+            )
+        )
+        let skippedCursorEvent = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "88888888-8888-8888-8888-888888888888")!,
+            eventType: .messageCreated,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 3,
+            occurredAt: Date(timeIntervalSince1970: 1_700_900_032),
+            actorUserID: Self.peerUserID,
+            conversation: nil,
+            ownerCursor: 3,
+            ownerAggregateSequence: 3,
+            body: .messageCreated(
+                message: IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "eeeeeeee-1111-2222-3333-ffffffffffff")!,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    serverSequence: 2,
+                    timelineSequence: 3,
+                    content: .richText(.plain("third")),
+                    createdAt: Date(timeIntervalSince1970: 1_700_900_032)
+                ),
+                clientMessageID: nil
+            )
+        )
+
+        let outcome = store.applyDomainEvents(
+            [
+                Self.envelope(cursor: 1, payload: firstEvent),
+                Self.envelope(cursor: 3, payload: skippedCursorEvent)
+            ],
+            nextCursor: 3,
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(outcome.shouldFetchDomainEvents == true)
+        #expect(store.domainEventSyncCursor == 1)
+        #expect(store.domainEventDebugMetrics.catchUpCursorGap == 1)
+        #expect(store.conversations.first?.messages.map(\.text) == ["first"])
+    }
+
+    @Test func domainEventProjectionReducerClassifiesRequiredNoticeAndMissingMessage() {
+        let reducer = DomainEventProjectionReducer()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let messageID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+        let snapshot = DomainEventProjectionReducer.DependencySnapshot(
+            processedEventIDs: [],
+            ownerAggregateHighWatermarks: [:],
+            existingMessageKeys: []
+        )
+
+        let missingNotice = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!,
+            eventType: .memberAdded,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 1,
+            occurredAt: Date(timeIntervalSince1970: 1_700_900_020),
+            actorUserID: Self.peerUserID,
+            conversation: nil,
+            requiresTimelineNotice: true,
+            ownerCursor: 1,
+            ownerAggregateSequence: 1,
+            body: .memberChanged(memberUserIDs: [Self.peerUserID])
+        )
+        let outOfOrderEdit = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "66666666-6666-6666-6666-666666666666")!,
+            eventType: .messageEdited,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 2,
+            occurredAt: Date(timeIntervalSince1970: 1_700_900_021),
+            actorUserID: Self.peerUserID,
+            conversation: nil,
+            ownerCursor: 2,
+            ownerAggregateSequence: 1,
+            body: .messageEdited(
+                messageID: messageID,
+                body: .plain("edited"),
+                editedAt: Date(timeIntervalSince1970: 1_700_900_022),
+                message: nil
+            )
+        )
+
+        if case .requestCatchUp = reducer.reduce(
+            event: missingNotice,
+            currentUserID: Self.currentUserID,
+            dependencies: snapshot
+        ) {
+            // Expected path.
+        } else {
+            Issue.record("Missing required notice should request catch-up.")
+        }
+
+        if case .deferEvent(let reason, let missingKey, let deferredConversationID) = reducer.reduce(
+            event: outOfOrderEdit,
+            currentUserID: Self.currentUserID,
+            dependencies: snapshot
+        ) {
+            #expect(reason == .missingMessage)
+            #expect(missingKey == .message(messageID.uuidString))
+            #expect(deferredConversationID == conversationID.uuidString)
+        } else {
+            Issue.record("Out-of-order edit should be deferred.")
+        }
+    }
+
+    private static func envelope(
+        cursor: UInt64,
+        payload: IMTCPChatDomainEventPayload
+    ) -> SessionClient.IMDomainEventDeliveryEnvelope {
+        SessionClient.IMDomainEventDeliveryEnvelope(
+            cursor: cursor,
+            eventID: payload.eventID,
+            ownerAggregateSequence: payload.ownerAggregateSequence ?? 0,
+            eventPBBase64: "",
+            payload: payload
+        )
+    }
+
     @Test func replaceMembersStoresConversationParticipants() {
         let store = IMConversationStore()
         let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
@@ -90,7 +354,7 @@ extension IMConversationStoreTests {
             for: conversationIDString
         )
         store.openConversation(id: conversationIDString)
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -124,15 +388,15 @@ extension IMConversationStoreTests {
         #expect(restoredStore.selectedConversation?.serverUnreadCount == 2)
         #expect(restoredStore.selectedConversation?.messages.map(\.text) == ["cached message"])
         #expect(restoredStore.selectedConversation?.hasMoreHistory == true)
-        #expect(restoredStore.latestLoadedServerSequence(for: conversationIDString) == 3)
-        #expect(restoredStore.oldestLoadedServerSequence(for: conversationIDString) == 3)
+        #expect(restoredStore.latestLoadedMessageSequence(for: conversationIDString) == 3)
+        #expect(restoredStore.oldestLoadedTimelineSequence(for: conversationIDString) == 3)
         #expect(snapshot.metadata.selectedConversationID == conversationIDString)
         #expect(snapshot.cursors == [
             IMSyncCursorState(
                 conversationID: conversationIDString,
                 hasLoadedMessages: true,
-                latestSyncedServerSequence: 3,
-                oldestLoadedServerSequence: 3
+                latestLoadedTimelineSequence: 3,
+                oldestLoadedTimelineSequence: 3
             )
         ])
     }
@@ -152,7 +416,7 @@ extension IMConversationStoreTests {
         restoredStore.restoreCacheSnapshot(snapshot)
 
         #expect(restoredStore.hasLoadedMessages(for: conversationID.uuidString) == false)
-        #expect(restoredStore.latestLoadedServerSequence(for: conversationID.uuidString) == nil)
+        #expect(restoredStore.latestLoadedMessageSequence(for: conversationID.uuidString) == nil)
         #expect(restoredStore.gapSyncTargets(from: summaries).isEmpty)
     }
 
@@ -163,7 +427,7 @@ extension IMConversationStoreTests {
         let conversationIDString = conversationID.uuidString
 
         store.replaceConversationSummaries([Self.gapSummary(conversationID: conversationID, latestServerSequence: 205)])
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationIDString,
             messages: (1...205).map { sequence in
                 Self.messageResponse(conversationID: conversationID, serverSequence: sequence)
@@ -178,8 +442,8 @@ extension IMConversationStoreTests {
         #expect(cachedConversation.messages.count == IMConversationCacheSnapshot.cachedMessageLimit)
         #expect(cachedConversation.messages.first?.serverSequence == 6)
         #expect(cachedConversation.messages.last?.serverSequence == 205)
-        #expect(cursor.latestSyncedServerSequence == 205)
-        #expect(cursor.oldestLoadedServerSequence == 6)
+        #expect(cursor.latestLoadedTimelineSequence == 205)
+        #expect(cursor.oldestLoadedTimelineSequence == 6)
     }
 
 
@@ -232,8 +496,8 @@ extension IMConversationStoreTests {
         restoredStore.restoreCacheSnapshot(snapshot)
         restoredStore.markAllPendingMessagesFailed(message: "should not apply")
 
-        #expect(restoredStore.selectedConversation?.messages.map(\.text) == ["failed draft", "pending draft", "queued draft"])
-        #expect(restoredStore.selectedConversation?.messages.map(\.deliveryState) == [
+        #expect(restoredStore.selectedConversation?.pendingMessages.map(\.text) == ["failed draft", "pending draft", "queued draft"])
+        #expect(restoredStore.selectedConversation?.pendingMessages.map(\.deliveryState) == [
             .failed(message: "send failed"),
             .unknown(message: "发送状态未确认，请重试。"),
             .queued(message: "等待 IM 长连接恢复后发送。")
@@ -261,7 +525,7 @@ extension IMConversationStoreTests {
             senderUserID: Self.currentUserID,
             sourceFileURL: sourceFileURL
         )
-        let localMessageID = try #require(store.selectedConversation?.messages.first?.id)
+        let localMessageID = try #require(store.selectedConversation?.pendingMessages.first?.id)
         store.markOutgoingUploading(
             localMessageID: localMessageID,
             message: "正在上传附件。",
@@ -272,7 +536,7 @@ extension IMConversationStoreTests {
         let restoredStore = IMConversationStore()
         restoredStore.restoreCacheSnapshot(snapshot)
 
-        let restoredMessage = try #require(restoredStore.selectedConversation?.messages.first)
+        let restoredMessage = try #require(restoredStore.selectedConversation?.pendingMessages.first)
         #expect(restoredMessage.deliveryState == .uploading(message: "正在上传附件。"))
         #expect(restoredMessage.localTransferState?.sourceFilePath == sourceFileURL.path)
         #expect(restoredMessage.localTransferState?.uploadID == "upload-cache-1")
@@ -303,7 +567,7 @@ extension IMConversationStoreTests {
                 )
             ]
         )
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationID,
             messages: [
                 IMConversationMessageResponseBody(
@@ -312,6 +576,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 1,
+                    timelineSequence: 1,
                     content: .file(asset),
                     createdAt: Date(timeIntervalSince1970: 1_700_000_001)
                 )

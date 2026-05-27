@@ -318,6 +318,41 @@ public actor SessionClient {
         )
     }
 
+    public struct IMDomainEventDeliveryEnvelope: Equatable, Sendable {
+        public let cursor: UInt64
+        public let eventID: UUID
+        public let ownerAggregateSequence: UInt64
+        public let eventPBBase64: String
+        public let payload: IMTCPChatDomainEventPayload
+    }
+
+    public func fetchIMDomainEvents(
+        after cursor: UInt64,
+        limit: Int? = nil
+    ) async throws -> (envelopes: [IMDomainEventDeliveryEnvelope], nextCursor: UInt64, hasMore: Bool) {
+        let response = try await executor.execute(IMRequest.domainEventChanges(after: cursor, limit: limit))
+        let envelopes = try response.items.map { item in
+            guard item.cursor > 0, let data = Data(base64Encoded: item.eventPBBase64) else {
+                throw APIError.decodingFailed("IM domain event payload is not valid base64.")
+            }
+            let payload = try IMTCPProtobufCodec.decodeDomainEvent(data)
+            guard payload.ownerCursor == UInt64(item.cursor),
+                  payload.ownerAggregateSequence == item.ownerAggregateSequence,
+                  payload.eventID == item.eventID
+            else {
+                throw APIError.decodingFailed("IM domain event envelope metadata does not match payload metadata.")
+            }
+            return IMDomainEventDeliveryEnvelope(
+                cursor: item.cursor,
+                eventID: item.eventID,
+                ownerAggregateSequence: item.ownerAggregateSequence,
+                eventPBBase64: item.eventPBBase64,
+                payload: payload
+            )
+        }
+        return (envelopes, response.nextCursor, response.hasMore)
+    }
+
     public func createIMConversation(
         kind: IMConversationKind,
         title: String?,
@@ -432,13 +467,13 @@ public actor SessionClient {
         )
     }
 
-    public func fetchIMMessages(
+    public func fetchIMTimeline(
         conversationID: String,
         beforeSequence: UInt64? = nil,
         limit: Int? = nil
-    ) async throws -> [IMConversationMessageResponseBody] {
+    ) async throws -> IMConversationTimelineResponseBody {
         try await executor.execute(
-            IMRequest.messages(
+            IMRequest.timeline(
                 conversationID: conversationID,
                 beforeSequence: beforeSequence,
                 limit: limit
@@ -446,13 +481,13 @@ public actor SessionClient {
         )
     }
 
-    public func fetchIMMessagesSince(
+    public func fetchIMTimelineSince(
         conversationID: String,
         afterSequence: UInt64,
         limit: Int? = nil
-    ) async throws -> IMConversationMessagesSinceResponseBody {
+    ) async throws -> IMConversationTimelineResponseBody {
         try await executor.execute(
-            IMRequest.messagesSince(
+            IMRequest.timelineSince(
                 conversationID: conversationID,
                 afterSequence: afterSequence,
                 limit: limit
@@ -698,6 +733,7 @@ public actor SessionClient {
             senderUserID: response.senderUserID,
             clientMessageID: response.clientMessageID,
             serverSequence: response.serverSequence,
+            timelineSequence: response.timelineSequence,
             content: response.content,
             derivedState: response.derivedState,
             createdAt: response.createdAt

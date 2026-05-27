@@ -6,6 +6,73 @@ import VaporTesting
 import Testing
 
 extension IMServerTests {
+    @Test("Contact outbox processing records delivery before best-effort realtime")
+    func contactOutboxProcessingRecordsDeliveryBeforeBestEffortRealtime() async throws {
+        try await withApp(configure: configure) { app in
+            let owner = try await user(email: "demo@example.com", on: app)
+            let peer = try await makeUser(email: "contact-outbox-peer@example.com", on: app)
+            let ownerID = try owner.requireID()
+            let peerID = try peer.requireID()
+            let eventID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
+
+            let event = try ContactDomainEvent(
+                id: eventID,
+                ownerUserID: ownerID,
+                eventType: .contactRemoved,
+                aggregateID: peerID,
+                ownerSequence: 1,
+                actorUserID: ownerID,
+                payload: .contactRemoved(contactUserID: peerID, affectedConversationIDs: [])
+            )
+            try await event.create(on: app.db)
+
+            let processed = try await ContactOutboxProcessor(db: app.db).processPendingBatch(
+                app: app,
+                configuration: .init(batchSize: 10, pollIntervalNanoseconds: 100_000_000, maxRetries: 5)
+            )
+
+            let reloadedEvent = try #require(try await ContactDomainEvent.find(eventID, on: app.db))
+            let delivery = try await OwnerDomainEventDelivery.find(
+                OwnerDomainEventDelivery.recordID(ownerUserID: ownerID, eventID: eventID),
+                on: app.db
+            )
+            #expect(processed == 1)
+            #expect(reloadedEvent.statusEnum == .processed)
+            #expect(delivery?.ownerUserID == ownerID)
+            #expect(delivery?.sourceType == DomainEventSourceType.contact.rawValue)
+        }
+    }
+
+    @Test("Contact realtime relay does not create missing delivery rows")
+    func contactRealtimeRelayDoesNotCreateMissingDeliveryRows() async throws {
+        try await withApp(configure: configure) { app in
+            let owner = try await user(email: "demo@example.com", on: app)
+            let peer = try await makeUser(email: "contact-relay-missing@example.com", on: app)
+            let ownerID = try owner.requireID()
+            let peerID = try peer.requireID()
+            let eventID = UUID(uuidString: "bbbbbbbb-cccc-dddd-eeee-ffffffffffff")!
+
+            let event = try ContactDomainEvent(
+                id: eventID,
+                ownerUserID: ownerID,
+                eventType: .contactRemoved,
+                aggregateID: peerID,
+                ownerSequence: 1,
+                actorUserID: ownerID,
+                payload: .contactRemoved(contactUserID: peerID, affectedConversationIDs: [])
+            )
+            try await event.create(on: app.db)
+
+            await ContactRealtimeRelay(app: app, db: app.db).relay(event: event)
+
+            let delivery = try await OwnerDomainEventDelivery.find(
+                OwnerDomainEventDelivery.recordID(ownerUserID: ownerID, eventID: eventID),
+                on: app.db
+            )
+            #expect(delivery == nil)
+        }
+    }
+
     @Test("Performance tuning environment configures outbox and write queue limits")
     func performanceTuningEnvironmentConfiguresRuntimeLimits() async throws {
         let oldOutboxConcurrency = Environment.get("IM_OUTBOX_MAX_CONCURRENCY")
@@ -130,6 +197,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: senderID,
                 serverSequence: 1,
+                timelineSequence: 1,
                 clientMessageID: "projection-event-message",
                 content: .richText(.plain("event message"))
             )
@@ -140,6 +208,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: senderID,
                 serverSequence: 2,
+                timelineSequence: 2,
                 clientMessageID: "projection-later-message",
                 content: .richText(.plain("later message"))
             )
@@ -149,10 +218,10 @@ extension IMServerTests {
                 id: UUID(),
                 conversationID: conversationID,
                 eventType: .messageCreated,
-                payload: .init(recipientUserIDs: memberUserIDs, messageID: eventMessageID),
+                payload: .messageCreated(messageID: eventMessageID, recipientUserIDs: memberUserIDs),
                 createdAt: Date(timeIntervalSince1970: 1_710_000_001)
             )
-            let envelope = ConversationEventEnvelope(
+            let envelope = try ConversationEventEnvelope(
                 event: event,
                 payload: try event.decodedPayload(),
                 deliveryContext: nil
@@ -232,6 +301,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: senderID,
                 serverSequence: 3,
+                timelineSequence: 3,
                 clientMessageID: "summary-stable-message",
                 content: .richText(.plain("new dynamic message"))
             )
@@ -293,6 +363,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: senderID,
                 serverSequence: 10,
+                timelineSequence: 10,
                 clientMessageID: "read-advanced-source",
                 content: .richText(.plain("latest"))
             )
@@ -333,10 +404,10 @@ extension IMServerTests {
                 id: UUID(),
                 conversationID: conversationID,
                 eventType: .readAdvanced,
-                payload: .init(recipientUserIDs: [readerID]),
+                payload: .readAdvanced(ownerUserID: readerID),
                 createdAt: Date(timeIntervalSince1970: 1_710_300_010)
             )
-            let envelope = ConversationEventEnvelope(
+            let envelope = try ConversationEventEnvelope(
                 event: event,
                 payload: try event.decodedPayload(),
                 deliveryContext: nil
@@ -407,6 +478,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: senderID,
                 serverSequence: 8,
+                timelineSequence: 8,
                 clientMessageID: "read-advanced-missing-source",
                 content: .richText(.plain("restored latest"))
             )
@@ -471,6 +543,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: senderID,
                 serverSequence: 4,
+                timelineSequence: 4,
                 clientMessageID: "media-reference-message",
                 content: .file(asset)
             )
@@ -480,9 +553,9 @@ extension IMServerTests {
                 id: UUID(),
                 conversationID: conversationID,
                 eventType: .messageCreated,
-                payload: .init(recipientUserIDs: [senderID, peerID], messageID: messageID)
+                payload: .messageCreated(messageID: messageID, recipientUserIDs: [senderID, peerID])
             )
-            let createdEnvelope = ConversationEventEnvelope(
+            let createdEnvelope = try ConversationEventEnvelope(
                 event: createdEvent,
                 payload: try createdEvent.decodedPayload(),
                 deliveryContext: nil
@@ -516,9 +589,9 @@ extension IMServerTests {
                 id: UUID(),
                 conversationID: conversationID,
                 eventType: .messageRecalled,
-                payload: .init(recipientUserIDs: [senderID, peerID], messageID: messageID)
+                payload: .messageRecalled(messageID: messageID, recipientUserIDs: [senderID, peerID])
             )
-            let recalledEnvelope = ConversationEventEnvelope(
+            let recalledEnvelope = try ConversationEventEnvelope(
                 event: recalledEvent,
                 payload: try recalledEvent.decodedPayload(),
                 deliveryContext: nil
@@ -568,7 +641,7 @@ extension IMServerTests {
             let event = try ConversationDomainEvent(
                 conversationID: UUID(),
                 eventType: .metadataUpdated,
-                payload: .init()
+                payload: .metadataUpdated(recipientUserIDs: [UUID()])
             )
             try await event.create(on: app.db)
             guard let eventID = event.id else {
@@ -603,6 +676,93 @@ extension IMServerTests {
         }
     }
 
+    @Test("Unknown outbox event type fails instead of falling back")
+    func unknownOutboxEventTypeFailsInsteadOfFallingBack() async throws {
+        try await withApp(configure: configure) { app in
+            guard let sql = app.db as? any SQLDatabase else {
+                Issue.record("Expected SQL database")
+                return
+            }
+
+            let event = try ConversationDomainEvent(
+                conversationID: UUID(),
+                eventType: .metadataUpdated,
+                payload: .metadataUpdated(recipientUserIDs: [UUID()])
+            )
+            try await event.create(on: app.db)
+            let eventID = try event.requireID()
+
+            try await sql.raw("""
+                UPDATE conversation_domain_events
+                SET event_type = 'unknown_event_type'
+                WHERE id = \(bind: eventID)
+                """).run()
+
+            _ = try await ConversationOutboxProcessor(db: app.db).processPendingBatch(
+                app: app,
+                configuration: .init(
+                    batchSize: 10,
+                    pollIntervalNanoseconds: 100_000_000,
+                    maxRetries: 2,
+                    logsProcessingFailures: false
+                )
+            )
+
+            let reloaded = try #require(try await ConversationDomainEvent.find(eventID, on: app.db))
+            #expect(reloaded.statusEnum == .failed)
+            #expect(reloaded.errorMessage?.contains("unknown_event_type") == true)
+        }
+    }
+
+    @Test("Corrupt timeline notice payload throws instead of returning empty values")
+    func corruptTimelineNoticePayloadThrowsInsteadOfReturningEmptyValues() async throws {
+        try await withApp(configure: configure) { app in
+            guard let sql = app.db as? any SQLDatabase else {
+                Issue.record("Expected SQL database")
+                return
+            }
+
+            let eventID = UUID()
+            let notice = try ConversationTimelineNotice(
+                eventID: eventID,
+                conversationID: UUID(),
+                timelineSequence: 1,
+                eventType: ConversationDomainEventType.membershipAdded.rawValue,
+                actorUserID: UUID(),
+                targetUserIDs: [UUID()],
+                noticeKind: "member_added",
+                params: ["actor": "demo"],
+                fallbackText: "member added",
+                createdAt: Date()
+            )
+            try await notice.create(on: app.db)
+
+            try await sql.raw("""
+                UPDATE conversation_timeline_notices
+                SET target_user_ids_json = '["not-a-uuid"]',
+                    params_json = '{"unterminated":'
+                WHERE event_id = \(bind: eventID)
+                """).run()
+
+            let reloaded = try #require(try await ConversationTimelineNotice.find(eventID, on: app.db))
+            var targetDecodeFailed = false
+            do {
+                _ = try reloaded.targetUserIDs
+            } catch {
+                targetDecodeFailed = true
+            }
+            var paramsDecodeFailed = false
+            do {
+                _ = try reloaded.params
+            } catch {
+                paramsDecodeFailed = true
+            }
+
+            #expect(targetDecodeFailed)
+            #expect(paramsDecodeFailed)
+        }
+    }
+
     @Test("Outbox side-effect failures do not block critical projections")
     func outboxSideEffectFailuresDoNotBlockCriticalProjections() async throws {
         try await withApp(configure: configure) { app in
@@ -627,6 +787,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: senderID,
                 serverSequence: 1,
+                timelineSequence: 1,
                 clientMessageID: "side-effect-message",
                 content: .richText(.plain("critical path should finish"))
             )
@@ -635,7 +796,7 @@ extension IMServerTests {
             let event = try ConversationDomainEvent(
                 conversationID: conversationID,
                 eventType: .messageCreated,
-                payload: .init(recipientUserIDs: [senderID, peerID], messageID: messageID)
+                payload: .messageCreated(messageID: messageID, recipientUserIDs: [senderID, peerID])
             )
             try await event.create(on: app.db)
             let eventID = try #require(event.id)
@@ -674,7 +835,7 @@ extension IMServerTests {
             let event = try ConversationDomainEvent(
                 conversationID: UUID(),
                 eventType: .metadataUpdated,
-                payload: .init(),
+                payload: .metadataUpdated(recipientUserIDs: [UUID()]),
                 status: .failed
             )
             event.retryCount = 3
@@ -706,7 +867,7 @@ extension IMServerTests {
             let event = try ConversationDomainEvent(
                 conversationID: UUID(),
                 eventType: .metadataUpdated,
-                payload: .init(recipientUserIDs: [UUID()])
+                payload: .metadataUpdated(recipientUserIDs: [UUID()])
             )
             try await event.create(on: app.imWriteDB)
 
@@ -742,7 +903,7 @@ extension IMServerTests {
             let event = try ConversationDomainEvent(
                 conversationID: UUID(),
                 eventType: .metadataUpdated,
-                payload: .init(recipientUserIDs: [UUID()])
+                payload: .metadataUpdated(recipientUserIDs: [UUID()])
             )
             event.streamPublishStartedAt = Date()
             event.streamPublishClaimedBy = "other-relay"
@@ -777,7 +938,7 @@ extension IMServerTests {
             let event = try ConversationDomainEvent(
                 conversationID: UUID(),
                 eventType: .metadataUpdated,
-                payload: .init(recipientUserIDs: [UUID()])
+                payload: .metadataUpdated(recipientUserIDs: [UUID()])
             )
             try await event.create(on: app.imWriteDB)
 
@@ -808,14 +969,15 @@ extension IMServerTests {
     func notificationConsumerWritesOwnerScopedEntries() async throws {
         try await withApp(configure: configure) { app in
             let recipientUserID = UUID()
+            let messageID = UUID()
             let event = try ConversationDomainEvent(
                 id: UUID(),
                 conversationID: UUID(),
                 eventType: .messageUpdated,
-                payload: .init(recipientUserIDs: [recipientUserID]),
+                payload: .messageUpdated(messageID: messageID, recipientUserIDs: [recipientUserID]),
                 createdAt: Date(timeIntervalSince1970: 1_700_000_000)
             )
-            let envelope = ConversationEventEnvelope(event: event, payload: try event.decodedPayload(), deliveryContext: nil)
+            let envelope = try ConversationEventEnvelope(event: event, payload: try event.decodedPayload(), deliveryContext: nil)
 
             try await ConversationNotificationConsumer(app: app).consume(envelope)
 
@@ -832,15 +994,15 @@ extension IMServerTests {
         try await withApp(configure: configure) { app in
             let eventID = UUID()
             let conversationID = UUID()
-            let envelope = ConversationEventEnvelope(
+            let envelope = try ConversationEventEnvelope(
                 event: try ConversationDomainEvent(
                     id: eventID,
                     conversationID: conversationID,
                     eventType: .metadataUpdated,
-                    payload: .init(recipientUserIDs: [UUID()]),
+                    payload: .metadataUpdated(recipientUserIDs: [UUID()]),
                     createdAt: Date(timeIntervalSince1970: 1_700_000_100)
                 ),
-                payload: .init(recipientUserIDs: [UUID()]),
+                payload: .metadataUpdated(recipientUserIDs: [UUID()]),
                 deliveryContext: .init(
                     sourceTopic: "conversation-domain-events-dead-letter",
                     consumerGroupID: "repair-replay-consumer",
@@ -864,6 +1026,38 @@ extension IMServerTests {
             #expect(stored?.producerShard == "shard-0")
             #expect(stored?.lastError == "projection failed")
             #expect(stored?.statusEnum == .pending)
+        }
+    }
+
+    @Test("Conversation outbox enqueueOnce is idempotent by side-effect key")
+    func conversationOutboxEnqueueOnceIsIdempotentBySideEffectKey() async throws {
+        try await withApp(configure: configure) { app in
+            let conversationID = UUID()
+            let recipientUserID = UUID()
+            let key = "contact:\(UUID().uuidString.lowercased()):direct-peer:\(conversationID.uuidString.lowercased())"
+            let service = ConversationOutboxService(db: app.imWriteDB)
+
+            let first = try await service.enqueueOnce(
+                sideEffectKey: key,
+                type: .directPeerUpdated,
+                conversationID: conversationID,
+                actorUserID: recipientUserID,
+                payload: .directPeerUpdated(recipientUserIDs: [recipientUserID])
+            )
+            let second = try await service.enqueueOnce(
+                sideEffectKey: key,
+                type: .directPeerUpdated,
+                conversationID: conversationID,
+                actorUserID: recipientUserID,
+                payload: .directPeerUpdated(recipientUserIDs: [recipientUserID])
+            )
+
+            #expect(try first.requireID() == second.requireID())
+            #expect(first.aggregateSequence == second.aggregateSequence)
+            let count = try await ConversationDomainEvent.query(on: app.imWriteDB)
+                .filter(\.$sideEffectKey == key)
+                .count()
+            #expect(count == 1)
         }
     }
 }

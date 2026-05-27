@@ -171,7 +171,7 @@ extension AuthManagerTests {
                     body: try HTTPFixtures.jsonBody(
                         IMConversationReadResponseBody(
                             conversationID: conversationID,
-                            lastReadSequence: Int(payload.readSequence),
+                            lastReadSequence: payload.readSequence,
                             unreadCount: 0
                         )
                     )
@@ -521,14 +521,13 @@ extension AuthManagerTests {
                         kind: .direct,
                         memberCount: 2,
                         memberUserIDs: [Self.user.id],
-                        messages: [
-                            IMCachedMessageState(
-                                id: "media-local-1",
-                                conversationID: conversationID,
+                        messages: [],
+                        pendingMessages: [
+                            IMCachedPendingMessageState(
+                                localMessageID: "media-local-1",
                                 clientMessageID: "media-local-1",
-                                serverMessageID: nil,
+                                conversationID: conversationID,
                                 senderUserID: Self.user.id,
-                                serverSequence: nil,
                                 content: .image(
                                     IMMediaAsset(
                                         assetID: "local-recover-asset",
@@ -540,7 +539,6 @@ extension AuthManagerTests {
                                         height: 90
                                     )
                                 ),
-                                direction: .outgoing,
                                 createdAt: Date(timeIntervalSince1970: 1_700_900_000),
                                 deliveryState: .uploading(message: "正在上传附件。"),
                                 localTransferState: IMMessageLocalTransferState(
@@ -551,8 +549,8 @@ extension AuthManagerTests {
                         hasLoadedMessages: true,
                         lastMessagePreviewText: "recover.png",
                         hasMoreHistory: false,
-                        latestSyncedServerSequence: nil,
-                        oldestLoadedServerSequence: nil,
+                        latestLoadedTimelineSequence: nil,
+                        oldestLoadedTimelineSequence: nil,
                         serverLastReadSequence: 0,
                         serverUnreadCount: 0,
                         updatedAt: Date(timeIntervalSince1970: 1_700_900_000)
@@ -709,13 +707,14 @@ extension AuthManagerTests {
                         memberCount: 2,
                         memberUserIDs: [Self.user.id],
                         messages: [
-                            IMCachedMessageState(
+                            try! IMCachedMessageState(
                                 id: "download-message-1",
                                 conversationID: conversationID,
                                 clientMessageID: nil,
                                 serverMessageID: UUID().uuidString,
                                 senderUserID: Self.user.id,
                                 serverSequence: 9,
+                                timelineSequence: 9,
                                 content: .file(asset),
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_701_000_000),
@@ -729,8 +728,8 @@ extension AuthManagerTests {
                         hasLoadedMessages: true,
                         lastMessagePreviewText: asset.filename,
                         hasMoreHistory: false,
-                        latestSyncedServerSequence: 9,
-                        oldestLoadedServerSequence: 9,
+                        latestLoadedTimelineSequence: 9,
+                        oldestLoadedTimelineSequence: 9,
                         serverLastReadSequence: 9,
                         serverUnreadCount: 0,
                         updatedAt: Date(timeIntervalSince1970: 1_701_000_010)
@@ -839,13 +838,14 @@ extension AuthManagerTests {
                         memberCount: 2,
                         memberUserIDs: [Self.user.id],
                         messages: [
-                            IMCachedMessageState(
+                            try! IMCachedMessageState(
                                 id: "download-message-cache-only",
                                 conversationID: conversationID,
                                 clientMessageID: nil,
                                 serverMessageID: UUID().uuidString,
                                 senderUserID: Self.user.id,
                                 serverSequence: 12,
+                                timelineSequence: 12,
                                 content: .file(asset),
                                 direction: .incoming,
                                 createdAt: Date(timeIntervalSince1970: 1_701_100_000),
@@ -857,8 +857,8 @@ extension AuthManagerTests {
                         hasLoadedMessages: true,
                         lastMessagePreviewText: asset.filename,
                         hasMoreHistory: false,
-                        latestSyncedServerSequence: 12,
-                        oldestLoadedServerSequence: 12,
+                        latestLoadedTimelineSequence: 12,
+                        oldestLoadedTimelineSequence: 12,
                         serverLastReadSequence: 12,
                         serverUnreadCount: 0,
                         updatedAt: Date(timeIntervalSince1970: 1_701_100_010)
@@ -968,17 +968,15 @@ extension AuthManagerTests {
                         kind: .direct,
                         memberCount: 2,
                         memberUserIDs: [Self.user.id],
-                        messages: [
-                            IMCachedMessageState(
+                        messages: [],
+                        pendingMessages: [
+                            IMCachedPendingMessageState(
                                 id: "queued-client-1",
                                 conversationID: conversationIDString,
                                 clientMessageID: "queued-client-1",
-                                serverMessageID: nil,
                                 senderUserID: Self.user.id,
-                                serverSequence: nil,
                                 kind: "rich_text",
                                 text: "恢复后发送",
-                                direction: .outgoing,
                                 createdAt: Date(timeIntervalSince1970: 1_700_100_000),
                                 deliveryState: .queued(message: "等待 IM 长连接恢复后发送。")
                             )
@@ -986,8 +984,8 @@ extension AuthManagerTests {
                         hasLoadedMessages: true,
                         lastMessagePreviewText: "恢复后发送",
                         hasMoreHistory: false,
-                        latestSyncedServerSequence: nil,
-                        oldestLoadedServerSequence: nil,
+                        latestLoadedTimelineSequence: nil,
+                        oldestLoadedTimelineSequence: nil,
                         serverLastReadSequence: 0,
                         serverUnreadCount: 0,
                         updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
@@ -1066,17 +1064,15 @@ extension AuthManagerTests {
                         kind: .direct,
                         memberCount: 2,
                         memberUserIDs: [Self.user.id],
-                        messages: [
-                            IMCachedMessageState(
+                        messages: [],
+                        pendingMessages: [
+                            IMCachedPendingMessageState(
                                 id: "queued-client-1",
                                 conversationID: conversationIDString,
                                 clientMessageID: "queued-client-1",
-                                serverMessageID: nil,
                                 senderUserID: Self.user.id,
-                                serverSequence: nil,
                                 kind: "rich_text",
                                 text: "恢复后发送",
-                                direction: .outgoing,
                                 createdAt: Date(timeIntervalSince1970: 1_700_100_000),
                                 deliveryState: .queued(message: "等待 IM 长连接恢复后发送。")
                             )
@@ -1084,8 +1080,8 @@ extension AuthManagerTests {
                         hasLoadedMessages: true,
                         lastMessagePreviewText: "恢复后发送",
                         hasMoreHistory: false,
-                        latestSyncedServerSequence: nil,
-                        oldestLoadedServerSequence: nil,
+                        latestLoadedTimelineSequence: nil,
+                        oldestLoadedTimelineSequence: nil,
                         serverLastReadSequence: 0,
                         serverUnreadCount: 0,
                         updatedAt: Date(timeIntervalSince1970: 1_700_100_000)
@@ -1169,30 +1165,25 @@ extension AuthManagerTests {
                         kind: .direct,
                         memberCount: 2,
                         memberUserIDs: [Self.user.id],
-                        messages: [
-                            IMCachedMessageState(
+                        messages: [],
+                        pendingMessages: [
+                            IMCachedPendingMessageState(
                                 id: "queued-client-1",
                                 conversationID: conversationIDString,
                                 clientMessageID: "queued-client-1",
-                                serverMessageID: nil,
                                 senderUserID: Self.user.id,
-                                serverSequence: nil,
                                 kind: "rich_text",
                                 text: "第一条",
-                                direction: .outgoing,
                                 createdAt: Date(timeIntervalSince1970: 1_700_100_000),
                                 deliveryState: .queued(message: "等待 IM 长连接恢复后发送。")
                             ),
-                            IMCachedMessageState(
+                            IMCachedPendingMessageState(
                                 id: "queued-client-2",
                                 conversationID: conversationIDString,
                                 clientMessageID: "queued-client-2",
-                                serverMessageID: nil,
                                 senderUserID: Self.user.id,
-                                serverSequence: nil,
                                 kind: "rich_text",
                                 text: "第二条",
-                                direction: .outgoing,
                                 createdAt: Date(timeIntervalSince1970: 1_700_100_001),
                                 deliveryState: .queued(message: "等待 IM 长连接恢复后发送。")
                             )
@@ -1200,8 +1191,8 @@ extension AuthManagerTests {
                         hasLoadedMessages: true,
                         lastMessagePreviewText: "第二条",
                         hasMoreHistory: false,
-                        latestSyncedServerSequence: nil,
-                        oldestLoadedServerSequence: nil,
+                        latestLoadedTimelineSequence: nil,
+                        oldestLoadedTimelineSequence: nil,
                         serverLastReadSequence: 0,
                         serverUnreadCount: 0,
                         updatedAt: Date(timeIntervalSince1970: 1_700_100_001)
@@ -1352,7 +1343,7 @@ extension AuthManagerTests {
     }
 
 
-    @Test func queuedFlushFailureInLaterBatchStopsBackfillAndLeavesRemainingQueued() async throws {
+    @Test func queuedFlushFailureInLaterBatchStopsCatchUpAndLeavesRemainingQueued() async throws {
         let harness = IMConnectionTestHarness(failingSendNumbers: [22])
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
         let conversationIDString = conversationID.uuidString
@@ -1448,7 +1439,7 @@ extension AuthManagerTests {
     }
 
 
-    @Test func logoutCancelsQueuedFlushBackfillAndPreventsLateMutation() async throws {
+    @Test func logoutCancelsQueuedFlushCatchUpAndPreventsLateMutation() async throws {
         let harness = IMConnectionTestHarness(sendDelayNanoseconds: 200_000_000)
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
         let conversationIDString = conversationID.uuidString

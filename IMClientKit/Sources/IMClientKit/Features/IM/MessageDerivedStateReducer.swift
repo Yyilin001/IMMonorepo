@@ -54,10 +54,6 @@ struct MessageDerivedStateReducer {
             return responsePreview
         }
 
-        if latestLoadedMessage.serverSequence == nil {
-            return latestLoadedMessage.text
-        }
-
         let responseMessageID = responseLastMessage.id.uuidString
         let responseServerSequence = UInt64(responseLastMessage.serverSequence)
 
@@ -67,8 +63,7 @@ struct MessageDerivedStateReducer {
             return responsePreview
         }
 
-        if let latestLoadedServerSequence = latestLoadedMessage.serverSequence,
-           latestLoadedServerSequence > responseServerSequence {
+        if latestLoadedMessage.serverSequence > responseServerSequence {
             return latestLoadedMessage.text
         }
 

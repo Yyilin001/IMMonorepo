@@ -4,6 +4,7 @@ import Vapor
 struct UserController: RouteCollection {
     private let friendRequestService = FriendRequestService()
     private let contactChangesService = ContactChangesService()
+    private let contactCommandService = ContactCommandService()
 
     func boot(routes: any RoutesBuilder) throws {
         // /api/me 走最小化的受保护路由，用来验证 access token 是否仍可用。
@@ -39,35 +40,13 @@ struct UserController: RouteCollection {
 
     func updateProfile(req: Request) async throws -> UserResponse {
         let user = try req.auth.require(User.self)
-        let userID = try user.requireID()
         let body = try req.content.decode(UserProfileUpdateRequest.self)
 
-        user.displayName = normalizedDisplayName(body.displayName)
-        user.avatarPresetEnum = body.avatarPreset
-        try await user.update(on: req.db)
-
-        var affectedConversationRecipientUserIDs: [UUID: [UUID]] = [:]
-        for readModelDB in summaryReadModelDatabases(for: req.application) {
-            let refreshed = try await IMConversationSummaryProjectionService(
-                sourceDB: req.application.imWriteDB,
-                readModelDB: readModelDB
-            ).refreshDirectPeerProfiles(for: userID)
-            mergeRecipientUserIDs(refreshed, into: &affectedConversationRecipientUserIDs)
-        }
-
-        for (conversationID, recipientUserIDs) in affectedConversationRecipientUserIDs {
-            let conversationDB = try await req.application.conversationShardRouter.commandDatabase(
-                forConversationID: conversationID
-            )
-            try await ConversationOutboxService(db: conversationDB).enqueue(
-                type: .directPeerUpdated,
-                conversationID: conversationID,
-                payload: ConversationDomainEventPayload(recipientUserIDs: recipientUserIDs)
-            )
-        }
+        let response = try await UserProfileCommandService(app: req.application)
+            .updateProfile(user: user, displayName: body.displayName, avatarPreset: body.avatarPreset)
         try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
 
-        return try user.asResponse()
+        return response
     }
 
     func contacts(req: Request) async throws -> [ContactResponse] {
@@ -104,94 +83,26 @@ struct UserController: RouteCollection {
         let contactUserID = try contactUserID(from: req)
         let body = try req.content.decode(ContactUpdateRequest.self)
 
-        guard let contact = try await UserContact.query(on: req.db)
-            .filter(\.$owner.$id == ownerUserID)
-            .filter(\.$contact.$id == contactUserID)
-            .with(\.$contact)
-            .first()
-        else {
-            throw Abort(.notFound, reason: "联系人不存在。")
-        }
-
-        contact.remark = normalizedContactRemark(body.remark)
-        try await contact.update(on: req.db)
-        try await contactChangesService.recordContactUpsert(
+        let response = try await contactCommandService.updateContact(
             ownerUserID: ownerUserID,
             contactUserID: contactUserID,
+            remark: body.remark,
             on: req.db
         )
-        return try ContactResponse(contact: contact)
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
+        return response
     }
 
     func deleteContact(req: Request) async throws -> HTTPStatus {
         let user = try req.auth.require(User.self)
         let ownerUserID = try user.requireID()
         let contactUserID = try contactUserID(from: req)
-        let affectedDirectConversationIDs = try await req.db.transaction { database in
-            guard let contact = try await UserContact.query(on: database)
-                .filter(\.$owner.$id == ownerUserID)
-                .filter(\.$contact.$id == contactUserID)
-                .first()
-            else {
-                throw Abort(.notFound, reason: "联系人不存在。")
-            }
-
-            try await contact.delete(on: database)
-            if let reverseContact = try await UserContact.query(on: database)
-                .filter(\.$owner.$id == contactUserID)
-                .filter(\.$contact.$id == ownerUserID)
-                .first()
-            {
-                try await reverseContact.delete(on: database)
-            }
-
-            return try await IMDirectConversationStateService().updateExistingDirectConversations(
-                between: ownerUserID,
-                and: contactUserID,
-                to: .frozenAfterUnfriend,
-                on: database
-            )
-        }
-        try await contactChangesService.recordContactRemoval(
+        try await contactCommandService.deleteContact(
             ownerUserID: ownerUserID,
             contactUserID: contactUserID,
             on: req.db
         )
-        try await contactChangesService.recordContactRemoval(
-            ownerUserID: contactUserID,
-            contactUserID: ownerUserID,
-            on: req.db
-        )
-
-        await publishContactDomainEvent(
-            app: req.application,
-            eventType: .contactRequestUpdated,
-            recipientUserIDs: [ownerUserID],
-            request: nil,
-            contact: nil,
-            contactUserID: contactUserID,
-            actorUserID: ownerUserID
-        )
-        await publishContactDomainEvent(
-            app: req.application,
-            eventType: .contactRequestUpdated,
-            recipientUserIDs: [contactUserID],
-            request: nil,
-            contact: nil,
-            contactUserID: ownerUserID,
-            actorUserID: ownerUserID
-        )
-        for conversationID in affectedDirectConversationIDs {
-            let conversationDB = try await req.application.conversationShardRouter.commandDatabase(
-                forConversationID: conversationID
-            )
-            try await ConversationOutboxService(db: conversationDB).enqueue(
-                type: .directPeerUpdated,
-                conversationID: conversationID,
-                payload: ConversationDomainEventPayload(recipientUserIDs: [ownerUserID, contactUserID])
-            )
-            try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
-        }
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return .ok
     }
 
@@ -211,156 +122,47 @@ struct UserController: RouteCollection {
     func sendContactRequest(req: Request) async throws -> FriendRequestResponse {
         let user = try req.auth.require(User.self)
         let body = try req.content.decode(ContactRequestCreateRequest.self)
-        let requesterUserID = try user.requireID()
-        let normalizedEmail = User.normalize(body.email)
-        if let addressee = try await User.query(on: req.db)
-            .filter(\.$email == normalizedEmail)
-            .first(),
-           try await hasBlockBetween(requesterUserID, and: addressee.requireID(), on: req.db)
-        {
-            throw Abort(.forbidden, reason: "当前无法发送好友申请。")
-        }
-        let response = try await friendRequestService.sendRequest(
+        let response = try await contactCommandService.sendContactRequest(
             from: user,
-            email: body.email,
-            message: body.message,
-            remark: body.remark,
+            body: body,
             on: req.db
         )
-        try await contactChangesService.recordRequestUpsert(
-            ownerUserID: response.requester.id,
-            requestID: response.id,
-            on: req.db
-        )
-        try await contactChangesService.recordRequestUpsert(
-            ownerUserID: response.addressee.id,
-            requestID: response.id,
-            on: req.db
-        )
-        await publishContactDomainEvent(
-            app: req.application,
-            eventType: .contactRequestCreated,
-            recipientUserIDs: [response.requester.id, response.addressee.id],
-            request: response,
-            actorUserID: response.requester.id
-        )
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return response
     }
 
     func acceptContactRequest(req: Request) async throws -> ContactResponse {
         let user = try req.auth.require(User.self)
         let body = try req.content.decode(ContactRequestAcceptRequest.self)
-        let result = try await friendRequestService.acceptRequest(
-            id: contactRequestID(from: req),
+        let response = try await contactCommandService.acceptContactRequest(
+            requestID: contactRequestID(from: req),
             addresseeUserID: try user.requireID(),
             remark: body.remark,
             on: req.db
         )
-        try await contactChangesService.recordRequestUpsert(
-            ownerUserID: result.request.requester.id,
-            requestID: result.request.id,
-            on: req.db
-        )
-        try await contactChangesService.recordRequestUpsert(
-            ownerUserID: result.request.addressee.id,
-            requestID: result.request.id,
-            on: req.db
-        )
-        try await contactChangesService.recordContactUpsert(
-            ownerUserID: result.request.requester.id,
-            contactUserID: result.request.addressee.id,
-            on: req.db
-        )
-        try await contactChangesService.recordContactUpsert(
-            ownerUserID: result.request.addressee.id,
-            contactUserID: result.request.requester.id,
-            on: req.db
-        )
-        await publishContactDomainEvent(
-            app: req.application,
-            eventType: .contactRequestAccepted,
-            recipientUserIDs: [result.request.requester.id],
-            request: result.request,
-            contact: result.requesterContact,
-            contactUserID: result.request.addressee.id,
-            actorUserID: result.request.addressee.id
-        )
-        await publishContactDomainEvent(
-            app: req.application,
-            eventType: .contactRequestAccepted,
-            recipientUserIDs: [result.request.addressee.id],
-            request: result.request,
-            contact: result.addresseeContact,
-            contactUserID: result.request.requester.id,
-            actorUserID: result.request.addressee.id
-        )
-        for conversationID in result.affectedDirectConversationIDs {
-            let conversationDB = try await req.application.conversationShardRouter.commandDatabase(
-                forConversationID: conversationID
-            )
-            try await ConversationOutboxService(db: conversationDB).enqueue(
-                type: .directPeerUpdated,
-                conversationID: conversationID,
-                payload: ConversationDomainEventPayload(
-                    recipientUserIDs: [result.request.requester.id, result.request.addressee.id]
-                )
-            )
-            try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
-        }
-        return result.addresseeContact
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
+        return response
     }
 
     func declineContactRequest(req: Request) async throws -> FriendRequestResponse {
         let user = try req.auth.require(User.self)
-        let response = try await friendRequestService.declineRequest(
-            id: contactRequestID(from: req),
+        let response = try await contactCommandService.declineContactRequest(
+            requestID: contactRequestID(from: req),
             addresseeUserID: try user.requireID(),
             on: req.db
         )
-        try await contactChangesService.recordRequestUpsert(
-            ownerUserID: response.requester.id,
-            requestID: response.id,
-            on: req.db
-        )
-        try await contactChangesService.recordRequestUpsert(
-            ownerUserID: response.addressee.id,
-            requestID: response.id,
-            on: req.db
-        )
-        await publishContactDomainEvent(
-            app: req.application,
-            eventType: .contactRequestUpdated,
-            recipientUserIDs: [response.requester.id, response.addressee.id],
-            request: response,
-            actorUserID: response.addressee.id
-        )
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return response
     }
 
     func cancelContactRequest(req: Request) async throws -> FriendRequestResponse {
         let user = try req.auth.require(User.self)
-        let response = try await friendRequestService.cancelRequest(
-            id: contactRequestID(from: req),
+        let response = try await contactCommandService.cancelContactRequest(
+            requestID: contactRequestID(from: req),
             requesterUserID: try user.requireID(),
             on: req.db
         )
-        try await contactChangesService.recordRequestUpsert(
-            ownerUserID: response.requester.id,
-            requestID: response.id,
-            on: req.db
-        )
-        try await contactChangesService.recordRequestUpsert(
-            ownerUserID: response.addressee.id,
-            requestID: response.id,
-            on: req.db
-        )
-        await publishContactDomainEvent(
-            app: req.application,
-            eventType: .contactRequestUpdated,
-            recipientUserIDs: [response.requester.id, response.addressee.id],
-            request: response,
-            actorUserID: response.requester.id
-        )
+        try await InlineOutboxProjectionRuntime(app: req.application).flushIfAllowed()
         return response
     }
 
@@ -386,14 +188,6 @@ struct UserController: RouteCollection {
         return requestID
     }
 
-    private func normalizedContactRemark(_ remark: String?) -> String? {
-        let normalized = remark?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let normalized, !normalized.isEmpty else {
-            return nil
-        }
-        return String(normalized.prefix(64))
-    }
-
     private func normalizedDisplayName(_ displayName: String?) -> String? {
         let normalized = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let normalized, !normalized.isEmpty else {
@@ -404,38 +198,6 @@ struct UserController: RouteCollection {
 
     private func summaryReadModelDatabases(for app: Application) -> [any Database] {
         app.summaryShardRouter.shardIDs.map { app.summaryShardRouter.database(forShardID: $0) }
-    }
-
-    private func publishContactDomainEvent(
-        app: Application,
-        eventType: IMTCPChatDomainEventType,
-        recipientUserIDs: [UUID],
-        request: FriendRequestResponse?,
-        contact: ContactResponse? = nil,
-        contactUserID: UUID? = nil,
-        actorUserID: UUID?
-    ) async {
-        let eventID = UUID()
-        let aggregateID = request?.id ?? contactUserID ?? actorUserID ?? eventID
-        await app.gatewaySessionService.sendDomainEvent(
-            IMTCPChatDomainEventPayload(
-                eventID: eventID,
-                eventType: eventType,
-                aggregateType: "contact",
-                aggregateID: aggregateID,
-                aggregateSequence: 0,
-                occurredAt: Date(),
-                actorUserID: actorUserID,
-                conversation: nil,
-                body: .contactChanged(
-                    request: request,
-                    contact: contact,
-                    contactUserID: contactUserID
-                )
-            ),
-            toUserIDs: recipientUserIDs,
-            requestID: eventID
-        )
     }
 
     private func mergeRecipientUserIDs(
@@ -449,17 +211,6 @@ struct UserController: RouteCollection {
         }
     }
 
-    private func hasBlockBetween(_ lhs: UUID, and rhs: UUID, on db: any Database) async throws -> Bool {
-        let lhsBlocked = try await UserBlock.find(
-            UserBlock.recordID(ownerUserID: lhs, blockedUserID: rhs),
-            on: db
-        ) != nil
-        let rhsBlocked = try await UserBlock.find(
-            UserBlock.recordID(ownerUserID: rhs, blockedUserID: lhs),
-            on: db
-        ) != nil
-        return lhsBlocked || rhsBlocked
-    }
 }
 
 struct ContactCreateRequest: Content {

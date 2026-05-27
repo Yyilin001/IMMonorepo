@@ -64,12 +64,15 @@ struct KafkaConversationEventStreamConsumerRunner {
                         try await consumer.commit(message)
                         continue
                     }
-                    let eventType = ConversationDomainEventType(rawValue: envelope.eventType)
-                        ?? .metadataUpdated
+                    guard let eventType = ConversationDomainEventType(rawValue: envelope.eventType) else {
+                        throw Abort(.unprocessableEntity, reason: "未知 conversation stream event 类型：\(envelope.eventType)。")
+                    }
                     let syntheticEvent = try ConversationDomainEvent(
                         id: envelope.eventID,
                         conversationID: envelope.conversationID,
                         eventType: eventType,
+                        aggregateSequence: envelope.aggregateSequence,
+                        actorUserID: envelope.actorUserID,
                         payload: envelope.payload,
                         status: .pending,
                         createdAt: envelope.occurredAt
@@ -189,6 +192,7 @@ struct KafkaConversationEventStreamConsumerRunner {
             sourceTopic: topics.first ?? app.eventStreamConfiguration.topic,
             conversationID: envelope.conversationID,
             eventType: envelope.eventType,
+            aggregateSequence: envelope.aggregateSequence,
             producerShard: envelope.producerShard,
             payload: envelope.payload,
             status: .replayed,

@@ -98,7 +98,7 @@ extension UserController {
             conversationID: conversationID,
             messageID: messageID,
             senderUserID: message.$sender.id,
-            serverSequence: message.serverSequence,
+            serverSequence: try imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence"),
             content: try message.decodedContent(),
             derivedState: try message.decodedDerivedState(),
             createdAt: message.createdAt

@@ -51,6 +51,12 @@ public enum IMMessageDeliveryState: Equatable, Sendable {
     case failed(message: String)
 }
 
+public enum IMConversationMessageValidationError: Error, Equatable, Sendable {
+    case missingServerMessageID
+    case invalidServerSequence(UInt64)
+    case invalidTimelineSequence(UInt64)
+}
+
 public struct IMMessageLocalTransferState: Codable, Equatable, Sendable {
     public let sourceFilePath: String
     public let uploadID: String?
@@ -189,9 +195,10 @@ public struct IMConversationMessage: Identifiable, Equatable, Sendable {
     public let id: String
     public let conversationID: String
     public let clientMessageID: String?
-    public var serverMessageID: String?
-    public var senderUserID: UUID?
-    public var serverSequence: UInt64?
+    public var serverMessageID: String
+    public var senderUserID: UUID
+    public var serverSequence: UInt64
+    public var timelineSequence: UInt64
     public var content: IMMessageContent
     public var derivedState: MessageDerivedState
     public let direction: IMMessageDirection
@@ -233,9 +240,10 @@ public struct IMConversationMessage: Identifiable, Equatable, Sendable {
         id: String,
         conversationID: String,
         clientMessageID: String?,
-        serverMessageID: String?,
-        senderUserID: UUID?,
-        serverSequence: UInt64?,
+        serverMessageID: String,
+        senderUserID: UUID,
+        serverSequence: UInt64,
+        timelineSequence: UInt64,
         content: IMMessageContent,
         derivedState: MessageDerivedState = MessageDerivedState(),
         direction: IMMessageDirection,
@@ -244,13 +252,23 @@ public struct IMConversationMessage: Identifiable, Equatable, Sendable {
         transferTaskID: TransferTaskID? = nil,
         localTransferState: IMMessageLocalTransferState? = nil,
         localDownloadState: IMMessageLocalDownloadState? = nil
-    ) {
+    ) throws {
+        guard !serverMessageID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw IMConversationMessageValidationError.missingServerMessageID
+        }
+        guard serverSequence > 0 else {
+            throw IMConversationMessageValidationError.invalidServerSequence(serverSequence)
+        }
+        guard timelineSequence > 0 else {
+            throw IMConversationMessageValidationError.invalidTimelineSequence(timelineSequence)
+        }
         self.id = id
         self.conversationID = conversationID
         self.clientMessageID = clientMessageID
         self.serverMessageID = serverMessageID
         self.senderUserID = senderUserID
         self.serverSequence = serverSequence
+        self.timelineSequence = timelineSequence
         self.content = content
         self.derivedState = content.derivedState.isRecalled ? content.derivedState : derivedState
         self.direction = direction
@@ -259,6 +277,146 @@ public struct IMConversationMessage: Identifiable, Equatable, Sendable {
         self.transferTaskID = transferTaskID
         self.localTransferState = localTransferState
         self.localDownloadState = localDownloadState
+    }
+}
+
+public struct IMPendingConversationMessage: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let localMessageID: String
+    public let clientMessageID: String
+    public let conversationID: String
+    public let senderUserID: UUID
+    public var content: IMMessageContent
+    public var createdAt: Date
+    public var deliveryState: IMMessageDeliveryState
+    public var transferTaskID: TransferTaskID?
+    public var localTransferState: IMMessageLocalTransferState?
+    public var localDownloadState: IMMessageLocalDownloadState?
+
+    public var direction: IMMessageDirection { .outgoing }
+
+    public var text: String {
+        MessagePresentation(aggregate: aggregate).previewText
+    }
+
+    public var aggregate: MessageAggregate {
+        content.aggregate(derivedState: MessageDerivedState())
+    }
+
+    public var mediaAsset: IMMediaAsset? {
+        MessagePresentation(aggregate: aggregate).mediaAsset
+    }
+
+    public var isRecoverableOutgoingMediaUpload: Bool {
+        guard localTransferState != nil, mediaAsset != nil else {
+            return false
+        }
+
+        switch deliveryState {
+        case .preparing, .uploading, .uploaded:
+            return true
+        case .queued, .sending, .sent, .received, .unknown, .failed:
+            return false
+        }
+    }
+
+    public init(
+        localMessageID: String,
+        clientMessageID: String,
+        conversationID: String,
+        senderUserID: UUID,
+        content: IMMessageContent,
+        createdAt: Date,
+        deliveryState: IMMessageDeliveryState,
+        transferTaskID: TransferTaskID? = nil,
+        localTransferState: IMMessageLocalTransferState? = nil,
+        localDownloadState: IMMessageLocalDownloadState? = nil
+    ) {
+        self.id = localMessageID
+        self.localMessageID = localMessageID
+        self.clientMessageID = clientMessageID
+        self.conversationID = conversationID
+        self.senderUserID = senderUserID
+        self.content = content
+        self.createdAt = createdAt
+        self.deliveryState = deliveryState
+        self.transferTaskID = transferTaskID
+        self.localTransferState = localTransferState
+        self.localDownloadState = localDownloadState
+    }
+}
+
+public struct IMTimelineNotice: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let conversationID: String
+    public let timelineSequence: UInt64
+    public let eventType: String
+    public let actorUserID: UUID?
+    public let targetUserIDs: [UUID]
+    public let noticeKind: String
+    public let params: [String: String]
+    public let fallbackText: String
+    public let createdAt: Date
+
+    public init(
+        id: String,
+        conversationID: String,
+        timelineSequence: UInt64,
+        eventType: String,
+        actorUserID: UUID?,
+        targetUserIDs: [UUID],
+        noticeKind: String,
+        params: [String: String] = [:],
+        fallbackText: String,
+        createdAt: Date
+    ) {
+        self.id = id
+        self.conversationID = conversationID
+        self.timelineSequence = timelineSequence
+        self.eventType = eventType
+        self.actorUserID = actorUserID
+        self.targetUserIDs = targetUserIDs
+        self.noticeKind = noticeKind
+        self.params = params
+        self.fallbackText = fallbackText
+        self.createdAt = createdAt
+    }
+}
+
+public enum IMConversationTimelineItem: Identifiable, Equatable, Sendable {
+    case message(IMConversationMessage)
+    case notice(IMTimelineNotice)
+    case pendingMessage(IMPendingConversationMessage)
+
+    public var id: String {
+        switch self {
+        case .message(let message):
+            return "message:\(message.id)"
+        case .notice(let notice):
+            return "notice:\(notice.id)"
+        case .pendingMessage(let message):
+            return "pendingMessage:\(message.id)"
+        }
+    }
+
+    public var timelineSequence: UInt64? {
+        switch self {
+        case .message(let message):
+            return message.timelineSequence
+        case .notice(let notice):
+            return notice.timelineSequence
+        case .pendingMessage:
+            return nil
+        }
+    }
+
+    public var pendingSortDate: Date? {
+        switch self {
+        case .pendingMessage(let message):
+            return message.createdAt
+        case .message, .notice:
+            return nil
+        }
     }
 }
 
@@ -283,6 +441,12 @@ public extension IMConversationMessage {
         MessageDerivedStateReducer().resolveReplyReference(for: self, in: messages)
     }
 
+    var resolvedTransferTaskID: TransferTaskID? {
+        transferTaskID ?? localTransferState?.taskID ?? localDownloadState?.taskID
+    }
+}
+
+public extension IMPendingConversationMessage {
     var resolvedTransferTaskID: TransferTaskID? {
         transferTaskID ?? localTransferState?.taskID ?? localDownloadState?.taskID
     }
@@ -348,6 +512,8 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
     public var memberUserIDs: [UUID]
     public var members: [IMConversationMember]
     public var messages: [IMConversationMessage]
+    public var pendingMessages: [IMPendingConversationMessage]
+    public var notices: [IMTimelineNotice]
     public var lastMessagePreviewText: String
     public var hasMoreHistory: Bool
     public var serverLastReadSequence: UInt64
@@ -397,6 +563,8 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
         memberUserIDs: [UUID],
         members: [IMConversationMember],
         messages: [IMConversationMessage],
+        pendingMessages: [IMPendingConversationMessage] = [],
+        notices: [IMTimelineNotice] = [],
         lastMessagePreviewText: String,
         hasMoreHistory: Bool,
         serverLastReadSequence: UInt64,
@@ -421,6 +589,8 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
         self.memberUserIDs = memberUserIDs
         self.members = members
         self.messages = messages
+        self.pendingMessages = pendingMessages
+        self.notices = notices
         self.lastMessagePreviewText = lastMessagePreviewText
         self.hasMoreHistory = hasMoreHistory
         self.serverLastReadSequence = serverLastReadSequence
@@ -432,6 +602,32 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
         self.draftText = draftText
         self.draftUpdatedAt = draftUpdatedAt
         self.updatedAt = updatedAt
+    }
+
+    public var timelineItems: [IMConversationTimelineItem] {
+        let messageItems = messages.map(IMConversationTimelineItem.message)
+        let pendingItems = pendingMessages.map(IMConversationTimelineItem.pendingMessage)
+        return (messageItems + notices.map(IMConversationTimelineItem.notice) + pendingItems)
+            .sorted { lhs, rhs in
+                switch (lhs.timelineSequence, rhs.timelineSequence) {
+                case let (left?, right?):
+                    if left == right {
+                        return lhs.id < rhs.id
+                    }
+                    return left < right
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                case (nil, nil):
+                    let leftDate = lhs.pendingSortDate ?? .distantFuture
+                    let rightDate = rhs.pendingSortDate ?? .distantFuture
+                    if leftDate == rightDate {
+                        return lhs.id < rhs.id
+                    }
+                    return leftDate < rightDate
+                }
+            }
     }
 }
 
@@ -464,6 +660,47 @@ public struct IMConversationQueueSummary: Equatable, Sendable {
 
 public struct IMConversationEventApplyOutcome: Equatable, Sendable {
     public let shouldReloadMembersForConversationID: String?
+    public let shouldFetchDomainEvents: Bool
+    public let didConsumeEvent: Bool
+
+    public init(
+        shouldReloadMembersForConversationID: String?,
+        shouldFetchDomainEvents: Bool = false,
+        didConsumeEvent: Bool = true
+    ) {
+        self.shouldReloadMembersForConversationID = shouldReloadMembersForConversationID
+        self.shouldFetchDomainEvents = shouldFetchDomainEvents
+        self.didConsumeEvent = didConsumeEvent
+    }
+}
+
+public enum IMDeferredDomainEventReplayResult: Equatable, Sendable {
+    case applied(UUID)
+    case stillMissingDependency(UUID)
+    case invalidPayload(UUID?)
+    case expired(UUID)
+    case requiresFullTimelineRefresh(String)
+}
+
+public struct IMDomainEventDebugMetrics: Equatable, Sendable {
+    public var invalidDomainEventMetadata = 0
+    public var missingRequiredNotice = 0
+    public var deferredStored = 0
+    public var deferredEncodeFailed = 0
+    public var deferredNotDeferrable = 0
+    public var deferredReplayApplied = 0
+    public var deferredExpired = 0
+    public var deferredFullRefreshRequested = 0
+    public var cacheDroppedCanonicalMessages = 0
+    public var invalidCanonicalMessageDTOs = 0
+    public var invalidProjectionDTOs = 0
+    public var sequenceDecodeOverflow = 0
+    public var realtimeMissingDeliveryRow = 0
+    public var catchUpCursorGap = 0
+    public var catchUpStoppedBeforeCursorAdvance = 0
+    public var invalidDeferredPayload = 0
+
+    public init() {}
 }
 
 public struct IMConversationMemberPageState: Equatable, Sendable {

@@ -158,14 +158,25 @@ struct ConversationOutboxProcessor {
         var processedCount = 0
         var index = events.startIndex
         while index < events.endIndex {
-            if let run = messageCreatedRun(in: events, startingAt: index), run.count > 1 {
-                processedCount += try await processMessageCreatedRun(
-                    run,
+            do {
+                if let run = try messageCreatedRun(in: events, startingAt: index), run.count > 1 {
+                    processedCount += try await processMessageCreatedRun(
+                        run,
+                        app: app,
+                        configuration: configuration,
+                        registries: registries
+                    )
+                    index += run.count
+                    continue
+                }
+            } catch {
+                processedCount += try await processEvent(
+                    events[index],
                     app: app,
                     configuration: configuration,
                     registries: registries
                 )
-                index += run.count
+                index += 1
                 continue
             }
 
@@ -183,9 +194,9 @@ struct ConversationOutboxProcessor {
     private func messageCreatedRun(
         in events: [ConversationDomainEvent],
         startingAt index: Int
-    ) -> [ConversationDomainEvent]? {
+    ) throws -> [ConversationDomainEvent]? {
         guard index < events.endIndex,
-              isCoalescableMessageCreated(events[index])
+              try isCoalescableMessageCreated(events[index])
         else {
             return nil
         }
@@ -194,7 +205,7 @@ struct ConversationOutboxProcessor {
         var nextIndex = index + 1
         while nextIndex < events.endIndex,
               events[nextIndex].conversationID == events[index].conversationID,
-              isCoalescableMessageCreated(events[nextIndex])
+              try isCoalescableMessageCreated(events[nextIndex])
         {
             run.append(events[nextIndex])
             nextIndex += 1
@@ -202,12 +213,11 @@ struct ConversationOutboxProcessor {
         return run
     }
 
-    private func isCoalescableMessageCreated(_ event: ConversationDomainEvent) -> Bool {
-        guard event.eventTypeEnum == .messageCreated,
-              let payload = try? event.decodedPayload()
-        else {
+    private func isCoalescableMessageCreated(_ event: ConversationDomainEvent) throws -> Bool {
+        guard try event.eventTypeEnum == .messageCreated else {
             return false
         }
+        let payload = try event.decodedPayload()
         return payload.messageID != nil
     }
 
@@ -223,7 +233,7 @@ struct ConversationOutboxProcessor {
             try await statusUpdater.markProcessing(events, startedAt: startedAt)
 
             let envelopes = try events.map { event in
-                ConversationEventEnvelope(
+                try ConversationEventEnvelope(
                     event: event,
                     payload: try event.decodedPayload(),
                     deliveryContext: nil
@@ -239,17 +249,20 @@ struct ConversationOutboxProcessor {
                 return 0
             }
 
-            let coalescedPayload = ConversationDomainEventPayload(
+            let coalescedPayload = ConversationDomainEventPayload.messageCreated(
+                messageID: lastMessageID,
                 recipientUserIDs: Array(Set(envelopes.flatMap(\.payload.recipientUserIDs)))
-                    .sorted { $0.uuidString < $1.uuidString },
-                messageID: lastMessageID
+                    .sorted { $0.uuidString < $1.uuidString }
             )
-            let coalescedEnvelope = ConversationEventEnvelope(
+            let coalescedEnvelope = try ConversationEventEnvelope(
                 event: lastEnvelope.event,
                 payload: coalescedPayload,
                 deliveryContext: nil
             )
             try await ConversationProjectionConsumer(app: app, sourceDB: db).consume(coalescedEnvelope)
+            for envelope in envelopes {
+                try await OwnerDomainEventDeliveryConsumer(app: app, sourceDB: db).consume(envelope)
+            }
 
             await processMessageCreatedRunSideEffects(
                 envelopes,
@@ -261,16 +274,31 @@ struct ConversationOutboxProcessor {
             try await statusUpdater.markProcessed(events, processedAt: processedAt)
             for event in events {
                 await app.outboxMetrics.recordProcessedEvent(
-                    eventType: event.eventTypeEnum.rawValue,
+                    eventType: event.eventType,
                     durationMillis: max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
                 )
             }
             return events.count
         } catch {
-            try? await statusUpdater.markFailed(events, errorMessage: String(describing: error))
+            let processingError = error
+            do {
+                try await statusUpdater.markFailed(events, errorMessage: String(describing: processingError))
+            } catch {
+                app.logger.critical(
+                    "Failed to persist conversation outbox failure state",
+                    metadata: [
+                        "event_ids": .array(events.map { .string($0.id?.uuidString ?? "unknown") }),
+                        "conversation_ids": .array(events.map { .string($0.conversationID.uuidString) }),
+                        "event_types": .array(events.map { .string($0.eventType) }),
+                        "processing_error": .string(String(describing: processingError)),
+                        "persistence_error": .string(String(describing: error))
+                    ]
+                )
+                throw error
+            }
             for event in events {
                 await app.outboxMetrics.recordFailedEvent(
-                    eventType: event.eventTypeEnum.rawValue,
+                    eventType: event.eventType,
                     durationMillis: max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
                 )
                 if configuration.logsProcessingFailures {
@@ -306,7 +334,7 @@ struct ConversationOutboxProcessor {
 
         do {
             let payload = try event.decodedPayload()
-            let envelope = ConversationEventEnvelope(
+            let envelope = try ConversationEventEnvelope(
                 event: event,
                 payload: payload,
                 deliveryContext: nil
@@ -314,7 +342,7 @@ struct ConversationOutboxProcessor {
             try await registries.critical.consume(envelope)
             await registries.sideEffects.consumeBestEffort(envelope) { consumerName, error in
                 await app.outboxMetrics.recordFailedEvent(
-                    eventType: "\(event.eventTypeEnum.rawValue).\(consumerName)",
+                    eventType: "\(event.eventType).\(consumerName)",
                     durationMillis: max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
                 )
                 app.logger.warning(
@@ -335,7 +363,7 @@ struct ConversationOutboxProcessor {
             try await event.update(on: db)
 
             await app.outboxMetrics.recordProcessedEvent(
-                eventType: event.eventTypeEnum.rawValue,
+                eventType: event.eventType,
                 durationMillis: max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
             )
             app.logger.debug(
@@ -357,7 +385,7 @@ struct ConversationOutboxProcessor {
             try? await event.update(on: db)
 
             await app.outboxMetrics.recordFailedEvent(
-                eventType: event.eventTypeEnum.rawValue,
+                eventType: event.eventType,
                 durationMillis: max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
             )
             if configuration.logsProcessingFailures {
@@ -443,7 +471,9 @@ struct ConversationOutboxProcessor {
             critical: ConversationEventConsumerRegistry(consumers: [
                 ConversationMediaAssetReferenceConsumer(db: db, app: app),
                 ConversationProjectionConsumer(app: app, sourceDB: db),
-                ChangesLogConsumer(app: app, sourceDB: db)
+                ChangesLogConsumer(app: app, sourceDB: db),
+                ConversationTimelineNoticeProjectionConsumer(db: db),
+                OwnerDomainEventDeliveryConsumer(app: app, sourceDB: db)
             ]),
             sideEffects: ConversationEventConsumerRegistry(consumers: [
                 ConversationSearchIndexConsumer(app: app, db: db),

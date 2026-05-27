@@ -185,7 +185,7 @@ extension AuthManagerTests {
             updatedAt: createdAt
         )
         store.applyConversationSummaryPage([summary])
-        store.appendMessages(
+        store.appendTimelineItems(
             in: conversationID.uuidString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -193,6 +193,7 @@ extension AuthManagerTests {
                     conversationID: conversationID,
                     senderUserID: Self.user.id,
                     serverSequence: 1,
+                    timelineSequence: 1,
                     content: .richText(.plain("partial")),
                     derivedState: MessageDerivedState(
                         streamState: MessageStreamState(
@@ -233,6 +234,7 @@ extension AuthManagerTests {
                     conversationID: conversationID,
                     senderUserID: Self.user.id,
                     serverSequence: 1,
+                    timelineSequence: 1,
                     content: .richText(.plain(text)),
                     derivedState: derivedState,
                     createdAt: Date(timeIntervalSince1970: 1_700_300_000)

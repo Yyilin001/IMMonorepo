@@ -11,8 +11,8 @@ struct ConversationDetailState: Sendable, Equatable {
     var isLoadingMembers = false
     var isLoadingMessages = false
     var loadedConversationIDs: Set<String> = []
-    var latestSyncedServerSequences: [String: UInt64] = [:]
-    var oldestLoadedServerSequences: [String: UInt64] = [:]
+    var latestLoadedTimelineSequences: [String: UInt64] = [:]
+    var oldestLoadedTimelineSequences: [String: UInt64] = [:]
     var replyJumpConversationID: String?
     var replyJumpTargetMessageID: String?
     var replyJumpMatchedMessageID: String?
@@ -22,8 +22,8 @@ struct ConversationDetailState: Sendable, Equatable {
         isLoadingMembers = false
         isLoadingMessages = false
         loadedConversationIDs = []
-        latestSyncedServerSequences = [:]
-        oldestLoadedServerSequences = [:]
+        latestLoadedTimelineSequences = [:]
+        oldestLoadedTimelineSequences = [:]
         clearReplyJump()
     }
 
@@ -31,11 +31,11 @@ struct ConversationDetailState: Sendable, Equatable {
         loadedConversationIDs.contains(conversationID)
     }
 
-    func oldestLoadedServerSequence(
+    func oldestLoadedTimelineSequence(
         for conversationID: String,
         conversations: [IMConversation]
     ) -> UInt64? {
-        if let storedSequence = oldestLoadedServerSequences[conversationID] {
+        if let storedSequence = oldestLoadedTimelineSequences[conversationID] {
             return storedSequence
         }
 
@@ -44,22 +44,22 @@ struct ConversationDetailState: Sendable, Equatable {
         }
 
         return conversations.first(where: { $0.id == conversationID })?
-            .messages
-            .compactMap(\.serverSequence)
+            .timelineItems
+            .compactMap(\.timelineSequence)
             .min()
     }
 
-    func latestLoadedServerSequence(
+    func latestLoadedTimelineSequence(
         for conversationID: String,
         conversations: [IMConversation]
     ) -> UInt64? {
-        if let storedSequence = latestSyncedServerSequences[conversationID] {
+        if let storedSequence = latestLoadedTimelineSequences[conversationID] {
             return storedSequence
         }
 
         return conversations.first(where: { $0.id == conversationID })?
-            .messages
-            .compactMap(\.serverSequence)
+            .timelineItems
+            .compactMap(\.timelineSequence)
             .max()
     }
 
@@ -77,12 +77,12 @@ struct ConversationDetailState: Sendable, Equatable {
         return IMSyncCursorState(
             conversationID: trimmedConversationID,
             hasLoadedMessages: loadedConversationIDs.contains(trimmedConversationID),
-            latestSyncedServerSequence: latestLoadedServerSequence(
+            latestLoadedTimelineSequence: latestLoadedTimelineSequence(
                 for: trimmedConversationID,
                 conversations: conversations
             ),
-            oldestLoadedServerSequence: loadedConversationIDs.contains(trimmedConversationID)
-                ? oldestLoadedServerSequence(
+            oldestLoadedTimelineSequence: loadedConversationIDs.contains(trimmedConversationID)
+                ? oldestLoadedTimelineSequence(
                     for: trimmedConversationID,
                     conversations: conversations
                 )
@@ -90,50 +90,50 @@ struct ConversationDetailState: Sendable, Equatable {
         )
     }
 
-    mutating func setLatestSyncedServerSequence(_ sequence: UInt64?, for conversationID: String) {
-        latestSyncedServerSequences[conversationID] = sequence
+    mutating func setLatestLoadedTimelineSequence(_ sequence: UInt64?, for conversationID: String) {
+        latestLoadedTimelineSequences[conversationID] = sequence
     }
 
-    mutating func setOldestLoadedServerSequence(_ sequence: UInt64?, for conversationID: String) {
-        oldestLoadedServerSequences[conversationID] = sequence
+    mutating func setOldestLoadedTimelineSequence(_ sequence: UInt64?, for conversationID: String) {
+        oldestLoadedTimelineSequences[conversationID] = sequence
     }
 
     mutating func removeConversation(id conversationID: String) {
         loadedConversationIDs.remove(conversationID)
-        latestSyncedServerSequences.removeValue(forKey: conversationID)
-        oldestLoadedServerSequences.removeValue(forKey: conversationID)
+        latestLoadedTimelineSequences.removeValue(forKey: conversationID)
+        oldestLoadedTimelineSequences.removeValue(forKey: conversationID)
 
         if replyJumpConversationID == conversationID {
             clearReplyJump()
         }
     }
 
-    mutating func refreshLoadedMessageCursors(
+    mutating func refreshLoadedTimelineCursors(
         for conversationID: String,
-        messages: [IMConversationMessage]
+        timelineItems: [IMConversationTimelineItem]
     ) {
-        let serverSequences = messages.compactMap(\.serverSequence)
-        latestSyncedServerSequences[conversationID] = serverSequences.max()
+        let timelineSequences = timelineItems.compactMap(\.timelineSequence)
+        latestLoadedTimelineSequences[conversationID] = timelineSequences.max()
 
-        if let oldestSequence = serverSequences.min() {
-            oldestLoadedServerSequences[conversationID] = oldestSequence
+        if let oldestSequence = timelineSequences.min() {
+            oldestLoadedTimelineSequences[conversationID] = oldestSequence
         } else {
-            oldestLoadedServerSequences.removeValue(forKey: conversationID)
+            oldestLoadedTimelineSequences.removeValue(forKey: conversationID)
         }
 
         loadedConversationIDs.insert(conversationID)
     }
 
-    mutating func refreshLatestSyncedCursor(
+    mutating func refreshLatestLoadedTimelineCursor(
         for conversationID: String,
-        messages: [IMConversationMessage]
+        timelineItems: [IMConversationTimelineItem]
     ) {
-        guard let latestSequence = messages.compactMap(\.serverSequence).max() else {
+        guard let latestSequence = timelineItems.compactMap(\.timelineSequence).max() else {
             return
         }
 
-        let currentLatest = latestSyncedServerSequences[conversationID] ?? 0
-        latestSyncedServerSequences[conversationID] = max(currentLatest, latestSequence)
+        let currentLatest = latestLoadedTimelineSequences[conversationID] ?? 0
+        latestLoadedTimelineSequences[conversationID] = max(currentLatest, latestSequence)
     }
 
     mutating func startReplyJump(

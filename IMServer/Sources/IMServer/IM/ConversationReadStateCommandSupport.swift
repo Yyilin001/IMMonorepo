@@ -21,24 +21,30 @@ struct ConversationReadStateCommandSupport {
             throw Abort(.badRequest, reason: "已读游标无效。")
         }
 
-        try await readAdvanceSupport.advanceConversationRead(
-            conversationID: conversationID,
-            userID: userID,
-            requestedReadSequence: requestedReadSequence
-        )
-
-        let readState = try await readAdvanceSupport.conversationReadState(
-            conversationID: conversationID,
-            userID: userID
-        )
-        try await refreshPublisher.publish(
-            .readAdvanced,
-            conversationID: conversationID,
-            recipientUserIDs: [userID]
-        )
+        let readState = try await db.transaction { database in
+            try await ConversationReadStateService(db: database).advanceConversationRead(
+                conversationID: conversationID,
+                userID: userID,
+                requestedReadSequence: requestedReadSequence,
+                on: database
+            )
+            let readState = try await ConversationReadStateService(db: database).conversationReadState(
+                conversationID: conversationID,
+                userID: userID,
+                on: database
+            )
+            try await ConversationSummaryRefreshPublisher(db: database).publish(
+                .readAdvanced,
+                conversationID: conversationID,
+                actorUserID: userID,
+                recipientUserIDs: [userID],
+                on: database
+            )
+            return readState
+        }
         return IMConversationReadResponse(
             conversationID: conversationID,
-            lastReadSequence: readState.lastReadSequence,
+            lastReadSequence: UInt64(readState.lastReadSequence),
             unreadCount: readState.unreadCount
         )
     }

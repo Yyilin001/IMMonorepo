@@ -1,4 +1,4 @@
-# IM TCP Realtime Protocol v3
+# IM TCP Realtime Protocol v8
 
 ## Scope
 
@@ -11,7 +11,7 @@ TCP clients authenticate with an HTTP-issued access token during the first packe
 - Protocol: plain TCP behind the existing deployment boundary
 - Framing: 4-byte big-endian unsigned length prefix followed by one Protobuf packet
 - Encoding: `Protocol/im_realtime/v1/im_realtime.proto`
-- Current protocol version: `3`
+- Current protocol version: `7`
 - Direction: full duplex
 
 Each frame is:
@@ -39,16 +39,16 @@ message Packet {
     AuthError auth_error = 12;
     Heartbeat heartbeat = 20;
     Heartbeat heartbeat_ack = 21;
-    MessagePayload message = 30;
     Ack ack = 31;
-    ConversationEvent conversation_event = 40;
-    ContactEvent contact_event = 41;
+    SendMessageCommand send_message = 30;
+    ChatDomainEvent domain_event = 40;
+    MessageStreamSignal stream_signal = 41;
     Kick kick = 50;
   }
 }
 ```
 
-UUIDs are strings, timestamps are `int64 timestamp_ms`, and `server_sequence` is `uint64`. Message media fields contain asset references only; uploads stay on the existing HTTP/file path.
+UUIDs are strings, timestamps are `int64 timestamp_ms`, and `server_sequence` is `uint64`. `Packet.protocol_version` is the only wire protocol version source. Message media fields contain asset references only; uploads stay on the existing HTTP/file path.
 
 ## Packet Types
 
@@ -56,7 +56,7 @@ Client to server:
 
 - `auth`: initial authentication handshake
 - `heartbeat`: keepalive ping
-- `message`: client-sent IM message
+- `send_message`: client-sent message command
 - `ack`: acknowledgement for server-delivered message
 
 Server to client:
@@ -64,21 +64,20 @@ Server to client:
 - `auth_ok`: authentication succeeded
 - `auth_error`: authentication failed and the server will close the connection
 - `heartbeat_ack`: keepalive response
-- `message`: server-delivered IM message or canonical echo
 - `ack`: acknowledgement for client-sent message
-- `conversation_event`: realtime conversation summary/message event
-- `contact_event`: realtime contact/request event
+- `domain_event`: server-delivered `ChatDomainEvent` projection from durable outbox
+- `stream_signal`: best-effort realtime stream chunk signal, not a durable domain event
 - `kick`: server-initiated disconnect notice
 
 ## Handshake
 
-The client must send `auth` as the first packet before the auth timeout. `AuthRequest.protocol_version` must be `3`; unsupported versions are rejected.
+The client must send `auth` as the first packet before the auth timeout. `Packet.protocol_version` must be `8`; unsupported versions are rejected. `AuthRequest` does not carry a second protocol version.
 
 On success, the server binds the TCP channel to the resolved `userID`, `sessionID`, and connection metadata, then sends `auth_ok`. On failure, it sends `auth_error` and closes.
 
 ## Realtime Relay
 
-Local fanout writes the same PB packet directly to active TCP channels.
+Local fanout writes `domain_event` PB packets to active TCP channels. Client commands only receive `ack`; realtime message, conversation, member, and contact changes are emitted by the conversation/contact outbox consumers after durable projection and owner delivery logging. High-frequency AI stream chunks use `stream_signal` and are intentionally excluded from the durable outbox, delivery log, applied-event cache, and owner cursor.
 
 Cross-node Redis dispatch and gateway HTTP relay keep a JSON envelope for observability and routing metadata, but realtime payload data is `packetBase64`, a base64 encoded serialized PB `Packet`. Message content is modeled from the protobuf schema; HTTP/REST still transports JSON DTOs with the same rich-text content shape.
 

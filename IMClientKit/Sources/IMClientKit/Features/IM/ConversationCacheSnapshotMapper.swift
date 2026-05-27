@@ -4,6 +4,55 @@ struct RestoredConversationCacheState {
     let conversations: [IMConversation]
     let selectedConversationID: String?
     let detailState: ConversationDetailState
+    let diagnostics: IMCacheRestoreDiagnostics
+}
+
+public struct IMCacheRestoreDiagnostics: Equatable, Sendable {
+    public struct DroppedCanonicalMessage: Equatable, Sendable {
+        public let conversationID: String
+        public let messageID: String
+        public let reason: String
+    }
+
+    public private(set) var droppedCanonicalMessages: [DroppedCanonicalMessage] = []
+    public private(set) var droppedCanonicalMessagesDuringSnapshot: [DroppedCanonicalMessage] = []
+
+    public var droppedCanonicalMessageCount: Int {
+        droppedCanonicalMessages.count + droppedCanonicalMessagesDuringSnapshot.count
+    }
+
+    mutating func recordDroppedCanonicalMessage(
+        conversationID: String,
+        messageID: String,
+        reason: String
+    ) {
+        droppedCanonicalMessages.append(
+            DroppedCanonicalMessage(
+                conversationID: conversationID,
+                messageID: messageID,
+                reason: reason
+            )
+        )
+    }
+
+    mutating func recordDroppedCanonicalMessageDuringSnapshot(
+        conversationID: String,
+        messageID: String,
+        reason: String
+    ) {
+        droppedCanonicalMessagesDuringSnapshot.append(
+            DroppedCanonicalMessage(
+                conversationID: conversationID,
+                messageID: messageID,
+                reason: reason
+            )
+        )
+    }
+
+    mutating func merge(_ other: IMCacheRestoreDiagnostics) {
+        droppedCanonicalMessages.append(contentsOf: other.droppedCanonicalMessages)
+        droppedCanonicalMessagesDuringSnapshot.append(contentsOf: other.droppedCanonicalMessagesDuringSnapshot)
+    }
 }
 
 enum ConversationCacheSnapshotMapper {
@@ -16,25 +65,28 @@ enum ConversationCacheSnapshotMapper {
         summaryNextCursor: String? = nil,
         hasMoreConversationSummaries: Bool = false,
         transferSnapshots: [IMTransferSnapshot] = [],
+        domainEventState: IMDomainEventCacheState = IMDomainEventCacheState(),
         trimMessages: ([IMConversationMessage], Int) -> [IMConversationMessage]
     ) -> IMConversationCacheSnapshot {
         var cursorStates: [IMSyncCursorState] = []
+        var diagnostics = IMCacheRestoreDiagnostics()
         let cachedConversations = conversations.map { conversation in
             let cachedMessages = trimMessages(
                 conversation.messages,
                 IMConversationCacheSnapshot.cachedMessageLimit
             )
-            let cachedServerSequences = cachedMessages.compactMap(\.serverSequence)
             let hasLoadedMessages = detailState.loadedConversationIDs.contains(conversation.id)
-            let latestSyncedServerSequence = cachedServerSequences.max()
-            let oldestLoadedServerSequence = hasLoadedMessages ? cachedServerSequences.min() : nil
+            let cachedTimelineSequences = cachedMessages.map(\.timelineSequence)
+                + conversation.notices.map(\.timelineSequence)
+            let latestLoadedTimelineSequence = cachedTimelineSequences.max()
+            let oldestLoadedTimelineSequence = hasLoadedMessages ? cachedTimelineSequences.min() : nil
 
             cursorStates.append(
                 IMSyncCursorState(
                     conversationID: conversation.id,
                     hasLoadedMessages: hasLoadedMessages,
-                    latestSyncedServerSequence: latestSyncedServerSequence,
-                    oldestLoadedServerSequence: oldestLoadedServerSequence
+                    latestLoadedTimelineSequence: latestLoadedTimelineSequence,
+                    oldestLoadedTimelineSequence: oldestLoadedTimelineSequence
                 )
             )
 
@@ -48,17 +100,41 @@ enum ConversationCacheSnapshotMapper {
                 avatarPreset: conversation.avatarPreset,
                 memberCount: conversation.memberCount,
                 memberUserIDs: conversation.memberUserIDs,
-                messages: cachedMessages.map { message in
-                    IMCachedMessageState(
-                        id: message.id,
-                        conversationID: message.conversationID,
+                messages: cachedMessages.compactMap { message in
+                    do {
+                        return try IMCachedMessageState(
+                            id: message.id,
+                            conversationID: message.conversationID,
+                            clientMessageID: message.clientMessageID,
+                            serverMessageID: message.serverMessageID,
+                            senderUserID: message.senderUserID,
+                            serverSequence: message.serverSequence,
+                            timelineSequence: message.timelineSequence,
+                            content: message.content,
+                            derivedState: message.derivedState,
+                            direction: message.direction,
+                            createdAt: message.createdAt,
+                            deliveryState: message.deliveryState,
+                            transferTaskID: message.resolvedTransferTaskID,
+                            localTransferState: message.localTransferState,
+                            localDownloadState: message.localDownloadState
+                        )
+                    } catch {
+                        diagnostics.recordDroppedCanonicalMessageDuringSnapshot(
+                            conversationID: message.conversationID,
+                            messageID: message.serverMessageID,
+                            reason: String(describing: error)
+                        )
+                        return nil
+                    }
+                },
+                pendingMessages: conversation.pendingMessages.map { message in
+                    IMCachedPendingMessageState(
+                        localMessageID: message.localMessageID,
                         clientMessageID: message.clientMessageID,
-                        serverMessageID: message.serverMessageID,
+                        conversationID: message.conversationID,
                         senderUserID: message.senderUserID,
-                        serverSequence: message.serverSequence,
                         content: message.content,
-                        derivedState: message.derivedState,
-                        direction: message.direction,
                         createdAt: message.createdAt,
                         deliveryState: message.deliveryState,
                         transferTaskID: message.resolvedTransferTaskID,
@@ -66,11 +142,25 @@ enum ConversationCacheSnapshotMapper {
                         localDownloadState: message.localDownloadState
                     )
                 },
+                notices: conversation.notices.map { notice in
+                    IMCachedTimelineNoticeState(
+                        id: notice.id,
+                        conversationID: notice.conversationID,
+                        timelineSequence: notice.timelineSequence,
+                        eventType: notice.eventType,
+                        actorUserID: notice.actorUserID,
+                        targetUserIDs: notice.targetUserIDs,
+                        noticeKind: notice.noticeKind,
+                        params: notice.params,
+                        fallbackText: notice.fallbackText,
+                        createdAt: notice.createdAt
+                    )
+                },
                 hasLoadedMessages: hasLoadedMessages,
                 lastMessagePreviewText: conversation.lastMessagePreviewText,
                 hasMoreHistory: conversation.hasMoreHistory,
-                latestSyncedServerSequence: latestSyncedServerSequence,
-                oldestLoadedServerSequence: oldestLoadedServerSequence,
+                latestLoadedTimelineSequence: latestLoadedTimelineSequence,
+                oldestLoadedTimelineSequence: oldestLoadedTimelineSequence,
                 serverLastReadSequence: conversation.serverLastReadSequence,
                 serverUnreadCount: conversation.serverUnreadCount,
                 isPinned: conversation.isPinned,
@@ -82,6 +172,9 @@ enum ConversationCacheSnapshotMapper {
             )
         }
 
+        let fullRefreshConversationIDs = Set(domainEventState.fullRefreshConversationIDs)
+            .union(diagnostics.droppedCanonicalMessagesDuringSnapshot.map(\.conversationID))
+
         return IMConversationCacheSnapshot(
             metadata: IMCacheMetadataState(
                 selectedConversationID: selectedConversationID,
@@ -92,7 +185,15 @@ enum ConversationCacheSnapshotMapper {
             ),
             conversations: cachedConversations,
             cursors: cursorStates,
-            transferSnapshots: transferSnapshots
+            transferSnapshots: transferSnapshots,
+            domainEventState: IMDomainEventCacheState(
+                cursor: domainEventState.cursor,
+                appliedEventIDs: domainEventState.appliedEventIDs,
+                ownerAggregateHighWatermarks: domainEventState.ownerAggregateHighWatermarks,
+                deferredEvents: domainEventState.deferredEvents,
+                fullRefreshConversationIDs: fullRefreshConversationIDs.sorted()
+            ),
+            diagnostics: diagnostics
         )
     }
 
@@ -104,8 +205,37 @@ enum ConversationCacheSnapshotMapper {
             uniqueKeysWithValues: snapshot.cursors.map { ($0.conversationID, $0) }
         )
 
+        var diagnostics = snapshot.diagnostics
         let conversations = snapshot.conversations.map { cachedConversation in
-            IMConversation(
+            let restoredMessages = cachedConversation.messages.compactMap { cachedMessage -> IMConversationMessage? in
+                do {
+                    return try IMConversationMessage(
+                        id: cachedMessage.id,
+                        conversationID: cachedMessage.conversationID,
+                        clientMessageID: cachedMessage.clientMessageID,
+                        serverMessageID: cachedMessage.serverMessageID,
+                        senderUserID: cachedMessage.senderUserID,
+                        serverSequence: cachedMessage.serverSequence,
+                        timelineSequence: cachedMessage.timelineSequence,
+                        content: cachedMessage.content,
+                        derivedState: cachedMessage.derivedState,
+                        direction: cachedMessage.direction,
+                        createdAt: cachedMessage.createdAt,
+                        deliveryState: restoreDeliveryState(cachedMessage.deliveryState),
+                        transferTaskID: cachedMessage.transferTaskID,
+                        localTransferState: cachedMessage.localTransferState,
+                        localDownloadState: cachedMessage.localDownloadState
+                    )
+                } catch {
+                    diagnostics.recordDroppedCanonicalMessage(
+                        conversationID: cachedMessage.conversationID,
+                        messageID: cachedMessage.serverMessageID,
+                        reason: String(describing: error)
+                    )
+                    return nil
+                }
+            }
+            return IMConversation(
                 id: cachedConversation.id,
                 title: cachedConversation.title,
                 kind: cachedConversation.kind,
@@ -116,22 +246,33 @@ enum ConversationCacheSnapshotMapper {
                 memberCount: cachedConversation.memberCount,
                 memberUserIDs: cachedConversation.memberUserIDs,
                 members: [],
-                messages: cachedConversation.messages.map { cachedMessage in
-                    IMConversationMessage(
-                        id: cachedMessage.id,
-                        conversationID: cachedMessage.conversationID,
+                messages: restoredMessages,
+                pendingMessages: cachedConversation.pendingMessages.map { cachedMessage in
+                    IMPendingConversationMessage(
+                        localMessageID: cachedMessage.localMessageID,
                         clientMessageID: cachedMessage.clientMessageID,
-                        serverMessageID: cachedMessage.serverMessageID,
+                        conversationID: cachedMessage.conversationID,
                         senderUserID: cachedMessage.senderUserID,
-                        serverSequence: cachedMessage.serverSequence,
                         content: cachedMessage.content,
-                        derivedState: cachedMessage.derivedState,
-                        direction: cachedMessage.direction,
                         createdAt: cachedMessage.createdAt,
                         deliveryState: restoreDeliveryState(cachedMessage.deliveryState),
                         transferTaskID: cachedMessage.transferTaskID,
                         localTransferState: cachedMessage.localTransferState,
                         localDownloadState: cachedMessage.localDownloadState
+                    )
+                },
+                notices: cachedConversation.notices.map { notice in
+                    IMTimelineNotice(
+                        id: notice.id,
+                        conversationID: notice.conversationID,
+                        timelineSequence: notice.timelineSequence,
+                        eventType: notice.eventType,
+                        actorUserID: notice.actorUserID,
+                        targetUserIDs: notice.targetUserIDs,
+                        noticeKind: notice.noticeKind,
+                        params: notice.params,
+                        fallbackText: notice.fallbackText,
+                        createdAt: notice.createdAt
                     )
                 },
                 lastMessagePreviewText: cachedConversation.lastMessagePreviewText,
@@ -154,17 +295,17 @@ enum ConversationCacheSnapshotMapper {
                 .filter(\.hasLoadedMessages)
                 .map(\.conversationID)
         )
-        detailState.latestSyncedServerSequences = Dictionary(
+        detailState.latestLoadedTimelineSequences = Dictionary(
             uniqueKeysWithValues: snapshot.conversations.compactMap { conversation in
                 let cursor = cursorsByConversationID[conversation.id]
-                return (cursor?.latestSyncedServerSequence ?? conversation.latestSyncedServerSequence)
+                return (cursor?.latestLoadedTimelineSequence ?? conversation.latestLoadedTimelineSequence)
                     .map { (conversation.id, $0) }
             }
         )
-        detailState.oldestLoadedServerSequences = Dictionary(
+        detailState.oldestLoadedTimelineSequences = Dictionary(
             uniqueKeysWithValues: snapshot.conversations.compactMap { conversation in
                 let cursor = cursorsByConversationID[conversation.id]
-                return (cursor?.oldestLoadedServerSequence ?? conversation.oldestLoadedServerSequence)
+                return (cursor?.oldestLoadedTimelineSequence ?? conversation.oldestLoadedTimelineSequence)
                     .map { (conversation.id, $0) }
             }
         )
@@ -180,7 +321,8 @@ enum ConversationCacheSnapshotMapper {
         return RestoredConversationCacheState(
             conversations: conversations,
             selectedConversationID: selectedConversationID,
-            detailState: detailState
+            detailState: detailState,
+            diagnostics: diagnostics
         )
     }
 }

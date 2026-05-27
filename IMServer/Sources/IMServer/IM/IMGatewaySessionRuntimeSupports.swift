@@ -6,8 +6,13 @@ import Vapor
 
 
 protocol GatewaySessionTransport: Sendable {
-    func sendDomainEvent(
-        _ payload: IMTCPChatDomainEventPayload,
+    func sendDomainEventDelivery(
+        ownerUserID: UUID,
+        eventID: UUID,
+        requestID: UUID?
+    ) async
+    func sendStreamSignal(
+        _ payload: IMTCPMessageStreamSignalPayload,
         toUserIDs userIDs: [UUID],
         requestID: UUID?
     ) async
@@ -56,12 +61,20 @@ struct ConnectionRoutingGatewayDispatchBus: GatewayDispatchBus {
 struct LocalGatewaySessionTransport: GatewaySessionTransport {
     let routingService: ConnectionRoutingService
 
-    func sendDomainEvent(
-        _ payload: IMTCPChatDomainEventPayload,
+    func sendDomainEventDelivery(
+        ownerUserID: UUID,
+        eventID: UUID,
+        requestID: UUID?
+    ) async {
+        await routingService.sendDomainEventDelivery(ownerUserID: ownerUserID, eventID: eventID, requestID: requestID)
+    }
+
+    func sendStreamSignal(
+        _ payload: IMTCPMessageStreamSignalPayload,
         toUserIDs userIDs: [UUID],
         requestID: UUID?
     ) async {
-        await routingService.sendDomainEvent(payload, toUserIDs: userIDs, requestID: requestID)
+        await routingService.sendStreamSignal(payload, toUserIDs: userIDs, requestID: requestID)
     }
 
     func kickConnections(
@@ -89,16 +102,31 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
     let app: Application
     let configuration: IMGatewayRelayConfiguration
 
-    func sendDomainEvent(
-        _ payload: IMTCPChatDomainEventPayload,
+    func sendDomainEventDelivery(
+        ownerUserID: UUID,
+        eventID: UUID,
+        requestID: UUID?
+    ) async {
+        await postOrLog(
+            path: "/internal/gateway/realtime/domain-event",
+            payload: GatewayRelayDomainEventDeliveryRequest(
+                ownerUserID: ownerUserID,
+                eventID: eventID,
+                requestID: requestID
+            )
+        )
+    }
+
+    func sendStreamSignal(
+        _ payload: IMTCPMessageStreamSignalPayload,
         toUserIDs userIDs: [UUID],
         requestID: UUID?
     ) async {
-        guard let packetBase64 = packetBase64(type: .domainEvent, requestID: requestID, payload: payload) else {
+        guard let packetBase64 = packetBase64(type: .streamSignal, requestID: requestID, payload: payload) else {
             return
         }
         await postOrLog(
-            path: "/internal/gateway/realtime/domain-event",
+            path: "/internal/gateway/realtime/stream-signal",
             payload: GatewayRelayMessageRequest(
                 packetBase64: packetBase64,
                 recipientUserIDs: userIDs,
@@ -245,8 +273,16 @@ struct LoggingUnavailableGatewaySessionTransport: GatewaySessionTransport {
     let logger: Logger
     let role: IMRuntimeRole
 
-    func sendDomainEvent(
-        _ payload: IMTCPChatDomainEventPayload,
+    func sendDomainEventDelivery(
+        ownerUserID: UUID,
+        eventID: UUID,
+        requestID: UUID?
+    ) async {
+        logUnavailable()
+    }
+
+    func sendStreamSignal(
+        _ payload: IMTCPMessageStreamSignalPayload,
         toUserIDs userIDs: [UUID],
         requestID: UUID?
     ) async {
@@ -296,12 +332,20 @@ struct GatewaySessionService {
         }
     }
 
-    func sendDomainEvent(
-        _ payload: IMTCPChatDomainEventPayload,
+    func sendDomainEventDelivery(
+        ownerUserID: UUID,
+        eventID: UUID,
+        requestID: UUID? = UUID()
+    ) async {
+        await transport.sendDomainEventDelivery(ownerUserID: ownerUserID, eventID: eventID, requestID: requestID)
+    }
+
+    func sendStreamSignal(
+        _ payload: IMTCPMessageStreamSignalPayload,
         toUserIDs userIDs: [UUID],
         requestID: UUID? = UUID()
     ) async {
-        await transport.sendDomainEvent(payload, toUserIDs: userIDs, requestID: requestID)
+        await transport.sendStreamSignal(payload, toUserIDs: userIDs, requestID: requestID)
     }
 
     func kickConnections(
@@ -329,6 +373,7 @@ protocol ConversationEventBus: Sendable {
     func publish(
         type: ConversationDomainEventType,
         conversationID: UUID,
+        actorUserID: UUID?,
         payload: ConversationDomainEventPayload,
         on database: (any Database)?
     ) async throws

@@ -52,17 +52,20 @@ struct ConversationGovernanceCommandSupport {
             persistedConversation.title = normalizedTitle
             try await persistedConversation.update(on: database)
 
-            return try await ConversationSummaryReadSupport(db: database).conversationSummary(
+            let response = try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
                 for: requesterUserID
             )
+            try await ConversationSummaryRefreshPublisher(db: database).publish(
+                .metadataUpdated,
+                conversationID: conversationID,
+                actorUserID: requesterUserID,
+                recipientUserIDs: response.memberUserIDs,
+                on: database
+            )
+            return response
         }
 
-        try await refreshPublisher.publish(
-            .metadataUpdated,
-            conversationID: conversationID,
-            recipientUserIDs: response.memberUserIDs
-        )
         return response
     }
 
@@ -113,17 +116,20 @@ struct ConversationGovernanceCommandSupport {
 
             try await persistedConversation.update(on: database)
 
-            return try await ConversationSummaryReadSupport(db: database).conversationSummary(
+            let response = try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
                 for: requesterUserID
             )
+            try await ConversationSummaryRefreshPublisher(db: database).publish(
+                .metadataUpdated,
+                conversationID: conversationID,
+                actorUserID: requesterUserID,
+                recipientUserIDs: response.memberUserIDs,
+                on: database
+            )
+            return response
         }
 
-        try await refreshPublisher.publish(
-            .metadataUpdated,
-            conversationID: conversationID,
-            recipientUserIDs: response.memberUserIDs
-        )
         return response
     }
 
@@ -144,17 +150,20 @@ struct ConversationGovernanceCommandSupport {
             )
             membership.memberNickname = storedNickname
             try await membership.update(on: database)
-            return try await ConversationSummaryReadSupport(db: database).conversationSummary(
+            let response = try await ConversationSummaryReadSupport(db: database).conversationSummary(
                 conversationID: conversationID,
                 for: requesterUserID
             )
+            try await ConversationSummaryRefreshPublisher(db: database).publish(
+                .metadataUpdated,
+                conversationID: conversationID,
+                actorUserID: requesterUserID,
+                recipientUserIDs: response.memberUserIDs,
+                on: database
+            )
+            return response
         }
 
-        try await refreshPublisher.publish(
-            .metadataUpdated,
-            conversationID: conversationID,
-            recipientUserIDs: response.memberUserIDs
-        )
         return response
     }
 
@@ -167,34 +176,49 @@ struct ConversationGovernanceCommandSupport {
         _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
         let recordID = ConversationUserSummary.recordID(ownerUserID: requesterUserID, conversationID: conversationID)
 
-        let summary: ConversationUserSummary
-        if let existingSummary = try await ConversationUserSummary.find(recordID, on: db) {
-            summary = existingSummary
-        } else {
-            try await summaryProjectionService.refreshConversationSummaries(
-                conversationID: conversationID,
-                recipientUserIDs: [requesterUserID]
-            )
-            guard let refreshedSummary = try await ConversationUserSummary.find(recordID, on: db) else {
-                throw Abort(.notFound, reason: "会话不存在。")
+        return try await db.transaction { database in
+            let summary: ConversationUserSummary
+            if let existingSummary = try await ConversationUserSummary.find(recordID, on: database) {
+                summary = existingSummary
+            } else {
+                try await IMConversationSummaryProjectionService(db: database).refreshConversationSummaries(
+                    conversationID: conversationID,
+                    recipientUserIDs: [requesterUserID]
+                )
+                guard let refreshedSummary = try await ConversationUserSummary.find(recordID, on: database) else {
+                    throw Abort(.notFound, reason: "会话不存在。")
+                }
+                summary = refreshedSummary
             }
-            summary = refreshedSummary
-        }
 
-        if let isPinned {
-            summary.isPinned = isPinned
-            summary.pinnedAt = isPinned ? Date() : nil
-        }
-        if let isMuted {
-            summary.isMuted = isMuted
-        }
-        summary.updatedAt = Date()
-        try await summary.update(on: db)
+            var didUpdate = false
+            if let isPinned, summary.isPinned != isPinned {
+                summary.isPinned = isPinned
+                summary.pinnedAt = isPinned ? Date() : nil
+                didUpdate = true
+            }
+            if let isMuted, summary.isMuted != isMuted {
+                summary.isMuted = isMuted
+                didUpdate = true
+            }
 
-        return try await readSupport.conversationSummary(
-            conversationID: conversationID,
-            for: requesterUserID
-        )
+            if didUpdate {
+                summary.updatedAt = Date()
+                try await summary.update(on: database)
+                try await ConversationSummaryRefreshPublisher(db: database).publish(
+                    .conversationSettingsChanged,
+                    conversationID: conversationID,
+                    actorUserID: requesterUserID,
+                    recipientUserIDs: [requesterUserID],
+                    on: database
+                )
+            }
+
+            return try await ConversationReadSupport(db: database).conversationSummary(
+                conversationID: conversationID,
+                for: requesterUserID
+            )
+        }
     }
 
     private func requireMembershipRecord(

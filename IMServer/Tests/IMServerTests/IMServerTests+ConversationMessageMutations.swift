@@ -32,6 +32,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try demoUser.requireID(),
                 serverSequence: 1,
+                timelineSequence: 1,
                 content: .richText(.plain("hello recall"))
             )
             try await message.create(on: app.db)
@@ -53,10 +54,11 @@ extension IMServerTests {
                 #expect(recalled.derivedState.recallState == .recalled)
             })
 
-            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/timeline", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
-                let messages = try res.content.decode([IMMessageResponse].self)
+                let timeline = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = timeline.items.compactMap(\.message)
                 #expect(messages.count == 1)
                 #expect(messages[0].id == messageID)
                 #expect(messages[0].content == .richText(.plain("hello recall")))
@@ -101,6 +103,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try demoUser.requireID(),
                 serverSequence: 1,
+                timelineSequence: 1,
                 content: .richText(.plain("expired recall"))
             )
             try await message.create(on: app.db)
@@ -143,6 +146,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try demoUser.requireID(),
                 serverSequence: 1,
+                timelineSequence: 1,
                 content: .richText(.plain("before edit"))
             )
             try await message.create(on: app.db)
@@ -170,12 +174,13 @@ extension IMServerTests {
 
             try await app.testing().test(
                 .GET,
-                "api/im/conversations/\(conversationID.uuidString)/messages",
+                "api/im/conversations/\(conversationID.uuidString)/timeline",
                 beforeRequest: { req in
                     req.headers.bearerAuthorization = .init(token: accessToken)
                 },
                 afterResponse: { res async throws in
-                    let messages = try res.content.decode([IMMessageResponse].self)
+                    let timeline = try res.content.decode(IMTimelinePageResponse.self)
+                    let messages = timeline.items.compactMap(\.message)
                     #expect(messages.count == 1)
                     #expect(messages[0].content == .richText(.plain("before edit")))
                     #expect(messages[0].derivedState.edits.last?.body.text == "after edit")
@@ -230,6 +235,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 1,
+                timelineSequence: 1,
                 content: .richText(.plain("react here"))
             )
             try await message.create(on: app.db)

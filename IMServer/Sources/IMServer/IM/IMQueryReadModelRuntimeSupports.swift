@@ -71,13 +71,13 @@ struct QueryReadModelFacade {
         )
     }
 
-    func listMessages(
+    func listTimeline(
         in conversationID: UUID,
         for userID: UUID,
         beforeSequence: Int?,
         limit: Int?
-    ) async throws -> [IMMessageResponse] {
-        try await timelineReadService.listMessages(
+    ) async throws -> IMTimelinePageResponse {
+        try await timelineReadService.listTimeline(
             in: conversationID,
             for: userID,
             beforeSequence: beforeSequence,
@@ -85,13 +85,13 @@ struct QueryReadModelFacade {
         )
     }
 
-    func listMessagesSince(
+    func listTimelineSince(
         in conversationID: UUID,
         for userID: UUID,
         afterSequence: Int,
         limit: Int?
-    ) async throws -> IMMessageSinceResponse {
-        try await timelineReadService.listMessagesSince(
+    ) async throws -> IMTimelinePageResponse {
+        try await timelineReadService.listTimelineSince(
             in: conversationID,
             for: userID,
             afterSequence: afterSequence,

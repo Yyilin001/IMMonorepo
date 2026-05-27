@@ -31,6 +31,7 @@ struct AIMessageStreamWriteStore {
                     conversationID: conversationID,
                     senderUserID: userID,
                     serverSequence: sequence,
+                    timelineSequence: sequence,
                     content: .richText(.plain("")),
                     derivedState: AIMessageStreamMutationBuilder.initialDerivedState(
                         streamID: streamID,
@@ -57,9 +58,21 @@ struct AIMessageStreamWriteStore {
                 try await ConversationOutboxService(db: database).enqueue(
                     type: .messageCreated,
                     conversationID: conversationID,
-                    payload: ConversationDomainEventPayload(
-                        recipientUserIDs: membership.memberUserIDs,
-                        messageID: messageID
+                    actorUserID: userID,
+                    payload: .messageCreated(
+                        messageID: messageID,
+                        recipientUserIDs: membership.memberUserIDs
+                    ),
+                    on: database
+                )
+                try await ConversationOutboxService(db: database).enqueue(
+                    type: .messageStreamStarted,
+                    conversationID: conversationID,
+                    actorUserID: userID,
+                    payload: .streamStarted(
+                        messageID: messageID,
+                        streamID: streamID,
+                        recipientUserIDs: membership.memberUserIDs
                     ),
                     on: database
                 )
@@ -216,7 +229,7 @@ struct AIMessageStreamWriteStore {
                             state: existing.state
                         ),
                         recipients: [],
-                        eventType: AIMessageStreamMutationBuilder.eventType(for: existing.state),
+                        eventType: try AIMessageStreamMutationBuilder.eventType(for: existing.state),
                         actorUserID: userID,
                         shouldPublish: false
                     )
@@ -246,10 +259,24 @@ struct AIMessageStreamWriteStore {
                 try await ConversationOutboxService(db: database).enqueue(
                     type: .messageUpdated,
                     conversationID: conversationID,
-                    payload: ConversationDomainEventPayload(
-                        recipientUserIDs: recipients,
-                        messageID: messageID
+                    actorUserID: userID,
+                    payload: .messageUpdated(
+                        messageID: messageID,
+                        recipientUserIDs: recipients
                     ),
+                    on: database
+                )
+                let lifecycle = try streamLifecycleEvent(
+                    state: state,
+                    messageID: messageID,
+                    streamID: streamID,
+                    recipientUserIDs: recipients
+                )
+                try await ConversationOutboxService(db: database).enqueue(
+                    type: lifecycle.type,
+                    conversationID: conversationID,
+                    actorUserID: userID,
+                    payload: lifecycle.payload,
                     on: database
                 )
                 let response = try ConversationMessageService(db: database).messageResponse(
@@ -267,7 +294,7 @@ struct AIMessageStreamWriteStore {
                         state: state
                     ),
                     recipients: recipients,
-                    eventType: AIMessageStreamMutationBuilder.eventType(for: state),
+                    eventType: try AIMessageStreamMutationBuilder.eventType(for: state),
                     actorUserID: userID,
                     shouldPublish: true
                 )
@@ -322,14 +349,55 @@ struct AIMessageStreamWriteStore {
                 try await ConversationOutboxService(db: database).enqueue(
                     type: .messageUpdated,
                     conversationID: conversationID,
-                    payload: ConversationDomainEventPayload(
-                        recipientUserIDs: recipients,
-                        messageID: messageID
+                    actorUserID: index.userID,
+                    payload: .messageUpdated(
+                        messageID: messageID,
+                        recipientUserIDs: recipients
                     ),
+                    on: database
+                )
+                let lifecycle = try streamLifecycleEvent(
+                    state: .failed,
+                    messageID: messageID,
+                    streamID: streamID,
+                    recipientUserIDs: recipients
+                )
+                try await ConversationOutboxService(db: database).enqueue(
+                    type: lifecycle.type,
+                    conversationID: conversationID,
+                    actorUserID: index.userID,
+                    payload: lifecycle.payload,
                     on: database
                 )
                 return true
             }
+        }
+    }
+
+    private func streamLifecycleEvent(
+        state: MessageStreamLifecycleState,
+        messageID: UUID,
+        streamID: String,
+        recipientUserIDs: [UUID]
+    ) throws -> (type: ConversationDomainEventType, payload: ConversationDomainEventPayload) {
+        switch state {
+        case .completed:
+            return (
+                .messageStreamCompleted,
+                .streamCompleted(messageID: messageID, streamID: streamID, recipientUserIDs: recipientUserIDs)
+            )
+        case .failed:
+            return (
+                .messageStreamFailed,
+                .streamFailed(messageID: messageID, streamID: streamID, recipientUserIDs: recipientUserIDs)
+            )
+        case .cancelled:
+            return (
+                .messageStreamCancelled,
+                .streamCancelled(messageID: messageID, streamID: streamID, recipientUserIDs: recipientUserIDs)
+            )
+        case .streaming:
+            throw Abort(.internalServerError, reason: "Streaming chunks are transient TCP stream signals, not durable domain events.")
         }
     }
 

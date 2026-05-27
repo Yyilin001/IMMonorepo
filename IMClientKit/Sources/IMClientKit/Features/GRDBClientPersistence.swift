@@ -55,11 +55,30 @@ public final class GRDBIMConversationCache: IMConversationCaching, @unchecked Se
                 """,
                 arguments: [owner]
             )
-
-            let messagesByConversationID = Dictionary(
-                grouping: messageRows.compactMap(GRDBClientPersistence.decodeMessage(row:)),
-                by: \.conversationID
+            let domainEventStateRow = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM cached_domain_event_state
+                WHERE owner_user_id = ?
+                """,
+                arguments: [owner]
             )
+
+            var diagnostics = IMCacheRestoreDiagnostics()
+            let decodedMessages = messageRows.compactMap { row -> IMCachedMessageState? in
+                switch GRDBClientPersistence.decodeMessage(row: row) {
+                case .success(let message):
+                    return message
+                case .failure(let conversationID, let messageID, let reason):
+                    diagnostics.recordDroppedCanonicalMessage(
+                        conversationID: conversationID,
+                        messageID: messageID,
+                        reason: reason
+                    )
+                    return nil
+                }
+            }
+            let messagesByConversationID = Dictionary(grouping: decodedMessages, by: \.conversationID)
             let cursors = cursorRows.map(GRDBClientPersistence.decodeCursor(row:))
             let cursorsByConversationID = Dictionary(uniqueKeysWithValues: cursors.map { ($0.conversationID, $0) })
             let conversations = conversationRows.map { row in
@@ -86,7 +105,9 @@ public final class GRDBIMConversationCache: IMConversationCaching, @unchecked Se
                 ),
                 conversations: conversations,
                 cursors: cursors,
-                transferSnapshots: transferRows.compactMap(GRDBClientPersistence.decodeTransferSnapshot(row:))
+                transferSnapshots: transferRows.compactMap(GRDBClientPersistence.decodeTransferSnapshot(row:)),
+                domainEventState: GRDBClientPersistence.decodeDomainEventState(row: domainEventStateRow),
+                diagnostics: diagnostics
             )
         }
     }
@@ -121,6 +142,11 @@ public final class GRDBIMConversationCache: IMConversationCaching, @unchecked Se
                     db: db
                 )
             }
+            try GRDBClientPersistence.insertDomainEventState(
+                snapshot.domainEventState,
+                ownerUserID: owner,
+                db: db
+            )
         }
     }
 
@@ -134,6 +160,7 @@ public final class GRDBIMConversationCache: IMConversationCaching, @unchecked Se
     public func clearAll() async throws {
         try await databasePool.write { db in
             try db.execute(sql: "DELETE FROM cached_transfer_snapshots")
+            try db.execute(sql: "DELETE FROM cached_domain_event_state")
             try db.execute(sql: "DELETE FROM cached_messages")
             try db.execute(sql: "DELETE FROM cached_message_cursors")
             try db.execute(sql: "DELETE FROM cached_conversations")
@@ -339,6 +366,12 @@ enum GRDBClientDatabase {
                 PRIMARY KEY (owner_user_id, task_session_identifier, task_identifier)
             );
 
+            CREATE TABLE IF NOT EXISTS cached_domain_event_state (
+                owner_user_id TEXT PRIMARY KEY NOT NULL,
+                cursor INTEGER NOT NULL,
+                applied_event_ids_json TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS contact_cache_metadata (
                 owner_user_id TEXT PRIMARY KEY NOT NULL,
                 last_refresh_at REAL,
@@ -388,6 +421,51 @@ enum GRDBClientDatabase {
             ON cached_contact_requests(owner_user_id, bucket_raw_value, created_at, responded_at, updated_at);
             """)
         }
+        migrator.registerMigration("createClientDomainEventStateV1") { db in
+            try db.execute(sql: """
+            CREATE TABLE IF NOT EXISTS cached_domain_event_state (
+                owner_user_id TEXT PRIMARY KEY NOT NULL,
+                cursor INTEGER NOT NULL,
+                applied_event_ids_json TEXT NOT NULL
+            )
+            """)
+        }
+        migrator.registerMigration("addCachedDeferredDomainEventsV1") { db in
+            try db.execute(sql: """
+            ALTER TABLE cached_domain_event_state
+            ADD COLUMN deferred_event_pb_base64_json TEXT NOT NULL DEFAULT '[]'
+            """)
+        }
+        migrator.registerMigration("addCachedOwnerAggregateHighWatermarksV1") { db in
+            try db.execute(sql: """
+            ALTER TABLE cached_domain_event_state
+            ADD COLUMN owner_aggregate_high_watermarks_json TEXT NOT NULL DEFAULT '[]'
+            """)
+        }
+        migrator.registerMigration("addCachedMessageTimelineSequenceV1") { db in
+            try db.execute(sql: """
+            ALTER TABLE cached_messages
+            ADD COLUMN timeline_sequence INTEGER
+            """)
+        }
+        migrator.registerMigration("addCachedTimelineNoticesV1") { db in
+            try db.execute(sql: """
+            ALTER TABLE cached_conversations
+            ADD COLUMN notices_json TEXT NOT NULL DEFAULT '[]'
+            """)
+        }
+        migrator.registerMigration("addCachedPendingMessagesV1") { db in
+            try db.execute(sql: """
+            ALTER TABLE cached_conversations
+            ADD COLUMN pending_messages_json TEXT NOT NULL DEFAULT '[]'
+            """)
+        }
+        migrator.registerMigration("addCachedDomainEventFullRefreshV1") { db in
+            try db.execute(sql: """
+            ALTER TABLE cached_domain_event_state
+            ADD COLUMN full_refresh_conversation_ids_json TEXT NOT NULL DEFAULT '[]'
+            """)
+        }
         return migrator
     }
 }
@@ -399,8 +477,18 @@ private enum ContactRequestCacheBucket: String {
 }
 
 private enum GRDBClientPersistence {
+    enum PersistenceError: Error {
+        case invalidSequenceOverflow
+    }
+
+    enum CachedMessageDecodeResult {
+        case success(IMCachedMessageState)
+        case failure(conversationID: String, messageID: String, reason: String)
+    }
+
     static func deleteIMSnapshot(ownerUserID: String, db: Database) throws {
         try db.execute(sql: "DELETE FROM cached_transfer_snapshots WHERE owner_user_id = ?", arguments: [ownerUserID])
+        try db.execute(sql: "DELETE FROM cached_domain_event_state WHERE owner_user_id = ?", arguments: [ownerUserID])
         try db.execute(sql: "DELETE FROM cached_messages WHERE owner_user_id = ?", arguments: [ownerUserID])
         try db.execute(sql: "DELETE FROM cached_message_cursors WHERE owner_user_id = ?", arguments: [ownerUserID])
         try db.execute(sql: "DELETE FROM cached_conversations WHERE owner_user_id = ?", arguments: [ownerUserID])
@@ -432,10 +520,10 @@ private enum GRDBClientPersistence {
             INSERT INTO cached_conversations (
                 owner_user_id, conversation_id, title, kind_raw_value, direct_messaging_state_raw_value,
                 direct_peer_user_id, direct_peer_email, direct_peer_display_name, direct_peer_avatar_preset_raw_value,
-                notice, avatar_preset_raw_value, member_count, member_user_ids_blob, last_message_preview_text,
+                notice, notices_json, pending_messages_json, avatar_preset_raw_value, member_count, member_user_ids_blob, last_message_preview_text,
                 updated_at, server_last_read_sequence, server_unread_count, is_pinned, pinned_at, is_muted,
                 draft_text, draft_updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [
                 ownerUserID,
@@ -448,12 +536,14 @@ private enum GRDBClientPersistence {
                 conversation.directPeer?.displayName,
                 conversation.directPeer?.avatarPreset?.rawValue,
                 conversation.notice,
+                jsonString(conversation.notices),
+                jsonString(conversation.pendingMessages),
                 conversation.avatarPreset?.rawValue,
                 conversation.memberCount,
                 encodeUUIDs(conversation.memberUserIDs),
                 conversation.lastMessagePreviewText,
                 conversation.updatedAt.timeIntervalSince1970,
-                int64Value(from: conversation.serverLastReadSequence),
+                try int64Value(from: conversation.serverLastReadSequence),
                 max(0, conversation.serverUnreadCount),
                 int(from: conversation.isPinned),
                 timestamp(from: conversation.pinnedAt),
@@ -481,8 +571,8 @@ private enum GRDBClientPersistence {
                 ownerUserID,
                 conversation.id,
                 int(from: cursor?.hasLoadedMessages ?? conversation.hasLoadedMessages),
-                int64(from: cursor?.latestSyncedServerSequence ?? conversation.latestSyncedServerSequence),
-                int64(from: cursor?.oldestLoadedServerSequence ?? conversation.oldestLoadedServerSequence),
+                try int64(from: cursor?.latestLoadedTimelineSequence ?? conversation.latestLoadedTimelineSequence),
+                try int64(from: cursor?.oldestLoadedTimelineSequence ?? conversation.oldestLoadedTimelineSequence),
             ]
         )
     }
@@ -492,18 +582,19 @@ private enum GRDBClientPersistence {
             sql: """
             INSERT INTO cached_messages (
                 owner_user_id, conversation_id, message_id, client_message_id, sender_user_id,
-                server_sequence, kind, text_preview, content_json, direction_raw_value, created_at,
+                server_sequence, timeline_sequence, kind, text_preview, content_json, direction_raw_value, created_at,
                 delivery_state_raw_value, delivery_failure_message, transfer_task_session_identifier,
                 transfer_task_identifier, derived_state_json, local_transfer_state_json, local_download_state_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [
                 ownerUserID,
                 message.conversationID,
                 message.id,
                 message.clientMessageID,
-                message.senderUserID?.uuidString,
-                int64(from: message.serverSequence),
+                message.senderUserID.uuidString,
+                try int64Value(from: message.serverSequence),
+                try int64Value(from: message.timelineSequence),
                 message.content.type.rawValue,
                 message.content.presentation(derivedState: message.derivedState).previewText,
                 jsonString(message.content),
@@ -543,12 +634,38 @@ private enum GRDBClientPersistence {
         )
     }
 
+    static func insertDomainEventState(
+        _ state: IMDomainEventCacheState,
+        ownerUserID: String,
+        db: Database
+    ) throws {
+        try db.execute(
+            sql: """
+            INSERT INTO cached_domain_event_state (
+                owner_user_id, cursor, applied_event_ids_json, owner_aggregate_high_watermarks_json,
+                deferred_event_pb_base64_json, full_refresh_conversation_ids_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                ownerUserID,
+                try int64Value(from: state.cursor),
+                jsonString(state.appliedEventIDs.map(\.uuidString)),
+                jsonString(state.ownerAggregateHighWatermarks),
+                jsonString(state.deferredEvents),
+                jsonString(state.fullRefreshConversationIDs),
+            ]
+        )
+    }
+
     static func decodeConversation(
         row: Row,
         messages: [IMCachedMessageState],
         cursor: IMSyncCursorState?
     ) -> IMCachedConversationState {
         let hasLoadedMessages = cursor?.hasLoadedMessages ?? false
+        let notices = (decodeJSON(row["notices_json"]) as [IMCachedTimelineNoticeState]?) ?? []
+        let pendingMessages = (decodeJSON(row["pending_messages_json"]) as [IMCachedPendingMessageState]?) ?? []
+        let timelineSequences = messages.map(\.timelineSequence) + notices.map(\.timelineSequence)
         return IMCachedConversationState(
             id: row["conversation_id"],
             title: row["title"],
@@ -567,13 +684,15 @@ private enum GRDBClientPersistence {
             memberCount: row["member_count"],
             memberUserIDs: decodeUUIDs(from: row["member_user_ids_blob"]),
             messages: messages.sorted(by: messageComparator),
+            pendingMessages: pendingMessages,
+            notices: notices,
             hasLoadedMessages: hasLoadedMessages,
             lastMessagePreviewText: row["last_message_preview_text"],
-            hasMoreHistory: hasLoadedMessages && (cursor?.oldestLoadedServerSequence ?? 0) > 1,
-            latestSyncedServerSequence: cursor?.latestSyncedServerSequence
-                ?? messages.compactMap(\.serverSequence).max(),
-            oldestLoadedServerSequence: hasLoadedMessages
-                ? cursor?.oldestLoadedServerSequence ?? messages.compactMap(\.serverSequence).min()
+            hasMoreHistory: hasLoadedMessages && (cursor?.oldestLoadedTimelineSequence ?? 0) > 1,
+            latestLoadedTimelineSequence: cursor?.latestLoadedTimelineSequence
+                ?? timelineSequences.max(),
+            oldestLoadedTimelineSequence: hasLoadedMessages
+                ? cursor?.oldestLoadedTimelineSequence ?? timelineSequences.min()
                 : nil,
             serverLastReadSequence: uint64(from: row["server_last_read_sequence"]),
             serverUnreadCount: max(0, row["server_unread_count"] as Int),
@@ -586,33 +705,57 @@ private enum GRDBClientPersistence {
         )
     }
 
-    static func decodeMessage(row: Row) -> IMCachedMessageState? {
-        IMCachedMessageState(
-            id: row["message_id"],
-            conversationID: row["conversation_id"],
-            clientMessageID: row["client_message_id"],
-            serverMessageID: (row["server_sequence"] as Int64?) == nil ? nil : row["message_id"],
-            senderUserID: (row["sender_user_id"] as String?).flatMap(UUID.init(uuidString:)),
-            serverSequence: uint64Optional(from: row["server_sequence"]),
-            content: decodeMessageContent(
-                kind: row["kind"],
-                textPreview: row["text_preview"],
-                contentJSON: row["content_json"]
-            ),
-            derivedState: decodeJSON(row["derived_state_json"]) ?? MessageDerivedState(),
-            direction: IMMessageDirection(rawValue: row["direction_raw_value"]) ?? .incoming,
-            createdAt: date(from: row["created_at"]) ?? .distantPast,
-            deliveryState: deliveryState(
-                rawValue: row["delivery_state_raw_value"],
-                failureMessage: row["delivery_failure_message"]
-            ),
-            transferTaskID: transferTaskID(
-                sessionIdentifier: row["transfer_task_session_identifier"],
-                taskIdentifier: row["transfer_task_identifier"]
-            ),
-            localTransferState: decodeJSON(row["local_transfer_state_json"]),
-            localDownloadState: decodeJSON(row["local_download_state_json"])
-        )
+    static func decodeMessage(row: Row) -> CachedMessageDecodeResult {
+        let conversationID: String = row["conversation_id"] ?? "unknown"
+        let messageID: String = row["message_id"] ?? "unknown"
+        guard let senderUserID = (row["sender_user_id"] as String?).flatMap(UUID.init(uuidString:)),
+              let serverSequence = uint64Optional(from: row["server_sequence"]),
+              let timelineSequence = uint64Optional(from: row["timeline_sequence"]),
+              serverSequence > 0,
+              timelineSequence > 0
+        else {
+            return .failure(
+                conversationID: conversationID,
+                messageID: messageID,
+                reason: "canonical message is missing sender or positive sequence"
+            )
+        }
+
+        do {
+            return .success(try IMCachedMessageState(
+                id: messageID,
+                conversationID: conversationID,
+                clientMessageID: row["client_message_id"],
+                serverMessageID: messageID,
+                senderUserID: senderUserID,
+                serverSequence: serverSequence,
+                timelineSequence: timelineSequence,
+                content: decodeMessageContent(
+                    kind: row["kind"],
+                    textPreview: row["text_preview"],
+                    contentJSON: row["content_json"]
+                ),
+                derivedState: decodeJSON(row["derived_state_json"]) ?? MessageDerivedState(),
+                direction: IMMessageDirection(rawValue: row["direction_raw_value"]) ?? .incoming,
+                createdAt: date(from: row["created_at"]) ?? .distantPast,
+                deliveryState: deliveryState(
+                    rawValue: row["delivery_state_raw_value"],
+                    failureMessage: row["delivery_failure_message"]
+                ),
+                transferTaskID: transferTaskID(
+                    sessionIdentifier: row["transfer_task_session_identifier"],
+                    taskIdentifier: row["transfer_task_identifier"]
+                ),
+                localTransferState: decodeJSON(row["local_transfer_state_json"]),
+                localDownloadState: decodeJSON(row["local_download_state_json"])
+            ))
+        } catch {
+            return .failure(
+                conversationID: conversationID,
+                messageID: messageID,
+                reason: String(describing: error)
+            )
+        }
     }
 
     static func decodeCursor(row: Row) -> IMSyncCursorState {
@@ -620,8 +763,8 @@ private enum GRDBClientPersistence {
         return IMSyncCursorState(
             conversationID: row["conversation_id"],
             hasLoadedMessages: hasLoadedMessages,
-            latestSyncedServerSequence: uint64Optional(from: row["latest_synced_server_sequence"]),
-            oldestLoadedServerSequence: hasLoadedMessages
+            latestLoadedTimelineSequence: uint64Optional(from: row["latest_synced_server_sequence"]),
+            oldestLoadedTimelineSequence: hasLoadedMessages
                 ? uint64Optional(from: row["oldest_loaded_server_sequence"])
                 : nil
         )
@@ -631,6 +774,21 @@ private enum GRDBClientPersistence {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decodeJSON(row["snapshot_json"], decoder: decoder)
+    }
+
+    static func decodeDomainEventState(row: Row?) -> IMDomainEventCacheState {
+        guard let row else {
+            return IMDomainEventCacheState()
+        }
+        let ids: [String] = decodeJSON(row["applied_event_ids_json"]) ?? []
+        let appliedEventIDs = ids.map(UUID.init(uuidString:))
+        return IMDomainEventCacheState(
+            cursor: uint64(from: row["cursor"] ?? 0),
+            appliedEventIDs: appliedEventIDs.allSatisfy { $0 != nil } ? appliedEventIDs.compactMap { $0 } : [],
+            ownerAggregateHighWatermarks: decodeJSON(row["owner_aggregate_high_watermarks_json"]) ?? [],
+            deferredEvents: decodeJSON(row["deferred_event_pb_base64_json"]) ?? [],
+            fullRefreshConversationIDs: decodeJSON(row["full_refresh_conversation_ids_json"]) ?? []
+        )
     }
 
     static func deleteContactSnapshot(ownerUserID: String, db: Database) throws {
@@ -828,25 +986,13 @@ private enum GRDBClientPersistence {
     }
 
     private static func messageComparator(_ left: IMCachedMessageState, _ right: IMCachedMessageState) -> Bool {
-        switch (left.serverSequence, right.serverSequence) {
-        case let (leftSequence?, rightSequence?):
-            if leftSequence == rightSequence {
-                if left.createdAt == right.createdAt {
-                    return left.id < right.id
-                }
-                return left.createdAt < right.createdAt
-            }
-            return leftSequence < rightSequence
-        case (_?, nil):
-            return true
-        case (nil, _?):
-            return false
-        case (nil, nil):
+        if left.serverSequence == right.serverSequence {
             if left.createdAt == right.createdAt {
                 return left.id < right.id
             }
             return left.createdAt < right.createdAt
         }
+        return left.serverSequence < right.serverSequence
     }
 
     private static func decodeMessageContent(
@@ -978,12 +1124,16 @@ private enum GRDBClientPersistence {
         date?.timeIntervalSince1970
     }
 
-    private static func int64(from value: UInt64?) -> Int64? {
-        value.map { Int64(min($0, UInt64(Int64.max))) }
+    private static func int64(from value: UInt64?) throws -> Int64? {
+        guard let value else { return nil }
+        return try int64Value(from: value)
     }
 
-    private static func int64Value(from value: UInt64) -> Int64 {
-        Int64(min(value, UInt64(Int64.max)))
+    private static func int64Value(from value: UInt64) throws -> Int64 {
+        guard value <= UInt64(Int64.max) else {
+            throw PersistenceError.invalidSequenceOverflow
+        }
+        return Int64(value)
     }
 
     private static func uint64(from value: Int64) -> UInt64 {

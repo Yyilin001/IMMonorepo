@@ -1,7 +1,101 @@
 import Foundation
 
 struct ConversationTimelineStore {
-    func replaceMessages(
+    func replaceTimelineItems(
+        in conversationID: String,
+        items: [IMTimelineItemResponseBody],
+        hasMore: Bool,
+        currentUserID: UUID,
+        conversations: inout [IMConversation],
+        ensureConversationIndex: (String, inout [IMConversation]) -> Int,
+        makeMessages: ([IMConversationMessageResponseBody], UUID) -> [IMConversationMessage],
+        makeNotices: ([IMTimelineNoticeResponseBody]) -> [IMTimelineNotice],
+        mergeMessages: ([IMConversationMessage], [IMConversationMessage], Bool) -> [IMConversationMessage],
+        refreshLoadedMessageCursors: (String, [IMConversationTimelineItem]) -> Void
+    ) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return
+        }
+
+        let index = ensureConversationIndex(trimmedConversationID, &conversations)
+        let serverMessages = makeMessages(items.compactMap(\.message), currentUserID)
+        let serverNotices = makeNotices(items.compactMap(\.notice))
+        let mergedMessages = mergeMessages(conversations[index].messages, serverMessages, false)
+
+        conversations[index].messages = mergedMessages
+        conversations[index].notices = serverNotices.sorted(by: Self.noticeComparator)
+        conversations[index].lastMessagePreviewText = latestPreviewText(
+            messages: mergedMessages,
+            pendingMessages: conversations[index].pendingMessages,
+            fallback: conversations[index].lastMessagePreviewText
+        )
+        conversations[index].updatedAt = latestTimelineDate(
+            messages: mergedMessages,
+            pendingMessages: conversations[index].pendingMessages,
+            notices: conversations[index].notices,
+            fallback: conversations[index].updatedAt
+        )
+        conversations[index].hasMoreHistory = hasMore
+        refreshLoadedMessageCursors(trimmedConversationID, conversations[index].timelineItems)
+    }
+
+    func appendTimelineItems(
+        in conversationID: String,
+        items: [IMTimelineItemResponseBody],
+        currentUserID: UUID,
+        conversations: inout [IMConversation],
+        ensureConversationIndex: (String, inout [IMConversation]) -> Int,
+        makeMessages: ([IMConversationMessageResponseBody], UUID) -> [IMConversationMessage],
+        makeNotices: ([IMTimelineNoticeResponseBody]) -> [IMTimelineNotice],
+        mergeMessages: ([IMConversationMessage], [IMConversationMessage], Bool) -> [IMConversationMessage],
+        refreshLatestSyncedCursor: (String, [IMConversationTimelineItem]) -> Void
+    ) {
+        mergeTimeline(
+            in: conversationID,
+            items: items,
+            currentUserID: currentUserID,
+            conversations: &conversations,
+            ensureConversationIndex: ensureConversationIndex,
+            makeMessages: makeMessages,
+            makeNotices: makeNotices,
+            mergeMessages: mergeMessages,
+            refreshCursor: refreshLatestSyncedCursor
+        )
+    }
+
+    func prependTimelineItems(
+        in conversationID: String,
+        items: [IMTimelineItemResponseBody],
+        hasMore: Bool,
+        currentUserID: UUID,
+        conversations: inout [IMConversation],
+        ensureConversationIndex: (String, inout [IMConversation]) -> Int,
+        makeMessages: ([IMConversationMessageResponseBody], UUID) -> [IMConversationMessage],
+        makeNotices: ([IMTimelineNoticeResponseBody]) -> [IMTimelineNotice],
+        mergeMessages: ([IMConversationMessage], [IMConversationMessage], Bool) -> [IMConversationMessage],
+        refreshLoadedMessageCursors: (String, [IMConversationTimelineItem]) -> Void
+    ) {
+        mergeTimeline(
+            in: conversationID,
+            items: items,
+            currentUserID: currentUserID,
+            conversations: &conversations,
+            ensureConversationIndex: ensureConversationIndex,
+            makeMessages: makeMessages,
+            makeNotices: makeNotices,
+            mergeMessages: mergeMessages,
+            refreshCursor: refreshLoadedMessageCursors
+        )
+
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let index = conversations.firstIndex(where: { $0.id == trimmedConversationID }) else {
+            return
+        }
+        conversations[index].hasMoreHistory = hasMore
+    }
+
+    func replaceTimelineMessageItems(
         in conversationID: String,
         messages responses: [IMConversationMessageResponseBody],
         currentUserID: UUID,
@@ -10,7 +104,7 @@ struct ConversationTimelineStore {
         makeMessages: ([IMConversationMessageResponseBody], UUID) -> [IMConversationMessage],
         mergeMessages: ([IMConversationMessage], [IMConversationMessage], Bool) -> [IMConversationMessage],
         hasOlderHistory: ([IMConversationMessage]) -> Bool,
-        refreshLoadedMessageCursors: (String, [IMConversationMessage]) -> Void
+        refreshLoadedMessageCursors: (String, [IMConversationTimelineItem]) -> Void
     ) {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty else {
@@ -21,13 +115,17 @@ struct ConversationTimelineStore {
         let serverMessages = makeMessages(responses, currentUserID)
         let mergedMessages = mergeMessages(conversations[index].messages, serverMessages, false)
         conversations[index].messages = mergedMessages
-        conversations[index].lastMessagePreviewText = mergedMessages.last?.text ?? conversations[index].lastMessagePreviewText
+        conversations[index].lastMessagePreviewText = latestPreviewText(
+            messages: mergedMessages,
+            pendingMessages: conversations[index].pendingMessages,
+            fallback: conversations[index].lastMessagePreviewText
+        )
         conversations[index].updatedAt = mergedMessages.last?.createdAt ?? conversations[index].updatedAt
         conversations[index].hasMoreHistory = hasOlderHistory(serverMessages)
-        refreshLoadedMessageCursors(trimmedConversationID, mergedMessages)
+        refreshLoadedMessageCursors(trimmedConversationID, mergedMessages.map(IMConversationTimelineItem.message))
     }
 
-    func appendMessages(
+    func appendTimelineMessageItems(
         in conversationID: String,
         messages responses: [IMConversationMessageResponseBody],
         currentUserID: UUID,
@@ -35,7 +133,7 @@ struct ConversationTimelineStore {
         ensureConversationIndex: (String, inout [IMConversation]) -> Int,
         makeMessages: ([IMConversationMessageResponseBody], UUID) -> [IMConversationMessage],
         mergeMessages: ([IMConversationMessage], [IMConversationMessage], Bool) -> [IMConversationMessage],
-        refreshLatestSyncedCursor: (String, [IMConversationMessage]) -> Void
+        refreshLatestSyncedCursor: (String, [IMConversationTimelineItem]) -> Void
     ) {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty else {
@@ -46,12 +144,16 @@ struct ConversationTimelineStore {
         let serverMessages = makeMessages(responses, currentUserID)
         let mergedMessages = mergeMessages(conversations[index].messages, serverMessages, true)
         conversations[index].messages = mergedMessages
-        conversations[index].lastMessagePreviewText = mergedMessages.last?.text ?? conversations[index].lastMessagePreviewText
+        conversations[index].lastMessagePreviewText = latestPreviewText(
+            messages: mergedMessages,
+            pendingMessages: conversations[index].pendingMessages,
+            fallback: conversations[index].lastMessagePreviewText
+        )
         conversations[index].updatedAt = mergedMessages.last?.createdAt ?? conversations[index].updatedAt
-        refreshLatestSyncedCursor(trimmedConversationID, mergedMessages)
+        refreshLatestSyncedCursor(trimmedConversationID, mergedMessages.map(IMConversationTimelineItem.message))
     }
 
-    func prependMessages(
+    func prependTimelineMessageItems(
         in conversationID: String,
         messages responses: [IMConversationMessageResponseBody],
         currentUserID: UUID,
@@ -60,7 +162,7 @@ struct ConversationTimelineStore {
         makeMessages: ([IMConversationMessageResponseBody], UUID) -> [IMConversationMessage],
         mergeMessages: ([IMConversationMessage], [IMConversationMessage], Bool) -> [IMConversationMessage],
         hasOlderHistory: ([IMConversationMessage]) -> Bool,
-        refreshLoadedMessageCursors: (String, [IMConversationMessage]) -> Void
+        refreshLoadedMessageCursors: (String, [IMConversationTimelineItem]) -> Void
     ) {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty else {
@@ -71,10 +173,14 @@ struct ConversationTimelineStore {
         let serverMessages = makeMessages(responses, currentUserID)
         let mergedMessages = mergeMessages(conversations[index].messages, serverMessages, true)
         conversations[index].messages = mergedMessages
-        conversations[index].lastMessagePreviewText = mergedMessages.last?.text ?? conversations[index].lastMessagePreviewText
+        conversations[index].lastMessagePreviewText = latestPreviewText(
+            messages: mergedMessages,
+            pendingMessages: conversations[index].pendingMessages,
+            fallback: conversations[index].lastMessagePreviewText
+        )
         conversations[index].updatedAt = mergedMessages.last?.createdAt ?? conversations[index].updatedAt
         conversations[index].hasMoreHistory = hasOlderHistory(serverMessages)
-        refreshLoadedMessageCursors(trimmedConversationID, mergedMessages)
+        refreshLoadedMessageCursors(trimmedConversationID, mergedMessages.map(IMConversationTimelineItem.message))
     }
 
     func localMessageID(
@@ -96,5 +202,88 @@ struct ConversationTimelineStore {
             matchingReferencedMessageID: trimmedTargetMessageID,
             in: conversation.messages
         )
+    }
+
+    private func mergeTimeline(
+        in conversationID: String,
+        items: [IMTimelineItemResponseBody],
+        currentUserID: UUID,
+        conversations: inout [IMConversation],
+        ensureConversationIndex: (String, inout [IMConversation]) -> Int,
+        makeMessages: ([IMConversationMessageResponseBody], UUID) -> [IMConversationMessage],
+        makeNotices: ([IMTimelineNoticeResponseBody]) -> [IMTimelineNotice],
+        mergeMessages: ([IMConversationMessage], [IMConversationMessage], Bool) -> [IMConversationMessage],
+        refreshCursor: (String, [IMConversationTimelineItem]) -> Void
+    ) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty else {
+            return
+        }
+
+        let index = ensureConversationIndex(trimmedConversationID, &conversations)
+        let serverMessages = makeMessages(items.compactMap(\.message), currentUserID)
+        let serverNotices = makeNotices(items.compactMap(\.notice))
+        let mergedMessages = mergeMessages(conversations[index].messages, serverMessages, true)
+
+        conversations[index].messages = mergedMessages
+        conversations[index].notices = mergeNotices(conversations[index].notices, serverNotices)
+        conversations[index].lastMessagePreviewText = latestPreviewText(
+            messages: mergedMessages,
+            pendingMessages: conversations[index].pendingMessages,
+            fallback: conversations[index].lastMessagePreviewText
+        )
+        conversations[index].updatedAt = latestTimelineDate(
+            messages: mergedMessages,
+            pendingMessages: conversations[index].pendingMessages,
+            notices: conversations[index].notices,
+            fallback: conversations[index].updatedAt
+        )
+        refreshCursor(trimmedConversationID, conversations[index].timelineItems)
+    }
+
+    private func mergeNotices(
+        _ existing: [IMTimelineNotice],
+        _ serverNotices: [IMTimelineNotice]
+    ) -> [IMTimelineNotice] {
+        var merged = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        for notice in serverNotices {
+            merged[notice.id] = notice
+        }
+        return merged.values.sorted(by: Self.noticeComparator)
+    }
+
+    private func latestTimelineDate(
+        messages: [IMConversationMessage],
+        pendingMessages: [IMPendingConversationMessage],
+        notices: [IMTimelineNotice],
+        fallback: Date
+    ) -> Date {
+        let latestMessageDate = messages.map(\.createdAt).max()
+        let latestPendingDate = pendingMessages.map(\.createdAt).max()
+        let latestNoticeDate = notices.map(\.createdAt).max()
+        return [latestMessageDate, latestPendingDate, latestNoticeDate, fallback].compactMap { $0 }.max() ?? fallback
+    }
+
+    private func latestPreviewText(
+        messages: [IMConversationMessage],
+        pendingMessages: [IMPendingConversationMessage],
+        fallback: String
+    ) -> String {
+        if let latestPending = pendingMessages.max(by: { left, right in
+            if left.createdAt == right.createdAt {
+                return left.id < right.id
+            }
+            return left.createdAt < right.createdAt
+        }) {
+            return latestPending.text
+        }
+        return messages.last?.text ?? fallback
+    }
+
+    private static func noticeComparator(_ lhs: IMTimelineNotice, _ rhs: IMTimelineNotice) -> Bool {
+        if lhs.timelineSequence == rhs.timelineSequence {
+            return lhs.id < rhs.id
+        }
+        return lhs.timelineSequence < rhs.timelineSequence
     }
 }

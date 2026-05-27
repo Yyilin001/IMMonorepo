@@ -148,6 +148,7 @@ extension IMConversationStoreTests {
                         id: UUID(),
                         senderUserID: Self.peerUserID,
                         serverSequence: 8,
+                        timelineSequence: 8,
                         content: .richText(.plain("regular preview")),
                         createdAt: Date(timeIntervalSince1970: 1_700_410_100)
                     ),
@@ -164,6 +165,7 @@ extension IMConversationStoreTests {
                         id: UUID(),
                         senderUserID: Self.peerUserID,
                         serverSequence: 4,
+                        timelineSequence: 4,
                         content: .richText(.plain("muted preview")),
                         createdAt: Date(timeIntervalSince1970: 1_700_410_050)
                     ),
@@ -205,6 +207,7 @@ extension IMConversationStoreTests {
                         id: UUID(),
                         senderUserID: Self.peerUserID,
                         serverSequence: 2,
+                        timelineSequence: 2,
                         content: .richText(.plain("sync notes")),
                         createdAt: Date(timeIntervalSince1970: 1_700_420_100)
                     ),
@@ -219,6 +222,7 @@ extension IMConversationStoreTests {
                         id: UUID(),
                         senderUserID: Self.peerUserID,
                         serverSequence: 1,
+                        timelineSequence: 1,
                         content: .richText(.plain("lunch?")),
                         createdAt: Date(timeIntervalSince1970: 1_700_420_050)
                     ),

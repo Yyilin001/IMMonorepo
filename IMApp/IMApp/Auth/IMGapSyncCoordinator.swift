@@ -4,7 +4,7 @@ import IMClientKit
 @MainActor
 final class IMGapSyncCoordinator {
     private weak var runtime: ConversationRuntimeController?
-    private var backfillTask: Task<Void, Never>?
+    private var catchUpTask: Task<Void, Never>?
     private var queue: [String] = []
     private var activeConversationID: String?
 
@@ -23,7 +23,7 @@ final class IMGapSyncCoordinator {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty,
               runtime.imConversationStore.containsConversation(id: trimmedConversationID),
-              let latestLoadedSequence = runtime.imConversationStore.latestLoadedServerSequence(for: trimmedConversationID)
+              let latestLoadedSequence = runtime.imConversationStore.latestLoadedTimelineSequence(for: trimmedConversationID)
         else {
             return .completed
         }
@@ -33,7 +33,7 @@ final class IMGapSyncCoordinator {
             var iterations = 0
 
             while iterations < ConversationRuntimeController.HistoryConfig.gapSyncMaxIterations {
-                let response = try await runtime.sessionClient.fetchIMMessagesSince(
+                let response = try await runtime.sessionClient.fetchIMTimelineSince(
                     conversationID: trimmedConversationID,
                     afterSequence: afterSequence,
                     limit: ConversationRuntimeController.HistoryConfig.gapSyncLimit
@@ -46,9 +46,9 @@ final class IMGapSyncCoordinator {
                 }
 
                 runtime.markServerOnline()
-                runtime.imConversationStore.appendMessages(
+                runtime.imConversationStore.appendTimelinePage(
                     in: trimmedConversationID,
-                    messages: response.messages,
+                    response: response,
                     currentUserID: currentUserID
                 )
                 runtime.scheduleConversationCachePersist()
@@ -95,10 +95,10 @@ final class IMGapSyncCoordinator {
             case .completed:
                 await runtime.markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
             case .incomplete:
-                enqueueBackfill(for: conversationID)
+                enqueueCatchUp(for: conversationID)
                 await runtime.markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
             case .failed:
-                cancelBackfill()
+                cancelCatchUp()
                 return
             }
         }
@@ -115,7 +115,7 @@ final class IMGapSyncCoordinator {
         return [selectedConversationID] + conversationIDs.filter { $0 != selectedConversationID }
     }
 
-    func enqueueBackfill(
+    func enqueueCatchUp(
         for conversationID: String,
         prioritize: Bool = false
     ) {
@@ -136,34 +136,34 @@ final class IMGapSyncCoordinator {
             queue.append(trimmedConversationID)
         }
 
-        startBackfillIfNeeded()
+        startCatchUpIfNeeded()
     }
 
-    func startBackfillIfNeeded() {
+    func startCatchUpIfNeeded() {
         guard let runtime,
               let currentUserID = runtime.currentUserProvider()?.id,
               runtime.imConnection != nil,
-              backfillTask == nil,
+              catchUpTask == nil,
               !queue.isEmpty
         else {
             return
         }
 
         let generation = runtime.imConnectionGeneration
-        backfillTask = Task { [weak self] in
-            await self?.runBackfillLoop(
+        catchUpTask = Task { [weak self] in
+            await self?.runCatchUpLoop(
                 currentUserID: currentUserID,
                 generation: generation
             )
         }
     }
 
-    func cancelBackfill() {
-        backfillTask?.cancel()
-        clearBackfillState()
+    func cancelCatchUp() {
+        catchUpTask?.cancel()
+        clearCatchUpState()
     }
 
-    private func runBackfillLoop(
+    private func runCatchUpLoop(
         currentUserID: UUID,
         generation: UInt64
     ) async {
@@ -173,12 +173,12 @@ final class IMGapSyncCoordinator {
                   runtime.currentUserProvider()?.id == currentUserID,
                   runtime.imConnection != nil
             else {
-                clearBackfillState()
+                clearCatchUpState()
                 return
             }
 
             guard let conversationID = dequeueNextConversationID() else {
-                backfillTask = nil
+                catchUpTask = nil
                 activeConversationID = nil
                 return
             }
@@ -191,7 +191,7 @@ final class IMGapSyncCoordinator {
                   runtime.imConnection != nil,
                   !Task.isCancelled
             else {
-                clearBackfillState()
+                clearCatchUpState()
                 return
             }
 
@@ -200,9 +200,9 @@ final class IMGapSyncCoordinator {
                 await runtime.markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
             case .incomplete:
                 await runtime.markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
-                enqueueBackfill(for: conversationID)
+                enqueueCatchUp(for: conversationID)
             case .failed:
-                clearBackfillState()
+                clearCatchUpState()
                 return
             }
 
@@ -210,7 +210,7 @@ final class IMGapSyncCoordinator {
             await Task.yield()
         }
 
-        backfillTask = nil
+        catchUpTask = nil
         activeConversationID = nil
     }
 
@@ -227,8 +227,8 @@ final class IMGapSyncCoordinator {
         return queue.removeFirst()
     }
 
-    private func clearBackfillState() {
-        backfillTask = nil
+    private func clearCatchUpState() {
+        catchUpTask = nil
         queue = []
         activeConversationID = nil
     }
@@ -263,18 +263,65 @@ extension ConversationRuntimeController {
         gapSyncCoordinator.prioritizedTargets(conversationIDs)
     }
 
-    func enqueueConversationGapSyncBackfill(
+    func enqueueConversationGapSyncCatchUp(
         for conversationID: String,
         prioritize: Bool = false
     ) {
-        gapSyncCoordinator.enqueueBackfill(for: conversationID, prioritize: prioritize)
+        gapSyncCoordinator.enqueueCatchUp(for: conversationID, prioritize: prioritize)
     }
 
-    func startConversationGapSyncBackfillIfNeeded() {
-        gapSyncCoordinator.startBackfillIfNeeded()
+    func startConversationGapSyncCatchUpIfNeeded() {
+        gapSyncCoordinator.startCatchUpIfNeeded()
     }
 
-    func cancelConversationGapSyncBackfill() {
-        gapSyncCoordinator.cancelBackfill()
+    func cancelConversationGapSyncCatchUp() {
+        gapSyncCoordinator.cancelCatchUp()
+    }
+
+    func syncDomainEventsAfterConnection() async {
+        guard let currentUserID = currentUserProvider()?.id else {
+            return
+        }
+
+        var cursor = imConversationStore.domainEventSyncCursor
+        var iterations = 0
+        do {
+            while iterations < HistoryConfig.gapSyncMaxIterations {
+                let response = try await sessionClient.fetchIMDomainEvents(
+                    after: cursor,
+                    limit: HistoryConfig.gapSyncLimit
+                )
+                guard currentUserProvider()?.id == currentUserID else {
+                    return
+                }
+                markServerOnline()
+                let events = response.envelopes.map(\.payload)
+                for event in events {
+                    if case .contactChanged = event.body {
+                        applyContactDomainEvent(event)
+                    }
+                }
+                let outcome = imConversationStore.applyDomainEvents(
+                    response.envelopes,
+                    nextCursor: response.nextCursor,
+                    currentUserID: currentUserID
+                )
+                if let conversationID = outcome.shouldReloadMembersForConversationID {
+                    await loadConversationMembers(for: conversationID)
+                }
+                scheduleConversationCachePersist()
+
+                guard response.hasMore, response.nextCursor > cursor else {
+                    return
+                }
+                cursor = response.nextCursor
+                iterations += 1
+                try Task.checkCancellation()
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            await handleIMDataRequestError(error)
+        }
     }
 }

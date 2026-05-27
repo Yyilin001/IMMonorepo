@@ -84,49 +84,47 @@ struct FriendRequestService {
         remark: String?,
         on database: any Database
     ) async throws -> FriendRequestAcceptanceResult {
-        try await database.transaction { transaction in
-            let request = try await requirePendingRequest(
-                id: requestID,
-                requiredUserID: addresseeUserID,
-                role: .addressee,
-                on: transaction
-            )
-            let requesterUserID = request.$requester.id
-            let addresseeRemark = normalizedOptionalText(remark, maxLength: 64)
+        let request = try await requirePendingRequest(
+            id: requestID,
+            requiredUserID: addresseeUserID,
+            role: .addressee,
+            on: database
+        )
+        let requesterUserID = request.$requester.id
+        let addresseeRemark = normalizedOptionalText(remark, maxLength: 64)
 
-            request.status = FriendRequestStatus.accepted.rawValue
-            request.addresseeRemark = addresseeRemark
-            request.respondedAt = Date()
-            try await request.update(on: transaction)
+        request.status = FriendRequestStatus.accepted.rawValue
+        request.addresseeRemark = addresseeRemark
+        request.respondedAt = Date()
+        try await request.update(on: database)
 
-            let requesterContact = try await ensureContact(
-                ownerUserID: requesterUserID,
-                contactUserID: addresseeUserID,
-                remark: request.requesterRemark,
-                on: transaction
-            )
-            let acceptedContact = try await ensureContact(
-                ownerUserID: addresseeUserID,
-                contactUserID: requesterUserID,
-                remark: addresseeRemark,
-                on: transaction
-            )
-            let affectedDirectConversationIDs = try await IMDirectConversationStateService().updateExistingDirectConversations(
-                between: requesterUserID,
-                and: addresseeUserID,
-                to: .active,
-                on: transaction
-            )
-            try await request.$requester.load(on: transaction)
-            try await request.$addressee.load(on: transaction)
+        let requesterContact = try await ensureContact(
+            ownerUserID: requesterUserID,
+            contactUserID: addresseeUserID,
+            remark: request.requesterRemark,
+            on: database
+        )
+        let acceptedContact = try await ensureContact(
+            ownerUserID: addresseeUserID,
+            contactUserID: requesterUserID,
+            remark: addresseeRemark,
+            on: database
+        )
+        let affectedDirectConversationIDs = try await IMDirectConversationStateService().updateExistingDirectConversations(
+            between: requesterUserID,
+            and: addresseeUserID,
+            to: .active,
+            on: database
+        )
+        try await request.$requester.load(on: database)
+        try await request.$addressee.load(on: database)
 
-            return try FriendRequestAcceptanceResult(
-                request: FriendRequestResponse(request: request),
-                requesterContact: ContactResponse(contact: requesterContact),
-                addresseeContact: ContactResponse(contact: acceptedContact),
-                affectedDirectConversationIDs: affectedDirectConversationIDs
-            )
-        }
+        return try FriendRequestAcceptanceResult(
+            request: FriendRequestResponse(request: request),
+            requesterContact: ContactResponse(contact: requesterContact),
+            addresseeContact: ContactResponse(contact: acceptedContact),
+            affectedDirectConversationIDs: affectedDirectConversationIDs
+        )
     }
 
     func declineRequest(

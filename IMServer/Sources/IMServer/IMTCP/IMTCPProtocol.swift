@@ -8,6 +8,7 @@ enum IMTCPPacketType: String, Codable, Sendable {
     case heartbeatAck = "heartbeat_ack"
     case sendMessage = "send_message"
     case domainEvent = "domain_event"
+    case streamSignal = "stream_signal"
     case ack
     case kick
 }
@@ -19,6 +20,7 @@ enum IMTCPProtocolError: Error, LocalizedError, Sendable {
     case duplicateAuth
     case unsupportedPacketType
     case unsupportedProtocolVersion(Int)
+    case invalidPayload(reason: String)
 
     var errorDescription: String? {
         switch self {
@@ -34,6 +36,8 @@ enum IMTCPProtocolError: Error, LocalizedError, Sendable {
             return "Unsupported packet type."
         case .unsupportedProtocolVersion(let version):
             return "Unsupported protocol version: \(version)."
+        case .invalidPayload(let reason):
+            return "Invalid TCP payload: \(reason)."
         }
     }
 }
@@ -44,7 +48,6 @@ struct IMTCPAuthRequestPayload: Codable, Sendable {
     let deviceName: String?
     let platform: String?
     let appVersion: String?
-    let protocolVersion: Int
 }
 
 struct IMTCPAuthAcceptedPayload: Codable, Sendable {
@@ -112,6 +115,11 @@ struct IMTCPMessageStreamPayload: Codable, Equatable, Sendable {
     let serverTimestamp: Date
 }
 
+struct IMTCPMessageStreamSignalPayload: Codable, Equatable, Sendable {
+    let stream: IMTCPMessageStreamPayload
+    let message: IMMessageResponse?
+}
+
 enum IMTCPChatDomainEventType: String, Codable, Sendable {
     case messageCreated = "message_created"
     case messageEdited = "message_edited"
@@ -119,7 +127,6 @@ enum IMTCPChatDomainEventType: String, Codable, Sendable {
     case messageVisibilityChanged = "message_visibility_changed"
     case messageFavoriteChanged = "message_favorite_changed"
     case messageStreamStarted = "message_stream_started"
-    case messageStreamChunk = "message_stream_chunk"
     case messageStreamCompleted = "message_stream_completed"
     case messageStreamFailed = "message_stream_failed"
     case messageStreamCancelled = "message_stream_cancelled"
@@ -159,7 +166,41 @@ struct IMTCPChatDomainEventPayload: Sendable {
     let occurredAt: Date
     let actorUserID: UUID?
     let conversation: IMConversationResponse?
+    let timelineNotice: IMTimelineNoticeResponse?
+    let requiresTimelineNotice: Bool
+    let ownerCursor: UInt64?
+    let ownerAggregateSequence: UInt64?
     let body: IMTCPChatDomainEventBody
+
+    init(
+        eventID: UUID,
+        eventType: IMTCPChatDomainEventType,
+        aggregateType: String,
+        aggregateID: UUID,
+        aggregateSequence: UInt64,
+        occurredAt: Date,
+        actorUserID: UUID?,
+        conversation: IMConversationResponse?,
+        timelineNotice: IMTimelineNoticeResponse? = nil,
+        requiresTimelineNotice: Bool = false,
+        ownerCursor: UInt64? = nil,
+        ownerAggregateSequence: UInt64? = nil,
+        body: IMTCPChatDomainEventBody
+    ) {
+        self.eventID = eventID
+        self.eventType = eventType
+        self.aggregateType = aggregateType
+        self.aggregateID = aggregateID
+        self.aggregateSequence = aggregateSequence
+        self.occurredAt = occurredAt
+        self.actorUserID = actorUserID
+        self.conversation = conversation
+        self.timelineNotice = timelineNotice
+        self.requiresTimelineNotice = requiresTimelineNotice
+        self.ownerCursor = ownerCursor
+        self.ownerAggregateSequence = ownerAggregateSequence
+        self.body = body
+    }
 }
 
 enum IMTCPKickReason: String, Codable, Sendable {

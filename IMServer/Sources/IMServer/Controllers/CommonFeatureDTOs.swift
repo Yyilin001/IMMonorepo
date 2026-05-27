@@ -56,7 +56,7 @@ struct ReportMessageSnapshot: Codable, Equatable, Sendable {
     let conversationID: UUID
     let messageID: UUID
     let senderUserID: UUID
-    let serverSequence: Int
+    let serverSequence: UInt64
     let content: IMMessageContent
     let derivedState: IMMessageDerivedState
     let createdAt: Date?

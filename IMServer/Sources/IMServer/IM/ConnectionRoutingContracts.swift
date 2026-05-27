@@ -4,31 +4,82 @@ import Vapor
 struct NodeMessageDispatchEnvelope: Codable, Sendable {
     enum Action: String, Codable, Sendable {
         case domainEvent
+        case streamSignal
         case kickSession
         case kickUser
     }
 
-    let action: Action
-    let packetType: IMTCPPacketType?
     let requestID: UUID?
-    let packetBase64: String?
-    let targetUserIDs: [UUID]
-    let sessionID: UUID?
-    let kickReason: IMTCPKickReason?
-    let kickMessage: String?
+    let payload: Payload
+
+    enum Payload: Codable, Sendable {
+        case domainEvent(ownerUserID: UUID, eventID: UUID)
+        case streamSignal(packetBase64: String, targetUserIDs: [UUID])
+        case kickSession(sessionID: UUID, reason: IMTCPKickReason, message: String)
+        case kickUser(userID: UUID, reason: IMTCPKickReason, message: String)
+    }
+
+    var action: Action {
+        switch payload {
+        case .domainEvent:
+            return .domainEvent
+        case .streamSignal:
+            return .streamSignal
+        case .kickSession:
+            return .kickSession
+        case .kickUser:
+            return .kickUser
+        }
+    }
+
+    var targetUserIDs: [UUID] {
+        switch payload {
+        case .domainEvent(let ownerUserID, _):
+            return [ownerUserID]
+        case .streamSignal(_, let targetUserIDs):
+            return targetUserIDs
+        case .kickSession:
+            return []
+        case .kickUser(let userID, _, _):
+            return [userID]
+        }
+    }
+
+    var sessionID: UUID? {
+        if case .kickSession(let sessionID, _, _) = payload {
+            return sessionID
+        }
+        return nil
+    }
 }
 
 extension NodeMessageDispatchEnvelope {
     func withTargetUserIDs(_ targetUserIDs: [UUID]) -> NodeMessageDispatchEnvelope {
-        NodeMessageDispatchEnvelope(
-            action: action,
-            packetType: packetType,
+        switch payload {
+        case .streamSignal(let packetBase64, _):
+            return NodeMessageDispatchEnvelope(
+                requestID: requestID,
+                payload: .streamSignal(packetBase64: packetBase64, targetUserIDs: targetUserIDs)
+            )
+        case .kickUser(_, let reason, let message):
+            guard let userID = targetUserIDs.first else { return self }
+            return NodeMessageDispatchEnvelope(
+                requestID: requestID,
+                payload: .kickUser(userID: userID, reason: reason, message: message)
+            )
+        case .domainEvent,
+             .kickSession:
+            return self
+        }
+    }
+
+    func withSessionID(_ sessionID: UUID) -> NodeMessageDispatchEnvelope {
+        guard case .kickSession(_, let reason, let message) = payload else {
+            return self
+        }
+        return NodeMessageDispatchEnvelope(
             requestID: requestID,
-            packetBase64: packetBase64,
-            targetUserIDs: targetUserIDs,
-            sessionID: sessionID,
-            kickReason: kickReason,
-            kickMessage: kickMessage
+            payload: .kickSession(sessionID: sessionID, reason: reason, message: message)
         )
     }
 }

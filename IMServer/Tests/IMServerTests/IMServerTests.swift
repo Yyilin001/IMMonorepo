@@ -28,6 +28,26 @@ struct IMServerTests {
             appVersion: "1.0"
         )
     )
+
+    @Test("TCP protocol version ignores runtime environment override")
+    func tcpProtocolVersionIgnoresRuntimeEnvironmentOverride() {
+        let key = "IM_TCP_PROTOCOL_VERSION"
+        let previousValue = getenv(key).map { String(cString: $0) }
+        setenv(key, "8", 1)
+        defer {
+            if let previousValue {
+                setenv(key, previousValue, 1)
+            } else {
+                unsetenv(key)
+            }
+        }
+
+        let configuration = IMTCPConfiguration.load(from: .production)
+
+        #expect(configuration.protocolVersion == IMRealtimeProtocolVersion.currentInt)
+        #expect(configuration.protocolVersion == 9)
+    }
+
     @Test("Reset IM schema rebuilds testing database cleanly")
     func resetIMSchemaRebuildsTestingDatabase() async throws {
         try await withApp(configure: { app in
@@ -688,7 +708,8 @@ struct IMServerTests {
             lastMessage: IMMessagePreviewResponse(
                 id: UUID(),
                 senderUserID: peerUserID,
-                serverSequence: serverSequence,
+                serverSequence: UInt64(serverSequence),
+                timelineSequence: UInt64(serverSequence),
                 content: .richText(.plain(title)),
                 createdAt: lastActivityAt
             ),

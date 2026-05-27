@@ -820,7 +820,7 @@ struct SessionClientTests {
         #expect(members.nextCursor == nil)
     }
 
-    @Test func fetchIMMessagesUsesConversationHistoryEndpoint() async throws {
+    @Test func fetchIMTimelineUsesConversationTimelineEndpoint() async throws {
         let tokenStore = InMemoryTokenStore()
         let userCache = InMemoryUserSessionCache()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
@@ -830,8 +830,8 @@ struct SessionClientTests {
             case ("POST", "/api/auth/login", _):
                 let body = try Self.authResponseBody(accessToken: "access-1", refreshToken: "refresh-1")
                 return HTTPFixtures.response(statusCode: 200, body: body)
-            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/messages", "Bearer access-1"):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.imMessagesBody(conversationID: conversationID))
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline", "Bearer access-1"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imTimelineBody(conversationID: conversationID))
             default:
                 Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
                 return HTTPFixtures.response(statusCode: 500)
@@ -846,7 +846,8 @@ struct SessionClientTests {
 
         let noDevice: DeviceMetadataPayload? = nil
         _ = try await client.login(email: Self.userEmail, password: "password123", device: noDevice)
-        let messages = try await client.fetchIMMessages(conversationID: conversationID.uuidString)
+        let response = try await client.fetchIMTimeline(conversationID: conversationID.uuidString)
+        let messages = response.items.compactMap(\.message)
 
         #expect(messages.count == 2)
         #expect(messages.map(\.serverSequence) == [1, 2])
@@ -854,7 +855,7 @@ struct SessionClientTests {
         #expect(messages.map { $0.body["text"] } == ["first", "second"])
     }
 
-    @Test func fetchIMMessagesPaginationUsesQueryItems() async throws {
+    @Test func fetchIMTimelinePaginationUsesQueryItems() async throws {
         let tokenStore = InMemoryTokenStore()
         let userCache = InMemoryUserSessionCache()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
@@ -871,11 +872,11 @@ struct SessionClientTests {
                 return HTTPFixtures.response(statusCode: 200, body: body)
             case (
                 "GET",
-                "/api/im/conversations/\(conversationID.uuidString)/messages",
+                "/api/im/conversations/\(conversationID.uuidString)/timeline",
                 "beforeSequence=3&limit=2",
                 "Bearer access-1"
             ):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.imMessagesBody(conversationID: conversationID))
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imTimelineBody(conversationID: conversationID))
             default:
                 Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
                 return HTTPFixtures.response(statusCode: 500)
@@ -890,17 +891,18 @@ struct SessionClientTests {
 
         let noDevice: DeviceMetadataPayload? = nil
         _ = try await client.login(email: Self.userEmail, password: "password123", device: noDevice)
-        let messages = try await client.fetchIMMessages(
+        let response = try await client.fetchIMTimeline(
             conversationID: conversationID.uuidString,
             beforeSequence: 3,
             limit: 2
         )
+        let messages = response.items.compactMap(\.message)
 
         #expect(messages.count == 2)
         #expect(messages.map(\.serverSequence) == [1, 2])
     }
 
-    @Test func fetchIMMessagesSinceUsesIncrementalEndpoint() async throws {
+    @Test func fetchIMTimelineSinceUsesIncrementalEndpoint() async throws {
         let tokenStore = InMemoryTokenStore()
         let userCache = InMemoryUserSessionCache()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
@@ -917,11 +919,11 @@ struct SessionClientTests {
                 return HTTPFixtures.response(statusCode: 200, body: body)
             case (
                 "GET",
-                "/api/im/conversations/\(conversationID.uuidString)/messages/since",
+                "/api/im/conversations/\(conversationID.uuidString)/timeline/since",
                 "afterSequence=2&limit=50",
                 "Bearer access-1"
             ):
-                return HTTPFixtures.response(statusCode: 200, body: try Self.imMessagesSinceBody(conversationID: conversationID))
+                return HTTPFixtures.response(statusCode: 200, body: try Self.imTimelineBody(conversationID: conversationID))
             default:
                 Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
                 return HTTPFixtures.response(statusCode: 500)
@@ -936,12 +938,12 @@ struct SessionClientTests {
 
         let noDevice: DeviceMetadataPayload? = nil
         _ = try await client.login(email: Self.userEmail, password: "password123", device: noDevice)
-        let response = try await client.fetchIMMessagesSince(
+        let response = try await client.fetchIMTimelineSince(
             conversationID: conversationID.uuidString,
             afterSequence: 2,
             limit: 50
         )
-        let messages = response.messages
+        let messages = response.items.compactMap(\.message)
 
         #expect(messages.count == 2)
         #expect(messages.map(\.serverSequence) == [1, 2])
@@ -1105,56 +1107,41 @@ struct SessionClientTests {
         )
     }
 
-    private static func imMessagesBody(conversationID: UUID) throws -> Data {
+    private static func imTimelineBody(conversationID: UUID) throws -> Data {
         try HTTPFixtures.jsonBody(
-            [
-                IMConversationMessageResponseBody(
-                    id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
-                    conversationID: conversationID,
-                    senderUserID: userID,
-                    clientMessageID: "client-history-1",
-                    serverSequence: 1,
-                    kind: "rich_text",
-                    body: ["text": "first"],
-                    createdAt: Date(timeIntervalSince1970: 1_700_200_000)
-                ),
-                IMConversationMessageResponseBody(
-                    id: UUID(uuidString: "66666666-7777-8888-9999-aaaaaaaaaaaa")!,
-                    conversationID: conversationID,
-                    senderUserID: userID,
-                    clientMessageID: "client-history-2",
-                    serverSequence: 2,
-                    kind: "rich_text",
-                    body: ["text": "second"],
-                    createdAt: Date(timeIntervalSince1970: 1_700_200_100)
-                )
-            ]
-        )
-    }
-
-    private static func imMessagesSinceBody(conversationID: UUID) throws -> Data {
-        try HTTPFixtures.jsonBody(
-            IMConversationMessagesSinceResponseBody(
-                messages: [
-                    IMConversationMessageResponseBody(
-                        id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
-                        conversationID: conversationID,
-                        senderUserID: userID,
-                        clientMessageID: "client-history-1",
-                        serverSequence: 1,
-                        kind: "rich_text",
-                        body: ["text": "first"],
-                        createdAt: Date(timeIntervalSince1970: 1_700_200_000)
+            IMConversationTimelineResponseBody(
+                items: [
+                    IMTimelineItemResponseBody(
+                        type: .message,
+                        timelineSequence: 1,
+                        message: IMConversationMessageResponseBody(
+                            id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+                            conversationID: conversationID,
+                            senderUserID: userID,
+                            clientMessageID: "client-history-1",
+                            serverSequence: 1,
+                            timelineSequence: 1,
+                            kind: "rich_text",
+                            body: ["text": "first"],
+                            createdAt: Date(timeIntervalSince1970: 1_700_200_000)
+                        ),
+                        notice: nil
                     ),
-                    IMConversationMessageResponseBody(
-                        id: UUID(uuidString: "66666666-7777-8888-9999-aaaaaaaaaaaa")!,
-                        conversationID: conversationID,
-                        senderUserID: userID,
-                        clientMessageID: "client-history-2",
-                        serverSequence: 2,
-                        kind: "rich_text",
-                        body: ["text": "second"],
-                        createdAt: Date(timeIntervalSince1970: 1_700_200_100)
+                    IMTimelineItemResponseBody(
+                        type: .message,
+                        timelineSequence: 2,
+                        message: IMConversationMessageResponseBody(
+                            id: UUID(uuidString: "66666666-7777-8888-9999-aaaaaaaaaaaa")!,
+                            conversationID: conversationID,
+                            senderUserID: userID,
+                            clientMessageID: "client-history-2",
+                            serverSequence: 2,
+                            timelineSequence: 2,
+                            kind: "rich_text",
+                            body: ["text": "second"],
+                            createdAt: Date(timeIntervalSince1970: 1_700_200_100)
+                        ),
+                        notice: nil
                     )
                 ],
                 hasMore: false,

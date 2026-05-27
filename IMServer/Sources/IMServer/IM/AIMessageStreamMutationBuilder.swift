@@ -114,7 +114,7 @@ enum AIMessageStreamMutationBuilder {
         )
     }
 
-    static func eventType(for state: MessageStreamLifecycleState) -> IMTCPChatDomainEventType {
+    static func eventType(for state: MessageStreamLifecycleState) throws -> IMTCPChatDomainEventType {
         switch state {
         case .completed:
             .messageStreamCompleted
@@ -123,7 +123,7 @@ enum AIMessageStreamMutationBuilder {
         case .cancelled:
             .messageStreamCancelled
         case .streaming:
-            .messageStreamChunk
+            throw Abort(.internalServerError, reason: "Streaming chunks are transient TCP stream signals, not durable domain events.")
         }
     }
 }

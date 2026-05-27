@@ -162,7 +162,7 @@ extension IMConversationDetailView {
         }
 
         return IMReplyReference(
-            messageID: message.serverMessageID ?? message.id,
+            messageID: message.serverMessageID,
             senderUserID: message.senderUserID,
             previewText: replyComposerPreviewText(for: message)
         )

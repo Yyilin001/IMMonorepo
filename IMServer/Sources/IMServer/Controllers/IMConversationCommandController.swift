@@ -157,7 +157,7 @@ extension IMConversationController {
         let response = try await commandService.markConversationRead(
             in: conversationID,
             for: userID,
-            readSequence: body.readSequence
+            readSequence: try imIntSequence(body.readSequence, field: "readSequence")
         )
         try await sideEffects.projectInlineOutboxIfAllowed()
         return response

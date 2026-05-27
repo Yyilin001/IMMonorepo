@@ -20,6 +20,7 @@ struct CreateConversationEventAuxiliaryReadModelTables: AsyncMigration {
             .field("source_topic", .string, .required)
             .field("conversation_id", .uuid, .required)
             .field("event_type", .string, .required)
+            .field("aggregate_sequence", .int, .required)
             .field("producer_shard", .string, .required)
             .field("payload_json", .string, .required)
             .field("status", .string, .required)

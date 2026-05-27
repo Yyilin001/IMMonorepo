@@ -227,11 +227,12 @@ extension IMServerTests {
                 #expect(response.avatarPreset == .forest)
             })
 
-            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/timeline", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
-                let messages = try res.content.decode([IMMessageResponse].self)
+                let timeline = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = timeline.items.compactMap(\.message)
                 #expect(messages.isEmpty)
             })
         }
@@ -278,11 +279,12 @@ extension IMServerTests {
                 #expect(res.status == .ok)
             })
 
-            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/timeline", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
-                let messages = try res.content.decode([IMMessageResponse].self)
+                let timeline = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = timeline.items.compactMap(\.message)
                 #expect(messages.isEmpty)
             })
         }

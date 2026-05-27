@@ -13,10 +13,21 @@ struct ConversationEventEnvelope: Sendable {
     let event: ConversationDomainEvent
     let payload: ConversationDomainEventPayload
     let deliveryContext: DeliveryContext?
+    let eventType: ConversationDomainEventType
 
     var eventID: UUID? { event.id }
     var conversationID: UUID { event.conversationID }
-    var eventType: ConversationDomainEventType { event.eventTypeEnum }
+
+    init(
+        event: ConversationDomainEvent,
+        payload: ConversationDomainEventPayload,
+        deliveryContext: DeliveryContext?
+    ) throws {
+        self.event = event
+        self.payload = payload
+        self.deliveryContext = deliveryContext
+        self.eventType = try event.eventTypeEnum
+    }
 }
 
 protocol ConversationEventConsumer: Sendable {
@@ -92,6 +103,10 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
             }
         case .messageUpdated,
              .messageRecalled,
+             .messageStreamStarted,
+             .messageStreamCompleted,
+             .messageStreamFailed,
+             .messageStreamCancelled,
              .metadataUpdated,
              .membershipAdded,
              .membershipRemoved,
@@ -216,6 +231,10 @@ struct ChangesLogConsumer: ConversationEventConsumer {
                 }
             }
         case .messageCreated,
+             .messageStreamStarted,
+             .messageStreamCompleted,
+             .messageStreamFailed,
+             .messageStreamCancelled,
              .readAdvanced:
             return
         case .messageUpdated,
@@ -256,14 +275,34 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
     }
 
     func consume(_ envelope: ConversationEventEnvelope) async throws {
+        guard envelope.eventID != nil else {
+            return
+        }
+        let payloads = try await domainEventPayloads(for: envelope)
+        for (recipientUserID, payload) in payloads {
+            await app.gatewaySessionService.sendDomainEventDelivery(
+                ownerUserID: recipientUserID,
+                eventID: payload.eventID,
+                requestID: payload.eventID
+            )
+        }
+    }
+
+    func domainEventPayloads(for envelope: ConversationEventEnvelope) async throws -> [(UUID, IMTCPChatDomainEventPayload)] {
         let recipientUserIDs = realtimeRecipientUserIDs(for: envelope)
         guard !recipientUserIDs.isEmpty else {
-            return
+            return []
         }
 
         let message = try await messageResponse(for: envelope)
-        let eventID = envelope.eventID ?? UUID()
-        let aggregateSequence = UInt64(message?.serverSequence ?? 0)
+        guard let eventID = envelope.eventID else {
+            throw Abort(.internalServerError, reason: "领域事件缺少 eventID。")
+        }
+        guard envelope.event.aggregateSequence > 0 else {
+            throw Abort(.internalServerError, reason: "领域事件缺少 aggregate_sequence。")
+        }
+        let aggregateSequence = UInt64(envelope.event.aggregateSequence)
+        var payloads: [(UUID, IMTCPChatDomainEventPayload)] = []
 
         for recipientUserID in recipientUserIDs {
             let conversation = try? await ConversationStrongReadService(app: app).conversationSummary(
@@ -275,20 +314,16 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
                 eventType: envelope.eventType.chatDomainEventType,
                 aggregateType: "conversation",
                 aggregateID: envelope.conversationID,
-                aggregateSequence: aggregateSequence == 0
-                    ? UInt64(max(conversation?.lastMessage?.serverSequence ?? conversation?.lastReadSequence ?? 0, 0))
-                    : aggregateSequence,
+                aggregateSequence: aggregateSequence,
                 occurredAt: envelope.event.createdAt,
-                actorUserID: nil,
+                actorUserID: envelope.event.actorUserID,
                 conversation: conversation,
-                body: domainEventBody(for: envelope, message: message)
+                requiresTimelineNotice: envelope.eventType.requiresTimelineNotice,
+                body: try domainEventBody(for: envelope, message: message)
             )
-            await app.gatewaySessionService.sendDomainEvent(
-                payload,
-                toUserIDs: [recipientUserID],
-                requestID: eventID
-            )
+            payloads.append((recipientUserID, payload))
         }
+        return payloads
     }
 
     private func realtimeRecipientUserIDs(for envelope: ConversationEventEnvelope) -> [UUID] {
@@ -298,6 +333,10 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
         case .messageCreated,
              .messageUpdated,
              .messageRecalled,
+             .messageStreamStarted,
+             .messageStreamCompleted,
+             .messageStreamFailed,
+             .messageStreamCancelled,
              .readAdvanced,
              .metadataUpdated,
              .membershipAdded,
@@ -329,26 +368,32 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
     private func domainEventBody(
         for envelope: ConversationEventEnvelope,
         message: IMMessageResponse?
-    ) -> IMTCPChatDomainEventBody {
+    ) throws -> IMTCPChatDomainEventBody {
         switch envelope.eventType {
         case .messageCreated:
-            if let message {
-                return .messageCreated(message: message, clientMessageID: message.clientMessageID)
+            guard let message else {
+                throw Abort(.internalServerError, reason: "message_created 缺少消息正文。")
             }
-            return .conversationChanged
+            return .messageCreated(message: message, clientMessageID: message.clientMessageID)
         case .messageUpdated:
+            guard let messageID = envelope.payload.messageID else {
+                throw Abort(.internalServerError, reason: "message_edited 缺少 messageID。")
+            }
             let body = message.flatMap { richTextBody(from: $0.content) } ?? .plain(message?.content.previewText ?? "")
             return .messageEdited(
-                messageID: envelope.payload.messageID ?? message?.id ?? UUID(),
+                messageID: messageID,
                 body: body,
                 editedAt: message?.derivedState.edits.last?.editedAt ?? envelope.event.createdAt,
                 message: message
             )
         case .messageRecalled:
+            guard let messageID = envelope.payload.messageID else {
+                throw Abort(.internalServerError, reason: "message_revoked 缺少 messageID。")
+            }
             return .messageRevoked(
-                messageID: envelope.payload.messageID ?? message?.id ?? UUID(),
+                messageID: messageID,
                 revokedAt: envelope.event.createdAt,
-                revokedByUserID: nil,
+                revokedByUserID: envelope.event.actorUserID,
                 message: message
             )
         case .messageVisibilityChanged:
@@ -358,9 +403,20 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
                 visibilityAction: envelope.payload.visibilityAction
             )
         case .messageFavoriteChanged:
+            guard let messageID = envelope.payload.favoriteChangedMessageID else {
+                throw Abort(.internalServerError, reason: "message_favorite_changed 缺少 messageID。")
+            }
             return .messageFavoriteChanged(
-                messageID: envelope.payload.favoriteChangedMessageID ?? envelope.payload.messageID ?? message?.id ?? UUID(),
+                messageID: messageID,
                 isFavorited: envelope.payload.isFavorited ?? false
+            )
+        case .messageStreamStarted,
+             .messageStreamCompleted,
+             .messageStreamFailed,
+             .messageStreamCancelled:
+            return .messageStream(
+                try streamPayload(for: envelope),
+                message: message
             )
         case .conversationRemovedForUser:
             return .conversationRemovedForSelf
@@ -384,6 +440,37 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
         }
     }
 
+    private func streamPayload(for envelope: ConversationEventEnvelope) throws -> IMTCPMessageStreamPayload {
+        guard let messageID = envelope.payload.messageID,
+              let streamID = envelope.payload.streamID
+        else {
+            throw Abort(.internalServerError, reason: "message_stream 事件缺少 messageID 或 streamID。")
+        }
+        let state: MessageStreamLifecycleState
+        switch envelope.eventType {
+        case .messageStreamStarted:
+            state = .streaming
+        case .messageStreamCompleted:
+            state = .completed
+        case .messageStreamFailed:
+            state = .failed
+        case .messageStreamCancelled:
+            state = .cancelled
+        default:
+            throw Abort(.internalServerError, reason: "非 stream 事件不能构造 stream payload。")
+        }
+        return IMTCPMessageStreamPayload(
+            streamID: streamID,
+            messageID: messageID.uuidString,
+            conversationID: envelope.conversationID.uuidString,
+            chunkIndex: 0,
+            deltaText: nil,
+            partialTextLength: 0,
+            state: state,
+            serverTimestamp: envelope.event.createdAt
+        )
+    }
+
     private func richTextBody(from content: IMMessageContent) -> IMRichTextContent? {
         switch content {
         case .richText(let body):
@@ -393,6 +480,77 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
         case .image, .audio, .file:
             return nil
         }
+    }
+}
+
+struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
+    let app: Application
+    let sourceDB: any Database
+
+    var supportedEventTypes: Set<ConversationDomainEventType> {
+        Set(ConversationDomainEventType.allCases)
+    }
+
+    func consume(_ envelope: ConversationEventEnvelope) async throws {
+        guard let sourceEventID = envelope.eventID else {
+            return
+        }
+        let payloads = try await ConversationRealtimeConsumer(app: app, sourceDB: sourceDB)
+            .domainEventPayloads(for: envelope)
+        let timelineNotice = try await timelineNotice(forEventID: sourceEventID)
+        if envelope.eventType.requiresTimelineNotice, timelineNotice == nil {
+            throw Abort(.internalServerError, reason: "领域事件需要 timeline notice，但 projection 未生成。")
+        }
+        for (ownerUserID, payload) in payloads {
+            let db = app.summaryShardRouter.database(forOwnerUserID: ownerUserID)
+            try await OwnerDomainEventDeliveryService(db: db).record(
+                payload: payload.withTimelineNotice(timelineNotice),
+                ownerUserID: ownerUserID,
+                sourceType: .conversation,
+                sourceEventID: sourceEventID,
+                createdAt: envelope.event.createdAt
+            )
+        }
+    }
+
+    private func timelineNotice(forEventID eventID: UUID) async throws -> IMTimelineNoticeResponse? {
+        guard let notice = try await ConversationTimelineNotice.find(eventID, on: sourceDB),
+              let id = notice.eventID
+        else {
+            return nil
+        }
+        return IMTimelineNoticeResponse(
+            id: id,
+            conversationID: notice.conversationID,
+            timelineSequence: try imPositiveUInt64Sequence(notice.timelineSequence, field: "timeline_sequence"),
+            eventType: notice.eventType,
+            actorUserID: notice.actorUserID,
+            targetUserIDs: try notice.targetUserIDs,
+            noticeKind: notice.noticeKind,
+            params: try notice.params,
+            fallbackText: notice.fallbackText,
+            createdAt: notice.createdAt
+        )
+    }
+}
+
+private extension IMTCPChatDomainEventPayload {
+    func withTimelineNotice(_ timelineNotice: IMTimelineNoticeResponse?) -> IMTCPChatDomainEventPayload {
+        IMTCPChatDomainEventPayload(
+            eventID: eventID,
+            eventType: eventType,
+            aggregateType: aggregateType,
+            aggregateID: aggregateID,
+            aggregateSequence: aggregateSequence,
+            occurredAt: occurredAt,
+            actorUserID: actorUserID,
+            conversation: conversation,
+            timelineNotice: timelineNotice,
+            requiresTimelineNotice: requiresTimelineNotice,
+            ownerCursor: ownerCursor,
+            ownerAggregateSequence: ownerAggregateSequence,
+            body: body
+        )
     }
 }
 
@@ -444,6 +602,10 @@ struct ConversationNotificationConsumer: ConversationEventConsumer {
         case .messageCreated,
              .messageUpdated,
              .messageRecalled,
+             .messageStreamStarted,
+             .messageStreamCompleted,
+             .messageStreamFailed,
+             .messageStreamCancelled,
              .readAdvanced,
              .metadataUpdated,
              .membershipAdded,
@@ -504,6 +666,10 @@ struct ConversationNotificationRunWriter {
         case .messageCreated,
              .messageUpdated,
              .messageRecalled,
+             .messageStreamStarted,
+             .messageStreamCompleted,
+             .messageStreamFailed,
+             .messageStreamCancelled,
              .readAdvanced,
              .metadataUpdated,
              .membershipAdded,
@@ -537,6 +703,10 @@ struct ConversationSearchIndexConsumer: ConversationEventConsumer {
         case .messageCreated, .messageUpdated, .messageRecalled:
             try await app.conversationSearchIndexWriter.reindexMessage(messageID: messageID, on: db)
         case .readAdvanced,
+             .messageStreamStarted,
+             .messageStreamCompleted,
+             .messageStreamFailed,
+             .messageStreamCancelled,
              .metadataUpdated,
              .membershipAdded,
              .membershipRemoved,
@@ -615,6 +785,32 @@ struct ConversationEventConsumerRegistry: Sendable {
 private struct ConversationEventConsumerTimeoutError: Error {}
 
 private extension ConversationDomainEventType {
+    var requiresTimelineNotice: Bool {
+        switch self {
+        case .metadataUpdated,
+             .membershipAdded,
+             .membershipRemoved,
+             .membershipRoleUpdated,
+             .directPeerUpdated,
+             .conversationVisibilityChanged,
+             .conversationSettingsChanged,
+             .inviteChanged:
+            return true
+        case .messageCreated,
+             .messageUpdated,
+             .messageRecalled,
+             .messageStreamStarted,
+             .messageStreamCompleted,
+             .messageStreamFailed,
+             .messageStreamCancelled,
+             .readAdvanced,
+             .messageVisibilityChanged,
+             .messageFavoriteChanged,
+             .conversationRemovedForUser:
+            return false
+        }
+    }
+
     var chatDomainEventType: IMTCPChatDomainEventType {
         switch self {
         case .messageCreated:
@@ -623,6 +819,14 @@ private extension ConversationDomainEventType {
             return .messageEdited
         case .messageRecalled:
             return .messageRevoked
+        case .messageStreamStarted:
+            return .messageStreamStarted
+        case .messageStreamCompleted:
+            return .messageStreamCompleted
+        case .messageStreamFailed:
+            return .messageStreamFailed
+        case .messageStreamCancelled:
+            return .messageStreamCancelled
         case .messageVisibilityChanged:
             return .messageVisibilityChanged
         case .messageFavoriteChanged:

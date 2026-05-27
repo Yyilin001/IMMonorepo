@@ -161,7 +161,8 @@ public struct IMConversationMessageRecallResponseBody: Codable, Equatable, Senda
     public let conversationID: UUID
     public let senderUserID: UUID
     public let clientMessageID: String?
-    public let serverSequence: Int
+    public let serverSequence: UInt64
+    public let timelineSequence: UInt64
     public let content: IMMessageContent
     public let derivedState: IMMessageDerivedState
     public let createdAt: Date?
@@ -171,7 +172,8 @@ public struct IMConversationMessageRecallResponseBody: Codable, Equatable, Senda
         conversationID: UUID,
         senderUserID: UUID,
         clientMessageID: String? = nil,
-        serverSequence: Int,
+        serverSequence: UInt64,
+        timelineSequence: UInt64,
         content: IMMessageContent,
         derivedState: IMMessageDerivedState = IMMessageDerivedState(),
         createdAt: Date?
@@ -181,6 +183,7 @@ public struct IMConversationMessageRecallResponseBody: Codable, Equatable, Senda
         self.senderUserID = senderUserID
         self.clientMessageID = clientMessageID
         self.serverSequence = serverSequence
+        self.timelineSequence = timelineSequence
         self.content = content
         self.derivedState = derivedState
         self.createdAt = createdAt
@@ -225,7 +228,8 @@ public struct IMConversationMemberPageResponseBody: Codable, Equatable, Sendable
 public struct IMMessagePreviewResponseBody: Codable, Equatable, Sendable, APIResponseBody {
     public let id: UUID
     public let senderUserID: UUID
-    public let serverSequence: Int
+    public let serverSequence: UInt64
+    public let timelineSequence: UInt64
     public let content: IMMessageContent
     public let derivedState: IMMessageDerivedState
     public let createdAt: Date?
@@ -233,7 +237,8 @@ public struct IMMessagePreviewResponseBody: Codable, Equatable, Sendable, APIRes
     public init(
         id: UUID,
         senderUserID: UUID,
-        serverSequence: Int,
+        serverSequence: UInt64,
+        timelineSequence: UInt64,
         content: IMMessageContent,
         derivedState: IMMessageDerivedState = IMMessageDerivedState(),
         createdAt: Date?
@@ -241,6 +246,7 @@ public struct IMMessagePreviewResponseBody: Codable, Equatable, Sendable, APIRes
         self.id = id
         self.senderUserID = senderUserID
         self.serverSequence = serverSequence
+        self.timelineSequence = timelineSequence
         self.content = content
         self.derivedState = derivedState
         self.createdAt = createdAt
@@ -267,7 +273,7 @@ public struct IMConversationSummaryResponseBody: Codable, Equatable, Sendable, A
     public let avatarPreset: IMConversationAvatarPreset?
     public let muteAll: Bool
     public let lastMessage: IMMessagePreviewResponseBody?
-    public let lastReadSequence: Int
+    public let lastReadSequence: UInt64
     public let unreadCount: Int
     public let isPinned: Bool
     public let pinnedAt: Date?
@@ -287,7 +293,7 @@ public struct IMConversationSummaryResponseBody: Codable, Equatable, Sendable, A
         avatarPreset: IMConversationAvatarPreset? = nil,
         muteAll: Bool = false,
         lastMessage: IMMessagePreviewResponseBody?,
-        lastReadSequence: Int = 0,
+        lastReadSequence: UInt64 = 0,
         unreadCount: Int = 0,
         isPinned: Bool = false,
         pinnedAt: Date? = nil,
@@ -331,9 +337,22 @@ public struct IMConversationSummaryChangesResponseBody: Codable, Equatable, Send
     public let targetToken: String
 }
 
+public struct IMDomainEventDeliveryResponseBody: Codable, Equatable, Sendable {
+    public let cursor: UInt64
+    public let eventID: UUID
+    public let ownerAggregateSequence: UInt64
+    public let eventPBBase64: String
+}
+
+public struct IMDomainEventChangesResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let items: [IMDomainEventDeliveryResponseBody]
+    public let nextCursor: UInt64
+    public let hasMore: Bool
+}
+
 public struct IMConversationReadResponseBody: Codable, Equatable, Sendable, APIResponseBody {
     public let conversationID: UUID
-    public let lastReadSequence: Int
+    public let lastReadSequence: UInt64
     public let unreadCount: Int
 }
 
@@ -342,7 +361,8 @@ public struct IMConversationMessageResponseBody: Codable, Equatable, Sendable, A
     public let conversationID: UUID
     public let senderUserID: UUID
     public let clientMessageID: String?
-    public let serverSequence: Int
+    public let serverSequence: UInt64
+    public let timelineSequence: UInt64
     public let content: IMMessageContent
     public let derivedState: IMMessageDerivedState
     public let createdAt: Date?
@@ -360,7 +380,8 @@ public struct IMConversationMessageResponseBody: Codable, Equatable, Sendable, A
         conversationID: UUID,
         senderUserID: UUID,
         clientMessageID: String? = nil,
-        serverSequence: Int,
+        serverSequence: UInt64,
+        timelineSequence: UInt64,
         content: IMMessageContent,
         derivedState: IMMessageDerivedState = IMMessageDerivedState(),
         createdAt: Date?
@@ -370,32 +391,66 @@ public struct IMConversationMessageResponseBody: Codable, Equatable, Sendable, A
         self.senderUserID = senderUserID
         self.clientMessageID = clientMessageID
         self.serverSequence = serverSequence
+        self.timelineSequence = timelineSequence
         self.content = content
         self.derivedState = derivedState
         self.createdAt = createdAt
     }
 }
 
-public struct IMConversationMessagesSinceResponseBody: Codable, Equatable, Sendable, APIResponseBody {
-    public let messages: [IMConversationMessageResponseBody]
-    public let hasMore: Bool
-    public let nextAfterSequence: Int?
+public struct IMTimelineNoticeResponseBody: Codable, Equatable, Sendable, APIResponseBody, Identifiable {
+    public let id: UUID
+    public let conversationID: UUID
+    public let timelineSequence: UInt64
+    public let eventType: String
+    public let actorUserID: UUID?
+    public let targetUserIDs: [UUID]
+    public let noticeKind: String
+    public let params: [String: String]
+    public let fallbackText: String
+    public let createdAt: Date
+}
 
-    init(
-        messages: [IMConversationMessageResponseBody],
-        hasMore: Bool,
-        nextAfterSequence: Int?
-    ) {
-        self.messages = messages
-        self.hasMore = hasMore
-        self.nextAfterSequence = nextAfterSequence
+public enum IMTimelineItemKindResponseBody: String, Codable, Equatable, Sendable {
+    case message
+    case notice
+}
+
+public struct IMTimelineItemResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let type: IMTimelineItemKindResponseBody
+    public let timelineSequence: UInt64
+    public let message: IMConversationMessageResponseBody?
+    public let notice: IMTimelineNoticeResponseBody?
+
+    public static func message(_ message: IMConversationMessageResponseBody) -> Self {
+        Self(
+            type: .message,
+            timelineSequence: message.timelineSequence,
+            message: message,
+            notice: nil
+        )
     }
+
+    public static func notice(_ notice: IMTimelineNoticeResponseBody) -> Self {
+        Self(
+            type: .notice,
+            timelineSequence: notice.timelineSequence,
+            message: nil,
+            notice: notice
+        )
+    }
+}
+
+public struct IMConversationTimelineResponseBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let items: [IMTimelineItemResponseBody]
+    public let hasMore: Bool
+    public let nextAfterSequence: UInt64?
 }
 
 public struct IMConversationMessageSearchHitResponseBody: Codable, Equatable, Sendable, APIResponseBody {
     public let messageID: UUID
     public let senderUserID: UUID
-    public let serverSequence: Int
+    public let serverSequence: UInt64
     public let content: IMMessageContent
     public let derivedState: IMMessageDerivedState
     public let snippet: String
@@ -408,7 +463,7 @@ public struct IMConversationMessageSearchHitResponseBody: Codable, Equatable, Se
     public init(
         messageID: UUID,
         senderUserID: UUID,
-        serverSequence: Int,
+        serverSequence: UInt64,
         content: IMMessageContent,
         derivedState: IMMessageDerivedState = IMMessageDerivedState(),
         snippet: String,
@@ -504,6 +559,21 @@ enum IMRequest {
             }
 
             return items
+        }
+    }
+
+    public struct DomainEventChanges: AuthorizedEndpoint {
+        public typealias Response = IMDomainEventChangesResponseBody
+
+        let after: UInt64
+        let limit: Int?
+
+        var baseRequestSpec: HTTPRequestSpec {
+            var items = [URLQueryItem(name: "after", value: String(after))]
+            if let limit {
+                items.append(URLQueryItem(name: "limit", value: String(limit)))
+            }
+            return .init(path: "api/im/domain-events", queryItems: items)
         }
     }
 
@@ -658,8 +728,8 @@ enum IMRequest {
         }
     }
 
-    public struct Messages: AuthorizedEndpoint {
-        public typealias Response = [IMConversationMessageResponseBody]
+    public struct Timeline: AuthorizedEndpoint {
+        public typealias Response = IMConversationTimelineResponseBody
 
         let conversationID: String
         let beforeSequence: UInt64?
@@ -667,28 +737,25 @@ enum IMRequest {
 
         var baseRequestSpec: HTTPRequestSpec {
             .init(
-                path: "api/im/conversations/\(conversationID)/messages",
+                path: "api/im/conversations/\(conversationID)/timeline",
                 queryItems: queryItems
             )
         }
 
         private var queryItems: [URLQueryItem] {
             var items: [URLQueryItem] = []
-
             if let beforeSequence {
                 items.append(URLQueryItem(name: "beforeSequence", value: String(beforeSequence)))
             }
-
             if let limit {
                 items.append(URLQueryItem(name: "limit", value: String(limit)))
             }
-
             return items
         }
     }
 
-    public struct MessagesSince: AuthorizedEndpoint {
-        public typealias Response = IMConversationMessagesSinceResponseBody
+    public struct TimelineSince: AuthorizedEndpoint {
+        public typealias Response = IMConversationTimelineResponseBody
 
         let conversationID: String
         let afterSequence: UInt64
@@ -696,18 +763,16 @@ enum IMRequest {
 
         var baseRequestSpec: HTTPRequestSpec {
             .init(
-                path: "api/im/conversations/\(conversationID)/messages/since",
+                path: "api/im/conversations/\(conversationID)/timeline/since",
                 queryItems: queryItems
             )
         }
 
         private var queryItems: [URLQueryItem] {
             var items = [URLQueryItem(name: "afterSequence", value: String(afterSequence))]
-
             if let limit {
                 items.append(URLQueryItem(name: "limit", value: String(limit)))
             }
-
             return items
         }
     }
@@ -1037,6 +1102,10 @@ enum IMRequest {
         ConversationChanges(afterToken: afterToken, cursor: cursor, limit: limit)
     }
 
+    public static func domainEventChanges(after: UInt64, limit: Int? = nil) -> DomainEventChanges {
+        DomainEventChanges(after: after, limit: limit)
+    }
+
     public static func createConversation(
         kind: IMConversationKind,
         title: String?,
@@ -1141,24 +1210,24 @@ enum IMRequest {
         )
     }
 
-    public static func messages(
+    public static func timeline(
         conversationID: String,
         beforeSequence: UInt64? = nil,
         limit: Int? = nil
-    ) -> Messages {
-        Messages(
+    ) -> Timeline {
+        Timeline(
             conversationID: conversationID,
             beforeSequence: beforeSequence,
             limit: limit
         )
     }
 
-    public static func messagesSince(
+    public static func timelineSince(
         conversationID: String,
         afterSequence: UInt64,
         limit: Int? = nil
-    ) -> MessagesSince {
-        MessagesSince(
+    ) -> TimelineSince {
+        TimelineSince(
             conversationID: conversationID,
             afterSequence: afterSequence,
             limit: limit

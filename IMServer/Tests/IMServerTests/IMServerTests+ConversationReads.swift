@@ -38,6 +38,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try otherUser.requireID(),
                 serverSequence: 1,
+                timelineSequence: 1,
                 kind: "rich_text",
                 body: ["text": "hello from history"]
             ).create(on: app.db)
@@ -95,6 +96,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: peerID,
                 serverSequence: 1,
+                timelineSequence: 1,
                 kind: "rich_text",
                 body: ["text": "needs rebuild"]
             ).create(on: app.db)
@@ -315,6 +317,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try demoUser.requireID(),
                 serverSequence: 1,
+                timelineSequence: 1,
                 clientMessageID: "client-history-1",
                 kind: "rich_text",
                 body: ["text": "first"]
@@ -323,6 +326,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try otherUser.requireID(),
                 serverSequence: 2,
+                timelineSequence: 2,
                 clientMessageID: "client-history-2",
                 kind: "rich_text",
                 body: ["text": "second"]
@@ -330,13 +334,15 @@ extension IMServerTests {
             try await IMConversationSummaryProjectionService(db: app.db)
                 .rebuildSummaries(for: try demoUser.requireID())
 
-            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/timeline", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let messages = try res.content.decode([IMMessageResponse].self)
+                let timeline = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = timeline.items.compactMap(\.message)
                 #expect(messages.map(\.serverSequence) == [1, 2])
+                #expect(messages.map(\.timelineSequence) == [1, 2])
                 #expect(messages.map(\.clientMessageID) == ["client-history-1", "client-history-2"])
                 #expect(messages.map { $0.body["text"] } == ["first", "second"])
             })
@@ -360,7 +366,7 @@ extension IMServerTests {
             )
             _ = stranger
 
-            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/timeline", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: strangerAccessToken)
             }, afterResponse: { res async in
                 #expect(res.status == .notFound)
@@ -398,12 +404,14 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 1,
+                timelineSequence: 1,
                 content: .richText(.plain("alpha release notes"))
             ).create(on: app.db)
             try await ConversationMessage(
                 conversationID: conversationID,
                 senderUserID: try demoUser.requireID(),
                 serverSequence: 2,
+                timelineSequence: 2,
                 content: .reply(
                     reference: IMReplyReference(
                         messageID: UUID().uuidString,
@@ -417,6 +425,7 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 4,
+                timelineSequence: 4,
                 content: .file(
                     IMMediaAsset(
                         assetID: "asset-plan",
@@ -523,18 +532,21 @@ extension IMServerTests {
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 1,
+                timelineSequence: 1,
                 content: .richText(.plain("visible archive before rejoin"))
             ).create(on: app.db)
             try await ConversationMessage(
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 2,
+                timelineSequence: 2,
                 content: .richText(.plain("visible archive still old"))
             ).create(on: app.db)
             let visibleMessage = try ConversationMessage(
                 conversationID: conversationID,
                 senderUserID: try peerUser.requireID(),
                 serverSequence: 3,
+                timelineSequence: 3,
                 content: .richText(.plain("visible timeline after rejoin"))
             )
             try await visibleMessage.create(on: app.db)
@@ -625,21 +637,25 @@ extension IMServerTests {
                 senderUserID: try ownerUser.requireID()
             )
 
-            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages", beforeRequest: { req in
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/timeline", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: newUserToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
-                let messages = try res.content.decode([IMMessageResponse].self)
+                let timeline = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = timeline.items.compactMap(\.message)
                 #expect(messages.map(\.serverSequence) == [3])
+                #expect(messages.map(\.timelineSequence) == [3])
                 #expect(messages.map(\.content.previewText) == ["after join"])
             })
 
-            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=0", beforeRequest: { req in
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/timeline/since?afterSequence=0", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: newUserToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
-                let payload = try res.content.decode(IMMessageSinceResponse.self)
-                #expect(payload.messages.map(\.serverSequence) == [3])
+                let payload = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = payload.items.compactMap(\.message)
+                #expect(messages.map(\.serverSequence) == [3])
+                #expect(messages.map(\.timelineSequence) == [3])
                 #expect(payload.nextAfterSequence == 3)
             })
         }
@@ -757,6 +773,7 @@ extension IMServerTests {
                     conversationID: conversationID,
                     senderUserID: senderID,
                     serverSequence: sequence,
+                    timelineSequence: sequence,
                     clientMessageID: "client-since-\(sequence)",
                     kind: "rich_text",
                     body: ["text": "since-\(sequence)"]
@@ -765,15 +782,16 @@ extension IMServerTests {
 
             try await app.testing().test(
                 .GET,
-                "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=0"
+                "api/im/conversations/\(conversationID.uuidString)/timeline/since?afterSequence=0"
             , beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let response = try res.content.decode(IMMessageSinceResponse.self)
-                let messages = response.messages
+                let response = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = response.items.compactMap(\.message)
                 #expect(messages.map(\.serverSequence) == [1, 2, 3, 4])
+                #expect(messages.map(\.timelineSequence) == [1, 2, 3, 4])
                 #expect(messages.map(\.clientMessageID) == [
                     "client-since-1",
                     "client-since-2",
@@ -787,14 +805,14 @@ extension IMServerTests {
 
             try await app.testing().test(
                 .GET,
-                "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=2&limit=2"
+                "api/im/conversations/\(conversationID.uuidString)/timeline/since?afterSequence=2&limit=2"
             , beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let response = try res.content.decode(IMMessageSinceResponse.self)
-                let messages = response.messages
+                let response = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = response.items.compactMap(\.message)
                 #expect(messages.map(\.serverSequence) == [3, 4])
                 #expect(response.hasMore == false)
                 #expect(response.nextAfterSequence == 4)
@@ -810,7 +828,7 @@ extension IMServerTests {
 
             try await app.testing().test(
                 .GET,
-                "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=0"
+                "api/im/conversations/\(conversationID.uuidString)/timeline/since?afterSequence=0"
             , beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: strangerAccessToken)
             }, afterResponse: { res async in
@@ -841,6 +859,7 @@ extension IMServerTests {
                     conversationID: conversationID,
                     senderUserID: senderID,
                     serverSequence: sequence,
+                    timelineSequence: sequence,
                     clientMessageID: "client-limit-\(sequence)",
                     kind: "rich_text",
                     body: ["text": "limit-\(sequence)"]
@@ -849,14 +868,14 @@ extension IMServerTests {
 
             try await app.testing().test(
                 .GET,
-                "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=0"
+                "api/im/conversations/\(conversationID.uuidString)/timeline/since?afterSequence=0"
             , beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let response = try res.content.decode(IMMessageSinceResponse.self)
-                let messages = response.messages
+                let response = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = response.items.compactMap(\.message)
                 #expect(messages.count == 100)
                 #expect(messages.first?.serverSequence == 1)
                 #expect(messages.last?.serverSequence == 100)
@@ -866,14 +885,14 @@ extension IMServerTests {
 
             try await app.testing().test(
                 .GET,
-                "api/im/conversations/\(conversationID.uuidString)/messages/since?afterSequence=0&limit=999"
+                "api/im/conversations/\(conversationID.uuidString)/timeline/since?afterSequence=0&limit=999"
             , beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let response = try res.content.decode(IMMessageSinceResponse.self)
-                let messages = response.messages
+                let response = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = response.items.compactMap(\.message)
                 #expect(messages.count == 500)
                 #expect(messages.first?.serverSequence == 1)
                 #expect(messages.last?.serverSequence == 500)
@@ -905,28 +924,33 @@ extension IMServerTests {
                     conversationID: conversationID,
                     senderUserID: senderID,
                     serverSequence: sequence,
+                    timelineSequence: sequence,
                     kind: "rich_text",
                     body: ["text": "message-\(sequence)"]
                 ).create(on: app.db)
             }
 
-            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages?limit=2", beforeRequest: { req in
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/timeline?limit=2", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let messages = try res.content.decode([IMMessageResponse].self)
+                let response = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = response.items.compactMap(\.message)
                 #expect(messages.map(\.serverSequence) == [3, 4])
+                #expect(messages.map(\.timelineSequence) == [3, 4])
                 #expect(messages.map { $0.body["text"] } == ["message-3", "message-4"])
             })
 
-            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/messages?beforeSequence=3&limit=2", beforeRequest: { req in
+            try await app.testing().test(.GET, "api/im/conversations/\(conversationID.uuidString)/timeline?beforeSequence=3&limit=2", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: accessToken)
             }, afterResponse: { res async throws in
                 #expect(res.status == .ok)
 
-                let messages = try res.content.decode([IMMessageResponse].self)
+                let response = try res.content.decode(IMTimelinePageResponse.self)
+                let messages = response.items.compactMap(\.message)
                 #expect(messages.map(\.serverSequence) == [1, 2])
+                #expect(messages.map(\.timelineSequence) == [1, 2])
                 #expect(messages.map { $0.body["text"] } == ["message-1", "message-2"])
             })
         }

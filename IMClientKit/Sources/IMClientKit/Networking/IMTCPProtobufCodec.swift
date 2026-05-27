@@ -1,7 +1,15 @@
 import Foundation
 
 enum IMTCPProtobufCodec {
-    static let protocolVersion: UInt32 = 4
+    static let protocolVersion = IMRealtimeProtocolVersion.current
+
+    static func decodeDomainEvent(_ data: Data) throws -> IMTCPChatDomainEventPayload {
+        try IMRTChatDomainEvent(serializedBytes: data).domainValue()
+    }
+
+    static func encodeDomainEvent(_ payload: IMTCPChatDomainEventPayload) throws -> Data {
+        try payload.protobuf(requireDeliveryMetadata: true).serializedData()
+    }
 
     static func encode<Payload: Sendable>(
         type: IMTCPPacketType,
@@ -19,47 +27,52 @@ enum IMTCPProtobufCodec {
         switch type {
         case .auth:
             guard let payload = payload as? IMTCPAuthRequestPayload else {
-                throw IMTCPClientError.invalidPayload(type)
+                throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
             }
             packet.auth = payload.protobuf
         case .authOK:
             guard let payload = payload as? IMTCPAuthAcceptedPayload else {
-                throw IMTCPClientError.invalidPayload(type)
+                throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
             }
             packet.authOk = payload.protobuf
         case .authError:
             guard let payload = payload as? IMTCPAuthErrorPayload else {
-                throw IMTCPClientError.invalidPayload(type)
+                throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
             }
             packet.authError = payload.protobuf
         case .heartbeat:
             guard let payload = payload as? IMTCPHeartbeatPayload else {
-                throw IMTCPClientError.invalidPayload(type)
+                throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
             }
             packet.heartbeat = payload.protobuf
         case .heartbeatAck:
             guard let payload = payload as? IMTCPHeartbeatPayload else {
-                throw IMTCPClientError.invalidPayload(type)
+                throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
             }
             packet.heartbeatAck = payload.protobuf
         case .sendMessage:
             guard let payload = payload as? IMTCPMessagePayload else {
-                throw IMTCPClientError.invalidPayload(type)
+                throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
             }
             packet.sendMessage = payload.protobuf
         case .ack:
             guard let payload = payload as? IMTCPAckPayload else {
-                throw IMTCPClientError.invalidPayload(type)
+                throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
             }
             packet.ack = payload.protobuf
         case .domainEvent:
             guard let payload = payload as? IMTCPChatDomainEventPayload else {
-                throw IMTCPClientError.invalidPayload(type)
+                throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
             }
-            packet.domainEvent = payload.protobuf
+            packet.domainEvent = try payload.protobuf(requireDeliveryMetadata: true)
+        case .streamSignal:
+            guard let payload = payload as? IMTCPMessageStreamSignalPayload else {
+                throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
+            }
+            packet.streamSignal = payload.protobuf
         case .kick:
             guard let payload = payload as? IMTCPKickPayload else {
-                throw IMTCPClientError.invalidPayload(type)
+                throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
             }
             packet.kick = payload.protobuf
         }
@@ -69,28 +82,33 @@ enum IMTCPProtobufCodec {
 
     static func decode(_ data: Data) throws -> IMTCPInboundPacket {
         let packet = try IMRTPacket(serializedBytes: data)
+        guard packet.protocolVersion == protocolVersion else {
+            throw IMTCPClientError.invalidPacket
+        }
         let requestID = packet.hasRequestID ? UUID(uuidString: packet.requestID) : nil
         let timestamp = packet.timestampMs > 0 ? Date(millisecondsSince1970: packet.timestampMs) : nil
 
         switch packet.body {
         case .auth(let payload):
-            return IMTCPInboundPacket(type: .auth, requestID: requestID, timestamp: timestamp, payload: try payload.domainValue())
+            return IMTCPInboundPacket(type: .auth, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: try payload.domainValue())
         case .authOk(let payload):
-            return IMTCPInboundPacket(type: .authOK, requestID: requestID, timestamp: timestamp, payload: try payload.domainValue())
+            return IMTCPInboundPacket(type: .authOK, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: try payload.domainValue())
         case .authError(let payload):
-            return IMTCPInboundPacket(type: .authError, requestID: requestID, timestamp: timestamp, payload: payload.domainValue)
+            return IMTCPInboundPacket(type: .authError, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: payload.domainValue)
         case .heartbeat(let payload):
-            return IMTCPInboundPacket(type: .heartbeat, requestID: requestID, timestamp: timestamp, payload: payload.domainValue)
+            return IMTCPInboundPacket(type: .heartbeat, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: payload.domainValue)
         case .heartbeatAck(let payload):
-            return IMTCPInboundPacket(type: .heartbeatAck, requestID: requestID, timestamp: timestamp, payload: payload.domainValue)
+            return IMTCPInboundPacket(type: .heartbeatAck, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: payload.domainValue)
         case .sendMessage(let payload):
-            return IMTCPInboundPacket(type: .sendMessage, requestID: requestID, timestamp: timestamp, payload: try payload.domainValue())
+            return IMTCPInboundPacket(type: .sendMessage, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: try payload.domainValue())
         case .ack(let payload):
-            return IMTCPInboundPacket(type: .ack, requestID: requestID, timestamp: timestamp, payload: payload.domainValue)
+            return IMTCPInboundPacket(type: .ack, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: payload.domainValue)
         case .domainEvent(let payload):
-            return IMTCPInboundPacket(type: .domainEvent, requestID: requestID, timestamp: timestamp, payload: try payload.domainValue())
+            return IMTCPInboundPacket(type: .domainEvent, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: try payload.domainValue())
+        case .streamSignal(let payload):
+            return IMTCPInboundPacket(type: .streamSignal, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: try payload.domainValue())
         case .kick(let payload):
-            return IMTCPInboundPacket(type: .kick, requestID: requestID, timestamp: timestamp, payload: payload.domainValue)
+            return IMTCPInboundPacket(type: .kick, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: payload.domainValue)
         case nil:
             throw IMTCPClientError.invalidPacket
         }
@@ -116,12 +134,14 @@ public struct IMTCPInboundPacket: Sendable {
     public let type: IMTCPPacketType
     public let requestID: UUID?
     public let timestamp: Date?
+    public let protocolVersion: Int
     public let payload: IMTCPDecodedPayload
 
-    init(type: IMTCPPacketType, requestID: UUID?, timestamp: Date?, payload: any Sendable) {
+    init(type: IMTCPPacketType, requestID: UUID?, timestamp: Date?, protocolVersion: Int, payload: any Sendable) {
         self.type = type
         self.requestID = requestID
         self.timestamp = timestamp
+        self.protocolVersion = protocolVersion
         self.payload = IMTCPDecodedPayload(payload)
     }
 }
@@ -144,7 +164,6 @@ private extension IMTCPAuthRequestPayload {
         if let deviceName { value.deviceName = deviceName }
         if let platform { value.platform = platform }
         if let appVersion { value.appVersion = appVersion }
-        value.protocolVersion = UInt32(protocolVersion)
         return value
     }
 }
@@ -156,8 +175,7 @@ private extension IMRTAuthRequest {
             deviceID: hasDeviceID ? deviceID : nil,
             deviceName: hasDeviceName ? deviceName : nil,
             platform: hasPlatform ? platform : nil,
-            appVersion: hasAppVersion ? appVersion : nil,
-            protocolVersion: Int(protocolVersion)
+            appVersion: hasAppVersion ? appVersion : nil
         )
     }
 }
@@ -455,8 +473,8 @@ private extension IMRTMessageDerivedState {
     func domainValue() throws -> MessageDerivedState {
         MessageDerivedState(
             recallState: recallState == "recalled" ? .recalled : .active,
-            edits: edits.map { $0.domainValue },
-            reactions: reactions.compactMap { $0.domainValue },
+            edits: try edits.map { try $0.domainValue() },
+            reactions: try reactions.map { try $0.domainValue() },
             streamState: hasStreamState ? try streamState.domainValue() : nil
         )
     }
@@ -483,17 +501,11 @@ private extension MessageEdit {
 }
 
 private extension IMRTMessageEdit {
-    var domainValue: MessageEdit {
+    func domainValue() throws -> MessageEdit {
         MessageEdit(
             editedAt: hasEditedAtMs ? Date(millisecondsSince1970: editedAtMs) : nil,
-            body: body.domainValueOrEmpty
+            body: try body.domainValue()
         )
-    }
-}
-
-private extension IMRTRichTextContent {
-    var domainValueOrEmpty: IMRichTextContent {
-        (try? domainValue()) ?? IMRichTextContent(text: text)
     }
 }
 
@@ -507,11 +519,8 @@ private extension MessageReaction {
 }
 
 private extension IMRTMessageReaction {
-    var domainValue: MessageReaction? {
-        let ids = actorUserIds.compactMap(UUID.init(uuidString:))
-        guard ids.count == actorUserIds.count else {
-            return nil
-        }
+    func domainValue() throws -> MessageReaction {
+        let ids = try domainEventUUIDs(actorUserIds)
         return MessageReaction(emoji: emoji, actorUserIDs: ids)
     }
 }
@@ -582,8 +591,33 @@ private extension IMRTMessageStreamPayload {
     }
 }
 
+private extension IMTCPMessageStreamSignalPayload {
+    var protobuf: IMRTMessageStreamSignal {
+        var value = IMRTMessageStreamSignal()
+        value.stream = stream.protobuf
+        if let message { value.message = message.protobuf }
+        return value
+    }
+}
+
+private extension IMRTMessageStreamSignal {
+    func domainValue() throws -> IMTCPMessageStreamSignalPayload {
+        IMTCPMessageStreamSignalPayload(
+            stream: try stream.domainValue(),
+            message: hasMessage ? try message.domainValue() : nil
+        )
+    }
+}
+
 private extension IMTCPChatDomainEventPayload {
-    var protobuf: IMRTChatDomainEvent {
+    func protobuf(requireDeliveryMetadata: Bool) throws -> IMRTChatDomainEvent {
+        if requireDeliveryMetadata {
+            guard let ownerCursor, ownerCursor > 0,
+                  let ownerAggregateSequence, ownerAggregateSequence > 0
+            else {
+                throw IMTCPClientError.invalidPayload(.domainEvent)
+            }
+        }
         var value = IMRTChatDomainEvent()
         value.eventID = eventID.uuidString
         value.eventType = eventType.rawValue
@@ -593,6 +627,10 @@ private extension IMTCPChatDomainEventPayload {
         value.occurredAtMs = occurredAt.millisecondsSince1970
         if let actorUserID { value.actorUserID = actorUserID.uuidString }
         if let conversation { value.conversation = conversation.protobuf }
+        if let timelineNotice { value.timelineNotice = timelineNotice.protobuf }
+        value.requiresTimelineNotice = requiresTimelineNotice
+        if let ownerCursor { value.ownerCursor = ownerCursor }
+        if let ownerAggregateSequence { value.ownerAggregateSequence = ownerAggregateSequence }
 
         switch body {
         case .messageCreated(let message, let clientMessageID):
@@ -632,8 +670,6 @@ private extension IMTCPChatDomainEventPayload {
             switch eventType {
             case .messageStreamStarted:
                 value.messageStreamStarted = event
-            case .messageStreamChunk:
-                value.messageStreamChunk = event
             case .messageStreamCompleted:
                 value.messageStreamCompleted = event
             case .messageStreamFailed:
@@ -641,7 +677,10 @@ private extension IMTCPChatDomainEventPayload {
             case .messageStreamCancelled:
                 value.messageStreamCancelled = event
             default:
-                value.messageStreamChunk = event
+                throw IMTCPClientError.invalidPayload(
+                    .domainEvent,
+                    reason: "message_stream body requires a durable stream lifecycle event type"
+                )
             }
         case .conversationChanged:
             let event = IMRTConversationChangedEvent()
@@ -689,12 +728,58 @@ private extension IMTCPChatDomainEventPayload {
     }
 }
 
+private func domainEventUUIDs(_ values: [String]) throws -> [UUID] {
+    try values.map { value in
+        guard let id = UUID(uuidString: value) else {
+            throw IMTCPClientError.invalidPayload(.domainEvent)
+        }
+        return id
+    }
+}
+
+private func optionalDomainEventUUID(_ hasValue: Bool, _ value: String) throws -> UUID? {
+    guard hasValue else { return nil }
+    guard let id = UUID(uuidString: value) else {
+        throw IMTCPClientError.invalidPayload(.domainEvent)
+    }
+    return id
+}
+
+private func domainEventInt(_ value: UInt64) throws -> Int {
+    guard value <= UInt64(Int.max) else {
+        throw IMTCPClientError.invalidPayload(.domainEvent, reason: "integer overflow")
+    }
+    return Int(value)
+}
+
+private func requiredNonNegativeSequence(_ hasValue: Bool, _ value: UInt64, field: String) throws -> UInt64 {
+    guard hasValue else {
+        throw IMTCPClientError.invalidPayload(.domainEvent, reason: "\(field) is missing")
+    }
+    return value
+}
+
 private extension IMRTChatDomainEvent {
     func domainValue() throws -> IMTCPChatDomainEventPayload {
         guard let eventID = UUID(uuidString: eventID),
               let eventType = IMTCPChatDomainEventType(rawValue: eventType),
-              let aggregateID = UUID(uuidString: aggregateID)
+              let aggregateID = UUID(uuidString: aggregateID),
+              hasAggregateSequence,
+              aggregateSequence > 0,
+              hasOwnerCursor,
+              ownerCursor > 0,
+              hasOwnerAggregateSequence,
+              ownerAggregateSequence > 0
         else {
+            throw IMTCPClientError.invalidPayload(.domainEvent)
+        }
+        let body = try domainBody()
+        guard body.matches(eventType: eventType),
+              eventType.expectedAggregateType == aggregateType
+        else {
+            throw IMTCPClientError.invalidPayload(.domainEvent)
+        }
+        guard !requiresTimelineNotice || hasTimelineNotice else {
             throw IMTCPClientError.invalidPayload(.domainEvent)
         }
 
@@ -705,9 +790,13 @@ private extension IMRTChatDomainEvent {
             aggregateID: aggregateID,
             aggregateSequence: aggregateSequence,
             occurredAt: Date(millisecondsSince1970: occurredAtMs),
-            actorUserID: hasActorUserID ? UUID(uuidString: actorUserID) : nil,
+            actorUserID: try optionalDomainEventUUID(hasActorUserID, actorUserID),
             conversation: hasConversation ? try conversation.domainValue() : nil,
-            body: try domainBody()
+            timelineNotice: hasTimelineNotice ? try timelineNotice.domainValue() : nil,
+            requiresTimelineNotice: requiresTimelineNotice,
+            ownerCursor: ownerCursor,
+            ownerAggregateSequence: ownerAggregateSequence,
+            body: body
         )
     }
 
@@ -735,12 +824,12 @@ private extension IMRTChatDomainEvent {
             return .messageRevoked(
                 messageID: messageID,
                 revokedAt: Date(millisecondsSince1970: event.revokedAtMs),
-                revokedByUserID: event.hasRevokedByUserID ? UUID(uuidString: event.revokedByUserID) : nil,
+                revokedByUserID: try optionalDomainEventUUID(event.hasRevokedByUserID, event.revokedByUserID),
                 message: event.hasMessage ? try event.message.domainValue() : nil
             )
         case .messageVisibilityChanged(let event):
             return .messageVisibilityChanged(
-                messageIDs: event.messageIds.compactMap(UUID.init(uuidString:)),
+                messageIDs: try domainEventUUIDs(event.messageIds),
                 message: event.hasMessage ? try event.message.domainValue() : nil,
                 visibilityAction: event.hasVisibilityAction ? IMTCPConversationVisibilityAction(rawValue: event.visibilityAction) : nil
             )
@@ -750,7 +839,6 @@ private extension IMRTChatDomainEvent {
             }
             return .messageFavoriteChanged(messageID: messageID, isFavorited: event.isFavorited)
         case .messageStreamStarted(let event),
-             .messageStreamChunk(let event),
              .messageStreamCompleted(let event),
              .messageStreamFailed(let event),
              .messageStreamCancelled(let event):
@@ -768,19 +856,101 @@ private extension IMRTChatDomainEvent {
             }
             return .conversationVisibilityChanged(
                 visibilityAction: action,
-                messageIDs: event.messageIds.compactMap(UUID.init(uuidString:))
+                messageIDs: try domainEventUUIDs(event.messageIds)
             )
         case .memberAdded(let event), .memberRemoved(let event), .memberRoleUpdated(let event):
-            return .memberChanged(memberUserIDs: event.memberUserIds.compactMap(UUID.init(uuidString:)))
+            return .memberChanged(memberUserIDs: try domainEventUUIDs(event.memberUserIds))
         case .contactRequestCreated(let event), .contactRequestAccepted(let event), .contactRequestUpdated(let event):
             return .contactChanged(
                 request: event.hasRequest ? try event.request.domainValue() : nil,
                 contact: event.hasContact ? try event.contact.domainValue() : nil,
-                contactUserID: event.hasContactUserID ? UUID(uuidString: event.contactUserID) : nil
+                contactUserID: try optionalDomainEventUUID(event.hasContactUserID, event.contactUserID)
             )
         case nil:
             throw IMTCPClientError.invalidPayload(.domainEvent)
         }
+    }
+}
+
+private extension IMTCPChatDomainEventBody {
+    func matches(eventType: IMTCPChatDomainEventType) -> Bool {
+        switch (self, eventType) {
+        case (.messageCreated, .messageCreated),
+             (.messageEdited, .messageEdited),
+             (.messageRevoked, .messageRevoked),
+             (.messageVisibilityChanged, .messageVisibilityChanged),
+             (.messageFavoriteChanged, .messageFavoriteChanged),
+             (.messageStream, .messageStreamStarted),
+             (.messageStream, .messageStreamCompleted),
+             (.messageStream, .messageStreamFailed),
+             (.messageStream, .messageStreamCancelled),
+             (.conversationChanged, .conversationCreated),
+             (.conversationChanged, .conversationUpdated),
+             (.conversationChanged, .conversationSettingsChanged),
+             (.conversationRemovedForSelf, .conversationRemovedForSelf),
+             (.conversationVisibilityChanged, .conversationVisibilityChanged),
+             (.memberChanged, .memberAdded),
+             (.memberChanged, .memberRemoved),
+             (.memberChanged, .memberRoleUpdated),
+             (.contactChanged, .contactRequestCreated),
+             (.contactChanged, .contactRequestAccepted),
+             (.contactChanged, .contactRequestUpdated):
+            true
+        default:
+            false
+        }
+    }
+}
+
+private extension IMTCPChatDomainEventType {
+    var expectedAggregateType: String {
+        switch self {
+        case .contactRequestCreated, .contactRequestAccepted, .contactRequestUpdated:
+            "contact"
+        default:
+            "conversation"
+        }
+    }
+}
+
+private extension IMTimelineNoticeResponseBody {
+    var protobuf: IMRTTimelineNotice {
+        var value = IMRTTimelineNotice()
+        value.id = id.uuidString
+        value.conversationID = conversationID.uuidString
+        value.timelineSequence = timelineSequence
+        value.eventType = eventType
+        if let actorUserID { value.actorUserID = actorUserID.uuidString }
+        value.targetUserIds = targetUserIDs.map(\.uuidString)
+        value.noticeKind = noticeKind
+        value.params = params
+        value.fallbackText = fallbackText
+        value.createdAtMs = createdAt.millisecondsSince1970
+        return value
+    }
+}
+
+private extension IMRTTimelineNotice {
+    func domainValue() throws -> IMTimelineNoticeResponseBody {
+        guard let id = UUID(uuidString: id),
+              let conversationID = UUID(uuidString: conversationID),
+              hasTimelineSequence,
+              timelineSequence > 0
+        else {
+            throw IMTCPClientError.invalidPayload(.domainEvent)
+        }
+        return IMTimelineNoticeResponseBody(
+            id: id,
+            conversationID: conversationID,
+            timelineSequence: timelineSequence,
+            eventType: eventType,
+            actorUserID: try optionalDomainEventUUID(hasActorUserID, actorUserID),
+            targetUserIDs: try domainEventUUIDs(targetUserIds),
+            noticeKind: noticeKind,
+            params: params,
+            fallbackText: fallbackText,
+            createdAt: Date(millisecondsSince1970: createdAtMs)
+        )
     }
 }
 
@@ -798,7 +968,7 @@ private extension IMConversationSummaryResponseBody {
         value.memberCount = Int32(memberCount)
         value.memberUserIds = memberUserIDs.map(\.uuidString)
         if let lastMessage { value.lastMessage = lastMessage.protobuf }
-        value.lastReadSequence = Int32(lastReadSequence)
+        value.lastReadSequence = lastReadSequence
         value.unreadCount = Int32(unreadCount)
         value.isPinned = isPinned
         if let pinnedAt { value.pinnedAtMs = pinnedAt.millisecondsSince1970 }
@@ -821,12 +991,12 @@ private extension IMRTConversationSummary {
             directMessagingState: hasDirectMessagingState ? directMessagingState : nil,
             directPeer: hasDirectPeer ? try directPeer.domainValue() : nil,
             memberCount: Int(memberCount),
-            memberUserIDs: memberUserIds.compactMap(UUID.init(uuidString:)),
+            memberUserIDs: try domainEventUUIDs(memberUserIds),
             notice: hasNotice ? notice : nil,
             avatarPreset: hasAvatarPreset ? IMConversationAvatarPreset(rawValue: avatarPreset) : nil,
             muteAll: muteAll,
             lastMessage: hasLastMessage ? try lastMessage.domainValue() : nil,
-            lastReadSequence: Int(lastReadSequence),
+            lastReadSequence: try requiredNonNegativeSequence(hasLastReadSequence, lastReadSequence, field: "last_read_sequence"),
             unreadCount: Int(unreadCount),
             isPinned: isPinned,
             pinnedAt: hasPinnedAtMs ? Date(millisecondsSince1970: pinnedAtMs) : nil,
@@ -867,7 +1037,8 @@ private extension IMMessagePreviewResponseBody {
         var value = IMRTMessagePreview()
         value.id = id.uuidString
         value.senderUserID = senderUserID.uuidString
-        value.serverSequence = Int32(serverSequence)
+        value.serverSequence = UInt64(serverSequence)
+        value.timelineSequence = UInt64(timelineSequence)
         value.content = content.protobuf
         value.derivedState = derivedState.protobuf
         if let createdAt { value.createdAtMs = createdAt.millisecondsSince1970 }
@@ -878,14 +1049,19 @@ private extension IMMessagePreviewResponseBody {
 private extension IMRTMessagePreview {
     func domainValue() throws -> IMMessagePreviewResponseBody {
         guard let id = UUID(uuidString: id),
-              let senderUserID = UUID(uuidString: senderUserID)
+              let senderUserID = UUID(uuidString: senderUserID),
+              hasServerSequence,
+              serverSequence > 0,
+              hasTimelineSequence,
+              timelineSequence > 0
         else {
             throw IMTCPClientError.invalidPayload(.domainEvent)
         }
         return IMMessagePreviewResponseBody(
             id: id,
             senderUserID: senderUserID,
-            serverSequence: Int(serverSequence),
+            serverSequence: serverSequence,
+            timelineSequence: timelineSequence,
             content: try content.domainValue(),
             derivedState: try derivedState.domainValue(),
             createdAt: hasCreatedAtMs ? Date(millisecondsSince1970: createdAtMs) : nil
@@ -900,7 +1076,8 @@ private extension IMConversationMessageResponseBody {
         value.conversationID = conversationID.uuidString
         value.senderUserID = senderUserID.uuidString
         if let clientMessageID { value.clientMessageID = clientMessageID }
-        value.serverSequence = Int32(serverSequence)
+        value.serverSequence = UInt64(serverSequence)
+        value.timelineSequence = UInt64(timelineSequence)
         value.content = content.protobuf
         value.derivedState = derivedState.protobuf
         if let createdAt { value.createdAtMs = createdAt.millisecondsSince1970 }
@@ -912,7 +1089,11 @@ private extension IMRTConversationMessage {
     func domainValue() throws -> IMConversationMessageResponseBody {
         guard let id = UUID(uuidString: id),
               let conversationID = UUID(uuidString: conversationID),
-              let senderUserID = UUID(uuidString: senderUserID)
+              let senderUserID = UUID(uuidString: senderUserID),
+              hasServerSequence,
+              serverSequence > 0,
+              hasTimelineSequence,
+              timelineSequence > 0
         else {
             throw IMTCPClientError.invalidPayload(.domainEvent)
         }
@@ -921,7 +1102,8 @@ private extension IMRTConversationMessage {
             conversationID: conversationID,
             senderUserID: senderUserID,
             clientMessageID: hasClientMessageID ? clientMessageID : nil,
-            serverSequence: Int(serverSequence),
+            serverSequence: serverSequence,
+            timelineSequence: timelineSequence,
             content: try content.domainValue(),
             derivedState: try derivedState.domainValue(),
             createdAt: hasCreatedAtMs ? Date(millisecondsSince1970: createdAtMs) : nil

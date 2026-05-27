@@ -30,7 +30,7 @@ extension IMConversationStoreTests {
     }
 
 
-    @Test func replaceMessagesDoesNotClearUnreadForBackgroundConversation() {
+    @Test func replaceTimelineItemsDoesNotClearUnreadForBackgroundConversation() {
         let store = IMConversationStore()
         let selectedConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
         let backgroundConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
@@ -70,7 +70,7 @@ extension IMConversationStoreTests {
             currentUserID: Self.currentUserID
         )
 
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: backgroundConversationID.uuidString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -93,7 +93,7 @@ extension IMConversationStoreTests {
     }
 
 
-    @Test func replaceMessagesMergesServerHistoryWithPendingOutgoingMessage() {
+    @Test func replaceTimelineItemsMergesServerHistoryWithPendingOutgoingMessage() {
         let store = IMConversationStore()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
         let conversationIDString = conversationID.uuidString
@@ -106,7 +106,7 @@ extension IMConversationStoreTests {
         )
         #expect(request != nil)
 
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -122,8 +122,8 @@ extension IMConversationStoreTests {
             currentUserID: Self.currentUserID
         )
 
-        #expect(store.selectedConversation?.messages.count == 2)
-        #expect(store.selectedConversation?.messages.map(\.text) == ["from server", "pending local"])
+        #expect(store.selectedConversation?.messages.count == 1)
+        #expect(store.selectedConversation?.pendingMessages.map(\.text) == ["pending local"])
         #expect(store.selectedConversation?.lastMessagePreview == "pending local")
     }
 
@@ -146,7 +146,7 @@ extension IMConversationStoreTests {
         )
 
         let selectedConversation = try #require(store.selectedConversation)
-        let localMessage = try #require(selectedConversation.messages.last)
+        let localMessage = try #require(selectedConversation.pendingMessages.last)
         #expect(request?.payload.content == .reply(
             reference: IMReplyReference(
                 messageID: "server-message-1",
@@ -174,7 +174,7 @@ extension IMConversationStoreTests {
         let conversationIDString = conversationID.uuidString
 
         store.openConversation(id: conversationIDString)
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -213,7 +213,7 @@ extension IMConversationStoreTests {
         let replyMessageID = UUID(uuidString: "66666666-2222-3333-4444-555555555555")!
 
         store.openConversation(id: conversationIDString)
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -262,7 +262,7 @@ extension IMConversationStoreTests {
         let replyMessageID = UUID(uuidString: "66666666-2222-3333-4444-555555555555")!
 
         store.openConversation(id: conversationIDString)
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -301,6 +301,7 @@ extension IMConversationStoreTests {
                 senderUserID: Self.peerUserID,
                 clientMessageID: nil,
                 serverSequence: 1,
+                timelineSequence: 1,
                 content: .richText(.plain("will be recalled")),
                 derivedState: MessageDerivedState(recallState: .recalled),
                 createdAt: Date(timeIntervalSince1970: 1_700_400_000)
@@ -325,7 +326,7 @@ extension IMConversationStoreTests {
         let replyMessageID = UUID(uuidString: "66666666-2222-3333-4444-555555555555")!
 
         store.openConversation(id: conversationIDString)
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -357,7 +358,7 @@ extension IMConversationStoreTests {
             currentUserID: Self.currentUserID
         )
 
-        store.appendMessages(
+        store.appendTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -366,6 +367,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 1,
+                    timelineSequence: 1,
                     content: .richText(.plain("original text")),
                     derivedState: MessageDerivedState(recallState: .recalled),
                     createdAt: Date(timeIntervalSince1970: 1_700_400_000)
@@ -391,7 +393,7 @@ extension IMConversationStoreTests {
         let replyMessageID = UUID(uuidString: "66666666-9999-3333-4444-555555555555")!
 
         store.openConversation(id: conversationIDString)
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -400,6 +402,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.peerUserID,
                     clientMessageID: nil,
                     serverSequence: 2,
+                    timelineSequence: 2,
                     content: .richText(.plain("original text")),
                     derivedState: MessageDerivedState(recallState: .recalled),
                     createdAt: Date(timeIntervalSince1970: 1_700_450_000)
@@ -410,6 +413,7 @@ extension IMConversationStoreTests {
                     senderUserID: Self.currentUserID,
                     clientMessageID: "client-reply-jump",
                     serverSequence: 3,
+                    timelineSequence: 3,
                     content: .reply(
                         reference: IMReplyReference(
                             messageID: referencedMessageID.uuidString,
@@ -470,7 +474,7 @@ extension IMConversationStoreTests {
     }
 
 
-    @Test func replaceMessagesUsesClientMessageIDToMergePendingOutgoingMessage() {
+    @Test func replaceTimelineItemsUsesClientMessageIDToMergePendingOutgoingMessage() {
         let store = IMConversationStore()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
         let conversationIDString = conversationID.uuidString
@@ -487,7 +491,7 @@ extension IMConversationStoreTests {
             return
         }
 
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -511,13 +515,13 @@ extension IMConversationStoreTests {
     }
 
 
-    @Test func prependMessagesAddsOlderHistoryPage() {
+    @Test func prependTimelineItemsAddsOlderHistoryPage() {
         let store = IMConversationStore()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
         let conversationIDString = conversationID.uuidString
 
         store.openConversation(id: conversationIDString)
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -543,9 +547,9 @@ extension IMConversationStoreTests {
         )
 
         #expect(store.selectedConversation?.hasMoreHistory == true)
-        #expect(store.oldestLoadedServerSequence(for: conversationIDString) == 3)
+        #expect(store.oldestLoadedTimelineSequence(for: conversationIDString) == 3)
 
-        store.prependMessages(
+        store.prependTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -572,11 +576,11 @@ extension IMConversationStoreTests {
 
         #expect(store.selectedConversation?.messages.map(\.text) == ["first", "second", "third", "fourth"])
         #expect(store.selectedConversation?.hasMoreHistory == false)
-        #expect(store.oldestLoadedServerSequence(for: conversationIDString) == 1)
+        #expect(store.oldestLoadedTimelineSequence(for: conversationIDString) == 1)
     }
 
 
-    @Test func appendMessagesMergesIncrementalGapResults() {
+    @Test func appendTimelineItemsMergesIncrementalGapResults() {
         let store = IMConversationStore()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
         let conversationIDString = conversationID.uuidString
@@ -593,7 +597,7 @@ extension IMConversationStoreTests {
             return
         }
 
-        store.replaceMessages(
+        store.replaceTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(
@@ -610,7 +614,7 @@ extension IMConversationStoreTests {
             currentUserID: Self.currentUserID
         )
 
-        store.appendMessages(
+        store.appendTimelineItems(
             in: conversationIDString,
             messages: [
                 IMConversationMessageResponseBody(

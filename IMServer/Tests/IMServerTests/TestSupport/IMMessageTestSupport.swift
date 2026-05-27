@@ -45,6 +45,7 @@ extension ConversationMessage {
         conversationID: UUID,
         senderUserID: UUID,
         serverSequence: Int,
+        timelineSequence: Int = 0,
         clientMessageID: String? = nil,
         kind: String,
         body: [String: String]
@@ -54,6 +55,7 @@ extension ConversationMessage {
             conversationID: conversationID,
             senderUserID: senderUserID,
             serverSequence: serverSequence,
+            timelineSequence: timelineSequence,
             clientMessageID: clientMessageID,
             content: testMessageContent(kind: kind, body: body)
         )

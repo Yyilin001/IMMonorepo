@@ -34,6 +34,7 @@ struct RepairReplayConsumer: ConversationEventConsumer {
                 sourceTopic: deliveryContext.sourceTopic,
                 conversationID: envelope.conversationID,
                 eventType: envelope.event.eventType,
+                aggregateSequence: envelope.event.aggregateSequence,
                 producerShard: deliveryContext.producerShard,
                 payload: envelope.payload,
                 lastError: deliveryContext.deadLetterError,
@@ -48,8 +49,9 @@ struct RepairReplayConsumer: ConversationEventConsumer {
         record.sourceTopic = deliveryContext.sourceTopic
         record.conversationID = envelope.conversationID
         record.eventType = envelope.event.eventType
+        record.aggregateSequence = envelope.event.aggregateSequence
         record.producerShard = deliveryContext.producerShard
-        record.payload = envelope.payload
+        try record.replacePayload(envelope.payload)
         record.statusEnum = .pending
         record.lastError = deliveryContext.deadLetterError
         record.receiveCount = isExisting ? record.receiveCount + 1 : 1
@@ -81,7 +83,7 @@ struct ConversationOutboxRetryService {
             if let maxRetryCount, event.retryCount > maxRetryCount {
                 continue
             }
-            if !eventTypes.isEmpty, !eventTypes.contains(event.eventTypeEnum) {
+            if !eventTypes.isEmpty, !eventTypes.contains(try event.eventTypeEnum) {
                 continue
             }
 

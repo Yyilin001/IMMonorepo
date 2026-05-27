@@ -28,7 +28,7 @@ final class IMReadReportCoordinator {
 
     func markUpToLatestLoadedSequence(for conversationID: String) async {
         guard let runtime,
-              let readSequence = runtime.imConversationStore.latestLoadedServerSequence(for: conversationID)
+              let readSequence = runtime.imConversationStore.latestLoadedMessageSequence(for: conversationID)
         else {
             return
         }
