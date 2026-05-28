@@ -105,8 +105,8 @@ public struct IMFavoritePageResponseBody: Codable, Equatable, Sendable, APIRespo
 
 public struct IMConversationReceiptSummaryResponseBody: Codable, Equatable, Sendable, APIResponseBody {
     public let conversationID: UUID
-    public let deliveredThroughSequence: Int
-    public let readThroughSequence: Int
+    public let deliveredThroughSequence: UInt64
+    public let readThroughSequence: UInt64
     public let readableMemberCount: Int
 }
 

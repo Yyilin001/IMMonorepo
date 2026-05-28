@@ -2207,12 +2207,15 @@ public final class IMConversationStore {
     }
 
     private func recordCacheDiagnostics(_ diagnostics: IMCacheRestoreDiagnostics) {
-        guard diagnostics.droppedCanonicalMessageCount > 0 else {
+        guard diagnostics.droppedCanonicalMessageCount > 0 || diagnostics.droppedTimelineNoticeCount > 0 else {
             return
         }
         domainEventDebugMetrics.cacheDroppedCanonicalMessages += diagnostics.droppedCanonicalMessageCount
+        domainEventDebugMetrics.cacheDroppedTimelineNotices += diagnostics.droppedTimelineNoticeCount
         let conversationIDs = diagnostics.droppedCanonicalMessages.map(\.conversationID)
             + diagnostics.droppedCanonicalMessagesDuringSnapshot.map(\.conversationID)
+            + diagnostics.droppedTimelineNotices.map(\.conversationID)
+            + diagnostics.droppedTimelineNoticesDuringSnapshot.map(\.conversationID)
         for conversationID in conversationIDs {
             domainEventFullRefreshConversationIDs.insert(conversationID)
         }
@@ -2536,19 +2539,25 @@ public final class IMConversationStore {
     private func makeNotices(
         from responses: [IMTimelineNoticeResponseBody]
     ) -> [IMTimelineNotice] {
-        responses.map { response in
-            IMTimelineNotice(
-                id: response.id.uuidString,
-                conversationID: response.conversationID.uuidString,
-                timelineSequence: UInt64(response.timelineSequence),
-                eventType: response.eventType,
-                actorUserID: response.actorUserID,
-                targetUserIDs: response.targetUserIDs,
-                noticeKind: response.noticeKind,
-                params: response.params,
-                fallbackText: response.fallbackText,
-                createdAt: response.createdAt
-            )
+        responses.compactMap { response in
+            do {
+                return try IMTimelineNotice(
+                    id: response.id.uuidString,
+                    conversationID: response.conversationID.uuidString,
+                    timelineSequence: UInt64(response.timelineSequence),
+                    eventType: response.eventType,
+                    actorUserID: response.actorUserID,
+                    targetUserIDs: response.targetUserIDs,
+                    noticeKind: response.noticeKind,
+                    params: response.params,
+                    fallbackText: response.fallbackText,
+                    createdAt: response.createdAt
+                )
+            } catch {
+                domainEventDebugMetrics.invalidProjectionDTOs += 1
+                domainEventFullRefreshConversationIDs.insert(response.conversationID.uuidString)
+                return nil
+            }
         }
     }
 

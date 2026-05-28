@@ -88,7 +88,8 @@ public final class GRDBIMConversationCache: IMConversationCaching, @unchecked Se
                 return GRDBClientPersistence.decodeConversation(
                     row: row,
                     messages: cachedMessages,
-                    cursor: cursor
+                    cursor: cursor,
+                    diagnostics: &diagnostics
                 )
             }
             .sorted(by: GRDBClientPersistence.conversationComparator)
@@ -660,14 +661,36 @@ private enum GRDBClientPersistence {
     static func decodeConversation(
         row: Row,
         messages: [IMCachedMessageState],
-        cursor: IMSyncCursorState?
+        cursor: IMSyncCursorState?,
+        diagnostics: inout IMCacheRestoreDiagnostics
     ) -> IMCachedConversationState {
         let hasLoadedMessages = cursor?.hasLoadedMessages ?? false
-        let notices = (decodeJSON(row["notices_json"]) as [IMCachedTimelineNoticeState]?) ?? []
+        let conversationID: String = row["conversation_id"]
+        let notices: [IMCachedTimelineNoticeState]
+        if let rawNoticesJSON = row["notices_json"] as String?,
+           !rawNoticesJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            do {
+                notices = try JSONDecoder().decode([IMCachedTimelineNoticeState].self, from: Data(rawNoticesJSON.utf8))
+            } catch {
+                diagnostics.recordDroppedTimelineNotice(
+                    conversationID: conversationID,
+                    noticeID: "notices_json",
+                    reason: String(describing: error)
+                )
+                notices = []
+            }
+        } else {
+            diagnostics.recordDroppedTimelineNotice(
+                conversationID: conversationID,
+                noticeID: "notices_json",
+                reason: "missing notices_json"
+            )
+            notices = []
+        }
         let pendingMessages = (decodeJSON(row["pending_messages_json"]) as [IMCachedPendingMessageState]?) ?? []
         let timelineSequences = messages.map(\.timelineSequence) + notices.map(\.timelineSequence)
         return IMCachedConversationState(
-            id: row["conversation_id"],
+            id: conversationID,
             title: row["title"],
             kind: IMConversationKind(rawValue: row["kind_raw_value"]) ?? .group,
             directMessagingState: (row["direct_messaging_state_raw_value"] as String?)

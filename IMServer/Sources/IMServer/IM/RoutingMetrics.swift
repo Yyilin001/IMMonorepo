@@ -13,6 +13,7 @@ actor RoutingMetrics {
         var redisPresencePipelineLookupUserCount: Int = 0
         var redisPresenceStaleCleanupCount: Int = 0
         var realtimeDeliveryMissingRowCount: Int = 0
+        var invalidRealtimeDeliveryPayloadCount: Int = 0
     }
 
     private var snapshot = Snapshot()
@@ -47,6 +48,10 @@ actor RoutingMetrics {
 
     func recordRealtimeDeliveryMissingRow() {
         snapshot.realtimeDeliveryMissingRowCount += 1
+    }
+
+    func recordInvalidRealtimeDeliveryPayload() {
+        snapshot.invalidRealtimeDeliveryPayloadCount += 1
     }
 
     func recordRedisPresenceRouteCacheHit() {

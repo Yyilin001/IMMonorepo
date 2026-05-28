@@ -257,7 +257,7 @@ struct DomainEventProjectionReducer: Sendable {
         guard response.timelineSequence > 0 else {
             throw IMConversationMessageValidationError.invalidTimelineSequence(response.timelineSequence)
         }
-        return IMTimelineNotice(
+        return try IMTimelineNotice(
             id: response.id.uuidString,
             conversationID: response.conversationID.uuidString,
             timelineSequence: UInt64(response.timelineSequence),

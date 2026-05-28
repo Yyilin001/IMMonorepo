@@ -2,6 +2,22 @@ import Fluent
 import Foundation
 import Vapor
 
+struct IMCanonicalDomainEventDelivery: Sendable {
+    let ownerUserID: UUID
+    let eventID: UUID
+    let payload: IMTCPChatDomainEventPayload
+
+    fileprivate init(
+        ownerUserID: UUID,
+        eventID: UUID,
+        payload: IMTCPChatDomainEventPayload
+    ) {
+        self.ownerUserID = ownerUserID
+        self.eventID = eventID
+        self.payload = payload
+    }
+}
+
 struct OwnerDomainEventDeliveryService {
     let db: any Database
 
@@ -71,6 +87,14 @@ struct OwnerDomainEventDeliveryService {
             throw Abort(.internalServerError, reason: "Owner domain event delivery payload is not valid base64.")
         }
         return try IMTCPProtobufCodec.decodeDomainEvent(data)
+    }
+
+    func canonicalDelivery(from delivery: OwnerDomainEventDelivery) throws -> IMCanonicalDomainEventDelivery {
+        try IMCanonicalDomainEventDelivery(
+            ownerUserID: delivery.ownerUserID,
+            eventID: delivery.eventID,
+            payload: decodePayload(from: delivery)
+        )
     }
 
     func list(

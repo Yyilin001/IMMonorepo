@@ -93,8 +93,8 @@ extension IMConversationController {
         let readThrough = members.map(\.lastReadSequence).min() ?? 0
         return IMConversationReceiptSummaryResponse(
             conversationID: conversationID,
-            deliveredThroughSequence: members.count > 1 ? lastSequence : 0,
-            readThroughSequence: readThrough,
+            deliveredThroughSequence: members.count > 1 ? try imNonNegativeUInt64Sequence(lastSequence, field: "last_message_sequence") : 0,
+            readThroughSequence: try imNonNegativeUInt64Sequence(readThrough, field: "last_read_sequence"),
             readableMemberCount: members.count
         )
     }

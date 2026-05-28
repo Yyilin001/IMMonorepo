@@ -25,7 +25,7 @@ struct GatewayRelayController: RouteCollection {
             ])
             return .ok
         }
-        _ = try OwnerDomainEventDeliveryService(db: db).decodePayload(from: delivery)
+        _ = try OwnerDomainEventDeliveryService(db: db).canonicalDelivery(from: delivery)
         await req.application.gatewaySessionService.sendDomainEventDelivery(
             ownerUserID: body.ownerUserID,
             eventID: body.eventID,

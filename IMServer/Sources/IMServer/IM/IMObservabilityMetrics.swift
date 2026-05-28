@@ -42,6 +42,8 @@ actor IMDatabaseMetrics {
         var totalLatencyMillis: Int = 0
         var maxLatencyMillis: Int = 0
         var lastOperation: String?
+        var invalidSequenceCount: Int = 0
+        var staleSearchHitCount: Int = 0
 
         var averageLatencyMillis: Int {
             guard operationCount > 0 else {
@@ -61,6 +63,14 @@ actor IMDatabaseMetrics {
         snapshot.totalLatencyMillis += max(0, durationMillis)
         snapshot.maxLatencyMillis = max(snapshot.maxLatencyMillis, durationMillis)
         snapshot.lastOperation = operation
+    }
+
+    func recordInvalidSequence() {
+        snapshot.invalidSequenceCount += 1
+    }
+
+    func recordStaleSearchHit() {
+        snapshot.staleSearchHitCount += 1
     }
 
     func currentSnapshot() -> Snapshot {

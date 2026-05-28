@@ -187,7 +187,7 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
 
             struct FilterBody: Content {
                 let term: [String: String]?
-                let range: [String: [String: Int]]?
+                let range: [String: [String: UInt64]]?
             }
 
             struct MultiMatchBody: Content {
@@ -208,7 +208,7 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
 
         let size: Int
         let query: QueryBody
-        let searchAfter: [Int]?
+        let searchAfter: [UInt64]?
 
         enum CodingKeys: String, CodingKey {
             case size
@@ -222,7 +222,7 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
             struct HitBody: Content {
                 struct SourceBody: Content {
                     let messageID: UUID
-                    let serverSequence: Int
+                    let serverSequence: UInt64
 
                     enum CodingKeys: String, CodingKey {
                         case messageID = "messageID"
@@ -231,7 +231,7 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
                 }
 
                 let source: SourceBody
-                let sort: [Int]?
+                let sort: [UInt64]?
 
                 enum CodingKeys: String, CodingKey {
                     case source = "_source"
@@ -262,14 +262,24 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
 
         let requestedLimit = limit ?? 20
         let normalizedLimit = max(1, min(requestedLimit, 50))
-        let searchAfter = cursor.flatMap(Int.init(_:))
+        let searchAfter: UInt64?
+        if let cursor, !cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let parsedCursor = UInt64(cursor), parsedCursor > 0 else {
+                await app.databaseMetrics.recordInvalidSequence()
+                throw Abort(.badRequest, reason: "Invalid search cursor.")
+            }
+            searchAfter = parsedCursor
+        } else {
+            searchAfter = nil
+        }
+        let visibleFromSequence = try imNonNegativeUInt64Sequence(membership.visibleFromSequence, field: "visible_from_sequence")
         let body = SearchRequestBody(
             size: normalizedLimit + 1,
             query: .init(
                 bool: .init(
                     filter: [
                         .init(term: ["conversationID": conversationID.uuidString], range: nil),
-                        .init(term: nil, range: ["serverSequence": ["gte": membership.visibleFromSequence]])
+                        .init(term: nil, range: ["serverSequence": ["gte": visibleFromSequence]])
                     ],
                     must: [
                         .init(query: query, fields: ["searchableText"])
@@ -305,8 +315,10 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
             let byID = Dictionary(uniqueKeysWithValues: try messages.map { (try $0.requireID(), $0) })
             let searchService = ConversationSearchService(db: conversationReadDB)
 
+            var staleHitIDs: [UUID] = []
             let items = try pageHits.compactMap { hit -> IMConversationMessageSearchHitResponse? in
                 guard let message = byID[hit.source.messageID] else {
+                    staleHitIDs.append(hit.source.messageID)
                     return nil
                 }
                 let aggregate = try message.decodedAggregate()
@@ -321,6 +333,10 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
                     createdAt: message.createdAt
                 )
             }
+            for staleHitID in staleHitIDs {
+                await app.databaseMetrics.recordStaleSearchHit()
+                try? await deleteDocument(documentID: ConversationMessageSearchIndex.recordID(messageID: staleHitID))
+            }
 
             return IMConversationMessageSearchPageResponse(
                 items: items,
@@ -329,6 +345,14 @@ struct OpenSearchConversationSearchAdapter: ConversationSearchAdapter {
             )
         } catch {
             throw error
+        }
+    }
+
+    private func deleteDocument(documentID: String) async throws {
+        let baseEndpoint = endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let response = try await app.client.delete(URI(string: "\(baseEndpoint)/\(indexName)/_doc/\(documentID)"))
+        guard response.status == .ok || response.status == .notFound else {
+            throw Abort(.badGateway, reason: "OpenSearch stale document delete failed.")
         }
     }
 }

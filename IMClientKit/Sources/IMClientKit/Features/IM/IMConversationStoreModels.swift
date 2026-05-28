@@ -57,6 +57,13 @@ public enum IMConversationMessageValidationError: Error, Equatable, Sendable {
     case invalidTimelineSequence(UInt64)
 }
 
+public enum IMTimelineNoticeValidationError: Error, Equatable, Sendable {
+    case missingID
+    case missingConversationID
+    case invalidTimelineSequence(UInt64)
+    case missingNoticeKind
+}
+
 public struct IMMessageLocalTransferState: Codable, Equatable, Sendable {
     public let sourceFilePath: String
     public let uploadID: String?
@@ -369,7 +376,19 @@ public struct IMTimelineNotice: Identifiable, Equatable, Sendable {
         params: [String: String] = [:],
         fallbackText: String,
         createdAt: Date
-    ) {
+    ) throws {
+        guard !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw IMTimelineNoticeValidationError.missingID
+        }
+        guard !conversationID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw IMTimelineNoticeValidationError.missingConversationID
+        }
+        guard timelineSequence > 0 else {
+            throw IMTimelineNoticeValidationError.invalidTimelineSequence(timelineSequence)
+        }
+        guard !noticeKind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw IMTimelineNoticeValidationError.missingNoticeKind
+        }
         self.id = id
         self.conversationID = conversationID
         self.timelineSequence = timelineSequence
@@ -692,6 +711,7 @@ public struct IMDomainEventDebugMetrics: Equatable, Sendable {
     public var deferredExpired = 0
     public var deferredFullRefreshRequested = 0
     public var cacheDroppedCanonicalMessages = 0
+    public var cacheDroppedTimelineNotices = 0
     public var invalidCanonicalMessageDTOs = 0
     public var invalidProjectionDTOs = 0
     public var sequenceDecodeOverflow = 0

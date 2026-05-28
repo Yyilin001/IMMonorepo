@@ -340,14 +340,13 @@ extension IMConversationDetailView {
             return "已发送"
         }
 
-        let sequenceValue = Int(sequence)
-        if summary.readThroughSequence >= sequenceValue {
+        if summary.readThroughSequence >= sequence {
             return "已读"
         }
-        if conversation?.kind == .group, summary.deliveredThroughSequence >= sequenceValue {
+        if conversation?.kind == .group, summary.deliveredThroughSequence >= sequence {
             return summary.readThroughSequence > 0 ? "部分已读" : "已送达"
         }
-        if summary.deliveredThroughSequence >= sequenceValue {
+        if summary.deliveredThroughSequence >= sequence {
             return "已送达"
         }
         return "已发送"

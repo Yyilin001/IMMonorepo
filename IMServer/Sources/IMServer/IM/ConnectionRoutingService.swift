@@ -71,7 +71,7 @@ struct ConnectionRoutingService {
         let deliveryService = OwnerDomainEventDeliveryService(
             db: app.summaryShardRouter.database(forOwnerUserID: ownerUserID)
         )
-        let payload: IMTCPChatDomainEventPayload
+        let canonicalDelivery: IMCanonicalDomainEventDelivery
         do {
             guard let delivery = try await deliveryService.find(ownerUserID: ownerUserID, eventID: eventID) else {
                 await app.routingMetrics.recordRealtimeDeliveryMissingRow()
@@ -82,9 +82,9 @@ struct ConnectionRoutingService {
                 ])
                 return
             }
-            payload = try deliveryService.decodePayload(from: delivery)
+            canonicalDelivery = try deliveryService.canonicalDelivery(from: delivery)
         } catch {
-            await app.routingMetrics.recordCrossNodeDispatchFailed()
+            await app.routingMetrics.recordInvalidRealtimeDeliveryPayload()
             app.logger.warning("Skipping realtime domain event because owner delivery payload is invalid.", metadata: [
                 "owner_user_id": .string(ownerUserID.uuidString),
                 "event_id": .string(eventID.uuidString),
@@ -94,7 +94,7 @@ struct ConnectionRoutingService {
             return
         }
         await app.routingMetrics.recordUserFanout(targetUserCount: 1)
-        await app.imConnectionRegistry.sendDomainEvent(payload, toUserIDs: [ownerUserID], requestID: requestID)
+        await app.imConnectionRegistry.sendDomainEventDelivery(canonicalDelivery, requestID: requestID)
         let envelope = NodeMessageDispatchEnvelope(
             requestID: requestID,
             payload: .domainEvent(ownerUserID: ownerUserID, eventID: eventID)
@@ -168,7 +168,7 @@ struct ConnectionRoutingService {
             let deliveryService = OwnerDomainEventDeliveryService(
                 db: app.summaryShardRouter.database(forOwnerUserID: ownerUserID)
             )
-            let payload: IMTCPChatDomainEventPayload
+            let canonicalDelivery: IMCanonicalDomainEventDelivery
             do {
                 guard let delivery = try await deliveryService.find(ownerUserID: ownerUserID, eventID: eventID) else {
                     await app.routingMetrics.recordRealtimeDeliveryMissingRow()
@@ -179,8 +179,9 @@ struct ConnectionRoutingService {
                     ])
                     return
                 }
-                payload = try deliveryService.decodePayload(from: delivery)
+                canonicalDelivery = try deliveryService.canonicalDelivery(from: delivery)
             } catch {
+                await app.routingMetrics.recordInvalidRealtimeDeliveryPayload()
                 app.logger.warning("Remote domain-event dispatch failed to decode owner delivery payload.", metadata: [
                     "ownerUserID": .string(ownerUserID.uuidString),
                     "eventID": .string(eventID.uuidString),
@@ -189,11 +190,7 @@ struct ConnectionRoutingService {
                 ])
                 return
             }
-            await app.imConnectionRegistry.sendDomainEvent(
-                payload,
-                toUserIDs: [ownerUserID],
-                requestID: envelope.requestID
-            )
+            await app.imConnectionRegistry.sendDomainEventDelivery(canonicalDelivery, requestID: envelope.requestID)
         case .streamSignal:
             guard let payload: IMTCPMessageStreamSignalPayload = decodePayload(from: envelope) else {
                 await app.routingMetrics.recordCrossNodeDispatchFailed()

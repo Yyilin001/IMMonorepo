@@ -16,9 +16,15 @@ public struct IMCacheRestoreDiagnostics: Equatable, Sendable {
 
     public private(set) var droppedCanonicalMessages: [DroppedCanonicalMessage] = []
     public private(set) var droppedCanonicalMessagesDuringSnapshot: [DroppedCanonicalMessage] = []
+    public private(set) var droppedTimelineNotices: [DroppedCanonicalMessage] = []
+    public private(set) var droppedTimelineNoticesDuringSnapshot: [DroppedCanonicalMessage] = []
 
     public var droppedCanonicalMessageCount: Int {
         droppedCanonicalMessages.count + droppedCanonicalMessagesDuringSnapshot.count
+    }
+
+    public var droppedTimelineNoticeCount: Int {
+        droppedTimelineNotices.count + droppedTimelineNoticesDuringSnapshot.count
     }
 
     mutating func recordDroppedCanonicalMessage(
@@ -49,9 +55,39 @@ public struct IMCacheRestoreDiagnostics: Equatable, Sendable {
         )
     }
 
+    mutating func recordDroppedTimelineNotice(
+        conversationID: String,
+        noticeID: String,
+        reason: String
+    ) {
+        droppedTimelineNotices.append(
+            DroppedCanonicalMessage(
+                conversationID: conversationID,
+                messageID: noticeID,
+                reason: reason
+            )
+        )
+    }
+
+    mutating func recordDroppedTimelineNoticeDuringSnapshot(
+        conversationID: String,
+        noticeID: String,
+        reason: String
+    ) {
+        droppedTimelineNoticesDuringSnapshot.append(
+            DroppedCanonicalMessage(
+                conversationID: conversationID,
+                messageID: noticeID,
+                reason: reason
+            )
+        )
+    }
+
     mutating func merge(_ other: IMCacheRestoreDiagnostics) {
         droppedCanonicalMessages.append(contentsOf: other.droppedCanonicalMessages)
         droppedCanonicalMessagesDuringSnapshot.append(contentsOf: other.droppedCanonicalMessagesDuringSnapshot)
+        droppedTimelineNotices.append(contentsOf: other.droppedTimelineNotices)
+        droppedTimelineNoticesDuringSnapshot.append(contentsOf: other.droppedTimelineNoticesDuringSnapshot)
     }
 }
 
@@ -142,19 +178,28 @@ enum ConversationCacheSnapshotMapper {
                         localDownloadState: message.localDownloadState
                     )
                 },
-                notices: conversation.notices.map { notice in
-                    IMCachedTimelineNoticeState(
-                        id: notice.id,
-                        conversationID: notice.conversationID,
-                        timelineSequence: notice.timelineSequence,
-                        eventType: notice.eventType,
-                        actorUserID: notice.actorUserID,
-                        targetUserIDs: notice.targetUserIDs,
-                        noticeKind: notice.noticeKind,
-                        params: notice.params,
-                        fallbackText: notice.fallbackText,
-                        createdAt: notice.createdAt
-                    )
+                notices: conversation.notices.compactMap { notice in
+                    do {
+                        return try IMCachedTimelineNoticeState(
+                            id: notice.id,
+                            conversationID: notice.conversationID,
+                            timelineSequence: notice.timelineSequence,
+                            eventType: notice.eventType,
+                            actorUserID: notice.actorUserID,
+                            targetUserIDs: notice.targetUserIDs,
+                            noticeKind: notice.noticeKind,
+                            params: notice.params,
+                            fallbackText: notice.fallbackText,
+                            createdAt: notice.createdAt
+                        )
+                    } catch {
+                        diagnostics.recordDroppedTimelineNoticeDuringSnapshot(
+                            conversationID: notice.conversationID,
+                            noticeID: notice.id,
+                            reason: String(describing: error)
+                        )
+                        return nil
+                    }
                 },
                 hasLoadedMessages: hasLoadedMessages,
                 lastMessagePreviewText: conversation.lastMessagePreviewText,
@@ -174,6 +219,7 @@ enum ConversationCacheSnapshotMapper {
 
         let fullRefreshConversationIDs = Set(domainEventState.fullRefreshConversationIDs)
             .union(diagnostics.droppedCanonicalMessagesDuringSnapshot.map(\.conversationID))
+            .union(diagnostics.droppedTimelineNoticesDuringSnapshot.map(\.conversationID))
 
         return IMConversationCacheSnapshot(
             metadata: IMCacheMetadataState(
@@ -261,19 +307,28 @@ enum ConversationCacheSnapshotMapper {
                         localDownloadState: cachedMessage.localDownloadState
                     )
                 },
-                notices: cachedConversation.notices.map { notice in
-                    IMTimelineNotice(
-                        id: notice.id,
-                        conversationID: notice.conversationID,
-                        timelineSequence: notice.timelineSequence,
-                        eventType: notice.eventType,
-                        actorUserID: notice.actorUserID,
-                        targetUserIDs: notice.targetUserIDs,
-                        noticeKind: notice.noticeKind,
-                        params: notice.params,
-                        fallbackText: notice.fallbackText,
-                        createdAt: notice.createdAt
-                    )
+                notices: cachedConversation.notices.compactMap { notice in
+                    do {
+                        return try IMTimelineNotice(
+                            id: notice.id,
+                            conversationID: notice.conversationID,
+                            timelineSequence: notice.timelineSequence,
+                            eventType: notice.eventType,
+                            actorUserID: notice.actorUserID,
+                            targetUserIDs: notice.targetUserIDs,
+                            noticeKind: notice.noticeKind,
+                            params: notice.params,
+                            fallbackText: notice.fallbackText,
+                            createdAt: notice.createdAt
+                        )
+                    } catch {
+                        diagnostics.recordDroppedTimelineNotice(
+                            conversationID: notice.conversationID,
+                            noticeID: notice.id,
+                            reason: String(describing: error)
+                        )
+                        return nil
+                    }
                 },
                 lastMessagePreviewText: cachedConversation.lastMessagePreviewText,
                 hasMoreHistory: cachedConversation.hasMoreHistory,

@@ -131,8 +131,8 @@ struct IMFavoritePageResponse: Content, Equatable {
 
 struct IMConversationReceiptSummaryResponse: Content, Equatable {
     let conversationID: UUID
-    let deliveredThroughSequence: Int
-    let readThroughSequence: Int
+    let deliveredThroughSequence: UInt64
+    let readThroughSequence: UInt64
     let readableMemberCount: Int
 }
 

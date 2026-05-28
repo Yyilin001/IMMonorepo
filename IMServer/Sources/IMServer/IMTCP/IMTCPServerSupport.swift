@@ -218,12 +218,16 @@ actor IMConnectionRegistry {
         connectionsByID.count
     }
 
-    func sendDomainEvent(
-        _ payload: IMTCPChatDomainEventPayload,
-        toUserIDs userIDs: [UUID],
+    func sendDomainEventDelivery(
+        _ delivery: IMCanonicalDomainEventDelivery,
         requestID: UUID? = UUID()
     ) {
-        sendPacket(type: .domainEvent, payload: payload, toUserIDs: userIDs, requestID: requestID)
+        sendPacket(
+            type: .domainEvent,
+            payload: delivery.payload,
+            toUserIDs: [delivery.ownerUserID],
+            requestID: requestID
+        )
     }
 
     func sendStreamSignal(

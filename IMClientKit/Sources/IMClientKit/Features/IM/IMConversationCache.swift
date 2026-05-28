@@ -289,7 +289,19 @@ public struct IMCachedTimelineNoticeState: Identifiable, Codable, Sendable, Equa
         params: [String: String] = [:],
         fallbackText: String,
         createdAt: Date
-    ) {
+    ) throws {
+        guard !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw IMTimelineNoticeValidationError.missingID
+        }
+        guard !conversationID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw IMTimelineNoticeValidationError.missingConversationID
+        }
+        guard timelineSequence > 0 else {
+            throw IMTimelineNoticeValidationError.invalidTimelineSequence(timelineSequence)
+        }
+        guard !noticeKind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw IMTimelineNoticeValidationError.missingNoticeKind
+        }
         self.id = id
         self.conversationID = conversationID
         self.timelineSequence = timelineSequence
@@ -300,6 +312,49 @@ public struct IMCachedTimelineNoticeState: Identifiable, Codable, Sendable, Equa
         self.params = params
         self.fallbackText = fallbackText
         self.createdAt = createdAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case conversationID
+        case timelineSequence
+        case eventType
+        case actorUserID
+        case targetUserIDs
+        case noticeKind
+        case params
+        case fallbackText
+        case createdAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            id: container.decode(String.self, forKey: .id),
+            conversationID: container.decode(String.self, forKey: .conversationID),
+            timelineSequence: container.decode(UInt64.self, forKey: .timelineSequence),
+            eventType: container.decode(String.self, forKey: .eventType),
+            actorUserID: container.decodeIfPresent(UUID.self, forKey: .actorUserID),
+            targetUserIDs: container.decode([UUID].self, forKey: .targetUserIDs),
+            noticeKind: container.decode(String.self, forKey: .noticeKind),
+            params: container.decodeIfPresent([String: String].self, forKey: .params) ?? [:],
+            fallbackText: container.decode(String.self, forKey: .fallbackText),
+            createdAt: container.decode(Date.self, forKey: .createdAt)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(conversationID, forKey: .conversationID)
+        try container.encode(timelineSequence, forKey: .timelineSequence)
+        try container.encode(eventType, forKey: .eventType)
+        try container.encodeIfPresent(actorUserID, forKey: .actorUserID)
+        try container.encode(targetUserIDs, forKey: .targetUserIDs)
+        try container.encode(noticeKind, forKey: .noticeKind)
+        try container.encode(params, forKey: .params)
+        try container.encode(fallbackText, forKey: .fallbackText)
+        try container.encode(createdAt, forKey: .createdAt)
     }
 }
 

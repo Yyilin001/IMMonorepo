@@ -159,6 +159,60 @@ struct GRDBIMConversationCacheTests {
         #expect(restored.conversations.first?.messages.first?.text == "hello")
     }
 
+    @Test func invalidTimelineNoticeStateIsRejectedAndReported() async throws {
+        #expect(throws: IMTimelineNoticeValidationError.invalidTimelineSequence(0)) {
+            try IMTimelineNotice(
+                id: "notice-1",
+                conversationID: "conversation-1",
+                timelineSequence: 0,
+                eventType: "member.added",
+                actorUserID: nil,
+                targetUserIDs: [],
+                noticeKind: "member_added",
+                fallbackText: "member added",
+                createdAt: Date(timeIntervalSince1970: 1_700_300_001)
+            )
+        }
+        #expect(throws: IMTimelineNoticeValidationError.missingNoticeKind) {
+            try IMCachedTimelineNoticeState(
+                id: "notice-1",
+                conversationID: "conversation-1",
+                timelineSequence: 1,
+                eventType: "member.added",
+                actorUserID: nil,
+                targetUserIDs: [],
+                noticeKind: "",
+                fallbackText: "member added",
+                createdAt: Date(timeIntervalSince1970: 1_700_300_001)
+            )
+        }
+    }
+
+    @Test func corruptTimelineNoticeJSONProducesDiagnostics() async throws {
+        let ownerUserID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let databaseURL = try temporaryDatabaseURL()
+        let cache = try GRDBIMConversationCache(databaseURL: databaseURL)
+        try await cache.saveSnapshot(sampleSnapshot(ownerUserID: ownerUserID), for: ownerUserID)
+
+        let pool = try DatabasePool(path: databaseURL.path)
+        try await pool.write { db in
+            try db.execute(
+                sql: """
+                UPDATE cached_conversations
+                SET notices_json = '{broken-json'
+                WHERE owner_user_id = ?
+                """,
+                arguments: [ownerUserID.uuidString]
+            )
+        }
+
+        let restored = try await cache.loadSnapshot(for: ownerUserID)
+
+        #expect(restored.conversations.first?.notices.isEmpty == true)
+        #expect(restored.diagnostics.droppedTimelineNoticeCount == 1)
+        #expect(restored.diagnostics.droppedTimelineNotices.first?.conversationID == "conversation-\(ownerUserID.uuidString)")
+    }
+
     private func makeCache() throws -> GRDBIMConversationCache {
         try GRDBIMConversationCache(databaseURL: temporaryDatabaseURL())
     }

@@ -29,7 +29,7 @@ struct OpenSearchConversationSearchIndexWriter: ConversationSearchIndexWriter {
     private struct Document: Content {
         let messageID: UUID
         let conversationID: UUID
-        let serverSequence: Int
+        let serverSequence: UInt64
         let searchableText: String
         let messageType: String
         let createdAt: Date
@@ -55,7 +55,7 @@ struct OpenSearchConversationSearchIndexWriter: ConversationSearchIndexWriter {
         let document = Document(
             messageID: messageID,
             conversationID: message.$conversation.id,
-            serverSequence: message.serverSequence,
+            serverSequence: try imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence"),
             searchableText: searchableText,
             messageType: message.kind,
             createdAt: message.createdAt ?? Date()
@@ -94,7 +94,7 @@ struct OpenSearchConversationSearchIndexWriter: ConversationSearchIndexWriter {
                 Document(
                     messageID: messageID,
                     conversationID: message.$conversation.id,
-                    serverSequence: message.serverSequence,
+                    serverSequence: try imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence"),
                     searchableText: searchableText,
                     messageType: message.kind,
                     createdAt: message.createdAt ?? Date()
