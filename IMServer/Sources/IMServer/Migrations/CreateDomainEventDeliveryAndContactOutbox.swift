@@ -71,9 +71,12 @@ struct CreateOwnerDomainEventDelivery: AsyncMigration {
             .field("source_event_id", .uuid, .required)
             .field("event_pb_base64", .string, .required)
             .field("created_at", .datetime, .required)
-            .unique(on: "owner_user_id", "owner_cursor")
-            .unique(on: "owner_user_id", "event_id")
-            .unique(on: "owner_user_id", "aggregate_type", "aggregate_id", "owner_aggregate_sequence")
+            .unique(on: "owner_user_id", "owner_cursor", name: "uq_owner_delivery_cursor")
+            .unique(on: "owner_user_id", "event_id", name: "uq_owner_delivery_event")
+            .unique(
+                on: "owner_user_id", "aggregate_type", "aggregate_id", "owner_aggregate_sequence",
+                name: "uq_owner_delivery_aggregate_seq"
+            )
             .ignoreExisting()
             .create()
 

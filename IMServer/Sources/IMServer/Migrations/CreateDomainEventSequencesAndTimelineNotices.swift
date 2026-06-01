@@ -49,6 +49,24 @@ struct CreateDomainEventSequencesAndTimelineNotices: AsyncMigration {
             return
         }
         try await sql.raw("""
+            ALTER TABLE conversation_domain_events
+            ADD COLUMN IF NOT EXISTS aggregate_sequence BIGINT NOT NULL DEFAULT 1
+            """).run()
+        try await sql.raw("""
+            ALTER TABLE im_messages
+            ADD COLUMN IF NOT EXISTS timeline_sequence BIGINT
+            """).run()
+        try await sql.raw("""
+            UPDATE im_messages
+            SET timeline_sequence = server_sequence
+            WHERE timeline_sequence IS NULL
+            """).run()
+        try await sql.raw("""
+            ALTER TABLE im_messages
+            ALTER COLUMN timeline_sequence SET DEFAULT 1,
+            ALTER COLUMN timeline_sequence SET NOT NULL
+            """).run()
+        try await sql.raw("""
             CREATE INDEX IF NOT EXISTS conversation_timeline_notices_conversation_sequence_idx
             ON conversation_timeline_notices (conversation_id, timeline_sequence ASC)
             """).run()

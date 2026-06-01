@@ -80,6 +80,10 @@ private func loadLocalEnvironmentIfNeeded(environment: Environment) {
         return
     }
 
+    guard FileManager.default.isReadableFile(atPath: packageRoot.path) else {
+        return
+    }
+
     // 优先读取 .env.local，其次兜底 .env，且不会覆盖已经注入的环境变量。
     let candidates = [
         packageRoot.appendingPathComponent(".env.local"),

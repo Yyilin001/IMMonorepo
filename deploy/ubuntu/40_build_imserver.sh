@@ -18,8 +18,9 @@ ensure_user "${IMSERVER_USER}" "${IMSERVER_GROUP}" "${IMSERVER_HOME}"
 install -d -o "${IMSERVER_USER}" -g "${IMSERVER_GROUP}" -m 0755 "${IMSERVER_HOME}" "${IMSERVER_BIN_DIR}" "${IMSERVER_LOG_DIR}"
 
 cd "${ROOT}"
-swift build -c release --package-path IMServer --jobs "${SWIFT_BUILD_JOBS:-1}"
-install -o "${IMSERVER_USER}" -g "${IMSERVER_GROUP}" -m 0755 "IMServer/.build/release/IMServer" "${IMSERVER_BIN_DIR}/IMServer"
+build_configuration="${IMSERVER_BUILD_CONFIGURATION:-release}"
+swift build -c "${build_configuration}" --package-path IMServer --jobs "${SWIFT_BUILD_JOBS:-1}"
+install -o "${IMSERVER_USER}" -g "${IMSERVER_GROUP}" -m 0755 "IMServer/.build/${build_configuration}/IMServer" "${IMSERVER_BIN_DIR}/IMServer"
 
 swift_runtime_dir="$(swift -print-target-info | sed -n 's/.*\"runtimeLibraryPaths\"[[:space:]]*:[[:space:]]*\\[\"\\([^\"]*\\)\".*/\\1/p' | head -1)"
 if [[ -z "${swift_runtime_dir}" || ! -d "${swift_runtime_dir}" ]]; then

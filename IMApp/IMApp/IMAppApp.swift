@@ -14,7 +14,7 @@ struct IMAppApp: App {
     @State private var authManager: AuthManager
 
     init() {
-        let configuration = AppNetworkConfiguration.local
+        let configuration = AppNetworkConfiguration.publicGateway
         _authManager = State(
             initialValue: AuthManager(
                 network: configuration.makeNetworkEnvironment(),

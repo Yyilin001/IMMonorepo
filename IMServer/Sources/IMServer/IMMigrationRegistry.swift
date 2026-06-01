@@ -63,6 +63,7 @@ enum IMMigrationRegistry {
         app.migrations.add(AddReportSnapshotFields())
         app.migrations.add(CreateAIMessageStreamIndex())
         app.migrations.add(EnforceV8SequenceInvariants())
+        app.migrations.add(RepairLegacyUserProfileColumns())
     }
 
     static func resetIMSchemaIfRequested(_ app: Application) async throws {

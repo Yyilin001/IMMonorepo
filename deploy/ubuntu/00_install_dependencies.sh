@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -f /opt/swiftly/env.sh ]]; then
+  # Swiftly may be installed under /opt for non-interactive root scripts.
+  # shellcheck source=/dev/null
+  source /opt/swiftly/env.sh
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
