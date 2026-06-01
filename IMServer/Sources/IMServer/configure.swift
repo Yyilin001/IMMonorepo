@@ -18,6 +18,7 @@ private func configureShared(_ app: Application) async throws {
 
     let authConfiguration = try AuthConfiguration.load(from: app.environment)
     let authSecurityConfiguration = try AuthSecurityConfiguration.load(from: app.environment)
+    let authSessionCacheConfiguration = AuthSessionCacheConfiguration.load(from: app.environment)
     let imTCPConfiguration = IMTCPConfiguration.load(from: app.environment)
     app.authClientIPResolver = AuthClientIPResolver.load(from: app.environment)
     app.gatewayRelayConfiguration = IMGatewayRelayConfiguration.load(from: app.environment)
@@ -44,6 +45,11 @@ private func configureShared(_ app: Application) async throws {
     try await app.configureAIStreamLeaseStoreIfNeeded()
     app.authConfiguration = authConfiguration
     app.authSecurityConfiguration = authSecurityConfiguration
+    app.authSessionCacheConfiguration = authSessionCacheConfiguration
+    app.authSessionValidationCache = await AuthSessionValidationCacheFactory.make(
+        app: app,
+        configuration: authSessionCacheConfiguration
+    )
     app.authLoginRateLimiter = try await AuthRateLimiterFactory.make(app: app, configuration: authSecurityConfiguration)
     app.authEmailSender = try AuthEmailSenderFactory.make(app: app, configuration: authSecurityConfiguration)
     app.imTCPConfiguration = imTCPConfiguration

@@ -675,6 +675,7 @@ extension IMServerTests {
                 #expect(res.headers.contentType?.type == "text")
                 #expect(res.body.string.contains("im_tcp_connections"))
                 #expect(res.body.string.contains("im_outbox_backlog_events"))
+                #expect(res.body.string.contains("im_auth_session_cache_hits_total"))
             })
 
             app.metricsConfiguration = IMMetricsConfiguration(isEnabled: false, internalSecret: nil)

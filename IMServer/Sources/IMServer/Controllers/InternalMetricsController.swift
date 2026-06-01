@@ -24,6 +24,7 @@ struct InternalMetricsController: RouteCollection {
         let stream = await req.application.streamMetrics.currentSnapshot()
         let aiStream = await req.application.aiStreamMetrics.currentSnapshot()
         let messageWrite = await req.application.messageWriteMetrics.currentSnapshot()
+        let authSessionCache = await req.application.authSessionCacheMetrics.currentSnapshot()
         let liveLag = await collectLiveLagSnapshot(app: req.application)
 
         var lines: [String] = []
@@ -35,6 +36,12 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_user_fanout_total", value: routing.userFanoutCount, to: &lines)
         appendCounter("im_session_kick_total", value: routing.sessionKickCount, to: &lines)
         appendCounter("im_session_count_query_failures_total", value: routing.sessionCountQueryFailureCount, to: &lines)
+        appendCounter("im_auth_session_cache_hits_total", value: authSessionCache.hits, to: &lines)
+        appendCounter("im_auth_session_cache_misses_total", value: authSessionCache.misses, to: &lines)
+        appendCounter("im_auth_session_cache_stores_total", value: authSessionCache.stores, to: &lines)
+        appendCounter("im_auth_session_cache_invalidations_total", value: authSessionCache.invalidations, to: &lines)
+        appendCounter("im_auth_session_cache_redis_errors_total", value: authSessionCache.redisErrors, to: &lines)
+        appendCounter("im_auth_session_cache_database_fallbacks_total", value: authSessionCache.databaseFallbacks, to: &lines)
         appendCounter("im_redis_route_registrations_total", value: routing.redisRouteRegistrations, to: &lines)
         appendCounter("im_redis_presence_route_cache_hits_total", value: routing.redisPresenceRouteCacheHits, to: &lines)
         appendCounter("im_redis_presence_route_cache_misses_total", value: routing.redisPresenceRouteCacheMisses, to: &lines)

@@ -220,6 +220,7 @@ struct AuthService {
         session.revokedAt = now
         session.revokedReason = AuthSessionRevocationReason.refreshTokenReuse.rawValue
         try await session.update(on: db)
+        await app.authSessionValidationCache.invalidate(sessionID: payload.sid)
         await audit(
             eventType: "refresh_reuse_detected",
             user: user,
@@ -409,6 +410,7 @@ struct AuthService {
                 )
         }
 
+        await app.authSessionValidationCache.invalidate(userID: try user.requireID())
         for sessionID in revokedSessionIDs {
             await kickRevokedSession(
                 sessionID: sessionID,
@@ -433,21 +435,36 @@ struct AuthService {
         let payload = try await app.jwtKeys.verify(token, as: AccessTokenPayload.self)
         try validate(payload: payload, tokenKind: .access)
 
-        let session = try await requireActiveSession(id: payload.sid, userID: payload.sub, shouldRevokeExpired: true)
-        let user = try await requireActiveUser(id: payload.sub)
+        let principal = try await app.authSessionValidationCache.principal(
+            sessionID: payload.sid,
+            userID: payload.sub,
+            loadFromDatabase: {
+                try await loadAuthenticatedPrincipal(
+                    sessionID: payload.sid,
+                    userID: payload.sub,
+                    shouldRevokeExpired: true
+                )
+            }
+        )
 
         return (
-            user,
-            SessionContext(
-                userID: payload.sub,
-                sessionID: try session.requireID(),
-                deviceID: session.deviceID
-            )
+            principal.makeUserSnapshot(),
+            principal.sessionContext
         )
     }
 
     func validateActiveSession(id sessionID: UUID, userID: UUID) async throws {
-        _ = try await requireActiveSession(id: sessionID, userID: userID, shouldRevokeExpired: true)
+        _ = try await app.authSessionValidationCache.principal(
+            sessionID: sessionID,
+            userID: userID,
+            loadFromDatabase: {
+                try await loadAuthenticatedPrincipal(
+                    sessionID: sessionID,
+                    userID: userID,
+                    shouldRevokeExpired: true
+                )
+            }
+        )
     }
 
     func logout(sessionID: UUID) async throws {
@@ -458,6 +475,7 @@ struct AuthService {
         session.revokedAt = now
         session.revokedReason = AuthSessionRevocationReason.logoutCurrent.rawValue
         try await session.update(on: db)
+        await app.authSessionValidationCache.invalidate(sessionID: sessionID)
         await app.gatewaySessionService.kickConnections(
             forSessionID: sessionID,
             reason: .logoutCurrent,
@@ -475,6 +493,7 @@ struct AuthService {
         session.revokedAt = now
         session.revokedReason = AuthSessionRevocationReason.sessionRevoked.rawValue
         try await session.update(on: db)
+        await app.authSessionValidationCache.invalidate(sessionID: sessionID)
         await app.gatewaySessionService.kickConnections(
             forSessionID: sessionID,
             reason: .sessionRevoked,
@@ -539,6 +558,7 @@ struct AuthService {
             .set(\.$revokedReason, to: AuthSessionRevocationReason.logoutAll.rawValue)
             .update()
 
+        await app.authSessionValidationCache.invalidate(userID: userID)
         await app.gatewaySessionService.kickConnections(
             forUserID: userID,
             reason: .logoutAll,
@@ -583,6 +603,7 @@ struct AuthService {
 
             let response = try await makeAuthResponse(for: user, session: session, now: issuedAt)
             for revokedSessionID in revokedSessionIDs {
+                await app.authSessionValidationCache.invalidate(sessionID: revokedSessionID)
                 await app.gatewaySessionService.kickConnections(
                     forSessionID: revokedSessionID,
                     reason: .sessionRevoked,
@@ -731,6 +752,20 @@ struct AuthService {
         }
     }
 
+    private func loadAuthenticatedPrincipal(
+        sessionID: UUID,
+        userID: UUID,
+        shouldRevokeExpired: Bool
+    ) async throws -> AuthenticatedPrincipal {
+        let session = try await requireActiveSession(
+            id: sessionID,
+            userID: userID,
+            shouldRevokeExpired: shouldRevokeExpired
+        )
+        let user = try await requireActiveUser(id: userID)
+        return try AuthenticatedPrincipal(user: user, session: session)
+    }
+
     private func requireActiveSession(id sessionID: UUID, userID: UUID, shouldRevokeExpired: Bool) async throws -> AuthSession {
         guard let session = try await AuthSession.find(sessionID, on: db),
               session.$user.id == userID
@@ -752,6 +787,7 @@ struct AuthService {
                 session.revokedAt = now
                 session.revokedReason = AuthSessionRevocationReason.sessionRevoked.rawValue
                 try await session.update(on: db)
+                await app.authSessionValidationCache.invalidate(sessionID: sessionID)
                 await kickRevokedSession(
                     sessionID: sessionID,
                     reason: .sessionRevoked,

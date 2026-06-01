@@ -39,6 +39,7 @@ struct UserProfileCommandService {
         guard let refreshedUser = try await User.find(userID, on: app.db) else {
             throw Abort(.notFound, reason: "用户不存在。")
         }
+        await app.authSessionValidationCache.invalidate(userID: userID)
         return try refreshedUser.asResponse()
     }
 
