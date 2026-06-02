@@ -50,7 +50,7 @@ Required roles:
 - `command-api`: IM mutations, command-side persistence, outbox production, media/file mutation APIs.
 - `query-api`: conversations, changes, messages, `messages/since`, and message search.
 - `outbox-relay`: shard-local outbox claim and Kafka publication.
-- `stream-consumer`: Kafka consumption, summary projection, changes log, search/notification/replay updates.
+- `stream-consumer`: Kafka consumption, domain delivery/realtime relay, summary projection, changes log, search/notification/replay updates.
 - `ops`: rebuild, verify, repair, requeue, replay, and inspect commands.
 
 Required production posture:

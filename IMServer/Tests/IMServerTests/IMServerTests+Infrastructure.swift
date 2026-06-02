@@ -358,6 +358,23 @@ extension IMServerTests {
         }
     }
 
+    @Test("Production domain delivery consumer requires gateway relay configuration")
+    func productionDomainDeliveryConsumerRequiresGatewayRelayConfiguration() async throws {
+        try await withProductionRuntimeEnvironment {
+            setenv("IM_STREAM_CONSUMER_GROUPS", "domain-delivery-consumer", 1)
+            unsetenv("IM_GATEWAY_INTERNAL_BASE_URL")
+            let app = try await productionRuntimeValidationApp(role: .streamConsumer)
+            do {
+                try IMStreamConsumerProductionValidator.validate(app: app)
+                Issue.record("Expected domain-delivery-consumer validation to require gateway relay base URL")
+            } catch GatewayRelayConfigurationError.httpModeRequiresBaseURL {
+            } catch {
+                Issue.record("Unexpected stream-consumer validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
     @Test("Production gateway public TCP bind requires TLS termination confirmation")
     func productionGatewayPublicTCPBindRequiresTLSTerminationConfirmation() async throws {
         try await withProductionRuntimeEnvironment {
@@ -479,6 +496,8 @@ extension IMServerTests {
         #expect(configuration.brokers.count == 2)
         #expect(producerConfiguration.identifier == "im-command-node-1")
         #expect(producerConfiguration.bootstrapBrokerAddresses.count == 2)
+        #expect(producerConfiguration.isIdempotenceEnabled == true)
+        #expect(producerConfiguration.maximumInFlightRequestsPerConnection == 5)
         #expect(producerConfiguration.queue.maximumMessageQueueTime == .milliseconds(25))
         #expect(producerConfiguration.topicConfiguration.requestTimeout == .milliseconds(45_000))
         #expect(producerConfiguration.topicConfiguration.messageTimeout == .timeout(.milliseconds(120_000)))
@@ -595,6 +614,26 @@ extension IMServerTests {
         let configuration = IMStreamConsumerConfiguration.load(from: .production)
         #expect(configuration.orderedEnabledGroups == ["summary-projection-consumer"])
         #expect(configuration.preservesGroupedDeploymentsInProduction == false)
+    }
+
+    @Test("Stream consumer default groups include domain delivery")
+    func streamConsumerDefaultGroupsIncludeDomainDelivery() {
+        let originalValues = [
+            "IM_STREAM_CONSUMER_GROUPS": Environment.get("IM_STREAM_CONSUMER_GROUPS"),
+            "IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP": Environment.get("IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP")
+        ]
+        defer {
+            for (key, value) in originalValues {
+                restoreEnvironment(key, to: value)
+            }
+        }
+
+        unsetenv("IM_STREAM_CONSUMER_GROUPS")
+        unsetenv("IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP")
+
+        let configuration = IMStreamConsumerConfiguration.load(from: .development)
+        #expect(configuration.enabledGroups.contains("summary-projection-consumer"))
+        #expect(configuration.enabledGroups.contains("domain-delivery-consumer"))
     }
 
     @Test("Stream consumer multi-group production deployments require explicit override")

@@ -117,6 +117,14 @@ IM_KAFKA_CLIENT_ID=im-stream-consumer
 IM_STREAM_CONSUMER_GROUPS=summary-projection-consumer
 EOF
 
+cat > "${IMSERVER_ETC_DIR}/roles/domain-delivery-consumer.env" <<EOF
+IM_NODE_ID=domain-delivery-consumer-1
+IM_KAFKA_CLIENT_ID=im-domain-delivery-consumer
+IM_STREAM_CONSUMER_GROUPS=domain-delivery-consumer
+IM_GATEWAY_RELAY_MODE=http
+IM_GATEWAY_INTERNAL_BASE_URL=http://127.0.0.1:18080
+EOF
+
 chmod 0640 "${IMSERVER_ETC_DIR}"/roles/*.env
 
 cat > /etc/systemd/system/imserver-gateway.service <<EOF
@@ -224,9 +232,30 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF
 
+cat > /etc/systemd/system/imserver-domain-delivery-consumer.service <<EOF
+[Unit]
+Description=IMServer domain delivery stream consumer
+After=network-online.target postgresql.service redis-server.service kafka.service imserver-gateway.service
+Wants=network-online.target kafka.service
+
+[Service]
+User=${IMSERVER_USER}
+Group=${IMSERVER_GROUP}
+WorkingDirectory=${IMSERVER_HOME}
+EnvironmentFile=${common_env}
+EnvironmentFile=${IMSERVER_ETC_DIR}/roles/domain-delivery-consumer.env
+ExecStart=${IMSERVER_BIN_DIR}/IMServer stream-consumer
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
-systemctl enable imserver-gateway imserver-command-api imserver-query-api imserver-outbox-relay imserver-stream-consumer
+systemctl enable imserver-gateway imserver-command-api imserver-query-api imserver-outbox-relay imserver-stream-consumer imserver-domain-delivery-consumer
 
 echo "Installed systemd units. Start them with:"
-echo "  systemctl start imserver-gateway imserver-command-api imserver-query-api imserver-outbox-relay imserver-stream-consumer"
+echo "  systemctl start imserver-gateway imserver-command-api imserver-query-api imserver-outbox-relay imserver-stream-consumer imserver-domain-delivery-consumer"
 echo "Review ${common_env} before switching APP_ENV to production."

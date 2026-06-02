@@ -141,6 +141,7 @@ struct IMEventStreamConfiguration: Sendable {
         )
         configuration.identifier = "\(clientID)-\(nodeID)"
         configuration.isIdempotenceEnabled = true
+        configuration.maximumInFlightRequestsPerConnection = 5
         configuration.pollInterval = .milliseconds(pollIntervalMilliseconds)
         configuration.flushTimeoutMilliseconds = flushTimeoutMilliseconds
         configuration.isAutoCreateTopicsEnabled = autoCreateTopics
@@ -315,6 +316,7 @@ struct IMSearchIndexConfiguration: Sendable {
 struct IMStreamConsumerConfiguration: Sendable {
     static let defaultGroups = [
         "summary-projection-consumer",
+        "domain-delivery-consumer",
         "changes-log-consumer",
         "search-index-consumer",
         "notification-consumer",

@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 struct ConversationTimelineStore {
     func replaceTimelineItems(
@@ -19,11 +20,14 @@ struct ConversationTimelineStore {
         }
 
         let index = ensureConversationIndex(trimmedConversationID, &conversations)
+        let pendingBefore = conversations[index].pendingMessages.count
+        let messagesBefore = conversations[index].messages.count
         let serverMessages = makeMessages(items.compactMap(\.message), currentUserID)
         let serverNotices = makeNotices(items.compactMap(\.notice))
         let mergedMessages = mergeMessages(conversations[index].messages, serverMessages, false)
 
         conversations[index].messages = mergedMessages
+        removeCanonicalizedPendingMessages(from: &conversations[index], serverMessages: serverMessages)
         conversations[index].notices = serverNotices.sorted(by: Self.noticeComparator)
         conversations[index].lastMessagePreviewText = latestPreviewText(
             messages: mergedMessages,
@@ -38,6 +42,12 @@ struct ConversationTimelineStore {
         )
         conversations[index].hasMoreHistory = hasMore
         refreshLoadedMessageCursors(trimmedConversationID, conversations[index].timelineItems)
+        let pendingAfter = conversations[index].pendingMessages.count
+        let messagesAfter = conversations[index].messages.count
+        let timelineAfter = conversations[index].timelineItems.count
+        IMClientLog.timeline.debug(
+            "Timeline replace items conversationID=\(trimmedConversationID, privacy: .public) serverMessages=\(serverMessages.count, privacy: .public) serverNotices=\(serverNotices.count, privacy: .public) pendingBefore=\(pendingBefore, privacy: .public) pendingAfter=\(pendingAfter, privacy: .public) messagesBefore=\(messagesBefore, privacy: .public) messagesAfter=\(messagesAfter, privacy: .public) timelineAfter=\(timelineAfter, privacy: .public) hasMore=\(hasMore, privacy: .public)"
+        )
     }
 
     func appendTimelineItems(
@@ -112,9 +122,12 @@ struct ConversationTimelineStore {
         }
 
         let index = ensureConversationIndex(trimmedConversationID, &conversations)
+        let pendingBefore = conversations[index].pendingMessages.count
+        let messagesBefore = conversations[index].messages.count
         let serverMessages = makeMessages(responses, currentUserID)
         let mergedMessages = mergeMessages(conversations[index].messages, serverMessages, false)
         conversations[index].messages = mergedMessages
+        removeCanonicalizedPendingMessages(from: &conversations[index], serverMessages: serverMessages)
         conversations[index].lastMessagePreviewText = latestPreviewText(
             messages: mergedMessages,
             pendingMessages: conversations[index].pendingMessages,
@@ -123,6 +136,11 @@ struct ConversationTimelineStore {
         conversations[index].updatedAt = mergedMessages.last?.createdAt ?? conversations[index].updatedAt
         conversations[index].hasMoreHistory = hasOlderHistory(serverMessages)
         refreshLoadedMessageCursors(trimmedConversationID, mergedMessages.map(IMConversationTimelineItem.message))
+        let pendingAfter = conversations[index].pendingMessages.count
+        let messagesAfter = conversations[index].messages.count
+        IMClientLog.timeline.debug(
+            "Timeline replace messages conversationID=\(trimmedConversationID, privacy: .public) serverMessages=\(serverMessages.count, privacy: .public) pendingBefore=\(pendingBefore, privacy: .public) pendingAfter=\(pendingAfter, privacy: .public) messagesBefore=\(messagesBefore, privacy: .public) messagesAfter=\(messagesAfter, privacy: .public)"
+        )
     }
 
     func appendTimelineMessageItems(
@@ -141,9 +159,12 @@ struct ConversationTimelineStore {
         }
 
         let index = ensureConversationIndex(trimmedConversationID, &conversations)
+        let pendingBefore = conversations[index].pendingMessages.count
+        let messagesBefore = conversations[index].messages.count
         let serverMessages = makeMessages(responses, currentUserID)
         let mergedMessages = mergeMessages(conversations[index].messages, serverMessages, true)
         conversations[index].messages = mergedMessages
+        removeCanonicalizedPendingMessages(from: &conversations[index], serverMessages: serverMessages)
         conversations[index].lastMessagePreviewText = latestPreviewText(
             messages: mergedMessages,
             pendingMessages: conversations[index].pendingMessages,
@@ -151,6 +172,11 @@ struct ConversationTimelineStore {
         )
         conversations[index].updatedAt = mergedMessages.last?.createdAt ?? conversations[index].updatedAt
         refreshLatestSyncedCursor(trimmedConversationID, mergedMessages.map(IMConversationTimelineItem.message))
+        let pendingAfter = conversations[index].pendingMessages.count
+        let messagesAfter = conversations[index].messages.count
+        IMClientLog.timeline.debug(
+            "Timeline append messages conversationID=\(trimmedConversationID, privacy: .public) serverMessages=\(serverMessages.count, privacy: .public) pendingBefore=\(pendingBefore, privacy: .public) pendingAfter=\(pendingAfter, privacy: .public) messagesBefore=\(messagesBefore, privacy: .public) messagesAfter=\(messagesAfter, privacy: .public)"
+        )
     }
 
     func prependTimelineMessageItems(
@@ -173,6 +199,7 @@ struct ConversationTimelineStore {
         let serverMessages = makeMessages(responses, currentUserID)
         let mergedMessages = mergeMessages(conversations[index].messages, serverMessages, true)
         conversations[index].messages = mergedMessages
+        removeCanonicalizedPendingMessages(from: &conversations[index], serverMessages: serverMessages)
         conversations[index].lastMessagePreviewText = latestPreviewText(
             messages: mergedMessages,
             pendingMessages: conversations[index].pendingMessages,
@@ -221,11 +248,14 @@ struct ConversationTimelineStore {
         }
 
         let index = ensureConversationIndex(trimmedConversationID, &conversations)
+        let pendingBefore = conversations[index].pendingMessages.count
+        let messagesBefore = conversations[index].messages.count
         let serverMessages = makeMessages(items.compactMap(\.message), currentUserID)
         let serverNotices = makeNotices(items.compactMap(\.notice))
         let mergedMessages = mergeMessages(conversations[index].messages, serverMessages, true)
 
         conversations[index].messages = mergedMessages
+        removeCanonicalizedPendingMessages(from: &conversations[index], serverMessages: serverMessages)
         conversations[index].notices = mergeNotices(conversations[index].notices, serverNotices)
         conversations[index].lastMessagePreviewText = latestPreviewText(
             messages: mergedMessages,
@@ -239,6 +269,12 @@ struct ConversationTimelineStore {
             fallback: conversations[index].updatedAt
         )
         refreshCursor(trimmedConversationID, conversations[index].timelineItems)
+        let pendingAfter = conversations[index].pendingMessages.count
+        let messagesAfter = conversations[index].messages.count
+        let timelineAfter = conversations[index].timelineItems.count
+        IMClientLog.timeline.debug(
+            "Timeline merge items conversationID=\(trimmedConversationID, privacy: .public) serverMessages=\(serverMessages.count, privacy: .public) serverNotices=\(serverNotices.count, privacy: .public) pendingBefore=\(pendingBefore, privacy: .public) pendingAfter=\(pendingAfter, privacy: .public) messagesBefore=\(messagesBefore, privacy: .public) messagesAfter=\(messagesAfter, privacy: .public) timelineAfter=\(timelineAfter, privacy: .public)"
+        )
     }
 
     private func mergeNotices(
@@ -250,6 +286,25 @@ struct ConversationTimelineStore {
             merged[notice.id] = notice
         }
         return merged.values.sorted(by: Self.noticeComparator)
+    }
+
+    private func removeCanonicalizedPendingMessages(
+        from conversation: inout IMConversation,
+        serverMessages: [IMConversationMessage]
+    ) {
+        guard !serverMessages.isEmpty else {
+            return
+        }
+
+        let serverMessageIDs = Set(serverMessages.map(\.serverMessageID))
+        let clientMessageIDs = Set(serverMessages.compactMap(\.clientMessageID))
+        conversation.pendingMessages.removeAll { pendingMessage in
+            if let pendingServerMessageID = pendingMessage.serverMessageID,
+               serverMessageIDs.contains(pendingServerMessageID) {
+                return true
+            }
+            return clientMessageIDs.contains(pendingMessage.clientMessageID)
+        }
     }
 
     private func latestTimelineDate(

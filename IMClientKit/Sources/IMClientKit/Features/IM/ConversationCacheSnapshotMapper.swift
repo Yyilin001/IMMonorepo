@@ -168,6 +168,7 @@ enum ConversationCacheSnapshotMapper {
                     IMCachedPendingMessageState(
                         localMessageID: message.localMessageID,
                         clientMessageID: message.clientMessageID,
+                        serverMessageID: message.serverMessageID,
                         conversationID: message.conversationID,
                         senderUserID: message.senderUserID,
                         content: message.content,
@@ -297,6 +298,7 @@ enum ConversationCacheSnapshotMapper {
                     IMPendingConversationMessage(
                         localMessageID: cachedMessage.localMessageID,
                         clientMessageID: cachedMessage.clientMessageID,
+                        serverMessageID: cachedMessage.serverMessageID,
                         conversationID: cachedMessage.conversationID,
                         senderUserID: cachedMessage.senderUserID,
                         content: cachedMessage.content,

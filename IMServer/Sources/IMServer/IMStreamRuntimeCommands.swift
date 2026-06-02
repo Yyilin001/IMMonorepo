@@ -110,6 +110,25 @@ struct IMStreamConsumerCommand: AsyncCommand {
             ))
         }
 
+        if consumerConfiguration.isEnabled("domain-delivery-consumer") {
+            tasks.append(NamedStreamConsumerTask(groupID: "domain-delivery-consumer", task: Task {
+                    try await KafkaConversationEventStreamConsumerRunner(
+                        app: app,
+                        groupID: "domain-delivery-consumer",
+                        clientSuffix: "domain-delivery-consumer",
+                        topics: [app.eventStreamConfiguration.topic],
+                        consumerFactory: { shardID in
+                            let sourceDB = app.conversationShardRouter.commandDatabase(forShardID: shardID)
+                            return [
+                                OwnerDomainEventDeliveryConsumer(app: app, sourceDB: sourceDB),
+                                ConversationRealtimeConsumer(app: app, sourceDB: sourceDB)
+                            ]
+                        }
+                    ).run()
+                }
+            ))
+        }
+
         if consumerConfiguration.isEnabled("changes-log-consumer") {
             tasks.append(NamedStreamConsumerTask(groupID: "changes-log-consumer", task: Task {
                     try await KafkaConversationEventStreamConsumerRunner(

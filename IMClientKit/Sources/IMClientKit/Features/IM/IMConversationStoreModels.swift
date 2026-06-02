@@ -291,6 +291,7 @@ public struct IMPendingConversationMessage: Identifiable, Equatable, Sendable {
     public let id: String
     public let localMessageID: String
     public let clientMessageID: String
+    public var serverMessageID: String?
     public let conversationID: String
     public let senderUserID: UUID
     public var content: IMMessageContent
@@ -330,6 +331,7 @@ public struct IMPendingConversationMessage: Identifiable, Equatable, Sendable {
     public init(
         localMessageID: String,
         clientMessageID: String,
+        serverMessageID: String? = nil,
         conversationID: String,
         senderUserID: UUID,
         content: IMMessageContent,
@@ -342,6 +344,7 @@ public struct IMPendingConversationMessage: Identifiable, Equatable, Sendable {
         self.id = localMessageID
         self.localMessageID = localMessageID
         self.clientMessageID = clientMessageID
+        self.serverMessageID = serverMessageID
         self.conversationID = conversationID
         self.senderUserID = senderUserID
         self.content = content

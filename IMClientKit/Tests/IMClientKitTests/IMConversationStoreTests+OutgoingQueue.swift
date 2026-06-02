@@ -104,7 +104,10 @@ extension IMConversationStoreTests {
             )
         )
 
-        #expect(store.selectedConversation?.pendingMessages.first?.deliveryState == .sending)
+        let sentMessage = try #require(store.selectedConversation?.pendingMessages.first)
+        #expect(sentMessage.clientMessageID == clientMessageID)
+        #expect(sentMessage.deliveryState == .sent)
+        #expect(store.selectedConversation?.lastMessagePreview == "queued text")
     }
 
 
@@ -137,7 +140,7 @@ extension IMConversationStoreTests {
         )
 
         let message = try #require(store.selectedConversation?.pendingMessages.first)
-        #expect(message.deliveryState == .sending)
+        #expect(message.deliveryState == .sent)
         #expect(store.statusMessage == nil)
     }
 
@@ -314,6 +317,183 @@ extension IMConversationStoreTests {
     }
 
 
+    @Test func acceptedAckMarksOutgoingMessageSentUntilCanonicalTimelineArrives() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let request = try #require(store.prepareOutgoingText(
+            "ack before canonical",
+            conversationID: conversationIDString,
+            senderUserID: Self.currentUserID
+        ))
+        let clientMessageID = try #require(request.payload.clientMessageID)
+
+        store.applyOutgoingAcknowledgement(
+            requestID: request.requestID,
+            payload: IMTCPAckPayload(
+                messageID: "11111111-2222-3333-4444-555555555555",
+                conversationID: conversationIDString,
+                status: "accepted"
+            )
+        )
+
+        #expect(store.selectedConversation?.pendingMessages.count == 1)
+        #expect(store.selectedConversation?.pendingMessages.first?.deliveryState == .sent)
+        #expect(store.selectedConversation?.messages.isEmpty == true)
+        #expect(store.selectedConversation?.lastMessagePreview == "ack before canonical")
+        #expect(store.queueSummary(for: conversationIDString).hasPendingWork == false)
+
+        store.appendTimelineItems(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: clientMessageID,
+                    serverSequence: 9,
+                    kind: "rich_text",
+                    body: ["text": "ack before canonical"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_009)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(store.selectedConversation?.messages.count == 1)
+        #expect(store.selectedConversation?.pendingMessages.isEmpty == true)
+        #expect(store.selectedConversation?.messages.first?.clientMessageID == clientMessageID)
+        #expect(store.selectedConversation?.messages.first?.serverSequence == 9)
+        #expect(store.selectedConversation?.messages.first?.deliveryState == .sent)
+    }
+
+    @Test func acceptedAckMergesTimelineMessageWithoutClientMessageIDByServerMessageID() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let serverMessageID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let request = try #require(store.prepareOutgoingText(
+            "ack server id fallback",
+            conversationID: conversationIDString,
+            senderUserID: Self.currentUserID
+        ))
+
+        store.applyOutgoingAcknowledgement(
+            requestID: request.requestID,
+            payload: IMTCPAckPayload(
+                messageID: serverMessageID.uuidString,
+                conversationID: conversationIDString,
+                status: "accepted"
+            )
+        )
+
+        #expect(store.selectedConversation?.pendingMessages.count == 1)
+        #expect(store.selectedConversation?.pendingMessages.first?.serverMessageID == serverMessageID.uuidString)
+
+        store.appendTimelineItems(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: serverMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: nil,
+                    serverSequence: 10,
+                    kind: "rich_text",
+                    body: ["text": "ack server id fallback"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_010)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(store.selectedConversation?.pendingMessages.isEmpty == true)
+        #expect(store.selectedConversation?.messages.count == 1)
+        #expect(store.selectedConversation?.messages.first?.serverMessageID == serverMessageID.uuidString)
+        #expect(store.selectedConversation?.messages.first?.clientMessageID == nil)
+    }
+
+
+    @Test func acceptedAckPendingMessageSurvivesTimelineReplaceUntilCanonicalArrives() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let request = try #require(store.prepareOutgoingText(
+            "replace race",
+            conversationID: conversationIDString,
+            senderUserID: Self.currentUserID
+        ))
+
+        store.applyOutgoingAcknowledgement(
+            requestID: request.requestID,
+            payload: IMTCPAckPayload(
+                messageID: "11111111-2222-3333-4444-555555555555",
+                conversationID: conversationIDString,
+                status: "accepted"
+            )
+        )
+
+        store.replaceTimelineItems(
+            in: conversationIDString,
+            messages: [],
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(store.selectedConversation?.pendingMessages.count == 1)
+        #expect(store.selectedConversation?.pendingMessages.first?.text == "replace race")
+        #expect(store.selectedConversation?.pendingMessages.first?.deliveryState == .sent)
+        #expect(store.selectedConversation?.messages.isEmpty == true)
+        #expect(store.queueSummary(for: conversationIDString).hasPendingWork == false)
+    }
+
+
+    @Test func outgoingMessageLifecycleAdvancesConversationMutationGeneration() throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let initialGeneration = store.conversationMutationGeneration
+
+        let request = try #require(store.prepareOutgoingText(
+            "generation refresh",
+            conversationID: conversationIDString,
+            senderUserID: Self.currentUserID
+        ))
+        let clientMessageID = try #require(request.payload.clientMessageID)
+        let pendingGeneration = store.conversationMutationGeneration
+        #expect(pendingGeneration > initialGeneration)
+
+        store.applyOutgoingAcknowledgement(
+            requestID: request.requestID,
+            payload: IMTCPAckPayload(
+                messageID: "11111111-2222-3333-4444-555555555555",
+                conversationID: conversationIDString,
+                status: "accepted"
+            )
+        )
+        let acknowledgedGeneration = store.conversationMutationGeneration
+        #expect(acknowledgedGeneration > pendingGeneration)
+
+        store.appendTimelineItems(
+            in: conversationIDString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+                    conversationID: conversationID,
+                    senderUserID: Self.currentUserID,
+                    clientMessageID: clientMessageID,
+                    serverSequence: 11,
+                    kind: "rich_text",
+                    body: ["text": "generation refresh"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_400_011)
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(store.conversationMutationGeneration > acknowledgedGeneration)
+    }
+
+
     @Test func cancelQueuedOutgoingMessageRemovesMessageAndUpdatesSummaryAndPreview() throws {
         let store = IMConversationStore()
         let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
@@ -386,7 +566,7 @@ extension IMConversationStoreTests {
         let sendingMessage = try #require(pendingMessages.first(where: { $0.id == sendingRequest.localMessageID }))
         let failedMessage = try #require(pendingMessages.first(where: { $0.text == "failed" }))
 
-        #expect(store.selectedConversation?.pendingMessages.first(where: { $0.text == "sent" })?.deliveryState == .sending)
+        #expect(store.selectedConversation?.pendingMessages.first(where: { $0.text == "sent" })?.deliveryState == .sent)
         #expect(!store.cancelQueuedOutgoingMessage(localMessageID: sendingMessage.id, conversationID: conversationID))
         #expect(!store.cancelQueuedOutgoingMessage(localMessageID: failedMessage.id, conversationID: conversationID))
         #expect(store.selectedConversation?.pendingMessages.count == 4)

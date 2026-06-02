@@ -427,6 +427,7 @@ public struct IMCachedPendingMessageState: Identifiable, Sendable, Equatable, Co
     public let id: String
     public let localMessageID: String
     public let clientMessageID: String
+    public let serverMessageID: String?
     public let conversationID: String
     public let senderUserID: UUID
     public let content: IMMessageContent
@@ -439,6 +440,7 @@ public struct IMCachedPendingMessageState: Identifiable, Sendable, Equatable, Co
     public init(
         localMessageID: String,
         clientMessageID: String,
+        serverMessageID: String? = nil,
         conversationID: String,
         senderUserID: UUID,
         content: IMMessageContent,
@@ -451,6 +453,7 @@ public struct IMCachedPendingMessageState: Identifiable, Sendable, Equatable, Co
         self.id = localMessageID
         self.localMessageID = localMessageID
         self.clientMessageID = clientMessageID
+        self.serverMessageID = serverMessageID
         self.conversationID = conversationID
         self.senderUserID = senderUserID
         self.content = content
@@ -465,6 +468,7 @@ public struct IMCachedPendingMessageState: Identifiable, Sendable, Equatable, Co
         case id
         case localMessageID
         case clientMessageID
+        case serverMessageID
         case conversationID
         case senderUserID
         case content
@@ -483,6 +487,7 @@ public struct IMCachedPendingMessageState: Identifiable, Sendable, Equatable, Co
         self.init(
             localMessageID: try container.decode(String.self, forKey: .localMessageID),
             clientMessageID: try container.decode(String.self, forKey: .clientMessageID),
+            serverMessageID: try container.decodeIfPresent(String.self, forKey: .serverMessageID),
             conversationID: try container.decode(String.self, forKey: .conversationID),
             senderUserID: try container.decode(UUID.self, forKey: .senderUserID),
             content: try container.decode(IMMessageContent.self, forKey: .content),
@@ -499,6 +504,7 @@ public struct IMCachedPendingMessageState: Identifiable, Sendable, Equatable, Co
         try container.encode(id, forKey: .id)
         try container.encode(localMessageID, forKey: .localMessageID)
         try container.encode(clientMessageID, forKey: .clientMessageID)
+        try container.encodeIfPresent(serverMessageID, forKey: .serverMessageID)
         try container.encode(conversationID, forKey: .conversationID)
         try container.encode(senderUserID, forKey: .senderUserID)
         try container.encode(content, forKey: .content)

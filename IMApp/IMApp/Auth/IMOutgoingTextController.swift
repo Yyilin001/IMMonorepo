@@ -1,9 +1,17 @@
 import Foundation
 import IMClientKit
+import OSLog
 
 extension ConversationRuntimeController {
     func sendText(_ text: String, to conversationID: String) async -> Bool {
+        IMAppLog.imRuntime.debug(
+            "sendText requested conversationID=\(conversationID, privacy: .public) textLength=\(text.count, privacy: .public)"
+        )
+
         guard let user = currentUserProvider() else {
+            IMAppLog.imRuntime.warning(
+                "sendText aborted: missing current user conversationID=\(conversationID, privacy: .public)"
+            )
             return false
         }
 
@@ -17,6 +25,9 @@ extension ConversationRuntimeController {
                 scheduleConversationCachePersist()
                 scheduleConnectionIfNeeded()
             }
+            IMAppLog.imRuntime.debug(
+                "sendText queued because TCP unavailable conversationID=\(conversationID, privacy: .public) didQueue=\(didQueue, privacy: .public)"
+            )
             return didQueue
         }
 
@@ -25,16 +36,28 @@ extension ConversationRuntimeController {
             conversationID: conversationID,
             senderUserID: user.id
         ) else {
+            IMAppLog.imRuntime.warning(
+                "sendText aborted: prepareOutgoingText failed conversationID=\(conversationID, privacy: .public)"
+            )
             return false
         }
+        IMAppLog.imRuntime.debug(
+            "sendText prepared TCP packet conversationID=\(conversationID, privacy: .public) requestID=\(request.requestID.uuidString, privacy: .public) localMessageID=\(request.localMessageID, privacy: .public) clientMessageID=\(request.payload.clientMessageID ?? "nil", privacy: .public)"
+        )
         scheduleConversationCachePersist()
 
         let generation = imConnectionGeneration
 
         do {
             try await connection.sendMessage(request.payload, requestID: request.requestID)
+            IMAppLog.imRuntime.debug(
+                "sendText TCP sendMessage returned conversationID=\(conversationID, privacy: .public) requestID=\(request.requestID.uuidString, privacy: .public) generation=\(generation, privacy: .public)"
+            )
             return true
         } catch {
+            IMAppLog.imRuntime.error(
+                "sendText TCP sendMessage failed conversationID=\(conversationID, privacy: .public) requestID=\(request.requestID.uuidString, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
             await handleIMConnectionFailure(error, generation: generation)
             return false
         }

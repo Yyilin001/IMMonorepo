@@ -1,5 +1,6 @@
 import SwiftUI
 import IMClientKit
+import OSLog
 import QuickLook
 import UniformTypeIdentifiers
 #if canImport(UIKit)
@@ -128,6 +129,15 @@ struct IMConversationView: View {
             conversationsSection
         }
         .listStyle(.insetGrouped)
+        .onAppear {
+            logConversationListSnapshot(reason: "appear")
+        }
+        .onChange(of: conversationStore.conversationMutationGeneration) { _, generation in
+            logConversationListSnapshot(reason: "generationChanged:\(generation)")
+        }
+        .onChange(of: conversationListFilter) { _, filter in
+            logConversationListSnapshot(reason: "filterChanged:\(filter.rawValue)")
+        }
         .navigationTitle("消息")
         .background(AppSurface.groupedBackground)
         .searchable(
@@ -297,6 +307,7 @@ struct IMConversationView: View {
                     handleConversationRowAction(action, for: conversation)
                 }
             )
+            .id(conversationRowRefreshID(for: conversation))
         }
     }
 
@@ -362,6 +373,7 @@ struct IMConversationView: View {
     }
 
     var displayedConversations: [IMConversation] {
+        _ = conversationStore.conversationMutationGeneration
         let conversations = conversationStore.filteredConversations
         switch conversationListFilter {
         case .all, .groups:
@@ -369,6 +381,32 @@ struct IMConversationView: View {
         case .unread:
             return conversations.filter { $0.unreadCount > 0 }
         }
+    }
+
+    func logConversationListSnapshot(reason: String) {
+        let generation = conversationStore.conversationMutationGeneration
+        let allConversations = conversationStore.conversations
+        let filtered = displayedConversations
+        let head = filtered.prefix(5).map { conversation in
+            "\(conversation.id)|unread=\(conversation.unreadCount)|preview=\(conversation.lastMessagePreviewText)|updated=\(conversation.updatedAt.timeIntervalSince1970)|pending=\(conversation.pendingMessages.count)|messages=\(conversation.messages.count)|timeline=\(conversation.timelineItems.count)"
+        }.joined(separator: " || ")
+        IMAppLog.imUI.debug(
+            "Conversation list snapshot reason=\(reason, privacy: .public) generation=\(generation, privacy: .public) filter=\(conversationListFilter.rawValue, privacy: .public) allCount=\(allConversations.count, privacy: .public) displayedCount=\(filtered.count, privacy: .public) selected=\(conversationStore.selectedConversationID ?? "nil", privacy: .public) head=\(head, privacy: .public)"
+        )
+    }
+
+    func conversationRowRefreshID(for conversation: IMConversation) -> String {
+        [
+            conversation.id,
+            "\(conversationStore.conversationMutationGeneration)",
+            "\(conversation.unreadCount)",
+            conversation.lastMessagePreviewText,
+            "\(conversation.updatedAt.timeIntervalSince1970)",
+            "\(conversation.pendingMessages.count)",
+            "\(conversation.messages.count)",
+            "\(conversation.timelineItems.count)",
+            "\(conversation.id == conversationStore.selectedConversationID)"
+        ].joined(separator: "|")
     }
 
     var conversationCountText: String? {

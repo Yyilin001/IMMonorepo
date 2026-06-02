@@ -145,6 +145,7 @@ Deploy:
 - `outbox-relay`
 - `stream-consumer` with one group per deployment:
   - `summary-projection-consumer`
+  - `domain-delivery-consumer`
   - `changes-log-consumer`
   - `search-index-consumer`
   - `notification-consumer`

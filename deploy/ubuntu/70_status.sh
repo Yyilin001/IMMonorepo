@@ -10,6 +10,7 @@ services=(
   imserver-query-api
   imserver-outbox-relay
   imserver-stream-consumer
+  imserver-domain-delivery-consumer
   nginx
 )
 
@@ -20,5 +21,4 @@ done
 
 echo
 echo "Recent IMServer logs:"
-journalctl -u imserver-gateway -u imserver-command-api -u imserver-query-api -u imserver-outbox-relay -u imserver-stream-consumer -n 80 --no-pager
-
+journalctl -u imserver-gateway -u imserver-command-api -u imserver-query-api -u imserver-outbox-relay -u imserver-stream-consumer -u imserver-domain-delivery-consumer -n 80 --no-pager

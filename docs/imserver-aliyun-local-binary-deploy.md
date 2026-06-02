@@ -16,6 +16,7 @@ This server is small: Aliyun ECS `120.25.106.200`, Ubuntu 24.04 x86_64, 2 vCPU, 
   - `imserver-query-api`
   - `imserver-outbox-relay`
   - `imserver-stream-consumer`
+  - `imserver-domain-delivery-consumer`
 - Keep swap enabled. This deployment added a 6 GiB `/swapfile`.
 - `/etc/imserver/common.env` must include:
 
@@ -104,7 +105,8 @@ systemctl stop \
   imserver-gateway \
   imserver-query-api \
   imserver-outbox-relay \
-  imserver-stream-consumer
+  imserver-stream-consumer \
+  imserver-domain-delivery-consumer
 
 file /tmp/IMServer.new
 
@@ -158,12 +160,13 @@ systemctl start \
   imserver-gateway \
   imserver-query-api \
   imserver-outbox-relay \
-  imserver-stream-consumer
+  imserver-stream-consumer \
+  imserver-domain-delivery-consumer
 
 systemctl is-active \
   postgresql redis-server kafka nginx \
   imserver-command-api imserver-gateway imserver-query-api \
-  imserver-outbox-relay imserver-stream-consumer
+  imserver-outbox-relay imserver-stream-consumer imserver-domain-delivery-consumer
 ```
 
 Smoke tests:

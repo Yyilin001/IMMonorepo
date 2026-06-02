@@ -359,7 +359,7 @@ extension AuthManagerTests {
 
         try await Self.waitUntil {
             await MainActor.run {
-                manager.imConversationStore.selectedConversation?.messages.first?.deliveryState == .sending
+                manager.imConversationStore.selectedConversation?.pendingMessages.first?.deliveryState == .sending
             }
         }
 
@@ -376,7 +376,7 @@ extension AuthManagerTests {
 
         try await Self.waitUntil {
             await MainActor.run {
-                manager.imConversationStore.selectedConversation?.messages.first?.deliveryState == .sent
+                manager.imConversationStore.selectedConversation?.pendingMessages.first?.deliveryState == .sent
             }
         }
 
@@ -576,7 +576,7 @@ extension AuthManagerTests {
 
         try await Self.waitUntil {
             await MainActor.run {
-                manager.imConversationStore.selectedConversation?.messages.first?.deliveryState == .sending
+                manager.imConversationStore.selectedConversation?.pendingMessages.first?.deliveryState == .sending
             }
         }
     }
@@ -756,7 +756,7 @@ extension AuthManagerTests {
 
         for _ in 0..<1_000 {
             let didApplyRecoveredUpload = await MainActor.run {
-                guard let message = manager.imConversationStore.selectedConversation?.messages.first else {
+                guard let message = manager.imConversationStore.selectedConversation?.pendingMessages.first else {
                     return false
                 }
                 return message.deliveryState == .sending && message.localTransferState == nil

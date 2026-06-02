@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 
 // Main-actor client read model for IM state. Runtime controllers feed this store
 // with HTTP/TCP/cache events; SwiftUI should observe the merged result instead
@@ -40,6 +41,7 @@ public final class IMConversationStore {
     public internal(set) var replyJumpTargetMessageID: String?
     public internal(set) var replyJumpMatchedMessageID: String?
     public internal(set) var replyJumpState: IMReplyJumpState = .idle
+    public internal(set) var conversationMutationGeneration: UInt64 = 0
 
     let listReadModel = ConversationListReadModel()
     private let conversationListStore = ConversationListStore()
@@ -416,6 +418,9 @@ public final class IMConversationStore {
     }
 
     public func applyRealtimeUnreadIncrement(for conversationID: String) {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let unreadBefore = conversations.first(where: { $0.id == trimmedConversationID })?.unreadCount ?? -1
+        let selectedBefore = selectedConversationID ?? "nil"
         conversationListStore.applyRealtimeUnreadIncrement(
             for: conversationID,
             conversations: &conversations,
@@ -423,6 +428,10 @@ public final class IMConversationStore {
         ) { index, conversations in
             resetUnreadState(for: index, conversations: &conversations)
         }
+        let unreadAfter = conversations.first(where: { $0.id == trimmedConversationID })?.unreadCount ?? -1
+        IMClientLog.conversationStore.debug(
+            "Realtime unread increment conversationID=\(trimmedConversationID, privacy: .public) selectedBefore=\(selectedBefore, privacy: .public) unreadBefore=\(unreadBefore, privacy: .public) unreadAfter=\(unreadAfter, privacy: .public)"
+        )
     }
 
     public func applyServerUnreadCount(_ unreadCount: Int, for conversationID: String) {
@@ -458,6 +467,10 @@ public final class IMConversationStore {
             currentUserID: currentUserID,
             dependencies: dependencies
         )
+        let operationName = domainEventOperationDebugName(operation)
+        IMClientLog.conversationStore.debug(
+            "Domain event reduced eventID=\(payload.eventID.uuidString, privacy: .public) eventType=\(payload.eventType.rawValue, privacy: .public) aggregateID=\(payload.aggregateID.uuidString, privacy: .public) aggregateSequence=\(payload.aggregateSequence, privacy: .public) ownerCursor=\(payload.ownerCursor ?? 0, privacy: .public) ownerAggregateSequence=\(payload.ownerAggregateSequence ?? 0, privacy: .public) operation=\(operationName, privacy: .public) summaryID=\(payload.conversation?.id.uuidString ?? "nil", privacy: .public) summaryPreview=\(payload.conversation?.lastMessage?.previewText ?? "nil", privacy: .public) summaryUnread=\(payload.conversation?.unreadCount ?? -1, privacy: .public)"
+        )
 
         switch operation {
         case .ignoreDuplicate:
@@ -479,7 +492,10 @@ public final class IMConversationStore {
                 shouldFetchDomainEvents: true,
                 didConsumeEvent: false
             )
-        case .deferEvent(_, let missingKey, let conversationID):
+        case .deferEvent(let reason, let missingKey, let conversationID):
+            IMClientLog.conversationStore.debug(
+                "Domain event deferred eventID=\(payload.eventID.uuidString, privacy: .public) eventType=\(payload.eventType.rawValue, privacy: .public) reason=\(reason.rawValue, privacy: .public) missingKey=\(String(describing: missingKey), privacy: .public) conversationID=\(conversationID ?? "nil", privacy: .public)"
+            )
             let deferResult = deferDomainEvent(payload, missingKey: missingKey, conversationID: conversationID)
             return IMConversationEventApplyOutcome(
                 shouldReloadMembersForConversationID: nil,
@@ -885,6 +901,9 @@ public final class IMConversationStore {
         case .encodeFailed:
             domainEventDebugMetrics.deferredEncodeFailed += 1
         }
+        IMClientLog.conversationStore.debug(
+            "Domain event defer store result eventID=\(payload.eventID.uuidString, privacy: .public) eventType=\(payload.eventType.rawValue, privacy: .public) result=\(String(describing: result), privacy: .public) missingKey=\(String(describing: missingKey ?? deferredMissingKey(for: payload)), privacy: .public) conversationID=\(conversationID ?? deferredConversationID(for: payload) ?? "nil", privacy: .public)"
+        )
         return result
     }
 
@@ -1099,10 +1118,52 @@ public final class IMConversationStore {
         return lhs.aggregateSequence < rhs.aggregateSequence
     }
 
+    private func domainEventOperationDebugName(_ operation: DomainEventProjectionReducer.Operation) -> String {
+        switch operation {
+        case .ignoreDuplicate:
+            return "ignoreDuplicate"
+        case .applyMessageCreated:
+            return "applyMessageCreated"
+        case .applyMessageMutation:
+            return "applyMessageMutation"
+        case .applyVisibility:
+            return "applyVisibility"
+        case .applyMessageFavorite:
+            return "applyMessageFavorite"
+        case .applyMessageStream:
+            return "applyMessageStream"
+        case .applyConversationChange:
+            return "applyConversationChange"
+        case .removeConversation:
+            return "removeConversation"
+        case .applyConversationVisibility:
+            return "applyConversationVisibility"
+        case .applyMemberChange:
+            return "applyMemberChange"
+        case .applyContactChange:
+            return "applyContactChange"
+        case .deferEvent(let reason, let missingKey, let conversationID):
+            return "deferEvent(reason=\(reason.rawValue),missingKey=\(String(describing: missingKey)),conversationID=\(conversationID ?? "nil"))"
+        case .requestCatchUp(let reason):
+            return "requestCatchUp(\(reason))"
+        case .rejectInvalid(let reason):
+            return "rejectInvalid(\(reason))"
+        }
+    }
+
     private func applySummaryIfPresent(_ conversation: IMConversationSummaryResponseBody?) {
         guard let conversation else { return }
+        let conversationID = conversation.id.uuidString
+        let existingBefore = conversations.first { $0.id == conversationID }
+        IMClientLog.conversationStore.debug(
+            "Summary applying conversationID=\(conversationID, privacy: .public) summaryPreview=\(conversation.lastMessage?.previewText ?? "nil", privacy: .public) summaryUnread=\(conversation.unreadCount, privacy: .public) summaryUpdated=\(conversation.updatedAt.timeIntervalSince1970, privacy: .public) beforePreview=\(existingBefore?.lastMessagePreviewText ?? "nil", privacy: .public) beforeUnread=\(existingBefore?.unreadCount ?? -1, privacy: .public) beforeUpdated=\(existingBefore?.updatedAt.timeIntervalSince1970 ?? -1, privacy: .public)"
+        )
         applyConversationSummaryContent(conversation)
         applyServerSummaryReadState(conversation)
+        let existingAfter = conversations.first { $0.id == conversationID }
+        IMClientLog.conversationStore.debug(
+            "Summary applied conversationID=\(conversationID, privacy: .public) afterPreview=\(existingAfter?.lastMessagePreviewText ?? "nil", privacy: .public) afterUnread=\(existingAfter?.unreadCount ?? -1, privacy: .public) afterUpdated=\(existingAfter?.updatedAt.timeIntervalSince1970 ?? -1, privacy: .public) messages=\(existingAfter?.messages.count ?? -1, privacy: .public) timeline=\(existingAfter?.timelineItems.count ?? -1, privacy: .public)"
+        )
     }
 
     private func upsertTimelineNotice(_ response: IMTimelineNoticeResponseBody) {
@@ -1884,18 +1945,36 @@ public final class IMConversationStore {
     }
 
     public func applyOutgoingAcknowledgement(requestID: UUID?, payload: IMTCPAckPayload) {
-        guard let requestID, let localMessageID = outgoingQueueState.removePendingRequest(requestID) else {
+        guard let requestID else {
+            IMClientLog.conversationStore.warning(
+                "ACK ignored: missing requestID status=\(payload.status, privacy: .public) messageID=\(payload.messageID, privacy: .public) conversationID=\(payload.conversationID ?? "nil", privacy: .public)"
+            )
+            return
+        }
+
+        guard let localMessageID = outgoingQueueState.removePendingRequest(requestID) else {
+            IMClientLog.conversationStore.warning(
+                "ACK ignored: no pending request requestID=\(requestID.uuidString, privacy: .public) status=\(payload.status, privacy: .public) messageID=\(payload.messageID, privacy: .public) conversationID=\(payload.conversationID ?? "nil", privacy: .public)"
+            )
+            return
+        }
+
+        IMClientLog.conversationStore.debug(
+            "ACK received requestID=\(requestID.uuidString, privacy: .public) localMessageID=\(localMessageID, privacy: .public) status=\(payload.status, privacy: .public) messageID=\(payload.messageID, privacy: .public) conversationID=\(payload.conversationID ?? "nil", privacy: .public)"
+        )
+
+        if payload.status == "accepted" {
+            applyAcceptedOutgoingAcknowledgement(
+                localMessageID: localMessageID,
+                payload: payload
+            )
             return
         }
 
         mutatePendingMessage(id: localMessageID) { message in
-            if payload.status == "accepted" {
-                message.deliveryState = .sending
-            } else {
-                let failureMessage = outgoingAcknowledgementFailureMessage(for: payload.status)
-                message.deliveryState = .failed(message: failureMessage)
-                statusMessage = failureMessage
-            }
+            let failureMessage = outgoingAcknowledgementFailureMessage(for: payload.status)
+            message.deliveryState = .failed(message: failureMessage)
+            statusMessage = failureMessage
         }
     }
 
@@ -1946,23 +2025,36 @@ public final class IMConversationStore {
         let conversationID = message.conversationID
         let serverMessageID = message.serverMessageID
         let index = ensureConversationIndex(for: conversationID)
+        let pendingCountBefore = conversations[index].pendingMessages.count
+        let messageCountBefore = conversations[index].messages.count
+        let unreadBefore = conversations[index].unreadCount
+        let previewBefore = conversations[index].lastMessagePreviewText
 
-        if message.direction == .outgoing, let clientMessageID {
-            conversations[index].pendingMessages.removeAll { $0.clientMessageID == clientMessageID }
+        if message.direction == .outgoing {
+            conversations[index].pendingMessages.removeAll { pendingMessage in
+                if pendingMessage.serverMessageID == serverMessageID {
+                    return true
+                }
+                guard let clientMessageID else {
+                    return false
+                }
+                return pendingMessage.clientMessageID == clientMessageID
+            }
         }
 
-        let alreadyExists = conversations[index].messages.contains {
+        if let existingIndex = conversations[index].messages.firstIndex(where: {
             $0.id == serverMessageID
                 || $0.serverMessageID == serverMessageID
                 || ($0.clientMessageID != nil && $0.clientMessageID == clientMessageID)
-        }
-        guard !alreadyExists else {
-            return
+        }) {
+            conversations[index].messages[existingIndex] = message
+        } else {
+            conversations[index].messages.append(message)
         }
 
-        conversations[index].messages.append(message)
+        conversations[index].messages.sort(by: Self.messageComparator)
         conversations[index].lastMessagePreviewText = message.text
-        conversations[index].updatedAt = message.createdAt
+        conversations[index].updatedAt = max(conversations[index].updatedAt, message.createdAt)
         refreshLatestLoadedTimelineCursor(
             for: conversationID,
             timelineItems: conversations[index].timelineItems
@@ -1972,6 +2064,40 @@ public final class IMConversationStore {
 
         statusMessage = nil
         sortConversations()
+        let conversationAfter = conversations.first { $0.id == conversationID }
+        let pendingCountAfter = conversationAfter?.pendingMessages.count ?? -1
+        let messageCountAfter = conversationAfter?.messages.count ?? -1
+        IMClientLog.conversationStore.debug(
+            "Canonical message applied conversationID=\(conversationID, privacy: .public) serverMessageID=\(serverMessageID, privacy: .public) clientMessageID=\(clientMessageID ?? "nil", privacy: .public) direction=\(String(describing: message.direction), privacy: .public) text=\(message.text, privacy: .public) unreadBefore=\(unreadBefore, privacy: .public) unreadAfter=\(conversationAfter?.unreadCount ?? -1, privacy: .public) previewBefore=\(previewBefore, privacy: .public) previewAfter=\(conversationAfter?.lastMessagePreviewText ?? "nil", privacy: .public) updatedAfter=\(conversationAfter?.updatedAt.timeIntervalSince1970 ?? -1, privacy: .public) pendingBefore=\(pendingCountBefore, privacy: .public) pendingAfter=\(pendingCountAfter, privacy: .public) messagesBefore=\(messageCountBefore, privacy: .public) messagesAfter=\(messageCountAfter, privacy: .public) timelineAfter=\(conversationAfter?.timelineItems.count ?? -1, privacy: .public)"
+        )
+    }
+
+    private func applyAcceptedOutgoingAcknowledgement(
+        localMessageID: String,
+        payload: IMTCPAckPayload
+    ) {
+        var didApply = false
+        mutatePendingMessage(id: localMessageID) { message in
+            didApply = true
+            message.deliveryState = .sent
+            let serverMessageID = payload.messageID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !serverMessageID.isEmpty {
+                message.serverMessageID = serverMessageID
+            }
+            statusMessage = nil
+            let clientMessageID = message.clientMessageID
+            let conversationID = message.conversationID
+            let acknowledgedServerMessageID = message.serverMessageID ?? "nil"
+            IMClientLog.conversationStore.debug(
+                "ACK accepted kept pending localMessageID=\(localMessageID, privacy: .public) clientMessageID=\(clientMessageID, privacy: .public) conversationID=\(conversationID, privacy: .public) serverMessageID=\(acknowledgedServerMessageID, privacy: .public) state=sent"
+            )
+        }
+
+        if !didApply {
+            IMClientLog.conversationStore.warning(
+                "ACK accepted could not find pending localMessageID=\(localMessageID, privacy: .public) serverMessageID=\(payload.messageID, privacy: .public) conversationID=\(payload.conversationID ?? "nil", privacy: .public)"
+            )
+        }
     }
 
     private func applyUpdatedMessage(_ message: IMConversationMessage) {
@@ -2735,12 +2861,24 @@ public final class IMConversationStore {
                 continue
             }
 
+            let oldState = conversations[conversationIndex].pendingMessages[messageIndex].deliveryState
             update(&conversations[conversationIndex].pendingMessages[messageIndex])
+            let updatedMessage = conversations[conversationIndex].pendingMessages[messageIndex]
+            let serverMessageID = updatedMessage.serverMessageID ?? "nil"
             conversations[conversationIndex].updatedAt = conversations[conversationIndex].pendingMessages[messageIndex].createdAt
             conversations[conversationIndex].lastMessagePreviewText = conversations[conversationIndex].pendingMessages[messageIndex].text
             sortConversations()
+            let pendingCount = conversations[conversationIndex].pendingMessages.count
+            let messageCount = conversations[conversationIndex].messages.count
+            IMClientLog.conversationStore.debug(
+                "Pending mutated conversationID=\(updatedMessage.conversationID, privacy: .public) localMessageID=\(updatedMessage.id, privacy: .public) clientMessageID=\(updatedMessage.clientMessageID, privacy: .public) serverMessageID=\(serverMessageID, privacy: .public) oldState=\(String(describing: oldState), privacy: .public) newState=\(String(describing: updatedMessage.deliveryState), privacy: .public) pendingCount=\(pendingCount, privacy: .public) messageCount=\(messageCount, privacy: .public)"
+            )
             return
         }
+
+        IMClientLog.conversationStore.warning(
+            "Pending mutate skipped: localMessageID not found localMessageID=\(id, privacy: .public)"
+        )
     }
 
     private func refreshConversationPresentationAfterLocalMessageRemoval(at conversationIndex: Int) {
@@ -2789,6 +2927,16 @@ public final class IMConversationStore {
             }
             return left.updatedAt > right.updatedAt
         }
+        conversationMutationGeneration &+= 1
+        let head = conversations.prefix(5).map { conversation in
+            "\(conversation.id)|unread=\(conversation.unreadCount)|preview=\(conversation.lastMessagePreviewText)|updated=\(conversation.updatedAt.timeIntervalSince1970)|pending=\(conversation.pendingMessages.count)|messages=\(conversation.messages.count)|timeline=\(conversation.timelineItems.count)"
+        }.joined(separator: " || ")
+        let generation = conversationMutationGeneration
+        let count = conversations.count
+        let selectedConversationID = selectedConversationID ?? "nil"
+        IMClientLog.conversationStore.debug(
+            "Conversations sorted generation=\(generation, privacy: .public) count=\(count, privacy: .public) selected=\(selectedConversationID, privacy: .public) head=\(head, privacy: .public)"
+        )
     }
 
     private func normalizedTitle(
@@ -3104,6 +3252,11 @@ public final class IMConversationStore {
         }
         statusMessage = nil
         sortConversations()
+        let pendingCount = conversations[index].pendingMessages.count
+        let messageCount = conversations[index].messages.count
+        IMClientLog.conversationStore.debug(
+            "Outgoing pending created conversationID=\(trimmedConversationID, privacy: .public) localMessageID=\(localMessageID, privacy: .public) clientMessageID=\(clientMessageID, privacy: .public) deliveryState=\(String(describing: deliveryState), privacy: .public) previewLength=\(content.previewText.count, privacy: .public) pendingCount=\(pendingCount, privacy: .public) messageCount=\(messageCount, privacy: .public)"
+        )
 
         let payload = IMTCPMessagePayload(
             clientMessageID: clientMessageID,

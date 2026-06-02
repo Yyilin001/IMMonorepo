@@ -1,5 +1,6 @@
 import SwiftUI
 import IMClientKit
+import OSLog
 import UniformTypeIdentifiers
 
 extension IMConversationDetailView {
@@ -20,18 +21,24 @@ extension IMConversationDetailView {
                 }
             }
             .task(id: conversationID) {
+                IMAppLog.imUI.debug(
+                    "Conversation detail opened conversationID=\(conversationID, privacy: .public) generation=\(conversationStore.conversationMutationGeneration, privacy: .public) pending=\(conversation?.pendingMessages.count ?? 0, privacy: .public) messages=\(messages.count, privacy: .public) timeline=\(timelineItems.count, privacy: .public)"
+                )
                 lastObservedMessageID = latestMessageID
                 unseenNewMessageCount = 0
                 isNearBottom = true
                 await scrollToLatestMessage(proxy: proxy, animated: false)
             }
             .onChange(of: latestMessageID) { _, latestMessageID in
+                IMAppLog.imUI.debug(
+                    "Conversation latest item changed conversationID=\(conversationID, privacy: .public) latestID=\(latestMessageID ?? "nil", privacy: .public) pending=\(conversation?.pendingMessages.count ?? 0, privacy: .public) messages=\(messages.count, privacy: .public) timeline=\(timelineItems.count, privacy: .public) isNearBottom=\(isNearBottom, privacy: .public) latestIsCurrentUserOutgoing=\(latestTimelineItemIsCurrentUserOutgoing, privacy: .public)"
+                )
                 guard latestMessageID != nil else {
                     return
                 }
 
                 Task {
-                    if isNearBottom {
+                    if isNearBottom || latestTimelineItemIsCurrentUserOutgoing {
                         await scrollToLatestMessage(proxy: proxy, animated: true)
                         unseenNewMessageCount = 0
                     } else if latestMessageID != lastObservedMessageID {
@@ -39,6 +46,11 @@ extension IMConversationDetailView {
                     }
                     lastObservedMessageID = latestMessageID
                 }
+            }
+            .onChange(of: conversationStore.conversationMutationGeneration) { _, generation in
+                IMAppLog.imUI.debug(
+                    "Conversation store generation changed conversationID=\(conversationID, privacy: .public) generation=\(generation, privacy: .public) pending=\(conversation?.pendingMessages.count ?? 0, privacy: .public) messages=\(messages.count, privacy: .public) timeline=\(timelineItems.count, privacy: .public) latestID=\(latestMessageID ?? "nil", privacy: .public) isNearBottom=\(isNearBottom, privacy: .public)"
+                )
             }
             .onChange(of: conversationStore.replyJumpMatchedMessageID) { _, matchedMessageID in
                 guard conversationStore.replyJumpConversationID == conversationID,
@@ -68,6 +80,7 @@ extension IMConversationDetailView {
         }
 
         await Task.yield()
+        try? await Task.sleep(nanoseconds: 50_000_000)
 
         if animated {
             withAnimation(.easeOut(duration: 0.2)) {
@@ -76,6 +89,9 @@ extension IMConversationDetailView {
         } else {
             proxy.scrollTo(latestMessageID, anchor: .bottom)
         }
+        IMAppLog.imUI.debug(
+            "Conversation scrolled to latest conversationID=\(conversationID, privacy: .public) latestID=\(latestMessageID, privacy: .public) animated=\(animated, privacy: .public)"
+        )
     }
 
     func applyingPresentationModifiers<Content: View>(to content: Content) -> some View {
@@ -316,7 +332,8 @@ extension IMConversationDetailView {
     }
 
     var conversation: IMConversation? {
-        conversationStore.conversations.first { $0.id == conversationID }
+        _ = conversationStore.conversationMutationGeneration
+        return conversationStore.conversations.first { $0.id == conversationID }
     }
 
     var messages: [IMConversationMessage] {
@@ -325,6 +342,23 @@ extension IMConversationDetailView {
 
     var timelineItems: [IMConversationTimelineItem] {
         conversation?.timelineItems ?? []
+    }
+
+    var latestTimelineItemIsCurrentUserOutgoing: Bool {
+        guard let currentUserID = runtimeStore.currentUserID,
+              let latestItem = timelineItems.last
+        else {
+            return false
+        }
+
+        switch latestItem {
+        case .message(let message):
+            return message.direction == .outgoing && message.senderUserID == currentUserID
+        case .pendingMessage(let message):
+            return message.senderUserID == currentUserID
+        case .notice:
+            return false
+        }
     }
 
     func deliveryOverrideText(for message: IMConversationMessage) -> String? {
@@ -353,11 +387,11 @@ extension IMConversationDetailView {
     }
 
     var latestMessageID: String? {
-        messages.last?.id
+        timelineItems.last?.id
     }
 
     var shouldShowLoadingState: Bool {
-        messages.isEmpty && conversationStore.isLoadingMessages
+        timelineItems.isEmpty && conversationStore.isLoadingMessages
     }
 
     var queueSummary: IMConversationQueueSummary {

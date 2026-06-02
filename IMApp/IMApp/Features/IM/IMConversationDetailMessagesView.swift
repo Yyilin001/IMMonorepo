@@ -332,6 +332,7 @@ extension IMConversationDetailView {
             .background(Color.accentColor.opacity(0.16))
             .clipShape(RoundedRectangle(cornerRadius: 16))
         }
+        .accessibilityIdentifier("conversation.pendingMessage.\(message.id)")
     }
 
     func deliveryDisplay(for state: IMMessageDeliveryState) -> IMMessageDeliveryDisplay {

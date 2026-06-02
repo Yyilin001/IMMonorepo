@@ -1,5 +1,6 @@
 import Foundation
 import IMClientKit
+import OSLog
 
 @MainActor
 final class IMGapSyncCoordinator {
@@ -22,15 +23,27 @@ final class IMGapSyncCoordinator {
 
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty,
-              runtime.imConversationStore.containsConversation(id: trimmedConversationID),
-              let latestLoadedSequence = runtime.imConversationStore.latestLoadedTimelineSequence(for: trimmedConversationID)
+              runtime.imConversationStore.containsConversation(id: trimmedConversationID)
         else {
+            IMAppLog.imRuntime.debug(
+                "Gap sync skipped: conversation unavailable conversationID=\(trimmedConversationID, privacy: .public)"
+            )
+            return .completed
+        }
+
+        guard let latestLoadedSequence = runtime.imConversationStore.latestLoadedTimelineSequence(for: trimmedConversationID) else {
+            IMAppLog.imRuntime.debug(
+                "Gap sync skipped: no loaded timeline cursor conversationID=\(trimmedConversationID, privacy: .public)"
+            )
             return .completed
         }
 
         do {
             var afterSequence = latestLoadedSequence
             var iterations = 0
+            IMAppLog.imRuntime.debug(
+                "Gap sync started conversationID=\(trimmedConversationID, privacy: .public) afterSequence=\(afterSequence, privacy: .public)"
+            )
 
             while iterations < ConversationRuntimeController.HistoryConfig.gapSyncMaxIterations {
                 let response = try await runtime.sessionClient.fetchIMTimelineSince(
@@ -46,30 +59,58 @@ final class IMGapSyncCoordinator {
                 }
 
                 runtime.markServerOnline()
+                let itemCount = response.items.count
+                let messageCount = response.items.compactMap(\.message).count
+                let noticeCount = response.items.compactMap(\.notice).count
+                let nextAfterSequence = response.nextAfterSequence.map(String.init) ?? "nil"
+                IMAppLog.imRuntime.debug(
+                    "Gap sync fetched conversationID=\(trimmedConversationID, privacy: .public) afterSequence=\(afterSequence, privacy: .public) items=\(itemCount, privacy: .public) messages=\(messageCount, privacy: .public) notices=\(noticeCount, privacy: .public) hasMore=\(response.hasMore, privacy: .public) nextAfterSequence=\(nextAfterSequence, privacy: .public)"
+                )
                 runtime.imConversationStore.appendTimelinePage(
                     in: trimmedConversationID,
                     response: response,
                     currentUserID: currentUserID
                 )
                 runtime.scheduleConversationCachePersist()
+                let conversation = runtime.imConversationStore.conversations.first {
+                    $0.id == trimmedConversationID
+                }
+                let pendingAfter = conversation?.pendingMessages.count ?? -1
+                let messagesAfter = conversation?.messages.count ?? -1
+                let timelineAfter = conversation?.timelineItems.count ?? -1
+                IMAppLog.imRuntime.debug(
+                    "Gap sync applied conversationID=\(trimmedConversationID, privacy: .public) pending=\(pendingAfter, privacy: .public) messages=\(messagesAfter, privacy: .public) timeline=\(timelineAfter, privacy: .public)"
+                )
 
                 guard response.hasMore else {
+                    IMAppLog.imRuntime.debug(
+                        "Gap sync completed conversationID=\(trimmedConversationID, privacy: .public)"
+                    )
                     return .completed
                 }
 
-                guard let nextAfterSequence = response.nextAfterSequence,
-                      nextAfterSequence > afterSequence
+                guard let nextSequence = response.nextAfterSequence,
+                      nextSequence > afterSequence
                 else {
                     throw APIError.server(statusCode: 500, message: "IM 增量补洞响应无效。")
                 }
 
-                afterSequence = UInt64(nextAfterSequence)
+                afterSequence = UInt64(nextSequence)
                 iterations += 1
             }
+            IMAppLog.imRuntime.debug(
+                "Gap sync incomplete conversationID=\(trimmedConversationID, privacy: .public) iterations=\(iterations, privacy: .public)"
+            )
             return .incomplete
         } catch is CancellationError {
+            IMAppLog.imRuntime.debug(
+                "Gap sync cancelled conversationID=\(trimmedConversationID, privacy: .public)"
+            )
             return .failed
         } catch {
+            IMAppLog.imRuntime.error(
+                "Gap sync failed conversationID=\(trimmedConversationID, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
             await runtime.handleIMDataRequestError(error)
             return .failed
         }

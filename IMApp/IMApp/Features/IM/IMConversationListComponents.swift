@@ -1,4 +1,5 @@
 import IMClientKit
+import OSLog
 import SwiftUI
 
 struct IMConversationRowButton: View {
@@ -112,6 +113,12 @@ struct IMConversationRow: View {
         }
         .padding(.vertical, AppSpacing.small)
         .contentShape(Rectangle())
+        .onAppear {
+            logRowSnapshot(reason: "appear")
+        }
+        .onChange(of: rowDebugSignature) { _, _ in
+            logRowSnapshot(reason: "changed")
+        }
     }
 
     private var avatarText: String {
@@ -170,6 +177,25 @@ struct IMConversationRow: View {
             return .red
         }
         return conversation.unreadCount > 0 ? .primary : .secondary
+    }
+
+    private var rowDebugSignature: String {
+        [
+            conversation.id,
+            "\(conversation.unreadCount)",
+            conversation.lastMessagePreviewText,
+            "\(conversation.updatedAt.timeIntervalSince1970)",
+            "\(conversation.pendingMessages.count)",
+            "\(conversation.messages.count)",
+            "\(conversation.timelineItems.count)",
+            "\(isActive)"
+        ].joined(separator: "|")
+    }
+
+    private func logRowSnapshot(reason: String) {
+        IMAppLog.imUI.debug(
+            "Conversation row snapshot reason=\(reason, privacy: .public) conversationID=\(conversation.id, privacy: .public) title=\(identity.title, privacy: .public) unread=\(conversation.unreadCount, privacy: .public) preview=\(conversation.lastMessagePreviewText, privacy: .public) updated=\(conversation.updatedAt.timeIntervalSince1970, privacy: .public) pending=\(conversation.pendingMessages.count, privacy: .public) messages=\(conversation.messages.count, privacy: .public) timeline=\(conversation.timelineItems.count, privacy: .public) isActive=\(isActive, privacy: .public)"
+        )
     }
 }
 

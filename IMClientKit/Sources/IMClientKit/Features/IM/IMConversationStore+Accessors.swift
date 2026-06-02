@@ -34,6 +34,7 @@ extension IMConversationStore {
 
     public func reset() {
         conversations = []
+        conversationMutationGeneration &+= 1
         selectedConversationID = nil
         statusMessage = nil
         isLoadingConversations = false

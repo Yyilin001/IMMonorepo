@@ -1,5 +1,6 @@
 import Foundation
 import IMClientKit
+import OSLog
 
 @MainActor
 final class IMConnectionCoordinator {
@@ -264,7 +265,21 @@ final class IMConnectionCoordinator {
         case .heartbeatAck:
             return
         case .ack(let requestID, let payload):
+            IMAppLog.imRuntime.debug(
+                "TCP ACK event requestID=\(requestID?.uuidString ?? "nil", privacy: .public) status=\(payload.status, privacy: .public) messageID=\(payload.messageID, privacy: .public) conversationID=\(payload.conversationID ?? "nil", privacy: .public) generation=\(targetGeneration, privacy: .public)"
+            )
             runtime.imConversationStore.applyOutgoingAcknowledgement(requestID: requestID, payload: payload)
+            if payload.status == "accepted",
+               let conversationID = payload.conversationID {
+                let selectedConversationID = runtime.imConversationStore.selectedConversationID ?? "nil"
+                IMAppLog.imRuntime.debug(
+                    "ACK accepted scheduling conversation gap catch-up conversationID=\(conversationID, privacy: .public) serverMessageID=\(payload.messageID, privacy: .public) selectedConversationID=\(selectedConversationID, privacy: .public)"
+                )
+                runtime.enqueueConversationGapSyncCatchUp(
+                    for: conversationID,
+                    prioritize: conversationID == runtime.imConversationStore.selectedConversationID
+                )
+            }
             if let conversationID = payload.conversationID,
                conversationID == runtime.imConversationStore.selectedConversationID {
                 await runtime.loadReceiptSummary(for: conversationID)
@@ -282,6 +297,21 @@ final class IMConnectionCoordinator {
             }
 
             let outcome = runtime.imConversationStore.applyDomainEvent(payload, currentUserID: currentUserID)
+            IMAppLog.imRuntime.debug(
+                "TCP domain event applied eventType=\(payload.eventType.rawValue, privacy: .public) aggregateID=\(payload.aggregateID.uuidString, privacy: .public) shouldFetchDomainEvents=\(outcome.shouldFetchDomainEvents, privacy: .public) didConsumeEvent=\(outcome.didConsumeEvent, privacy: .public)"
+            )
+            if case .messageCreated(let message, _) = payload.body,
+               outcome.shouldFetchDomainEvents || !outcome.didConsumeEvent {
+                let conversationID = message.conversationID.uuidString
+                IMAppLog.imRuntime.debug(
+                    "Message created event deferred; scheduling timeline catch-up conversationID=\(conversationID, privacy: .public) messageID=\(message.id.uuidString, privacy: .public) didConsumeEvent=\(outcome.didConsumeEvent, privacy: .public)"
+                )
+                runtime.enqueueConversationGapSyncCatchUp(
+                    for: conversationID,
+                    prioritize: conversationID == runtime.imConversationStore.selectedConversationID
+                )
+                runtime.scheduleConversationSummaryReadModelCorrection(force: true)
+            }
             if outcome.shouldFetchDomainEvents {
                 await runtime.syncDomainEventsAfterConnection()
             }
@@ -299,6 +329,9 @@ final class IMConnectionCoordinator {
                message.senderUserID != currentUserID,
                message.conversationID.uuidString == runtime.imConversationStore.selectedConversationID,
                let connection {
+                IMAppLog.imRuntime.debug(
+                    "TCP domain messageCreated incoming selected conversationID=\(message.conversationID.uuidString, privacy: .public) messageID=\(message.id.uuidString, privacy: .public) serverSequence=\(message.serverSequence, privacy: .public)"
+                )
                 do {
                     try await connection.sendAcknowledgement(
                         IMTCPAckPayload(
