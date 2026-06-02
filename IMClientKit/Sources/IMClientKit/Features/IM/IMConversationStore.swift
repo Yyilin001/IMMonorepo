@@ -80,9 +80,9 @@ public final class IMConversationStore {
     }
 
     public func applyConversationSummaryPage(_ responses: [IMConversationSummaryResponseBody]) {
-        for response in responses {
-            upsertConversationSummaryContent(response)
-        }
+        upsertConversationSummaryContents(responses, conversations: &conversations)
+        statusMessage = nil
+        sortConversations()
     }
 
     public func applyConversationSummaryChanges(
@@ -94,8 +94,8 @@ public final class IMConversationStore {
             removedConversationIDs: removedConversationIDs,
             conversations: &conversations,
             selectedConversationID: &selectedConversationID
-        ) { response, conversations in
-            upsertConversationSummaryContent(response, conversations: &conversations)
+        ) { responses, conversations in
+            upsertConversationSummaryContents(responses, conversations: &conversations)
         }
         let remainingConversationIDs = Set(conversations.map(\.id))
         for removedConversationID in removedConversationIDs.map(\.uuidString)
@@ -139,8 +139,8 @@ public final class IMConversationStore {
             conversations: &conversations,
             nextCursor: nextCursor,
             hasMore: hasMore
-        ) { response, conversations in
-            upsertConversationSummaryContent(response, conversations: &conversations)
+        ) { responses, conversations in
+            upsertConversationSummaryContents(responses, conversations: &conversations)
         }
 
         conversationSummaryNextCursor = pagination.nextCursor
@@ -330,8 +330,25 @@ public final class IMConversationStore {
     }
 
     public func applyServerSummaryReadStates(_ responses: [IMConversationSummaryResponseBody]) {
+        let conversationIndicesByID = Dictionary(
+            uniqueKeysWithValues: conversations.indices.map { index in
+                (conversations[index].id, index)
+            }
+        )
+        let localLatestSequences = latestLoadedMessageSequencesByConversationID()
+
         for response in responses {
-            applyServerSummaryReadState(response)
+            let conversationID = response.id.uuidString
+            guard let index = conversationIndicesByID[conversationID] else {
+                continue
+            }
+            applyServerSummaryReadState(
+                lastReadSequence: UInt64(response.lastReadSequence),
+                unreadCount: response.unreadCount,
+                for: conversationID,
+                at: index,
+                hasLatestLoadedServerSequence: localLatestSequences[conversationID] != nil
+            )
         }
     }
 
@@ -368,6 +385,36 @@ public final class IMConversationStore {
         conversations[index].localUnreadDelta = 0
     }
 
+    private func applyServerSummaryReadState(
+        lastReadSequence: UInt64,
+        unreadCount: Int,
+        for conversationID: String,
+        at index: Int,
+        hasLatestLoadedServerSequence: Bool
+    ) {
+        guard conversations.indices.contains(index),
+              conversations[index].id == conversationID
+        else {
+            return
+        }
+
+        let previousServerLastReadSequence = conversations[index].serverLastReadSequence
+        let previousServerUnreadCount = conversations[index].serverUnreadCount
+        let previousLocalUnreadDelta = conversations[index].localUnreadDelta
+        let normalizedUnreadCount = max(0, unreadCount)
+        conversations[index].serverLastReadSequence = lastReadSequence
+        conversations[index].serverUnreadCount = normalizedUnreadCount
+        conversations[index].localUnreadDelta = reconciledLocalUnreadDelta(
+            for: conversationID,
+            previousServerLastReadSequence: previousServerLastReadSequence,
+            previousServerUnreadCount: previousServerUnreadCount,
+            previousLocalUnreadDelta: previousLocalUnreadDelta,
+            updatedServerLastReadSequence: lastReadSequence,
+            updatedServerUnreadCount: normalizedUnreadCount,
+            hasLatestLoadedServerSequence: hasLatestLoadedServerSequence
+        )
+    }
+
     public func applyRealtimeUnreadIncrement(for conversationID: String) {
         conversationListStore.applyRealtimeUnreadIncrement(
             for: conversationID,
@@ -393,10 +440,23 @@ public final class IMConversationStore {
         _ payload: IMTCPChatDomainEventPayload,
         currentUserID: UUID
     ) -> IMConversationEventApplyOutcome {
+        var dependencies = domainEventDependencySnapshot()
+        return applyDomainEvent(
+            payload,
+            currentUserID: currentUserID,
+            dependencies: &dependencies
+        )
+    }
+
+    private func applyDomainEvent(
+        _ payload: IMTCPChatDomainEventPayload,
+        currentUserID: UUID,
+        dependencies: inout DomainEventProjectionReducer.DependencySnapshot
+    ) -> IMConversationEventApplyOutcome {
         let operation = domainEventProjectionReducer.reduce(
             event: payload,
             currentUserID: currentUserID,
-            dependencies: domainEventDependencySnapshot()
+            dependencies: dependencies
         )
 
         switch operation {
@@ -437,6 +497,11 @@ public final class IMConversationStore {
             applySummaryIfPresent(summary)
             recordProcessedDomainEvent(payload.eventID)
             recordOwnerAggregateHighWatermark(payload)
+            updateDomainEventDependencySnapshot(
+                &dependencies,
+                afterConsuming: payload,
+                operation: operation
+            )
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .applyMessageMutation(_, let message, let notice, let summary):
@@ -449,6 +514,11 @@ public final class IMConversationStore {
             }
             recordProcessedDomainEvent(payload.eventID)
             recordOwnerAggregateHighWatermark(payload)
+            updateDomainEventDependencySnapshot(
+                &dependencies,
+                afterConsuming: payload,
+                operation: operation
+            )
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .applyVisibility(let conversationID, let messageIDs, let message, let visibilityAction, let notice, let summary):
@@ -465,6 +535,11 @@ public final class IMConversationStore {
             }
             recordProcessedDomainEvent(payload.eventID)
             recordOwnerAggregateHighWatermark(payload)
+            updateDomainEventDependencySnapshot(
+                &dependencies,
+                afterConsuming: payload,
+                operation: operation
+            )
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .applyMessageFavorite(_, _, let notice, let summary):
@@ -475,6 +550,11 @@ public final class IMConversationStore {
             statusMessage = nil
             recordProcessedDomainEvent(payload.eventID)
             recordOwnerAggregateHighWatermark(payload)
+            updateDomainEventDependencySnapshot(
+                &dependencies,
+                afterConsuming: payload,
+                operation: operation
+            )
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .applyMessageStream(let stream, let message, let notice, let summary):
@@ -485,6 +565,11 @@ public final class IMConversationStore {
             applyMessageStreamEvent(stream: stream, message: message)
             recordProcessedDomainEvent(payload.eventID)
             recordOwnerAggregateHighWatermark(payload)
+            updateDomainEventDependencySnapshot(
+                &dependencies,
+                afterConsuming: payload,
+                operation: operation
+            )
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .applyConversationChange(let notice, let summary):
@@ -494,6 +579,11 @@ public final class IMConversationStore {
             applySummaryIfPresent(summary)
             recordProcessedDomainEvent(payload.eventID)
             recordOwnerAggregateHighWatermark(payload)
+            updateDomainEventDependencySnapshot(
+                &dependencies,
+                afterConsuming: payload,
+                operation: operation
+            )
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .removeConversation(let conversationID, let notice):
@@ -503,6 +593,11 @@ public final class IMConversationStore {
             removeConversation(id: conversationID)
             recordProcessedDomainEvent(payload.eventID)
             recordOwnerAggregateHighWatermark(payload)
+            updateDomainEventDependencySnapshot(
+                &dependencies,
+                afterConsuming: payload,
+                operation: operation
+            )
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .applyConversationVisibility(let conversationID, let visibilityAction, let messageIDs, let notice, let summary):
@@ -520,6 +615,11 @@ public final class IMConversationStore {
             }
             recordProcessedDomainEvent(payload.eventID)
             recordOwnerAggregateHighWatermark(payload)
+            updateDomainEventDependencySnapshot(
+                &dependencies,
+                afterConsuming: payload,
+                operation: operation
+            )
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
 
         case .applyMemberChange(let conversationID, _, let notice, let summary):
@@ -530,6 +630,11 @@ public final class IMConversationStore {
             applySummaryIfPresent(summary)
             recordProcessedDomainEvent(payload.eventID)
             recordOwnerAggregateHighWatermark(payload)
+            updateDomainEventDependencySnapshot(
+                &dependencies,
+                afterConsuming: payload,
+                operation: operation
+            )
             return IMConversationEventApplyOutcome(
                 shouldReloadMembersForConversationID: selectedConversationIDBeforeApply == conversationID ? conversationID : nil
             )
@@ -541,6 +646,11 @@ public final class IMConversationStore {
             applySummaryIfPresent(summary)
             recordProcessedDomainEvent(payload.eventID)
             recordOwnerAggregateHighWatermark(payload)
+            updateDomainEventDependencySnapshot(
+                &dependencies,
+                afterConsuming: payload,
+                operation: operation
+            )
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
         }
     }
@@ -553,6 +663,7 @@ public final class IMConversationStore {
         var shouldReloadMembersForConversationID: String?
         var shouldFetchDomainEvents = false
         var lastConsumedCursor = domainEventCursor
+        var dependencies = domainEventDependencySnapshot()
         for envelope in envelopes {
             guard envelope.cursor == lastConsumedCursor + 1 else {
                 domainEventDebugMetrics.catchUpCursorGap += 1
@@ -560,7 +671,11 @@ public final class IMConversationStore {
                 shouldFetchDomainEvents = true
                 break
             }
-            let outcome = applyDomainEvent(envelope.payload, currentUserID: currentUserID)
+            let outcome = applyDomainEvent(
+                envelope.payload,
+                currentUserID: currentUserID,
+                dependencies: &dependencies
+            )
             shouldReloadMembersForConversationID = outcome.shouldReloadMembersForConversationID
                 ?? shouldReloadMembersForConversationID
             shouldFetchDomainEvents = shouldFetchDomainEvents || outcome.shouldFetchDomainEvents
@@ -582,23 +697,128 @@ public final class IMConversationStore {
         domainEventCursor
     }
 
+    public var healthSnapshot: IMConversationHealthSnapshot {
+        IMConversationHealthSnapshot(
+            domainEventCursor: domainEventCursor,
+            deferredDomainEventCount: deferredDomainEventsForSnapshot().count,
+            fullRefreshConversationCount: domainEventFullRefreshConversationIDs.count,
+            domainEventMetrics: domainEventDebugMetrics
+        )
+    }
+
     private func domainEventDependencySnapshot() -> DomainEventProjectionReducer.DependencySnapshot {
-        var messageKeys = Set<DomainEventProjectionReducer.MessageKey>()
+        var existingMessageKeys = Set<DomainEventProjectionReducer.MessageKey>()
         for conversation in conversations {
             for message in conversation.messages {
-                messageKeys.insert(
-                    DomainEventProjectionReducer.MessageKey(
-                        conversationID: conversation.id,
-                        messageID: message.id
-                    )
-                )
+                existingMessageKeys.formUnion(messageKeys(for: message))
             }
         }
         return DomainEventProjectionReducer.DependencySnapshot(
             processedEventIDs: processedDomainEventIDs,
             ownerAggregateHighWatermarks: ownerAggregateHighWatermarks,
-            existingMessageKeys: messageKeys
+            existingMessageKeys: existingMessageKeys
         )
+    }
+
+    private func updateDomainEventDependencySnapshot(
+        _ dependencies: inout DomainEventProjectionReducer.DependencySnapshot,
+        afterConsuming payload: IMTCPChatDomainEventPayload,
+        operation: DomainEventProjectionReducer.Operation
+    ) {
+        dependencies.processedEventIDs.insert(payload.eventID)
+        if let ownerAggregateSequence = payload.ownerAggregateSequence,
+           ownerAggregateSequence > 0 {
+            let key = IMOwnerAggregateKey(
+                aggregateType: payload.aggregateType,
+                aggregateID: payload.aggregateID.uuidString
+            )
+            dependencies.ownerAggregateHighWatermarks[key] = max(
+                dependencies.ownerAggregateHighWatermarks[key] ?? 0,
+                ownerAggregateSequence
+            )
+        }
+
+        switch operation {
+        case .applyMessageCreated(let message, _, _, _):
+            dependencies.existingMessageKeys.formUnion(messageKeys(for: message))
+        case .applyMessageMutation(_, let message, _, _):
+            if let message {
+                dependencies.existingMessageKeys.formUnion(messageKeys(for: message))
+            }
+        case .applyVisibility(let conversationID, let messageIDs, let message, let action, _, _):
+            if let message {
+                dependencies.existingMessageKeys.formUnion(messageKeys(for: message))
+            }
+            if action == .messageHidden {
+                removeMessageKeys(
+                    conversationID: conversationID,
+                    messageIDs: Set(messageIDs.map(\.uuidString)),
+                    from: &dependencies.existingMessageKeys
+                )
+            }
+        case .applyMessageStream(_, let message, _, _):
+            if let message {
+                dependencies.existingMessageKeys.formUnion(messageKeys(for: message))
+            }
+        case .removeConversation(let conversationID, _):
+            removeMessageKeys(conversationID: conversationID, from: &dependencies.existingMessageKeys)
+        case .applyConversationVisibility(let conversationID, let action, let messageIDs, _, _):
+            switch action {
+            case .conversationCleared, .conversationDeleted:
+                removeMessageKeys(conversationID: conversationID, from: &dependencies.existingMessageKeys)
+            case .messageHidden:
+                removeMessageKeys(
+                    conversationID: conversationID,
+                    messageIDs: Set(messageIDs.map(\.uuidString)),
+                    from: &dependencies.existingMessageKeys
+                )
+            }
+        case .ignoreDuplicate,
+             .requestCatchUp,
+             .rejectInvalid,
+             .deferEvent,
+             .applyMessageFavorite,
+             .applyConversationChange,
+             .applyMemberChange,
+             .applyContactChange:
+            break
+        }
+    }
+
+    private func messageKeys(for message: IMConversationMessage) -> Set<DomainEventProjectionReducer.MessageKey> {
+        var keys: Set<DomainEventProjectionReducer.MessageKey> = [
+            DomainEventProjectionReducer.MessageKey(
+                conversationID: message.conversationID,
+                messageID: message.id
+            )
+        ]
+        keys.insert(
+            DomainEventProjectionReducer.MessageKey(
+                conversationID: message.conversationID,
+                messageID: message.serverMessageID
+            )
+        )
+        return keys
+    }
+
+    private func removeMessageKeys(
+        conversationID: String,
+        messageIDs: Set<String>,
+        from keys: inout Set<DomainEventProjectionReducer.MessageKey>
+    ) {
+        guard !messageIDs.isEmpty else {
+            return
+        }
+        keys = keys.filter { key in
+            key.conversationID != conversationID || !messageIDs.contains(key.messageID)
+        }
+    }
+
+    private func removeMessageKeys(
+        conversationID: String,
+        from keys: inout Set<DomainEventProjectionReducer.MessageKey>
+    ) {
+        keys = keys.filter { $0.conversationID != conversationID }
     }
 
     private func recordProcessedDomainEvent(_ eventID: UUID) {
@@ -696,16 +916,19 @@ public final class IMConversationStore {
     private func replayDeferredDomainEvents(currentUserID: UUID) -> [IMDeferredDomainEventReplayResult] {
         var results: [IMDeferredDomainEventReplayResult] = []
         let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
-        for state in deferredDomainEventsForSnapshot() where state.firstSeenAt < cutoff {
+
+        let deferredEvents = deferredDomainEventsByMissingKey.values.flatMap { $0 }
+        for state in deferredEvents where state.firstSeenAt < cutoff {
             removeDeferredDomainEvent(state)
             domainEventDebugMetrics.deferredExpired += 1
             results.append(.expired(state.eventID))
         }
 
-        let pending = deferredDomainEventsForSnapshot().sorted {
+        let pending = deferredEvents.filter { $0.firstSeenAt >= cutoff }.sorted {
             ($0.ownerCursor ?? 0, $0.ownerAggregateSequence ?? 0, $0.firstSeenAt) <
                 ($1.ownerCursor ?? 0, $1.ownerAggregateSequence ?? 0, $1.firstSeenAt)
         }
+        var dependencies = domainEventDependencySnapshot()
         for state in pending {
             guard let data = Data(base64Encoded: state.eventPBBase64) else {
                 removeDeferredDomainEvent(state)
@@ -726,7 +949,11 @@ public final class IMConversationStore {
                 continue
             }
 
-            let outcome = applyDomainEvent(payload, currentUserID: currentUserID)
+            let outcome = applyDomainEvent(
+                payload,
+                currentUserID: currentUserID,
+                dependencies: &dependencies
+            )
             guard processedDomainEventIDs.contains(payload.eventID) else {
                 if outcome.shouldFetchDomainEvents {
                     domainEventDebugMetrics.deferredFullRefreshRequested += 1
@@ -1966,7 +2193,16 @@ public final class IMConversationStore {
     }
 
     public func hasLoadedMessages(for conversationID: String) -> Bool {
-        detailState.hasLoadedMessages(for: conversationID)
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard detailState.hasLoadedMessages(for: trimmedConversationID) else {
+            return false
+        }
+
+        guard let conversation = conversations.first(where: { $0.id == trimmedConversationID }) else {
+            return false
+        }
+
+        return !shouldTreatLoadedTimelineAsSummaryOnly(conversation)
     }
 
     public func canLoadOlderMessages(for conversationID: String) -> Bool {
@@ -2035,11 +2271,13 @@ public final class IMConversationStore {
     }
 
     public func gapSyncTargets(from summaries: [IMConversationSummaryResponseBody]) -> [String] {
-        summaries.compactMap { summary in
+        let localLatestSequences = latestLoadedMessageSequencesByConversationID()
+
+        return summaries.compactMap { summary -> String? in
             let conversationID = summary.id.uuidString
-            let serverLatestSequence = UInt64(max(0, summary.lastMessage?.serverSequence ?? 0))
+            let serverLatestSequence = summary.lastMessage?.serverSequence ?? 0
             guard
-                let localLatestSequence = latestLoadedMessageSequence(for: conversationID),
+                let localLatestSequence = localLatestSequences[conversationID],
                 serverLatestSequence > localLatestSequence
             else {
                 return nil
@@ -2047,6 +2285,19 @@ public final class IMConversationStore {
 
             return conversationID
         }
+    }
+
+    private func latestLoadedMessageSequencesByConversationID() -> [String: UInt64] {
+        Dictionary(uniqueKeysWithValues: conversations.compactMap { conversation -> (String, UInt64)? in
+            var latestSequence: UInt64?
+            for message in conversation.messages {
+                latestSequence = max(latestSequence ?? 0, message.serverSequence)
+            }
+            guard let latestSequence else {
+                return nil
+            }
+            return (conversation.id, latestSequence)
+        })
     }
 
     public func serverLastReadSequence(for conversationID: String) -> UInt64? {
@@ -2277,6 +2528,56 @@ public final class IMConversationStore {
             from: response,
             existing: conversations[index]
         )
+    }
+
+    private func upsertConversationSummaryContents(
+        _ responses: [IMConversationSummaryResponseBody],
+        conversations: inout [IMConversation]
+    ) {
+        guard !responses.isEmpty else {
+            return
+        }
+
+        var indicesByID = Dictionary(
+            uniqueKeysWithValues: conversations.indices.map { index in
+                (conversations[index].id, index)
+            }
+        )
+
+        for response in responses {
+            let conversationID = response.id.uuidString
+            if let index = indicesByID[conversationID],
+               conversations.indices.contains(index) {
+                conversations[index] = conversationSummary(
+                    from: response,
+                    existing: conversations[index]
+                )
+            } else {
+                conversations.append(
+                    conversationSummary(
+                        from: response,
+                        existing: nil
+                    )
+                )
+                indicesByID[conversationID] = conversations.count - 1
+            }
+        }
+    }
+
+    private func shouldTreatLoadedTimelineAsSummaryOnly(_ conversation: IMConversation) -> Bool {
+        guard conversation.messages.isEmpty,
+              conversation.notices.isEmpty,
+              conversation.pendingMessages.isEmpty
+        else {
+            return false
+        }
+
+        if conversation.unreadCount > 0 {
+            return true
+        }
+
+        let preview = conversation.lastMessagePreviewText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !preview.isEmpty && preview != "暂无消息"
     }
 
     private func conversationSummary(

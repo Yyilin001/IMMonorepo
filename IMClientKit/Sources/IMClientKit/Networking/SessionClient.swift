@@ -353,6 +353,22 @@ public actor SessionClient {
         return (envelopes, response.nextCursor, response.hasMore)
     }
 
+    public func reportIMClientHealth(
+        snapshot: IMConversationHealthSnapshot,
+        reason: String,
+        reportedAt: Date = Date()
+    ) async throws {
+        _ = try await executor.execute(
+            IMRequest.reportClientHealth(
+                IMClientHealthReportRequestBody(
+                    snapshot: snapshot,
+                    reason: reason,
+                    reportedAt: reportedAt
+                )
+            )
+        )
+    }
+
     public func createIMConversation(
         kind: IMConversationKind,
         title: String?,

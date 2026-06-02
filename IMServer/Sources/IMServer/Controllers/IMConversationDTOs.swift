@@ -28,6 +28,39 @@ struct IMDomainEventChangesQuery: Content {
     let limit: Int?
 }
 
+struct IMClientDomainEventDebugMetricsRequest: Content, Equatable, Sendable {
+    var invalidDomainEventMetadata: Int = 0
+    var missingRequiredNotice: Int = 0
+    var deferredStored: Int = 0
+    var deferredEncodeFailed: Int = 0
+    var deferredNotDeferrable: Int = 0
+    var deferredReplayApplied: Int = 0
+    var deferredExpired: Int = 0
+    var deferredFullRefreshRequested: Int = 0
+    var cacheDroppedCanonicalMessages: Int = 0
+    var cacheDroppedTimelineNotices: Int = 0
+    var invalidCanonicalMessageDTOs: Int = 0
+    var invalidProjectionDTOs: Int = 0
+    var sequenceDecodeOverflow: Int = 0
+    var realtimeMissingDeliveryRow: Int = 0
+    var catchUpCursorGap: Int = 0
+    var catchUpStoppedBeforeCursorAdvance: Int = 0
+    var invalidDeferredPayload: Int = 0
+}
+
+struct IMClientHealthSnapshotRequest: Content, Equatable, Sendable {
+    let domainEventCursor: UInt64
+    let deferredDomainEventCount: Int
+    let fullRefreshConversationCount: Int
+    let domainEventMetrics: IMClientDomainEventDebugMetricsRequest
+}
+
+struct IMClientHealthReportRequest: Content, Equatable, Sendable {
+    let snapshot: IMClientHealthSnapshotRequest
+    let reason: String
+    let reportedAt: Date
+}
+
 struct IMTimelineSinceQuery: Content {
     let afterSequence: UInt64
     let limit: Int?

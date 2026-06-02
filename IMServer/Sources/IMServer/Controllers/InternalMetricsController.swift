@@ -25,6 +25,7 @@ struct InternalMetricsController: RouteCollection {
         let aiStream = await req.application.aiStreamMetrics.currentSnapshot()
         let messageWrite = await req.application.messageWriteMetrics.currentSnapshot()
         let authSessionCache = await req.application.authSessionCacheMetrics.currentSnapshot()
+        let clientHealth = await req.application.clientHealthMetrics.currentSnapshot()
         let liveLag = await collectLiveLagSnapshot(app: req.application)
 
         var lines: [String] = []
@@ -97,6 +98,52 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_message_write_batches_total", value: messageWrite.messageWriteBatches, to: &lines)
         appendCounter("im_message_write_batch_messages_total", value: messageWrite.messageWriteBatchMessages, to: &lines)
         appendCounter("im_message_write_queue_rejected_total", value: messageWrite.writeQueueRejected, to: &lines)
+        appendCounter("im_client_health_reports_total", value: clientHealth.reports, to: &lines)
+        appendGauge("im_client_health_reporting_users", value: clientHealth.activeReportingUsers, to: &lines)
+        appendGauge(
+            "im_client_health_users_with_deferred_domain_events",
+            value: clientHealth.usersWithDeferredDomainEvents,
+            to: &lines
+        )
+        appendGauge("im_client_deferred_domain_events", value: clientHealth.totalDeferredDomainEvents, to: &lines)
+        appendGauge("im_client_deferred_domain_events_max", value: clientHealth.maxDeferredDomainEvents, to: &lines)
+        appendGauge("im_client_full_refresh_conversations_max", value: clientHealth.maxFullRefreshConversations, to: &lines)
+        appendGauge("im_client_domain_event_cursor_max", value: clientHealth.maxDomainEventCursor, to: &lines)
+        appendCounter("im_client_domain_event_cursor_gap_total", value: clientHealth.catchUpCursorGaps, to: &lines)
+        appendCounter(
+            "im_client_domain_event_sync_stopped_total",
+            value: clientHealth.catchUpStoppedBeforeCursorAdvance,
+            to: &lines
+        )
+        appendCounter("im_client_deferred_domain_events_stored_total", value: clientHealth.deferredStored, to: &lines)
+        appendCounter(
+            "im_client_deferred_domain_events_replayed_total",
+            value: clientHealth.deferredReplayApplied,
+            to: &lines
+        )
+        appendCounter("im_client_deferred_domain_events_expired_total", value: clientHealth.deferredExpired, to: &lines)
+        appendCounter(
+            "im_client_deferred_full_refresh_requested_total",
+            value: clientHealth.deferredFullRefreshRequested,
+            to: &lines
+        )
+        appendCounter("im_client_invalid_domain_events_total", value: clientHealth.invalidDomainEvents, to: &lines)
+        appendCounter("im_client_invalid_projection_dtos_total", value: clientHealth.invalidProjectionDTOs, to: &lines)
+        appendCounter(
+            "im_client_invalid_canonical_message_dtos_total",
+            value: clientHealth.invalidCanonicalMessageDTOs,
+            to: &lines
+        )
+        appendCounter(
+            "im_client_cache_dropped_canonical_messages_total",
+            value: clientHealth.cacheDroppedCanonicalMessages,
+            to: &lines
+        )
+        appendCounter(
+            "im_client_cache_dropped_timeline_notices_total",
+            value: clientHealth.cacheDroppedTimelineNotices,
+            to: &lines
+        )
         appendGauge("im_projection_lag_millis", value: liveLag.projectionLagMillis, to: &lines)
         appendGauge("im_search_lag_millis", value: liveLag.searchLagMillis, to: &lines)
         appendGauge("im_replay_pending_events", value: liveLag.replayPendingEvents, to: &lines)
@@ -108,6 +155,11 @@ struct InternalMetricsController: RouteCollection {
     }
 
     private func appendGauge(_ name: String, value: Int, to lines: inout [String]) {
+        lines.append("# TYPE \(name) gauge")
+        lines.append("\(name) \(value)")
+    }
+
+    private func appendGauge(_ name: String, value: UInt64, to lines: inout [String]) {
         lines.append("# TYPE \(name) gauge")
         lines.append("\(name) \(value)")
     }

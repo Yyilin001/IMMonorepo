@@ -310,6 +310,11 @@ extension ConversationRuntimeController {
                     await loadConversationMembers(for: conversationID)
                 }
                 scheduleConversationCachePersist()
+                await reportClientHealthIfNeeded(
+                    reason: outcome.shouldFetchDomainEvents
+                        ? "domain-event-catch-up-needed"
+                        : "domain-event-sync"
+                )
 
                 guard response.hasMore, response.nextCursor > cursor else {
                     return

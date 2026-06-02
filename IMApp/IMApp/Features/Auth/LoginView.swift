@@ -35,9 +35,7 @@ struct LoginView: View {
     @State private var localMessage: String?
     @FocusState private var focusedField: Field?
 
-    #if DEBUG
     private let demoAccounts = DemoLoginAccount.defaults
-    #endif
 
     init(authentication: AuthenticationFacade) {
         self.authentication = authentication
@@ -333,25 +331,25 @@ struct LoginView: View {
             .buttonStyle(.borderless)
             .accessibilityIdentifier("auth.forgotPasswordButton")
 
-            #if DEBUG
-            Menu {
-                ForEach(demoAccounts) { account in
-                    Button(account.email) {
-                        selectDemoAccount(account)
+            if LoginFeatureFlags.isDemoLoginEnabled {
+                Menu {
+                    ForEach(demoAccounts) { account in
+                        Button(account.email) {
+                            selectDemoAccount(account)
+                        }
+                        .accessibilityIdentifier("auth.demoAccount.\(account.id)")
                     }
-                    .accessibilityIdentifier("auth.demoAccount.\(account.id)")
+                } label: {
+                    Label("使用测试账号", systemImage: "person.crop.circle")
+                        .font(.subheadline)
                 }
-            } label: {
-                Label("使用测试账号", systemImage: "person.crop.circle")
-                    .font(.subheadline)
-            }
-            .controlSize(.regular)
-            .disabled(isBusy)
+                .controlSize(.regular)
+                .disabled(isBusy)
 
-            Text("测试账号仅用于本地开发环境")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            #endif
+                Text("测试账号仅用于测试环境")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         } else {
             Text("注册后需要完成邮箱验证，再使用账号登录。")
                 .font(.footnote)
@@ -419,7 +417,6 @@ struct LoginView: View {
         }
     }
 
-    #if DEBUG
     private func selectDemoAccount(_ account: DemoLoginAccount) {
         localMessage = nil
         flow = .credentials
@@ -432,7 +429,6 @@ struct LoginView: View {
             await authentication.login(email: account.email, password: account.password)
         }
     }
-    #endif
 
     private var displayNotice: AuthNotice? {
         if let localMessage {
@@ -603,6 +599,20 @@ struct LoginView: View {
     }
 }
 
+private enum LoginFeatureFlags {
+    static var isDemoLoginEnabled: Bool {
+        if let value = Bundle.main.object(forInfoDictionaryKey: "IMDemoLoginEnabled") as? Bool {
+            return value
+        }
+
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
+    }
+}
+
 private enum LoginDefaults {
     #if DEBUG
     static let email = "demo@example.com"
@@ -613,7 +623,6 @@ private enum LoginDefaults {
     #endif
 }
 
-#if DEBUG
 private struct DemoLoginAccount: Identifiable {
     let name: String
     let email: String
@@ -629,7 +638,6 @@ private struct DemoLoginAccount: Identifiable {
         DemoLoginAccount(name: "Dave", email: "dave@example.com", password: "password1234")
     ]
 }
-#endif
 
 private struct AuthNoticeBanner: View {
     let notice: AuthNotice

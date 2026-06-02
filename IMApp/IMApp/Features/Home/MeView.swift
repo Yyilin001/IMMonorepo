@@ -407,6 +407,7 @@ struct NetworkStatusView: View {
 
 struct DiagnosticsView: View {
     let probeManager: ProbeManager
+    let conversationHealthSnapshot: IMConversationHealthSnapshot
 
     var body: some View {
         List {
@@ -448,8 +449,28 @@ struct DiagnosticsView: View {
                 statusRow(title: "失败次数", value: "\(probeManager.loadTestFailureCount)")
                 statusRow(title: "最近请求", value: lastLoadTestText)
             }
+
+            Section("IM 补偿链路") {
+                statusRow(title: "Domain cursor", value: "\(conversationHealthSnapshot.domainEventCursor)")
+                statusRow(title: "延迟事件积压", value: "\(conversationHealthSnapshot.deferredDomainEventCount)")
+                statusRow(title: "全量刷新会话", value: "\(conversationHealthSnapshot.fullRefreshConversationCount)")
+                statusRow(title: "Domain cursor gap", value: "\(domainEventMetrics.catchUpCursorGap)")
+                statusRow(title: "补偿中断", value: "\(domainEventMetrics.catchUpStoppedBeforeCursorAdvance)")
+                statusRow(title: "延迟事件入队", value: "\(domainEventMetrics.deferredStored)")
+                statusRow(title: "延迟事件回放", value: "\(domainEventMetrics.deferredReplayApplied)")
+                statusRow(title: "延迟事件过期", value: "\(domainEventMetrics.deferredExpired)")
+                statusRow(title: "需全量刷新", value: "\(domainEventMetrics.deferredFullRefreshRequested)")
+                statusRow(title: "非法事件", value: "\(domainEventMetrics.invalidDomainEventMetadata)")
+                statusRow(title: "非法 DTO", value: "\(domainEventMetrics.invalidProjectionDTOs)")
+                statusRow(title: "缓存消息丢弃", value: "\(domainEventMetrics.cacheDroppedCanonicalMessages)")
+                statusRow(title: "缓存通知丢弃", value: "\(domainEventMetrics.cacheDroppedTimelineNotices)")
+            }
         }
         .navigationTitle("开发诊断")
+    }
+
+    private var domainEventMetrics: IMDomainEventDebugMetrics {
+        conversationHealthSnapshot.domainEventMetrics
     }
 
     private var lastRequestText: String {

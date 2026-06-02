@@ -41,6 +41,42 @@ extension AuthManagerTests {
     }
 
 
+    @Test func connectedIMSendsHeartbeatUsingServerInterval() async throws {
+        let harness = IMConnectionTestHarness(heartbeatIntervalSeconds: 1)
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("DELETE", "/api/auth/sessions/current"):
+                return HTTPFixtures.response(statusCode: 200)
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+        let manager = AuthManager(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: wrapWithDefaultIMResponses(transport)),
+            tokenStore: InMemoryTokenStore(),
+            userCache: InMemoryUserSessionCache(),
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            shouldRestoreSession: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run { manager.imConnectionStatus == .connected }
+        }
+
+        let heartbeatLine = try await Self.requireRecordedLine(at: 0, from: harness)
+        let heartbeatPacket = try Self.decode(IMTCPPacketEnvelope<IMTCPHeartbeatPayload>.self, from: heartbeatLine)
+        #expect(heartbeatPacket.type == .heartbeat)
+        #expect(heartbeatPacket.payload.sequence == 1)
+
+        await manager.logout()
+    }
+
+
     @Test func kickClearsLocalSession() async throws {
         let harness = IMConnectionTestHarness()
         let transport = MockHTTPTransport { request in
@@ -82,6 +118,54 @@ extension AuthManagerTests {
 
         #expect(manager.currentUser == nil)
         #expect(manager.imConnectionStatus == .disconnected)
+    }
+
+
+    @Test func idleTimeoutKickKeepsSessionAndReconnects() async throws {
+        let harness = IMConnectionTestHarness()
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+        let manager = AuthManager(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: wrapWithDefaultIMResponses(transport)),
+            tokenStore: InMemoryTokenStore(),
+            userCache: InMemoryUserSessionCache(),
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            shouldRestoreSession: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run { manager.imConnectionStatus == .connected }
+        }
+
+        await harness.yield(
+            .kick(IMTCPKickPayload(reason: .protocolError, message: "Connection idle timeout."))
+        )
+        try await Self.waitUntil {
+            await MainActor.run {
+                if case .failed(let message) = manager.imConnectionStatus {
+                    return message.contains("Connection idle timeout.")
+                }
+                return false
+            }
+        }
+
+        #expect(manager.currentUser != nil)
+        let isSignedIn: Bool
+        if case .signedIn = manager.sessionStore.authRouteState {
+            isSignedIn = true
+        } else {
+            isSignedIn = false
+        }
+        #expect(isSignedIn)
     }
 
 

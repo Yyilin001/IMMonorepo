@@ -345,10 +345,17 @@ enum ConversationCacheSnapshotMapper {
         }
 
         var detailState = ConversationDetailState()
+        let conversationsByID = Dictionary(uniqueKeysWithValues: conversations.map { ($0.id, $0) })
         detailState.loadedConversationIDs = Set(
-            snapshot.cursors
-                .filter(\.hasLoadedMessages)
-                .map(\.conversationID)
+            snapshot.cursors.compactMap { cursor in
+                guard cursor.hasLoadedMessages,
+                      let conversation = conversationsByID[cursor.conversationID],
+                      shouldRestoreLoadedCursor(for: conversation)
+                else {
+                    return nil
+                }
+                return cursor.conversationID
+            }
         )
         detailState.latestLoadedTimelineSequences = Dictionary(
             uniqueKeysWithValues: snapshot.conversations.compactMap { conversation in
@@ -379,5 +386,21 @@ enum ConversationCacheSnapshotMapper {
             detailState: detailState,
             diagnostics: diagnostics
         )
+    }
+
+    private static func shouldRestoreLoadedCursor(for conversation: IMConversation) -> Bool {
+        guard conversation.messages.isEmpty,
+              conversation.notices.isEmpty,
+              conversation.pendingMessages.isEmpty
+        else {
+            return true
+        }
+
+        if conversation.unreadCount > 0 {
+            return false
+        }
+
+        let preview = conversation.lastMessagePreviewText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return preview.isEmpty || preview == "暂无消息"
     }
 }

@@ -47,6 +47,7 @@ final class ConversationRuntimeController {
     var mediaUploadRecoveryTasks: [String: Task<Void, Never>] = [:]
     var mediaDownloadBackgroundObserveTask: Task<Void, Never>?
     var mediaTransferStore = TransferStore()
+    var lastClientHealthReportAt: Date?
 
     init(
         sessionClient: SessionClient,

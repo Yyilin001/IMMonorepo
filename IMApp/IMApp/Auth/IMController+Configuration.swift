@@ -14,6 +14,7 @@ extension ConversationRuntimeController {
         static let summaryPageLimit = 100
         static let reconnectInitialDelayNanoseconds: UInt64 = 1_000_000_000
         static let reconnectMaxDelayNanoseconds: UInt64 = 30_000_000_000
+        static let clientHealthReportMinimumInterval: TimeInterval = 60
     }
 
     enum ConversationGapSyncResult {

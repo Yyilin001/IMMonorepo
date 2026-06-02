@@ -421,6 +421,81 @@ extension IMConversationStoreTests {
     }
 
 
+    @Test func cacheRestoreTreatsEmptyLoadedConversationWithSummaryMessageAsUnloaded() {
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let snapshot = IMConversationCacheSnapshot(
+            conversations: [
+                IMCachedConversationState(
+                    id: conversationIDString,
+                    title: "Summary Only",
+                    kind: .direct,
+                    memberCount: 2,
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    messages: [],
+                    hasLoadedMessages: true,
+                    lastMessagePreviewText: "summary 20",
+                    hasMoreHistory: false,
+                    latestLoadedTimelineSequence: nil,
+                    oldestLoadedTimelineSequence: nil,
+                    serverLastReadSequence: 0,
+                    serverUnreadCount: 1,
+                    updatedAt: Date(timeIntervalSince1970: 1_700_400_020)
+                )
+            ],
+            selectedConversationID: conversationIDString,
+            lastSummaryRefreshAt: nil,
+            summarySyncToken: nil,
+            summaryNextCursor: nil,
+            hasMoreConversationSummaries: false
+        )
+
+        let restoredStore = IMConversationStore()
+        restoredStore.restoreCacheSnapshot(snapshot)
+
+        #expect(restoredStore.hasLoadedMessages(for: conversationIDString) == false)
+        #expect(restoredStore.selectedConversation?.messages.isEmpty == true)
+        #expect(restoredStore.selectedConversation?.lastMessagePreview == "summary 20")
+        #expect(restoredStore.selectedConversation?.unreadCount == 1)
+    }
+
+
+    @Test func cacheRestoreKeepsLoadedEmptyConversationWithoutSummaryMessageLoaded() {
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        let snapshot = IMConversationCacheSnapshot(
+            conversations: [
+                IMCachedConversationState(
+                    id: conversationIDString,
+                    title: "Empty",
+                    kind: .direct,
+                    memberCount: 2,
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    messages: [],
+                    hasLoadedMessages: true,
+                    lastMessagePreviewText: "暂无消息",
+                    hasMoreHistory: false,
+                    latestLoadedTimelineSequence: nil,
+                    oldestLoadedTimelineSequence: nil,
+                    serverLastReadSequence: 0,
+                    serverUnreadCount: 0,
+                    updatedAt: Date(timeIntervalSince1970: 1_700_400_020)
+                )
+            ],
+            selectedConversationID: conversationIDString,
+            lastSummaryRefreshAt: nil,
+            summarySyncToken: nil,
+            summaryNextCursor: nil,
+            hasMoreConversationSummaries: false
+        )
+
+        let restoredStore = IMConversationStore()
+        restoredStore.restoreCacheSnapshot(snapshot)
+
+        #expect(restoredStore.hasLoadedMessages(for: conversationIDString))
+    }
+
+
     @Test func cacheSnapshotTrimsMessagesToRecentWindowAndPreservesWindowCursor() throws {
         let store = IMConversationStore()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!

@@ -32,11 +32,9 @@ struct ConversationListStore {
         conversations: inout [IMConversation],
         nextCursor: String?,
         hasMore: Bool,
-        upsert: (IMConversationSummaryResponseBody, inout [IMConversation]) -> Void
+        upsert: ([IMConversationSummaryResponseBody], inout [IMConversation]) -> Void
     ) -> (nextCursor: String?, hasMore: Bool) {
-        for response in responses {
-            upsert(response, &conversations)
-        }
+        upsert(responses, &conversations)
         return (nextCursor, hasMore)
     }
 
@@ -45,18 +43,23 @@ struct ConversationListStore {
         removedConversationIDs: [UUID],
         conversations: inout [IMConversation],
         selectedConversationID: inout String?,
-        upsert: (IMConversationSummaryResponseBody, inout [IMConversation]) -> Void
+        upsert: ([IMConversationSummaryResponseBody], inout [IMConversation]) -> Void
     ) {
-        for response in upserts {
-            upsert(response, &conversations)
+        upsert(upserts, &conversations)
+
+        let removedIDs = Set(removedConversationIDs.map(\.uuidString))
+        guard !removedIDs.isEmpty else {
+            return
         }
 
-        for conversationID in removedConversationIDs {
-            removeConversation(
-                id: conversationID.uuidString,
-                conversations: &conversations,
-                selectedConversationID: &selectedConversationID
-            )
+        conversations.removeAll { removedIDs.contains($0.id) }
+
+        if let currentSelectedConversationID = selectedConversationID,
+           removedIDs.contains(currentSelectedConversationID) {
+            selectedConversationID = conversations.first?.id
+        } else if selectedConversationID == nil
+                    || !conversations.contains(where: { $0.id == selectedConversationID }) {
+            selectedConversationID = conversations.first?.id
         }
     }
 

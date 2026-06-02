@@ -350,6 +350,22 @@ public struct IMDomainEventChangesResponseBody: Codable, Equatable, Sendable, AP
     public let hasMore: Bool
 }
 
+public struct IMClientHealthReportRequestBody: Codable, Equatable, Sendable {
+    public let snapshot: IMConversationHealthSnapshot
+    public let reason: String
+    public let reportedAt: Date
+
+    public init(
+        snapshot: IMConversationHealthSnapshot,
+        reason: String,
+        reportedAt: Date = Date()
+    ) {
+        self.snapshot = snapshot
+        self.reason = reason
+        self.reportedAt = reportedAt
+    }
+}
+
 public struct IMConversationReadResponseBody: Codable, Equatable, Sendable, APIResponseBody {
     public let conversationID: UUID
     public let lastReadSequence: UInt64
@@ -574,6 +590,20 @@ enum IMRequest {
                 items.append(URLQueryItem(name: "limit", value: String(limit)))
             }
             return .init(path: "api/im/domain-events", queryItems: items)
+        }
+    }
+
+    public struct ReportClientHealth: AuthorizedEndpoint {
+        public typealias Response = EmptyResponse
+
+        let payload: IMClientHealthReportRequestBody
+
+        let baseRequestSpec = HTTPRequestSpec(path: "api/im/client-health", method: .post)
+
+        var requestContentType: String? { "application/json" }
+
+        public func makeBody(using encoder: JSONEncoder) throws -> Data? {
+            try encoder.encode(payload)
         }
     }
 
@@ -1104,6 +1134,10 @@ enum IMRequest {
 
     public static func domainEventChanges(after: UInt64, limit: Int? = nil) -> DomainEventChanges {
         DomainEventChanges(after: after, limit: limit)
+    }
+
+    public static func reportClientHealth(_ payload: IMClientHealthReportRequestBody) -> ReportClientHealth {
+        ReportClientHealth(payload: payload)
     }
 
     public static func createConversation(

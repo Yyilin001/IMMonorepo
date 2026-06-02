@@ -151,7 +151,7 @@ final class QueuedMessageFlushCoordinator {
         }
 
         return runtime.imConversationStore.conversations.contains { conversation in
-            conversation.messages.contains { message in
+            conversation.pendingMessages.contains { message in
                 guard message.direction == .outgoing, message.content.isUserComposable else {
                     return false
                 }

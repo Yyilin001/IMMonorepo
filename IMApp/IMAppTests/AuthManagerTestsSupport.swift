@@ -1007,10 +1007,16 @@ actor IMConnectionTestHarness {
     private var sendAttemptCount = 0
     private let sendDelayNanoseconds: UInt64
     private let failingSendNumbers: Set<Int>
+    private let heartbeatIntervalSeconds: Int
 
-    init(sendDelayNanoseconds: UInt64 = 0, failingSendNumbers: Set<Int> = []) {
+    init(
+        sendDelayNanoseconds: UInt64 = 0,
+        failingSendNumbers: Set<Int> = [],
+        heartbeatIntervalSeconds: Int = 30
+    ) {
         self.sendDelayNanoseconds = sendDelayNanoseconds
         self.failingSendNumbers = failingSendNumbers
+        self.heartbeatIntervalSeconds = heartbeatIntervalSeconds
     }
 
     func makeConnection() -> IMTCPConnection {
@@ -1028,7 +1034,7 @@ actor IMConnectionTestHarness {
                 connectionID: UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!,
                 userID: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
                 sessionID: UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!,
-                heartbeatIntervalSeconds: 30,
+                heartbeatIntervalSeconds: heartbeatIntervalSeconds,
                 serverTime: Date(timeIntervalSince1970: 1_700_000_000)
             ),
             events: events,

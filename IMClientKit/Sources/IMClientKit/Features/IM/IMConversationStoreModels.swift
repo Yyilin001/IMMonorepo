@@ -701,7 +701,7 @@ public enum IMDeferredDomainEventReplayResult: Equatable, Sendable {
     case requiresFullTimelineRefresh(String)
 }
 
-public struct IMDomainEventDebugMetrics: Equatable, Sendable {
+public struct IMDomainEventDebugMetrics: Codable, Equatable, Sendable {
     public var invalidDomainEventMetadata = 0
     public var missingRequiredNotice = 0
     public var deferredStored = 0
@@ -721,6 +721,25 @@ public struct IMDomainEventDebugMetrics: Equatable, Sendable {
     public var invalidDeferredPayload = 0
 
     public init() {}
+}
+
+public struct IMConversationHealthSnapshot: Codable, Equatable, Sendable {
+    public let domainEventCursor: UInt64
+    public let deferredDomainEventCount: Int
+    public let fullRefreshConversationCount: Int
+    public let domainEventMetrics: IMDomainEventDebugMetrics
+
+    public init(
+        domainEventCursor: UInt64,
+        deferredDomainEventCount: Int,
+        fullRefreshConversationCount: Int,
+        domainEventMetrics: IMDomainEventDebugMetrics
+    ) {
+        self.domainEventCursor = domainEventCursor
+        self.deferredDomainEventCount = deferredDomainEventCount
+        self.fullRefreshConversationCount = fullRefreshConversationCount
+        self.domainEventMetrics = domainEventMetrics
+    }
 }
 
 public struct IMConversationMemberPageState: Equatable, Sendable {

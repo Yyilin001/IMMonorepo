@@ -7,21 +7,14 @@ enum SignedInTab: Hashable {
     case me
 }
 
-enum MessageRoute: Hashable {
+enum SignedInRoute: Hashable {
     case conversation(String)
-}
-
-enum ContactsRoute: Hashable {
     case requests
     case contact(UUID)
     case blockedUsers
-}
-
-enum MeRoute: Hashable {
     case profile
     case sessions
     case privacy
-    case blockedUsers
     case fileTransfer
     case networkStatus
     case diagnostics
@@ -62,9 +55,7 @@ struct SignedInTabView: View {
     let createDirectConversation: (String) async -> String?
 
     @State private var selectedTab: SignedInTab = .messages
-    @State private var messagePath: [MessageRoute] = []
-    @State private var contactsPath: [ContactsRoute] = []
-    @State private var mePath: [MeRoute] = []
+    @State private var navigationPath: [SignedInRoute] = []
 
     init(
         user: AuthUser,
@@ -133,175 +124,160 @@ struct SignedInTabView: View {
     }
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            messagesRoot
-                .tabItem {
-                    Label("消息", systemImage: "message")
-                }
-                .tag(SignedInTab.messages)
-                .badge(conversationStore.totalUnreadCount)
-                .accessibilityIdentifier("tab.messages")
+        NavigationStack(path: $navigationPath) {
+            TabView(selection: $selectedTab) {
+                messagesRoot
+                    .tabItem {
+                        Label("消息", systemImage: "message")
+                    }
+                    .tag(SignedInTab.messages)
+                    .badge(conversationStore.totalUnreadCount)
+                    .accessibilityIdentifier("tab.messages")
 
-            contactsRoot
-                .tabItem {
-                    Label("通讯录", systemImage: "person.2")
-                }
-                .tag(SignedInTab.contacts)
-                .badge(contactStore.unseenIncomingContactRequestCount)
-                .accessibilityIdentifier("tab.contacts")
+                contactsRoot
+                    .tabItem {
+                        Label("通讯录", systemImage: "person.2")
+                    }
+                    .tag(SignedInTab.contacts)
+                    .badge(contactStore.unseenIncomingContactRequestCount)
+                    .accessibilityIdentifier("tab.contacts")
 
-            meRoot
-                .tabItem {
-                    Label("我的", systemImage: "person.crop.circle")
-                }
-                .tag(SignedInTab.me)
-                .accessibilityIdentifier("tab.me")
+                meRoot
+                    .tabItem {
+                        Label("我的", systemImage: "person.crop.circle")
+                    }
+                    .tag(SignedInTab.me)
+                    .accessibilityIdentifier("tab.me")
+            }
+            .navigationDestination(for: SignedInRoute.self) { route in
+                destination(for: route)
+            }
         }
     }
 
     private var messagesRoot: some View {
-        NavigationStack(path: $messagePath) {
-            IMConversationView(
-                conversationStore: conversationStore,
-                presentationStore: conversationPresentationStore,
-                runtimeStore: conversationRuntimeStore,
-                onOpenConversation: openConversation
-            )
-            .navigationDestination(for: MessageRoute.self) { route in
-                switch route {
-                case .conversation(let conversationID):
-                    IMConversationDetailView(
-                        conversationStore: conversationStore,
-                        presentationStore: conversationPresentationStore,
-                        runtimeStore: conversationRuntimeStore,
-                        conversationID: conversationID
-                    )
-                }
-            }
-        }
+        IMConversationView(
+            conversationStore: conversationStore,
+            presentationStore: conversationPresentationStore,
+            runtimeStore: conversationRuntimeStore,
+            onOpenConversation: openConversation
+        )
     }
 
     private var contactsRoot: some View {
-        NavigationStack(path: $contactsPath) {
-            ContactsView(
-                contactStore: contactStore,
-                currentUserID: user.id,
-                currentUserEmail: user.email,
-                reloadContacts: reloadContacts,
-                reloadContactRequests: reloadContactRequests,
-                markIncomingContactRequestsSeen: markIncomingContactRequestsSeen,
-                sendContactRequest: sendContactRequest,
-                onOpenRequests: openContactRequests,
-                onOpenBlockedUsers: { contactsPath.append(.blockedUsers) },
-                onOpenContact: openContact
-            )
-            .navigationDestination(for: ContactsRoute.self) { route in
-                switch route {
-                case .requests:
-                    NewContactRequestsView(
-                        contactStore: contactStore,
-                        currentUserID: user.id,
-                        showsCloseButton: false,
-                        markIncomingContactRequestsSeen: markIncomingContactRequestsSeen,
-                        reloadContactRequests: reloadContactRequests,
-                        sendContactRequest: sendContactRequest,
-                        acceptContactRequest: acceptContactRequest,
-                        declineContactRequest: declineContactRequest,
-                        cancelContactRequest: cancelContactRequest,
-                        createDirectConversation: createDirectConversation,
-                        onOpenConversation: openConversation
-                    )
-                case .contact(let contactID):
-                    ContactDetailView(
-                        contactStore: contactStore,
-                        contactID: contactID,
-                        updateContactRemark: updateContactRemark,
-                        deleteContact: deleteContact,
-                        blockUser: blockUser,
-                        reportUser: reportUser,
-                        createDirectConversation: createDirectConversation,
-                        onOpenConversation: openConversation
-                    )
-                case .blockedUsers:
-                    BlockedUsersSheet(
-                        contactStore: contactStore,
-                        conversationStore: conversationStore,
-                        currentUserID: user.id,
-                        currentUserEmail: user.email,
-                        showsCloseButton: false,
-                        loadBlockedUsers: loadBlockedUsers,
-                        unblockUser: unblockUser,
-                        sendContactRequest: sendContactRequest
-                    )
-                }
-            }
-        }
+        ContactsView(
+            contactStore: contactStore,
+            currentUserID: user.id,
+            currentUserEmail: user.email,
+            reloadContacts: reloadContacts,
+            reloadContactRequests: reloadContactRequests,
+            markIncomingContactRequestsSeen: markIncomingContactRequestsSeen,
+            sendContactRequest: sendContactRequest,
+            onOpenRequests: openContactRequests,
+            onOpenBlockedUsers: { navigationPath.append(.blockedUsers) },
+            onOpenContact: openContact
+        )
     }
 
     private var meRoot: some View {
-        NavigationStack(path: $mePath) {
-            MeView(
-                sessionStore: sessionStore,
-                user: user,
-                imConnectionStatus: imConnectionStatus,
-                reloadProfile: reloadProfile,
-                updateProfile: updateProfile,
-                logout: logout,
-                openProfile: { mePath.append(.profile) },
-                openSessions: { mePath.append(.sessions) },
-                openPrivacy: { mePath.append(.privacy) },
-                openFileTransfer: { mePath.append(.fileTransfer) },
-                openNetworkStatus: { mePath.append(.networkStatus) },
-                openDiagnostics: { mePath.append(.diagnostics) }
+        MeView(
+            sessionStore: sessionStore,
+            user: user,
+            imConnectionStatus: imConnectionStatus,
+            reloadProfile: reloadProfile,
+            updateProfile: updateProfile,
+            logout: logout,
+            openProfile: { navigationPath.append(.profile) },
+            openSessions: { navigationPath.append(.sessions) },
+            openPrivacy: { navigationPath.append(.privacy) },
+            openFileTransfer: { navigationPath.append(.fileTransfer) },
+            openNetworkStatus: { navigationPath.append(.networkStatus) },
+            openDiagnostics: { navigationPath.append(.diagnostics) }
+        )
+    }
+
+    @ViewBuilder
+    private func destination(for route: SignedInRoute) -> some View {
+        switch route {
+        case .conversation(let conversationID):
+            IMConversationDetailView(
+                conversationStore: conversationStore,
+                presentationStore: conversationPresentationStore,
+                runtimeStore: conversationRuntimeStore,
+                conversationID: conversationID
             )
-            .navigationDestination(for: MeRoute.self) { route in
-                switch route {
-                case .profile:
-                    EditProfileSheet(
-                        initialEmail: activeUser.email,
-                        initialDisplayName: activeUser.displayName,
-                        initialAvatarPreset: activeUser.avatarPreset,
-                        isSubmitting: sessionStore.isUpdatingProfile,
-                        message: sessionStore.profileMessage,
-                        onSubmit: { displayName, avatarPreset in
-                            await updateProfile(displayName, avatarPreset)
-                        }
-                    )
-                case .sessions:
-                    SessionManagementView(
-                        sessionStore: sessionStore,
-                        loadSessions: loadSessions,
-                        signOutCurrentDevice: signOutCurrentDevice,
-                        logoutAllSessions: logoutAllSessions,
-                        signOut: signOut
-                    )
-                case .privacy:
-                    PrivacySecurityView(
-                        openBlockedUsers: { mePath.append(.blockedUsers) }
-                    )
-                case .blockedUsers:
-                    BlockedUsersSheet(
-                        contactStore: contactStore,
-                        conversationStore: conversationStore,
-                        currentUserID: user.id,
-                        currentUserEmail: user.email,
-                        showsCloseButton: false,
-                        loadBlockedUsers: loadBlockedUsers,
-                        unblockUser: unblockUser,
-                        sendContactRequest: sendContactRequest
-                    )
-                case .fileTransfer:
-                    FileTransferView(fileTransferManager: fileTransferManager)
-                case .networkStatus:
-                    NetworkStatusView(
-                        sessionStore: sessionStore,
-                        imConnectionStatus: imConnectionStatus,
-                        reconnectIMConnection: reconnectIMConnection
-                    )
-                case .diagnostics:
-                    DiagnosticsView(probeManager: probeManager)
+        case .requests:
+            NewContactRequestsView(
+                contactStore: contactStore,
+                currentUserID: user.id,
+                showsCloseButton: false,
+                markIncomingContactRequestsSeen: markIncomingContactRequestsSeen,
+                reloadContactRequests: reloadContactRequests,
+                sendContactRequest: sendContactRequest,
+                acceptContactRequest: acceptContactRequest,
+                declineContactRequest: declineContactRequest,
+                cancelContactRequest: cancelContactRequest,
+                createDirectConversation: createDirectConversation,
+                onOpenConversation: openConversation
+            )
+        case .contact(let contactID):
+            ContactDetailView(
+                contactStore: contactStore,
+                contactID: contactID,
+                updateContactRemark: updateContactRemark,
+                deleteContact: deleteContact,
+                blockUser: blockUser,
+                reportUser: reportUser,
+                createDirectConversation: createDirectConversation,
+                onOpenConversation: openConversation
+            )
+        case .blockedUsers:
+            BlockedUsersSheet(
+                contactStore: contactStore,
+                conversationStore: conversationStore,
+                currentUserID: user.id,
+                currentUserEmail: user.email,
+                showsCloseButton: false,
+                loadBlockedUsers: loadBlockedUsers,
+                unblockUser: unblockUser,
+                sendContactRequest: sendContactRequest
+            )
+        case .profile:
+            EditProfileSheet(
+                initialEmail: activeUser.email,
+                initialDisplayName: activeUser.displayName,
+                initialAvatarPreset: activeUser.avatarPreset,
+                isSubmitting: sessionStore.isUpdatingProfile,
+                message: sessionStore.profileMessage,
+                onSubmit: { displayName, avatarPreset in
+                    await updateProfile(displayName, avatarPreset)
                 }
-            }
+            )
+        case .sessions:
+            SessionManagementView(
+                sessionStore: sessionStore,
+                loadSessions: loadSessions,
+                signOutCurrentDevice: signOutCurrentDevice,
+                logoutAllSessions: logoutAllSessions,
+                signOut: signOut
+            )
+        case .privacy:
+            PrivacySecurityView(
+                openBlockedUsers: { navigationPath.append(.blockedUsers) }
+            )
+        case .fileTransfer:
+            FileTransferView(fileTransferManager: fileTransferManager)
+        case .networkStatus:
+            NetworkStatusView(
+                sessionStore: sessionStore,
+                imConnectionStatus: imConnectionStatus,
+                reconnectIMConnection: reconnectIMConnection
+            )
+        case .diagnostics:
+            DiagnosticsView(
+                probeManager: probeManager,
+                conversationHealthSnapshot: conversationStore.healthSnapshot
+            )
         }
     }
 
@@ -310,15 +286,16 @@ struct SignedInTabView: View {
     }
 
     private func openContactRequests() {
-        contactsPath.append(.requests)
+        navigationPath.append(.requests)
     }
 
     private func openContact(_ contactID: UUID) {
-        contactsPath.append(.contact(contactID))
+        navigationPath.append(.contact(contactID))
     }
 
     private func openConversation(_ conversationID: String) {
         selectedTab = .messages
-        messagePath.append(.conversation(conversationID))
+        navigationPath.removeAll()
+        navigationPath.append(.conversation(conversationID))
     }
 }

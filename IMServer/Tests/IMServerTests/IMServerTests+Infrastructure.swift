@@ -685,6 +685,55 @@ extension IMServerTests {
         }
     }
 
+    @Test("Client health reports aggregate into internal metrics")
+    func clientHealthReportsAggregateIntoInternalMetrics() async throws {
+        try await withApp(configure: configure) { app in
+            app.metricsConfiguration = IMMetricsConfiguration(isEnabled: true, internalSecret: "metrics-secret")
+            let accessToken = try await loginAccessToken(using: app)
+            let report = IMClientHealthReportRequest(
+                snapshot: IMClientHealthSnapshotRequest(
+                    domainEventCursor: 42,
+                    deferredDomainEventCount: 3,
+                    fullRefreshConversationCount: 1,
+                    domainEventMetrics: IMClientDomainEventDebugMetricsRequest(
+                        invalidDomainEventMetadata: 1,
+                        deferredStored: 4,
+                        deferredReplayApplied: 2,
+                        cacheDroppedCanonicalMessages: 1,
+                        invalidProjectionDTOs: 1,
+                        catchUpCursorGap: 2,
+                        catchUpStoppedBeforeCursorAdvance: 1
+                    )
+                ),
+                reason: "test-sync",
+                reportedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+
+            for _ in 0..<2 {
+                try await app.testing().test(.POST, "api/im/client-health", beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                    try req.content.encode(report)
+                }, afterResponse: { res async in
+                    #expect(res.status == .noContent)
+                })
+            }
+
+            try await app.testing().test(.GET, "internal/metrics", beforeRequest: { req in
+                req.headers.replaceOrAdd(name: "X-IM-Metrics-Secret", value: "metrics-secret")
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+                let body = res.body.string
+                #expect(body.contains("im_client_health_reports_total 2"))
+                #expect(body.contains("im_client_health_reporting_users 1"))
+                #expect(body.contains("im_client_deferred_domain_events 3"))
+                #expect(body.contains("im_client_domain_event_cursor_max 42"))
+                #expect(body.contains("im_client_domain_event_cursor_gap_total 2"))
+                #expect(body.contains("im_client_deferred_domain_events_stored_total 4"))
+                #expect(body.contains("im_client_invalid_projection_dtos_total 1"))
+            })
+        }
+    }
+
     @Test("Production metrics require an internal secret")
     func productionMetricsRequireInternalSecret() throws {
         let originalValues = [

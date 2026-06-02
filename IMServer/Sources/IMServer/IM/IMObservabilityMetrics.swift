@@ -214,6 +214,107 @@ actor IMAIStreamMetrics {
     }
 }
 
+actor IMClientHealthMetrics {
+    struct Snapshot: Sendable {
+        var reports: Int = 0
+        var activeReportingUsers: Int = 0
+        var usersWithDeferredDomainEvents: Int = 0
+        var totalDeferredDomainEvents: Int = 0
+        var maxDeferredDomainEvents: Int = 0
+        var maxFullRefreshConversations: Int = 0
+        var maxDomainEventCursor: UInt64 = 0
+        var catchUpCursorGaps: Int = 0
+        var catchUpStoppedBeforeCursorAdvance: Int = 0
+        var deferredStored: Int = 0
+        var deferredReplayApplied: Int = 0
+        var deferredExpired: Int = 0
+        var deferredFullRefreshRequested: Int = 0
+        var invalidDomainEvents: Int = 0
+        var invalidProjectionDTOs: Int = 0
+        var invalidCanonicalMessageDTOs: Int = 0
+        var cacheDroppedCanonicalMessages: Int = 0
+        var cacheDroppedTimelineNotices: Int = 0
+        var lastReason: String?
+        var lastReportedAt: Date?
+    }
+
+    private var snapshot = Snapshot()
+    private var lastReportsByUserID: [UUID: IMClientHealthReportRequest] = [:]
+
+    func record(userID: UUID, report: IMClientHealthReportRequest) {
+        let previous = lastReportsByUserID[userID]
+        lastReportsByUserID[userID] = report
+
+        snapshot.reports += 1
+        snapshot.activeReportingUsers = lastReportsByUserID.count
+        snapshot.lastReason = report.reason
+        snapshot.lastReportedAt = report.reportedAt
+
+        let metrics = report.snapshot.domainEventMetrics
+        let previousMetrics = previous?.snapshot.domainEventMetrics
+        snapshot.catchUpCursorGaps += positiveDelta(metrics.catchUpCursorGap, previousMetrics?.catchUpCursorGap)
+        snapshot.catchUpStoppedBeforeCursorAdvance += positiveDelta(
+            metrics.catchUpStoppedBeforeCursorAdvance,
+            previousMetrics?.catchUpStoppedBeforeCursorAdvance
+        )
+        snapshot.deferredStored += positiveDelta(metrics.deferredStored, previousMetrics?.deferredStored)
+        snapshot.deferredReplayApplied += positiveDelta(
+            metrics.deferredReplayApplied,
+            previousMetrics?.deferredReplayApplied
+        )
+        snapshot.deferredExpired += positiveDelta(metrics.deferredExpired, previousMetrics?.deferredExpired)
+        snapshot.deferredFullRefreshRequested += positiveDelta(
+            metrics.deferredFullRefreshRequested,
+            previousMetrics?.deferredFullRefreshRequested
+        )
+        snapshot.invalidDomainEvents += positiveDelta(
+            metrics.invalidDomainEventMetadata,
+            previousMetrics?.invalidDomainEventMetadata
+        )
+        snapshot.invalidProjectionDTOs += positiveDelta(
+            metrics.invalidProjectionDTOs,
+            previousMetrics?.invalidProjectionDTOs
+        )
+        snapshot.invalidCanonicalMessageDTOs += positiveDelta(
+            metrics.invalidCanonicalMessageDTOs,
+            previousMetrics?.invalidCanonicalMessageDTOs
+        )
+        snapshot.cacheDroppedCanonicalMessages += positiveDelta(
+            metrics.cacheDroppedCanonicalMessages,
+            previousMetrics?.cacheDroppedCanonicalMessages
+        )
+        snapshot.cacheDroppedTimelineNotices += positiveDelta(
+            metrics.cacheDroppedTimelineNotices,
+            previousMetrics?.cacheDroppedTimelineNotices
+        )
+
+        recalculateCurrentGauges()
+    }
+
+    func currentSnapshot() -> Snapshot {
+        snapshot
+    }
+
+    private func positiveDelta(_ current: Int, _ previous: Int?) -> Int {
+        max(0, current - (previous ?? 0))
+    }
+
+    private func recalculateCurrentGauges() {
+        let reports = Array(lastReportsByUserID.values)
+        snapshot.usersWithDeferredDomainEvents = reports.filter { $0.snapshot.deferredDomainEventCount > 0 }.count
+        snapshot.totalDeferredDomainEvents = reports.reduce(0) {
+            $0 + max(0, $1.snapshot.deferredDomainEventCount)
+        }
+        snapshot.maxDeferredDomainEvents = reports.map {
+            max(0, $0.snapshot.deferredDomainEventCount)
+        }.max() ?? 0
+        snapshot.maxFullRefreshConversations = reports.map {
+            max(0, $0.snapshot.fullRefreshConversationCount)
+        }.max() ?? 0
+        snapshot.maxDomainEventCursor = reports.map(\.snapshot.domainEventCursor).max() ?? 0
+    }
+}
+
 struct IMHTTPMetricsMiddleware: AsyncMiddleware {
     func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
         let start = Date()
@@ -256,6 +357,10 @@ private struct IMStreamMetricsStorageKey: StorageKey {
 
 private struct IMAIStreamMetricsStorageKey: StorageKey {
     typealias Value = IMAIStreamMetrics
+}
+
+private struct IMClientHealthMetricsStorageKey: StorageKey {
+    typealias Value = IMClientHealthMetrics
 }
 
 extension Application {
@@ -305,5 +410,17 @@ extension Application {
             return metrics
         }
         set { storage[IMAIStreamMetricsStorageKey.self] = newValue }
+    }
+
+    var clientHealthMetrics: IMClientHealthMetrics {
+        get {
+            if let metrics = storage[IMClientHealthMetricsStorageKey.self] {
+                return metrics
+            }
+            let metrics = IMClientHealthMetrics()
+            storage[IMClientHealthMetricsStorageKey.self] = metrics
+            return metrics
+        }
+        set { storage[IMClientHealthMetricsStorageKey.self] = newValue }
     }
 }

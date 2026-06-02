@@ -2,9 +2,9 @@ import Foundation
 
 struct DomainEventProjectionReducer: Sendable {
     struct DependencySnapshot: Sendable {
-        let processedEventIDs: Set<UUID>
-        let ownerAggregateHighWatermarks: [IMOwnerAggregateKey: UInt64]
-        let existingMessageKeys: Set<MessageKey>
+        var processedEventIDs: Set<UUID>
+        var ownerAggregateHighWatermarks: [IMOwnerAggregateKey: UInt64]
+        var existingMessageKeys: Set<MessageKey>
 
         init(
             processedEventIDs: Set<UUID>,

@@ -7,6 +7,7 @@ final class IMConnectionCoordinator {
     private(set) var connection: IMTCPConnection?
     private var connectTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
+    private var heartbeatTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private(set) var generation: UInt64 = 0
     private var reconnectAttempt = 0
@@ -71,6 +72,10 @@ final class IMConnectionCoordinator {
         eventTask = nil
         currentEventTask?.cancel()
 
+        let currentHeartbeatTask = heartbeatTask
+        heartbeatTask = nil
+        currentHeartbeatTask?.cancel()
+
         let currentReconnectTask = reconnectTask
         reconnectTask = nil
         currentReconnectTask?.cancel()
@@ -128,6 +133,8 @@ final class IMConnectionCoordinator {
         runtime.mediaUploadRecoveryTasks = [:]
         connectTask = nil
         eventTask = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
         connection = nil
 
         if error is CancellationError {
@@ -139,8 +146,15 @@ final class IMConnectionCoordinator {
             switch tcpError {
             case .authRejected(_, let message):
                 await runtime.clearSession(message)
-            case .kicked(_, let message):
-                await runtime.clearSession(message)
+            case .kicked(let reason, let message):
+                if isSessionInvalidatingKick(reason) {
+                    await runtime.clearSession(message)
+                } else {
+                    markPendingMessagesUnknownAndReconnect(
+                        message: message,
+                        generation: targetGeneration
+                    )
+                }
             case .connectionClosed:
                 markPendingMessagesUnknownAndReconnect(
                     message: "IM 连接已断开。",
@@ -184,6 +198,7 @@ final class IMConnectionCoordinator {
         reconnectAttempt = 0
         runtime.setConnectionStatus(.connected)
         startEventLoop(newConnection, generation: targetGeneration)
+        startHeartbeatLoop(newConnection, generation: targetGeneration)
         await runtime.syncDomainEventsAfterConnection()
         await runtime.syncConversationGapsAfterConnection()
         await runtime.syncContactStateAfterConnection()
@@ -211,6 +226,29 @@ final class IMConnectionCoordinator {
                 )
             } catch {
                 await self.handleFailure(error, generation: targetGeneration)
+            }
+        }
+    }
+
+    private func startHeartbeatLoop(_ connection: IMTCPConnection, generation targetGeneration: UInt64) {
+        heartbeatTask?.cancel()
+        heartbeatTask = Task { [weak self] in
+            let intervalSeconds = max(connection.authentication.heartbeatIntervalSeconds, 1)
+            let intervalNanoseconds = UInt64(intervalSeconds) * 1_000_000_000
+            var sequence = 0
+
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: intervalNanoseconds)
+                    try Task.checkCancellation()
+                    sequence &+= 1
+                    try await connection.sendHeartbeat(sequence: sequence)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    await self?.handleFailure(error, generation: targetGeneration)
+                    return
+                }
             }
         }
     }
@@ -286,7 +324,23 @@ final class IMConnectionCoordinator {
             runtime.syncPendingMessageStreamSnapshotsIfNeeded()
             runtime.scheduleConversationCachePersist()
         case .kick(let payload):
-            await runtime.clearSession(payload.message)
+            if isSessionInvalidatingKick(payload.reason) {
+                await runtime.clearSession(payload.message)
+            } else {
+                await handleFailure(
+                    IMTCPClientError.kicked(reason: payload.reason, message: payload.message),
+                    generation: targetGeneration
+                )
+            }
+        }
+    }
+
+    private func isSessionInvalidatingKick(_ reason: IMTCPKickReason) -> Bool {
+        switch reason {
+        case .sessionRevoked, .logoutCurrent, .logoutAll:
+            return true
+        case .duplicateConnection, .serverShutdown, .protocolError:
+            return false
         }
     }
 

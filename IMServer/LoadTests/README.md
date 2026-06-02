@@ -43,6 +43,81 @@ Optional environment:
 - `IM_CONVERSATION_ID` to reuse an existing conversation
 - `IM_INTERNAL_SECRET` to exercise `/internal/im/messages/send`
 
+## Hot Conversation HTTP k6
+
+Use this profile when validating a single high-frequency conversation. It sends all writes to the same conversation through the internal message endpoint, so it stresses sequence allocation, owner routing, the single-conversation write queue, outbox creation, projection lag, and fanout side effects without mixing in conversation creation noise.
+
+```bash
+cd IMServer/LoadTests/k6
+k6 run \
+  -e PROFILE=local-hot-smoke \
+  -e BASE_URL=http://127.0.0.1:8080 \
+  -e IM_EMAIL="$IM_EMAIL" \
+  -e IM_PASSWORD="$IM_PASSWORD" \
+  -e IM_CONVERSATION_ID="$IM_CONVERSATION_ID" \
+  -e IM_INTERNAL_SECRET="$IM_INTERNAL_SECRET" \
+  http-hot-conversation-write.js
+```
+
+Profiles:
+
+- `local-hot-smoke`: 50 VUs for 1 minute.
+- `staging-hot-baseline`: 500 VUs for 10 minutes.
+- `capacity-hot-target`: 2k VUs for 20 minutes; run only against isolated capacity infrastructure.
+
+Optional environment:
+
+- `IM_MEMBER_EMAILS` when the script should create a fresh group conversation.
+- `IM_SEND_INTERVAL_MS` to add per-VU pacing.
+- `IM_METRICS_URL` to sample a non-default metrics endpoint.
+- `IM_METRICS_SECRET`, `IM_METRICS_INTERNAL_SECRET`, or `IM_INTERNAL_SHARED_SECRET` to sample `/internal/metrics`.
+- `IM_METRICS_SAMPLE_EVERY` to control metrics sampling frequency for VU 1.
+
+Hot conversation go/no-go:
+
+- `im_hot_write_errors` below 0.1%.
+- `im_hot_write_send_latency` P95 below 500 ms and P99 below 1s for `staging-hot-baseline`.
+- `im_conversation_write_queue_depth` does not stay above 100 for more than 5 minutes.
+- `im_outbox_backlog_events` drains after load stops.
+- `im_projection_lag_millis` returns below 10s after load stops.
+- `im_message_write_queue_rejected_total`, `im_sequence_block_reserve_failures_total`, and `im_conversation_owner_forward_failures_total` remain at zero.
+
+## Message Convergence HTTP k6
+
+Use this profile to measure the HTTP compensation path end to end. Each iteration sends one message, polls `messages/since` until the canonical message is visible, then polls the conversation list until the summary projection catches up to that message.
+
+```bash
+cd IMServer/LoadTests/k6
+k6 run \
+  -e PROFILE=local-convergence-smoke \
+  -e BASE_URL=http://127.0.0.1:8080 \
+  -e IM_EMAIL="$IM_EMAIL" \
+  -e IM_PASSWORD="$IM_PASSWORD" \
+  -e IM_CONVERSATION_ID="$IM_CONVERSATION_ID" \
+  -e IM_INTERNAL_SECRET="$IM_INTERNAL_SECRET" \
+  http-message-convergence.js
+```
+
+Profiles:
+
+- `local-convergence-smoke`: 10 VUs for 1 minute.
+- `staging-convergence-baseline`: 100 VUs for 10 minutes.
+
+Optional environment:
+
+- `IM_CONVERGENCE_TIMEOUT_MS`, default `10000`.
+- `IM_CONVERGENCE_POLL_INTERVAL_MS`, default `250`.
+
+Convergence go/no-go:
+
+- TCPDriver ack success rate remains above 99.9%.
+- TCPDriver canonical message success rate remains above 99.9%.
+- `im_message_convergence_errors` below 0.1%.
+- `im_message_accept_latency` P95 below 300 ms for `staging-convergence-baseline`.
+- `im_message_timeline_latency` P95 below 2s for `staging-convergence-baseline`.
+- `im_message_summary_latency` P95 below 5s for `staging-convergence-baseline`.
+- Outbox backlog and projection lag drain back under alert thresholds after the run.
+
 ## TCPDriver
 
 ```bash

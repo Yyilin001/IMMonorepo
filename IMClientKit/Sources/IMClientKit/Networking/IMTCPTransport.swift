@@ -95,8 +95,8 @@ private final class NWIMTCPConnectionBridge: @unchecked Sendable {
     private func handle(state: NWConnection.State) {
         switch state {
         case .ready:
-            resumeOpenIfNeeded(with: .success(()))
             setConnected(true)
+            resumeOpenIfNeeded(with: .success(()))
             receiveNext()
 
         case .failed(let error):
