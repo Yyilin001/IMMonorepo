@@ -78,7 +78,9 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private let application: Application
+    private let traceID = UUID()
     private var state: State = .waitingForAuth
+    private var closeReason: String?
     private var authTimeoutTask: Scheduled<Void>?
 
     init(application: Application) {
@@ -89,6 +91,13 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         let timeout = application.imTCPConfiguration.authTimeout
         let delay = TimeAmount.milliseconds(Int64(timeout * 1000))
         let channel = context.channel
+        Task {
+            await self.application.routingMetrics.recordTCPChannelActive()
+        }
+        application.logger.info(
+            "IM TCP channel active",
+            metadata: logMetadata(channel: channel)
+        )
 
         authTimeoutTask = channel.eventLoop.scheduleTask(in: delay) { [weak self, channel] in
             guard let self else {
@@ -102,7 +111,8 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
             self.sendKickAndClose(
                 channel: channel,
                 reason: .protocolError,
-                message: "Authentication timeout."
+                message: "Authentication timeout.",
+                closeReason: "auth_timeout"
             )
         }
     }
@@ -116,6 +126,16 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                 await self.application.connectionRoutingService.remove(connectionID: connection.connectionID)
             }
         }
+
+        Task {
+            await self.application.routingMetrics.recordTCPChannelInactive(closeReason: self.closeReason)
+        }
+        application.logger.info(
+            "IM TCP channel inactive",
+            metadata: logMetadata(channel: context.channel, extra: [
+                "close_reason": .string(closeReason ?? "peer_or_unknown")
+            ])
+        )
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -123,6 +143,17 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
 
         do {
             let packet = try IMTCPProtobufCodec.decode(frame)
+            if packet.type == .auth {
+                Task {
+                    await self.application.routingMetrics.recordTCPAuthReceived()
+                }
+                application.logger.info(
+                    "IM TCP auth received",
+                    metadata: logMetadata(channel: context.channel, extra: [
+                        "requestID": .string(packet.requestID?.uuidString ?? "")
+                    ])
+                )
+            }
             handle(packet: packet, channel: context.channel)
         } catch let error as IMTCPProtocolError {
             application.logger.debug(
@@ -132,7 +163,8 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
             sendKickAndClose(
                 channel: context.channel,
                 reason: .protocolError,
-                message: error.localizedDescription
+                message: error.localizedDescription,
+                closeReason: "kick:protocol_error"
             )
         } catch {
             application.logger.debug(
@@ -142,15 +174,23 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
             sendKickAndClose(
                 channel: context.channel,
                 reason: .protocolError,
-                message: "Invalid packet."
+                message: "Invalid packet.",
+                closeReason: "kick:protocol_error"
             )
         }
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
-        application.logger.debug(
+        closeReason = "error:\(String(reflecting: type(of: error)))"
+        Task {
+            await self.application.routingMetrics.recordTCPErrorCaught()
+        }
+        application.logger.warning(
             "IM TCP connection error",
-            metadata: ["error": .string(String(describing: error))]
+            metadata: logMetadata(context: context, extra: [
+                "error": .string(String(describing: error)),
+                "debugError": .string(String(reflecting: error))
+            ])
         )
         context.close(promise: nil)
     }
@@ -159,10 +199,18 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         if let idleEvent = event as? IdleStateHandler.IdleStateEvent {
             switch idleEvent {
             case .read:
+                Task {
+                    await self.application.routingMetrics.recordTCPIdleTimeout()
+                }
+                application.logger.info(
+                    "IM TCP idle timeout",
+                    metadata: logMetadata(context: context)
+                )
                 sendKickAndClose(
                     channel: context.channel,
                     reason: .protocolError,
-                    message: "Connection idle timeout."
+                    message: "Connection idle timeout.",
+                    closeReason: "idle_timeout"
                 )
             case .write, .all:
                 break
@@ -231,6 +279,14 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let remoteIPAddress = channel.remoteAddress?.ipAddress
         let authenticator = IMTCPAuthenticator(app: application, db: application.db)
+        application.logger.info(
+            "IM TCP auth started",
+            metadata: logMetadata(channel: channel, extra: [
+                "requestID": .string(requestID?.uuidString ?? ""),
+                "deviceID": .string(payload.deviceID ?? ""),
+                "protocolVersion": .stringConvertible(protocolVersion)
+            ])
+        )
 
         Task {
             do {
@@ -251,6 +307,9 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                     self.authTimeoutTask?.cancel()
                     self.authTimeoutTask = nil
                     self.state = .authenticated(connection)
+                    Task {
+                        await self.application.routingMetrics.recordTCPAuthOKSent()
+                    }
 
                     let response = IMTCPAuthAcceptedPayload(
                         connectionID: connection.connectionID,
@@ -265,9 +324,26 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                         payload: response,
                         channel: channel
                     )
+                    self.application.logger.info(
+                        "IM TCP auth OK sent",
+                        metadata: self.logMetadata(channel: channel, extra: [
+                            "requestID": .string(requestID?.uuidString ?? ""),
+                            "connectionID": .string(connection.connectionID.uuidString),
+                            "userID": .string(connection.userID.uuidString),
+                            "sessionID": .string(connection.sessionID.uuidString)
+                        ])
+                    )
                 }
             } catch {
                 channel.eventLoop.execute {
+                    self.application.logger.info(
+                        "IM TCP auth failed",
+                        metadata: self.logMetadata(channel: channel, extra: [
+                            "requestID": .string(requestID?.uuidString ?? ""),
+                            "error": .string(String(describing: error)),
+                            "debugError": .string(String(reflecting: error))
+                        ])
+                    )
                     self.sendAuthErrorAndClose(
                         channel: channel,
                         requestID: requestID,
@@ -406,6 +482,18 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         code: String,
         message: String
     ) {
+        closeReason = "auth_error"
+        Task {
+            await self.application.routingMetrics.recordTCPAuthErrorSent()
+        }
+        application.logger.info(
+            "IM TCP auth error sent",
+            metadata: logMetadata(channel: channel, extra: [
+                "requestID": .string(requestID?.uuidString ?? ""),
+                "code": .string(code),
+                "message": .string(message)
+            ])
+        )
         state = .closing
         writePacket(
             type: .authError,
@@ -419,9 +507,22 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
     private func sendKickAndClose(
         channel: any Channel,
         reason: IMTCPKickReason,
-        message: String
+        message: String,
+        closeReason: String? = nil
     ) {
         guard case .closing = state else {
+            self.closeReason = closeReason ?? "kick:\(reason.rawValue)"
+            Task {
+                await self.application.routingMetrics.recordTCPKickSent()
+            }
+            application.logger.info(
+                "IM TCP kick sent",
+                metadata: logMetadata(channel: channel, extra: [
+                    "kick_reason": .string(reason.rawValue),
+                    "close_reason": .string(self.closeReason ?? ""),
+                    "message": .string(message)
+                ])
+            )
             removeAuthenticatedConnectionIfNeeded()
             state = .closing
             IMTCPChannelWriter.sendKickAndClose(on: channel, reason: reason, message: message)
@@ -435,6 +536,39 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         Task {
             await self.application.connectionRoutingService.remove(connectionID: connection.connectionID)
+        }
+    }
+
+    private func logMetadata(context: ChannelHandlerContext, extra: Logger.Metadata = [:]) -> Logger.Metadata {
+        logMetadata(channel: context.channel, extra: extra)
+    }
+
+    private func logMetadata(channel: any Channel, extra: Logger.Metadata = [:]) -> Logger.Metadata {
+        var metadata = extra
+        metadata["traceID"] = .string(traceID.uuidString)
+        metadata["state"] = .string(stateName)
+        metadata["remote"] = .string(channel.remoteAddress.map(String.init(describing:)) ?? "")
+        if let closeReason {
+            metadata["close_reason"] = .string(closeReason)
+        }
+        if case .authenticated(let connection) = state {
+            metadata["connectionID"] = .string(connection.connectionID.uuidString)
+            metadata["userID"] = .string(connection.userID.uuidString)
+            metadata["sessionID"] = .string(connection.sessionID.uuidString)
+        }
+        return metadata
+    }
+
+    private var stateName: String {
+        switch state {
+        case .waitingForAuth:
+            return "waitingForAuth"
+        case .authenticating:
+            return "authenticating"
+        case .authenticated:
+            return "authenticated"
+        case .closing:
+            return "closing"
         }
     }
 }

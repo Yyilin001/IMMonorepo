@@ -1,32 +1,73 @@
 import Foundation
 import Network
 
-struct Options {
+struct Options: Sendable {
     var profile = "local-smoke"
     var baseURL = URL(string: "http://127.0.0.1:8080")!
     var tcpHost = "127.0.0.1"
     var tcpPort: UInt16 = 9001
     var email = ProcessInfo.processInfo.environment["IM_EMAIL"] ?? "demo@example.com"
     var password = ProcessInfo.processInfo.environment["IM_PASSWORD"] ?? "password1234"
+    var accountFile: String?
     var conversationID = ProcessInfo.processInfo.environment["IM_CONVERSATION_ID"] ?? ""
     var connections = 100
     var devicesPerUser = 1
     var messagesPerConnection = 1
     var sendIntervalMillis = 0
+    var holdSeconds = 0
+    var connectRampSeconds = 0
+    var loginConcurrency = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_CONCURRENCY"].flatMap(Int.init(_:)) ?? 5
     var timeoutSeconds = 20
+    var protocolVersion = ProcessInfo.processInfo.environment["IM_TCP_PROTOCOL_VERSION"].flatMap(UInt64.init(_:)) ?? 9
+    var connectionLogFile: String?
+    var heartbeatIntervalSeconds = ProcessInfo.processInfo.environment["IM_TCP_HEARTBEAT_INTERVAL"].flatMap(Int.init(_:)) ?? 0
+    var loginCacheFile: String?
+    var loginOnly = false
+    var loginMode = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_MODE"] ?? "upfront"
+    var connectionQueuePoolSize = ProcessInfo.processInfo.environment["IM_TCP_CONNECTION_QUEUE_POOL_SIZE"]
+        .flatMap(Int.init(_:)) ?? max(8, min(64, ProcessInfo.processInfo.activeProcessorCount * 4))
+    var maxReconnects = ProcessInfo.processInfo.environment["IM_TCP_MAX_RECONNECTS"].flatMap(Int.init(_:)) ?? 0
+    var reconnectDelayMillis = ProcessInfo.processInfo.environment["IM_TCP_RECONNECT_DELAY_MS"].flatMap(Int.init(_:)) ?? 1_000
+    var loginRetries = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_RETRIES"].flatMap(Int.init(_:)) ?? 2
+    var loginRetryDelayMillis = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_RETRY_DELAY_MS"].flatMap(Int.init(_:)) ?? 1_000
 }
 
-struct LoginResponse: Decodable {
-    struct User: Decodable {
+struct LoginResponse: Codable, Sendable {
+    struct User: Codable, Sendable {
         let id: String
     }
 
     let accessToken: String
+    let expiresIn: Int
     let user: User
+}
+
+struct AccountCredential: Sendable {
+    let email: String
+    let password: String
+}
+
+struct ConnectionLogin: Sendable {
+    let auth: LoginResponse
+    let loginIndex: Int
+    let email: String
+    let deviceID: String
+    let deviceName: String
+}
+
+struct LoginCacheRecord: Codable, Sendable {
+    let loginIndex: Int
+    let email: String
+    let deviceID: String
+    let deviceName: String
+    let userID: String
+    let accessToken: String
+    let expiresAtMs: Int64
 }
 
 struct ConnectionResult: Sendable {
     let success: Bool
+    let failureReason: String?
     let sent: Int
     let acknowledgements: Int
     let canonicalMessages: Int
@@ -34,8 +75,117 @@ struct ConnectionResult: Sendable {
     let fanoutMessages: Int
     let reconnects: Int
     let serverErrors: Int
+    let heartbeatSends: Int
+    let heartbeatAcks: Int
     let ackLatenciesMillis: [Double]
     let canonicalLatenciesMillis: [Double]
+}
+
+final class ConnectionEventLogger: @unchecked Sendable {
+    private let lock = NSLock()
+    private let startedAt = Date()
+    private let fileHandle: FileHandle?
+    let path: String?
+
+    init(path: String?) throws {
+        self.path = path
+        guard let path, !path.isEmpty else {
+            self.fileHandle = nil
+            return
+        }
+
+        let url = URL(fileURLWithPath: path)
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: path, contents: nil)
+        self.fileHandle = try FileHandle(forWritingTo: url)
+    }
+
+    deinit {
+        fileHandle?.closeFile()
+    }
+
+    func log(
+        _ event: String,
+        connectionIndex: Int? = nil,
+        loginIndex: Int? = nil,
+        fields: [String: String] = [:]
+    ) {
+        guard let fileHandle else {
+            return
+        }
+
+        var object: [String: Any] = [
+            "event": event,
+            "timestampMs": Int64(Date().timeIntervalSince1970 * 1_000),
+            "elapsedMs": Int(Date().timeIntervalSince(startedAt) * 1_000)
+        ]
+        if let connectionIndex {
+            object["connectionIndex"] = connectionIndex
+        }
+        if let loginIndex {
+            object["loginIndex"] = loginIndex
+        }
+        for (key, value) in fields {
+            object[key] = value
+        }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
+            return
+        }
+
+        lock.lock()
+        fileHandle.write(data)
+        fileHandle.write(Data("\n".utf8))
+        lock.unlock()
+    }
+}
+
+actor AsyncLimiter {
+    private var available: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(permits: Int) {
+        self.available = max(1, permits)
+    }
+
+    func acquire() async {
+        if available > 0 {
+            available -= 1
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            available += 1
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
+final class ConnectionQueuePool: @unchecked Sendable {
+    private let queues: [DispatchQueue]
+
+    init(size: Int) {
+        let count = max(1, size)
+        self.queues = (0..<count).map { index in
+            DispatchQueue(label: "im.tcp.load.pool.\(index)")
+        }
+    }
+
+    var size: Int {
+        queues.count
+    }
+
+    func queue(for connectionIndex: Int) -> DispatchQueue {
+        queues[connectionIndex % queues.count]
+    }
 }
 
 func parseOptions() -> Options {
@@ -58,6 +208,8 @@ func parseOptions() -> Options {
             options.email = value
         case "--password":
             options.password = value
+        case "--account-file":
+            options.accountFile = value
         case "--conversation-id":
             options.conversationID = value
         case "--connections":
@@ -68,14 +220,45 @@ func parseOptions() -> Options {
             options.messagesPerConnection = Int(value) ?? options.messagesPerConnection
         case "--send-interval-ms":
             options.sendIntervalMillis = max(0, Int(value) ?? options.sendIntervalMillis)
+        case "--hold-seconds":
+            options.holdSeconds = max(0, Int(value) ?? options.holdSeconds)
+        case "--connect-ramp-seconds":
+            options.connectRampSeconds = max(0, Int(value) ?? options.connectRampSeconds)
+        case "--login-concurrency":
+            options.loginConcurrency = max(1, Int(value) ?? options.loginConcurrency)
         case "--timeout-seconds":
             options.timeoutSeconds = max(1, Int(value) ?? options.timeoutSeconds)
+        case "--protocol-version":
+            options.protocolVersion = UInt64(value) ?? options.protocolVersion
+        case "--connection-log-file":
+            options.connectionLogFile = value
+        case "--heartbeat-interval-seconds":
+            options.heartbeatIntervalSeconds = max(0, Int(value) ?? options.heartbeatIntervalSeconds)
+        case "--login-cache-file":
+            options.loginCacheFile = value
+        case "--login-only":
+            options.loginOnly = ["1", "true", "yes", "y"].contains(value.lowercased())
+        case "--login-mode":
+            options.loginMode = value
+        case "--connection-queue-pool-size":
+            options.connectionQueuePoolSize = max(1, Int(value) ?? options.connectionQueuePoolSize)
+        case "--max-reconnects":
+            options.maxReconnects = max(0, Int(value) ?? options.maxReconnects)
+        case "--reconnect-delay-ms":
+            options.reconnectDelayMillis = max(0, Int(value) ?? options.reconnectDelayMillis)
+        case "--login-retries":
+            options.loginRetries = max(0, Int(value) ?? options.loginRetries)
+        case "--login-retry-delay-ms":
+            options.loginRetryDelayMillis = max(0, Int(value) ?? options.loginRetryDelayMillis)
         default:
             continue
         }
     }
 
     switch options.profile {
+    case "custom":
+        options.connections = max(options.connections, 1)
+        options.messagesPerConnection = max(options.messagesPerConnection, 0)
     case "staging-baseline":
         options.connections = max(options.connections, 10_000)
         options.devicesPerUser = max(options.devicesPerUser, 2)
@@ -91,34 +274,321 @@ func parseOptions() -> Options {
     return options
 }
 
-func login(options: Options, deviceIndex: Int) async throws -> LoginResponse {
+func loadAccountCredentials(options: Options) throws -> [AccountCredential] {
+    guard let accountFile = options.accountFile else {
+        return [AccountCredential(email: options.email, password: options.password)]
+    }
+
+    let contents = try String(contentsOfFile: accountFile, encoding: .utf8)
+    let credentials = contents
+        .split(whereSeparator: \.isNewline)
+        .compactMap { line -> AccountCredential? in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else {
+                return nil
+            }
+
+            let columns = trimmed
+                .split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard columns.count == 2, !columns[0].isEmpty, !columns[1].isEmpty else {
+                return nil
+            }
+            return AccountCredential(email: columns[0], password: columns[1])
+        }
+
+    guard !credentials.isEmpty else {
+        throw NSError(
+            domain: "IMTCPLoadDriver",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "account file has no usable email,password rows"]
+        )
+    }
+    return credentials
+}
+
+func makeLoginURLSession(options: Options) -> URLSession {
+    let configuration = URLSessionConfiguration.default
+    configuration.httpMaximumConnectionsPerHost = max(options.loginConcurrency, 6)
+    configuration.timeoutIntervalForRequest = TimeInterval(options.timeoutSeconds)
+    configuration.timeoutIntervalForResource = TimeInterval(options.timeoutSeconds)
+    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+    return URLSession(configuration: configuration)
+}
+
+func login(
+    options: Options,
+    credential: AccountCredential,
+    deviceID: String,
+    deviceName: String,
+    urlSession: URLSession
+) async throws -> LoginResponse {
     var request = URLRequest(url: options.baseURL.appending(path: "/api/auth/login"))
     request.httpMethod = "POST"
+    request.timeoutInterval = TimeInterval(options.timeoutSeconds)
     request.addValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONSerialization.data(withJSONObject: [
-        "email": options.email,
-        "password": options.password,
+        "email": credential.email,
+        "password": credential.password,
         "device": [
-            "deviceID": "tcp-load-driver-\(deviceIndex)",
-            "deviceName": "tcp-load-driver-\(deviceIndex)",
+            "deviceID": deviceID,
+            "deviceName": deviceName,
             "platform": "load-test",
             "appVersion": "load-test"
         ]
     ])
 
-    let (data, response) = try await URLSession.shared.data(for: request)
+    let (data, response) = try await urlSession.data(for: request)
     guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-        throw NSError(domain: "IMTCPLoadDriver", code: 1, userInfo: [NSLocalizedDescriptionKey: "login failed"])
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
+        throw NSError(
+            domain: "IMTCPLoadDriver",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "login failed status=\(status) body=\(body)"]
+        )
     }
     return try JSONDecoder().decode(LoginResponse.self, from: data)
 }
 
+func nowEpochMillis() -> Int64 {
+    Int64(Date().timeIntervalSince1970 * 1_000)
+}
+
+func cachedLogins(options: Options, loginCount: Int, logger: ConnectionEventLogger) throws -> [ConnectionLogin]? {
+    guard let path = options.loginCacheFile, !path.isEmpty else {
+        return nil
+    }
+
+    guard FileManager.default.fileExists(atPath: path) else {
+        logger.log("login_cache_miss", fields: ["path": path, "reason": "file_missing"])
+        return nil
+    }
+
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let records = try JSONDecoder().decode([LoginCacheRecord].self, from: data)
+    guard records.count >= loginCount else {
+        logger.log(
+            "login_cache_miss",
+            fields: [
+                "path": path,
+                "reason": "record_count",
+                "records": String(records.count),
+                "required": String(loginCount)
+            ]
+        )
+        return nil
+    }
+
+    let validUntilMs = nowEpochMillis() + Int64(max(options.connectRampSeconds + options.timeoutSeconds + 30, 60) * 1_000)
+    let selected = Array(records.prefix(loginCount))
+    guard selected.allSatisfy({ $0.expiresAtMs > validUntilMs }) else {
+        logger.log(
+            "login_cache_miss",
+            fields: [
+                "path": path,
+                "reason": "expired_or_too_close",
+                "requiredValidForSeconds": String(max(options.connectRampSeconds + options.timeoutSeconds + 30, 60))
+            ]
+        )
+        return nil
+    }
+
+    logger.log(
+        "login_cache_hit",
+        fields: [
+            "path": path,
+            "records": String(selected.count)
+        ]
+    )
+    let nowMs = nowEpochMillis()
+    return selected.map { record in
+        ConnectionLogin(
+            auth: LoginResponse(
+                accessToken: record.accessToken,
+                expiresIn: max(0, Int((record.expiresAtMs - nowMs) / 1_000)),
+                user: LoginResponse.User(id: record.userID)
+            ),
+            loginIndex: record.loginIndex,
+            email: record.email,
+            deviceID: record.deviceID,
+            deviceName: record.deviceName
+        )
+    }
+}
+
+func writeLoginCache(path: String?, logins: [ConnectionLogin], logger: ConnectionEventLogger) throws {
+    guard let path, !path.isEmpty else {
+        return
+    }
+
+    let issuedAtMs = nowEpochMillis()
+    let records = logins.map { login in
+        LoginCacheRecord(
+            loginIndex: login.loginIndex,
+            email: login.email,
+            deviceID: login.deviceID,
+            deviceName: login.deviceName,
+            userID: login.auth.user.id,
+            accessToken: login.auth.accessToken,
+            expiresAtMs: issuedAtMs + Int64(login.auth.expiresIn * 1_000)
+        )
+    }
+    let url = URL(fileURLWithPath: path)
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try encoder.encode(records).write(to: url, options: [.atomic])
+    logger.log(
+        "login_cache_written",
+        fields: [
+            "path": path,
+            "records": String(records.count)
+        ]
+    )
+}
+
+func loginForConnection(
+    options: Options,
+    credential: AccountCredential,
+    loginIndex: Int,
+    logger: ConnectionEventLogger,
+    urlSession: URLSession
+) async throws -> ConnectionLogin {
+    let deviceID = "tcp-load-driver-\(loginIndex)"
+    let deviceName = "tcp-load-driver-\(loginIndex)"
+    let loginStartedAt = Date()
+    let maxAttempts = max(1, options.loginRetries + 1)
+    logger.log(
+        "login_start",
+        loginIndex: loginIndex,
+        fields: [
+            "email": credential.email,
+            "deviceID": deviceID,
+            "maxAttempts": String(maxAttempts)
+        ]
+    )
+
+    var lastError: Error?
+    for attempt in 1...maxAttempts {
+        let attemptStartedAt = Date()
+        logger.log(
+            "login_attempt_start",
+            loginIndex: loginIndex,
+            fields: [
+                "email": credential.email,
+                "deviceID": deviceID,
+                "attempt": String(attempt),
+                "maxAttempts": String(maxAttempts)
+            ]
+        )
+        do {
+            let auth = try await login(
+                options: options,
+                credential: credential,
+                deviceID: deviceID,
+                deviceName: deviceName,
+                urlSession: urlSession
+            )
+            logger.log(
+                "login_ok",
+                loginIndex: loginIndex,
+                fields: [
+                    "email": credential.email,
+                    "deviceID": deviceID,
+                    "userID": auth.user.id,
+                    "attempt": String(attempt),
+                    "attemptDurationMs": String(Int(Date().timeIntervalSince(attemptStartedAt) * 1_000)),
+                    "durationMs": String(Int(Date().timeIntervalSince(loginStartedAt) * 1_000))
+                ]
+            )
+            return ConnectionLogin(
+                auth: auth,
+                loginIndex: loginIndex,
+                email: credential.email,
+                deviceID: deviceID,
+                deviceName: deviceName
+            )
+        } catch {
+            lastError = error
+            logger.log(
+                "login_attempt_failed",
+                loginIndex: loginIndex,
+                fields: [
+                    "email": credential.email,
+                    "deviceID": deviceID,
+                    "attempt": String(attempt),
+                    "maxAttempts": String(maxAttempts),
+                    "attemptDurationMs": String(Int(Date().timeIntervalSince(attemptStartedAt) * 1_000)),
+                    "error": String(describing: error)
+                ]
+            )
+            guard attempt < maxAttempts else {
+                break
+            }
+            logger.log(
+                "login_retry_scheduled",
+                loginIndex: loginIndex,
+                fields: [
+                    "email": credential.email,
+                    "deviceID": deviceID,
+                    "nextAttempt": String(attempt + 1),
+                    "delayMs": String(options.loginRetryDelayMillis)
+                ]
+            )
+            try? await Task.sleep(nanoseconds: UInt64(options.loginRetryDelayMillis) * 1_000_000)
+        }
+    }
+
+    logger.log(
+        "login_failed",
+        loginIndex: loginIndex,
+        fields: [
+            "email": credential.email,
+            "deviceID": deviceID,
+            "durationMs": String(Int(Date().timeIntervalSince(loginStartedAt) * 1_000)),
+            "error": lastError.map(String.init(describing:)) ?? "unknown"
+        ]
+    )
+    throw lastError ?? NSError(
+        domain: "IMTCPLoadDriver",
+        code: 3,
+        userInfo: [NSLocalizedDescriptionKey: "login failed without captured error"]
+    )
+}
+
 enum RealtimePacketType {
     case auth
+    case authOK
     case authError
+    case heartbeat
+    case heartbeatAck
     case message
     case ack
     case kick
+}
+
+extension RealtimePacketType {
+    var logName: String {
+        switch self {
+        case .auth:
+            return "auth"
+        case .authOK:
+            return "authOK"
+        case .authError:
+            return "authError"
+        case .heartbeat:
+            return "heartbeat"
+        case .heartbeatAck:
+            return "heartbeatAck"
+        case .message:
+            return "message"
+        case .ack:
+            return "ack"
+        case .kick:
+            return "kick"
+        }
+    }
 }
 
 struct DecodedRealtimePacket {
@@ -134,6 +604,7 @@ enum ProtoWire {
         deviceName: String,
         platform: String,
         appVersion: String,
+        protocolVersion: UInt64,
         requestID: String = UUID().uuidString
     ) -> Data {
         var auth = Data()
@@ -142,9 +613,8 @@ enum ProtoWire {
         auth.writeString(field: 3, deviceName)
         auth.writeString(field: 4, platform)
         auth.writeString(field: 5, appVersion)
-        auth.writeVarint(field: 6, 2)
 
-        var packet = packetBase(requestID: requestID)
+        var packet = packetBase(requestID: requestID, protocolVersion: protocolVersion)
         packet.writeMessage(field: 10, auth)
         return frame(packet)
     }
@@ -153,7 +623,8 @@ enum ProtoWire {
         conversationID: String,
         clientMessageID: String,
         text: String,
-        requestID: String
+        requestID: String,
+        protocolVersion: UInt64
     ) -> Data {
         var textContent = Data()
         textContent.writeString(field: 1, text)
@@ -166,8 +637,17 @@ enum ProtoWire {
         message.writeMessage(field: 7, content)
         message.writeMessage(field: 8, Data())
 
-        var packet = packetBase(requestID: requestID)
+        var packet = packetBase(requestID: requestID, protocolVersion: protocolVersion)
         packet.writeMessage(field: 30, message)
+        return frame(packet)
+    }
+
+    static func heartbeatFrame(sequence: Int, requestID: String, protocolVersion: UInt64) -> Data {
+        var heartbeat = Data()
+        heartbeat.writeVarint(field: 1, UInt64(sequence))
+
+        var packet = packetBase(requestID: requestID, protocolVersion: protocolVersion)
+        packet.writeMessage(field: 20, heartbeat)
         return frame(packet)
     }
 
@@ -180,15 +660,22 @@ enum ProtoWire {
             case 1:
                 requestID = field.stringValue
             case 11:
-                type = type ?? nil
+                type = .authOK
             case 12:
                 type = .authError
+            case 20:
+                type = .heartbeat
+            case 21:
+                type = .heartbeatAck
             case 30:
                 type = .message
                 payload.merge(decodeMessagePayload(field.value)) { current, _ in current }
             case 31:
                 type = .ack
                 payload.merge(decodeAckPayload(field.value)) { current, _ in current }
+            case 40:
+                type = .message
+                payload.merge(decodeDomainEventPayload(field.value)) { current, _ in current }
             case 50:
                 type = .kick
             default:
@@ -211,11 +698,11 @@ enum ProtoWire {
         return frames
     }
 
-    private static func packetBase(requestID: String) -> Data {
+    private static func packetBase(requestID: String, protocolVersion: UInt64) -> Data {
         var packet = Data()
         packet.writeString(field: 1, requestID)
         packet.writeVarint(field: 2, UInt64(Date().timeIntervalSince1970 * 1000))
-        packet.writeVarint(field: 3, 2)
+        packet.writeVarint(field: 3, protocolVersion)
         return packet
     }
 
@@ -257,6 +744,32 @@ enum ProtoWire {
                 payload["messageID"] = field.stringValue
             case 3:
                 payload["conversationID"] = field.stringValue
+            default:
+                continue
+            }
+        }
+        return payload
+    }
+
+    private static func decodeDomainEventPayload(_ data: Data) -> [String: String] {
+        var payload: [String: String] = [:]
+        for field in fields(in: data) {
+            switch field.number {
+            case 10:
+                payload.merge(decodeMessageCreatedEvent(field.value)) { current, _ in current }
+            default:
+                continue
+            }
+        }
+        return payload
+    }
+
+    private static func decodeMessageCreatedEvent(_ data: Data) -> [String: String] {
+        var payload: [String: String] = [:]
+        for field in fields(in: data) {
+            switch field.number {
+            case 2:
+                payload["clientMessageID"] = field.stringValue
             default:
                 continue
             }
@@ -348,6 +861,12 @@ private extension Data {
 }
 
 final class ConnectionState: @unchecked Sendable {
+    enum DisconnectDecision {
+        case reconnect(nextGeneration: Int, attempt: Int, connectionToCancel: NWConnection?)
+        case fail
+        case ignore
+    }
+
     private let lock = NSLock()
     private var completed = false
     private var sentClientIDsByRequestID: [String: String] = [:]
@@ -360,18 +879,29 @@ final class ConnectionState: @unchecked Sendable {
     private var fanoutMessages = 0
     private var serverErrors = 0
     private var reconnects = 0
+    private var heartbeatSends = 0
+    private var heartbeatAcks = 0
+    private var didStartMessages = false
+    private var didAuthenticate = false
+    private var didReachReady = false
+    private var reconnectInProgress = false
+    private var currentGeneration = 0
+    private var activeConnection: NWConnection?
     private let expectedOwnMessages: Int
     private let continuation: CheckedContinuation<ConnectionResult, Never>
-    private let connection: NWConnection
+    private let logger: ConnectionEventLogger
+    private let connectionIndex: Int
 
     init(
         expectedOwnMessages: Int,
         continuation: CheckedContinuation<ConnectionResult, Never>,
-        connection: NWConnection
+        logger: ConnectionEventLogger,
+        connectionIndex: Int
     ) {
         self.expectedOwnMessages = expectedOwnMessages
         self.continuation = continuation
-        self.connection = connection
+        self.logger = logger
+        self.connectionIndex = connectionIndex
     }
 
     func recordSent(clientMessageID: String, requestID: String, at date: Date) {
@@ -381,10 +911,66 @@ final class ConnectionState: @unchecked Sendable {
         lock.unlock()
     }
 
-    func recordReconnect() {
+    func attachConnection(_ connection: NWConnection, generation: Int) -> Bool {
         lock.lock()
-        reconnects += 1
+        guard !completed else {
+            lock.unlock()
+            connection.cancel()
+            return false
+        }
+        currentGeneration = generation
+        didAuthenticate = false
+        didReachReady = false
+        reconnectInProgress = false
+        activeConnection = connection
         lock.unlock()
+        return true
+    }
+
+    func recordHeartbeatSend() {
+        lock.lock()
+        heartbeatSends += 1
+        lock.unlock()
+    }
+
+    func isActive(generation: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !completed && !reconnectInProgress && generation == currentGeneration
+    }
+
+    func hasAuthenticated(generation: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation == currentGeneration && didAuthenticate
+    }
+
+    func markReady(generation: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !completed, !reconnectInProgress, generation == currentGeneration else {
+            return false
+        }
+        didReachReady = true
+        return true
+    }
+
+    func shouldFailConnectTimeout(generation: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !completed
+            && !reconnectInProgress
+            && generation == currentGeneration
+            && !didReachReady
+    }
+
+    func shouldFailPreauthTimeout(generation: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !completed
+            && !reconnectInProgress
+            && generation == currentGeneration
+            && !didAuthenticate
     }
 
     func recordPacket(_ packet: DecodedRealtimePacket) {
@@ -416,10 +1002,13 @@ final class ConnectionState: @unchecked Sendable {
             }
         case .authError, .kick:
             serverErrors += 1
-        case .auth:
+        case .heartbeatAck:
+            heartbeatAcks += 1
+        case .auth, .authOK, .heartbeat:
             break
         }
-        let shouldFinish = acknowledgedClientIDs.count >= expectedOwnMessages
+        let shouldFinish = expectedOwnMessages > 0
+            && acknowledgedClientIDs.count >= expectedOwnMessages
             && canonicalClientIDs.count >= expectedOwnMessages
         lock.unlock()
 
@@ -428,15 +1017,56 @@ final class ConnectionState: @unchecked Sendable {
         }
     }
 
-    func finish(success: Bool) {
+    func recordAuthOK(generation: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !completed, generation == currentGeneration else {
+            return false
+        }
+        didAuthenticate = true
+        guard !didStartMessages else {
+            return false
+        }
+        didStartMessages = true
+        return true
+    }
+
+    func handleDisconnect(generation: Int, maxReconnects: Int) -> DisconnectDecision {
+        lock.lock()
+        guard !completed, generation == currentGeneration else {
+            lock.unlock()
+            return .ignore
+        }
+        guard !reconnectInProgress else {
+            lock.unlock()
+            return .ignore
+        }
+        guard expectedOwnMessages == 0, reconnects < maxReconnects else {
+            lock.unlock()
+            return .fail
+        }
+
+        reconnectInProgress = true
+        reconnects += 1
+        let attempt = reconnects
+        let nextGeneration = currentGeneration + 1
+        let connectionToCancel = activeConnection
+        activeConnection = nil
+        lock.unlock()
+        return .reconnect(nextGeneration: nextGeneration, attempt: attempt, connectionToCancel: connectionToCancel)
+    }
+
+    @discardableResult
+    func finish(success: Bool, reason: String? = nil) -> Bool {
         lock.lock()
         guard !completed else {
             lock.unlock()
-            return
+            return false
         }
         completed = true
         let result = ConnectionResult(
             success: success,
+            failureReason: success ? nil : reason,
             sent: sentAtByClientID.count,
             acknowledgements: acknowledgedClientIDs.count,
             canonicalMessages: canonicalClientIDs.count,
@@ -444,20 +1074,57 @@ final class ConnectionState: @unchecked Sendable {
             fanoutMessages: fanoutMessages,
             reconnects: reconnects,
             serverErrors: serverErrors,
+            heartbeatSends: heartbeatSends,
+            heartbeatAcks: heartbeatAcks,
             ackLatenciesMillis: ackLatenciesMillis,
             canonicalLatenciesMillis: canonicalLatenciesMillis
         )
         lock.unlock()
 
-        connection.cancel()
+        logger.log(
+            "connection_finish",
+            connectionIndex: connectionIndex,
+            fields: [
+                "success": String(success),
+                "reason": result.failureReason ?? "",
+                "sent": String(result.sent),
+                "ack": String(result.acknowledgements),
+                "canonical": String(result.canonicalMessages),
+                "serverErrors": String(result.serverErrors),
+                "reconnects": String(result.reconnects),
+                "heartbeatSends": String(result.heartbeatSends),
+                "heartbeatAcks": String(result.heartbeatAcks)
+            ]
+        )
+        activeConnection?.cancel()
         continuation.resume(returning: result)
+        return true
     }
 }
 
-func receiveFrames(connection: NWConnection, state: ConnectionState, buffer: Data = Data()) {
+func receiveFrames(
+    connection: NWConnection,
+    state: ConnectionState,
+    logger: ConnectionEventLogger,
+    connectionIndex: Int,
+    generation: Int,
+    buffer: Data = Data(),
+    onAuthenticated: @escaping @Sendable (Bool) -> Void,
+    onDisconnected: @escaping @Sendable (String) -> Void
+) {
     connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
         if error != nil || isComplete {
-            state.finish(success: false)
+            let reason = error.map { "receive_error:\($0)" } ?? "receive_complete"
+            logger.log(
+                error == nil ? "receive_complete" : "receive_error",
+                connectionIndex: connectionIndex,
+                fields: [
+                    "generation": String(generation),
+                    "error": error.map(String.init(describing:)) ?? "",
+                    "isComplete": String(isComplete)
+                ]
+            )
+            onDisconnected(reason)
             return
         }
 
@@ -466,76 +1133,487 @@ func receiveFrames(connection: NWConnection, state: ConnectionState, buffer: Dat
             nextBuffer.append(data)
             for frame in ProtoWire.frames(from: &nextBuffer) {
                 guard let packet = ProtoWire.decodePacket(frame) else { continue }
+                logger.log(
+                    "packet_received",
+                    connectionIndex: connectionIndex,
+                    fields: [
+                        "generation": String(generation),
+                        "type": packet.type.logName,
+                        "requestID": packet.requestID ?? "",
+                        "status": packet.payload["status"] ?? "",
+                        "clientMessageID": packet.payload["clientMessageID"] ?? ""
+                    ]
+                )
                 state.recordPacket(packet)
+                if packet.type == .heartbeatAck {
+                    logger.log("heartbeat_ack_received", connectionIndex: connectionIndex)
+                }
+                if packet.type == .authOK {
+                    let shouldStartMessages = state.recordAuthOK(generation: generation)
+                    logger.log(
+                        "auth_ok_received",
+                        connectionIndex: connectionIndex,
+                        fields: [
+                            "generation": String(generation),
+                            "startMessages": String(shouldStartMessages)
+                        ]
+                    )
+                    onAuthenticated(shouldStartMessages)
+                }
             }
         }
 
-        receiveFrames(connection: connection, state: state, buffer: nextBuffer)
+        receiveFrames(
+            connection: connection,
+            state: state,
+            logger: logger,
+            connectionIndex: connectionIndex,
+            generation: generation,
+            buffer: nextBuffer,
+            onAuthenticated: onAuthenticated,
+            onDisconnected: onDisconnected
+        )
     }
 }
 
-func runConnection(index: Int, options: Options, auth: LoginResponse, deviceIndex: Int) async -> ConnectionResult {
-    await withCheckedContinuation { continuation in
-        let connection = NWConnection(
-            host: NWEndpoint.Host(options.tcpHost),
-            port: NWEndpoint.Port(rawValue: options.tcpPort)!,
-            using: .tcp
+func scheduleHeartbeatLoop(
+    connection: NWConnection,
+    state: ConnectionState,
+    logger: ConnectionEventLogger,
+    connectionIndex: Int,
+    loginIndex: Int,
+    options: Options,
+    queue: DispatchQueue,
+    generation: Int,
+    sequence: Int = 1,
+    nextDeadline: DispatchTime? = nil,
+    onDisconnected: @escaping @Sendable (String) -> Void
+) {
+    guard options.heartbeatIntervalSeconds > 0 else {
+        return
+    }
+
+    let intervalNanos = UInt64(options.heartbeatIntervalSeconds) * 1_000_000_000
+    let scheduledDeadline = nextDeadline ?? (DispatchTime.now() + .nanoseconds(Int(intervalNanos)))
+
+    queue.asyncAfter(deadline: scheduledDeadline) {
+        guard state.isActive(generation: generation) else {
+            return
+        }
+
+        let firedAt = DispatchTime.now()
+        let driftMillis = Int64(firedAt.uptimeNanoseconds)
+            - Int64(scheduledDeadline.uptimeNanoseconds)
+        let sendStartedAt = Date()
+        let requestID = UUID().uuidString
+        let heartbeatPacket = ProtoWire.heartbeatFrame(
+            sequence: sequence,
+            requestID: requestID,
+            protocolVersion: options.protocolVersion
         )
-        let queue = DispatchQueue(label: "im.tcp.load.\(index)")
+        state.recordHeartbeatSend()
+        logger.log(
+            "heartbeat_send_start",
+            connectionIndex: connectionIndex,
+            loginIndex: loginIndex,
+            fields: [
+                "sequence": String(sequence),
+                "requestID": requestID,
+                "generation": String(generation),
+                "scheduleDriftMs": String(max(0, driftMillis / 1_000_000))
+            ]
+        )
+        let followingDeadline = DispatchTime(uptimeNanoseconds: scheduledDeadline.uptimeNanoseconds + intervalNanos)
+        scheduleHeartbeatLoop(
+            connection: connection,
+            state: state,
+            logger: logger,
+            connectionIndex: connectionIndex,
+            loginIndex: loginIndex,
+            options: options,
+            queue: queue,
+            generation: generation,
+            sequence: sequence + 1,
+            nextDeadline: followingDeadline,
+            onDisconnected: onDisconnected
+        )
+        connection.send(content: heartbeatPacket, completion: .contentProcessed { error in
+            if error != nil {
+                logger.log(
+                    "heartbeat_send_error",
+                    connectionIndex: connectionIndex,
+                    loginIndex: loginIndex,
+                    fields: [
+                        "sequence": String(sequence),
+                        "generation": String(generation),
+                        "error": String(describing: error!)
+                    ]
+                )
+                onDisconnected("send_heartbeat_error:\(error!)")
+                return
+            }
+
+            logger.log(
+                "heartbeat_send_ok",
+                connectionIndex: connectionIndex,
+                loginIndex: loginIndex,
+                fields: [
+                    "sequence": String(sequence),
+                    "generation": String(generation),
+                    "sendCompletionMs": String(Int(Date().timeIntervalSince(sendStartedAt) * 1_000))
+                ]
+            )
+        })
+    }
+}
+
+func runConnection(
+    index: Int,
+    options: Options,
+    login: ConnectionLogin,
+    logger: ConnectionEventLogger,
+    queue: DispatchQueue
+) async -> ConnectionResult {
+    await withCheckedContinuation { continuation in
         let state = ConnectionState(
             expectedOwnMessages: options.messagesPerConnection,
             continuation: continuation,
-            connection: connection
+            logger: logger,
+            connectionIndex: index
         )
 
-        connection.stateUpdateHandler = { nwState in
-            switch nwState {
-            case .ready:
-                receiveFrames(connection: connection, state: state)
-                let authPacket = ProtoWire.authFrame(
-                    accessToken: auth.accessToken,
-                    deviceID: "tcp-load-driver-\(deviceIndex)",
-                    deviceName: "tcp-load-driver-\(deviceIndex)",
-                    platform: "load-test",
-                    appVersion: "load-test"
+        @Sendable func handleDisconnected(generation: Int, reason: String) {
+            switch state.handleDisconnect(generation: generation, maxReconnects: options.maxReconnects) {
+            case .reconnect(let nextGeneration, let attempt, let connectionToCancel):
+                logger.log(
+                    "connection_disconnected",
+                    connectionIndex: index,
+                    loginIndex: login.loginIndex,
+                    fields: [
+                        "generation": String(generation),
+                        "reason": reason,
+                        "decision": "reconnect"
+                    ]
                 )
-                connection.send(content: authPacket, completion: .contentProcessed { error in
-                    if error != nil {
-                        state.finish(success: false)
-                        return
-                    }
-                    for messageIndex in 0..<options.messagesPerConnection {
-                        let delay = DispatchTime.now() + .milliseconds(options.sendIntervalMillis * messageIndex)
-                        queue.asyncAfter(deadline: delay) {
-                            let requestID = UUID().uuidString
-                            let clientMessageID = "tcp-\(index)-\(messageIndex)-\(UUID().uuidString)"
-                            let messagePacket = ProtoWire.messageFrame(
-                                conversationID: options.conversationID,
-                                clientMessageID: clientMessageID,
-                                text: "tcp load \(index)/\(messageIndex)",
-                                requestID: requestID
-                            )
-                            state.recordSent(clientMessageID: clientMessageID, requestID: requestID, at: Date())
-                            connection.send(content: messagePacket, completion: .contentProcessed { error in
-                                if error != nil {
-                                    state.finish(success: false)
-                                }
-                            })
-                        }
-                    }
-                })
-            case .waiting:
-                state.recordReconnect()
-            case .failed, .cancelled:
-                state.finish(success: false)
-            default:
+                logger.log(
+                    "reconnect_scheduled",
+                    connectionIndex: index,
+                    loginIndex: login.loginIndex,
+                    fields: [
+                        "fromGeneration": String(generation),
+                        "nextGeneration": String(nextGeneration),
+                        "attempt": String(attempt),
+                        "delayMs": String(options.reconnectDelayMillis),
+                        "reason": reason
+                    ]
+                )
+                connectionToCancel?.cancel()
+                queue.asyncAfter(deadline: .now() + .milliseconds(options.reconnectDelayMillis)) {
+                    startAttempt(generation: nextGeneration)
+                }
+            case .fail:
+                logger.log(
+                    "connection_disconnected",
+                    connectionIndex: index,
+                    loginIndex: login.loginIndex,
+                    fields: [
+                        "generation": String(generation),
+                        "reason": reason,
+                        "decision": "fail"
+                    ]
+                )
+                state.finish(success: false, reason: reason)
+            case .ignore:
                 break
             }
         }
-        queue.asyncAfter(deadline: .now() + .seconds(options.timeoutSeconds)) {
-            state.finish(success: false)
+
+        @Sendable func scheduleWorkAfterAuth(connection: NWConnection, generation: Int, shouldStartMessages: Bool) {
+            scheduleHeartbeatLoop(
+                connection: connection,
+                state: state,
+                logger: logger,
+                connectionIndex: index,
+                loginIndex: login.loginIndex,
+                options: options,
+                queue: queue,
+                generation: generation,
+                onDisconnected: { reason in
+                    handleDisconnected(generation: generation, reason: reason)
+                }
+            )
+            guard shouldStartMessages else {
+                return
+            }
+            if options.messagesPerConnection == 0 {
+                logger.log(
+                    "hold_scheduled",
+                    connectionIndex: index,
+                    loginIndex: login.loginIndex,
+                    fields: [
+                        "generation": String(generation),
+                        "holdSeconds": String(options.holdSeconds)
+                    ]
+                )
+                queue.asyncAfter(deadline: .now() + .seconds(options.holdSeconds)) {
+                    logger.log("hold_complete", connectionIndex: index, loginIndex: login.loginIndex)
+                    state.finish(success: true)
+                }
+                queue.asyncAfter(deadline: .now() + .seconds(options.holdSeconds + options.timeoutSeconds)) {
+                    if state.finish(success: false, reason: "hold_timeout") {
+                        logger.log("hold_timeout_fired", connectionIndex: index, loginIndex: login.loginIndex)
+                    }
+                }
+                return
+            }
+
+            logger.log(
+                "messages_scheduled",
+                connectionIndex: index,
+                loginIndex: login.loginIndex,
+                fields: [
+                    "generation": String(generation),
+                    "messages": String(options.messagesPerConnection),
+                    "sendIntervalMillis": String(options.sendIntervalMillis)
+                ]
+            )
+            for messageIndex in 0..<options.messagesPerConnection {
+                let delay = DispatchTime.now() + .milliseconds(options.sendIntervalMillis * messageIndex)
+                queue.asyncAfter(deadline: delay) {
+                    let requestID = UUID().uuidString
+                    let clientMessageID = "tcp-\(index)-\(messageIndex)-\(UUID().uuidString)"
+                    let messagePacket = ProtoWire.messageFrame(
+                        conversationID: options.conversationID,
+                        clientMessageID: clientMessageID,
+                        text: "tcp load \(index)/\(messageIndex)",
+                        requestID: requestID,
+                        protocolVersion: options.protocolVersion
+                    )
+                    state.recordSent(clientMessageID: clientMessageID, requestID: requestID, at: Date())
+                    logger.log(
+                        "message_send_start",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: [
+                            "generation": String(generation),
+                            "messageIndex": String(messageIndex),
+                            "requestID": requestID,
+                            "clientMessageID": clientMessageID
+                        ]
+                    )
+                    connection.send(content: messagePacket, completion: .contentProcessed { error in
+                        if error != nil {
+                            logger.log(
+                                "message_send_error",
+                                connectionIndex: index,
+                                loginIndex: login.loginIndex,
+                                fields: [
+                                    "generation": String(generation),
+                                    "messageIndex": String(messageIndex),
+                                    "error": String(describing: error!)
+                                ]
+                            )
+                            state.finish(success: false, reason: "send_message_error:\(error!)")
+                        } else {
+                            logger.log(
+                                "message_send_ok",
+                                connectionIndex: index,
+                                loginIndex: login.loginIndex,
+                                fields: [
+                                    "generation": String(generation),
+                                    "messageIndex": String(messageIndex)
+                                ]
+                            )
+                        }
+                    })
+                }
+            }
         }
-        connection.start(queue: queue)
+
+        @Sendable func startAttempt(generation: Int) {
+            logger.log(
+                generation == 0 ? "connection_create" : "reconnect_start",
+                connectionIndex: index,
+                loginIndex: login.loginIndex,
+                fields: [
+                    "generation": String(generation),
+                    "email": login.email,
+                    "userID": login.auth.user.id,
+                    "deviceID": login.deviceID,
+                    "tcpHost": options.tcpHost,
+                    "tcpPort": String(options.tcpPort)
+                ]
+            )
+            let connection = NWConnection(
+                host: NWEndpoint.Host(options.tcpHost),
+                port: NWEndpoint.Port(rawValue: options.tcpPort)!,
+                using: .tcp
+            )
+            guard state.attachConnection(connection, generation: generation) else {
+                return
+            }
+
+            connection.stateUpdateHandler = { nwState in
+                switch nwState {
+                case .setup:
+                    logger.log(
+                        "nw_setup",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: ["generation": String(generation)]
+                    )
+                case .preparing:
+                    logger.log(
+                        "nw_preparing",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: ["generation": String(generation)]
+                    )
+                case .ready:
+                    guard state.markReady(generation: generation) else {
+                        return
+                    }
+                    logger.log(
+                        "nw_ready",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: ["generation": String(generation)]
+                    )
+                    receiveFrames(
+                        connection: connection,
+                        state: state,
+                        logger: logger,
+                        connectionIndex: index,
+                        generation: generation,
+                        onAuthenticated: { shouldStartMessages in
+                            scheduleWorkAfterAuth(
+                                connection: connection,
+                                generation: generation,
+                                shouldStartMessages: shouldStartMessages
+                            )
+                        },
+                        onDisconnected: { reason in
+                            handleDisconnected(generation: generation, reason: reason)
+                        }
+                    )
+                    let authPacket = ProtoWire.authFrame(
+                        accessToken: login.auth.accessToken,
+                        deviceID: login.deviceID,
+                        deviceName: login.deviceName,
+                        platform: "load-test",
+                        appVersion: "load-test",
+                        protocolVersion: options.protocolVersion
+                    )
+                    logger.log(
+                        "auth_send_start",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: ["generation": String(generation)]
+                    )
+                    logger.log(
+                        "preauth_timeout_scheduled",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: [
+                            "generation": String(generation),
+                            "timeoutSeconds": String(options.timeoutSeconds)
+                        ]
+                    )
+                    queue.asyncAfter(deadline: .now() + .seconds(options.timeoutSeconds)) {
+                        guard !state.hasAuthenticated(generation: generation) else {
+                            return
+                        }
+                        if state.shouldFailPreauthTimeout(generation: generation),
+                           state.finish(success: false, reason: "preauth_timeout") {
+                            logger.log(
+                                "preauth_timeout_fired",
+                                connectionIndex: index,
+                                loginIndex: login.loginIndex,
+                                fields: ["generation": String(generation)]
+                            )
+                        }
+                    }
+                    connection.send(content: authPacket, completion: .contentProcessed { error in
+                        if error != nil {
+                            logger.log(
+                                "auth_send_error",
+                                connectionIndex: index,
+                                loginIndex: login.loginIndex,
+                                fields: [
+                                    "generation": String(generation),
+                                    "error": String(describing: error!)
+                                ]
+                            )
+                            handleDisconnected(generation: generation, reason: "send_auth_error:\(error!)")
+                        } else {
+                            logger.log(
+                                "auth_send_ok",
+                                connectionIndex: index,
+                                loginIndex: login.loginIndex,
+                                fields: ["generation": String(generation)]
+                            )
+                        }
+                    })
+                case .waiting:
+                    logger.log(
+                        "nw_waiting",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: ["generation": String(generation)]
+                    )
+                case .failed(let error):
+                    logger.log(
+                        "nw_failed",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: [
+                            "generation": String(generation),
+                            "error": String(describing: error)
+                        ]
+                    )
+                    handleDisconnected(generation: generation, reason: "nw_failed:\(error)")
+                case .cancelled:
+                    logger.log(
+                        "nw_cancelled",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: ["generation": String(generation)]
+                    )
+                    handleDisconnected(generation: generation, reason: "nw_cancelled")
+                default:
+                    break
+                }
+            }
+            logger.log(
+                "connect_timeout_scheduled",
+                connectionIndex: index,
+                loginIndex: login.loginIndex,
+                fields: [
+                    "generation": String(generation),
+                    "timeoutSeconds": String(options.timeoutSeconds)
+                ]
+            )
+            queue.asyncAfter(deadline: .now() + .seconds(options.timeoutSeconds)) {
+                if state.shouldFailConnectTimeout(generation: generation),
+                   state.finish(success: false, reason: "connect_timeout") {
+                    logger.log(
+                        "connect_timeout_fired",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: ["generation": String(generation)]
+                    )
+                }
+            }
+            logger.log(
+                "connection_start",
+                connectionIndex: index,
+                loginIndex: login.loginIndex,
+                fields: ["generation": String(generation)]
+            )
+            connection.start(queue: queue)
+        }
+
+        startAttempt(generation: 0)
     }
 }
 
@@ -547,20 +1625,127 @@ func percentile(_ values: [Double], _ p: Double) -> Double {
 }
 
 let options = parseOptions()
-guard !options.conversationID.isEmpty else {
+guard options.loginOnly || !options.conversationID.isEmpty else {
     fputs("Missing --conversation-id or IM_CONVERSATION_ID\n", stderr)
     exit(2)
 }
 
-let auths = try await (0..<options.devicesPerUser).asyncMap { deviceIndex in
-    try await login(options: options, deviceIndex: deviceIndex)
+let connectionLogger = try ConnectionEventLogger(path: options.connectionLogFile)
+connectionLogger.log(
+    "run_start",
+    fields: [
+        "profile": options.profile,
+        "connections": String(options.connections),
+        "baseURL": options.baseURL.absoluteString,
+        "tcpHost": options.tcpHost,
+        "tcpPort": String(options.tcpPort),
+        "messagesPerConnection": String(options.messagesPerConnection),
+        "holdSeconds": String(options.holdSeconds),
+        "connectRampSeconds": String(options.connectRampSeconds),
+        "loginConcurrency": String(options.loginConcurrency),
+        "timeoutSeconds": String(options.timeoutSeconds),
+        "protocolVersion": String(options.protocolVersion),
+        "heartbeatIntervalSeconds": String(options.heartbeatIntervalSeconds),
+        "connectionQueuePoolSize": String(options.connectionQueuePoolSize),
+        "maxReconnects": String(options.maxReconnects),
+        "reconnectDelayMillis": String(options.reconnectDelayMillis),
+        "loginRetries": String(options.loginRetries),
+        "loginRetryDelayMillis": String(options.loginRetryDelayMillis),
+        "loginCacheFile": options.loginCacheFile ?? "",
+        "loginOnly": String(options.loginOnly),
+        "loginMode": options.loginMode
+    ]
+)
+let accountCredentials = try loadAccountCredentials(options: options)
+let loginCount = options.accountFile == nil ? options.devicesPerUser : options.connections
+let justInTimeLogin = options.loginMode == "just-in-time" && !options.loginOnly
+let loginURLSession = makeLoginURLSession(options: options)
+let connectionLogins: [ConnectionLogin]
+if justInTimeLogin {
+    connectionLogger.log("login_phase_deferred", fields: ["loginMode": options.loginMode])
+    connectionLogins = []
+} else if let cached = try cachedLogins(options: options, loginCount: loginCount, logger: connectionLogger) {
+    connectionLogins = cached
+} else {
+    connectionLogins = try await concurrentMap(Array(0..<loginCount), concurrency: options.loginConcurrency) { loginIndex in
+        let credential = accountCredentials[loginIndex % accountCredentials.count]
+        return try await loginForConnection(
+            options: options,
+            credential: credential,
+            loginIndex: loginIndex,
+            logger: connectionLogger,
+            urlSession: loginURLSession
+        )
+    }
+    try writeLoginCache(path: options.loginCacheFile, logins: connectionLogins, logger: connectionLogger)
+}
+connectionLogger.log("login_phase_complete", fields: ["loginCount": String(connectionLogins.count)])
+if options.loginOnly {
+    print("login-only complete logins=\(connectionLogins.count) cacheFile=\(options.loginCacheFile ?? "<none>")")
+    exit(0)
 }
 let startedAt = Date()
+let loginLimiter = AsyncLimiter(permits: options.loginConcurrency)
+let connectionQueuePool = ConnectionQueuePool(size: options.connectionQueuePoolSize)
+connectionLogger.log(
+    "connection_queue_pool_ready",
+    fields: ["connectionQueuePoolSize": String(connectionQueuePool.size)]
+)
 let results = await withTaskGroup(of: ConnectionResult.self) { group in
     for index in 0..<options.connections {
-        let deviceIndex = index % options.devicesPerUser
+        let loginIndex = options.accountFile == nil ? index % options.devicesPerUser : index
         group.addTask {
-            await runConnection(index: index, options: options, auth: auths[deviceIndex], deviceIndex: deviceIndex)
+            if options.connectRampSeconds > 0 {
+                let delay = Double(index) / Double(max(options.connections, 1)) * Double(options.connectRampSeconds)
+                connectionLogger.log(
+                    "ramp_sleep",
+                    connectionIndex: index,
+                    loginIndex: loginIndex,
+                    fields: ["delayMs": String(Int(delay * 1_000))]
+                )
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            let login: ConnectionLogin
+            if justInTimeLogin {
+                await loginLimiter.acquire()
+                do {
+                    let credential = accountCredentials[loginIndex % accountCredentials.count]
+                    login = try await loginForConnection(
+                        options: options,
+                        credential: credential,
+                        loginIndex: loginIndex,
+                        logger: connectionLogger,
+                        urlSession: loginURLSession
+                    )
+                    await loginLimiter.release()
+                } catch {
+                    await loginLimiter.release()
+                    return ConnectionResult(
+                        success: false,
+                        failureReason: "login_failed:\(error)",
+                        sent: 0,
+                        acknowledgements: 0,
+                        canonicalMessages: 0,
+                        duplicateCanonicalMessages: 0,
+                        fanoutMessages: 0,
+                        reconnects: 0,
+                        serverErrors: 0,
+                        heartbeatSends: 0,
+                        heartbeatAcks: 0,
+                        ackLatenciesMillis: [],
+                        canonicalLatenciesMillis: []
+                    )
+                }
+            } else {
+                login = connectionLogins[loginIndex]
+            }
+            return await runConnection(
+                index: index,
+                options: options,
+                login: login,
+                logger: connectionLogger,
+                queue: connectionQueuePool.queue(for: index)
+            )
         }
     }
     var values: [ConnectionResult] = []
@@ -579,16 +1764,52 @@ let duplicateCanonicalMessages = results.reduce(0) { $0 + $1.duplicateCanonicalM
 let fanoutMessages = results.reduce(0) { $0 + $1.fanoutMessages }
 let reconnects = results.reduce(0) { $0 + $1.reconnects }
 let serverErrors = results.reduce(0) { $0 + $1.serverErrors }
+let heartbeatSends = results.reduce(0) { $0 + $1.heartbeatSends }
+let heartbeatAcks = results.reduce(0) { $0 + $1.heartbeatAcks }
 let ackLatencies = results.flatMap(\.ackLatenciesMillis)
 let canonicalLatencies = results.flatMap(\.canonicalLatenciesMillis)
-let ackSuccessRate = sent == 0 ? 0 : Double(acknowledgements) / Double(sent)
-let canonicalSuccessRate = sent == 0 ? 0 : Double(canonicalMessages) / Double(sent)
+let failureReasons = results.reduce(into: [String: Int]()) { counts, result in
+    guard !result.success else { return }
+    counts[result.failureReason ?? "unknown", default: 0] += 1
+}
+let ackSuccessRate = sent == 0 ? Double(successes) / Double(max(options.connections, 1)) : Double(acknowledgements) / Double(sent)
+let canonicalSuccessRate = sent == 0 ? Double(successes) / Double(max(options.connections, 1)) : Double(canonicalMessages) / Double(sent)
 
-print("profile=\(options.profile) connections=\(options.connections) devicesPerUser=\(options.devicesPerUser) successes=\(successes) elapsed=\(String(format: "%.2f", elapsed))s")
+print("profile=\(options.profile) connections=\(options.connections) accounts=\(accountCredentials.count) devicesPerUser=\(options.devicesPerUser) queuePoolSize=\(connectionQueuePool.size) maxReconnects=\(options.maxReconnects) successes=\(successes) elapsed=\(String(format: "%.2f", elapsed))s")
 print("sent=\(sent) ack=\(acknowledgements) canonical=\(canonicalMessages) duplicateCanonical=\(duplicateCanonicalMessages) fanout=\(fanoutMessages) reconnects=\(reconnects) serverErrors=\(serverErrors)")
+print("heartbeat sent=\(heartbeatSends) ack=\(heartbeatAcks) intervalSeconds=\(options.heartbeatIntervalSeconds)")
 print("ackSuccessRate=\(String(format: "%.4f", ackSuccessRate)) canonicalSuccessRate=\(String(format: "%.4f", canonicalSuccessRate))")
+if !failureReasons.isEmpty {
+    let summary = failureReasons
+        .sorted { lhs, rhs in
+            if lhs.value == rhs.value {
+                return lhs.key < rhs.key
+            }
+            return lhs.value > rhs.value
+        }
+        .map { "\($0.key)=\($0.value)" }
+        .joined(separator: ", ")
+    print("failureReasons \(summary)")
+}
 print("ackLatencyMs p50=\(String(format: "%.1f", percentile(ackLatencies, 0.50))) p95=\(String(format: "%.1f", percentile(ackLatencies, 0.95))) p99=\(String(format: "%.1f", percentile(ackLatencies, 0.99)))")
 print("canonicalLatencyMs p50=\(String(format: "%.1f", percentile(canonicalLatencies, 0.50))) p95=\(String(format: "%.1f", percentile(canonicalLatencies, 0.95))) p99=\(String(format: "%.1f", percentile(canonicalLatencies, 0.99)))")
+if let connectionLogFile = options.connectionLogFile {
+    print("connectionLogFile=\(connectionLogFile)")
+}
+connectionLogger.log(
+    "run_finish",
+    fields: [
+        "successes": String(successes),
+        "connections": String(options.connections),
+        "sent": String(sent),
+        "ack": String(acknowledgements),
+        "canonical": String(canonicalMessages),
+        "serverErrors": String(serverErrors),
+        "heartbeatSends": String(heartbeatSends),
+        "heartbeatAcks": String(heartbeatAcks),
+        "elapsedMs": String(Int(elapsed * 1_000))
+    ]
+)
 
 extension Sequence {
     func asyncMap<T>(_ transform: (Element) async throws -> T) async throws -> [T] {
@@ -598,5 +1819,35 @@ extension Sequence {
             values.append(value)
         }
         return values
+    }
+}
+
+func concurrentMap<Element: Sendable, T: Sendable>(
+    _ elements: [Element],
+    concurrency: Int,
+    transform: @escaping @Sendable (Element) async throws -> T
+) async throws -> [T] {
+    var iterator = elements.enumerated().makeIterator()
+    let workerCount = min(max(concurrency, 1), elements.count)
+    return try await withThrowingTaskGroup(of: (Int, T).self) { group in
+        var results = Array<T?>(repeating: nil, count: elements.count)
+
+        for _ in 0..<workerCount {
+            guard let (index, element) = iterator.next() else { break }
+            group.addTask {
+                (index, try await transform(element))
+            }
+        }
+
+        while let (index, value) = try await group.next() {
+            results[index] = value
+            if let (nextIndex, nextElement) = iterator.next() {
+                group.addTask {
+                    (nextIndex, try await transform(nextElement))
+                }
+            }
+        }
+
+        return results.map { $0! }
     }
 }

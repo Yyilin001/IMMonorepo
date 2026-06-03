@@ -132,7 +132,8 @@ swift run IMTCPLoadDriver \
   --conversation-id "$IM_CONVERSATION_ID" \
   --connections 5 \
   --devices-per-user 5 \
-  --messages 1
+  --messages 1 \
+  --hold-seconds 0
 ```
 
 Required options:
@@ -143,7 +144,14 @@ Required options:
 
 Useful TCP scenarios:
 
+- Idle online capacity ladder: run with `--profile custom --messages 0 --hold-seconds 30`
+  to authenticate connections and keep them open while remote CPU, memory, TCP
+  connection count, and Kafka lag are sampled. This is the baseline for "how many
+  users can stay online".
 - `1 user x 5 devices`: `--connections 5 --devices-per-user 5 --messages 1`
+- Custom capacity ladder: use `--profile custom` so `--connections` is not capped by
+  `local-smoke` or raised by `staging-baseline`; run `100`, `500`, `1000`, `2000`,
+  `5000`, then `10000` connections from a separate load generator.
 - `100 users x 2 devices`: pair HTTP/k6 user load with TCP `--devices-per-user 2`; use more load generator accounts for true multi-user TCP pressure.
 - `1 group x 500 members x 2 devices`: create the group through staging fixtures, then run TCPDriver against the target `IM_CONVERSATION_ID` while k6 drives HTTP changes/history reads.
 - `AI stream concurrency`: covered by `scripts/staging_baseline.sh`; tune with `IM_AI_STREAM_ATTEMPTS` and `IM_AI_STREAM_CONCURRENCY`.
@@ -157,6 +165,190 @@ TCPDriver reports:
 - total fanout message count
 - reconnect count
 - server error count
+
+Add `--connection-log-file /path/to/tcp-driver.jsonl` when diagnosing TCP lifecycle
+issues. The file is JSONL and records `login_start`, `login_ok`, `connection_start`,
+`login_attempt_failed`, `login_retry_scheduled`, `nw_ready`, `auth_send_ok`,
+`packet_received`, `auth_ok_received`, `heartbeat_send_ok`,
+`heartbeat_ack_received`, `connection_disconnected`, `reconnect_scheduled`,
+`reconnect_start`, `hold_complete`, `connection_finish`, `connect_timeout_fired`,
+`preauth_timeout_fired`, `hold_timeout_fired`, and related failure events per
+connection.
+Use this when server metrics show `auth_ok` but the driver still reports missing or
+closed connections.
+
+Use `--login-cache-file` to separate HTTP login cost from TCP online-capacity tests.
+The driver reuses cached access tokens when they are still valid long enough for the
+connect ramp; otherwise it falls back to HTTP login and rewrites the cache. Use
+`--login-only true` to prewarm the cache without opening TCP connections.
+JIT HTTP login retries transient failures by default. Use `--login-retries` or
+`IM_TCP_LOGIN_RETRIES` and `--login-retry-delay-ms` or
+`IM_TCP_LOGIN_RETRY_DELAY_MS` to tune it. `login_failed` is logged only after all
+attempts fail.
+
+Use `--connection-queue-pool-size` when the local load generator becomes the
+bottleneck. A larger pool reduces timer and send-completion tail latency for
+thousands of `NWConnection` instances. Track `heartbeat_send_start.scheduleDriftMs`
+and `heartbeat_send_ok.sendCompletionMs` from the JSONL log; if these tails reach
+many seconds, split the run across multiple load generators before blaming the
+server.
+
+Use `--max-reconnects` for long idle-online hold tests. Reconnect is limited to
+`--messages 0` scenarios so message-send tests cannot hide duplicate-send behavior.
+Reconnect attempts log `connection_disconnected`, `reconnect_scheduled`, and
+`reconnect_start`, then authenticate again and restart heartbeat on the new TCP
+connection.
+
+```bash
+cd IMServer/LoadTests/TCPDriver
+.build/release/IMTCPLoadDriver \
+  --profile custom \
+  --base-url http://120.25.106.200:8080 \
+  --tcp-host 120.25.106.200 \
+  --tcp-port 9000 \
+  --account-file ../accounts/load-1000.csv \
+  --connections 1000 \
+  --messages 0 \
+  --login-concurrency 20 \
+  --timeout-seconds 120 \
+  --login-cache-file /tmp/imtcp-login-cache-1000.json \
+  --login-only true
+
+.build/release/IMTCPLoadDriver \
+  --profile custom \
+  --base-url http://120.25.106.200:8080 \
+  --tcp-host 120.25.106.200 \
+  --tcp-port 9000 \
+  --account-file ../accounts/load-1000.csv \
+  --conversation-id 00000000-0000-0000-0000-000000000001 \
+  --connections 1000 \
+  --messages 0 \
+  --hold-seconds 180 \
+  --connect-ramp-seconds 120 \
+  --timeout-seconds 120 \
+  --heartbeat-interval-seconds 30 \
+  --connection-queue-pool-size 256 \
+  --max-reconnects 3 \
+  --reconnect-delay-ms 1000 \
+  --login-retries 2 \
+  --login-cache-file /tmp/imtcp-login-cache-1000.json \
+  --connection-log-file /tmp/imtcp-driver-1000-online.jsonl
+```
+
+Example 1000-connection idle diagnostic run. Use heartbeat for hold windows longer
+than the server TCP idle timeout.
+
+```bash
+cd IMServer/LoadTests/TCPDriver
+swift run IMTCPLoadDriver \
+  --profile custom \
+  --base-url http://120.25.106.200:8080 \
+  --tcp-host 120.25.106.200 \
+  --tcp-port 9000 \
+  --account-file ../accounts/load-1000.csv \
+  --conversation-id 00000000-0000-0000-0000-000000000001 \
+  --connections 1000 \
+  --messages 0 \
+  --hold-seconds 180 \
+  --login-concurrency 20 \
+  --connect-ramp-seconds 60 \
+  --timeout-seconds 20 \
+  --heartbeat-interval-seconds 30 \
+  --connection-queue-pool-size 256 \
+  --max-reconnects 3 \
+  --connection-log-file /tmp/imtcp-driver-1000-heartbeat.jsonl
+```
+
+Capacity ladder helper:
+
+```bash
+cd IMServer/LoadTests
+IM_CONVERSATION_ID="$IM_CONVERSATION_ID" \
+SSH_HOST=root@120.25.106.200 \
+LADDER="100 500 1000 2000 5000 10000" \
+MESSAGES=0 \
+HOLD_SECONDS=30 \
+TIMEOUT_SECONDS=90 \
+./tcp_capacity_ladder.sh
+```
+
+Provision a realistic multi-account pool before running online-capacity tests:
+
+```bash
+cd IMServer/LoadTests
+COUNT=1000 \
+PREFIX=load \
+DOMAIN=example.com \
+PASSWORD=password1234 \
+SSH_HOST=root@120.25.106.200 \
+./provision_load_accounts.sh
+```
+
+Then run the ladder with that account file:
+
+```bash
+cd IMServer/LoadTests
+IM_CONVERSATION_ID="$IM_CONVERSATION_ID" \
+SSH_HOST=root@120.25.106.200 \
+ACCOUNT_FILE="$PWD/accounts/load-1000.csv" \
+LADDER="500 1000" \
+MESSAGES=0 \
+HOLD_SECONDS=60 \
+CONNECT_RAMP_SECONDS=60 \
+TIMEOUT_SECONDS=300 \
+HEARTBEAT_INTERVAL_SECONDS=30 \
+CONNECTION_QUEUE_POOL_SIZE=256 \
+MAX_RECONNECTS=3 \
+LOGIN_RETRIES=2 \
+LOGIN_MODE=just-in-time \
+CONNECTION_LOG_DIR=/tmp/imtcp-driver-logs \
+./tcp_capacity_ladder.sh
+```
+
+Use `MESSAGES`, `DEVICES_PER_USER`, `SEND_INTERVAL_MS`, `TIMEOUT_SECONDS`, and
+`COOLDOWN_SECONDS` to tune each step. Set `MESSAGES=0` plus `HOLD_SECONDS` for
+idle online capacity. Set `MESSAGES=1` or higher for a hot-conversation fanout
+test; that is intentionally heavier and should not be interpreted as idle online
+user capacity. When `MESSAGES=0` and `DEVICES_PER_USER` is unset, the helper uses
+one device session per connection because the server intentionally kicks duplicate
+connections for the same session. `LOGIN_CONCURRENCY` defaults to `5` for device
+session pre-warm; lower it if the auth/database path becomes the bottleneck.
+`ACCOUNT_FILE` points to a local `email,password` CSV and makes TCPDriver round-robin
+connections across real accounts.
+`CONNECT_RAMP_SECONDS` staggers TCP connection startup; use it to separate steady
+online capacity from a same-instant reconnect storm.
+`LOGIN_MODE=just-in-time` logs in each virtual user immediately before its ramped
+TCP connect. This better simulates real clients but can make the local generator's
+HTTP stack part of the test. `LOGIN_RETRIES` retries transient HTTP login timeouts;
+if `login_attempt_failed` grows but `login_failed` stays at zero, login jitter was
+absorbed by retries.
+`SAMPLE_DURING_SECONDS` controls remote metric sampling while the driver is still
+running; set it to `0` to disable during-run samples.
+`HEARTBEAT_INTERVAL_SECONDS` sends TCP heartbeat packets after auth succeeds. Keep
+it lower than server `IM_TCP_IDLE_TIMEOUT` when `MESSAGES=0` and `HOLD_SECONDS`
+is used to simulate long-lived online clients.
+TCPDriver schedules heartbeats against absolute deadlines and records
+`scheduleDriftMs` plus `sendCompletionMs` in `heartbeat_send_start` /
+`heartbeat_send_ok`. When idle-timeout failures appear, inspect those two fields
+before changing server idle timeout; large drift points to load-generator
+scheduling pressure, while large send completion latency points to local TCP send
+backpressure or network tail latency.
+`connect_timeout_fired` means the TCP connection did not reach `nw_ready` within
+`TIMEOUT_SECONDS`. `preauth_timeout_fired` means TCP reached `nw_ready` and auth was
+sent, but `authOK` did not arrive within `TIMEOUT_SECONDS`.
+Use `--connection-queue-pool-size` or `IM_TCP_CONNECTION_QUEUE_POOL_SIZE` to control
+how many DispatchQueues TCPDriver uses for NWConnection callbacks and timers.
+The default is capped at 64 queues. This avoids one serial queue per connection,
+which becomes expensive at thousands of connections. If `sendCompletionMs` stays
+high, try `32`, `64`, and `128` before changing server settings.
+On a single Mac load generator, observed signs of generator saturation are
+`heartbeat_send_ok.sendCompletionMs` P99 above 10s, growing
+`connect_timeout_fired`, and HTTP `login_attempt_failed` while the server gateway
+CPU and memory remain low. Treat that as a load-generator limit and split the run
+across multiple machines; do not treat it as the IM server's online-user limit.
+`PROTOCOL_VERSION` defaults to `9`; set it only when the generated
+realtime protocol version changes. Run it from a load generator, not from the
+IMServer host.
 
 ## Go/No-Go
 

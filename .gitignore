@@ -38,3 +38,4 @@ dist/
 
 # IMServer generated smoke/load-test reports
 IMServer/reports/
+IMServer/LoadTests/accounts/
