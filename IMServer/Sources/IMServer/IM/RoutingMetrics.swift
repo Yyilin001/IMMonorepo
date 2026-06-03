@@ -15,6 +15,11 @@ actor RoutingMetrics {
         var tcpCloseAuthErrorCount: Int = 0
         var tcpCloseKickCount: Int = 0
         var tcpCloseErrorCount: Int = 0
+        var tcpCloseInputClosedCount: Int = 0
+        var tcpCloseResetByPeerCount: Int = 0
+        var tcpClosePeerWaitingForAuthCount: Int = 0
+        var tcpClosePeerAuthenticatingCount: Int = 0
+        var tcpClosePeerAuthenticatedCount: Int = 0
         var tcpClosePeerOrUnknownCount: Int = 0
         var userFanoutCount: Int = 0
         var sessionKickCount: Int = 0
@@ -46,7 +51,7 @@ actor RoutingMetrics {
         snapshot.tcpChannelActiveCount += 1
     }
 
-    func recordTCPChannelInactive(closeReason: String?) {
+    func recordTCPChannelInactive(closeReason: String?, state: String) {
         snapshot.currentTCPChannelCount = max(0, snapshot.currentTCPChannelCount - 1)
         snapshot.tcpChannelInactiveCount += 1
 
@@ -59,10 +64,30 @@ actor RoutingMetrics {
             snapshot.tcpCloseAuthErrorCount += 1
         case let reason? where reason.hasPrefix("kick"):
             snapshot.tcpCloseKickCount += 1
+        case let reason? where reason == "peer_input_closed":
+            snapshot.tcpCloseInputClosedCount += 1
+            recordPeerCloseState(state)
+        case let reason? where reason == "error:connection_reset":
+            snapshot.tcpCloseResetByPeerCount += 1
+            snapshot.tcpCloseErrorCount += 1
         case let reason? where reason.hasPrefix("error"):
             snapshot.tcpCloseErrorCount += 1
         default:
+            recordPeerCloseState(state)
             snapshot.tcpClosePeerOrUnknownCount += 1
+        }
+    }
+
+    private func recordPeerCloseState(_ state: String) {
+        switch state {
+        case "waitingForAuth":
+            snapshot.tcpClosePeerWaitingForAuthCount += 1
+        case "authenticating":
+            snapshot.tcpClosePeerAuthenticatingCount += 1
+        case "authenticated":
+            snapshot.tcpClosePeerAuthenticatedCount += 1
+        default:
+            break
         }
     }
 

@@ -45,7 +45,8 @@ struct AuthConfiguration: Sendable {
             jwtSecret: activeSecret,
             jwtSecrets: secrets,
             activeJWTKeyID: activeKeyID,
-            accessTokenTTL: 10 * 60,
+            accessTokenTTL: Environment.get("AUTH_ACCESS_TOKEN_TTL_SECONDS")
+                .flatMap(TimeInterval.init(_:)) ?? 10 * 60,
             refreshTokenTTL: 30 * 24 * 60 * 60,
             refreshGracePeriod: 20
         )

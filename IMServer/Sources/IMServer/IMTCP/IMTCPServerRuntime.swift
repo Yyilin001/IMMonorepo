@@ -81,6 +81,9 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
     private let traceID = UUID()
     private var state: State = .waitingForAuth
     private var closeReason: String?
+    private var lastError: String?
+    private var lastDebugError: String?
+    private var didReceiveInputClosed = false
     private var authTimeoutTask: Scheduled<Void>?
 
     init(application: Application) {
@@ -128,12 +131,18 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         Task {
-            await self.application.routingMetrics.recordTCPChannelInactive(closeReason: self.closeReason)
+            await self.application.routingMetrics.recordTCPChannelInactive(
+                closeReason: self.closeReason,
+                state: self.stateName
+            )
         }
         application.logger.info(
             "IM TCP channel inactive",
             metadata: logMetadata(channel: context.channel, extra: [
-                "close_reason": .string(closeReason ?? "peer_or_unknown")
+                "close_reason": .string(closeReason ?? "peer_or_unknown"),
+                "input_closed": .stringConvertible(didReceiveInputClosed),
+                "last_error": .string(lastError ?? ""),
+                "last_debug_error": .string(lastDebugError ?? "")
             ])
         )
     }
@@ -181,21 +190,46 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
-        closeReason = "error:\(String(reflecting: type(of: error)))"
+        let errorText = String(describing: error)
+        let debugErrorText = String(reflecting: error)
+        lastError = errorText
+        lastDebugError = debugErrorText
+        closeReason = Self.closeReason(for: error, errorText: errorText, debugErrorText: debugErrorText)
         Task {
             await self.application.routingMetrics.recordTCPErrorCaught()
         }
         application.logger.warning(
             "IM TCP connection error",
             metadata: logMetadata(context: context, extra: [
-                "error": .string(String(describing: error)),
-                "debugError": .string(String(reflecting: error))
+                "error": .string(errorText),
+                "debugError": .string(debugErrorText),
+                "close_reason": .string(closeReason ?? "")
             ])
         )
         context.close(promise: nil)
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if let channelEvent = event as? ChannelEvent {
+            switch channelEvent {
+            case .inputClosed:
+                didReceiveInputClosed = true
+                if closeReason == nil {
+                    closeReason = "peer_input_closed"
+                }
+                application.logger.info(
+                    "IM TCP input closed",
+                    metadata: logMetadata(context: context, extra: [
+                        "close_reason": .string(closeReason ?? "")
+                    ])
+                )
+                context.close(promise: nil)
+                return
+            default:
+                break
+            }
+        }
+
         if let idleEvent = event as? IdleStateHandler.IdleStateEvent {
             switch idleEvent {
             case .read:
@@ -557,6 +591,18 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
             metadata["sessionID"] = .string(connection.sessionID.uuidString)
         }
         return metadata
+    }
+
+    private static func closeReason(
+        for error: any Error,
+        errorText: String,
+        debugErrorText: String
+    ) -> String {
+        let combined = "\(errorText) \(debugErrorText)".lowercased()
+        if combined.contains("connection reset") || combined.contains("econnreset") {
+            return "error:connection_reset"
+        }
+        return "error:\(String(reflecting: type(of: error)))"
     }
 
     private var stateName: String {

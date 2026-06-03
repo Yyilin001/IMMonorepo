@@ -13,6 +13,7 @@ struct IMTCPConfiguration: Sendable {
     let authTimeout: TimeInterval
     let heartbeatInterval: TimeInterval
     let idleTimeout: TimeInterval
+    let listenBacklog: Int
     let maxFrameBytes: Int
     let requiresTLSTermination: Bool
 
@@ -27,6 +28,7 @@ struct IMTCPConfiguration: Sendable {
             authTimeout: Environment.get("IM_TCP_AUTH_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 10,
             heartbeatInterval: Environment.get("IM_TCP_HEARTBEAT_INTERVAL").flatMap(TimeInterval.init(_:)) ?? 30,
             idleTimeout: Environment.get("IM_TCP_IDLE_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 90,
+            listenBacklog: Environment.get("IM_TCP_LISTEN_BACKLOG").flatMap(Int.init(_:)) ?? 1024,
             maxFrameBytes: Environment.get("IM_TCP_MAX_FRAME_BYTES").flatMap(Int.init(_:)) ?? 64 * 1024,
             requiresTLSTermination: parseBooleanEnvironment("IM_TCP_REQUIRES_TLS_TERMINATION", defaultValue: false)
         )
@@ -317,7 +319,7 @@ final class IMTCPServerLifecycle: LifecycleHandler, @unchecked Sendable {
         }
 
         let bootstrap = ServerBootstrap(group: application.eventLoopGroup)
-            .serverChannelOption(ChannelOptions.backlog, value: 256)
+            .serverChannelOption(ChannelOptions.backlog, value: Int32(clamping: configuration.listenBacklog))
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 16)
@@ -347,7 +349,8 @@ final class IMTCPServerLifecycle: LifecycleHandler, @unchecked Sendable {
             "IM TCP server started",
             metadata: [
                 "host": .string(configuration.host),
-                "port": .stringConvertible(configuration.port)
+                "port": .stringConvertible(configuration.port),
+                "listenBacklog": .stringConvertible(configuration.listenBacklog)
             ]
         )
     }

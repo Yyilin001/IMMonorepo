@@ -43,6 +43,40 @@ Optional environment:
 - `IM_CONVERSATION_ID` to reuse an existing conversation
 - `IM_INTERNAL_SECRET` to exercise `/internal/im/messages/send`
 
+## HTTP Login Capacity
+
+Use this profile to test `/api/auth/login` by itself. Do not mix this result with
+TCP online capacity; it measures the HTTP auth/database/session path only.
+
+```bash
+cd IMServer/LoadTests/k6
+k6 run \
+  -e PROFILE=login-baseline \
+  -e BASE_URL=http://120.25.106.200:8080 \
+  -e ACCOUNT_FILE="$PWD/../accounts/load-10000.csv" \
+  http-auth-login.js
+```
+
+Profiles:
+
+- `login-smoke`: 1 VU for 20 seconds.
+- `login-baseline`: 200 VUs for 10 minutes.
+- `login-capacity`: 1000 VUs for 20 minutes.
+
+Optional environment:
+
+- `ACCOUNT_FILE` or `IM_ACCOUNT_FILE`: local `email,password` CSV.
+- `IM_ACCOUNT_PREFIX`, `IM_ACCOUNT_DOMAIN`, `IM_ACCOUNT_PASSWORD`,
+  `IM_ACCOUNT_START_INDEX`, and `IM_ACCOUNT_COUNT`: generate account emails
+  without a CSV.
+- `IM_LOGIN_SLEEP_MS`: add per-iteration pacing.
+
+Go/no-go:
+
+- `im_auth_login_errors` below the profile threshold.
+- `im_auth_login_latency` P95/P99 below the profile threshold.
+- Report login throughput separately from TCP online capacity.
+
 ## Hot Conversation HTTP k6
 
 Use this profile when validating a single high-frequency conversation. It sends all writes to the same conversation through the internal message endpoint, so it stresses sequence allocation, owner routing, the single-conversation write queue, outbox creation, projection lag, and fanout side effects without mixing in conversation creation noise.
@@ -181,6 +215,10 @@ Use `--login-cache-file` to separate HTTP login cost from TCP online-capacity te
 The driver reuses cached access tokens when they are still valid long enough for the
 connect ramp; otherwise it falls back to HTTP login and rewrites the cache. Use
 `--login-only true` to prewarm the cache without opening TCP connections.
+Use `--require-login-cache true` for TCP online-capacity runs where HTTP login must
+not be part of the result. In that mode, a missing, undersized, or nearly expired
+cache fails fast instead of falling back to HTTP login. Summary output includes
+`loginCacheHit`, `loginCacheRecords`, and `loginCacheValidForSeconds`.
 JIT HTTP login retries transient failures by default. Use `--login-retries` or
 `IM_TCP_LOGIN_RETRIES` and `--login-retry-delay-ms` or
 `IM_TCP_LOGIN_RETRY_DELAY_MS` to tune it. `login_failed` is logged only after all
@@ -305,6 +343,104 @@ CONNECTION_LOG_DIR=/tmp/imtcp-driver-logs \
 ./tcp_capacity_ladder.sh
 ```
 
+### Online Capacity With Login Cache
+
+This is the primary online-user capacity workflow. It prewarms access tokens first,
+then the TCP run requires `login_cache_hit`; if the formal run logs any HTTP
+`login_start`, the step is invalid.
+
+The server access-token TTL must cover
+`CONNECT_RAMP_SECONDS + HOLD_SECONDS + TIMEOUT_SECONDS + LOGIN_CACHE_TTL_GUARD_SECONDS`.
+For the 10000-online example below, set `AUTH_ACCESS_TOKEN_TTL_SECONDS=3600` on the
+server before prewarming cache.
+
+For high TCP fan-in, set the gateway listen backlog and host SYN backlog above
+the target ramp burst before starting the gateway:
+
+```bash
+sudo tee /etc/sysctl.d/99-imserver-tcp-capacity.conf >/dev/null <<'EOF'
+net.core.somaxconn = 8192
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_synack_retries = 5
+net.ipv4.tcp_abort_on_overflow = 0
+EOF
+sudo sysctl -p /etc/sysctl.d/99-imserver-tcp-capacity.conf
+sudo sed -i 's/^IM_TCP_LISTEN_BACKLOG=.*/IM_TCP_LISTEN_BACKLOG=8192/' /etc/imserver/common.env
+grep -q '^IM_TCP_LISTEN_BACKLOG=' /etc/imserver/common.env \
+  || echo 'IM_TCP_LISTEN_BACKLOG=8192' | sudo tee -a /etc/imserver/common.env
+sudo systemctl restart imserver-gateway
+```
+
+Verify that `ss -ltn sport = :9000` shows `Send-Q` at the configured backlog.
+
+For a 10000-online target with two load generators, provision at least 10000
+accounts, copy the same CSV to both load generators, then run one command per
+machine.
+
+Load generator 1:
+
+```bash
+cd IMServer/LoadTests
+IM_CONVERSATION_ID="$IM_CONVERSATION_ID" \
+SSH_HOST=root@120.25.106.200 \
+ACCOUNT_FILE="$PWD/accounts/load-10000.csv" \
+LOAD_GENERATOR_ID=1 \
+LOAD_GENERATOR_COUNT=2 \
+LADDER="5000" \
+MESSAGES=0 \
+HOLD_SECONDS=1800 \
+CONNECT_RAMP_SECONDS=900 \
+TIMEOUT_SECONDS=30 \
+HEARTBEAT_INTERVAL_SECONDS=15 \
+CONNECTION_QUEUE_POOL_SIZE=256 \
+MAX_RECONNECTS=3 \
+PREWARM_LOGIN_CACHE=true \
+LOGIN_CACHE_DIR=/tmp/imtcp-login-cache \
+LOGIN_CACHE_TTL_GUARD_SECONDS=60 \
+LOGIN_MODE=upfront \
+CONNECTION_LOG_DIR=/tmp/imtcp-driver-logs \
+./tcp_capacity_ladder.sh
+```
+
+Load generator 2 uses the same command with `LOAD_GENERATOR_ID=2`.
+
+Single-machine local sharding is available when you cannot use two load
+generators. It runs multiple TCPDriver processes on the same host so one process
+does not become the bottleneck:
+
+```bash
+cd IMServer/LoadTests
+IM_CONVERSATION_ID="$IM_CONVERSATION_ID" \
+SSH_HOST=root@120.25.106.200 \
+ACCOUNT_FILE="$PWD/accounts/load-5000.csv" \
+CONNECTIONS=5000 \
+LOCAL_DRIVER_SHARDS=5 \
+MESSAGES=0 \
+HOLD_SECONDS=1800 \
+CONNECT_RAMP_SECONDS=900 \
+TIMEOUT_SECONDS=30 \
+HEARTBEAT_INTERVAL_SECONDS=15 \
+HEARTBEAT_LOG_MODE=errors \
+CONNECTION_QUEUE_POOL_SIZE=256 \
+MAX_RECONNECTS=3 \
+PREWARM_LOGIN_CACHE=true \
+LOGIN_CACHE_DIR=/tmp/imtcp-login-cache-local-shards \
+LOGIN_CACHE_TTL_GUARD_SECONDS=60 \
+CONNECTION_LOG_DIR=/tmp/imtcp-driver-logs-local-shards \
+./tcp_capacity_local_shards.sh
+```
+
+Acceptance for each generator:
+
+- `loginCacheHit=true`, `loginCacheRecords >= connections`, and no HTTP
+  `login_start` in the formal TCP run JSONL.
+- `successes / connections >= 99.9%`.
+- `connect_timeout_fired + preauth_timeout_fired < 0.1%`.
+- `heartbeat_send_ok.sendCompletionMs` P99 below 10s; if this exceeds 10s while
+  server CPU and memory are low, split into more load generators.
+- Server `established_9000`, gateway CPU/memory, and Kafka lag are recorded during
+  the run.
+
 Use `MESSAGES`, `DEVICES_PER_USER`, `SEND_INTERVAL_MS`, `TIMEOUT_SECONDS`, and
 `COOLDOWN_SECONDS` to tune each step. Set `MESSAGES=0` plus `HOLD_SECONDS` for
 idle online capacity. Set `MESSAGES=1` or higher for a hot-conversation fanout
@@ -322,17 +458,18 @@ TCP connect. This better simulates real clients but can make the local generator
 HTTP stack part of the test. `LOGIN_RETRIES` retries transient HTTP login timeouts;
 if `login_attempt_failed` grows but `login_failed` stays at zero, login jitter was
 absorbed by retries.
+For official online-capacity numbers, use `PREWARM_LOGIN_CACHE=true` and
+`LOGIN_MODE=upfront`; reserve `LOGIN_MODE=just-in-time` for combined login+TCP
+experiments.
 `SAMPLE_DURING_SECONDS` controls remote metric sampling while the driver is still
 running; set it to `0` to disable during-run samples.
 `HEARTBEAT_INTERVAL_SECONDS` sends TCP heartbeat packets after auth succeeds. Keep
 it lower than server `IM_TCP_IDLE_TIMEOUT` when `MESSAGES=0` and `HOLD_SECONDS`
-is used to simulate long-lived online clients.
-TCPDriver schedules heartbeats against absolute deadlines and records
-`scheduleDriftMs` plus `sendCompletionMs` in `heartbeat_send_start` /
-`heartbeat_send_ok`. When idle-timeout failures appear, inspect those two fields
-before changing server idle timeout; large drift points to load-generator
-scheduling pressure, while large send completion latency points to local TCP send
-backpressure or network tail latency.
+is used to simulate long-lived online clients. `HEARTBEAT_LOG_MODE` defaults to
+`errors` for capacity runs so heartbeat success traffic is aggregated in the
+summary instead of written for every heartbeat. Use `sample` or `all` only for
+diagnostic runs. The summary prints `heartbeatSendCompletionMs` p50/p95/p99; P99
+above 10s usually means the load generator is overloaded.
 `connect_timeout_fired` means the TCP connection did not reach `nw_ready` within
 `TIMEOUT_SECONDS`. `preauth_timeout_fired` means TCP reached `nw_ready` and auth was
 sent, but `authOK` did not arrive within `TIMEOUT_SECONDS`.

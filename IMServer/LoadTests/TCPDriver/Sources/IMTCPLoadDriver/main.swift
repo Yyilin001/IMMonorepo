@@ -21,9 +21,16 @@ struct Options: Sendable {
     var protocolVersion = ProcessInfo.processInfo.environment["IM_TCP_PROTOCOL_VERSION"].flatMap(UInt64.init(_:)) ?? 9
     var connectionLogFile: String?
     var heartbeatIntervalSeconds = ProcessInfo.processInfo.environment["IM_TCP_HEARTBEAT_INTERVAL"].flatMap(Int.init(_:)) ?? 0
+    var heartbeatJitterSeconds = ProcessInfo.processInfo.environment["IM_TCP_HEARTBEAT_JITTER_SECONDS"].flatMap(Int.init(_:)) ?? -1
+    var heartbeatLogMode = ProcessInfo.processInfo.environment["IM_TCP_HEARTBEAT_LOG_MODE"] ?? "errors"
+    var heartbeatLogSampleRate = ProcessInfo.processInfo.environment["IM_TCP_HEARTBEAT_LOG_SAMPLE_RATE"].flatMap(Int.init(_:)) ?? 100
     var loginCacheFile: String?
     var loginOnly = false
     var loginMode = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_MODE"] ?? "upfront"
+    var requireLoginCache = ["1", "true", "yes", "y"]
+        .contains((ProcessInfo.processInfo.environment["IM_TCP_REQUIRE_LOGIN_CACHE"] ?? "false").lowercased())
+    var loginCacheTTLGuardSeconds = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_CACHE_TTL_GUARD_SECONDS"]
+        .flatMap(Int.init(_:)) ?? 60
     var connectionQueuePoolSize = ProcessInfo.processInfo.environment["IM_TCP_CONNECTION_QUEUE_POOL_SIZE"]
         .flatMap(Int.init(_:)) ?? max(8, min(64, ProcessInfo.processInfo.activeProcessorCount * 4))
     var maxReconnects = ProcessInfo.processInfo.environment["IM_TCP_MAX_RECONNECTS"].flatMap(Int.init(_:)) ?? 0
@@ -65,6 +72,12 @@ struct LoginCacheRecord: Codable, Sendable {
     let expiresAtMs: Int64
 }
 
+struct LoginCacheLoadResult: Sendable {
+    let logins: [ConnectionLogin]
+    let records: Int
+    let validForSeconds: Int
+}
+
 struct ConnectionResult: Sendable {
     let success: Bool
     let failureReason: String?
@@ -77,6 +90,7 @@ struct ConnectionResult: Sendable {
     let serverErrors: Int
     let heartbeatSends: Int
     let heartbeatAcks: Int
+    let heartbeatSendCompletionMillis: [Double]
     let ackLatenciesMillis: [Double]
     let canonicalLatenciesMillis: [Double]
 }
@@ -188,6 +202,151 @@ final class ConnectionQueuePool: @unchecked Sendable {
     }
 }
 
+struct GlobalHoldBarrierRelease: Sendable {
+    let success: Bool
+    let reason: String
+    let authenticated: Int
+    let target: Int
+    let elapsedMillis: Int
+}
+
+final class GlobalHoldBarrier: @unchecked Sendable {
+    typealias Waiter = @Sendable (GlobalHoldBarrierRelease) -> Void
+
+    private let lock = NSLock()
+    private let target: Int
+    private let logger: ConnectionEventLogger
+    private let startedAt = Date()
+    private var authenticated = 0
+    private var waiters: [Waiter] = []
+    private var release: GlobalHoldBarrierRelease?
+
+    init(target: Int, logger: ConnectionEventLogger) {
+        self.target = max(1, target)
+        self.logger = logger
+    }
+
+    func scheduleTimeout(seconds: Int, queue: DispatchQueue) {
+        let timeoutSeconds = max(1, seconds)
+        logger.log(
+            "global_hold_barrier_timeout_scheduled",
+            fields: [
+                "target": String(target),
+                "timeoutSeconds": String(timeoutSeconds)
+            ]
+        )
+        queue.asyncAfter(deadline: .now() + .seconds(timeoutSeconds)) {
+            self.releaseIfNeeded(success: false, reason: "global_hold_barrier_timeout")
+        }
+    }
+
+    func arriveAndWait(
+        connectionIndex: Int,
+        loginIndex: Int,
+        queue: DispatchQueue,
+        onRelease: @escaping Waiter
+    ) {
+        let callback: Waiter = { release in
+            queue.async {
+                onRelease(release)
+            }
+        }
+
+        let releaseToDeliver: GlobalHoldBarrierRelease?
+        let callbacksToDeliver: [Waiter]
+        let currentAuthenticated: Int
+        lock.lock()
+        if let release {
+            lock.unlock()
+            logger.log(
+                "global_hold_barrier_already_released",
+                connectionIndex: connectionIndex,
+                loginIndex: loginIndex,
+                fields: [
+                    "success": String(release.success),
+                    "reason": release.reason,
+                    "authenticated": String(release.authenticated),
+                    "target": String(release.target)
+                ]
+            )
+            callback(release)
+            return
+        }
+
+        authenticated += 1
+        currentAuthenticated = authenticated
+        waiters.append(callback)
+        if authenticated >= target {
+            releaseToDeliver = makeReleaseLocked(success: true, reason: "all_authenticated")
+            callbacksToDeliver = waiters
+            waiters.removeAll()
+        } else {
+            releaseToDeliver = nil
+            callbacksToDeliver = []
+        }
+        lock.unlock()
+
+        logger.log(
+            "global_hold_barrier_auth_ok",
+            connectionIndex: connectionIndex,
+            loginIndex: loginIndex,
+            fields: [
+                "authenticated": String(currentAuthenticated),
+                "target": String(target)
+            ]
+        )
+
+        if let releaseToDeliver {
+            logRelease(releaseToDeliver)
+            callbacksToDeliver.forEach { $0(releaseToDeliver) }
+        }
+    }
+
+    private func releaseIfNeeded(success: Bool, reason: String) {
+        let releaseToDeliver: GlobalHoldBarrierRelease?
+        let callbacksToDeliver: [Waiter]
+        lock.lock()
+        if release != nil {
+            lock.unlock()
+            return
+        }
+        releaseToDeliver = makeReleaseLocked(success: success, reason: reason)
+        callbacksToDeliver = waiters
+        waiters.removeAll()
+        lock.unlock()
+
+        if let releaseToDeliver {
+            logRelease(releaseToDeliver)
+            callbacksToDeliver.forEach { $0(releaseToDeliver) }
+        }
+    }
+
+    private func makeReleaseLocked(success: Bool, reason: String) -> GlobalHoldBarrierRelease {
+        let value = GlobalHoldBarrierRelease(
+            success: success,
+            reason: reason,
+            authenticated: authenticated,
+            target: target,
+            elapsedMillis: Int(Date().timeIntervalSince(startedAt) * 1_000)
+        )
+        release = value
+        return value
+    }
+
+    private func logRelease(_ release: GlobalHoldBarrierRelease) {
+        logger.log(
+            "global_hold_barrier_released",
+            fields: [
+                "success": String(release.success),
+                "reason": release.reason,
+                "authenticated": String(release.authenticated),
+                "target": String(release.target),
+                "elapsedMs": String(release.elapsedMillis)
+            ]
+        )
+    }
+}
+
 func parseOptions() -> Options {
     var options = Options()
     var args = Array(CommandLine.arguments.dropFirst())
@@ -234,12 +393,22 @@ func parseOptions() -> Options {
             options.connectionLogFile = value
         case "--heartbeat-interval-seconds":
             options.heartbeatIntervalSeconds = max(0, Int(value) ?? options.heartbeatIntervalSeconds)
+        case "--heartbeat-jitter-seconds":
+            options.heartbeatJitterSeconds = max(0, Int(value) ?? options.heartbeatJitterSeconds)
+        case "--heartbeat-log-mode":
+            options.heartbeatLogMode = value
+        case "--heartbeat-log-sample-rate":
+            options.heartbeatLogSampleRate = max(1, Int(value) ?? options.heartbeatLogSampleRate)
         case "--login-cache-file":
             options.loginCacheFile = value
         case "--login-only":
             options.loginOnly = ["1", "true", "yes", "y"].contains(value.lowercased())
         case "--login-mode":
             options.loginMode = value
+        case "--require-login-cache":
+            options.requireLoginCache = ["1", "true", "yes", "y"].contains(value.lowercased())
+        case "--login-cache-ttl-guard-seconds":
+            options.loginCacheTTLGuardSeconds = max(0, Int(value) ?? options.loginCacheTTLGuardSeconds)
         case "--connection-queue-pool-size":
             options.connectionQueuePoolSize = max(1, Int(value) ?? options.connectionQueuePoolSize)
         case "--max-reconnects":
@@ -355,7 +524,17 @@ func nowEpochMillis() -> Int64 {
     Int64(Date().timeIntervalSince1970 * 1_000)
 }
 
-func cachedLogins(options: Options, loginCount: Int, logger: ConnectionEventLogger) throws -> [ConnectionLogin]? {
+func requiredLoginCacheValiditySeconds(options: Options) -> Int {
+    max(
+        options.connectRampSeconds
+            + options.holdSeconds
+            + options.timeoutSeconds
+            + options.loginCacheTTLGuardSeconds,
+        60
+    )
+}
+
+func cachedLogins(options: Options, loginCount: Int, logger: ConnectionEventLogger) throws -> LoginCacheLoadResult? {
     guard let path = options.loginCacheFile, !path.isEmpty else {
         return nil
     }
@@ -380,15 +559,21 @@ func cachedLogins(options: Options, loginCount: Int, logger: ConnectionEventLogg
         return nil
     }
 
-    let validUntilMs = nowEpochMillis() + Int64(max(options.connectRampSeconds + options.timeoutSeconds + 30, 60) * 1_000)
+    let requiredValidForSeconds = requiredLoginCacheValiditySeconds(options: options)
+    let validUntilMs = nowEpochMillis() + Int64(requiredValidForSeconds * 1_000)
     let selected = Array(records.prefix(loginCount))
+    let nowMs = nowEpochMillis()
+    let validForSeconds = selected
+        .map { Int(($0.expiresAtMs - nowMs) / 1_000) }
+        .min() ?? 0
     guard selected.allSatisfy({ $0.expiresAtMs > validUntilMs }) else {
         logger.log(
             "login_cache_miss",
             fields: [
                 "path": path,
                 "reason": "expired_or_too_close",
-                "requiredValidForSeconds": String(max(options.connectRampSeconds + options.timeoutSeconds + 30, 60))
+                "requiredValidForSeconds": String(requiredValidForSeconds),
+                "validForSeconds": String(validForSeconds)
             ]
         )
         return nil
@@ -398,11 +583,12 @@ func cachedLogins(options: Options, loginCount: Int, logger: ConnectionEventLogg
         "login_cache_hit",
         fields: [
             "path": path,
-            "records": String(selected.count)
+            "records": String(selected.count),
+            "validForSeconds": String(validForSeconds),
+            "requiredValidForSeconds": String(requiredValidForSeconds)
         ]
     )
-    let nowMs = nowEpochMillis()
-    return selected.map { record in
+    let logins = selected.map { record in
         ConnectionLogin(
             auth: LoginResponse(
                 accessToken: record.accessToken,
@@ -415,6 +601,11 @@ func cachedLogins(options: Options, loginCount: Int, logger: ConnectionEventLogg
             deviceName: record.deviceName
         )
     }
+    return LoginCacheLoadResult(
+        logins: logins,
+        records: selected.count,
+        validForSeconds: validForSeconds
+    )
 }
 
 func writeLoginCache(path: String?, logins: [ConnectionLogin], logger: ConnectionEventLogger) throws {
@@ -881,6 +1072,7 @@ final class ConnectionState: @unchecked Sendable {
     private var reconnects = 0
     private var heartbeatSends = 0
     private var heartbeatAcks = 0
+    private var heartbeatSendCompletionMillis: [Double] = []
     private var didStartMessages = false
     private var didAuthenticate = false
     private var didReachReady = false
@@ -930,6 +1122,12 @@ final class ConnectionState: @unchecked Sendable {
     func recordHeartbeatSend() {
         lock.lock()
         heartbeatSends += 1
+        lock.unlock()
+    }
+
+    func recordHeartbeatSendCompletion(milliseconds: Double) {
+        lock.lock()
+        heartbeatSendCompletionMillis.append(milliseconds)
         lock.unlock()
     }
 
@@ -1076,6 +1274,7 @@ final class ConnectionState: @unchecked Sendable {
             serverErrors: serverErrors,
             heartbeatSends: heartbeatSends,
             heartbeatAcks: heartbeatAcks,
+            heartbeatSendCompletionMillis: heartbeatSendCompletionMillis,
             ackLatenciesMillis: ackLatenciesMillis,
             canonicalLatenciesMillis: canonicalLatenciesMillis
         )
@@ -1102,10 +1301,42 @@ final class ConnectionState: @unchecked Sendable {
     }
 }
 
+func shouldLogHeartbeat(options: Options, connectionIndex: Int) -> Bool {
+    switch options.heartbeatLogMode.lowercased() {
+    case "all", "verbose":
+        return true
+    case "sample", "sampled":
+        return connectionIndex % max(1, options.heartbeatLogSampleRate) == 0
+    case "none", "off", "errors", "error":
+        return false
+    default:
+        return false
+    }
+}
+
+func heartbeatInitialJitterNanoseconds(options: Options, connectionIndex: Int, loginIndex: Int) -> UInt64 {
+    guard options.heartbeatIntervalSeconds > 0 else {
+        return 0
+    }
+
+    let jitterSeconds = options.heartbeatJitterSeconds >= 0
+        ? options.heartbeatJitterSeconds
+        : options.heartbeatIntervalSeconds
+    let cappedJitterSeconds = max(0, min(jitterSeconds, options.heartbeatIntervalSeconds))
+    guard cappedJitterSeconds > 0 else {
+        return 0
+    }
+
+    let jitterMillisRange = UInt64(cappedJitterSeconds * 1_000)
+    let stableValue = UInt64(bitPattern: Int64(connectionIndex &* 1_103_515_245) ^ Int64(loginIndex &* 12_345))
+    return (stableValue % jitterMillisRange) * 1_000_000
+}
+
 func receiveFrames(
     connection: NWConnection,
     state: ConnectionState,
     logger: ConnectionEventLogger,
+    options: Options,
     connectionIndex: Int,
     generation: Int,
     buffer: Data = Data(),
@@ -1133,19 +1364,22 @@ func receiveFrames(
             nextBuffer.append(data)
             for frame in ProtoWire.frames(from: &nextBuffer) {
                 guard let packet = ProtoWire.decodePacket(frame) else { continue }
-                logger.log(
-                    "packet_received",
-                    connectionIndex: connectionIndex,
-                    fields: [
-                        "generation": String(generation),
-                        "type": packet.type.logName,
-                        "requestID": packet.requestID ?? "",
-                        "status": packet.payload["status"] ?? "",
-                        "clientMessageID": packet.payload["clientMessageID"] ?? ""
-                    ]
-                )
+                let isHighFrequencyHeartbeat = packet.type == .heartbeatAck || packet.type == .heartbeat
+                if !isHighFrequencyHeartbeat || shouldLogHeartbeat(options: options, connectionIndex: connectionIndex) {
+                    logger.log(
+                        "packet_received",
+                        connectionIndex: connectionIndex,
+                        fields: [
+                            "generation": String(generation),
+                            "type": packet.type.logName,
+                            "requestID": packet.requestID ?? "",
+                            "status": packet.payload["status"] ?? "",
+                            "clientMessageID": packet.payload["clientMessageID"] ?? ""
+                        ]
+                    )
+                }
                 state.recordPacket(packet)
-                if packet.type == .heartbeatAck {
+                if packet.type == .heartbeatAck && shouldLogHeartbeat(options: options, connectionIndex: connectionIndex) {
                     logger.log("heartbeat_ack_received", connectionIndex: connectionIndex)
                 }
                 if packet.type == .authOK {
@@ -1167,6 +1401,7 @@ func receiveFrames(
             connection: connection,
             state: state,
             logger: logger,
+            options: options,
             connectionIndex: connectionIndex,
             generation: generation,
             buffer: nextBuffer,
@@ -1186,7 +1421,6 @@ func scheduleHeartbeatLoop(
     queue: DispatchQueue,
     generation: Int,
     sequence: Int = 1,
-    nextDeadline: DispatchTime? = nil,
     onDisconnected: @escaping @Sendable (String) -> Void
 ) {
     guard options.heartbeatIntervalSeconds > 0 else {
@@ -1194,7 +1428,10 @@ func scheduleHeartbeatLoop(
     }
 
     let intervalNanos = UInt64(options.heartbeatIntervalSeconds) * 1_000_000_000
-    let scheduledDeadline = nextDeadline ?? (DispatchTime.now() + .nanoseconds(Int(intervalNanos)))
+    let delayNanos = sequence == 1
+        ? heartbeatInitialJitterNanoseconds(options: options, connectionIndex: connectionIndex, loginIndex: loginIndex)
+        : intervalNanos
+    let scheduledDeadline = DispatchTime.now() + .nanoseconds(Int(delayNanos))
 
     queue.asyncAfter(deadline: scheduledDeadline) {
         guard state.isActive(generation: generation) else {
@@ -1212,31 +1449,19 @@ func scheduleHeartbeatLoop(
             protocolVersion: options.protocolVersion
         )
         state.recordHeartbeatSend()
-        logger.log(
-            "heartbeat_send_start",
-            connectionIndex: connectionIndex,
-            loginIndex: loginIndex,
-            fields: [
-                "sequence": String(sequence),
-                "requestID": requestID,
-                "generation": String(generation),
-                "scheduleDriftMs": String(max(0, driftMillis / 1_000_000))
-            ]
-        )
-        let followingDeadline = DispatchTime(uptimeNanoseconds: scheduledDeadline.uptimeNanoseconds + intervalNanos)
-        scheduleHeartbeatLoop(
-            connection: connection,
-            state: state,
-            logger: logger,
-            connectionIndex: connectionIndex,
-            loginIndex: loginIndex,
-            options: options,
-            queue: queue,
-            generation: generation,
-            sequence: sequence + 1,
-            nextDeadline: followingDeadline,
-            onDisconnected: onDisconnected
-        )
+        if shouldLogHeartbeat(options: options, connectionIndex: connectionIndex) {
+            logger.log(
+                "heartbeat_send_start",
+                connectionIndex: connectionIndex,
+                loginIndex: loginIndex,
+                fields: [
+                    "sequence": String(sequence),
+                    "requestID": requestID,
+                    "generation": String(generation),
+                    "scheduleDriftMs": String(max(0, driftMillis / 1_000_000))
+                ]
+            )
+        }
         connection.send(content: heartbeatPacket, completion: .contentProcessed { error in
             if error != nil {
                 logger.log(
@@ -1253,15 +1478,31 @@ func scheduleHeartbeatLoop(
                 return
             }
 
-            logger.log(
-                "heartbeat_send_ok",
+            let sendCompletionMillis = Date().timeIntervalSince(sendStartedAt) * 1_000
+            state.recordHeartbeatSendCompletion(milliseconds: sendCompletionMillis)
+            if shouldLogHeartbeat(options: options, connectionIndex: connectionIndex) {
+                logger.log(
+                    "heartbeat_send_ok",
+                    connectionIndex: connectionIndex,
+                    loginIndex: loginIndex,
+                    fields: [
+                        "sequence": String(sequence),
+                        "generation": String(generation),
+                        "sendCompletionMs": String(Int(sendCompletionMillis))
+                    ]
+                )
+            }
+            scheduleHeartbeatLoop(
+                connection: connection,
+                state: state,
+                logger: logger,
                 connectionIndex: connectionIndex,
                 loginIndex: loginIndex,
-                fields: [
-                    "sequence": String(sequence),
-                    "generation": String(generation),
-                    "sendCompletionMs": String(Int(Date().timeIntervalSince(sendStartedAt) * 1_000))
-                ]
+                options: options,
+                queue: queue,
+                generation: generation,
+                sequence: sequence + 1,
+                onDisconnected: onDisconnected
             )
         })
     }
@@ -1272,7 +1513,8 @@ func runConnection(
     options: Options,
     login: ConnectionLogin,
     logger: ConnectionEventLogger,
-    queue: DispatchQueue
+    queue: DispatchQueue,
+    globalHoldBarrier: GlobalHoldBarrier?
 ) async -> ConnectionResult {
     await withCheckedContinuation { continuation in
         let state = ConnectionState(
@@ -1346,24 +1588,69 @@ func runConnection(
                 return
             }
             if options.messagesPerConnection == 0 {
-                logger.log(
-                    "hold_scheduled",
-                    connectionIndex: index,
-                    loginIndex: login.loginIndex,
-                    fields: [
-                        "generation": String(generation),
-                        "holdSeconds": String(options.holdSeconds)
-                    ]
-                )
-                queue.asyncAfter(deadline: .now() + .seconds(options.holdSeconds)) {
-                    logger.log("hold_complete", connectionIndex: index, loginIndex: login.loginIndex)
-                    state.finish(success: true)
-                }
-                queue.asyncAfter(deadline: .now() + .seconds(options.holdSeconds + options.timeoutSeconds)) {
-                    if state.finish(success: false, reason: "hold_timeout") {
-                        logger.log("hold_timeout_fired", connectionIndex: index, loginIndex: login.loginIndex)
+                @Sendable func scheduleHold() {
+                    logger.log(
+                        "hold_scheduled",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: [
+                            "generation": String(generation),
+                            "holdSeconds": String(options.holdSeconds),
+                            "globalHoldBarrier": String(globalHoldBarrier != nil)
+                        ]
+                    )
+                    queue.asyncAfter(deadline: .now() + .seconds(options.holdSeconds)) {
+                        logger.log("hold_complete", connectionIndex: index, loginIndex: login.loginIndex)
+                        state.finish(success: true)
+                    }
+                    queue.asyncAfter(deadline: .now() + .seconds(options.holdSeconds + options.timeoutSeconds)) {
+                        if state.finish(success: false, reason: "hold_timeout") {
+                            logger.log("hold_timeout_fired", connectionIndex: index, loginIndex: login.loginIndex)
+                        }
                     }
                 }
+
+                if let globalHoldBarrier {
+                    logger.log(
+                        "global_hold_barrier_wait",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: [
+                            "generation": String(generation),
+                            "holdSeconds": String(options.holdSeconds)
+                        ]
+                    )
+                    globalHoldBarrier.arriveAndWait(
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        queue: queue
+                    ) { release in
+                        guard state.isActive(generation: generation) else {
+                            return
+                        }
+                        logger.log(
+                            "global_hold_barrier_done",
+                            connectionIndex: index,
+                            loginIndex: login.loginIndex,
+                            fields: [
+                                "generation": String(generation),
+                                "success": String(release.success),
+                                "reason": release.reason,
+                                "authenticated": String(release.authenticated),
+                                "target": String(release.target),
+                                "barrierElapsedMs": String(release.elapsedMillis)
+                            ]
+                        )
+                        if release.success {
+                            scheduleHold()
+                        } else {
+                            state.finish(success: false, reason: release.reason)
+                        }
+                    }
+                    return
+                }
+
+                scheduleHold()
                 return
             }
 
@@ -1483,6 +1770,7 @@ func runConnection(
                         connection: connection,
                         state: state,
                         logger: logger,
+                        options: options,
                         connectionIndex: index,
                         generation: generation,
                         onAuthenticated: { shouldStartMessages in
@@ -1646,12 +1934,17 @@ connectionLogger.log(
         "timeoutSeconds": String(options.timeoutSeconds),
         "protocolVersion": String(options.protocolVersion),
         "heartbeatIntervalSeconds": String(options.heartbeatIntervalSeconds),
+        "heartbeatJitterSeconds": String(options.heartbeatJitterSeconds),
+        "heartbeatLogMode": options.heartbeatLogMode,
+        "heartbeatLogSampleRate": String(options.heartbeatLogSampleRate),
         "connectionQueuePoolSize": String(options.connectionQueuePoolSize),
         "maxReconnects": String(options.maxReconnects),
         "reconnectDelayMillis": String(options.reconnectDelayMillis),
         "loginRetries": String(options.loginRetries),
         "loginRetryDelayMillis": String(options.loginRetryDelayMillis),
         "loginCacheFile": options.loginCacheFile ?? "",
+        "requireLoginCache": String(options.requireLoginCache),
+        "loginCacheTTLGuardSeconds": String(options.loginCacheTTLGuardSeconds),
         "loginOnly": String(options.loginOnly),
         "loginMode": options.loginMode
     ]
@@ -1661,12 +1954,25 @@ let loginCount = options.accountFile == nil ? options.devicesPerUser : options.c
 let justInTimeLogin = options.loginMode == "just-in-time" && !options.loginOnly
 let loginURLSession = makeLoginURLSession(options: options)
 let connectionLogins: [ConnectionLogin]
+var loginCacheHit = false
+var loginCacheRecords = 0
+var loginCacheValidForSeconds = 0
 if justInTimeLogin {
     connectionLogger.log("login_phase_deferred", fields: ["loginMode": options.loginMode])
     connectionLogins = []
 } else if let cached = try cachedLogins(options: options, loginCount: loginCount, logger: connectionLogger) {
-    connectionLogins = cached
+    loginCacheHit = true
+    loginCacheRecords = cached.records
+    loginCacheValidForSeconds = cached.validForSeconds
+    connectionLogins = cached.logins
 } else {
+    if options.requireLoginCache && !options.loginOnly {
+        fputs(
+            "required login cache is missing, too small, or expires too soon; run --login-only true with the same --login-cache-file first\n",
+            stderr
+        )
+        exit(4)
+    }
     connectionLogins = try await concurrentMap(Array(0..<loginCount), concurrency: options.loginConcurrency) { loginIndex in
         let credential = accountCredentials[loginIndex % accountCredentials.count]
         return try await loginForConnection(
@@ -1678,15 +1984,39 @@ if justInTimeLogin {
         )
     }
     try writeLoginCache(path: options.loginCacheFile, logins: connectionLogins, logger: connectionLogger)
+    loginCacheRecords = connectionLogins.count
+    loginCacheValidForSeconds = connectionLogins.map(\.auth.expiresIn).min() ?? 0
 }
-connectionLogger.log("login_phase_complete", fields: ["loginCount": String(connectionLogins.count)])
+connectionLogger.log(
+    "login_phase_complete",
+    fields: [
+        "loginCount": String(connectionLogins.count),
+        "loginCacheHit": String(loginCacheHit),
+        "loginCacheRecords": String(loginCacheRecords),
+        "loginCacheValidForSeconds": String(loginCacheValidForSeconds)
+    ]
+)
 if options.loginOnly {
-    print("login-only complete logins=\(connectionLogins.count) cacheFile=\(options.loginCacheFile ?? "<none>")")
+    print("login-only complete logins=\(connectionLogins.count) cacheFile=\(options.loginCacheFile ?? "<none>") loginCacheHit=\(loginCacheHit) loginCacheRecords=\(loginCacheRecords) loginCacheValidForSeconds=\(loginCacheValidForSeconds)")
     exit(0)
 }
 let startedAt = Date()
 let loginLimiter = AsyncLimiter(permits: options.loginConcurrency)
 let connectionQueuePool = ConnectionQueuePool(size: options.connectionQueuePoolSize)
+let globalHoldBarrier = options.messagesPerConnection == 0
+    ? GlobalHoldBarrier(target: options.connections, logger: connectionLogger)
+    : nil
+if let globalHoldBarrier {
+    let barrierTimeoutSeconds = options.connectRampSeconds + options.timeoutSeconds + 5
+    globalHoldBarrier.scheduleTimeout(seconds: barrierTimeoutSeconds, queue: DispatchQueue.global())
+    connectionLogger.log(
+        "global_hold_barrier_enabled",
+        fields: [
+            "target": String(options.connections),
+            "timeoutSeconds": String(barrierTimeoutSeconds)
+        ]
+    )
+}
 connectionLogger.log(
     "connection_queue_pool_ready",
     fields: ["connectionQueuePoolSize": String(connectionQueuePool.size)]
@@ -1732,6 +2062,7 @@ let results = await withTaskGroup(of: ConnectionResult.self) { group in
                         serverErrors: 0,
                         heartbeatSends: 0,
                         heartbeatAcks: 0,
+                        heartbeatSendCompletionMillis: [],
                         ackLatenciesMillis: [],
                         canonicalLatenciesMillis: []
                     )
@@ -1744,7 +2075,8 @@ let results = await withTaskGroup(of: ConnectionResult.self) { group in
                 options: options,
                 login: login,
                 logger: connectionLogger,
-                queue: connectionQueuePool.queue(for: index)
+                queue: connectionQueuePool.queue(for: index),
+                globalHoldBarrier: globalHoldBarrier
             )
         }
     }
@@ -1766,6 +2098,7 @@ let reconnects = results.reduce(0) { $0 + $1.reconnects }
 let serverErrors = results.reduce(0) { $0 + $1.serverErrors }
 let heartbeatSends = results.reduce(0) { $0 + $1.heartbeatSends }
 let heartbeatAcks = results.reduce(0) { $0 + $1.heartbeatAcks }
+let heartbeatSendCompletionMillis = results.flatMap(\.heartbeatSendCompletionMillis)
 let ackLatencies = results.flatMap(\.ackLatenciesMillis)
 let canonicalLatencies = results.flatMap(\.canonicalLatenciesMillis)
 let failureReasons = results.reduce(into: [String: Int]()) { counts, result in
@@ -1776,8 +2109,11 @@ let ackSuccessRate = sent == 0 ? Double(successes) / Double(max(options.connecti
 let canonicalSuccessRate = sent == 0 ? Double(successes) / Double(max(options.connections, 1)) : Double(canonicalMessages) / Double(sent)
 
 print("profile=\(options.profile) connections=\(options.connections) accounts=\(accountCredentials.count) devicesPerUser=\(options.devicesPerUser) queuePoolSize=\(connectionQueuePool.size) maxReconnects=\(options.maxReconnects) successes=\(successes) elapsed=\(String(format: "%.2f", elapsed))s")
+print("loginCacheHit=\(loginCacheHit) loginCacheRecords=\(loginCacheRecords) loginCacheValidForSeconds=\(loginCacheValidForSeconds) requireLoginCache=\(options.requireLoginCache)")
+print("globalHoldBarrier=\(globalHoldBarrier != nil)")
 print("sent=\(sent) ack=\(acknowledgements) canonical=\(canonicalMessages) duplicateCanonical=\(duplicateCanonicalMessages) fanout=\(fanoutMessages) reconnects=\(reconnects) serverErrors=\(serverErrors)")
 print("heartbeat sent=\(heartbeatSends) ack=\(heartbeatAcks) intervalSeconds=\(options.heartbeatIntervalSeconds)")
+print("heartbeatSendCompletionMs p50=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.50))) p95=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.95))) p99=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.99)))")
 print("ackSuccessRate=\(String(format: "%.4f", ackSuccessRate)) canonicalSuccessRate=\(String(format: "%.4f", canonicalSuccessRate))")
 if !failureReasons.isEmpty {
     let summary = failureReasons
@@ -1807,6 +2143,11 @@ connectionLogger.log(
         "serverErrors": String(serverErrors),
         "heartbeatSends": String(heartbeatSends),
         "heartbeatAcks": String(heartbeatAcks),
+        "heartbeatSendCompletionP95Ms": String(Int(percentile(heartbeatSendCompletionMillis, 0.95))),
+        "heartbeatSendCompletionP99Ms": String(Int(percentile(heartbeatSendCompletionMillis, 0.99))),
+        "loginCacheHit": String(loginCacheHit),
+        "loginCacheRecords": String(loginCacheRecords),
+        "loginCacheValidForSeconds": String(loginCacheValidForSeconds),
         "elapsedMs": String(Int(elapsed * 1_000))
     ]
 )

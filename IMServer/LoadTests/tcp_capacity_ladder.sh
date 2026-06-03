@@ -20,12 +20,22 @@ CONNECT_RAMP_SECONDS="${CONNECT_RAMP_SECONDS:-0}"
 LOGIN_CONCURRENCY="${LOGIN_CONCURRENCY:-5}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-30}"
 HEARTBEAT_INTERVAL_SECONDS="${HEARTBEAT_INTERVAL_SECONDS:-0}"
+HEARTBEAT_JITTER_SECONDS="${HEARTBEAT_JITTER_SECONDS:--1}"
+HEARTBEAT_LOG_MODE="${HEARTBEAT_LOG_MODE:-errors}"
+HEARTBEAT_LOG_SAMPLE_RATE="${HEARTBEAT_LOG_SAMPLE_RATE:-100}"
 CONNECTION_QUEUE_POOL_SIZE="${CONNECTION_QUEUE_POOL_SIZE:-256}"
 MAX_RECONNECTS="${MAX_RECONNECTS:-0}"
 RECONNECT_DELAY_MS="${RECONNECT_DELAY_MS:-1000}"
 LOGIN_RETRIES="${LOGIN_RETRIES:-2}"
 LOGIN_RETRY_DELAY_MS="${LOGIN_RETRY_DELAY_MS:-1000}"
 LOGIN_MODE="${LOGIN_MODE:-upfront}"
+LOGIN_CACHE_DIR="${LOGIN_CACHE_DIR:-/tmp/imtcp-login-cache}"
+PREWARM_LOGIN_CACHE="${PREWARM_LOGIN_CACHE:-auto}"
+LOGIN_CACHE_TTL_GUARD_SECONDS="${LOGIN_CACHE_TTL_GUARD_SECONDS:-60}"
+LOAD_GENERATOR_ID="${LOAD_GENERATOR_ID:-1}"
+LOAD_GENERATOR_COUNT="${LOAD_GENERATOR_COUNT:-1}"
+ACCOUNT_SHARD_OFFSET="${ACCOUNT_SHARD_OFFSET:-}"
+ACCOUNT_SHARD_LIMIT="${ACCOUNT_SHARD_LIMIT:-}"
 COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-15}"
 SAMPLE_DURING_SECONDS="${SAMPLE_DURING_SECONDS:-15}"
 PROTOCOL_VERSION="${PROTOCOL_VERSION:-9}"
@@ -59,6 +69,93 @@ echo "-- summary projection lag --"
 REMOTE
 }
 
+bool_enabled() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "${value}" in
+    1|true|yes|y|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+effective_prewarm_login_cache() {
+  if [[ "${PREWARM_LOGIN_CACHE}" == "auto" ]]; then
+    [[ "${MESSAGES}" == "0" ]]
+    return
+  fi
+  bool_enabled "${PREWARM_LOGIN_CACHE}"
+}
+
+make_account_shard() {
+  local connections="$1"
+  if [[ -z "${ACCOUNT_FILE}" ]]; then
+    return
+  fi
+
+  local total_accounts
+  total_accounts="$(grep -v '^[[:space:]]*#' "${ACCOUNT_FILE}" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+  if [[ "${total_accounts}" -eq 0 ]]; then
+    echo "ACCOUNT_FILE has no usable rows: ${ACCOUNT_FILE}" >&2
+    exit 1
+  fi
+
+  local offset limit
+  if [[ -n "${ACCOUNT_SHARD_OFFSET}" ]]; then
+    offset="${ACCOUNT_SHARD_OFFSET}"
+  else
+    offset=$(( (LOAD_GENERATOR_ID - 1) * ((total_accounts + LOAD_GENERATOR_COUNT - 1) / LOAD_GENERATOR_COUNT) ))
+  fi
+  if [[ -n "${ACCOUNT_SHARD_LIMIT}" ]]; then
+    limit="${ACCOUNT_SHARD_LIMIT}"
+  else
+    limit=$(( (total_accounts + LOAD_GENERATOR_COUNT - 1) / LOAD_GENERATOR_COUNT ))
+  fi
+
+  if (( offset < 0 || offset >= total_accounts )); then
+    echo "Account shard offset is out of range: offset=${offset}, total=${total_accounts}" >&2
+    exit 1
+  fi
+  if (( limit < connections )); then
+    echo "Account shard limit ${limit} is smaller than connections ${connections}; increase ACCOUNT_SHARD_LIMIT or reduce this ladder step." >&2
+    exit 1
+  fi
+
+  local shard_file="${TMPDIR:-/tmp}/imtcp-accounts-lg${LOAD_GENERATOR_ID}-of-${LOAD_GENERATOR_COUNT}-${offset}-${limit}.csv"
+  grep -v '^[[:space:]]*#' "${ACCOUNT_FILE}" \
+    | sed '/^[[:space:]]*$/d' \
+    | awk -v offset="${offset}" -v limit="${limit}" 'NR > offset && NR <= offset + limit { print }' >"${shard_file}"
+
+  local shard_count
+  shard_count="$(wc -l <"${shard_file}" | tr -d ' ')"
+  if (( shard_count < connections )); then
+    echo "Account shard has ${shard_count} rows, smaller than connections ${connections}." >&2
+    exit 1
+  fi
+  echo "${shard_file}"
+}
+
+jsonl_count() {
+  local event="$1"
+  local file="$2"
+  if [[ ! -f "${file}" ]]; then
+    echo 0
+    return
+  fi
+  grep -c "\"event\":\"${event}\"" "${file}" || true
+}
+
+ensure_login_cache_hit() {
+  local file="$1"
+  if [[ "$(jsonl_count "login_cache_hit" "${file}")" == "0" ]]; then
+    echo "Expected login_cache_hit in ${file}; TCP online capacity run is invalid without cached login tokens." >&2
+    exit 1
+  fi
+  if [[ "$(jsonl_count "login_start" "${file}")" != "0" ]]; then
+    echo "Unexpected HTTP login_start in strict TCP online capacity run: ${file}" >&2
+    exit 1
+  fi
+}
+
 echo "Building TCP load driver..."
 swift build -c release --package-path "${TCP_DRIVER_DIR}"
 
@@ -74,6 +171,17 @@ for connections in ${LADDER}; do
   echo
   echo "== TCP ladder step: connections=${connections}, devices=${devices_per_user}, messages=${MESSAGES}, hold=${HOLD_SECONDS}s, ramp=${CONNECT_RAMP_SECONDS}s =="
   collect_remote_metrics "before ${connections}"
+
+  step_account_file="${ACCOUNT_FILE}"
+  if [[ -n "${ACCOUNT_FILE}" ]]; then
+    step_account_file="$(make_account_shard "${connections}")"
+    echo "Account shard: ${step_account_file}"
+  fi
+
+  effective_connection_log_dir="${CONNECTION_LOG_DIR}"
+  if effective_prewarm_login_cache && [[ -z "${effective_connection_log_dir}" ]]; then
+    effective_connection_log_dir="/tmp/imtcp-driver-logs"
+  fi
 
   driver_args=(
     --profile custom
@@ -93,21 +201,64 @@ for connections in ${LADDER}; do
     --timeout-seconds "${TIMEOUT_SECONDS}"
     --protocol-version "${PROTOCOL_VERSION}"
     --heartbeat-interval-seconds "${HEARTBEAT_INTERVAL_SECONDS}"
+    --heartbeat-jitter-seconds "${HEARTBEAT_JITTER_SECONDS}"
+    --heartbeat-log-mode "${HEARTBEAT_LOG_MODE}"
+    --heartbeat-log-sample-rate "${HEARTBEAT_LOG_SAMPLE_RATE}"
     --connection-queue-pool-size "${CONNECTION_QUEUE_POOL_SIZE}"
     --max-reconnects "${MAX_RECONNECTS}"
     --reconnect-delay-ms "${RECONNECT_DELAY_MS}"
     --login-retries "${LOGIN_RETRIES}"
     --login-retry-delay-ms "${LOGIN_RETRY_DELAY_MS}"
     --login-mode "${LOGIN_MODE}"
+    --login-cache-ttl-guard-seconds "${LOGIN_CACHE_TTL_GUARD_SECONDS}"
   )
-  if [[ -n "${ACCOUNT_FILE}" ]]; then
-    driver_args+=(--account-file "${ACCOUNT_FILE}")
+  if [[ -n "${step_account_file}" ]]; then
+    driver_args+=(--account-file "${step_account_file}")
   fi
-  if [[ -n "${CONNECTION_LOG_DIR}" ]]; then
-    mkdir -p "${CONNECTION_LOG_DIR}"
-    connection_log_file="${CONNECTION_LOG_DIR}/tcp-driver-${connections}.jsonl"
+  if [[ -n "${effective_connection_log_dir}" ]]; then
+    mkdir -p "${effective_connection_log_dir}"
+    connection_log_file="${effective_connection_log_dir}/tcp-driver-lg${LOAD_GENERATOR_ID}-${connections}.jsonl"
     driver_args+=(--connection-log-file "${connection_log_file}")
     echo "Connection lifecycle log: ${connection_log_file}"
+  fi
+  if effective_prewarm_login_cache; then
+    mkdir -p "${LOGIN_CACHE_DIR}"
+    login_cache_file="${LOGIN_CACHE_DIR}/tcp-login-cache-lg${LOAD_GENERATOR_ID}-${connections}.json"
+    prewarm_log_file="${effective_connection_log_dir:-/tmp}/tcp-driver-prewarm-lg${LOAD_GENERATOR_ID}-${connections}.jsonl"
+    echo "Prewarming login cache: ${login_cache_file}"
+    prewarm_args=(
+      --profile custom
+      --base-url "${BASE_URL}"
+      --tcp-host "${TCP_HOST}"
+      --tcp-port "${TCP_PORT}"
+      --email "${IM_EMAIL}"
+      --password "${IM_PASSWORD}"
+      --conversation-id "${IM_CONVERSATION_ID}"
+      --connections "${connections}"
+      --devices-per-user "${devices_per_user}"
+      --messages "0"
+      --hold-seconds "${HOLD_SECONDS}"
+      --connect-ramp-seconds "${CONNECT_RAMP_SECONDS}"
+      --login-concurrency "${LOGIN_CONCURRENCY}"
+      --timeout-seconds "${TIMEOUT_SECONDS}"
+      --protocol-version "${PROTOCOL_VERSION}"
+      --login-retries "${LOGIN_RETRIES}"
+      --login-retry-delay-ms "${LOGIN_RETRY_DELAY_MS}"
+      --login-cache-ttl-guard-seconds "${LOGIN_CACHE_TTL_GUARD_SECONDS}"
+      --login-cache-file "${login_cache_file}"
+      --connection-log-file "${prewarm_log_file}"
+      --login-only true
+    )
+    if [[ -n "${step_account_file}" ]]; then
+      prewarm_args+=(--account-file "${step_account_file}")
+    fi
+    "${TCP_DRIVER_DIR}/.build/release/IMTCPLoadDriver" "${prewarm_args[@]}"
+
+    driver_args+=(
+      --login-cache-file "${login_cache_file}"
+      --require-login-cache true
+      --login-mode upfront
+    )
   fi
 
   "${TCP_DRIVER_DIR}/.build/release/IMTCPLoadDriver" "${driver_args[@]}" &
@@ -135,6 +286,10 @@ for connections in ${LADDER}; do
   if [[ -n "${sampler_pid}" ]]; then
     kill "${sampler_pid}" 2>/dev/null || true
     wait "${sampler_pid}" 2>/dev/null || true
+  fi
+
+  if effective_prewarm_login_cache; then
+    ensure_login_cache_hit "${connection_log_file}"
   fi
 
   collect_remote_metrics "after ${connections}"
