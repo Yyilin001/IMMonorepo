@@ -474,6 +474,12 @@ public final class IMConversationStore {
 
         switch operation {
         case .ignoreDuplicate:
+            recordOwnerAggregateHighWatermark(payload)
+            updateDomainEventDependencySnapshot(
+                &dependencies,
+                afterConsuming: payload,
+                operation: operation
+            )
             return IMConversationEventApplyOutcome(shouldReloadMembersForConversationID: nil)
         case .requestCatchUp:
             domainEventDebugMetrics.missingRequiredNotice += 1
@@ -2717,6 +2723,14 @@ public final class IMConversationStore {
             existing: existing,
             responseLastMessage: response.lastMessage
         )
+        let responseMemberUserIDs = response.memberUserIDs.sorted { $0.uuidString < $1.uuidString }
+        let shouldPreserveExistingMembers = responseMemberUserIDs.isEmpty && response.memberCount > 0
+        let memberUserIDs = shouldPreserveExistingMembers
+            ? existing?.memberUserIDs ?? []
+            : responseMemberUserIDs
+        let members = shouldPreserveExistingMembers
+            ? existing?.members ?? []
+            : (existing?.members ?? []).filter { responseMemberUserIDs.contains($0.id) }
 
         return IMConversation(
             id: conversationID,
@@ -2736,8 +2750,8 @@ public final class IMConversationStore {
             avatarPreset: response.avatarPreset,
             muteAll: response.muteAll,
             memberCount: response.memberCount,
-            memberUserIDs: response.memberUserIDs.sorted { $0.uuidString < $1.uuidString },
-            members: (existing?.members ?? []).filter { response.memberUserIDs.contains($0.id) },
+            memberUserIDs: memberUserIDs,
+            members: members,
             messages: existing?.messages ?? [],
             lastMessagePreviewText: previewText,
             hasMoreHistory: existing?.hasMoreHistory ?? false,

@@ -22,7 +22,7 @@ extension IMConversationDetailView {
             }
             .task(id: conversationID) {
                 IMAppLog.imUI.debug(
-                    "Conversation detail opened conversationID=\(conversationID, privacy: .public) generation=\(conversationStore.conversationMutationGeneration, privacy: .public) pending=\(conversation?.pendingMessages.count ?? 0, privacy: .public) messages=\(messages.count, privacy: .public) timeline=\(timelineItems.count, privacy: .public)"
+                    "Conversation detail opened conversationID=\(conversationID, privacy: .public) generation=\(chatPageSnapshot.generation, privacy: .public) pending=\(chatPageSnapshot.metrics.pendingMessageCount, privacy: .public) messages=\(chatPageSnapshot.metrics.messageCount, privacy: .public) timeline=\(chatPageSnapshot.metrics.timelineItemCount, privacy: .public)"
                 )
                 lastObservedMessageID = latestMessageID
                 unseenNewMessageCount = 0
@@ -31,7 +31,7 @@ extension IMConversationDetailView {
             }
             .onChange(of: latestMessageID) { _, latestMessageID in
                 IMAppLog.imUI.debug(
-                    "Conversation latest item changed conversationID=\(conversationID, privacy: .public) latestID=\(latestMessageID ?? "nil", privacy: .public) pending=\(conversation?.pendingMessages.count ?? 0, privacy: .public) messages=\(messages.count, privacy: .public) timeline=\(timelineItems.count, privacy: .public) isNearBottom=\(isNearBottom, privacy: .public) latestIsCurrentUserOutgoing=\(latestTimelineItemIsCurrentUserOutgoing, privacy: .public)"
+                    "Conversation latest item changed conversationID=\(conversationID, privacy: .public) latestID=\(latestMessageID ?? "nil", privacy: .public) pending=\(chatPageSnapshot.metrics.pendingMessageCount, privacy: .public) messages=\(chatPageSnapshot.metrics.messageCount, privacy: .public) timeline=\(chatPageSnapshot.metrics.timelineItemCount, privacy: .public) isNearBottom=\(isNearBottom, privacy: .public) latestIsCurrentUserOutgoing=\(latestTimelineItemIsCurrentUserOutgoing, privacy: .public)"
                 )
                 guard latestMessageID != nil else {
                     return
@@ -48,9 +48,25 @@ extension IMConversationDetailView {
                 }
             }
             .onChange(of: conversationStore.conversationMutationGeneration) { _, generation in
+                refreshChatPageSnapshot(reason: "generationChanged:\(generation)")
                 IMAppLog.imUI.debug(
-                    "Conversation store generation changed conversationID=\(conversationID, privacy: .public) generation=\(generation, privacy: .public) pending=\(conversation?.pendingMessages.count ?? 0, privacy: .public) messages=\(messages.count, privacy: .public) timeline=\(timelineItems.count, privacy: .public) latestID=\(latestMessageID ?? "nil", privacy: .public) isNearBottom=\(isNearBottom, privacy: .public)"
+                    "Conversation store generation changed conversationID=\(conversationID, privacy: .public) generation=\(generation, privacy: .public) pending=\(chatPageSnapshot.metrics.pendingMessageCount, privacy: .public) messages=\(chatPageSnapshot.metrics.messageCount, privacy: .public) timeline=\(chatPageSnapshot.metrics.timelineItemCount, privacy: .public) latestID=\(latestMessageID ?? "nil", privacy: .public) isNearBottom=\(isNearBottom, privacy: .public)"
                 )
+            }
+            .onChange(of: conversationStore.isLoadingMessages) { _, isLoading in
+                refreshChatPageSnapshot(reason: "messagesLoadingChanged:\(isLoading)")
+            }
+            .onChange(of: conversationStore.isLoadingMembers) { _, isLoading in
+                refreshChatPageSnapshot(reason: "membersLoadingChanged:\(isLoading)")
+            }
+            .onChange(of: conversationStore.receiptSummary(for: conversationID)) { _, _ in
+                refreshChatPageSnapshot(reason: "receiptChanged")
+            }
+            .onChange(of: runtimeStore.currentUserID) { _, currentUserID in
+                refreshChatPageSnapshot(reason: "currentUserChanged:\(currentUserID?.uuidString ?? "nil")")
+            }
+            .onChange(of: runtimeStore.blockedUserIDs) { _, _ in
+                refreshChatPageSnapshot(reason: "blockedUsersChanged")
             }
             .onChange(of: conversationStore.replyJumpMatchedMessageID) { _, matchedMessageID in
                 guard conversationStore.replyJumpConversationID == conversationID,
@@ -135,7 +151,7 @@ extension IMConversationDetailView {
             .sheet(isPresented: $isPresentingGroupSettings) {
                 NavigationStack {
                     GroupSettingsView(
-                        conversation: conversation,
+                        context: chatPageSnapshot.contextSnapshot,
                         identity: conversationIdentity,
                         currentRole: currentGroupRole,
                         canRenameConversation: canRenameConversation,
@@ -152,7 +168,7 @@ extension IMConversationDetailView {
                             Task {
                                 _ = await runtimeStore.updateConversationPreferences(
                                     conversationID,
-                                    isPinned: !(conversation?.isPinned ?? false)
+                                    isPinned: !chatPageSnapshot.contextSnapshot.isPinned
                                 )
                             }
                         },
@@ -160,7 +176,7 @@ extension IMConversationDetailView {
                             Task {
                                 _ = await runtimeStore.updateConversationPreferences(
                                     conversationID,
-                                    isMuted: !(conversation?.isMuted ?? false)
+                                    isMuted: !chatPageSnapshot.contextSnapshot.isMuted
                                 )
                             }
                         }
@@ -247,7 +263,7 @@ extension IMConversationDetailView {
             .sheet(isPresented: $isPresentingMemberNickname) {
                 NavigationStack {
                     IMMemberNicknameSheet(
-                        initialNickname: currentMember?.memberNickname ?? "",
+                        initialNickname: currentMemberNickname ?? "",
                         onSubmit: { nickname in
                             await runtimeStore.updateMyMemberNickname(conversationID, memberNickname: nickname)
                         }
@@ -331,92 +347,66 @@ extension IMConversationDetailView {
             }
     }
 
+    var chatPageSnapshot: IMChatPageSnapshot {
+        snapshotStore.chatPageSnapshot(for: conversationID)
+    }
+
+    func refreshChatPageSnapshot(reason: String) {
+        let commit = snapshotStore.commitChatPageSnapshot(
+            from: conversationStore,
+            conversationID: conversationID,
+            currentUserID: runtimeStore.currentUserID,
+            blockedUserIDs: runtimeStore.blockedUserIDs
+        )
+        IMAppLog.imUI.debug(
+            "Conversation detail snapshot refreshed reason=\(reason, privacy: .public) committed=\(commit.didCommit, privacy: .public) revision=\(commit.revision, privacy: .public) conversationID=\(conversationID, privacy: .public) generation=\(chatPageSnapshot.generation, privacy: .public) latestID=\(chatPageSnapshot.latestItemID ?? "nil", privacy: .public)"
+        )
+    }
+
     var conversation: IMConversation? {
-        _ = conversationStore.conversationMutationGeneration
-        return conversationStore.conversations.first { $0.id == conversationID }
-    }
-
-    var messages: [IMConversationMessage] {
-        conversation?.messages ?? []
-    }
-
-    var timelineItems: [IMConversationTimelineItem] {
-        conversation?.timelineItems ?? []
+        chatPageSnapshot.conversation
     }
 
     var latestTimelineItemIsCurrentUserOutgoing: Bool {
-        guard let currentUserID = runtimeStore.currentUserID,
-              let latestItem = timelineItems.last
-        else {
-            return false
-        }
-
-        switch latestItem {
-        case .message(let message):
-            return message.direction == .outgoing && message.senderUserID == currentUserID
-        case .pendingMessage(let message):
-            return message.senderUserID == currentUserID
-        case .notice:
-            return false
-        }
+        chatPageSnapshot.latestTimelineItemIsCurrentUserOutgoing
     }
 
     func deliveryOverrideText(for message: IMConversationMessage) -> String? {
-        guard message.direction == .outgoing,
-              message.deliveryState == .sent
-        else {
-            return nil
-        }
-
-        let sequence = message.serverSequence
-        guard let summary = conversationStore.receiptSummary(for: conversationID)
-        else {
-            return "已发送"
-        }
-
-        if summary.readThroughSequence >= sequence {
-            return "已读"
-        }
-        if conversation?.kind == .group, summary.deliveredThroughSequence >= sequence {
-            return summary.readThroughSequence > 0 ? "部分已读" : "已送达"
-        }
-        if summary.deliveredThroughSequence >= sequence {
-            return "已送达"
-        }
-        return "已发送"
+        chatPageSnapshot.deliveryOverrideText(for: message)
     }
 
     var latestMessageID: String? {
-        timelineItems.last?.id
+        chatPageSnapshot.latestItemID
     }
 
     var shouldShowLoadingState: Bool {
-        timelineItems.isEmpty && conversationStore.isLoadingMessages
+        chatPageSnapshot.shouldShowLoadingState
     }
 
     var queueSummary: IMConversationQueueSummary {
-        conversationStore.queueSummary(for: conversationID)
+        chatPageSnapshot.queueSummary
     }
 
     @ViewBuilder
     var conversationContextStrip: some View {
-        if shouldShowConversationContextStrip {
+        let context = chatPageSnapshot.contextSnapshot
+        if context.shouldShow {
             VStack(alignment: .leading, spacing: AppSpacing.small) {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: AppSpacing.small) {
                         conversationContextBadge(
-                            title: conversationKindText,
-                            systemImage: conversationKindIcon,
+                            title: context.kindText,
+                            systemImage: context.kindIcon,
                             tint: .secondary
                         )
 
                         conversationContextBadge(
-                            title: "成员 \(conversation?.memberCount ?? conversation?.memberUserIDs.count ?? 0)",
+                            title: "成员 \(context.memberCount)",
                             systemImage: "person.2",
                             tint: .secondary
                         )
 
-                        if let currentGroupRole {
+                        if let currentGroupRole = context.currentGroupRole {
                             conversationContextBadge(
                                 title: currentGroupRole.displayName,
                                 systemImage: "person.badge.shield.checkmark",
@@ -424,31 +414,31 @@ extension IMConversationDetailView {
                             )
                         }
 
-                        if conversation?.isPinned == true {
+                        if context.isPinned {
                             conversationContextBadge(title: "已置顶", systemImage: "pin.fill", tint: .orange)
                         }
 
-                        if conversation?.isMuted == true {
+                        if context.isMuted {
                             conversationContextBadge(title: "免打扰", systemImage: "bell.slash.fill", tint: .secondary)
                         }
 
-                        if conversation?.muteAll == true {
+                        if context.isMuteAll {
                             conversationContextBadge(title: "全员禁言", systemImage: "mic.slash.fill", tint: .orange)
                         }
 
-                        if conversationStore.isLoadingMembers || conversationStore.isLoadingMessages {
+                        if context.showsLoadingIndicator {
                             ProgressView()
                                 .controlSize(.small)
                         }
                     }
                 }
 
-                if let notice = conversation?.notice, !notice.isEmpty {
+                if let notice = context.notice, !notice.isEmpty {
                     AppStatusBanner(message: notice, tone: .info, systemImage: "text.quote")
                         .accessibilityIdentifier("conversation.notice")
                 }
 
-                if let directMessagingStatusMessage {
+                if let directMessagingStatusMessage = context.directMessagingStatusMessage {
                     AppStatusBanner(message: directMessagingStatusMessage, tone: .warning, systemImage: "lock.fill")
                         .accessibilityIdentifier("conversation.directMessagingStatus")
                 }
@@ -457,14 +447,7 @@ extension IMConversationDetailView {
     }
 
     var shouldShowConversationContextStrip: Bool {
-        conversation?.kind == .group
-            || conversation?.notice?.isEmpty == false
-            || directMessagingStatusMessage != nil
-            || conversation?.isPinned == true
-            || conversation?.isMuted == true
-            || conversation?.muteAll == true
-            || conversationStore.isLoadingMembers
-            || conversationStore.isLoadingMessages
+        chatPageSnapshot.contextSnapshot.shouldShow
     }
 
     func conversationContextBadge(title: String, systemImage: String, tint: Color) -> some View {
@@ -478,11 +461,11 @@ extension IMConversationDetailView {
 
     @ViewBuilder
     func conversationAvatar(size: CGFloat) -> some View {
-        if conversation?.kind == .direct {
+        if chatPageSnapshot.contextSnapshot.kind == .direct {
             UserAvatarView(
                 displayName: conversationIdentity.title,
-                email: conversation?.directPeer?.email,
-                avatarPreset: conversation?.directPeer?.avatarPreset,
+                email: directPeer?.email,
+                avatarPreset: directPeer?.avatarPreset,
                 size: size
             )
         } else {

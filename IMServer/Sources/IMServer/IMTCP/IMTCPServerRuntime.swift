@@ -21,6 +21,13 @@ enum IMTCPChannelWriter {
         }
     }
 
+    static func writeEncodedPacket(_ data: Data, on channel: any Channel) {
+        var buffer = channel.allocator.buffer(capacity: data.count + 4)
+        buffer.writeInteger(UInt32(data.count), endianness: .big)
+        buffer.writeBytes(data)
+        channel.writeAndFlush(buffer, promise: nil)
+    }
+
     static func sendKickAndClose(
         on channel: any Channel,
         reason: IMTCPKickReason,

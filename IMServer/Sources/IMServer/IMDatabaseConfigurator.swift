@@ -2,6 +2,7 @@ import Foundation
 import Fluent
 import FluentPostgresDriver
 import FluentSQLiteDriver
+import NIOCore
 import SQLKit
 import Vapor
 
@@ -17,15 +18,16 @@ enum IMDatabaseConfigurator {
             app.summaryShardDatabaseIDs = [:]
         } else {
             let databasePair = databaseConfigurationPair(for: app.environment)
-            app.databases.use(.postgres(configuration: databasePair.primary), as: .psql)
+            let pool = postgresConnectionPoolConfiguration(for: app)
+            app.databases.use(postgresFactory(configuration: databasePair.primary, pool: pool), as: .psql)
             if let replica = databasePair.replica {
-                app.databases.use(.postgres(configuration: replica), as: .imReplica)
+                app.databases.use(postgresFactory(configuration: replica, pool: pool), as: .imReplica)
                 app.imReplicaDatabaseEnabled = true
             } else {
                 app.imReplicaDatabaseEnabled = false
             }
             if let summary = databasePair.summary {
-                app.databases.use(.postgres(configuration: summary), as: .imSummary)
+                app.databases.use(postgresFactory(configuration: summary, pool: pool), as: .imSummary)
                 app.imSummaryDatabaseEnabled = true
             } else {
                 app.imSummaryDatabaseEnabled = false
@@ -34,21 +36,66 @@ enum IMDatabaseConfigurator {
             app.conversationShardReplicaDatabaseIDs = [:]
             for (shardID, configuration) in databasePair.conversationShards {
                 let databaseID = DatabaseID(string: "im-conversation-\(shardID)")
-                app.databases.use(.postgres(configuration: configuration), as: databaseID)
+                app.databases.use(postgresFactory(configuration: configuration, pool: pool), as: databaseID)
                 app.conversationShardDatabaseIDs[shardID] = databaseID
             }
             for (shardID, configuration) in databasePair.conversationShardReplicas {
                 let databaseID = DatabaseID(string: "im-conversation-\(shardID)-replica")
-                app.databases.use(.postgres(configuration: configuration), as: databaseID)
+                app.databases.use(postgresFactory(configuration: configuration, pool: pool), as: databaseID)
                 app.conversationShardReplicaDatabaseIDs[shardID] = databaseID
             }
             app.summaryShardDatabaseIDs = [:]
             for (shardID, configuration) in databasePair.summaryShards {
                 let databaseID = DatabaseID(string: "im-summary-\(shardID)")
-                app.databases.use(.postgres(configuration: configuration), as: databaseID)
+                app.databases.use(postgresFactory(configuration: configuration, pool: pool), as: databaseID)
                 app.summaryShardDatabaseIDs[shardID] = databaseID
             }
         }
+    }
+
+    private static func postgresFactory(
+        configuration: SQLPostgresConfiguration,
+        pool: IMPostgresConnectionPoolConfiguration?
+    ) -> DatabaseConfigurationFactory {
+        guard let pool else {
+            return .postgres(configuration: configuration)
+        }
+
+        return .postgres(
+            configuration: configuration,
+            maxConnectionsPerEventLoop: pool.maxConnectionsPerEventLoop,
+            connectionPoolTimeout: .seconds(Int64(pool.connectionPoolTimeoutSeconds))
+        )
+    }
+
+    private static func postgresConnectionPoolConfiguration(for app: Application) -> IMPostgresConnectionPoolConfiguration? {
+        let roleComponent = normalizedEnvironmentComponent(app.imRuntimeRole.rawValue)
+        let maxConnections = firstIntEnvironment([
+            "DATABASE_\(roleComponent)_MAX_CONNECTIONS_PER_EVENT_LOOP",
+            "DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP"
+        ])
+        let timeoutSeconds = firstIntEnvironment([
+            "DATABASE_\(roleComponent)_CONNECTION_POOL_TIMEOUT_SECONDS",
+            "DATABASE_CONNECTION_POOL_TIMEOUT_SECONDS"
+        ])
+
+        guard maxConnections != nil || timeoutSeconds != nil else {
+            return nil
+        }
+
+        return IMPostgresConnectionPoolConfiguration(
+            maxConnectionsPerEventLoop: max(1, maxConnections ?? 1),
+            connectionPoolTimeoutSeconds: max(1, timeoutSeconds ?? 10)
+        )
+    }
+
+    private static func firstIntEnvironment(_ keys: [String]) -> Int? {
+        for key in keys {
+            if let value = Environment.get(key).flatMap(Int.init(_:)) {
+                return value
+            }
+        }
+        return nil
     }
 
     private static func databaseConfigurationPair(for environment: Environment) -> IMPostgresDatabasePairConfiguration {
@@ -207,6 +254,11 @@ enum IMDatabaseConfigurator {
         }
         return String(scalars)
     }
+}
+
+private struct IMPostgresConnectionPoolConfiguration {
+    let maxConnectionsPerEventLoop: Int
+    let connectionPoolTimeoutSeconds: Int
 }
 
 private struct PostgresConnectionParameters {

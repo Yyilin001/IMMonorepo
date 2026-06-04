@@ -15,6 +15,10 @@ CONNECTIONS="${CONNECTIONS:-5000}"
 LOCAL_DRIVER_SHARDS="${LOCAL_DRIVER_SHARDS:-5}"
 MESSAGES="${MESSAGES:-0}"
 SEND_INTERVAL_MS="${SEND_INTERVAL_MS:-0}"
+MESSAGE_PROFILE="${MESSAGE_PROFILE:-per-connection}"
+MESSAGE_RATE_PER_SECOND="${MESSAGE_RATE_PER_SECOND:-0}"
+MESSAGE_SENDER_EVERY="${MESSAGE_SENDER_EVERY:-1}"
+MESSAGE_RECEIVER_OFFSET="${MESSAGE_RECEIVER_OFFSET:-1}"
 HOLD_SECONDS="${HOLD_SECONDS:-1800}"
 CONNECT_RAMP_SECONDS="${CONNECT_RAMP_SECONDS:-900}"
 LOGIN_CONCURRENCY="${LOGIN_CONCURRENCY:-5}"
@@ -119,6 +123,10 @@ driver_common_args() {
     --devices-per-user "${shard_connections}" \
     --messages "${MESSAGES}" \
     --send-interval-ms "${SEND_INTERVAL_MS}" \
+    --message-profile "${MESSAGE_PROFILE}" \
+    --message-rate-per-second "${MESSAGE_RATE_PER_SECOND}" \
+    --message-sender-every "${MESSAGE_SENDER_EVERY}" \
+    --message-receiver-offset "${MESSAGE_RECEIVER_OFFSET}" \
     --hold-seconds "${HOLD_SECONDS}" \
     --connect-ramp-seconds "${CONNECT_RAMP_SECONDS}" \
     --login-concurrency "${LOGIN_CONCURRENCY}" \

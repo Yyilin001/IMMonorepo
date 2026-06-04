@@ -42,7 +42,7 @@ extension IMConversationDetailView {
             .accessibilityIdentifier("conversation.searchButton")
         }
 
-        if conversation?.kind == .group {
+        if chatPageSnapshot.contextSnapshot.kind == .group {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     isPresentingGroupSettings = true
@@ -56,20 +56,20 @@ extension IMConversationDetailView {
 
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
-                Button(conversation?.isPinned == true ? "取消置顶" : "置顶会话") {
+                Button(chatPageSnapshot.contextSnapshot.isPinned ? "取消置顶" : "置顶会话") {
                     Task {
                         _ = await runtimeStore.updateConversationPreferences(
                             conversationID,
-                            isPinned: !(conversation?.isPinned ?? false)
+                            isPinned: !chatPageSnapshot.contextSnapshot.isPinned
                         )
                     }
                 }
 
-                Button(conversation?.isMuted == true ? "取消免打扰" : "免打扰") {
+                Button(chatPageSnapshot.contextSnapshot.isMuted ? "取消免打扰" : "免打扰") {
                     Task {
                         _ = await runtimeStore.updateConversationPreferences(
                             conversationID,
-                            isMuted: !(conversation?.isMuted ?? false)
+                            isMuted: !chatPageSnapshot.contextSnapshot.isMuted
                         )
                     }
                 }
@@ -136,7 +136,7 @@ extension IMConversationDetailView {
 struct GroupSettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
-    let conversation: IMConversation?
+    let context: IMChatContextSnapshot
     let identity: IMConversationIdentityPresentation
     let currentRole: IMConversationMemberRole?
     let canRenameConversation: Bool
@@ -182,13 +182,13 @@ struct GroupSettingsView: View {
                 Button {
                     onTogglePinned()
                 } label: {
-                    Label(conversation?.isPinned == true ? "取消置顶" : "置顶会话", systemImage: conversation?.isPinned == true ? "pin.slash" : "pin.fill")
+                    Label(context.isPinned ? "取消置顶" : "置顶会话", systemImage: context.isPinned ? "pin.slash" : "pin.fill")
                 }
 
                 Button {
                     onToggleMuted()
                 } label: {
-                    Label(conversation?.isMuted == true ? "取消免打扰" : "消息免打扰", systemImage: conversation?.isMuted == true ? "bell" : "bell.slash")
+                    Label(context.isMuted ? "取消免打扰" : "消息免打扰", systemImage: context.isMuted ? "bell" : "bell.slash")
                 }
 
                 if canRenameConversation {
@@ -280,7 +280,7 @@ struct GroupSettingsView: View {
     }
 
     private var summaryText: String {
-        let memberCount = conversation?.memberCount ?? conversation?.members.count ?? 0
+        let memberCount = context.memberCount
         if let currentRole {
             return "\(memberCount) 位成员 · \(currentRole.displayName)"
         }

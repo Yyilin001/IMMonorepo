@@ -2,6 +2,13 @@ import Foundation
 import Vapor
 
 struct ConnectionRoutingService {
+    private struct ReusableDomainEventPacketKey: Hashable, Sendable {
+        let eventID: UUID
+        let eventType: IMTCPChatDomainEventType
+        let aggregateID: UUID
+        let aggregateSequence: UInt64
+    }
+
     let app: Application
     let nodeID: String
     let backend: any ConnectionRoutingBackend
@@ -102,6 +109,132 @@ struct ConnectionRoutingService {
         await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: [ownerUserID])
     }
 
+    func sendDomainEventPayload(
+        _ payload: IMTCPChatDomainEventPayload,
+        ownerUserID: UUID,
+        requestID: UUID? = UUID()
+    ) async {
+        await sendDomainEventPayload(payload, toUserIDs: [ownerUserID], requestID: requestID)
+    }
+
+    func sendDomainEventPayload(
+        _ payload: IMTCPChatDomainEventPayload,
+        toUserIDs userIDs: [UUID],
+        requestID: UUID? = UUID()
+    ) async {
+        guard !userIDs.isEmpty else {
+            return
+        }
+
+        let startedAt = Date()
+        let uniqueUserCount = Set(userIDs).count
+        await app.routingMetrics.recordUserFanout(targetUserCount: uniqueUserCount)
+        let registryStartedAt = Date()
+        await app.imConnectionRegistry.sendDomainEventPayload(payload, toUserIDs: userIDs, requestID: requestID)
+        let registryMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: registryStartedAt)
+
+        let remoteDispatchStartedAt = Date()
+        do {
+            let envelope = try encodeDomainEventPacketEnvelope(
+                requestID: requestID,
+                payload: payload,
+                targetUserIDs: userIDs
+            )
+            await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: userIDs)
+        } catch {
+            await app.routingMetrics.recordCrossNodeDispatchFailed()
+            app.logger.warning("Domain-event packet dispatch encode failed.", metadata: [
+                "requestID": .string(requestID?.uuidString ?? ""),
+                "target_user_count": .stringConvertible(uniqueUserCount),
+                "error": .string(String(describing: error))
+            ])
+        }
+        let remoteDispatchMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: remoteDispatchStartedAt)
+        let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
+        let slowLogMilliseconds = app.streamConsumerConfiguration.realtimeDeliverySlowLogMilliseconds
+        if IMRealtimeDeliveryDiagnostics.shouldLogAny(
+            [registryMilliseconds, remoteDispatchMilliseconds, totalMilliseconds],
+            thresholdMilliseconds: slowLogMilliseconds
+        ) {
+            app.logger.info("Connection routing domain-event payload slow.", metadata: [
+                "request_id": .string(requestID?.uuidString ?? ""),
+                "event_id": .string(payload.eventID.uuidString),
+                "target_user_count": .stringConvertible(uniqueUserCount),
+                "registry_send_ms": .stringConvertible(registryMilliseconds),
+                "remote_dispatch_ms": .stringConvertible(remoteDispatchMilliseconds),
+                "total_ms": .stringConvertible(totalMilliseconds)
+            ])
+        }
+    }
+
+    func sendDomainEventPayloads(
+        _ deliveries: [IMCanonicalDomainEventDelivery],
+        requestID: UUID? = UUID()
+    ) async {
+        guard !deliveries.isEmpty else {
+            return
+        }
+
+        let startedAt = Date()
+        let uniqueUserCount = Set(deliveries.map(\.ownerUserID)).count
+        await app.routingMetrics.recordUserFanout(targetUserCount: uniqueUserCount)
+        let registryStartedAt = Date()
+        await app.imConnectionRegistry.sendDomainEventDeliveries(deliveries, requestID: requestID)
+        let registryMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: registryStartedAt)
+
+        let remoteDispatchStartedAt = Date()
+        let remoteDispatchGroups = groupReusableDomainEventPayloads(deliveries)
+        await withTaskGroup(of: Void.self) { group in
+            for groupedDelivery in remoteDispatchGroups.reusable {
+                group.addTask {
+                    do {
+                        let envelope = try encodeDomainEventPacketEnvelope(
+                            requestID: requestID,
+                            payload: groupedDelivery.payload,
+                            targetUserIDs: groupedDelivery.userIDs
+                        )
+                        await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: groupedDelivery.userIDs)
+                    } catch {
+                        await app.routingMetrics.recordCrossNodeDispatchFailed()
+                        app.logger.warning("Domain-event reusable packet dispatch encode failed.", metadata: [
+                            "requestID": .string(requestID?.uuidString ?? ""),
+                            "event_id": .string(groupedDelivery.payload.eventID.uuidString),
+                            "target_user_count": .stringConvertible(groupedDelivery.userIDs.count),
+                            "error": .string(String(describing: error))
+                        ])
+                    }
+                }
+            }
+            for delivery in remoteDispatchGroups.fallback {
+                group.addTask {
+                    let envelope = NodeMessageDispatchEnvelope(
+                        requestID: requestID,
+                        payload: .domainEvent(ownerUserID: delivery.ownerUserID, eventID: delivery.eventID)
+                    )
+                    await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: [delivery.ownerUserID])
+                }
+            }
+        }
+        let remoteDispatchMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: remoteDispatchStartedAt)
+        let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
+        let slowLogMilliseconds = app.streamConsumerConfiguration.realtimeDeliverySlowLogMilliseconds
+        if IMRealtimeDeliveryDiagnostics.shouldLogAny(
+            [registryMilliseconds, remoteDispatchMilliseconds, totalMilliseconds],
+            thresholdMilliseconds: slowLogMilliseconds
+        ) {
+            app.logger.info("Connection routing domain-event delivery batch slow.", metadata: [
+                "request_id": .string(requestID?.uuidString ?? ""),
+                "delivery_count": .stringConvertible(deliveries.count),
+                "target_user_count": .stringConvertible(uniqueUserCount),
+                "reusable_remote_packet_count": .stringConvertible(remoteDispatchGroups.reusable.count),
+                "fallback_remote_delivery_count": .stringConvertible(remoteDispatchGroups.fallback.count),
+                "registry_send_ms": .stringConvertible(registryMilliseconds),
+                "remote_dispatch_ms": .stringConvertible(remoteDispatchMilliseconds),
+                "total_ms": .stringConvertible(totalMilliseconds)
+            ])
+        }
+    }
+
     func sendStreamSignal(
         _ payload: IMTCPMessageStreamSignalPayload,
         toUserIDs userIDs: [UUID],
@@ -191,6 +324,20 @@ struct ConnectionRoutingService {
                 return
             }
             await app.imConnectionRegistry.sendDomainEventDelivery(canonicalDelivery, requestID: envelope.requestID)
+        case .domainEventPacket:
+            guard let payload = decodeDomainEventPacketPayload(from: envelope) else {
+                await app.routingMetrics.recordCrossNodeDispatchFailed()
+                app.logger.warning("Remote domain-event packet dispatch failed to decode payload.", metadata: [
+                    "requestID": .string(envelope.requestID?.uuidString ?? ""),
+                    "targetUserIDs": .array(envelope.targetUserIDs.map { .string($0.uuidString) })
+                ])
+                return
+            }
+            await app.imConnectionRegistry.sendDomainEventPayload(
+                payload,
+                toUserIDs: envelope.targetUserIDs,
+                requestID: envelope.requestID
+            )
         case .streamSignal:
             guard let payload: IMTCPMessageStreamSignalPayload = decodePayload(from: envelope) else {
                 await app.routingMetrics.recordCrossNodeDispatchFailed()
@@ -468,6 +615,74 @@ struct ConnectionRoutingService {
             requestID: requestID,
             payload: .streamSignal(packetBase64: data.base64EncodedString(), targetUserIDs: targetUserIDs)
         )
+    }
+
+    private func encodeDomainEventPacketEnvelope(
+        requestID: UUID?,
+        payload: IMTCPChatDomainEventPayload,
+        targetUserIDs: [UUID]
+    ) throws -> NodeMessageDispatchEnvelope {
+        let data = try IMTCPProtobufCodec.encode(type: .domainEvent, requestID: requestID, payload: payload)
+        return NodeMessageDispatchEnvelope(
+            requestID: requestID,
+            payload: .domainEventPacket(packetBase64: data.base64EncodedString(), targetUserIDs: targetUserIDs)
+        )
+    }
+
+    private func groupReusableDomainEventPayloads(
+        _ deliveries: [IMCanonicalDomainEventDelivery]
+    ) -> (
+        reusable: [(payload: IMTCPChatDomainEventPayload, userIDs: [UUID])],
+        fallback: [IMCanonicalDomainEventDelivery]
+    ) {
+        var reusableGroups: [ReusableDomainEventPacketKey: (payload: IMTCPChatDomainEventPayload, userIDs: [UUID])] = [:]
+        var fallback: [IMCanonicalDomainEventDelivery] = []
+        fallback.reserveCapacity(deliveries.count)
+
+        for delivery in deliveries {
+            guard let key = reusablePacketKey(for: delivery.payload) else {
+                fallback.append(delivery)
+                continue
+            }
+            if reusableGroups[key] == nil {
+                reusableGroups[key] = (payload: delivery.payload, userIDs: [])
+            }
+            reusableGroups[key]?.userIDs.append(delivery.ownerUserID)
+        }
+
+        return (
+            reusable: Array(reusableGroups.values),
+            fallback: fallback
+        )
+    }
+
+    private func reusablePacketKey(for payload: IMTCPChatDomainEventPayload) -> ReusableDomainEventPacketKey? {
+        guard payload.eventType == .messageCreated,
+              payload.conversation == nil,
+              payload.timelineNotice == nil,
+              payload.requiresTimelineNotice == false,
+              payload.ownerCursor == nil,
+              payload.ownerAggregateSequence == nil
+        else {
+            return nil
+        }
+
+        return ReusableDomainEventPacketKey(
+            eventID: payload.eventID,
+            eventType: payload.eventType,
+            aggregateID: payload.aggregateID,
+            aggregateSequence: payload.aggregateSequence
+        )
+    }
+
+    private func decodeDomainEventPacketPayload(from envelope: NodeMessageDispatchEnvelope) -> IMTCPChatDomainEventPayload? {
+        guard case .domainEventPacket(let packetBase64, _) = envelope.payload,
+              let packetData = Data(base64Encoded: packetBase64),
+              let packet = try? IMTCPProtobufCodec.decode(packetData)
+        else {
+            return nil
+        }
+        return try? packet.payload.decodePayload(IMTCPChatDomainEventPayload.self)
     }
 
     private func decodePayload<Payload: Sendable>(from envelope: NodeMessageDispatchEnvelope) -> Payload? {

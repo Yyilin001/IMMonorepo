@@ -29,6 +29,7 @@ struct ConversationOutboxRelay {
     let conversationDirectory: any ConversationDirectory
     let nodeID: String
     let claimTimeoutSeconds: Int
+    let logger: Logger
 
     init(app: Application, db: (any Database)? = nil) {
         if let db {
@@ -40,6 +41,7 @@ struct ConversationOutboxRelay {
         self.conversationDirectory = app.conversationDirectory
         self.nodeID = app.imNodeID
         self.claimTimeoutSeconds = app.conversationOutboxConfiguration.claimTimeoutSeconds
+        self.logger = app.logger
     }
 
     func drainPendingEvents(app: Application) async throws -> Int {
@@ -70,19 +72,20 @@ struct ConversationOutboxRelay {
                 guard let eventID = event.id else {
                     continue
                 }
-                let payload = try event.decodedPayload()
-                let shardID = try await conversationDirectory.shardID(for: event.conversationID)
-                let envelope = ConversationEventStreamEnvelope(
-                    eventID: eventID,
-                    conversationID: event.conversationID,
-                    actorUserID: event.actorUserID,
-                    aggregateSequence: event.aggregateSequence,
-                    eventType: event.eventType,
-                    payload: payload,
-                    occurredAt: event.createdAt,
-                    producerShard: shardID
-                )
+                let envelope: ConversationEventStreamEnvelope
                 do {
+                    let payload = try event.decodedPayload()
+                    let shardID = try await conversationDirectory.shardID(for: event.conversationID)
+                    envelope = ConversationEventStreamEnvelope(
+                        eventID: eventID,
+                        conversationID: event.conversationID,
+                        actorUserID: event.actorUserID,
+                        aggregateSequence: event.aggregateSequence,
+                        eventType: event.eventType,
+                        payload: payload,
+                        occurredAt: event.createdAt,
+                        producerShard: shardID
+                    )
                     try await producer.publish(envelope)
                     event.streamPublishedAt = Date()
                     event.streamPublishError = nil
@@ -92,6 +95,25 @@ struct ConversationOutboxRelay {
                     relayedCount += 1
                     remaining -= 1
                 } catch {
+                    if isNonRetryableOutboxRelayError(error) {
+                        event.statusEnum = .failed
+                        event.retryCount += 1
+                        event.errorMessage = "Stream relay rejected non-retryable event payload: \(String(describing: error))"
+                        event.streamPublishError = String(describing: error)
+                        event.streamPublishStartedAt = nil
+                        event.streamPublishClaimedBy = nil
+                        try await event.update(on: routedDatabase.database)
+                        logger.warning("Conversation outbox relay isolated non-retryable event.", metadata: [
+                            "event_id": .string(eventID.uuidString),
+                            "conversation_id": .string(event.conversationID.uuidString),
+                            "event_type": .string(event.eventType),
+                            "retry_count": .stringConvertible(event.retryCount),
+                            "error": .string(String(describing: error))
+                        ])
+                        relayedCount += 1
+                        remaining -= 1
+                        continue
+                    }
                     event.streamPublishError = String(describing: error)
                     event.streamPublishStartedAt = nil
                     event.streamPublishClaimedBy = nil
@@ -102,6 +124,17 @@ struct ConversationOutboxRelay {
         }
 
         return relayedCount
+    }
+
+    private func isNonRetryableOutboxRelayError(_ error: any Error) -> Bool {
+        switch error {
+        case is DecodingError:
+            return true
+        case is EncodingError:
+            return true
+        default:
+            return false
+        }
     }
 
     private func claimPendingEvents(

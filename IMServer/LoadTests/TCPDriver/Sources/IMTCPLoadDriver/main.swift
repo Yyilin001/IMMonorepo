@@ -14,6 +14,12 @@ struct Options: Sendable {
     var devicesPerUser = 1
     var messagesPerConnection = 1
     var sendIntervalMillis = 0
+    var messageProfile = ProcessInfo.processInfo.environment["IM_TCP_MESSAGE_PROFILE"] ?? "per-connection"
+    var messageCompletionMode = ProcessInfo.processInfo.environment["IM_TCP_MESSAGE_COMPLETION_MODE"] ?? "full"
+    var messageRatePerSecond = ProcessInfo.processInfo.environment["IM_TCP_MESSAGE_RATE_PER_SECOND"]
+        .flatMap(Double.init(_:)) ?? 0
+    var messageSenderEvery = ProcessInfo.processInfo.environment["IM_TCP_MESSAGE_SENDER_EVERY"].flatMap(Int.init(_:)) ?? 1
+    var messageReceiverOffset = ProcessInfo.processInfo.environment["IM_TCP_MESSAGE_RECEIVER_OFFSET"].flatMap(Int.init(_:)) ?? 1
     var holdSeconds = 0
     var connectRampSeconds = 0
     var loginConcurrency = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_CONCURRENCY"].flatMap(Int.init(_:)) ?? 5
@@ -85,6 +91,8 @@ struct ConnectionResult: Sendable {
     let acknowledgements: Int
     let canonicalMessages: Int
     let duplicateCanonicalMessages: Int
+    let deliveredMessages: Int
+    let duplicateDeliveredMessages: Int
     let fanoutMessages: Int
     let reconnects: Int
     let serverErrors: Int
@@ -93,6 +101,7 @@ struct ConnectionResult: Sendable {
     let heartbeatSendCompletionMillis: [Double]
     let ackLatenciesMillis: [Double]
     let canonicalLatenciesMillis: [Double]
+    let deliveryLatenciesMillis: [Double]
 }
 
 final class ConnectionEventLogger: @unchecked Sendable {
@@ -347,6 +356,60 @@ final class GlobalHoldBarrier: @unchecked Sendable {
     }
 }
 
+struct ScheduledMessage: Sendable {
+    let messageIndex: Int
+    let delayMillis: Int
+    let receiverIndex: Int?
+}
+
+struct MessageDeliveryRecord {
+    let senderIndex: Int
+    let receiverIndex: Int
+    let sentAt: Date
+    var deliveredTo: Set<Int> = []
+}
+
+final class MessageDeliveryTracker: @unchecked Sendable {
+    struct DeliveryResult: Sendable {
+        let accepted: Bool
+        let duplicate: Bool
+        let latencyMillis: Double
+        let senderIndex: Int
+    }
+
+    private let lock = NSLock()
+    private var records: [String: MessageDeliveryRecord] = [:]
+
+    func register(clientMessageID: String, senderIndex: Int, receiverIndex: Int, sentAt: Date) {
+        lock.lock()
+        records[clientMessageID] = MessageDeliveryRecord(
+            senderIndex: senderIndex,
+            receiverIndex: receiverIndex,
+            sentAt: sentAt
+        )
+        lock.unlock()
+    }
+
+    func recordDelivery(clientMessageID: String, receiverIndex: Int, at date: Date = Date()) -> DeliveryResult? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var record = records[clientMessageID], record.receiverIndex == receiverIndex else {
+            return nil
+        }
+        let duplicate = record.deliveredTo.contains(receiverIndex)
+        if !duplicate {
+            record.deliveredTo.insert(receiverIndex)
+            records[clientMessageID] = record
+        }
+        return DeliveryResult(
+            accepted: !duplicate,
+            duplicate: duplicate,
+            latencyMillis: date.timeIntervalSince(record.sentAt) * 1_000,
+            senderIndex: record.senderIndex
+        )
+    }
+}
+
 func parseOptions() -> Options {
     var options = Options()
     var args = Array(CommandLine.arguments.dropFirst())
@@ -379,6 +442,16 @@ func parseOptions() -> Options {
             options.messagesPerConnection = Int(value) ?? options.messagesPerConnection
         case "--send-interval-ms":
             options.sendIntervalMillis = max(0, Int(value) ?? options.sendIntervalMillis)
+        case "--message-profile":
+            options.messageProfile = value
+        case "--message-completion-mode":
+            options.messageCompletionMode = value
+        case "--message-rate-per-second":
+            options.messageRatePerSecond = max(0, Double(value) ?? options.messageRatePerSecond)
+        case "--message-sender-every":
+            options.messageSenderEvery = max(1, Int(value) ?? options.messageSenderEvery)
+        case "--message-receiver-offset":
+            options.messageReceiverOffset = Int(value) ?? options.messageReceiverOffset
         case "--hold-seconds":
             options.holdSeconds = max(0, Int(value) ?? options.holdSeconds)
         case "--connect-ramp-seconds":
@@ -421,6 +494,21 @@ func parseOptions() -> Options {
             options.loginRetryDelayMillis = max(0, Int(value) ?? options.loginRetryDelayMillis)
         default:
             continue
+        }
+    }
+    options.messageProfile = options.messageProfile.lowercased()
+    if !["per-connection", "pair-delivery"].contains(options.messageProfile) {
+        options.messageProfile = "per-connection"
+    }
+    options.messageCompletionMode = options.messageCompletionMode.lowercased()
+    if !["full", "ack-only"].contains(options.messageCompletionMode) {
+        options.messageCompletionMode = "full"
+    }
+    options.messageSenderEvery = max(1, options.messageSenderEvery)
+    if options.connections > 0 {
+        options.messageReceiverOffset = ((options.messageReceiverOffset % options.connections) + options.connections) % options.connections
+        if options.messageReceiverOffset == 0 && options.connections > 1 {
+            options.messageReceiverOffset = 1
         }
     }
 
@@ -1064,9 +1152,12 @@ final class ConnectionState: @unchecked Sendable {
     private var sentAtByClientID: [String: Date] = [:]
     private var acknowledgedClientIDs: Set<String> = []
     private var canonicalClientIDs: Set<String> = []
+    private var deliveredClientIDs: Set<String> = []
     private var duplicateCanonicalMessages = 0
+    private var duplicateDeliveredMessages = 0
     private var ackLatenciesMillis: [Double] = []
     private var canonicalLatenciesMillis: [Double] = []
+    private var deliveryLatenciesMillis: [Double] = []
     private var fanoutMessages = 0
     private var serverErrors = 0
     private var reconnects = 0
@@ -1079,18 +1170,27 @@ final class ConnectionState: @unchecked Sendable {
     private var reconnectInProgress = false
     private var currentGeneration = 0
     private var activeConnection: NWConnection?
-    private let expectedOwnMessages: Int
+    private let expectedAcks: Int
+    private let expectedCanonicalMessages: Int
+    private let expectedDeliveries: Int
+    private let messageDeliveryTracker: MessageDeliveryTracker?
     private let continuation: CheckedContinuation<ConnectionResult, Never>
     private let logger: ConnectionEventLogger
     private let connectionIndex: Int
 
     init(
-        expectedOwnMessages: Int,
+        expectedAcks: Int,
+        expectedCanonicalMessages: Int,
+        expectedDeliveries: Int,
+        messageDeliveryTracker: MessageDeliveryTracker?,
         continuation: CheckedContinuation<ConnectionResult, Never>,
         logger: ConnectionEventLogger,
         connectionIndex: Int
     ) {
-        self.expectedOwnMessages = expectedOwnMessages
+        self.expectedAcks = expectedAcks
+        self.expectedCanonicalMessages = expectedCanonicalMessages
+        self.expectedDeliveries = expectedDeliveries
+        self.messageDeliveryTracker = messageDeliveryTracker
         self.continuation = continuation
         self.logger = logger
         self.connectionIndex = connectionIndex
@@ -1198,6 +1298,27 @@ final class ConnectionState: @unchecked Sendable {
                     }
                 }
             }
+            if let clientID = packet.payload["clientMessageID"],
+               let delivery = messageDeliveryTracker?.recordDelivery(
+                clientMessageID: clientID,
+                receiverIndex: connectionIndex
+               ) {
+                if delivery.duplicate {
+                    duplicateDeliveredMessages += 1
+                } else {
+                    deliveredClientIDs.insert(clientID)
+                    deliveryLatenciesMillis.append(delivery.latencyMillis)
+                    logger.log(
+                        "message_delivery_received",
+                        connectionIndex: connectionIndex,
+                        fields: [
+                            "clientMessageID": clientID,
+                            "senderIndex": String(delivery.senderIndex),
+                            "latencyMs": String(Int(delivery.latencyMillis))
+                        ]
+                    )
+                }
+            }
         case .authError, .kick:
             serverErrors += 1
         case .heartbeatAck:
@@ -1205,9 +1326,7 @@ final class ConnectionState: @unchecked Sendable {
         case .auth, .authOK, .heartbeat:
             break
         }
-        let shouldFinish = expectedOwnMessages > 0
-            && acknowledgedClientIDs.count >= expectedOwnMessages
-            && canonicalClientIDs.count >= expectedOwnMessages
+        let shouldFinish = hasMetExpectedWork()
         lock.unlock()
 
         if shouldFinish {
@@ -1239,7 +1358,7 @@ final class ConnectionState: @unchecked Sendable {
             lock.unlock()
             return .ignore
         }
-        guard expectedOwnMessages == 0, reconnects < maxReconnects else {
+        guard expectedAcks == 0, expectedCanonicalMessages == 0, expectedDeliveries == 0, reconnects < maxReconnects else {
             lock.unlock()
             return .fail
         }
@@ -1269,6 +1388,8 @@ final class ConnectionState: @unchecked Sendable {
             acknowledgements: acknowledgedClientIDs.count,
             canonicalMessages: canonicalClientIDs.count,
             duplicateCanonicalMessages: duplicateCanonicalMessages,
+            deliveredMessages: deliveredClientIDs.count,
+            duplicateDeliveredMessages: duplicateDeliveredMessages,
             fanoutMessages: fanoutMessages,
             reconnects: reconnects,
             serverErrors: serverErrors,
@@ -1276,7 +1397,8 @@ final class ConnectionState: @unchecked Sendable {
             heartbeatAcks: heartbeatAcks,
             heartbeatSendCompletionMillis: heartbeatSendCompletionMillis,
             ackLatenciesMillis: ackLatenciesMillis,
-            canonicalLatenciesMillis: canonicalLatenciesMillis
+            canonicalLatenciesMillis: canonicalLatenciesMillis,
+            deliveryLatenciesMillis: deliveryLatenciesMillis
         )
         lock.unlock()
 
@@ -1289,6 +1411,7 @@ final class ConnectionState: @unchecked Sendable {
                 "sent": String(result.sent),
                 "ack": String(result.acknowledgements),
                 "canonical": String(result.canonicalMessages),
+                "delivered": String(result.deliveredMessages),
                 "serverErrors": String(result.serverErrors),
                 "reconnects": String(result.reconnects),
                 "heartbeatSends": String(result.heartbeatSends),
@@ -1298,6 +1421,16 @@ final class ConnectionState: @unchecked Sendable {
         activeConnection?.cancel()
         continuation.resume(returning: result)
         return true
+    }
+
+    private func hasMetExpectedWork() -> Bool {
+        let expectsWork = expectedAcks > 0 || expectedCanonicalMessages > 0 || expectedDeliveries > 0
+        guard expectsWork else {
+            return false
+        }
+        return acknowledgedClientIDs.count >= expectedAcks
+            && canonicalClientIDs.count >= expectedCanonicalMessages
+            && deliveredClientIDs.count >= expectedDeliveries
     }
 }
 
@@ -1330,6 +1463,73 @@ func heartbeatInitialJitterNanoseconds(options: Options, connectionIndex: Int, l
     let jitterMillisRange = UInt64(cappedJitterSeconds * 1_000)
     let stableValue = UInt64(bitPattern: Int64(connectionIndex &* 1_103_515_245) ^ Int64(loginIndex &* 12_345))
     return (stableValue % jitterMillisRange) * 1_000_000
+}
+
+func senderIndices(options: Options) -> [Int] {
+    guard options.messageProfile == "pair-delivery" else {
+        return Array(0..<options.connections)
+    }
+    return (0..<options.connections).filter { $0 % max(1, options.messageSenderEvery) == 0 }
+}
+
+func scheduledMessagesForConnection(index: Int, options: Options, senders: [Int]) -> [ScheduledMessage] {
+    guard options.messageProfile == "pair-delivery" else {
+        return (0..<options.messagesPerConnection).map { messageIndex in
+            ScheduledMessage(
+                messageIndex: messageIndex,
+                delayMillis: options.sendIntervalMillis * messageIndex,
+                receiverIndex: nil
+            )
+        }
+    }
+
+    guard let senderOrdinal = senders.firstIndex(of: index), !senders.isEmpty else {
+        return []
+    }
+    let receiverIndex = (index + options.messageReceiverOffset) % options.connections
+    let intervalMillis = options.messageRatePerSecond > 0
+        ? max(1, Int((1_000 / options.messageRatePerSecond).rounded()))
+        : max(0, options.sendIntervalMillis)
+
+    if options.messageRatePerSecond > 0 {
+        let durationSeconds = max(1, options.holdSeconds)
+        let totalMessages = max(1, Int((options.messageRatePerSecond * Double(durationSeconds)).rounded()))
+        var scheduled: [ScheduledMessage] = []
+        var globalIndex = senderOrdinal
+        var localMessageIndex = 0
+        while globalIndex < totalMessages {
+            scheduled.append(
+                ScheduledMessage(
+                    messageIndex: localMessageIndex,
+                    delayMillis: globalIndex * intervalMillis,
+                    receiverIndex: receiverIndex
+                )
+            )
+            localMessageIndex += 1
+            globalIndex += senders.count
+        }
+        return scheduled
+    }
+
+    return (0..<options.messagesPerConnection).map { messageIndex in
+        ScheduledMessage(
+            messageIndex: messageIndex,
+            delayMillis: intervalMillis * messageIndex,
+            receiverIndex: receiverIndex
+        )
+    }
+}
+
+func expectedDeliveryCounts(options: Options, senders: [Int]) -> [Int] {
+    var counts = Array(repeating: 0, count: options.connections)
+    guard options.messageProfile == "pair-delivery" else {
+        return counts
+    }
+    for senderIndex in senders {
+        let receiverIndex = (senderIndex + options.messageReceiverOffset) % options.connections
+        counts[receiverIndex] += scheduledMessagesForConnection(index: senderIndex, options: options, senders: senders).count
+    }
+    return counts
 }
 
 func receiveFrames(
@@ -1512,13 +1712,23 @@ func runConnection(
     index: Int,
     options: Options,
     login: ConnectionLogin,
+    scheduledMessages: [ScheduledMessage],
+    expectedDeliveries: Int,
+    messageResultTimeoutDelayMillis: Int,
+    messageDeliveryTracker: MessageDeliveryTracker?,
     logger: ConnectionEventLogger,
     queue: DispatchQueue,
     globalHoldBarrier: GlobalHoldBarrier?
 ) async -> ConnectionResult {
     await withCheckedContinuation { continuation in
+        let expectedCanonicalMessages = options.messageCompletionMode == "ack-only" || options.messageProfile == "pair-delivery"
+            ? 0
+            : scheduledMessages.count
         let state = ConnectionState(
-            expectedOwnMessages: options.messagesPerConnection,
+            expectedAcks: scheduledMessages.count,
+            expectedCanonicalMessages: expectedCanonicalMessages,
+            expectedDeliveries: expectedDeliveries,
+            messageDeliveryTracker: messageDeliveryTracker,
             continuation: continuation,
             logger: logger,
             connectionIndex: index
@@ -1587,7 +1797,7 @@ func runConnection(
             guard shouldStartMessages else {
                 return
             }
-            if options.messagesPerConnection == 0 {
+            if scheduledMessages.isEmpty && expectedDeliveries == 0 {
                 @Sendable func scheduleHold() {
                     logger.log(
                         "hold_scheduled",
@@ -1654,67 +1864,171 @@ func runConnection(
                 return
             }
 
-            logger.log(
-                "messages_scheduled",
-                connectionIndex: index,
-                loginIndex: login.loginIndex,
-                fields: [
-                    "generation": String(generation),
-                    "messages": String(options.messagesPerConnection),
-                    "sendIntervalMillis": String(options.sendIntervalMillis)
-                ]
-            )
-            for messageIndex in 0..<options.messagesPerConnection {
-                let delay = DispatchTime.now() + .milliseconds(options.sendIntervalMillis * messageIndex)
-                queue.asyncAfter(deadline: delay) {
-                    let requestID = UUID().uuidString
-                    let clientMessageID = "tcp-\(index)-\(messageIndex)-\(UUID().uuidString)"
-                    let messagePacket = ProtoWire.messageFrame(
-                        conversationID: options.conversationID,
-                        clientMessageID: clientMessageID,
-                        text: "tcp load \(index)/\(messageIndex)",
-                        requestID: requestID,
-                        protocolVersion: options.protocolVersion
-                    )
-                    state.recordSent(clientMessageID: clientMessageID, requestID: requestID, at: Date())
+            @Sendable func scheduleMessageWork() {
+                if scheduledMessages.isEmpty {
                     logger.log(
-                        "message_send_start",
+                        "message_delivery_wait",
                         connectionIndex: index,
                         loginIndex: login.loginIndex,
                         fields: [
                             "generation": String(generation),
-                            "messageIndex": String(messageIndex),
-                            "requestID": requestID,
-                            "clientMessageID": clientMessageID
+                            "expectedDeliveries": String(expectedDeliveries),
+                            "timeoutDelayMs": String(messageResultTimeoutDelayMillis)
                         ]
                     )
-                    connection.send(content: messagePacket, completion: .contentProcessed { error in
-                        if error != nil {
+                    queue.asyncAfter(deadline: .now() + .milliseconds(messageResultTimeoutDelayMillis)) {
+                        if state.finish(success: false, reason: "message_delivery_timeout") {
                             logger.log(
-                                "message_send_error",
+                                "message_delivery_timeout_fired",
                                 connectionIndex: index,
                                 loginIndex: login.loginIndex,
                                 fields: [
                                     "generation": String(generation),
-                                    "messageIndex": String(messageIndex),
-                                    "error": String(describing: error!)
-                                ]
-                            )
-                            state.finish(success: false, reason: "send_message_error:\(error!)")
-                        } else {
-                            logger.log(
-                                "message_send_ok",
-                                connectionIndex: index,
-                                loginIndex: login.loginIndex,
-                                fields: [
-                                    "generation": String(generation),
-                                    "messageIndex": String(messageIndex)
+                                    "timeoutDelayMs": String(messageResultTimeoutDelayMillis)
                                 ]
                             )
                         }
-                    })
+                    }
+                    return
+                }
+
+                logger.log(
+                    "messages_scheduled",
+                    connectionIndex: index,
+                    loginIndex: login.loginIndex,
+                    fields: [
+                        "generation": String(generation),
+                        "messages": String(scheduledMessages.count),
+                        "messageProfile": options.messageProfile,
+                        "messageRatePerSecond": String(options.messageRatePerSecond),
+                        "sendIntervalMillis": String(options.sendIntervalMillis),
+                        "expectedDeliveries": String(expectedDeliveries),
+                        "globalHoldBarrier": String(globalHoldBarrier != nil),
+                        "timeoutDelayMs": String(messageResultTimeoutDelayMillis)
+                    ]
+                )
+                let lastMessageDelayMillis = scheduledMessages.map(\.delayMillis).max() ?? 0
+                queue.asyncAfter(deadline: .now() + .milliseconds(messageResultTimeoutDelayMillis)) {
+                    if state.finish(success: false, reason: "message_result_timeout") {
+                        logger.log(
+                            "message_result_timeout_fired",
+                            connectionIndex: index,
+                            loginIndex: login.loginIndex,
+                            fields: [
+                                "generation": String(generation),
+                                "lastMessageDelayMs": String(lastMessageDelayMillis),
+                                "timeoutDelayMs": String(messageResultTimeoutDelayMillis),
+                                "timeoutSeconds": String(options.timeoutSeconds)
+                            ]
+                        )
+                    }
+                }
+                for scheduledMessage in scheduledMessages {
+                    let delay = DispatchTime.now() + .milliseconds(scheduledMessage.delayMillis)
+                    queue.asyncAfter(deadline: delay) {
+                        let requestID = UUID().uuidString
+                        let clientMessageID = "tcp-\(index)-\(scheduledMessage.messageIndex)-\(UUID().uuidString)"
+                        let messagePacket = ProtoWire.messageFrame(
+                            conversationID: options.conversationID,
+                            clientMessageID: clientMessageID,
+                            text: "tcp load \(index)/\(scheduledMessage.messageIndex)",
+                            requestID: requestID,
+                            protocolVersion: options.protocolVersion
+                        )
+                        let sentAt = Date()
+                        state.recordSent(clientMessageID: clientMessageID, requestID: requestID, at: sentAt)
+                        if let receiverIndex = scheduledMessage.receiverIndex {
+                            messageDeliveryTracker?.register(
+                                clientMessageID: clientMessageID,
+                                senderIndex: index,
+                                receiverIndex: receiverIndex,
+                                sentAt: sentAt
+                            )
+                        }
+                        logger.log(
+                            "message_send_start",
+                            connectionIndex: index,
+                            loginIndex: login.loginIndex,
+                            fields: [
+                                "generation": String(generation),
+                                "messageIndex": String(scheduledMessage.messageIndex),
+                                "requestID": requestID,
+                                "clientMessageID": clientMessageID,
+                                "receiverIndex": scheduledMessage.receiverIndex.map(String.init) ?? ""
+                            ]
+                        )
+                        connection.send(content: messagePacket, completion: .contentProcessed { error in
+                            if error != nil {
+                                logger.log(
+                                    "message_send_error",
+                                    connectionIndex: index,
+                                    loginIndex: login.loginIndex,
+                                    fields: [
+                                        "generation": String(generation),
+                                        "messageIndex": String(scheduledMessage.messageIndex),
+                                        "error": String(describing: error!)
+                                    ]
+                                )
+                                state.finish(success: false, reason: "send_message_error:\(error!)")
+                            } else {
+                                logger.log(
+                                    "message_send_ok",
+                                    connectionIndex: index,
+                                    loginIndex: login.loginIndex,
+                                    fields: [
+                                        "generation": String(generation),
+                                        "messageIndex": String(scheduledMessage.messageIndex)
+                                    ]
+                                )
+                            }
+                        })
+                    }
                 }
             }
+
+            if let globalHoldBarrier {
+                logger.log(
+                    "global_hold_barrier_wait",
+                    connectionIndex: index,
+                    loginIndex: login.loginIndex,
+                    fields: [
+                        "generation": String(generation),
+                        "messages": String(scheduledMessages.count),
+                        "expectedDeliveries": String(expectedDeliveries)
+                    ]
+                )
+                globalHoldBarrier.arriveAndWait(
+                    connectionIndex: index,
+                    loginIndex: login.loginIndex,
+                    queue: queue
+                ) { release in
+                    guard state.isActive(generation: generation) else {
+                        return
+                    }
+                    logger.log(
+                        "global_hold_barrier_done",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: [
+                            "generation": String(generation),
+                            "success": String(release.success),
+                            "reason": release.reason,
+                            "authenticated": String(release.authenticated),
+                            "target": String(release.target),
+                            "barrierElapsedMs": String(release.elapsedMillis),
+                            "work": "messages"
+                        ]
+                    )
+                    if release.success {
+                        scheduleMessageWork()
+                    } else {
+                        state.finish(success: false, reason: release.reason)
+                    }
+                }
+                return
+            }
+
+            scheduleMessageWork()
         }
 
         @Sendable func startAttempt(generation: Int) {
@@ -1928,6 +2242,10 @@ connectionLogger.log(
         "tcpHost": options.tcpHost,
         "tcpPort": String(options.tcpPort),
         "messagesPerConnection": String(options.messagesPerConnection),
+        "messageProfile": options.messageProfile,
+        "messageRatePerSecond": String(options.messageRatePerSecond),
+        "messageSenderEvery": String(options.messageSenderEvery),
+        "messageReceiverOffset": String(options.messageReceiverOffset),
         "holdSeconds": String(options.holdSeconds),
         "connectRampSeconds": String(options.connectRampSeconds),
         "loginConcurrency": String(options.loginConcurrency),
@@ -2003,7 +2321,18 @@ if options.loginOnly {
 let startedAt = Date()
 let loginLimiter = AsyncLimiter(permits: options.loginConcurrency)
 let connectionQueuePool = ConnectionQueuePool(size: options.connectionQueuePoolSize)
-let globalHoldBarrier = options.messagesPerConnection == 0
+let messageSenderIndices = senderIndices(options: options)
+let expectedDeliveriesByConnection = options.messageCompletionMode == "ack-only"
+    ? Array(repeating: 0, count: options.connections)
+    : expectedDeliveryCounts(options: options, senders: messageSenderIndices)
+let scheduledMessagesByConnection = (0..<options.connections).map {
+    scheduledMessagesForConnection(index: $0, options: options, senders: messageSenderIndices)
+}
+let globalLastMessageDelayMillis = scheduledMessagesByConnection.flatMap { $0 }.map(\.delayMillis).max() ?? 0
+let messageResultTimeoutDelayMillis = globalLastMessageDelayMillis + options.timeoutSeconds * 1_000
+let messageDeliveryTracker = options.messageProfile == "pair-delivery" ? MessageDeliveryTracker() : nil
+let usesGlobalStartBarrier = options.messagesPerConnection == 0 || options.messageProfile == "pair-delivery"
+let globalHoldBarrier = usesGlobalStartBarrier
     ? GlobalHoldBarrier(target: options.connections, logger: connectionLogger)
     : nil
 if let globalHoldBarrier {
@@ -2013,6 +2342,8 @@ if let globalHoldBarrier {
         "global_hold_barrier_enabled",
         fields: [
             "target": String(options.connections),
+            "messageProfile": options.messageProfile,
+            "messageCompletionMode": options.messageCompletionMode,
             "timeoutSeconds": String(barrierTimeoutSeconds)
         ]
     )
@@ -2020,6 +2351,19 @@ if let globalHoldBarrier {
 connectionLogger.log(
     "connection_queue_pool_ready",
     fields: ["connectionQueuePoolSize": String(connectionQueuePool.size)]
+)
+connectionLogger.log(
+    "message_plan_ready",
+    fields: [
+        "messageProfile": options.messageProfile,
+        "messageCompletionMode": options.messageCompletionMode,
+        "senderCount": String(messageSenderIndices.count),
+        "totalScheduledMessages": String(scheduledMessagesByConnection.reduce(0) { $0 + $1.count }),
+        "totalExpectedDeliveries": String(expectedDeliveriesByConnection.reduce(0, +)),
+        "globalLastMessageDelayMs": String(globalLastMessageDelayMillis),
+        "messageResultTimeoutDelayMs": String(messageResultTimeoutDelayMillis),
+        "messageRatePerSecond": String(options.messageRatePerSecond)
+    ]
 )
 let results = await withTaskGroup(of: ConnectionResult.self) { group in
     for index in 0..<options.connections {
@@ -2057,6 +2401,8 @@ let results = await withTaskGroup(of: ConnectionResult.self) { group in
                         acknowledgements: 0,
                         canonicalMessages: 0,
                         duplicateCanonicalMessages: 0,
+                        deliveredMessages: 0,
+                        duplicateDeliveredMessages: 0,
                         fanoutMessages: 0,
                         reconnects: 0,
                         serverErrors: 0,
@@ -2064,7 +2410,8 @@ let results = await withTaskGroup(of: ConnectionResult.self) { group in
                         heartbeatAcks: 0,
                         heartbeatSendCompletionMillis: [],
                         ackLatenciesMillis: [],
-                        canonicalLatenciesMillis: []
+                        canonicalLatenciesMillis: [],
+                        deliveryLatenciesMillis: []
                     )
                 }
             } else {
@@ -2074,6 +2421,10 @@ let results = await withTaskGroup(of: ConnectionResult.self) { group in
                 index: index,
                 options: options,
                 login: login,
+                scheduledMessages: scheduledMessagesByConnection[index],
+                expectedDeliveries: expectedDeliveriesByConnection[index],
+                messageResultTimeoutDelayMillis: messageResultTimeoutDelayMillis,
+                messageDeliveryTracker: messageDeliveryTracker,
                 logger: connectionLogger,
                 queue: connectionQueuePool.queue(for: index),
                 globalHoldBarrier: globalHoldBarrier
@@ -2093,6 +2444,8 @@ let sent = results.reduce(0) { $0 + $1.sent }
 let acknowledgements = results.reduce(0) { $0 + $1.acknowledgements }
 let canonicalMessages = results.reduce(0) { $0 + $1.canonicalMessages }
 let duplicateCanonicalMessages = results.reduce(0) { $0 + $1.duplicateCanonicalMessages }
+let deliveredMessages = results.reduce(0) { $0 + $1.deliveredMessages }
+let duplicateDeliveredMessages = results.reduce(0) { $0 + $1.duplicateDeliveredMessages }
 let fanoutMessages = results.reduce(0) { $0 + $1.fanoutMessages }
 let reconnects = results.reduce(0) { $0 + $1.reconnects }
 let serverErrors = results.reduce(0) { $0 + $1.serverErrors }
@@ -2101,20 +2454,26 @@ let heartbeatAcks = results.reduce(0) { $0 + $1.heartbeatAcks }
 let heartbeatSendCompletionMillis = results.flatMap(\.heartbeatSendCompletionMillis)
 let ackLatencies = results.flatMap(\.ackLatenciesMillis)
 let canonicalLatencies = results.flatMap(\.canonicalLatenciesMillis)
+let deliveryLatencies = results.flatMap(\.deliveryLatenciesMillis)
 let failureReasons = results.reduce(into: [String: Int]()) { counts, result in
     guard !result.success else { return }
     counts[result.failureReason ?? "unknown", default: 0] += 1
 }
+let expectedCanonicalMessages = options.messageCompletionMode == "ack-only" || options.messageProfile == "pair-delivery"
+    ? 0
+    : sent
 let ackSuccessRate = sent == 0 ? Double(successes) / Double(max(options.connections, 1)) : Double(acknowledgements) / Double(sent)
-let canonicalSuccessRate = sent == 0 ? Double(successes) / Double(max(options.connections, 1)) : Double(canonicalMessages) / Double(sent)
+let canonicalSuccessRate = expectedCanonicalMessages == 0 ? 1.0 : Double(canonicalMessages) / Double(expectedCanonicalMessages)
+let expectedDeliveries = expectedDeliveriesByConnection.reduce(0, +)
+let deliverySuccessRate = expectedDeliveries == 0 ? 0 : Double(deliveredMessages) / Double(expectedDeliveries)
 
 print("profile=\(options.profile) connections=\(options.connections) accounts=\(accountCredentials.count) devicesPerUser=\(options.devicesPerUser) queuePoolSize=\(connectionQueuePool.size) maxReconnects=\(options.maxReconnects) successes=\(successes) elapsed=\(String(format: "%.2f", elapsed))s")
 print("loginCacheHit=\(loginCacheHit) loginCacheRecords=\(loginCacheRecords) loginCacheValidForSeconds=\(loginCacheValidForSeconds) requireLoginCache=\(options.requireLoginCache)")
-print("globalHoldBarrier=\(globalHoldBarrier != nil)")
-print("sent=\(sent) ack=\(acknowledgements) canonical=\(canonicalMessages) duplicateCanonical=\(duplicateCanonicalMessages) fanout=\(fanoutMessages) reconnects=\(reconnects) serverErrors=\(serverErrors)")
+print("globalHoldBarrier=\(globalHoldBarrier != nil) messageProfile=\(options.messageProfile) messageCompletionMode=\(options.messageCompletionMode) messageRatePerSecond=\(options.messageRatePerSecond) expectedCanonical=\(expectedCanonicalMessages) expectedDeliveries=\(expectedDeliveries)")
+print("sent=\(sent) ack=\(acknowledgements) canonical=\(canonicalMessages) duplicateCanonical=\(duplicateCanonicalMessages) delivered=\(deliveredMessages) duplicateDelivered=\(duplicateDeliveredMessages) fanout=\(fanoutMessages) reconnects=\(reconnects) serverErrors=\(serverErrors)")
 print("heartbeat sent=\(heartbeatSends) ack=\(heartbeatAcks) intervalSeconds=\(options.heartbeatIntervalSeconds)")
 print("heartbeatSendCompletionMs p50=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.50))) p95=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.95))) p99=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.99)))")
-print("ackSuccessRate=\(String(format: "%.4f", ackSuccessRate)) canonicalSuccessRate=\(String(format: "%.4f", canonicalSuccessRate))")
+print("ackSuccessRate=\(String(format: "%.4f", ackSuccessRate)) canonicalSuccessRate=\(String(format: "%.4f", canonicalSuccessRate)) deliverySuccessRate=\(String(format: "%.4f", deliverySuccessRate))")
 if !failureReasons.isEmpty {
     let summary = failureReasons
         .sorted { lhs, rhs in
@@ -2129,6 +2488,7 @@ if !failureReasons.isEmpty {
 }
 print("ackLatencyMs p50=\(String(format: "%.1f", percentile(ackLatencies, 0.50))) p95=\(String(format: "%.1f", percentile(ackLatencies, 0.95))) p99=\(String(format: "%.1f", percentile(ackLatencies, 0.99)))")
 print("canonicalLatencyMs p50=\(String(format: "%.1f", percentile(canonicalLatencies, 0.50))) p95=\(String(format: "%.1f", percentile(canonicalLatencies, 0.95))) p99=\(String(format: "%.1f", percentile(canonicalLatencies, 0.99)))")
+print("deliveryLatencyMs p50=\(String(format: "%.1f", percentile(deliveryLatencies, 0.50))) p95=\(String(format: "%.1f", percentile(deliveryLatencies, 0.95))) p99=\(String(format: "%.1f", percentile(deliveryLatencies, 0.99)))")
 if let connectionLogFile = options.connectionLogFile {
     print("connectionLogFile=\(connectionLogFile)")
 }
@@ -2140,11 +2500,20 @@ connectionLogger.log(
         "sent": String(sent),
         "ack": String(acknowledgements),
         "canonical": String(canonicalMessages),
+        "expectedCanonical": String(expectedCanonicalMessages),
+        "delivered": String(deliveredMessages),
+        "expectedDeliveries": String(expectedDeliveries),
+        "deliverySuccessRate": String(deliverySuccessRate),
         "serverErrors": String(serverErrors),
         "heartbeatSends": String(heartbeatSends),
         "heartbeatAcks": String(heartbeatAcks),
         "heartbeatSendCompletionP95Ms": String(Int(percentile(heartbeatSendCompletionMillis, 0.95))),
         "heartbeatSendCompletionP99Ms": String(Int(percentile(heartbeatSendCompletionMillis, 0.99))),
+        "deliveryP95Ms": String(Int(percentile(deliveryLatencies, 0.95))),
+        "deliveryP99Ms": String(Int(percentile(deliveryLatencies, 0.99))),
+        "messageProfile": options.messageProfile,
+        "messageCompletionMode": options.messageCompletionMode,
+        "messageRatePerSecond": String(options.messageRatePerSecond),
         "loginCacheHit": String(loginCacheHit),
         "loginCacheRecords": String(loginCacheRecords),
         "loginCacheValidForSeconds": String(loginCacheValidForSeconds),

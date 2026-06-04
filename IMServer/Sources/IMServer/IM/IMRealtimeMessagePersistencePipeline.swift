@@ -10,21 +10,38 @@ struct IMMessagePersistencePipeline {
         guard !preparedMessages.isEmpty else {
             return []
         }
-        let routedDatabase = try await service.database(forConversationID: conversationID)
-        let preallocatedServerSequences = try await service.preallocateServerSequencesIfNeeded(
-            count: preparedMessages.count,
-            conversationID: conversationID,
-            updatedAt: preparedMessages.last?.serverTimestamp ?? Date(),
-            on: routedDatabase
-        )
-
-        return try await routedDatabase.transaction { database in
-            let membershipContext = try await service.requireConversationMembershipContext(
+        let diagnostics = IMMessagePersistenceDiagnostics()
+        defer {
+            diagnostics.logIfSlow(
+                app: service.app,
                 conversationID: conversationID,
-                senderUserID: preparedMessages[0].senderUserID,
-                on: database
+                messageCount: preparedMessages.count
             )
+        }
+
+        let routedDatabase = try await diagnostics.measure("databaseRoute", operation: {
+            try await service.database(forConversationID: conversationID)
+        })
+        let preallocatedServerSequences = try await diagnostics.measure("serverSequencePreallocate", operation: {
+            try await service.preallocateServerSequencesIfNeeded(
+                count: preparedMessages.count,
+                conversationID: conversationID,
+                updatedAt: preparedMessages.last?.serverTimestamp ?? Date(),
+                on: routedDatabase
+            )
+        })
+
+        return try await diagnostics.measure("transaction", operation: {
+            try await routedDatabase.transaction { database in
+                let membershipContext = try await diagnostics.measure("membershipContext", operation: {
+                    try await service.requireConversationMembershipContext(
+                        conversationID: conversationID,
+                        senderUserID: preparedMessages[0].senderUserID,
+                        on: database
+                    )
+                })
             let recipientUserIDs = membershipContext.memberUserIDs
+            diagnostics.recordRecipientCount(recipientUserIDs.count)
             let recipientUserIDSet = Set(recipientUserIDs)
             var directPolicyContext = DirectPolicyBatchContext(
                 conversationID: conversationID,
@@ -42,20 +59,24 @@ struct IMMessagePersistencePipeline {
                     throw IMRealtimeMessageError.conversationUnavailable
                 }
 
-                if let result = try await existingResult(
-                    prepared: prepared,
-                    recipientUserIDs: recipientUserIDs,
-                    on: database
-                ) {
+                if let result = try await diagnostics.measure("existingLookup", operation: {
+                    try await existingResult(
+                        prepared: prepared,
+                        recipientUserIDs: recipientUserIDs,
+                        on: database
+                    )
+                }) {
                     results.append(result)
                     continue
                 }
 
-                try await directPolicyContext.enforceBeforeCreate(
-                    senderUserID: prepared.senderUserID,
-                    service: service,
-                    on: database
-                )
+                try await diagnostics.measure("directPolicy", operation: {
+                    try await directPolicyContext.enforceBeforeCreate(
+                        senderUserID: prepared.senderUserID,
+                        service: service,
+                        on: database
+                    )
+                })
                 try service.validateMentionTargets(
                     in: prepared.normalizedContent,
                     memberUserIDs: recipientUserIDSet
@@ -65,17 +86,20 @@ struct IMMessagePersistencePipeline {
                 if let preallocatedServerSequences {
                     serverSequence = preallocatedServerSequences[index]
                 } else {
-                    serverSequence = try await service.allocateNextServerSequence(
-                        conversationID: conversationID,
-                        updatedAt: prepared.serverTimestamp,
-                        on: database
-                    )
+                    serverSequence = try await diagnostics.measure("serverSequenceAllocate", operation: {
+                        try await service.allocateNextServerSequence(
+                            conversationID: conversationID,
+                            updatedAt: prepared.serverTimestamp,
+                            on: database
+                        )
+                    })
                 }
 
                 let message = try await createMessage(
                     prepared: prepared,
                     serverSequence: serverSequence,
                     recipientUserIDs: recipientUserIDs,
+                    diagnostics: diagnostics,
                     on: database
                 )
                 directPolicyContext.recordCreated(senderUserID: prepared.senderUserID)
@@ -90,7 +114,8 @@ struct IMMessagePersistencePipeline {
                 )
             }
             return results
-        }
+            }
+        })
     }
 
     private func existingResult(
@@ -119,37 +144,55 @@ struct IMMessagePersistencePipeline {
         prepared: IMPreparedIncomingMessage,
         serverSequence: Int,
         recipientUserIDs: [UUID],
+        diagnostics: IMMessagePersistenceDiagnostics,
         on database: any Database
     ) async throws -> ConversationMessage {
-        let canonicalContent = try await service.canonicalizeReplyReferenceIfNeeded(
-            prepared.normalizedContent,
-            conversationID: conversationID,
-            on: database
-        )
+        let canonicalContent = try await diagnostics.measure("canonicalize", operation: {
+            try await service.canonicalizeReplyReferenceIfNeeded(
+                prepared.normalizedContent,
+                conversationID: conversationID,
+                on: database
+            )
+        })
+        let aggregateSequence = try await diagnostics.measure("aggregateSequenceAllocate", operation: {
+            let sequence = try await ConversationDomainEventSequenceAllocator(db: database).allocate(
+                conversationID: conversationID,
+                on: database
+            )
+            return try imIntSequence(sequence.rawValue, field: "aggregate_sequence")
+        })
         let message = try ConversationMessage(
             conversationID: conversationID,
             senderUserID: prepared.senderUserID,
             serverSequence: serverSequence,
-            timelineSequence: serverSequence,
+            timelineSequence: aggregateSequence,
             clientMessageID: prepared.normalizedClientMessageID,
             content: canonicalContent
         )
-        try await message.create(on: database)
-        try await service.advanceReadSequence(
-            conversationID: conversationID,
-            userID: prepared.senderUserID,
-            readSequence: serverSequence,
-            on: database
-        )
-        try await ConversationOutboxService(db: database).enqueue(
-            type: .messageCreated,
-            conversationID: conversationID,
-            actorUserID: prepared.senderUserID,
-            payload: .messageCreated(
-                messageID: try message.requireID(),
-                recipientUserIDs: recipientUserIDs
+        try await diagnostics.measure("messageCreate", operation: {
+            try await message.create(on: database)
+        })
+        try await diagnostics.measure("readAdvance", operation: {
+            try await service.advanceReadSequence(
+                conversationID: conversationID,
+                userID: prepared.senderUserID,
+                readSequence: serverSequence,
+                on: database
             )
-        )
+        })
+        try await diagnostics.measure("outboxEnqueue", operation: {
+            try await ConversationOutboxService(db: database).enqueue(
+                type: .messageCreated,
+                conversationID: conversationID,
+                actorUserID: prepared.senderUserID,
+                payload: .messageCreated(
+                    messageID: try message.requireID(),
+                    recipientUserIDs: recipientUserIDs
+                ),
+                preallocatedAggregateSequence: aggregateSequence,
+                updatesMessageTimelineSequence: false
+            )
+        })
         return message
     }
 }

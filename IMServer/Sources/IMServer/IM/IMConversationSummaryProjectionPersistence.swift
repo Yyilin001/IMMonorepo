@@ -4,6 +4,168 @@ import SQLKit
 import Vapor
 
 extension IMConversationSummaryProjectionService {
+    func applyMessageCreatedExistingSummariesSQL(
+        conversationID: UUID,
+        messageServerSequence: Int,
+        messagePreview: IMMessagePreviewResponse,
+        messageCreatedAt: Date?,
+        updatedAt: Date,
+        recipientUserIDs: [UUID],
+        on database: any Database
+    ) async throws -> MessageCreatedSummarySQLProjectionResult? {
+        guard !recipientUserIDs.isEmpty,
+              let sql = database as? any SQLDatabase,
+              sql.dialect.name == "postgresql"
+        else {
+            return nil
+        }
+
+        let uniqueUserIDs = Array(Set(recipientUserIDs)).sorted { $0.uuidString < $1.uuidString }
+        let summaryLookup = try await existingMessageCreatedSummaryOwnersSQL(
+            conversationID: conversationID,
+            recipientUserIDs: uniqueUserIDs,
+            sql: sql
+        )
+        let existingUserIDs = summaryLookup.existingUserIDs
+        let missingUserIDs = summaryLookup.missingUserIDs
+        guard !existingUserIDs.isEmpty else {
+            return MessageCreatedSummarySQLProjectionResult(
+                missingUserIDs: missingUserIDs,
+                changeLogRows: []
+            )
+        }
+
+        let lastMessageJSON = try ConversationUserSummary.encodeLastMessageForStorage(messagePreview)
+        let lastActivityAt = messageCreatedAt ?? updatedAt
+        let values = existingUserIDs.map { ownerUserID in
+            """
+            (
+                \(bind: ownerUserID),
+                \(bind: ConversationUserSummary.recordID(ownerUserID: ownerUserID, conversationID: conversationID))
+            )
+            """ as SQLQueryString
+        }.joined(separator: ", ")
+
+        let rows = try await sql.raw("""
+            WITH \(ident: "input")(
+                \(ident: "owner_user_id"),
+                \(ident: "summary_record_id")
+            ) AS (
+                VALUES \(values)
+            ),
+            \(ident: "updated_summaries") AS (
+                UPDATE \(ident: ConversationUserSummary.schema) AS \(ident: "summary")
+                SET
+                    \(ident: "last_message_json") = CASE
+                        WHEN \(bind: messageServerSequence) >= COALESCE(
+                            (\(ident: "summary").\(ident: "last_message_json")::jsonb ->> 'serverSequence')::integer,
+                            0
+                        )
+                        THEN \(bind: lastMessageJSON)
+                        ELSE \(ident: "summary").\(ident: "last_message_json")
+                    END,
+                    \(ident: "last_read_sequence") = GREATEST(
+                        \(ident: "member").\(ident: "last_read_sequence"),
+                        GREATEST(0, \(ident: "member").\(ident: "visible_from_sequence") - 1)
+                    ),
+                    \(ident: "unread_count") = GREATEST(
+                        GREATEST(
+                            \(bind: messageServerSequence),
+                            COALESCE(
+                                (\(ident: "summary").\(ident: "last_message_json")::jsonb ->> 'serverSequence')::integer,
+                                0
+                            ),
+                            GREATEST(0, \(ident: "member").\(ident: "visible_from_sequence") - 1)
+                        ) - GREATEST(
+                            \(ident: "member").\(ident: "last_read_sequence"),
+                            GREATEST(0, \(ident: "member").\(ident: "visible_from_sequence") - 1)
+                        ),
+                        0
+                    ),
+                    \(ident: "last_activity_at") = CASE
+                        WHEN \(bind: messageServerSequence) >= COALESCE(
+                            (\(ident: "summary").\(ident: "last_message_json")::jsonb ->> 'serverSequence')::integer,
+                            0
+                        )
+                        THEN \(bind: lastActivityAt)
+                        ELSE \(ident: "summary").\(ident: "last_activity_at")
+                    END,
+                    \(ident: "updated_at") = \(bind: updatedAt),
+                    \(ident: "is_removed") = FALSE
+                FROM \(ident: "input")
+                JOIN \(ident: ConversationMember.schema) AS \(ident: "member")
+                    ON \(ident: "member").\(ident: "conversation_id") = \(bind: conversationID)
+                   AND \(ident: "member").\(ident: "user_id") = \(ident: "input").\(ident: "owner_user_id")
+                WHERE \(ident: "summary").\(ident: "id") = \(ident: "input").\(ident: "summary_record_id")
+                  AND \(ident: "summary").\(ident: "conversation_id") = \(bind: conversationID)
+                  AND \(bind: messageServerSequence) >= \(ident: "member").\(ident: "visible_from_sequence")
+                RETURNING
+                    \(ident: "summary").\(ident: "owner_user_id") AS \(ident: "owner_user_id"),
+                    \(ident: "summary").\(ident: "conversation_id") AS \(ident: "conversation_id"),
+                    \(ident: "summary").\(ident: "id") AS \(ident: "summary_record_id"),
+                    \(ident: "summary").\(ident: "updated_at") AS \(ident: "updated_at"),
+                    \(ident: "summary").\(ident: "is_removed") AS \(ident: "is_removed")
+            )
+            SELECT
+                \(ident: "owner_user_id"),
+                \(ident: "conversation_id"),
+                \(ident: "summary_record_id"),
+                \(ident: "updated_at"),
+                \(ident: "is_removed")
+            FROM \(ident: "updated_summaries")
+            """).all(decoding: MessageCreatedSummarySQLUpdateRow.self)
+
+        return MessageCreatedSummarySQLProjectionResult(
+            missingUserIDs: missingUserIDs,
+            changeLogRows: rows.map(\.changeLogRow)
+        )
+    }
+
+    func existingMessageCreatedSummaryOwnersSQL(
+        conversationID: UUID,
+        recipientUserIDs: [UUID],
+        sql: any SQLDatabase
+    ) async throws -> (existingUserIDs: [UUID], missingUserIDs: [UUID]) {
+        guard !recipientUserIDs.isEmpty else {
+            return ([], [])
+        }
+
+        let values = recipientUserIDs.map { ownerUserID in
+            """
+            (
+                \(bind: ownerUserID),
+                \(bind: ConversationUserSummary.recordID(ownerUserID: ownerUserID, conversationID: conversationID))
+            )
+            """ as SQLQueryString
+        }.joined(separator: ", ")
+
+        let rows = try await sql.raw("""
+            WITH \(ident: "input")(
+                \(ident: "owner_user_id"),
+                \(ident: "summary_record_id")
+            ) AS (
+                VALUES \(values)
+            )
+            SELECT
+                \(ident: "input").\(ident: "owner_user_id") AS \(ident: "owner_user_id"),
+                CASE
+                    WHEN \(ident: "summary").\(ident: "id") IS NULL THEN FALSE
+                    ELSE TRUE
+                END AS \(ident: "exists")
+            FROM \(ident: "input")
+            LEFT JOIN \(ident: ConversationUserSummary.schema) AS \(ident: "summary")
+                ON \(ident: "summary").\(ident: "id") = \(ident: "input").\(ident: "summary_record_id")
+            """).all(decoding: MessageCreatedSummaryExistenceRow.self)
+
+        let existingUserIDs = rows
+            .filter(\.exists)
+            .map(\.ownerUserID)
+        let missingUserIDs = rows
+            .filter { !$0.exists }
+            .map(\.ownerUserID)
+        return (existingUserIDs, missingUserIDs)
+    }
+
     func latestVisibleMessagesByThreshold(
         conversationID: UUID,
         memberships: [ConversationMember],
@@ -359,4 +521,45 @@ struct MessageCreatedSummaryDynamicUpdateRow {
     let lastActivityAt: Date
     let updatedAt: Date
     let isRemoved: Bool
+}
+
+struct MessageCreatedSummarySQLProjectionResult {
+    let missingUserIDs: [UUID]
+    let changeLogRows: [ConversationChangeLogBatchWriter.Row]
+}
+
+struct MessageCreatedSummaryExistenceRow: Decodable {
+    let ownerUserID: UUID
+    let exists: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case ownerUserID = "owner_user_id"
+        case exists
+    }
+}
+
+struct MessageCreatedSummarySQLUpdateRow: Decodable {
+    let ownerUserID: UUID
+    let conversationID: UUID
+    let summaryRecordID: String
+    let updatedAt: Date
+    let isRemoved: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case ownerUserID = "owner_user_id"
+        case conversationID = "conversation_id"
+        case summaryRecordID = "summary_record_id"
+        case updatedAt = "updated_at"
+        case isRemoved = "is_removed"
+    }
+
+    var changeLogRow: ConversationChangeLogBatchWriter.Row {
+        ConversationChangeLogBatchWriter.Row(
+            ownerUserID: ownerUserID,
+            conversationID: conversationID,
+            summaryRecordID: summaryRecordID,
+            updatedAt: updatedAt,
+            isRemoved: isRemoved
+        )
+    }
 }

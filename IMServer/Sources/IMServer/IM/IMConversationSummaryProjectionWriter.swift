@@ -28,6 +28,32 @@ extension IMConversationSummaryProjectionService {
 
         let messagePreview = try makePreview(from: message)
         let updatedAt = Date()
+        if let fastPathResult = try await applyMessageCreatedExistingSummariesSQL(
+            conversationID: conversationID,
+            messageServerSequence: message.serverSequence,
+            messagePreview: messagePreview,
+            messageCreatedAt: message.createdAt,
+            updatedAt: updatedAt,
+            recipientUserIDs: uniqueUserIDs,
+            on: readModelDatabase
+        ) {
+            if !fastPathResult.missingUserIDs.isEmpty {
+                try await refreshConversationSummaries(
+                    conversationID: conversationID,
+                    recipientUserIDs: fastPathResult.missingUserIDs,
+                    on: database,
+                    writeChangeLog: writeChangeLog,
+                    preferredMessage: message
+                )
+            }
+            if writeChangeLog {
+                try await ConversationChangeLogBatchWriter(database: readModelDatabase).upsert(
+                    fastPathResult.changeLogRows
+                )
+            }
+            return
+        }
+
         let summaryRecordIDs = uniqueUserIDs.map {
             ConversationUserSummary.recordID(ownerUserID: $0, conversationID: conversationID)
         }

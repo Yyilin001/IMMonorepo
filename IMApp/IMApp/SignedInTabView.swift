@@ -56,6 +56,7 @@ struct SignedInTabView: View {
 
     @State private var selectedTab: SignedInTab = .messages
     @State private var navigationPath: [SignedInRoute] = []
+    @State private var conversationSnapshotStore = IMConversationSnapshotStore()
 
     init(
         user: AuthUser,
@@ -160,6 +161,7 @@ struct SignedInTabView: View {
             conversationStore: conversationStore,
             presentationStore: conversationPresentationStore,
             runtimeStore: conversationRuntimeStore,
+            snapshotStore: conversationSnapshotStore,
             onOpenConversation: openConversation
         )
     }
@@ -204,6 +206,7 @@ struct SignedInTabView: View {
                 conversationStore: conversationStore,
                 presentationStore: conversationPresentationStore,
                 runtimeStore: conversationRuntimeStore,
+                snapshotStore: conversationSnapshotStore,
                 conversationID: conversationID
             )
         case .requests:

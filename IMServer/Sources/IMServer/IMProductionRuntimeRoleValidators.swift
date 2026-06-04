@@ -47,7 +47,8 @@ enum IMStreamConsumerProductionValidator {
         try IMProductionRuntimeValidationSupport.validateConversationShardConfiguration(app)
         try IMProductionRuntimeValidationSupport.validateKafkaConsumerConfiguration(app)
         try IMProductionRuntimeValidationSupport.validateStreamConsumerDeploymentIsolation(app)
-        if app.streamConsumerConfiguration.isEnabled("domain-delivery-consumer") {
+        if app.streamConsumerConfiguration.isEnabled("domain-delivery-consumer")
+            || app.streamConsumerConfiguration.isEnabled("realtime-delivery-consumer") {
             try IMProductionRuntimeValidationSupport.validateGatewayRelayConfiguration(app)
         }
         try IMProductionRuntimeValidationSupport.validateSummaryReadModelWriteConfiguration(app)

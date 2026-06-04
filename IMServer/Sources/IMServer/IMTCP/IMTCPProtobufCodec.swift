@@ -7,8 +7,11 @@ enum IMTCPProtobufCodec {
         try IMRTChatDomainEvent(serializedBytes: data).domainValue()
     }
 
-    static func encodeDomainEvent(_ payload: IMTCPChatDomainEventPayload) throws -> Data {
-        try payload.protobuf(requireDeliveryMetadata: true).serializedData()
+    static func encodeDomainEvent(
+        _ payload: IMTCPChatDomainEventPayload,
+        requireDeliveryMetadata: Bool = true
+    ) throws -> Data {
+        try payload.protobuf(requireDeliveryMetadata: requireDeliveryMetadata).serializedData()
     }
 
     static func encode<Payload: Sendable>(
@@ -64,7 +67,7 @@ enum IMTCPProtobufCodec {
             guard let payload = payload as? IMTCPChatDomainEventPayload else {
                 throw IMTCPProtocolError.invalidEnvelope
             }
-            packet.domainEvent = try payload.protobuf(requireDeliveryMetadata: true)
+            packet.domainEvent = try payload.protobuf(requireDeliveryMetadata: false)
         case .streamSignal:
             guard let payload = payload as? IMTCPMessageStreamSignalPayload else {
                 throw IMTCPProtocolError.invalidEnvelope
@@ -764,11 +767,12 @@ private extension IMRTChatDomainEvent {
               let eventType = IMTCPChatDomainEventType(rawValue: eventType),
               let aggregateID = UUID(uuidString: aggregateID),
               hasAggregateSequence,
-              aggregateSequence > 0,
-              hasOwnerCursor,
-              ownerCursor > 0,
-              hasOwnerAggregateSequence,
-              ownerAggregateSequence > 0
+              aggregateSequence > 0
+        else {
+            throw IMTCPProtocolError.invalidEnvelope
+        }
+        guard !hasOwnerCursor || ownerCursor > 0,
+              !hasOwnerAggregateSequence || ownerAggregateSequence > 0
         else {
             throw IMTCPProtocolError.invalidEnvelope
         }
@@ -793,8 +797,8 @@ private extension IMRTChatDomainEvent {
             conversation: hasConversation ? try conversation.domainValue() : nil,
             timelineNotice: hasTimelineNotice ? try timelineNotice.domainValue() : nil,
             requiresTimelineNotice: requiresTimelineNotice,
-            ownerCursor: ownerCursor,
-            ownerAggregateSequence: ownerAggregateSequence,
+            ownerCursor: hasOwnerCursor ? ownerCursor : nil,
+            ownerAggregateSequence: hasOwnerAggregateSequence ? ownerAggregateSequence : nil,
             body: body
         )
     }

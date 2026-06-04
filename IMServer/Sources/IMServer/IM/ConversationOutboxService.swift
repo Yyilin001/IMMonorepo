@@ -10,14 +10,24 @@ struct ConversationOutboxService {
         conversationID: UUID,
         actorUserID: UUID? = nil,
         payload: ConversationDomainEventPayload,
+        preallocatedAggregateSequence: Int? = nil,
+        updatesMessageTimelineSequence: Bool = true,
         on database: (any Database)? = nil
     ) async throws {
         let database = database ?? db
-        let aggregateSequence = try await ConversationDomainEventSequenceAllocator(db: database).allocate(
-            conversationID: conversationID,
-            on: database
-        )
-        let aggregateSequenceValue = try imIntSequence(aggregateSequence.rawValue, field: "aggregate_sequence")
+        let aggregateSequenceValue: Int
+        if let preallocatedAggregateSequence {
+            aggregateSequenceValue = try imIntSequence(
+                UInt64(preallocatedAggregateSequence),
+                field: "aggregate_sequence"
+            )
+        } else {
+            let aggregateSequence = try await ConversationDomainEventSequenceAllocator(db: database).allocate(
+                conversationID: conversationID,
+                on: database
+            )
+            aggregateSequenceValue = try imIntSequence(aggregateSequence.rawValue, field: "aggregate_sequence")
+        }
         let event = try ConversationDomainEvent(
             conversationID: conversationID,
             eventType: type,
@@ -26,12 +36,13 @@ struct ConversationOutboxService {
             payload: payload
         )
         try await event.create(on: database)
-        if type == .messageCreated, let messageID = payload.messageID,
+        if updatesMessageTimelineSequence, type == .messageCreated, let messageID = payload.messageID,
            let message = try await ConversationMessage.find(messageID, on: database)
         {
             message.timelineSequence = aggregateSequenceValue
             try await message.update(on: database)
         }
+        await ConversationOutboxNotification.notifyPendingEvents(on: database)
     }
 
     @discardableResult
@@ -86,6 +97,7 @@ struct ConversationOutboxService {
                 payload: payload
             )
             try await event.create(on: tx)
+            await ConversationOutboxNotification.notifyPendingEvents(on: tx)
             return event
         }
     }

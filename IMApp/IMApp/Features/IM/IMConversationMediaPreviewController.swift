@@ -107,11 +107,11 @@ extension IMConversationDetailView {
     }
 
     func pauseMediaDownload(for assetID: String) {
-        let message = messages.first { $0.mediaAsset?.assetID == assetID }
+        let mediaDownloadSnapshot = mediaDownloadSnapshot(for: assetID)
         let progress: FileTransferProgress?
         let backgroundTransfer: IMMessageBackgroundTransferReference?
 
-        if let localDownloadState = message?.localDownloadState {
+        if let localDownloadState = mediaDownloadSnapshot?.localDownloadState {
             switch localDownloadState.status {
             case .downloading(let snapshot, let reference),
                  .waitingForConnectivity(let snapshot, let reference):
@@ -182,10 +182,10 @@ extension IMConversationDetailView {
 
     func pauseAllMediaDownloads() {
         for assetID in Set(mediaDownloadTasks.keys).union(
-            messages.compactMap { message in
-                switch message.localDownloadState?.status {
+            chatPageSnapshot.mediaDownloadSnapshots.compactMap { snapshot in
+                switch snapshot.localDownloadState?.status {
                 case .downloading, .waitingForConnectivity:
-                    return message.mediaAsset?.assetID
+                    return snapshot.asset.assetID
                 case .paused, .downloaded, .failed, .none:
                     return nil
                 }
@@ -226,12 +226,13 @@ extension IMConversationDetailView {
         return sanitized.isEmpty ? fallbackAssetID : sanitized
     }
 
-    func resolvedMediaDownloadState(for message: IMConversationMessage) -> IMMediaDownloadState? {
-        guard let asset = message.mediaAsset else {
+    func resolvedMediaDownloadState(for snapshot: IMChatMediaDownloadSnapshot?) -> IMMediaDownloadState? {
+        guard let snapshot else {
             return nil
         }
+        let asset = snapshot.asset
 
-        if let localDownloadState = message.localDownloadState {
+        if let localDownloadState = snapshot.localDownloadState {
             switch localDownloadState.status {
             case .downloading(let progress, _), .waitingForConnectivity(let progress, _):
                 return .downloading(progress: progress?.progress)
@@ -260,11 +261,15 @@ extension IMConversationDetailView {
     }
 
     func messageID(for assetID: String) -> String? {
-        messages.first { $0.mediaAsset?.assetID == assetID }?.id
+        mediaDownloadSnapshot(for: assetID)?.localMessageID
     }
 
     func mediaAsset(for assetID: String) -> IMMediaAsset? {
-        messages.first { $0.mediaAsset?.assetID == assetID }?.mediaAsset
+        mediaDownloadSnapshot(for: assetID)?.asset
+    }
+
+    func mediaDownloadSnapshot(for assetID: String) -> IMChatMediaDownloadSnapshot? {
+        chatPageSnapshot.mediaDownloadSnapshots.first { $0.asset.assetID == assetID }
     }
 
     func mediaDownloadFailureMessage(for asset: IMMediaAsset, error: Error) -> String {

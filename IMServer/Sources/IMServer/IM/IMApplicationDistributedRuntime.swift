@@ -18,9 +18,7 @@ private struct ConversationEventStreamProducerStorageKey: StorageKey {
 
 final class ConversationEventStreamProducerLifecycle: LifecycleHandler, @unchecked Sendable {
     func shutdown(_ application: Application) async {
-        if let producer = application.storage[ConversationEventStreamProducerStorageKey.self] {
-            await producer.shutdown()
-        }
+        await application.shutdownConversationEventStreamProducerIfConfigured()
     }
 }
 
@@ -96,6 +94,12 @@ extension Application {
         }
         set { storage[ConversationEventStreamProducerStorageKey.self] = newValue }
     }
+
+    func shutdownConversationEventStreamProducerIfConfigured() async {
+        if let producer = storage[ConversationEventStreamProducerStorageKey.self] {
+            await producer.shutdown()
+        }
+    }
 }
 
 struct ExplicitDatabaseConversationShardRouter: ConversationShardRouter {
@@ -163,6 +167,22 @@ struct GatewayRelayDomainEventDeliveryRequest: Content {
     let ownerUserID: UUID
     let eventID: UUID
     let requestID: UUID?
+}
+
+struct GatewayRelayDomainEventPayloadRequest: Content {
+    let payloadBase64: String
+    let recipientUserIDs: [UUID]
+    let requestID: UUID?
+}
+
+struct GatewayRelayDomainEventPayloadBatchRequest: Content {
+    let deliveries: [GatewayRelayDomainEventPayloadBatchEntry]
+    let requestID: UUID?
+}
+
+struct GatewayRelayDomainEventPayloadBatchEntry: Content {
+    let ownerUserID: UUID
+    let payloadBase64: String
 }
 
 struct GatewayRelayKickSessionRequest: Content {

@@ -45,6 +45,14 @@ final class IMConnectionControl: @unchecked Sendable {
         self.channel = channel
     }
 
+    var eventLoop: any EventLoop {
+        channel.eventLoop
+    }
+
+    var eventLoopIdentifier: ObjectIdentifier {
+        ObjectIdentifier(channel.eventLoop as AnyObject)
+    }
+
     func sendPacket<Payload: Sendable>(
         type: IMTCPPacketType,
         requestID: UUID?,
@@ -57,6 +65,23 @@ final class IMConnectionControl: @unchecked Sendable {
             }
             IMTCPChannelWriter.writePacket(type: type, requestID: requestID, payload: payload, on: channel)
         }
+    }
+
+    func sendEncodedPacket(_ data: Data) {
+        let channel = self.channel
+        channel.eventLoop.execute {
+            guard channel.isActive else {
+                return
+            }
+            IMTCPChannelWriter.writeEncodedPacket(data, on: channel)
+        }
+    }
+
+    func sendEncodedPacketOnEventLoop(_ data: Data) {
+        guard channel.isActive else {
+            return
+        }
+        IMTCPChannelWriter.writeEncodedPacket(data, on: channel)
     }
 
     func kick(reason: IMTCPKickReason, message: String) {
@@ -103,6 +128,13 @@ actor IMConnectionRegistry {
     private struct DeviceConnectionKey: Hashable, Sendable {
         let userID: UUID
         let deviceID: String
+    }
+
+    private struct ReusableDomainEventPacketKey: Hashable, Sendable {
+        let eventID: UUID
+        let eventType: IMTCPChatDomainEventType
+        let aggregateID: UUID
+        let aggregateSequence: UInt64
     }
 
     func bind(_ connection: IMAuthenticatedConnection, control: IMConnectionControl) {
@@ -232,6 +264,49 @@ actor IMConnectionRegistry {
         )
     }
 
+    func sendDomainEventDeliveries(
+        _ deliveries: [IMCanonicalDomainEventDelivery],
+        requestID: UUID? = UUID()
+    ) {
+        var reusableGroups: [ReusableDomainEventPacketKey: (payload: IMTCPChatDomainEventPayload, userIDs: [UUID])] = [:]
+        var fallbackDeliveries: [IMCanonicalDomainEventDelivery] = []
+        fallbackDeliveries.reserveCapacity(deliveries.count)
+
+        for delivery in deliveries {
+            guard let key = reusablePacketKey(for: delivery.payload) else {
+                fallbackDeliveries.append(delivery)
+                continue
+            }
+            if reusableGroups[key] == nil {
+                reusableGroups[key] = (payload: delivery.payload, userIDs: [])
+            }
+            reusableGroups[key]?.userIDs.append(delivery.ownerUserID)
+        }
+
+        for group in reusableGroups.values {
+            sendDomainEventPayload(group.payload, toUserIDs: group.userIDs, requestID: requestID)
+        }
+
+        for delivery in fallbackDeliveries {
+            sendDomainEventPayload(delivery.payload, toUserIDs: [delivery.ownerUserID], requestID: requestID)
+        }
+    }
+
+    func sendDomainEventPayload(
+        _ payload: IMTCPChatDomainEventPayload,
+        toUserIDs userIDs: [UUID],
+        requestID: UUID? = UUID()
+    ) {
+        guard let packetData = try? IMTCPProtobufCodec.encode(
+            type: .domainEvent,
+            requestID: requestID,
+            payload: payload
+        ) else {
+            return
+        }
+        sendEncodedPacket(packetData, toUserIDs: userIDs)
+    }
+
     func sendStreamSignal(
         _ payload: IMTCPMessageStreamSignalPayload,
         toUserIDs userIDs: [UUID],
@@ -254,12 +329,60 @@ actor IMConnectionRegistry {
         }
     }
 
+    private func sendEncodedPacket(_ data: Data, toUserIDs userIDs: [UUID]) {
+        let uniqueConnectionIDs = Set(userIDs).flatMap { connectionIDsByUserID[$0] ?? [] }
+        let controls = uniqueConnectionIDs.compactMap { connectionsByID[$0]?.control }
+        let groups = Dictionary(grouping: controls, by: \.eventLoopIdentifier)
+        let batchSize = max(1, Environment.get("IM_GATEWAY_LOCAL_FANOUT_BATCH_SIZE").flatMap(Int.init(_:)) ?? 128)
+
+        for group in groups.values {
+            guard let eventLoop = group.first?.eventLoop else {
+                continue
+            }
+
+            var startIndex = group.startIndex
+            while startIndex < group.endIndex {
+                let endIndex = group.index(
+                    startIndex,
+                    offsetBy: batchSize,
+                    limitedBy: group.endIndex
+                ) ?? group.endIndex
+                let batch = Array(group[startIndex..<endIndex])
+                eventLoop.execute {
+                    for control in batch {
+                        control.sendEncodedPacketOnEventLoop(data)
+                    }
+                }
+                startIndex = endIndex
+            }
+        }
+    }
+
     private func normalizedDeviceID(_ deviceID: String?) -> String? {
         let trimmed = deviceID?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let trimmed, !trimmed.isEmpty else {
             return nil
         }
         return trimmed
+    }
+
+    private func reusablePacketKey(for payload: IMTCPChatDomainEventPayload) -> ReusableDomainEventPacketKey? {
+        guard payload.eventType == .messageCreated,
+              payload.conversation == nil,
+              payload.timelineNotice == nil,
+              payload.requiresTimelineNotice == false,
+              payload.ownerCursor == nil,
+              payload.ownerAggregateSequence == nil
+        else {
+            return nil
+        }
+
+        return ReusableDomainEventPacketKey(
+            eventID: payload.eventID,
+            eventType: payload.eventType,
+            aggregateID: payload.aggregateID,
+            aggregateSequence: payload.aggregateSequence
+        )
     }
 }
 

@@ -41,12 +41,13 @@ extension IMConversationDetailView {
     }
 
     var detailMessageStack: some View {
-        LazyVStack(alignment: .leading, spacing: 14) {
+        let snapshot = chatPageSnapshot
+        return LazyVStack(alignment: .leading, spacing: 14) {
             conversationContextStrip
 
-            if queueSummary.hasPendingWork {
+            if snapshot.queueSummary.hasPendingWork {
                 IMConversationQueueBanner(
-                    summary: queueSummary,
+                    summary: snapshot.queueSummary,
                     isFlushing: runtimeStore.isFlushingQueuedTextMessages
                 )
             }
@@ -56,7 +57,7 @@ extension IMConversationDetailView {
                     .accessibilityIdentifier("conversation.status")
             }
 
-            detailMessagesContent
+            detailMessagesContent(snapshot: snapshot)
         }
         .padding(.horizontal, 16)
         .padding(.top, 20)
@@ -64,15 +65,15 @@ extension IMConversationDetailView {
     }
 
     @ViewBuilder
-    var detailMessagesContent: some View {
-        if shouldShowLoadingState {
+    func detailMessagesContent(snapshot: IMChatPageSnapshot) -> some View {
+        if snapshot.shouldShowLoadingState {
             ProgressView("正在拉取消息…")
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.vertical, 40)
-        } else if timelineItems.isEmpty {
+        } else if snapshot.timelineRows.isEmpty {
             IMDetailEmptyState()
         } else {
-            if conversation?.hasMoreHistory == true {
+            if snapshot.hasMoreHistory {
                 Button {
                     conversationStore.openConversation(id: conversationID)
                     Task {
@@ -87,24 +88,24 @@ extension IMConversationDetailView {
                 .accessibilityIdentifier("conversation.loadOlderMessagesButton")
             }
 
-            ForEach(timelineItems) { item in
-                switch item {
-                case .message(let message):
-                    detailMessageRow(message)
-                        .id(item.id)
-                case .notice(let notice):
-                    timelineNoticeRow(notice)
-                        .id(item.id)
-                case .pendingMessage(let message):
-                    pendingMessageRow(message)
-                        .id(item.id)
+            ForEach(snapshot.timelineRows) { row in
+                switch row {
+                case .message(let rowSnapshot):
+                    detailMessageRow(rowSnapshot, snapshot: snapshot)
+                        .id(row.id)
+                case .notice(let rowSnapshot):
+                    timelineNoticeRow(rowSnapshot)
+                        .id(row.id)
+                case .pendingMessage(let rowSnapshot):
+                    pendingMessageRow(rowSnapshot)
+                        .id(row.id)
                 }
             }
         }
     }
 
-    func timelineNoticeRow(_ notice: IMTimelineNotice) -> some View {
-        Text(timelineNoticeText(notice))
+    func timelineNoticeRow(_ notice: IMChatNoticeRowSnapshot) -> some View {
+        Text(notice.displayText)
             .font(.caption)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
@@ -115,49 +116,26 @@ extension IMConversationDetailView {
             .accessibilityIdentifier("conversation.timelineNotice.\(notice.id)")
     }
 
-    func timelineNoticeText(_ notice: IMTimelineNotice) -> String {
-        switch notice.noticeKind {
-        case "member_added":
-            return "成员已加入会话"
-        case "member_removed":
-            return "成员已离开会话"
-        case "member_role_updated":
-            return "成员角色已更新"
-        case "metadata_updated":
-            return "会话信息已更新"
-        case "direct_peer_updated":
-            return "联系人状态已更新"
-        case "conversation_visibility_changed":
-            return "会话可见性已更新"
-        case "conversation_settings_changed":
-            return "会话设置已更新"
-        case "invite_changed":
-            return "邀请链接已更新"
-        default:
-            return notice.fallbackText
-        }
-    }
-
-    func detailMessageRow(_ message: IMConversationMessage) -> some View {
-        let mediaAsset = message.mediaAsset
-        let selectableID = selectableMessageID(for: message)
+    func detailMessageRow(_ rowSnapshot: IMChatMessageRowSnapshot, snapshot: IMChatPageSnapshot) -> some View {
+        let mediaAsset = rowSnapshot.content.mediaAsset
+        let selectableID = rowSnapshot.selectableID
+        let localMessageID = rowSnapshot.localMessageID
+        let serverMessageID = rowSnapshot.serverMessageID
         return IMMessageBubble(
-            message: message,
-            replyReference: message.resolvedReplyReference(in: messages),
-            isHighlighted: highlightedMessageID == message.id,
+            rowSnapshot: rowSnapshot,
+            isHighlighted: highlightedMessageID == localMessageID,
             isSelectionMode: isSelectionMode,
             isSelected: selectableID.map(selectedMessageIDs.contains) ?? false,
             canSelect: selectableID != nil,
-            canRetry: conversationStore.isRetryableFailure(message),
-            canCancel: message.canCancelQueuedSend,
-            canReply: message.canReply,
-            canRecall: message.canRecall,
-            canEdit: message.canEdit,
-            canReact: message.canReact,
+            canRetry: rowSnapshot.canRetry,
+            canCancel: rowSnapshot.canCancel,
+            canReply: rowSnapshot.canReply,
+            canRecall: rowSnapshot.canRecall,
+            canEdit: rowSnapshot.canEdit,
+            canReact: rowSnapshot.canReact,
             isFavorited: selectableID.map(favoritedMessageIDs.contains) ?? false,
-            mediaDownloadState: resolvedMediaDownloadState(for: message),
-            deliveryOverrideText: deliveryOverrideText(for: message),
-            currentUserID: runtimeStore.currentUserID,
+            mediaDownloadState: resolvedMediaDownloadState(for: rowSnapshot.mediaDownload),
+            currentUserID: snapshot.currentUserID,
             onToggleSelection: {
                 guard let selectableID else {
                     return
@@ -172,39 +150,39 @@ extension IMConversationDetailView {
                 selectedMessageIDs.insert(selectableID)
             },
             onJumpToReplyReference: {
-                guard case .reply(let reference, _) = message.content else {
+                guard let referenceMessageID = rowSnapshot.content.replyReferenceMessageID else {
                     return
                 }
 
                 Task {
                     await runtimeStore.jumpToReferencedMessage(
-                        reference.messageID,
+                        referenceMessageID,
                         in: conversationID
                     )
                 }
             },
             onCancel: {
                 _ = runtimeStore.cancelQueuedTextMessage(
-                    localMessageID: message.id,
+                    localMessageID: localMessageID,
                     in: conversationID
                 )
             },
             onReply: {
                 editingTarget = nil
-                replyTarget = message
+                replyTarget = rowSnapshot.replyTarget
             },
             onEdit: {
                 replyTarget = nil
-                editingTarget = message
-                composerText = MessagePresentation(aggregate: message.aggregate).textValue ?? ""
+                editingTarget = rowSnapshot.editingTarget
+                composerText = rowSnapshot.editingTarget?.initialComposerText ?? ""
             },
             onRecall: {
                 Task {
                     let didRecall = await runtimeStore.recallMessage(
-                        messageID: message.serverMessageID,
+                        messageID: serverMessageID,
                         in: conversationID
                     )
-                    if didRecall, replyTarget?.id == message.id {
+                    if didRecall, replyTarget?.localMessageID == localMessageID {
                         replyTarget = nil
                     }
                 }
@@ -212,7 +190,7 @@ extension IMConversationDetailView {
             onRetry: {
                 Task {
                     await runtimeStore.retryTextMessage(
-                        localMessageID: message.id,
+                        localMessageID: localMessageID,
                         in: conversationID
                     )
                 }
@@ -243,7 +221,7 @@ extension IMConversationDetailView {
             onToggleReaction: { emoji in
                 Task {
                     _ = await runtimeStore.toggleMessageReaction(
-                        messageID: message.serverMessageID,
+                        messageID: serverMessageID,
                         emoji: emoji,
                         in: conversationID
                     )
@@ -282,15 +260,15 @@ extension IMConversationDetailView {
         )
     }
 
-    func pendingMessageRow(_ message: IMPendingConversationMessage) -> some View {
-        HStack {
+    func pendingMessageRow(_ rowSnapshot: IMChatPendingMessageRowSnapshot) -> some View {
+        return HStack {
             Spacer(minLength: 24)
             VStack(alignment: .leading, spacing: 6) {
-                Text(message.text)
+                Text(rowSnapshot.text)
                     .font(.body)
                 HStack(spacing: 8) {
-                    Text(message.createdAt.formatted(date: .omitted, time: .shortened))
-                    let display = deliveryDisplay(for: message.deliveryState)
+                    Text(rowSnapshot.createdAtText)
+                    let display = IMMessageDeliveryDisplay(snapshot: rowSnapshot.deliveryDisplay)
                     Label(display.text, systemImage: display.icon)
                         .labelStyle(.titleAndIcon)
                         .foregroundStyle(display.tint)
@@ -298,10 +276,10 @@ extension IMConversationDetailView {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                if message.canCancelQueuedSend {
+                if rowSnapshot.canCancel {
                     Button {
                         _ = runtimeStore.cancelQueuedTextMessage(
-                            localMessageID: message.id,
+                            localMessageID: rowSnapshot.localMessageID,
                             in: conversationID
                         )
                     } label: {
@@ -311,11 +289,11 @@ extension IMConversationDetailView {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .accessibilityIdentifier("conversation.message.cancelSend")
-                } else if conversationStore.isRetryableFailure(message) {
+                } else if rowSnapshot.canRetry {
                     Button {
                         Task {
                             await runtimeStore.retryTextMessage(
-                                localMessageID: message.id,
+                                localMessageID: rowSnapshot.localMessageID,
                                 in: conversationID
                             )
                         }
@@ -332,30 +310,7 @@ extension IMConversationDetailView {
             .background(Color.accentColor.opacity(0.16))
             .clipShape(RoundedRectangle(cornerRadius: 16))
         }
-        .accessibilityIdentifier("conversation.pendingMessage.\(message.id)")
-    }
-
-    func deliveryDisplay(for state: IMMessageDeliveryState) -> IMMessageDeliveryDisplay {
-        switch state {
-        case .preparing(let message):
-            return IMMessageDeliveryDisplay(icon: "clock", text: message.isEmpty ? "准备中" : message, tint: .secondary)
-        case .uploading(let message):
-            return IMMessageDeliveryDisplay(icon: "icloud.and.arrow.up", text: message.isEmpty ? "上传中" : message, tint: .blue)
-        case .uploaded:
-            return IMMessageDeliveryDisplay(icon: "icloud.and.arrow.up.fill", text: "上传完成", tint: .blue)
-        case .queued(let message):
-            return IMMessageDeliveryDisplay(icon: "clock.badge.exclamationmark", text: message.isEmpty ? "待发送" : message, tint: .orange)
-        case .sending:
-            return IMMessageDeliveryDisplay(icon: "paperplane", text: "发送中", tint: .secondary)
-        case .sent:
-            return IMMessageDeliveryDisplay(icon: "checkmark", text: "已发送", tint: .secondary)
-        case .received:
-            return IMMessageDeliveryDisplay(icon: "checkmark.circle", text: "已送达", tint: .secondary)
-        case .unknown(let message):
-            return IMMessageDeliveryDisplay(icon: "questionmark.circle", text: message.isEmpty ? "未确认" : message, tint: .orange)
-        case .failed(let message):
-            return IMMessageDeliveryDisplay(icon: "exclamationmark.circle.fill", text: message.isEmpty ? "失败" : message, tint: .red)
-        }
+        .accessibilityIdentifier("conversation.pendingMessage.\(rowSnapshot.localMessageID)")
     }
 
 }

@@ -60,15 +60,29 @@ actor KafkaConversationEventStreamProducer: ConversationEventStreamProducer {
     }
 
     func shutdown() async {
+        logger.notice("Kafka conversation event stream producer shutting down.")
         producer?.triggerGracefulShutdown()
-        eventsTask?.cancel()
-        runTask?.cancel()
         failPendingDeliveries(
             Abort(.serviceUnavailable, reason: "Kafka producer is shutting down before delivery acknowledgement.")
         )
+        let didStopRunTask = await waitForTask(
+            runTask,
+            timeoutNanoseconds: UInt64(min(max(configuration.flushTimeoutMilliseconds + 1_000, 1_000), 5_000)) * 1_000_000
+        )
+        if !didStopRunTask {
+            logger.warning("Kafka producer run task did not stop before timeout; cancelling.")
+            runTask?.cancel()
+        }
+        eventsTask?.cancel()
+        let didStopEventsTask = await waitForTask(eventsTask, timeoutNanoseconds: 1_000_000_000)
+        if !didStopEventsTask {
+            logger.warning("Kafka producer events task did not stop before timeout; cancelling.")
+            eventsTask?.cancel()
+        }
         producer = nil
         eventsTask = nil
         runTask = nil
+        logger.notice("Kafka conversation event stream producer shutdown completed.")
     }
 
     private func ensureProducer() throws -> KafkaProducer {
@@ -161,7 +175,7 @@ actor KafkaConversationEventStreamProducer: ConversationEventStreamProducer {
     }
 
     private func cancelPendingDelivery(_ messageID: KafkaProducerMessageID) {
-        pendingDeliveries.removeValue(forKey: messageID)
+        pendingDeliveries.removeValue(forKey: messageID)?.resume(throwing: CancellationError())
     }
 
     private func failPendingDeliveries(_ error: any Error) {
@@ -169,6 +183,25 @@ actor KafkaConversationEventStreamProducer: ConversationEventStreamProducer {
         pendingDeliveries.removeAll()
         for continuation in continuations {
             continuation.resume(throwing: error)
+        }
+    }
+
+    private func waitForTask(_ task: Task<Void, Never>?, timeoutNanoseconds: UInt64) async -> Bool {
+        guard let task else {
+            return true
+        }
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                _ = await task.result
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                return false
+            }
+            let completed = await group.next() ?? false
+            group.cancelAll()
+            return completed
         }
     }
 

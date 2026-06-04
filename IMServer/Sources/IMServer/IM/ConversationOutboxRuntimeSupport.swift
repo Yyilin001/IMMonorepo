@@ -1,4 +1,5 @@
 import Fluent
+import SQLKit
 import Vapor
 
 struct InlineOutboxProjectionRuntime {
@@ -12,6 +13,10 @@ struct InlineOutboxProjectionRuntime {
 struct ConversationOutboxConfiguration: Sendable {
     let batchSize: Int
     let pollIntervalNanoseconds: UInt64
+    let idlePollMinimumIntervalNanoseconds: UInt64
+    let activeIdleWindowNanoseconds: UInt64
+    let notificationsEnabled: Bool
+    let notificationChannel: String
     let maxRetries: Int
     let claimTimeoutNanoseconds: UInt64
     let logsProcessingFailures: Bool
@@ -20,6 +25,10 @@ struct ConversationOutboxConfiguration: Sendable {
     init(
         batchSize: Int,
         pollIntervalNanoseconds: UInt64,
+        idlePollMinimumIntervalNanoseconds: UInt64? = nil,
+        activeIdleWindowNanoseconds: UInt64 = 5_000_000_000,
+        notificationsEnabled: Bool = false,
+        notificationChannel: String = ConversationOutboxNotification.defaultChannel,
         maxRetries: Int,
         claimTimeoutNanoseconds: UInt64 = 60_000_000_000,
         logsProcessingFailures: Bool = true,
@@ -27,6 +36,13 @@ struct ConversationOutboxConfiguration: Sendable {
     ) {
         self.batchSize = batchSize
         self.pollIntervalNanoseconds = pollIntervalNanoseconds
+        self.idlePollMinimumIntervalNanoseconds = min(
+            idlePollMinimumIntervalNanoseconds ?? pollIntervalNanoseconds,
+            pollIntervalNanoseconds
+        )
+        self.activeIdleWindowNanoseconds = activeIdleWindowNanoseconds
+        self.notificationsEnabled = notificationsEnabled
+        self.notificationChannel = notificationChannel
         self.maxRetries = maxRetries
         self.claimTimeoutNanoseconds = claimTimeoutNanoseconds
         self.logsProcessingFailures = logsProcessingFailures
@@ -39,18 +55,94 @@ struct ConversationOutboxConfiguration: Sendable {
 
     static func load(from environment: Environment) -> ConversationOutboxConfiguration {
         let batchSize = max(1, Environment.get("IM_OUTBOX_BATCH_SIZE").flatMap(Int.init(_:)) ?? 200)
-        let pollIntervalMillis = max(50, Environment.get("IM_OUTBOX_POLL_INTERVAL_MS").flatMap(Int.init(_:)) ?? 500)
+        let pollIntervalMillis = max(50, Environment.get("IM_OUTBOX_POLL_INTERVAL_MS").flatMap(Int.init(_:)) ?? 50)
+        let idlePollMinimumIntervalMillis = min(
+            pollIntervalMillis,
+            max(10, Environment.get("IM_OUTBOX_IDLE_POLL_MIN_INTERVAL_MS").flatMap(Int.init(_:)) ?? 50)
+        )
+        let activeIdleWindowMillis = max(
+            0,
+            Environment.get("IM_OUTBOX_ACTIVE_IDLE_WINDOW_MS").flatMap(Int.init(_:)) ?? 5_000
+        )
+        let notificationsEnabled = parseBooleanEnvironment("IM_OUTBOX_NOTIFY_ENABLED", defaultValue: false)
+        let notificationChannel = ConversationOutboxNotification.channel()
         let maxRetries = max(1, Environment.get("IM_OUTBOX_MAX_RETRIES").flatMap(Int.init(_:)) ?? 5)
         let claimTimeoutMillis = max(1_000, Environment.get("IM_OUTBOX_CLAIM_TIMEOUT_MS").flatMap(Int.init(_:)) ?? 60_000)
         let maxConcurrentConversations = max(1, Environment.get("IM_OUTBOX_MAX_CONCURRENCY").flatMap(Int.init(_:)) ?? 4)
         return ConversationOutboxConfiguration(
             batchSize: batchSize,
             pollIntervalNanoseconds: UInt64(pollIntervalMillis) * 1_000_000,
+            idlePollMinimumIntervalNanoseconds: UInt64(idlePollMinimumIntervalMillis) * 1_000_000,
+            activeIdleWindowNanoseconds: UInt64(activeIdleWindowMillis) * 1_000_000,
+            notificationsEnabled: notificationsEnabled,
+            notificationChannel: notificationChannel,
             maxRetries: maxRetries,
             claimTimeoutNanoseconds: UInt64(claimTimeoutMillis) * 1_000_000,
             logsProcessingFailures: true,
             maxConcurrentConversations: maxConcurrentConversations
         )
+    }
+}
+
+enum ConversationOutboxNotification {
+    static let defaultChannel = "im_conversation_outbox"
+
+    static func channel() -> String {
+        let rawValue = Environment.get("IM_OUTBOX_NOTIFY_CHANNEL")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let rawValue, !rawValue.isEmpty else {
+            return defaultChannel
+        }
+        return rawValue
+    }
+
+    static func notifyPendingEvents(on database: any Database) async {
+        guard parseBooleanEnvironment("IM_OUTBOX_NOTIFY_ENABLED", defaultValue: false),
+              let sql = database as? any SQLDatabase,
+              sql.dialect.name == "postgresql"
+        else {
+            return
+        }
+        try? await sql.raw(
+            "SELECT pg_notify(\(bind: channel()), \(bind: "pending"))"
+        ).run()
+    }
+}
+
+actor ConversationOutboxWakeSignal {
+    private var pendingNotification = false
+    private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+
+    func notify() {
+        guard !waiters.isEmpty else {
+            pendingNotification = true
+            return
+        }
+        let continuations = waiters.values
+        waiters.removeAll(keepingCapacity: true)
+        pendingNotification = false
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
+    func wait(timeoutNanoseconds: UInt64) async {
+        guard !pendingNotification else {
+            pendingNotification = false
+            return
+        }
+        let id = UUID()
+        await withCheckedContinuation { continuation in
+            waiters[id] = continuation
+            Task {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                self.resumeWaiter(id)
+            }
+        }
+    }
+
+    private func resumeWaiter(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.resume()
     }
 }
 
@@ -101,6 +193,10 @@ private struct ConversationOutboxConfigurationStorageKey: StorageKey {
     typealias Value = ConversationOutboxConfiguration
 }
 
+private struct ConversationOutboxWakeSignalStorageKey: StorageKey {
+    typealias Value = ConversationOutboxWakeSignal
+}
+
 private struct OutboxMetricsStorageKey: StorageKey {
     typealias Value = OutboxMetrics
 }
@@ -132,6 +228,15 @@ extension Application {
         set {
             storage[ConversationOutboxConfigurationStorageKey.self] = newValue
         }
+    }
+
+    var conversationOutboxWakeSignal: ConversationOutboxWakeSignal {
+        if let signal = storage[ConversationOutboxWakeSignalStorageKey.self] {
+            return signal
+        }
+        let signal = ConversationOutboxWakeSignal()
+        storage[ConversationOutboxWakeSignalStorageKey.self] = signal
+        return signal
     }
 
     var outboxMetrics: OutboxMetrics {

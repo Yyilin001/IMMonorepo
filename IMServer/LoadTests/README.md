@@ -404,6 +404,72 @@ CONNECTION_LOG_DIR=/tmp/imtcp-driver-logs \
 
 Load generator 2 uses the same command with `LOAD_GENERATOR_ID=2`.
 
+### Slow Offline Login Cache
+
+On small servers, do not prewarm hundreds or thousands of HTTP logins inside the
+same ladder step. Generate the login cache first with low pressure, then run the
+TCP test in strict cache-only mode.
+
+Generate a 1000-account cache with small batches:
+
+```bash
+cd IMServer/LoadTests
+ACCOUNT_FILE="$PWD/accounts/load-1000.csv" \
+CONNECTIONS=1000 \
+BASE_URL=http://120.25.106.200:8080 \
+LOGIN_CACHE_FILE=/tmp/imtcp-login-cache-slow/tcp-login-cache-lg1-1000.json \
+BATCH_SIZE=50 \
+BATCH_PAUSE_SECONDS=5 \
+REQUEST_TIMEOUT_SECONDS=30 \
+LOGIN_RETRIES=2 \
+./prewarm_login_cache_slow.sh
+```
+
+Then run online capacity without any HTTP login fallback:
+
+```bash
+cd IMServer/LoadTests
+IM_CONVERSATION_ID="$IM_CONVERSATION_ID" \
+SSH_HOST=root@120.25.106.200 \
+ACCOUNT_FILE="$PWD/accounts/load-1000.csv" \
+LADDER="1000" \
+MESSAGES=0 \
+HOLD_SECONDS=1800 \
+CONNECT_RAMP_SECONDS=120 \
+TIMEOUT_SECONDS=30 \
+HEARTBEAT_INTERVAL_SECONDS=15 \
+PREWARM_LOGIN_CACHE=false \
+REQUIRE_LOGIN_CACHE=true \
+LOGIN_CACHE_FILE=/tmp/imtcp-login-cache-slow/tcp-login-cache-lg1-1000.json \
+LOGIN_CACHE_TTL_GUARD_SECONDS=600 \
+CONNECTION_LOG_DIR=/tmp/imtcp-driver-logs \
+./tcp_capacity_ladder.sh
+```
+
+For message-send tests, reuse the same cache:
+
+```bash
+cd IMServer/LoadTests
+IM_CONVERSATION_ID="$IM_CONVERSATION_ID" \
+SSH_HOST=root@120.25.106.200 \
+ACCOUNT_FILE="$PWD/accounts/load-1000.csv" \
+ONLINE_LADDER="1000" \
+MESSAGE_RATES="5 10" \
+MESSAGE_COMPLETION_MODE=ack-only \
+MESSAGE_HOLD_SECONDS=60 \
+MESSAGE_CONNECT_RAMP_SECONDS=120 \
+PREWARM_LOGIN_CACHE=false \
+REQUIRE_LOGIN_CACHE=true \
+LOGIN_CACHE_FILE=/tmp/imtcp-login-cache-slow/tcp-login-cache-lg1-1000.json \
+LOGIN_CACHE_TTL_GUARD_SECONDS=600 \
+COLLECT_REMOTE_METRICS=false \
+./tcp_message_send_ladder.sh
+```
+
+If the cache is missing, too small, or too close to expiry, the strict TCP run
+fails before it can perform HTTP login. That failure is intentional: it keeps
+HTTP login capacity separate from TCP online or message-delivery conclusions.
+
 Single-machine local sharding is available when you cannot use two load
 generators. It runs multiple TCPDriver processes on the same host so one process
 does not become the bottleneck:
@@ -441,11 +507,102 @@ Acceptance for each generator:
 - Server `established_9000`, gateway CPU/memory, and Kafka lag are recorded during
   the run.
 
+### Message Send And Delivery Capacity
+
+Use this workflow after online capacity is known. It keeps users online with
+cached login tokens, then sends messages at a controlled global rate and verifies
+that the paired receiver observes the realtime message event.
+
+Do not start with the server's maximum idle-online connection count. For the
+current 2 vCPU / 2 GiB single-node server, use `1000`, `2000`, then `3000`
+connections first; avoid `4000+` message tests until idle-online capacity has
+headroom.
+
+Single load generator example:
+
+```bash
+cd IMServer/LoadTests
+IM_CONVERSATION_ID="$IM_CONVERSATION_ID" \
+SSH_HOST=root@120.25.106.200 \
+ACCOUNT_FILE="$PWD/accounts/load-3000.csv" \
+ONLINE_LADDER="1000 2000 3000" \
+MESSAGE_RATES="10 50 100" \
+MESSAGE_HOLD_SECONDS=600 \
+MESSAGE_CONNECT_RAMP_SECONDS=300 \
+./tcp_message_send_ladder.sh
+```
+
+Message profile parameters:
+
+- `MESSAGE_PROFILE=per-connection` preserves the legacy behavior: each
+  connection sends `MESSAGES` messages and expects its own ack/canonical event.
+- `MESSAGE_PROFILE=pair-delivery` pairs sender `i` with receiver
+  `(i + MESSAGE_RECEIVER_OFFSET) % connections` and records delivery latency when
+  the receiver sees the matching `clientMessageID`.
+- `MESSAGE_RATE_PER_SECOND` controls the global send rate in `pair-delivery`.
+  When it is greater than zero, total messages are approximately
+  `MESSAGE_RATE_PER_SECOND * HOLD_SECONDS`, spread evenly across senders.
+- `MESSAGE_SENDER_EVERY=1` means every connection sends. Use `2`, `5`, or `10`
+  to reduce the active sender population while keeping receivers online.
+
+Recommended ladder for the current single-node server:
+
+```text
+1000 online, 10 msg/s, hold 10m
+1000 online, 50 msg/s, hold 10m
+1000 online, 100 msg/s, hold 10m
+2000 online, 10 msg/s, hold 10m
+2000 online, 50 msg/s, hold 10m
+2000 online, 100 msg/s, hold 10m
+3000 online, 10 msg/s, hold 10m
+3000 online, 50 msg/s, hold 10m
+```
+
+Message send acceptance:
+
+- `loginCacheHit=true` and no formal-run `login_start` events.
+- `successes / connections >= 99.9%`.
+- `ackSuccessRate >= 0.999`.
+- `deliverySuccessRate >= 0.999`.
+- `ackLatencyMs p95 < 300ms`, `ackLatencyMs p99 < 1000ms`.
+- `deliveryLatencyMs p95 < 1000ms`, `deliveryLatencyMs p99 < 3000ms`.
+- Kafka lag, outbox backlog, and projection lag do not grow without draining.
+- TCP close/reconnect counters do not spike during steady state.
+
+Realtime relay tuning:
+
+- Keep `IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED=false` for strict synchronous
+  relay semantics.
+- Use `IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED=true` for realtime latency
+  capacity tests. In this mode the realtime Kafka consumer commits after placing
+  relay work into a bounded in-process dispatcher; durable owner delivery remains
+  the catch-up source if the process exits before a best-effort live relay
+  finishes.
+- `IM_REALTIME_DELIVERY_ASYNC_MAX_IN_FLIGHT` caps concurrent gateway relay jobs.
+  Start with `32`; if gateway CPU, relay errors, or TCP send completion latency
+  spikes, lower it. If realtime Kafka lag grows while gateway has headroom, raise
+  it cautiously.
+- `IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD` enables a
+  large-conversation realtime optimization for `message_created`. When the
+  recipient count is greater than or equal to the threshold, realtime relay sends
+  a minimal message payload while owner delivery still stores the full payload for
+  catch-up pulls. Start with `100` for hot-group testing.
+- `IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_PREVIEW_MAX_CHARS` caps the preview
+  text used in that lightweight realtime payload; the default is `120`.
+- `IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS` coalesces large
+  `message_created` realtime relays by conversation. Within the window, only the
+  latest lightweight realtime event is pushed; clients must use owner-delivery
+  cursor or message-list pull to catch up. This is the production path for hot
+  large groups, not a per-message delivery guarantee.
+
 Use `MESSAGES`, `DEVICES_PER_USER`, `SEND_INTERVAL_MS`, `TIMEOUT_SECONDS`, and
 `COOLDOWN_SECONDS` to tune each step. Set `MESSAGES=0` plus `HOLD_SECONDS` for
 idle online capacity. Set `MESSAGES=1` or higher for a hot-conversation fanout
 test; that is intentionally heavier and should not be interpreted as idle online
-user capacity. When `MESSAGES=0` and `DEVICES_PER_USER` is unset, the helper uses
+user capacity. Set `MESSAGE_COMPLETION_MODE=ack-only` when validating large-group
+coalesced realtime mode; that mode measures send acknowledgement and observed
+fanout without requiring every message to be pushed live to every receiver. When
+`MESSAGES=0` and `DEVICES_PER_USER` is unset, the helper uses
 one device session per connection because the server intentionally kicks duplicate
 connections for the same session. `LOGIN_CONCURRENCY` defaults to `5` for device
 session pre-warm; lower it if the auth/database path becomes the bottleneck.
@@ -458,9 +615,11 @@ TCP connect. This better simulates real clients but can make the local generator
 HTTP stack part of the test. `LOGIN_RETRIES` retries transient HTTP login timeouts;
 if `login_attempt_failed` grows but `login_failed` stays at zero, login jitter was
 absorbed by retries.
-For official online-capacity numbers, use `PREWARM_LOGIN_CACHE=true` and
-`LOGIN_MODE=upfront`; reserve `LOGIN_MODE=just-in-time` for combined login+TCP
-experiments.
+For official online-capacity numbers, use cached tokens and `LOGIN_MODE=upfront`.
+On larger load generators, `PREWARM_LOGIN_CACHE=true` is acceptable. On small
+servers, prefer `prewarm_login_cache_slow.sh` followed by
+`PREWARM_LOGIN_CACHE=false` and `REQUIRE_LOGIN_CACHE=true`. Reserve
+`LOGIN_MODE=just-in-time` for combined login+TCP experiments.
 `SAMPLE_DURING_SECONDS` controls remote metric sampling while the driver is still
 running; set it to `0` to disable during-run samples.
 `HEARTBEAT_INTERVAL_SECONDS` sends TCP heartbeat packets after auth succeeds. Keep

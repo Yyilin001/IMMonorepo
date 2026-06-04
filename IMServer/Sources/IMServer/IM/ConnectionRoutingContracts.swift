@@ -4,6 +4,7 @@ import Vapor
 struct NodeMessageDispatchEnvelope: Codable, Sendable {
     enum Action: String, Codable, Sendable {
         case domainEvent
+        case domainEventPacket
         case streamSignal
         case kickSession
         case kickUser
@@ -14,6 +15,7 @@ struct NodeMessageDispatchEnvelope: Codable, Sendable {
 
     enum Payload: Codable, Sendable {
         case domainEvent(ownerUserID: UUID, eventID: UUID)
+        case domainEventPacket(packetBase64: String, targetUserIDs: [UUID])
         case streamSignal(packetBase64: String, targetUserIDs: [UUID])
         case kickSession(sessionID: UUID, reason: IMTCPKickReason, message: String)
         case kickUser(userID: UUID, reason: IMTCPKickReason, message: String)
@@ -23,6 +25,8 @@ struct NodeMessageDispatchEnvelope: Codable, Sendable {
         switch payload {
         case .domainEvent:
             return .domainEvent
+        case .domainEventPacket:
+            return .domainEventPacket
         case .streamSignal:
             return .streamSignal
         case .kickSession:
@@ -36,6 +40,8 @@ struct NodeMessageDispatchEnvelope: Codable, Sendable {
         switch payload {
         case .domainEvent(let ownerUserID, _):
             return [ownerUserID]
+        case .domainEventPacket(_, let targetUserIDs):
+            return targetUserIDs
         case .streamSignal(_, let targetUserIDs):
             return targetUserIDs
         case .kickSession:
@@ -56,6 +62,11 @@ struct NodeMessageDispatchEnvelope: Codable, Sendable {
 extension NodeMessageDispatchEnvelope {
     func withTargetUserIDs(_ targetUserIDs: [UUID]) -> NodeMessageDispatchEnvelope {
         switch payload {
+        case .domainEventPacket(let packetBase64, _):
+            return NodeMessageDispatchEnvelope(
+                requestID: requestID,
+                payload: .domainEventPacket(packetBase64: packetBase64, targetUserIDs: targetUserIDs)
+            )
         case .streamSignal(let packetBase64, _):
             return NodeMessageDispatchEnvelope(
                 requestID: requestID,

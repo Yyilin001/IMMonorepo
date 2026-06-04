@@ -1,6 +1,7 @@
 import ConsoleKit
 @preconcurrency import Dispatch
 import Foundation
+import FluentPostgresDriver
 import Vapor
 
 #if canImport(Darwin)
@@ -33,13 +34,40 @@ struct IMOutboxRelayCommand: AsyncCommand {
             ]
         )
 
+        let notificationListener = startConversationOutboxNotificationListener(
+            app: app,
+            configuration: configuration
+        )
         let task = Task {
             let relay = ConversationOutboxRelay(app: app)
+            var idleSleepNanoseconds = configuration.idlePollMinimumIntervalNanoseconds
+            var activeUntilNanoseconds: UInt64 = 0
             while !Task.isCancelled {
                 do {
                     let relayedCount = try await relay.relayPendingEvents(limit: configuration.batchSize)
                     if relayedCount == 0 {
-                        try await Task.sleep(nanoseconds: configuration.pollIntervalNanoseconds)
+                        let nowNanoseconds = DispatchTime.now().uptimeNanoseconds
+                        let isRecentlyActive = nowNanoseconds < activeUntilNanoseconds
+                        let sleepNanoseconds = isRecentlyActive
+                            ? configuration.idlePollMinimumIntervalNanoseconds
+                            : idleSleepNanoseconds
+                        await app.conversationOutboxWakeSignal.wait(timeoutNanoseconds: sleepNanoseconds)
+                        if isRecentlyActive {
+                            idleSleepNanoseconds = configuration.idlePollMinimumIntervalNanoseconds
+                        } else {
+                            let (nextIdleSleepNanoseconds, overflowed) = idleSleepNanoseconds.multipliedReportingOverflow(by: 2)
+                            idleSleepNanoseconds = min(
+                                overflowed ? UInt64.max : nextIdleSleepNanoseconds,
+                                configuration.pollIntervalNanoseconds
+                            )
+                        }
+                    } else {
+                        let nowNanoseconds = DispatchTime.now().uptimeNanoseconds
+                        let (activeUntil, overflowed) = nowNanoseconds.addingReportingOverflow(
+                            configuration.activeIdleWindowNanoseconds
+                        )
+                        activeUntilNanoseconds = overflowed ? UInt64.max : activeUntil
+                        idleSleepNanoseconds = configuration.idlePollMinimumIntervalNanoseconds
                     }
                 } catch {
                     app.logger.warning(
@@ -47,12 +75,14 @@ struct IMOutboxRelayCommand: AsyncCommand {
                         metadata: ["error": .string(String(describing: error))]
                     )
                     try? await Task.sleep(nanoseconds: configuration.pollIntervalNanoseconds)
+                    idleSleepNanoseconds = configuration.idlePollMinimumIntervalNanoseconds
                 }
             }
         }
 
         await waitForShutdownSignal(queueLabel: "imserver.outbox-relay.signal")
         task.cancel()
+        await notificationListener?.shutdown()
         _ = await task.result
 
         app.logger.notice(
@@ -62,7 +92,174 @@ struct IMOutboxRelayCommand: AsyncCommand {
                 "role": .string(app.imRuntimeRole.rawValue)
             ]
         )
+        await app.shutdownConversationEventStreamProducerIfConfigured()
+        exit(EXIT_SUCCESS)
     }
+}
+
+private func startConversationOutboxNotificationListener(
+    app: Application,
+    configuration: ConversationOutboxConfiguration
+) -> ConversationOutboxNotificationListenerHandle? {
+    guard configuration.notificationsEnabled else {
+        return nil
+    }
+    let connectionConfiguration = makeConversationOutboxNotificationConnectionConfiguration(app: app)
+    let channel = configuration.notificationChannel
+    let connectionBox = ConversationOutboxNotificationConnectionBox()
+    let task = Task {
+        defer {
+            connectionBox.close()
+        }
+        while !Task.isCancelled {
+            let connection: PostgresConnection
+            do {
+                await app.conversationOutboxWakeSignal.notify()
+                app.logger.notice(
+                    "Conversation outbox notification listener starting.",
+                    metadata: ["channel": .string(channel)]
+                )
+                connection = try await PostgresConnection.connect(
+                    on: app.eventLoopGroup.next(),
+                    configuration: connectionConfiguration,
+                    id: 9_001,
+                    logger: app.logger
+                )
+                connectionBox.set(connection)
+            } catch {
+                guard !Task.isCancelled else {
+                    return
+                }
+                app.logger.warning(
+                    "Conversation outbox notification listener failed to connect; falling back to poll until reconnect.",
+                    metadata: [
+                        "channel": .string(channel),
+                        "error": .string(String(describing: error))
+                    ]
+                )
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                continue
+            }
+
+            do {
+                defer {
+                    connectionBox.close()
+                }
+                try await withTaskCancellationHandler {
+                    try await connection.listen(on: channel) { notifications in
+                        for try await _ in notifications {
+                            guard !Task.isCancelled else {
+                                return
+                            }
+                            await app.conversationOutboxWakeSignal.notify()
+                        }
+                    }
+                } onCancel: {
+                    connectionBox.close()
+                }
+            } catch {
+                guard !Task.isCancelled else {
+                    return
+                }
+                app.logger.warning(
+                    "Conversation outbox notification listener failed; falling back to poll until reconnect.",
+                    metadata: [
+                        "channel": .string(channel),
+                        "error": .string(String(describing: error))
+                    ]
+                )
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+    return ConversationOutboxNotificationListenerHandle(task: task, connectionBox: connectionBox)
+}
+
+private struct ConversationOutboxNotificationListenerHandle: Sendable {
+    let task: Task<Void, Never>
+    let connectionBox: ConversationOutboxNotificationConnectionBox
+
+    func shutdown() async {
+        task.cancel()
+        await connectionBox.closeAndWait()
+    }
+}
+
+private final class ConversationOutboxNotificationConnectionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var connection: PostgresConnection?
+
+    func set(_ connection: PostgresConnection) {
+        let previous = lock.withLock { () -> PostgresConnection? in
+            let previous = self.connection
+            self.connection = connection
+            return previous
+        }
+        previous?.close().whenComplete { _ in }
+    }
+
+    func close() {
+        let connection = lock.withLock { () -> PostgresConnection? in
+            let connection = self.connection
+            self.connection = nil
+            return connection
+        }
+        connection?.close().whenComplete { _ in }
+    }
+
+    func closeAndWait() async {
+        let connection = lock.withLock { () -> PostgresConnection? in
+            let connection = self.connection
+            self.connection = nil
+            return connection
+        }
+        guard let connection else {
+            return
+        }
+        try? await connection.close().get()
+    }
+}
+
+private func makeConversationOutboxNotificationConnectionConfiguration(
+    app: Application
+) -> PostgresConnection.Configuration {
+    let isProduction = app.environment == .production
+    let defaultUsername = isProduction ? "vapor" : NSUserName()
+    let defaultPassword = isProduction ? "vapor_password" : ""
+    let host = Environment.get("IM_OUTBOX_NOTIFY_DATABASE_HOST")
+        ?? Environment.get("DATABASE_CONVERSATION_SHARD_0_HOST")
+        ?? Environment.get("DATABASE_PRIMARY_HOST")
+        ?? Environment.get("DATABASE_HOST")
+        ?? (isProduction ? "db" : "127.0.0.1")
+    let port = Environment.get("IM_OUTBOX_NOTIFY_DATABASE_PORT").flatMap(Int.init(_:))
+        ?? Environment.get("DATABASE_CONVERSATION_SHARD_0_PORT").flatMap(Int.init(_:))
+        ?? Environment.get("DATABASE_PRIMARY_PORT").flatMap(Int.init(_:))
+        ?? Environment.get("DATABASE_PORT").flatMap(Int.init(_:))
+        ?? 5432
+    let username = Environment.get("IM_OUTBOX_NOTIFY_DATABASE_USERNAME")
+        ?? Environment.get("DATABASE_CONVERSATION_SHARD_0_USERNAME")
+        ?? Environment.get("DATABASE_PRIMARY_USERNAME")
+        ?? Environment.get("DATABASE_USERNAME")
+        ?? defaultUsername
+    let password = Environment.get("IM_OUTBOX_NOTIFY_DATABASE_PASSWORD")
+        ?? Environment.get("DATABASE_CONVERSATION_SHARD_0_PASSWORD")
+        ?? Environment.get("DATABASE_PRIMARY_PASSWORD")
+        ?? Environment.get("DATABASE_PASSWORD")
+        ?? defaultPassword
+    let database = Environment.get("IM_OUTBOX_NOTIFY_DATABASE_NAME")
+        ?? Environment.get("DATABASE_CONVERSATION_SHARD_0_NAME")
+        ?? Environment.get("DATABASE_PRIMARY_NAME")
+        ?? Environment.get("DATABASE_NAME")
+        ?? "vapor_auth"
+
+    return PostgresConnection.Configuration(
+        host: host,
+        port: port,
+        username: username,
+        password: password,
+        database: database,
+        tls: .disable
+    )
 }
 
 struct IMStreamConsumerCommand: AsyncCommand {
@@ -117,11 +314,37 @@ struct IMStreamConsumerCommand: AsyncCommand {
                         groupID: "domain-delivery-consumer",
                         clientSuffix: "domain-delivery-consumer",
                         topics: [app.eventStreamConfiguration.topic],
+                        replayRecordsEnabled: consumerConfiguration.domainDeliveryReplayRecordsEnabled,
                         consumerFactory: { shardID in
                             let sourceDB = app.conversationShardRouter.commandDatabase(forShardID: shardID)
                             return [
-                                OwnerDomainEventDeliveryConsumer(app: app, sourceDB: sourceDB),
-                                ConversationRealtimeConsumer(app: app, sourceDB: sourceDB)
+                                OwnerDomainEventDeliveryConsumer(
+                                    app: app,
+                                    sourceDB: sourceDB,
+                                    relayRealtimeAfterRecord: consumerConfiguration.domainDeliveryRelayAfterRecord
+                                )
+                            ]
+                        }
+                    ).run()
+                }
+            ))
+        }
+
+        if consumerConfiguration.isEnabled("realtime-delivery-consumer") {
+            tasks.append(NamedStreamConsumerTask(groupID: "realtime-delivery-consumer", task: Task {
+                    try await KafkaConversationEventStreamConsumerRunner(
+                        app: app,
+                        groupID: "realtime-delivery-consumer",
+                        clientSuffix: "realtime-delivery-consumer",
+                        topics: [app.eventStreamConfiguration.topic],
+                        autoOffsetReset: .latest,
+                        consumerFactory: { shardID in
+                            let sourceDB = app.conversationShardRouter.commandDatabase(forShardID: shardID)
+                            return [
+                                ConversationRealtimeDeliveryConsumer(
+                                    app: app,
+                                    sourceDB: sourceDB
+                                )
                             ]
                         }
                     ).run()
@@ -221,6 +444,8 @@ struct IMStreamConsumerCommand: AsyncCommand {
                 "role": .string(app.imRuntimeRole.rawValue)
             ]
         )
+        await app.shutdownConversationEventStreamProducerIfConfigured()
+        exit(EXIT_SUCCESS)
     }
 }
 

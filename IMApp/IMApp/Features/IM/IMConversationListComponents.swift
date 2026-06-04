@@ -3,9 +3,7 @@ import OSLog
 import SwiftUI
 
 struct IMConversationRowButton: View {
-    let conversation: IMConversation
-    let identity: IMConversationIdentityPresentation
-    let queueSummary: IMConversationQueueSummary
+    let snapshot: IMConversationRowSnapshot
     let isActive: Bool
     let onOpen: () -> Void
     let onAction: (IMConversationRowAction) -> Void
@@ -15,31 +13,27 @@ struct IMConversationRowButton: View {
             onOpen()
         } label: {
             IMConversationRow(
-                conversation: conversation,
-                identity: identity,
-                queueSummary: queueSummary,
+                snapshot: snapshot,
                 isActive: isActive
             )
         }
         .buttonStyle(.plain)
-        .conversationRowActions(conversation: conversation, onAction: onAction)
-        .accessibilityIdentifier("messages.conversationRow.\(conversation.id)")
+        .conversationRowActions(snapshot: snapshot, onAction: onAction)
+        .accessibilityIdentifier("messages.conversationRow.\(snapshot.id)")
     }
 }
 
 struct IMConversationRow: View {
-    let conversation: IMConversation
-    let identity: IMConversationIdentityPresentation
-    let queueSummary: IMConversationQueueSummary
+    let snapshot: IMConversationRowSnapshot
     let isActive: Bool
 
     var body: some View {
         HStack(spacing: AppSpacing.medium) {
-            if conversation.kind == .direct {
+            if snapshot.kind == .direct {
                 UserAvatarView(
-                    displayName: identity.title,
-                    email: conversation.directPeer?.email,
-                    avatarPreset: conversation.directPeer?.avatarPreset,
+                    displayName: snapshot.title,
+                    email: snapshot.directPeerEmail,
+                    avatarPreset: snapshot.directPeerAvatarPreset,
                     size: 48
                 )
             } else {
@@ -52,18 +46,18 @@ struct IMConversationRow: View {
 
             VStack(alignment: .leading, spacing: AppSpacing.xSmall) {
                 HStack(alignment: .firstTextBaseline, spacing: AppSpacing.small) {
-                    Text(identity.title)
-                        .font(.body.weight(conversation.unreadCount > 0 || isActive ? .semibold : .regular))
+                    Text(snapshot.title)
+                        .font(.body.weight(snapshot.unreadCount > 0 || isActive ? .semibold : .regular))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
 
-                    if conversation.isPinned {
+                    if snapshot.isPinned {
                         Image(systemName: "pin.fill")
                             .font(.caption2)
                             .foregroundStyle(.orange)
                     }
 
-                    if conversation.isMuted {
+                    if snapshot.isMuted {
                         Image(systemName: "bell.slash.fill")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
@@ -81,15 +75,15 @@ struct IMConversationRow: View {
                     Spacer(minLength: 0)
                 }
 
-                if conversation.isDirectMessagingFrozen {
+                if snapshot.isDirectMessagingFrozen {
                     Text("已冻结")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.orange)
                         .lineLimit(1)
-                        .accessibilityLabel(conversation.directMessagingStatusMessage ?? "已冻结")
+                        .accessibilityLabel(snapshot.directMessagingStatusMessage ?? "已冻结")
                 }
 
-                if let rowSecondaryLabel = identity.rowSecondaryLabel {
+                if let rowSecondaryLabel = snapshot.rowSecondaryLabel {
                     Text(rowSecondaryLabel)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
@@ -98,12 +92,12 @@ struct IMConversationRow: View {
             }
 
             VStack(alignment: .trailing, spacing: AppSpacing.small) {
-                Text(conversation.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                Text(snapshot.updatedAt.formatted(date: .abbreviated, time: .shortened))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
 
-                ConversationUnreadBadge(count: conversation.unreadCount)
+                ConversationUnreadBadge(count: snapshot.unreadCount)
 
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
@@ -122,7 +116,7 @@ struct IMConversationRow: View {
     }
 
     private var avatarText: String {
-        let trimmed = identity.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = snapshot.title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return "IM"
         }
@@ -131,7 +125,7 @@ struct IMConversationRow: View {
     }
 
     private var avatarColor: Color {
-        switch conversation.avatarPreset {
+        switch snapshot.avatarPreset {
         case .sunrise:
             return .orange
         case .ocean:
@@ -144,7 +138,7 @@ struct IMConversationRow: View {
             break
         }
 
-        if conversation.unreadCount > 0 {
+        if snapshot.unreadCount > 0 {
             return .accentColor
         }
 
@@ -152,49 +146,29 @@ struct IMConversationRow: View {
     }
 
     private var primaryPreviewText: String {
-        let draft = conversation.draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !draft.isEmpty {
-            return "草稿: \(draft)"
-        }
-
-        if queueSummary.retryableIssueCount > 0 {
-            return "发送失败，点进会话重试"
-        }
-
-        let preview = conversation.lastMessagePreview.trimmingCharacters(in: .whitespacesAndNewlines)
-        if preview.isEmpty {
-            return conversation.kind == .group ? "\(conversation.memberCount) 位成员" : "暂无消息"
-        }
-        return preview
+        snapshot.primaryPreviewText
     }
 
     private var primaryPreviewColor: Color {
-        let draft = conversation.draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !draft.isEmpty {
+        switch snapshot.primaryPreviewTone {
+        case .draft:
             return .orange
-        }
-        if queueSummary.retryableIssueCount > 0 {
+        case .failure:
             return .red
+        case .unread:
+            return .primary
+        case .normal:
+            return .secondary
         }
-        return conversation.unreadCount > 0 ? .primary : .secondary
     }
 
     private var rowDebugSignature: String {
-        [
-            conversation.id,
-            "\(conversation.unreadCount)",
-            conversation.lastMessagePreviewText,
-            "\(conversation.updatedAt.timeIntervalSince1970)",
-            "\(conversation.pendingMessages.count)",
-            "\(conversation.messages.count)",
-            "\(conversation.timelineItems.count)",
-            "\(isActive)"
-        ].joined(separator: "|")
+        snapshot.debugSignature
     }
 
     private func logRowSnapshot(reason: String) {
         IMAppLog.imUI.debug(
-            "Conversation row snapshot reason=\(reason, privacy: .public) conversationID=\(conversation.id, privacy: .public) title=\(identity.title, privacy: .public) unread=\(conversation.unreadCount, privacy: .public) preview=\(conversation.lastMessagePreviewText, privacy: .public) updated=\(conversation.updatedAt.timeIntervalSince1970, privacy: .public) pending=\(conversation.pendingMessages.count, privacy: .public) messages=\(conversation.messages.count, privacy: .public) timeline=\(conversation.timelineItems.count, privacy: .public) isActive=\(isActive, privacy: .public)"
+            "Conversation row snapshot reason=\(reason, privacy: .public) conversationID=\(snapshot.id, privacy: .public) title=\(snapshot.title, privacy: .public) unread=\(snapshot.unreadCount, privacy: .public) preview=\(snapshot.primaryPreviewText, privacy: .public) updated=\(snapshot.updatedAt.timeIntervalSince1970, privacy: .public) pending=\(snapshot.pendingMessageCount, privacy: .public) messages=\(snapshot.messageCount, privacy: .public) timeline=\(snapshot.timelineItemCount, privacy: .public) isActive=\(isActive, privacy: .public)"
         )
     }
 }
@@ -209,7 +183,7 @@ enum IMConversationRowAction: Equatable, Sendable {
 }
 
 struct IMConversationRowSwipeActions: ViewModifier {
-    let conversation: IMConversation
+    let snapshot: IMConversationRowSnapshot
     let onAction: (IMConversationRowAction) -> Void
 
     func body(content: Content) -> some View {
@@ -218,7 +192,7 @@ struct IMConversationRowSwipeActions: ViewModifier {
                 Button {
                     onAction(.pin)
                 } label: {
-                    Label(conversation.isPinned ? "取消置顶" : "置顶", systemImage: conversation.isPinned ? "pin.slash" : "pin.fill")
+                    Label(snapshot.isPinned ? "取消置顶" : "置顶", systemImage: snapshot.isPinned ? "pin.slash" : "pin.fill")
                 }
                 .tint(.orange)
                 .accessibilityIdentifier("messages.row.action.pin")
@@ -226,7 +200,7 @@ struct IMConversationRowSwipeActions: ViewModifier {
                 Button {
                     onAction(.mute)
                 } label: {
-                    Label(conversation.isMuted ? "取消免打扰" : "免打扰", systemImage: conversation.isMuted ? "bell" : "bell.slash")
+                    Label(snapshot.isMuted ? "取消免打扰" : "免打扰", systemImage: snapshot.isMuted ? "bell" : "bell.slash")
                 }
                 .tint(.gray)
                 .accessibilityIdentifier("messages.row.action.mute")
@@ -247,22 +221,22 @@ struct IMConversationRowSwipeActions: ViewModifier {
                 .tint(.red.opacity(0.85))
 
                 Button {
-                    onAction(conversation.unreadCount > 0 ? .markRead : .markUnread)
+                    onAction(snapshot.unreadCount > 0 ? .markRead : .markUnread)
                 } label: {
-                    Label(conversation.unreadCount > 0 ? "已读" : "未读", systemImage: conversation.unreadCount > 0 ? "envelope.open" : "envelope.badge")
+                    Label(snapshot.unreadCount > 0 ? "已读" : "未读", systemImage: snapshot.unreadCount > 0 ? "envelope.open" : "envelope.badge")
                 }
                 .tint(.blue)
                 .accessibilityIdentifier("messages.row.action.markRead")
             }
             .contextMenu {
-                Button(conversation.isPinned ? "取消置顶" : "置顶会话", systemImage: conversation.isPinned ? "pin.slash" : "pin.fill") {
+                Button(snapshot.isPinned ? "取消置顶" : "置顶会话", systemImage: snapshot.isPinned ? "pin.slash" : "pin.fill") {
                     onAction(.pin)
                 }
-                Button(conversation.isMuted ? "取消免打扰" : "免打扰", systemImage: conversation.isMuted ? "bell" : "bell.slash") {
+                Button(snapshot.isMuted ? "取消免打扰" : "免打扰", systemImage: snapshot.isMuted ? "bell" : "bell.slash") {
                     onAction(.mute)
                 }
-                Button(conversation.unreadCount > 0 ? "标为已读" : "标为未读", systemImage: conversation.unreadCount > 0 ? "envelope.open" : "envelope.badge") {
-                    onAction(conversation.unreadCount > 0 ? .markRead : .markUnread)
+                Button(snapshot.unreadCount > 0 ? "标为已读" : "标为未读", systemImage: snapshot.unreadCount > 0 ? "envelope.open" : "envelope.badge") {
+                    onAction(snapshot.unreadCount > 0 ? .markRead : .markUnread)
                 }
                 Button("清空聊天记录", systemImage: "eraser", role: .destructive) {
                     onAction(.clearHistory)
@@ -276,10 +250,10 @@ struct IMConversationRowSwipeActions: ViewModifier {
 
 extension View {
     func conversationRowActions(
-        conversation: IMConversation,
+        snapshot: IMConversationRowSnapshot,
         onAction: @escaping (IMConversationRowAction) -> Void
     ) -> some View {
-        modifier(IMConversationRowSwipeActions(conversation: conversation, onAction: onAction))
+        modifier(IMConversationRowSwipeActions(snapshot: snapshot, onAction: onAction))
     }
 }
 

@@ -97,7 +97,7 @@ extension IMConversationDetailView {
                                 Text("编辑消息")
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.secondary)
-                                Text(MessagePresentation(aggregate: editingTarget.aggregate).textValue ?? "消息内容不可编辑")
+                                Text(editingTarget.previewText)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(2)
@@ -124,7 +124,7 @@ extension IMConversationDetailView {
                                 Text("回复消息")
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.secondary)
-                                Text(replyComposerPreviewText(for: replyTarget))
+                                Text(replyTarget.reference.previewText)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(2)
@@ -174,10 +174,9 @@ extension IMConversationDetailView {
                                 text: composerText,
                                 in: conversationID
                             )
-                        } else if let replyTarget,
-                           let reference = replyReference(from: replyTarget) {
+                        } else if let replyTarget {
                             didSend = await runtimeStore.sendReply(
-                                reference: reference,
+                                reference: replyTarget.reference,
                                 text: composerText,
                                 to: conversationID
                             )

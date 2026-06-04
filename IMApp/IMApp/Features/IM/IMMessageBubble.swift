@@ -13,8 +13,7 @@ struct IMMessageDeliveryDisplay {
 struct IMMessageBubble: View {
     private static let reactionEmojiOptions = ["👍", "❤️", "😂", "😮", "👎"]
 
-    let message: IMConversationMessage
-    let replyReference: IMReplyReferenceResolution?
+    let rowSnapshot: IMChatMessageRowSnapshot
     let isHighlighted: Bool
     let isSelectionMode: Bool
     let isSelected: Bool
@@ -27,7 +26,6 @@ struct IMMessageBubble: View {
     let canReact: Bool
     let isFavorited: Bool
     let mediaDownloadState: IMMediaDownloadState?
-    let deliveryOverrideText: String?
     let currentUserID: UUID?
     let onToggleSelection: () -> Void
     let onEnterSelection: () -> Void
@@ -49,7 +47,7 @@ struct IMMessageBubble: View {
 
     var body: some View {
         HStack {
-            if message.direction == .outgoing {
+            if rowSnapshot.direction == .outgoing {
                 Spacer(minLength: 24)
             }
 
@@ -62,8 +60,8 @@ struct IMMessageBubble: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 IMMessageContentBody(
-                    message: message,
-                    replyReference: replyReference,
+                    content: rowSnapshot.content,
+                    replyReference: rowSnapshot.replyReference,
                     mediaDownloadState: mediaDownloadState,
                     onJumpToReplyReference: onJumpToReplyReference,
                     onDownloadMedia: onDownloadMedia,
@@ -73,19 +71,19 @@ struct IMMessageBubble: View {
                     onDeleteDownloadedMedia: onDeleteDownloadedMedia
                 )
 
-                if !message.derivedState.reactions.isEmpty {
+                if !rowSnapshot.reactions.isEmpty {
                     IMMessageReactionRow(
-                        reactions: message.derivedState.reactions,
+                        reactions: rowSnapshot.reactions,
                         currentUserID: currentUserID
                     )
                 }
 
                 HStack(spacing: 8) {
-                    Text(message.createdAt.formatted(date: .omitted, time: .shortened))
+                    Text(rowSnapshot.createdAtText)
                     if let deliveryDisplay {
                         IMMessageDeliveryLabel(display: deliveryDisplay)
                     }
-                    if !message.derivedState.edits.isEmpty {
+                    if rowSnapshot.isEdited {
                         Text("已编辑")
                     }
                 }
@@ -123,14 +121,14 @@ struct IMMessageBubble: View {
             }
             .accessibilityIdentifier("conversation.message.moreActions")
 
-            if message.direction == .incoming {
+            if rowSnapshot.direction == .incoming {
                 Spacer(minLength: 24)
             }
         }
     }
 
     private var bubbleColor: Color {
-        switch message.direction {
+        switch rowSnapshot.direction {
         case .incoming:
             return Color(.secondarySystemGroupedBackground)
         case .outgoing:
@@ -139,34 +137,7 @@ struct IMMessageBubble: View {
     }
 
     private var deliveryDisplay: IMMessageDeliveryDisplay? {
-        guard message.direction == .outgoing else {
-            return nil
-        }
-
-        if let deliveryOverrideText {
-            return IMMessageDeliveryDisplay(icon: "checkmark.circle", text: deliveryOverrideText, tint: .secondary)
-        }
-
-        switch message.deliveryState {
-        case .preparing(let message):
-            return IMMessageDeliveryDisplay(icon: "clock", text: shortStatus("准备中", detail: message), tint: .secondary)
-        case .uploading(let message):
-            return IMMessageDeliveryDisplay(icon: "icloud.and.arrow.up", text: shortStatus("上传中", detail: message), tint: .blue)
-        case .uploaded:
-            return IMMessageDeliveryDisplay(icon: "icloud.and.arrow.up.fill", text: "上传完成", tint: .blue)
-        case .queued(let message):
-            return IMMessageDeliveryDisplay(icon: "clock.badge.exclamationmark", text: shortStatus("待发送", detail: message), tint: .orange)
-        case .sending:
-            return IMMessageDeliveryDisplay(icon: "paperplane", text: "发送中", tint: .secondary)
-        case .sent:
-            return IMMessageDeliveryDisplay(icon: "checkmark", text: "已发送", tint: .secondary)
-        case .received:
-            return IMMessageDeliveryDisplay(icon: "checkmark.circle", text: "已送达", tint: .secondary)
-        case .unknown(let message):
-            return IMMessageDeliveryDisplay(icon: "questionmark.circle", text: shortStatus("未确认", detail: message), tint: .orange)
-        case .failed(let message):
-            return IMMessageDeliveryDisplay(icon: "exclamationmark.circle.fill", text: shortStatus("失败", detail: message), tint: .red)
-        }
+        rowSnapshot.deliveryDisplay.map(IMMessageDeliveryDisplay.init(snapshot:))
     }
 
     private var contextMenuContent: some View {
@@ -187,7 +158,7 @@ struct IMMessageBubble: View {
                 }
             }
 
-            if copyableText != nil {
+            if rowSnapshot.copyableText != nil {
                 Button("复制", systemImage: "doc.on.doc") {
                     copyMessageText()
                 }
@@ -229,29 +200,37 @@ struct IMMessageBubble: View {
         }
     }
 
-    private func shortStatus(_ prefix: String, detail: String) -> String {
-        let trimmedDetail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedDetail.isEmpty else {
-            return prefix
-        }
-        return "\(prefix): \(trimmedDetail)"
-    }
-
-    private var copyableText: String? {
-        let text = MessagePresentation(aggregate: message.aggregate).textValue?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let text, !text.isEmpty else {
-            return nil
-        }
-        return text
-    }
-
     private func copyMessageText() {
         #if canImport(UIKit)
-        if let copyableText {
+        if let copyableText = rowSnapshot.copyableText {
             UIPasteboard.general.string = copyableText
         }
         #endif
+    }
+}
+
+extension IMMessageDeliveryDisplay {
+    init(snapshot: IMChatMessageDeliverySnapshot) {
+        self.init(
+            icon: snapshot.icon,
+            text: snapshot.text,
+            tint: snapshot.tone.tint
+        )
+    }
+}
+
+private extension IMChatMessageDeliverySnapshot.Tone {
+    var tint: Color {
+        switch self {
+        case .secondary:
+            return .secondary
+        case .blue:
+            return .blue
+        case .orange:
+            return .orange
+        case .red:
+            return .red
+        }
     }
 }
 

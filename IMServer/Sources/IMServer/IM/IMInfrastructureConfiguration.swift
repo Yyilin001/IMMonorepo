@@ -157,7 +157,8 @@ struct IMEventStreamConfiguration: Sendable {
     func makeConsumerConfiguration(
         consumerGroupID: String,
         clientSuffix: String,
-        topics: [String]? = nil
+        topics: [String]? = nil,
+        autoOffsetReset: KafkaConsumerConfiguration.AutoOffsetReset = .earliest
     ) throws -> KafkaConsumerConfiguration {
         let configuredTopics = topics?.filter { !$0.isEmpty } ?? [topic]
         var configuration = KafkaConsumerConfiguration(
@@ -168,7 +169,7 @@ struct IMEventStreamConfiguration: Sendable {
         configuration.pollInterval = .milliseconds(pollIntervalMilliseconds)
         configuration.isAutoCommitEnabled = false
         configuration.isAutoCreateTopicsEnabled = autoCreateTopics
-        configuration.autoOffsetReset = .earliest
+        configuration.autoOffsetReset = autoOffsetReset
         configuration.maximumPollInterval = .milliseconds(messageTimeoutMilliseconds)
         configuration.securityProtocol = try makeSecurityProtocol()
         return configuration
@@ -316,6 +317,7 @@ struct IMSearchIndexConfiguration: Sendable {
 struct IMStreamConsumerConfiguration: Sendable {
     static let defaultGroups = [
         "summary-projection-consumer",
+        "realtime-delivery-consumer",
         "domain-delivery-consumer",
         "changes-log-consumer",
         "search-index-consumer",
@@ -325,6 +327,20 @@ struct IMStreamConsumerConfiguration: Sendable {
 
     let enabledGroups: Set<String>
     let preservesGroupedDeploymentsInProduction: Bool
+    let domainDeliveryFanoutConcurrency: Int
+    let domainDeliveryRelayBatchSize: Int
+    let domainDeliveryReplayRecordsEnabled: Bool
+    let domainDeliveryRelayAfterRecord: Bool
+    let domainDeliverySkipsMessageCreatedOwnerDelivery: Bool
+    let realtimeDeliveryAsyncRelayEnabled: Bool
+    let realtimeDeliveryAsyncMaxInFlight: Int
+    let realtimeDeliverySlowLogMilliseconds: Int
+    let realtimeMessageCreatedLightweightRecipientThreshold: Int
+    let realtimeMessageCreatedLightweightPreviewMaxCharacters: Int
+    let realtimeMessageCreatedCoalesceWindowMilliseconds: Int
+    let domainDeliveryTransientMaxAttempts: Int
+    let domainDeliveryTimelineNoticeMaxWaitMilliseconds: Int
+    let domainDeliveryTimelineNoticeRetryDelayMilliseconds: Int
 
     static func load(from environment: Environment) -> IMStreamConsumerConfiguration {
         let configured = (Environment.get("IM_STREAM_CONSUMER_GROUPS") ?? "")
@@ -335,7 +351,57 @@ struct IMStreamConsumerConfiguration: Sendable {
             enabledGroups: Set(configured.isEmpty ? defaultGroups : configured),
             preservesGroupedDeploymentsInProduction: Environment.get("IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP")
                 .map { ["1", "true", "yes"].contains($0.lowercased()) }
-                ?? false
+                ?? false,
+            domainDeliveryFanoutConcurrency: max(1, Environment.get("IM_DOMAIN_DELIVERY_FANOUT_CONCURRENCY").flatMap(Int.init(_:)) ?? 4),
+            domainDeliveryRelayBatchSize: max(1, Environment.get("IM_DOMAIN_DELIVERY_RELAY_BATCH_SIZE").flatMap(Int.init(_:)) ?? 16),
+            domainDeliveryReplayRecordsEnabled: parseBooleanEnvironment(
+                "IM_DOMAIN_DELIVERY_REPLAY_RECORDS_ENABLED",
+                defaultValue: false
+            ),
+            domainDeliveryRelayAfterRecord: parseBooleanEnvironment(
+                "IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD",
+                defaultValue: !Set(configured.isEmpty ? defaultGroups : configured).contains("realtime-delivery-consumer")
+            ),
+            domainDeliverySkipsMessageCreatedOwnerDelivery: parseBooleanEnvironment(
+                "IM_DOMAIN_DELIVERY_SKIP_MESSAGE_CREATED_OWNER_DELIVERY",
+                defaultValue: false
+            ),
+            realtimeDeliveryAsyncRelayEnabled: parseBooleanEnvironment(
+                "IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED",
+                defaultValue: false
+            ),
+            realtimeDeliveryAsyncMaxInFlight: max(
+                1,
+                Environment.get("IM_REALTIME_DELIVERY_ASYNC_MAX_IN_FLIGHT").flatMap(Int.init(_:)) ?? 32
+            ),
+            realtimeDeliverySlowLogMilliseconds: max(
+                0,
+                Environment.get("IM_REALTIME_DELIVERY_SLOW_LOG_MS").flatMap(Int.init(_:)) ?? 1000
+            ),
+            realtimeMessageCreatedLightweightRecipientThreshold: max(
+                0,
+                Environment.get("IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD").flatMap(Int.init(_:)) ?? 0
+            ),
+            realtimeMessageCreatedLightweightPreviewMaxCharacters: max(
+                0,
+                Environment.get("IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_PREVIEW_MAX_CHARS").flatMap(Int.init(_:)) ?? 120
+            ),
+            realtimeMessageCreatedCoalesceWindowMilliseconds: max(
+                0,
+                Environment.get("IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS").flatMap(Int.init(_:)) ?? 0
+            ),
+            domainDeliveryTransientMaxAttempts: max(
+                1,
+                Environment.get("IM_DOMAIN_DELIVERY_TRANSIENT_MAX_ATTEMPTS").flatMap(Int.init(_:)) ?? 3
+            ),
+            domainDeliveryTimelineNoticeMaxWaitMilliseconds: max(
+                100,
+                Environment.get("IM_DOMAIN_DELIVERY_TIMELINE_NOTICE_MAX_WAIT_MS").flatMap(Int.init(_:)) ?? 10_000
+            ),
+            domainDeliveryTimelineNoticeRetryDelayMilliseconds: max(
+                10,
+                Environment.get("IM_DOMAIN_DELIVERY_TIMELINE_NOTICE_RETRY_DELAY_MS").flatMap(Int.init(_:)) ?? 100
+            )
         )
     }
 
