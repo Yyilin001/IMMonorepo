@@ -73,10 +73,17 @@ extension AuthManager {
         }
 
         conversationRuntimeController.appDidBecomeActive()
+        await conversationRuntimeController.reportSelectedConversationActivity(isActive: true)
         await refreshIMConversationSummaryReadModelIfNeeded()
+        conversationRuntimeController.syncSelectedConversationTimelineCatchUp(
+            reason: "foreground",
+            bypassRateLimit: true
+        )
     }
 
     func appDidEnterBackground() async {
+        conversationRuntimeController.appDidEnterBackground()
+        await conversationRuntimeController.reportSelectedConversationActivity(isActive: false)
         await flushIMConversationCache()
         await flushContactStateCache()
     }

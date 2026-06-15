@@ -3,6 +3,115 @@ import Testing
 @testable import IMClientKit
 
 extension IMConversationStoreTests {
+    @Test func asyncDomainEventBatchAdvancesCursorAndAppliesSequentialMessages() async throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let firstMessageID = UUID(uuidString: "11111111-aaaa-bbbb-cccc-111111111111")!
+        let secondMessageID = UUID(uuidString: "22222222-aaaa-bbbb-cccc-222222222222")!
+        let firstEvent = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "99999999-1111-1111-1111-111111111111")!,
+            eventType: .messageCreated,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 1,
+            occurredAt: Date(timeIntervalSince1970: 1_700_910_001),
+            actorUserID: Self.peerUserID,
+            conversation: nil,
+            ownerCursor: 1,
+            ownerAggregateSequence: 1,
+            body: .messageCreated(
+                message: IMConversationMessageResponseBody(
+                    id: firstMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    serverSequence: 1,
+                    timelineSequence: 1,
+                    content: .richText(.plain("async first")),
+                    createdAt: Date(timeIntervalSince1970: 1_700_910_001)
+                ),
+                clientMessageID: nil
+            )
+        )
+        let secondEvent = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "99999999-2222-2222-2222-222222222222")!,
+            eventType: .messageCreated,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 2,
+            occurredAt: Date(timeIntervalSince1970: 1_700_910_002),
+            actorUserID: Self.peerUserID,
+            conversation: nil,
+            ownerCursor: 2,
+            ownerAggregateSequence: 2,
+            body: .messageCreated(
+                message: IMConversationMessageResponseBody(
+                    id: secondMessageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    serverSequence: 2,
+                    timelineSequence: 2,
+                    content: .richText(.plain("async second")),
+                    createdAt: Date(timeIntervalSince1970: 1_700_910_002)
+                ),
+                clientMessageID: nil
+            )
+        )
+
+        let outcome = await store.applyDomainEventsAsync(
+            [
+                Self.envelope(cursor: 1, payload: firstEvent),
+                Self.envelope(cursor: 2, payload: secondEvent)
+            ],
+            nextCursor: 2,
+            currentUserID: Self.currentUserID
+        )
+
+        let texts = store.conversations.first?.messages.map(\.text) ?? []
+        #expect(outcome.shouldFetchDomainEvents == false)
+        #expect(store.domainEventSyncCursor == 2)
+        #expect(Set(texts) == ["async first", "async second"])
+    }
+
+    @Test func asyncDomainEventBatchStopsAtCursorGap() async throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let skippedCursorEvent = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "99999999-3333-3333-3333-333333333333")!,
+            eventType: .messageCreated,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 2,
+            occurredAt: Date(timeIntervalSince1970: 1_700_910_003),
+            actorUserID: Self.peerUserID,
+            conversation: nil,
+            ownerCursor: 2,
+            ownerAggregateSequence: 2,
+            body: .messageCreated(
+                message: IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "33333333-aaaa-bbbb-cccc-333333333333")!,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    serverSequence: 2,
+                    timelineSequence: 2,
+                    content: .richText(.plain("gap")),
+                    createdAt: Date(timeIntervalSince1970: 1_700_910_003)
+                ),
+                clientMessageID: nil
+            )
+        )
+
+        let outcome = await store.applyDomainEventsAsync(
+            [Self.envelope(cursor: 2, payload: skippedCursorEvent)],
+            nextCursor: 2,
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(outcome.shouldFetchDomainEvents == true)
+        #expect(store.domainEventSyncCursor == 0)
+        #expect(store.domainEventDebugMetrics.catchUpCursorGap == 1)
+        #expect(store.conversations.isEmpty)
+    }
+
     @Test func domainEventBatchStopsBeforeMissingRequiredNoticeAndDoesNotAdvanceCursorPastIt() throws {
         let store = IMConversationStore()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
@@ -285,6 +394,42 @@ extension IMConversationStoreTests {
         #expect(store.selectedConversation?.memberCount == 2)
     }
 
+    @Test func asyncMemberSnapshotUsesClientStateEngineAndProjectsMainActorState() async {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+
+        store.openConversation(id: conversationID)
+        await store.replaceMembersAsync(
+            in: conversationID,
+            members: [
+                IMConversationMemberResponseBody(id: Self.peerUserID, email: "peer@example.com"),
+                IMConversationMemberResponseBody(id: Self.currentUserID, email: "self@example.com")
+            ]
+        )
+
+        #expect(store.selectedConversation?.members.map(\.email) == ["peer@example.com", "self@example.com"])
+        #expect(store.selectedConversation?.memberUserIDs.count == 2)
+        #expect(store.selectedConversation?.memberCount == 2)
+
+        await store.applyMemberPageAsync(
+            IMConversationMemberPageResponseBody(
+                items: [
+                    IMConversationMemberResponseBody(id: Self.peerUserID, email: "peer@example.com")
+                ],
+                nextCursor: "members-2",
+                total: 5,
+                limit: 50
+            ),
+            in: conversationID,
+            query: "",
+            appending: false
+        )
+
+        #expect(store.selectedConversation?.members.map(\.email) == ["peer@example.com"])
+        #expect(store.selectedConversation?.memberCount == 5)
+        #expect(store.memberPageState(for: conversationID).nextCursor == "members-2")
+    }
+
 
     @Test func removeConversationRemovesSelectionAndFallsBackToRemainingConversation() {
         let store = IMConversationStore()
@@ -399,6 +544,53 @@ extension IMConversationStoreTests {
                 oldestLoadedTimelineSequence: 3
             )
         ])
+    }
+
+    @Test func cacheRestoreProjectsStateThroughClientSnapshot() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+        store.setStatusMessage("stale status")
+        store.setLoadingConversations(true)
+        store.setLoadingMoreConversationSummaries(true)
+
+        let snapshot = IMConversationCacheSnapshot(
+            conversations: [
+                IMCachedConversationState(
+                    id: conversationIDString,
+                    title: "Restored",
+                    kind: .group,
+                    memberCount: 2,
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    messages: [],
+                    hasLoadedMessages: false,
+                    lastMessagePreviewText: "cached",
+                    hasMoreHistory: true,
+                    latestLoadedTimelineSequence: nil,
+                    oldestLoadedTimelineSequence: nil,
+                    serverLastReadSequence: 7,
+                    serverUnreadCount: 3,
+                    updatedAt: Date(timeIntervalSince1970: 1_700_400_020)
+                )
+            ],
+            selectedConversationID: conversationIDString,
+            lastSummaryRefreshAt: nil,
+            summarySyncToken: nil,
+            summaryNextCursor: "next-page",
+            hasMoreConversationSummaries: true
+        )
+
+        store.restoreCacheSnapshot(snapshot)
+
+        #expect(store.conversations.map(\.id) == [conversationIDString])
+        #expect(store.selectedConversationID == conversationIDString)
+        #expect(store.statusMessage == nil)
+        #expect(store.isLoadingConversations)
+        #expect(!store.isLoadingMoreConversationSummaries)
+        #expect(store.conversationSummaryNextCursor == "next-page")
+        #expect(store.hasMoreConversationSummaries)
+        #expect(store.selectedConversation?.serverLastReadSequence == 7)
+        #expect(store.selectedConversation?.serverUnreadCount == 3)
     }
 
 
@@ -519,6 +711,27 @@ extension IMConversationStoreTests {
         #expect(cachedConversation.messages.last?.serverSequence == 205)
         #expect(cursor.latestLoadedTimelineSequence == 205)
         #expect(cursor.oldestLoadedTimelineSequence == 6)
+    }
+
+    @Test func trimCachedMessageWindowUsesTimelineReducerAndRefreshesLoadedCursor() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let conversationIDString = conversationID.uuidString
+
+        store.replaceConversationSummaries([Self.gapSummary(conversationID: conversationID, latestServerSequence: 5)])
+        store.replaceTimelineItems(
+            in: conversationIDString,
+            messages: (1...5).map { sequence in
+                Self.messageResponse(conversationID: conversationID, serverSequence: sequence)
+            },
+            currentUserID: Self.currentUserID
+        )
+
+        store.trimCachedMessageWindow(limit: 2)
+
+        #expect(store.conversations.first?.messages.map(\.serverSequence) == [4, 5])
+        #expect(store.oldestLoadedTimelineSequence(for: conversationIDString) == 4)
+        #expect(store.latestLoadedTimelineSequence(for: conversationIDString) == 5)
     }
 
 

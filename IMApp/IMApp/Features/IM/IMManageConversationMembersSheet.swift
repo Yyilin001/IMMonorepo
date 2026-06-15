@@ -1,6 +1,175 @@
 import IMClientKit
 import SwiftUI
 
+/// Member-management sheet state projected from the current conversation and member page.
+struct IMManageMembersSnapshot: Equatable {
+    let hasConversation: Bool
+    let rows: [IMManageMemberRowSnapshot]
+    let loadedMemberCount: Int
+    let memberTotal: Int
+    let isLoading: Bool
+    let isLoadingMore: Bool
+    let canLoadMore: Bool
+}
+
+/// Renderable member row plus the actions allowed for the current user's role.
+struct IMManageMemberRowSnapshot: Identifiable, Equatable {
+    let id: UUID
+    let displayTitle: String
+    let roleEmailText: String
+    let isCurrentUser: Bool
+    let actions: [IMManageMemberActionSnapshot]
+}
+
+/// Button model for one role or membership action.
+struct IMManageMemberActionSnapshot: Identifiable, Equatable {
+    let kind: IMManageMemberActionKind
+    let title: String
+    let failureMessage: String
+    let isDestructive: Bool
+
+    var id: IMManageMemberActionKind {
+        kind
+    }
+}
+
+/// Domain action represented by a member-management button.
+enum IMManageMemberActionKind: Hashable {
+    case promoteAdmin(memberID: UUID)
+    case demoteAdmin(memberID: UUID)
+    case transferOwner(memberID: UUID)
+    case removeMember(memberID: UUID)
+}
+
+/// Projects raw member state into sheet rows and role-scoped actions.
+struct IMManageMembersSnapshotBuilder {
+    func build(
+        conversation: IMConversation?,
+        pageState: IMConversationMemberPageState,
+        currentUserID: UUID?,
+        visibleQuery: String
+    ) -> IMManageMembersSnapshot {
+        guard let conversation else {
+            return IMManageMembersSnapshot(
+                hasConversation: false,
+                rows: [],
+                loadedMemberCount: 0,
+                memberTotal: 0,
+                isLoading: pageState.isLoading,
+                isLoadingMore: pageState.isLoadingMore,
+                canLoadMore: pageState.canLoadMore
+            )
+        }
+
+        let trimmedQuery = visibleQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayedMembers = pageState.query == trimmedQuery ? pageState.items : conversation.members
+        let currentRole = currentUserID.flatMap { userID in
+            displayedMembers.first(where: { $0.id == userID })?.role
+                ?? conversation.members.first(where: { $0.id == userID })?.role
+        }
+
+        return IMManageMembersSnapshot(
+            hasConversation: true,
+            rows: displayedMembers.map { member in
+                IMManageMemberRowSnapshot(
+                    id: member.id,
+                    displayTitle: member.displayTitle,
+                    roleEmailText: "\(member.role.displayName) · \(member.email)",
+                    isCurrentUser: member.id == currentUserID,
+                    actions: actions(for: member, currentUserID: currentUserID, currentRole: currentRole)
+                )
+            },
+            loadedMemberCount: displayedMembers.count,
+            memberTotal: pageState.total > 0 ? pageState.total : conversation.memberCount,
+            isLoading: pageState.isLoading,
+            isLoadingMore: pageState.isLoadingMore,
+            canLoadMore: pageState.canLoadMore
+        )
+    }
+
+    private func actions(
+        for member: IMConversationMember,
+        currentUserID: UUID?,
+        currentRole: IMConversationMemberRole?
+    ) -> [IMManageMemberActionSnapshot] {
+        guard let currentRole, member.id != currentUserID else {
+            return []
+        }
+
+        var actions: [IMManageMemberActionSnapshot] = []
+
+        if currentRole.canManageRoles {
+            switch member.role {
+            case .owner:
+                break
+            case .admin:
+                actions.append(
+                    IMManageMemberActionSnapshot(
+                        kind: .demoteAdmin(memberID: member.id),
+                        title: "取消管理员",
+                        failureMessage: "取消管理员失败。",
+                        isDestructive: false
+                    )
+                )
+                actions.append(
+                    IMManageMemberActionSnapshot(
+                        kind: .transferOwner(memberID: member.id),
+                        title: "转让群主",
+                        failureMessage: "转让群主失败。",
+                        isDestructive: false
+                    )
+                )
+            case .member:
+                actions.append(
+                    IMManageMemberActionSnapshot(
+                        kind: .promoteAdmin(memberID: member.id),
+                        title: "设为管理员",
+                        failureMessage: "设置管理员失败。",
+                        isDestructive: false
+                    )
+                )
+                actions.append(
+                    IMManageMemberActionSnapshot(
+                        kind: .transferOwner(memberID: member.id),
+                        title: "转让群主",
+                        failureMessage: "转让群主失败。",
+                        isDestructive: false
+                    )
+                )
+            }
+        }
+
+        if currentRole.canRemove(memberWithRole: member.role) {
+            actions.append(
+                IMManageMemberActionSnapshot(
+                    kind: .removeMember(memberID: member.id),
+                    title: "移除成员",
+                    failureMessage: "移除成员失败。",
+                    isDestructive: true
+                )
+            )
+        }
+
+        return actions
+    }
+}
+
+@MainActor
+extension IMConversationStore {
+    func manageMembersSnapshot(
+        conversationID: String,
+        currentUserID: UUID?,
+        visibleQuery: String
+    ) -> IMManageMembersSnapshot {
+        IMManageMembersSnapshotBuilder().build(
+            conversation: conversations.first(where: { $0.id == conversationID }),
+            pageState: memberPageState(for: conversationID),
+            currentUserID: currentUserID,
+            visibleQuery: visibleQuery
+        )
+    }
+}
+
 struct IMManageConversationMembersSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var submitter = IMAsyncSubmitter()
@@ -19,23 +188,23 @@ struct IMManageConversationMembersSheet: View {
 
     var body: some View {
         List {
-            if let conversation {
+            if memberSnapshot.hasConversation {
                 Section {
                     TextField("搜索成员", text: $query)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 } footer: {
-                    Text("成员 \(loadedMemberCount) / \(memberTotal) 人")
+                    Text("成员 \(memberSnapshot.loadedMemberCount) / \(memberSnapshot.memberTotal) 人")
                 }
 
                 Section {
-                    ForEach(displayMembers) { member in
+                    ForEach(memberSnapshot.rows) { member in
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack(spacing: 8) {
                                     Text(member.displayTitle)
                                         .font(.body)
-                                    if member.id == currentUserID {
+                                    if member.isCurrentUser {
                                         Text("我")
                                             .font(.caption2.weight(.semibold))
                                             .padding(.horizontal, 6)
@@ -45,22 +214,22 @@ struct IMManageConversationMembersSheet: View {
                                     }
                                 }
 
-                                Text("\(member.role.displayName) · \(member.email)")
+                                Text(member.roleEmailText)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
 
                             Spacer()
 
-                            if actionMenuItems(for: member).isEmpty {
+                            if member.actions.isEmpty {
                                 EmptyView()
                             } else {
                                 Menu {
-                                    ForEach(actionMenuItems(for: member)) { item in
-                                        Button(item.title, role: item.role) {
+                                    ForEach(member.actions) { item in
+                                        Button(item.title, role: item.isDestructive ? .destructive : nil) {
                                             Task {
                                                 await submitter.run(messageOnFailure: item.failureMessage) {
-                                                    let succeeded = await item.action()
+                                                    let succeeded = await perform(item.kind)
                                                     if succeeded {
                                                         await refreshCurrentQuery()
                                                     }
@@ -81,15 +250,15 @@ struct IMManageConversationMembersSheet: View {
                 } footer: {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("群主可以设置管理员、转让群主并移除成员；管理员只能移除普通成员。")
-                        if pageState.isLoading {
+                        if memberSnapshot.isLoading {
                             ProgressView()
-                        } else if pageState.canLoadMore {
-                            Button(pageState.isLoadingMore ? "加载中..." : "加载更多") {
+                        } else if memberSnapshot.canLoadMore {
+                            Button(memberSnapshot.isLoadingMore ? "加载中..." : "加载更多") {
                                 Task {
                                     await onLoadMoreMembers()
                                 }
                             }
-                            .disabled(pageState.isLoadingMore)
+                            .disabled(memberSnapshot.isLoadingMore)
                         }
                     }
                 }
@@ -135,117 +304,28 @@ struct IMManageConversationMembersSheet: View {
         }
     }
 
-    private var pageState: IMConversationMemberPageState {
-        conversationStore.memberPageState(for: conversationID)
-    }
-
-    private var displayMembers: [IMConversationMember] {
-        if pageState.query == query.trimmingCharacters(in: .whitespacesAndNewlines) {
-            return pageState.items
-        }
-        return conversation?.members ?? []
-    }
-
-    private var loadedMemberCount: Int {
-        displayMembers.count
-    }
-
-    private var memberTotal: Int {
-        pageState.total > 0 ? pageState.total : conversation?.memberCount ?? 0
-    }
-
-    private var conversation: IMConversation? {
-        conversationStore.conversations.first(where: { $0.id == conversationID })
-    }
-
-    private var currentRole: IMConversationMemberRole? {
-        guard let currentUserID else {
-            return nil
-        }
-
-        return displayMembers.first(where: { $0.id == currentUserID })?.role
-            ?? conversation?.members.first(where: { $0.id == currentUserID })?.role
+    private var memberSnapshot: IMManageMembersSnapshot {
+        conversationStore.manageMembersSnapshot(
+            conversationID: conversationID,
+            currentUserID: currentUserID,
+            visibleQuery: query
+        )
     }
 
     private func refreshCurrentQuery() async {
         await onSearchMembers(query)
     }
 
-    private func actionMenuItems(for member: IMConversationMember) -> [MemberActionItem] {
-        guard let currentRole, member.id != currentUserID else {
-            return []
+    private func perform(_ action: IMManageMemberActionKind) async -> Bool {
+        switch action {
+        case .promoteAdmin(let memberID):
+            return await onPromoteAdmin(memberID)
+        case .demoteAdmin(let memberID):
+            return await onDemoteAdmin(memberID)
+        case .transferOwner(let memberID):
+            return await onTransferOwner(memberID)
+        case .removeMember(let memberID):
+            return await onRemoveMember(memberID)
         }
-
-        var items: [MemberActionItem] = []
-
-        if currentRole.canManageRoles {
-            switch member.role {
-            case .owner:
-                break
-            case .admin:
-                items.append(
-                    MemberActionItem(
-                        title: "取消管理员",
-                        failureMessage: "取消管理员失败。",
-                        action: { await onDemoteAdmin(member.id) }
-                    )
-                )
-                items.append(
-                    MemberActionItem(
-                        title: "转让群主",
-                        failureMessage: "转让群主失败。",
-                        action: { await onTransferOwner(member.id) }
-                    )
-                )
-            case .member:
-                items.append(
-                    MemberActionItem(
-                        title: "设为管理员",
-                        failureMessage: "设置管理员失败。",
-                        action: { await onPromoteAdmin(member.id) }
-                    )
-                )
-                items.append(
-                    MemberActionItem(
-                        title: "转让群主",
-                        failureMessage: "转让群主失败。",
-                        action: { await onTransferOwner(member.id) }
-                    )
-                )
-            }
-        }
-
-        if currentRole.canRemove(memberWithRole: member.role) {
-            items.append(
-                MemberActionItem(
-                    title: "移除成员",
-                    role: .destructive,
-                    failureMessage: "移除成员失败。",
-                    action: { await onRemoveMember(member.id) }
-                )
-            )
-        }
-
-        return items
-    }
-}
-
-struct MemberActionItem: Identifiable {
-    let id = UUID()
-    let title: String
-    let role: ButtonRole?
-    let failureMessage: String
-    let action: () async -> Bool
-
-    init(
-        title: String,
-        role: ButtonRole? = nil,
-        failureMessage: String,
-        action: @escaping () async -> Bool
-    ) {
-        self.title = title
-        self.role = role
-        self.failureMessage = failureMessage
-        self.action = action
     }
 }

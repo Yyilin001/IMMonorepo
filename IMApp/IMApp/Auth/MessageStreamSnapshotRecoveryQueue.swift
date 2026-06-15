@@ -36,19 +36,29 @@ final class MessageStreamSnapshotRecoveryQueue: MessageStreamSnapshotRecovering 
     }
 
     func syncActiveMessageStreamSnapshots() {
-        let targets = imConversationStore.activeMessageStreamTargets()
-        guard !targets.isEmpty else {
-            return
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            let targets = await imConversationStore.activeMessageStreamTargetsAsync()
+            guard !targets.isEmpty else {
+                return
+            }
+            enqueue(targets)
         }
-        enqueue(targets)
     }
 
     func syncPendingMessageStreamSnapshotsIfNeeded() {
-        let targets = imConversationStore.consumePendingStreamSnapshotTargets()
-        guard !targets.isEmpty else {
-            return
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            let targets = await imConversationStore.consumePendingStreamSnapshotTargetsAsync()
+            guard !targets.isEmpty else {
+                return
+            }
+            enqueue(targets)
         }
-        enqueue(targets)
     }
 
     func cancel() {
@@ -114,7 +124,7 @@ final class MessageStreamSnapshotRecoveryQueue: MessageStreamSnapshotRecovering 
                 return
             }
             markServerOnline()
-            imConversationStore.applyMessageStreamSnapshot(
+            await imConversationStore.applyMessageStreamSnapshotAsync(
                 response,
                 currentUserID: currentUserID
             )

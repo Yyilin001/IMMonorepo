@@ -139,7 +139,7 @@ extension ConversationRuntimeController {
                 messageIDs: ids
             )
             markServerOnline()
-            imConversationStore.removeMessages(
+            await imConversationStore.removeMessagesAsync(
                 ids: Set(ids.map(\.uuidString) + messageIDs),
                 from: trimmedConversationID
             )
@@ -162,7 +162,7 @@ extension ConversationRuntimeController {
             markServerOnline()
             if let conversation = imConversationStore.conversations.first(where: { $0.id == trimmedConversationID }) {
                 let ids = Set(conversation.messages.map(\.id) + conversation.messages.compactMap(\.serverMessageID))
-                imConversationStore.removeMessages(ids: ids, from: trimmedConversationID)
+                await imConversationStore.removeMessagesAsync(ids: ids, from: trimmedConversationID)
             }
             scheduleConversationCachePersist()
             return true
@@ -181,7 +181,7 @@ extension ConversationRuntimeController {
         do {
             _ = try await sessionClient.deleteIMConversationForSelf(conversationID: trimmedConversationID)
             markServerOnline()
-            imConversationStore.removeConversation(id: trimmedConversationID)
+            await imConversationStore.removeConversationAsync(id: trimmedConversationID)
             scheduleConversationCachePersist()
             return true
         } catch {

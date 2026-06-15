@@ -332,6 +332,13 @@ extension IMConversationStore {
         applyDomainEvent(payload.domainEventPayload(), currentUserID: currentUserID)
     }
 
+    func applyTestConversationEventAsync(
+        _ payload: TestConversationEventPayload,
+        currentUserID: UUID
+    ) async -> IMConversationEventApplyOutcome {
+        await applyDomainEventAsync(payload.domainEventPayload(), currentUserID: currentUserID)
+    }
+
     func applyRecalledMessage(_ response: IMConversationMessageResponseBody, currentUserID: UUID) {
         applyUpdatedMessage(response, currentUserID: currentUserID)
     }

@@ -32,24 +32,6 @@ extension IMConversationStore {
         )
     }
 
-    public func reset() {
-        conversations = []
-        conversationMutationGeneration &+= 1
-        selectedConversationID = nil
-        statusMessage = nil
-        isLoadingConversations = false
-        conversationSummaryNextCursor = nil
-        hasMoreConversationSummaries = false
-        isLoadingMoreConversationSummaries = false
-        detailState.reset()
-        outgoingQueueState.reset()
-        isLoadingMembers = detailState.isLoadingMembers
-        isLoadingMessages = detailState.isLoadingMessages
-        conversationSearchState.reset()
-        searchText = conversationSearchState.text
-        syncReplyJumpState()
-    }
-
     public func setConversationSearchText(_ value: String) {
         conversationSearchState.setText(value)
         searchText = conversationSearchState.text

@@ -1,6 +1,20 @@
 import SwiftUI
 import IMClientKit
 
+/// Named coordinate space used to measure timeline row positions inside the chat scroll view.
+enum IMChatTimelineScrollCoordinateSpace {
+    static let name = "IMChatTimelineScrollCoordinateSpace"
+}
+
+/// Collects each visible timeline row's top offset relative to the chat scroll viewport.
+struct IMChatTimelineRowOffsetPreferenceKey: PreferenceKey {
+    static let defaultValue: [String: Double] = [:]
+
+    static func reduce(value: inout [String: Double], nextValue: () -> [String: Double]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, newValue in newValue })
+    }
+}
+
 struct ConversationNewMessagePill: View {
     let unseenCount: Int
     let showsJumpOnly: Bool
@@ -37,6 +51,11 @@ extension IMConversationDetailView {
             detailMessageStack
         }
         .defaultScrollAnchor(.bottom)
+        .scrollPosition($detailScrollPosition)
+        .coordinateSpace(name: IMChatTimelineScrollCoordinateSpace.name)
+        .onPreferenceChange(IMChatTimelineRowOffsetPreferenceKey.self) { offsets in
+            timelineRowOffsetsFromTop = offsets
+        }
         .background(AppSurface.groupedBackground)
     }
 
@@ -52,7 +71,7 @@ extension IMConversationDetailView {
                 )
             }
 
-            if let message = conversationStore.statusMessage, !message.isEmpty {
+            if let message = snapshot.statusMessage, !message.isEmpty {
                 AppStatusBanner(message: message, tone: .info)
                     .accessibilityIdentifier("conversation.status")
             }
@@ -75,6 +94,7 @@ extension IMConversationDetailView {
         } else {
             if snapshot.hasMoreHistory {
                 Button {
+                    pendingHistoryScrollAnchor = currentHistoryScrollAnchor ?? snapshot.historyLoadAnchor
                     conversationStore.openConversation(id: conversationID)
                     Task {
                         await runtimeStore.loadOlderMessages()
@@ -84,7 +104,7 @@ extension IMConversationDetailView {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-                .disabled(conversationStore.isLoadingMessages)
+                .disabled(snapshot.isLoadingMessages)
                 .accessibilityIdentifier("conversation.loadOlderMessagesButton")
             }
 
@@ -93,15 +113,41 @@ extension IMConversationDetailView {
                 case .message(let rowSnapshot):
                     detailMessageRow(rowSnapshot, snapshot: snapshot)
                         .id(row.id)
+                        .trackingTimelineRowOffset(id: row.id)
                 case .notice(let rowSnapshot):
                     timelineNoticeRow(rowSnapshot)
                         .id(row.id)
+                        .trackingTimelineRowOffset(id: row.id)
                 case .pendingMessage(let rowSnapshot):
                     pendingMessageRow(rowSnapshot)
                         .id(row.id)
+                        .trackingTimelineRowOffset(id: row.id)
                 }
             }
         }
+    }
+
+    /// Chooses the measured row closest to the viewport top as the history-load anchor.
+    ///
+    /// Preserving this row's offset keeps the reader's visible position stable when
+    /// older messages are inserted above the current timeline.
+    var currentHistoryScrollAnchor: IMChatScrollAnchorSnapshot? {
+        let measuredRows = chatPageSnapshot.timelineRows.compactMap { row -> IMChatScrollAnchorSnapshot? in
+            guard let offsetFromTop = timelineRowOffsetsFromTop[row.id] else {
+                return nil
+            }
+            return IMChatScrollAnchorSnapshot(
+                itemID: row.id,
+                offsetFromTop: offsetFromTop
+            )
+        }
+
+        return measuredRows
+            .filter { $0.offsetFromTop >= 0 }
+            .min { $0.offsetFromTop < $1.offsetFromTop }
+            ?? measuredRows.min {
+                abs($0.offsetFromTop) < abs($1.offsetFromTop)
+            }
     }
 
     func timelineNoticeRow(_ notice: IMChatNoticeRowSnapshot) -> some View {
@@ -313,4 +359,22 @@ extension IMConversationDetailView {
         .accessibilityIdentifier("conversation.pendingMessage.\(rowSnapshot.localMessageID)")
     }
 
+}
+
+private extension View {
+    /// Publishes this row's current top offset without affecting row layout.
+    func trackingTimelineRowOffset(id: String) -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: IMChatTimelineRowOffsetPreferenceKey.self,
+                    value: [
+                        id: Double(
+                            proxy.frame(in: .named(IMChatTimelineScrollCoordinateSpace.name)).minY
+                        )
+                    ]
+                )
+            }
+        }
+    }
 }

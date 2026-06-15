@@ -18,7 +18,8 @@ struct IMAppApp: App {
         _authManager = State(
             initialValue: AuthManager(
                 network: configuration.makeNetworkEnvironment(),
-                imConnectionConfiguration: configuration.makeIMTCPConfiguration()
+                imConnectionConfiguration: configuration.makeIMTCPConfiguration(),
+                timelineCatchUpConfiguration: configuration.timelineCatchUpConfiguration
             )
         )
     }

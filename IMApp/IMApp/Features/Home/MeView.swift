@@ -465,12 +465,49 @@ struct DiagnosticsView: View {
                 statusRow(title: "缓存消息丢弃", value: "\(domainEventMetrics.cacheDroppedCanonicalMessages)")
                 statusRow(title: "缓存通知丢弃", value: "\(domainEventMetrics.cacheDroppedTimelineNotices)")
             }
+
+            Section("IM Timeline 补洞") {
+                statusRow(title: "Hint 入队", value: "\(timelineCatchUpDiagnostics.hintQueuedCount)")
+                statusRow(title: "已加载跳过", value: "\(timelineCatchUpDiagnostics.hintSkippedAlreadyLoadedCount)")
+                statusRow(title: "延迟重试", value: "\(timelineCatchUpDiagnostics.deferredCount)")
+                statusRow(title: "since 请求", value: "\(timelineCatchUpDiagnostics.sinceRequestCount)")
+                statusRow(title: "since 成功", value: "\(timelineCatchUpDiagnostics.sinceSuccessCount)")
+                statusRow(title: "since 失败", value: "\(timelineCatchUpDiagnostics.sinceFailureCount)")
+                statusRow(title: "落库页数", value: "\(timelineCatchUpDiagnostics.appliedPageCount)")
+                statusRow(title: "落库条数", value: "\(timelineCatchUpDiagnostics.appliedItemCount)")
+                statusRow(title: "Hint 到请求", value: millisecondsText(timelineCatchUpDiagnostics.lastHintToRequestMilliseconds))
+                statusRow(title: "请求耗时", value: millisecondsText(timelineCatchUpDiagnostics.lastRequestMilliseconds))
+                statusRow(title: "Hint 到落库", value: millisecondsText(timelineCatchUpDiagnostics.lastHintToApplyMilliseconds))
+                statusRow(title: "最近会话", value: timelineCatchUpDiagnostics.lastConversationID ?? "暂无")
+                statusRow(title: "目标 sequence", value: sequenceText(timelineCatchUpDiagnostics.lastTargetTimelineSequence))
+                statusRow(title: "最近 after", value: sequenceText(timelineCatchUpDiagnostics.lastAfterSequence))
+                statusRow(title: "最近落库", value: sequenceText(timelineCatchUpDiagnostics.lastAppliedLatestTimelineSequence))
+                statusRow(title: "最近失败", value: timelineCatchUpDiagnostics.lastFailureReason ?? "无")
+            }
         }
         .navigationTitle("开发诊断")
     }
 
     private var domainEventMetrics: IMDomainEventDebugMetrics {
         conversationHealthSnapshot.domainEventMetrics
+    }
+
+    private var timelineCatchUpDiagnostics: IMTimelineCatchUpDiagnostics {
+        conversationHealthSnapshot.timelineCatchUpDiagnostics
+    }
+
+    private func millisecondsText(_ milliseconds: Int?) -> String {
+        guard let milliseconds else {
+            return "暂无"
+        }
+        return "\(milliseconds) ms"
+    }
+
+    private func sequenceText(_ sequence: UInt64?) -> String {
+        guard let sequence else {
+            return "暂无"
+        }
+        return "\(sequence)"
     }
 
     private var lastRequestText: String {

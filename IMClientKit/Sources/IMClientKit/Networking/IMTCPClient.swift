@@ -7,6 +7,7 @@ public enum IMTCPPacketType: String, Codable, Sendable {
     case heartbeat
     case heartbeatAck = "heartbeat_ack"
     case sendMessage = "send_message"
+    case conversationActivity = "conversation_activity"
     case domainEvent = "domain_event"
     case streamSignal = "stream_signal"
     case ack
@@ -99,6 +100,16 @@ public struct IMTCPMessagePayload: Codable, Equatable, Sendable {
     }
 }
 
+public struct IMTCPConversationActivityPayload: Codable, Equatable, Sendable {
+    public let conversationID: String
+    public let isActive: Bool
+
+    public init(conversationID: String, isActive: Bool) {
+        self.conversationID = conversationID
+        self.isActive = isActive
+    }
+}
+
 public enum IMTCPConversationVisibilityAction: String, Codable, Equatable, Sendable {
     case messageHidden = "message_hidden"
     case conversationCleared = "conversation_cleared"
@@ -161,12 +172,64 @@ public enum IMTCPChatDomainEventType: String, Codable, Equatable, Sendable {
     case conversationRemovedForSelf = "conversation_removed_for_self"
     case conversationSettingsChanged = "conversation_settings_changed"
     case conversationVisibilityChanged = "conversation_visibility_changed"
+    case conversationActivityHint = "conversation_activity_hint"
+    case timelineGapHint = "timeline_gap_hint"
     case memberAdded = "member_added"
     case memberRemoved = "member_removed"
     case memberRoleUpdated = "member_role_updated"
     case contactRequestCreated = "contact_request_created"
     case contactRequestAccepted = "contact_request_accepted"
     case contactRequestUpdated = "contact_request_updated"
+}
+
+public struct IMConversationActivityHintResponseBody: Codable, Equatable, Sendable {
+    public let messageID: UUID
+    public let senderUserID: UUID
+    public let serverSequence: UInt64
+    public let timelineSequence: UInt64
+    public let previewText: String
+    public let messageCreatedAt: Date?
+    public let updatedAt: Date
+
+    public init(
+        messageID: UUID,
+        senderUserID: UUID,
+        serverSequence: UInt64,
+        timelineSequence: UInt64,
+        previewText: String,
+        messageCreatedAt: Date?,
+        updatedAt: Date
+    ) {
+        self.messageID = messageID
+        self.senderUserID = senderUserID
+        self.serverSequence = serverSequence
+        self.timelineSequence = timelineSequence
+        self.previewText = previewText
+        self.messageCreatedAt = messageCreatedAt
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct IMTimelineGapHintResponseBody: Codable, Equatable, Sendable {
+    public let messageID: UUID
+    public let senderUserID: UUID
+    public let serverSequence: UInt64
+    public let timelineSequence: UInt64
+    public let updatedAt: Date
+
+    public init(
+        messageID: UUID,
+        senderUserID: UUID,
+        serverSequence: UInt64,
+        timelineSequence: UInt64,
+        updatedAt: Date
+    ) {
+        self.messageID = messageID
+        self.senderUserID = senderUserID
+        self.serverSequence = serverSequence
+        self.timelineSequence = timelineSequence
+        self.updatedAt = updatedAt
+    }
 }
 
 public enum IMTCPChatDomainEventBody: Equatable, Sendable {
@@ -177,6 +240,8 @@ public enum IMTCPChatDomainEventBody: Equatable, Sendable {
     case messageFavoriteChanged(messageID: UUID, isFavorited: Bool)
     case messageStream(IMTCPMessageStreamPayload, message: IMConversationMessageResponseBody?)
     case conversationChanged
+    case conversationActivityHint(IMConversationActivityHintResponseBody)
+    case timelineGapHint(IMTimelineGapHintResponseBody)
     case conversationRemovedForSelf
     case conversationVisibilityChanged(visibilityAction: IMTCPConversationVisibilityAction, messageIDs: [UUID])
     case memberChanged(memberUserIDs: [UUID])
@@ -342,6 +407,21 @@ public struct IMTCPConnection: Sendable {
 
     public func sendMessage(_ payload: IMTCPMessagePayload, requestID: UUID = UUID()) async throws {
         try await sendPacket(type: .sendMessage, requestID: requestID, payload: payload)
+    }
+
+    public func sendConversationActivity(
+        conversationID: String,
+        isActive: Bool,
+        requestID: UUID = UUID()
+    ) async throws {
+        try await sendPacket(
+            type: .conversationActivity,
+            requestID: requestID,
+            payload: IMTCPConversationActivityPayload(
+                conversationID: conversationID,
+                isActive: isActive
+            )
+        )
     }
 
     public func sendAcknowledgement(_ payload: IMTCPAckPayload, requestID: UUID? = UUID()) async throws {
@@ -593,7 +673,7 @@ private actor IMTCPEventRouter {
             finished = true
             continuation.finish()
 
-        case .auth, .authOK, .authError, .heartbeat, .sendMessage:
+        case .auth, .authOK, .authError, .heartbeat, .sendMessage, .conversationActivity:
             finish(with: IMTCPClientError.unexpectedPacket(packet.type))
         }
     }

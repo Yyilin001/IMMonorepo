@@ -7,6 +7,98 @@ struct IMChatPageSnapshotTests {
     private let currentUserID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
     private let peerUserID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
 
+    @Test func composerSnapshotProjectsSendAndEditPresentationState() {
+        let sendSnapshot = IMConversationComposerSnapshot(
+            text: "  hello  ",
+            canSendMessages: true,
+            disabledReason: nil,
+            replyTarget: nil,
+            editingTarget: nil
+        )
+
+        #expect(sendSnapshot.actionKind == .send)
+        #expect(sendSnapshot.placeholder == "输入消息")
+        #expect(sendSnapshot.trimmedText == "hello")
+        #expect(sendSnapshot.isSendEnabled)
+        #expect(sendSnapshot.shouldShowTopPadding)
+        #expect(sendSnapshot.shouldShowTextFieldTopPadding)
+        #expect(sendSnapshot.actionSystemImage == "paperplane.fill")
+        #expect(sendSnapshot.actionAccessibilityLabel == "发送消息")
+
+        let editingTarget = IMChatEditingTargetSnapshot(
+            localMessageID: "local-edit",
+            serverMessageID: "server-edit",
+            previewText: "before",
+            initialComposerText: "before"
+        )
+        let editSnapshot = IMConversationComposerSnapshot(
+            text: "updated",
+            canSendMessages: true,
+            disabledReason: "全员禁言中",
+            replyTarget: nil,
+            editingTarget: editingTarget
+        )
+
+        #expect(editSnapshot.actionKind == IMConversationComposerSnapshot.ActionKind.saveEdit)
+        #expect(editSnapshot.placeholder == "全员禁言中")
+        #expect(editSnapshot.isSendEnabled)
+        #expect(!editSnapshot.shouldShowTopPadding)
+        #expect(!editSnapshot.shouldShowTextFieldTopPadding)
+        #expect(editSnapshot.actionSystemImage == "square.and.arrow.down.fill")
+        #expect(editSnapshot.actionAccessibilityLabel == "保存编辑")
+    }
+
+    @Test func composerSnapshotDisablesWhitespaceOrBlockedInput() {
+        let blankSnapshot = IMConversationComposerSnapshot(
+            text: "   ",
+            canSendMessages: true,
+            disabledReason: nil,
+            replyTarget: nil,
+            editingTarget: nil
+        )
+        #expect(!blankSnapshot.isSendEnabled)
+
+        let disabledSnapshot = IMConversationComposerSnapshot(
+            text: "hello",
+            canSendMessages: false,
+            disabledReason: "已屏蔽对方",
+            replyTarget: nil,
+            editingTarget: nil
+        )
+        #expect(disabledSnapshot.placeholder == "已屏蔽对方")
+        #expect(!disabledSnapshot.isSendEnabled)
+    }
+
+    @Test func historyScrollAnchorRestorerPreservesMeasuredOffset() {
+        let anchor = IMChatScrollAnchorSnapshot(
+            itemID: "message:anchor",
+            offsetFromTop: 32
+        )
+
+        let restoration = IMChatHistoryScrollAnchorRestorer().restoration(
+            anchor: anchor,
+            measuredOffsetFromTop: 180,
+            currentContentOffsetY: 420
+        )
+
+        #expect(restoration.targetContentOffsetY == 568)
+    }
+
+    @Test func historyScrollAnchorRestorerClampsNegativeTargetOffset() {
+        let anchor = IMChatScrollAnchorSnapshot(
+            itemID: "message:anchor",
+            offsetFromTop: 160
+        )
+
+        let restoration = IMChatHistoryScrollAnchorRestorer().restoration(
+            anchor: anchor,
+            measuredOffsetFromTop: 20,
+            currentContentOffsetY: 80
+        )
+
+        #expect(restoration.targetContentOffsetY == 0)
+    }
+
     @Test func builderProjectsTimelineAndLatestOutgoingAnchor() throws {
         let conversationID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         let sent = try makeMessage(
@@ -41,6 +133,7 @@ struct IMChatPageSnapshotTests {
             conversations: [conversation],
             queueSummary: queueSummary,
             receiptSummary: nil,
+            statusMessage: "聊天同步提示",
             isLoadingMessages: false,
             isLoadingMembers: false,
             currentUserID: currentUserID,
@@ -48,15 +141,23 @@ struct IMChatPageSnapshotTests {
         )
 
         #expect(snapshot.generation == 42)
-        #expect(snapshot.conversation?.id == conversationID)
+        #expect(snapshot.conversationID == conversationID)
+        #expect(snapshot.metadata.conversationID == conversationID)
+        #expect(snapshot.metadata.title == "Conversation")
+        #expect(snapshot.metadata.notice.isEmpty)
+        #expect(snapshot.metadata.avatarPreset == .ocean)
+        #expect(!snapshot.metadata.muteAll)
         #expect(snapshot.timelineRows.map(\.id) == ["message:m1", "pendingMessage:p1"])
         #expect(snapshot.metrics.pendingMessageCount == 1)
         #expect(snapshot.metrics.messageCount == 1)
         #expect(snapshot.metrics.timelineItemCount == 2)
         #expect(!snapshot.hasMoreHistory)
         #expect(snapshot.latestItemID == "pendingMessage:p1")
+        #expect(snapshot.historyLoadAnchor?.itemID == "message:m1")
+        #expect(snapshot.historyLoadAnchor?.offsetFromTop == 0)
         #expect(snapshot.latestTimelineItemIsCurrentUserOutgoing)
         #expect(snapshot.queueSummary == queueSummary)
+        #expect(snapshot.statusMessage == "聊天同步提示")
         #expect(!snapshot.shouldShowLoadingState)
     }
 
@@ -73,15 +174,58 @@ struct IMChatPageSnapshotTests {
             blockedUserIDs: []
         )
 
-        #expect(snapshot.conversation == nil)
+        #expect(snapshot.conversationID == "missing")
+        #expect(snapshot.metadata.title == "会话")
+        #expect(snapshot.metadata.notice.isEmpty)
+        #expect(snapshot.metadata.avatarPreset == .ocean)
+        #expect(!snapshot.metadata.muteAll)
         #expect(snapshot.timelineRows.isEmpty)
         #expect(snapshot.metrics.pendingMessageCount == 0)
         #expect(snapshot.metrics.messageCount == 0)
         #expect(snapshot.metrics.timelineItemCount == 0)
         #expect(!snapshot.hasMoreHistory)
         #expect(snapshot.latestItemID == nil)
+        #expect(snapshot.historyLoadAnchor == nil)
+        #expect(snapshot.statusMessage == nil)
         #expect(snapshot.shouldShowLoadingState)
         #expect(!snapshot.latestTimelineItemIsCurrentUserOutgoing)
+    }
+
+    @Test func chatPageSnapshotDoesNotStoreRawConversationTimelineModels() throws {
+        let conversationID = "abababab-abab-abab-abab-abababababab"
+        let message = try makeMessage(
+            id: "pure-row",
+            conversationID: conversationID,
+            senderUserID: currentUserID,
+            serverSequence: 1,
+            timelineSequence: 1,
+            direction: .outgoing,
+            deliveryState: .sent
+        )
+        let conversation = makeConversation(
+            id: conversationID,
+            kind: .direct,
+            messages: [message],
+            pendingMessages: []
+        )
+
+        let snapshot = IMChatPageSnapshotBuilder().build(
+            conversationID: conversationID,
+            generation: 1,
+            conversations: [conversation],
+            queueSummary: IMConversationQueueSummary(queuedCount: 0, sendingCount: 0, retryableIssueCount: 0),
+            receiptSummary: nil,
+            isLoadingMessages: false,
+            isLoadingMembers: false,
+            currentUserID: currentUserID,
+            blockedUserIDs: []
+        )
+
+        let storedFieldLabels = Mirror(reflecting: snapshot).children.compactMap(\.label)
+        #expect(!storedFieldLabels.contains("conversation"))
+        #expect(!storedFieldLabels.contains("messages"))
+        #expect(!storedFieldLabels.contains("timelineItems"))
+        #expect(snapshot.timelineRows.map(\.id) == ["message:pure-row"])
     }
 
     @Test func deliveryOverrideUsesReceiptProjection() throws {
@@ -120,7 +264,12 @@ struct IMChatPageSnapshotTests {
             blockedUserIDs: []
         )
 
-        #expect(snapshot.deliveryOverrideText(for: message) == "部分已读")
+        guard case .message(let row) = try #require(snapshot.timelineRows.first) else {
+            Issue.record("Expected projected message row")
+            return
+        }
+        #expect(row.deliveryOverrideText == "部分已读")
+        #expect(row.deliveryDisplay?.text == "部分已读")
     }
 
     @Test func messageRowSnapshotProjectsStableMessagePresentationFields() throws {
@@ -151,10 +300,16 @@ struct IMChatPageSnapshotTests {
             isLoadingMessages: false,
             isLoadingMembers: false,
             currentUserID: currentUserID,
-            blockedUserIDs: []
+            blockedUserIDs: [],
+            isRetryableMessageFailure: { message in
+                message.id == "local-row"
+            }
         )
 
-        let row = snapshot.messageRowSnapshot(for: message, isRetryableFailure: { _ in true })
+        guard case .message(let row) = try #require(snapshot.timelineRows.first) else {
+            Issue.record("Expected projected message row")
+            return
+        }
 
         #expect(row.localMessageID == "local-row")
         #expect(row.serverMessageID == serverMessageID)
@@ -310,7 +465,6 @@ struct IMChatPageSnapshotTests {
             blockedUserIDs: [peerUserID]
         )
 
-        #expect(snapshot.directPeer?.id == peerUserID)
         #expect(snapshot.directPeerSnapshot?.id == peerUserID)
         #expect(snapshot.directPeerSnapshot?.email == "peer@example.com")
         #expect(snapshot.directPeerSnapshot?.avatarPreset == .forest)
@@ -354,6 +508,7 @@ struct IMChatPageSnapshotTests {
             id: conversationID,
             kind: .group,
             notice: "今晚 8 点同步",
+            avatarPreset: .forest,
             muteAll: true,
             members: [makeMember(id: currentUserID, role: .admin)],
             messages: [],
@@ -387,9 +542,13 @@ struct IMChatPageSnapshotTests {
         #expect(context.notice == "今晚 8 点同步")
         #expect(context.showsLoadingIndicator)
         #expect(context.shouldShow)
+        #expect(snapshot.metadata.title == "Conversation")
+        #expect(snapshot.metadata.notice == "今晚 8 点同步")
+        #expect(snapshot.metadata.avatarPreset == .forest)
+        #expect(snapshot.metadata.muteAll)
     }
 
-    @Test func pendingMessageRowSnapshotProjectsActionCapabilities() {
+    @Test func pendingMessageRowSnapshotProjectsActionCapabilities() throws {
         let conversationID = "88888888-8888-8888-8888-888888888888"
         let queued = makePendingMessage(
             id: "queued",
@@ -416,11 +575,22 @@ struct IMChatPageSnapshotTests {
             isLoadingMessages: false,
             isLoadingMembers: false,
             currentUserID: currentUserID,
-            blockedUserIDs: []
+            blockedUserIDs: [],
+            isRetryablePendingMessageFailure: { message in
+                message.id == "failed"
+            }
         )
 
-        let queuedRow = snapshot.pendingMessageRowSnapshot(for: queued, isRetryableFailure: { _ in false })
-        let failedRow = snapshot.pendingMessageRowSnapshot(for: failed, isRetryableFailure: { _ in true })
+        let pendingRows = Dictionary(
+            uniqueKeysWithValues: snapshot.timelineRows.compactMap { row -> (String, IMChatPendingMessageRowSnapshot)? in
+                guard case .pendingMessage(let rowSnapshot) = row else {
+                    return nil
+                }
+                return (rowSnapshot.localMessageID, rowSnapshot)
+            }
+        )
+        let queuedRow = try #require(pendingRows["queued"])
+        let failedRow = try #require(pendingRows["failed"])
 
         #expect(queuedRow.localMessageID == "queued")
         #expect(queuedRow.text == "queued")
@@ -540,12 +710,16 @@ struct IMChatPageSnapshotTests {
         )
 
         #expect(snapshot.generation > 0)
-        #expect(snapshot.conversation?.id == conversationID)
+        #expect(snapshot.conversationID == conversationID)
         #expect(snapshot.timelineRows.count == 1)
         #expect(snapshot.metrics.timelineItemCount == 1)
         #expect(snapshot.latestTimelineItemIsCurrentUserOutgoing)
         #expect(snapshot.queueSummary.queuedCount == 1)
-        #expect(snapshot.receiptSummary == receipt)
+        #expect(snapshot.receiptSummary == IMChatReceiptSummarySnapshot(
+            deliveredThroughSequence: 8,
+            readThroughSequence: 8,
+            readableMemberCount: 2
+        ))
         #expect(snapshot.contextSnapshot.showsLoadingIndicator)
     }
 
@@ -555,6 +729,7 @@ struct IMChatPageSnapshotTests {
         kind: IMConversationKind,
         directPeer: IMDirectPeer? = nil,
         notice: String? = nil,
+        avatarPreset: IMConversationAvatarPreset? = nil,
         muteAll: Bool = false,
         members: [IMConversationMember] = [],
         messages: [IMConversationMessage],
@@ -570,6 +745,7 @@ struct IMChatPageSnapshotTests {
             kind: kind,
             directPeer: directPeer,
             notice: notice,
+            avatarPreset: avatarPreset,
             muteAll: muteAll,
             memberCount: 2,
             memberUserIDs: [currentUserID, peerUserID],

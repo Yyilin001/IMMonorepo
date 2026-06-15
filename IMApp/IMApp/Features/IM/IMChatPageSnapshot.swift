@@ -1,77 +1,36 @@
 import Foundation
 import IMClientKit
 
-struct IMChatPageSnapshot: Equatable {
+/// Immutable projection for one conversation detail page.
+///
+/// The detail view renders this value instead of retaining raw conversation,
+/// message, member, receipt, or queue models across SwiftUI updates.
+struct IMChatPageSnapshot: Equatable, Sendable {
     let conversationID: String
     let generation: UInt64
-    let conversation: IMConversation?
-    fileprivate let messages: [IMConversationMessage]
-    fileprivate let timelineItems: [IMConversationTimelineItem]
     let timelineRows: [IMChatTimelineRowSnapshot]
     let metrics: IMChatPageMetricsSnapshot
     let hasMoreHistory: Bool
+    let metadata: IMChatConversationMetadataSnapshot
+    let contextSnapshot: IMChatContextSnapshot
     let queueSummary: IMConversationQueueSummary
-    let receiptSummary: IMConversationReceiptSummaryResponseBody?
+    let receiptSummary: IMChatReceiptSummarySnapshot?
+    let statusMessage: String?
     let isLoadingMessages: Bool
     let isLoadingMembers: Bool
     let currentUserID: UUID?
-    let blockedUserIDs: Set<UUID>
-
-    var currentMember: IMConversationMember? {
-        guard let currentUserID else {
-            return nil
-        }
-        return conversation?.members.first { $0.id == currentUserID }
-    }
-
-    var currentGroupRole: IMConversationMemberRole? {
-        currentMember?.role
-    }
-
-    var directPeer: IMDirectPeer? {
-        guard conversation?.kind == .direct else {
-            return nil
-        }
-        return conversation?.directPeer
-    }
-
-    var currentMemberNickname: String? {
-        currentMember?.memberNickname
-    }
-
-    var directPeerSnapshot: IMChatDirectPeerSnapshot? {
-        guard let directPeer else {
-            return nil
-        }
-        return IMChatDirectPeerSnapshot(peer: directPeer)
-    }
-
-    var isDirectPeerBlocked: Bool {
-        guard let directPeer else {
-            return false
-        }
-        return blockedUserIDs.contains(directPeer.id)
-    }
-
-    var canSendMessages: Bool {
-        guard let conversation else {
-            return true
-        }
-        if conversation.kind == .group {
-            return !(conversation.muteAll && currentGroupRole == .member)
-        }
-        if isDirectPeerBlocked {
-            return false
-        }
-        return conversation.canSendMessages
-    }
+    let currentGroupRole: IMConversationMemberRole?
+    let currentMemberNickname: String?
+    let directPeerSnapshot: IMChatDirectPeerSnapshot?
+    let isDirectPeerBlocked: Bool
+    let canSendMessages: Bool
 
     var composerDisabledReason: String? {
         if isDirectPeerBlocked {
             return "已屏蔽对方"
         }
-        guard conversation?.kind == .group,
-              conversation?.muteAll == true,
+        guard contextSnapshot.kind == .group,
+              contextSnapshot.isMuteAll,
               currentGroupRole == .member
         else {
             return nil
@@ -91,12 +50,15 @@ struct IMChatPageSnapshot: Equatable {
         currentGroupRole?.canManageRoles == true || currentGroupRole?.canAddMembers == true
     }
 
-    var directMessagingStatusMessage: String? {
-        conversation?.directMessagingStatusMessage
-    }
-
     var latestItemID: String? {
         timelineRows.last?.id
+    }
+
+    /// Fallback anchor used before row geometry has produced a measured visible row.
+    var historyLoadAnchor: IMChatScrollAnchorSnapshot? {
+        timelineRows.first.map { row in
+            IMChatScrollAnchorSnapshot(itemID: row.id, offsetFromTop: 0)
+        }
     }
 
     var mediaDownloadSnapshots: [IMChatMediaDownloadSnapshot] {
@@ -110,6 +72,27 @@ struct IMChatPageSnapshot: Equatable {
 
     var shouldShowLoadingState: Bool {
         timelineRows.isEmpty && isLoadingMessages
+    }
+
+    static func empty(
+        conversationID: String,
+        generation: UInt64 = 0
+    ) -> IMChatPageSnapshot {
+        IMChatPageSnapshotBuilder().build(
+            conversationID: conversationID,
+            generation: generation,
+            conversations: [],
+            queueSummary: IMConversationQueueSummary(
+                queuedCount: 0,
+                sendingCount: 0,
+                retryableIssueCount: 0
+            ),
+            receiptSummary: nil,
+            isLoadingMessages: false,
+            isLoadingMembers: false,
+            currentUserID: nil,
+            blockedUserIDs: []
+        )
     }
 
     var latestTimelineItemIsCurrentUserOutgoing: Bool {
@@ -129,18 +112,10 @@ struct IMChatPageSnapshot: Equatable {
         }
     }
 
-    func deliveryOverrideText(for message: IMConversationMessage) -> String? {
-        Self.deliveryOverrideText(
-            for: message,
-            conversationKind: conversation?.kind,
-            receiptSummary: receiptSummary
-        )
-    }
-
     static func deliveryOverrideText(
         for message: IMConversationMessage,
         conversationKind: IMConversationKind?,
-        receiptSummary: IMConversationReceiptSummaryResponseBody?
+        receiptSummary: IMChatReceiptSummarySnapshot?
     ) -> String? {
         guard message.direction == .outgoing,
               message.deliveryState == .sent
@@ -163,70 +138,6 @@ struct IMChatPageSnapshot: Equatable {
             return "已送达"
         }
         return "已发送"
-    }
-
-    func messageRowSnapshot(
-        for message: IMConversationMessage,
-        isRetryableFailure: (IMConversationMessage) -> Bool
-    ) -> IMChatMessageRowSnapshot {
-        IMChatMessageRowSnapshot(
-            content: IMChatMessageContentSnapshot(message: message),
-            replyReference: message.resolvedReplyReference(in: messages),
-            replyTarget: IMChatReplyTargetSnapshot(message: message),
-            editingTarget: IMChatEditingTargetSnapshot(message: message),
-            mediaDownload: IMChatMediaDownloadSnapshot(message: message),
-            localMessageID: message.id,
-            serverMessageID: message.serverMessageID,
-            senderUserID: message.senderUserID,
-            selectableID: Self.selectableMessageID(for: message),
-            direction: message.direction,
-            createdAtText: message.createdAt.formatted(date: .omitted, time: .shortened),
-            reactions: message.derivedState.reactions,
-            isEdited: !message.derivedState.edits.isEmpty,
-            copyableText: IMChatMessageRowSnapshot.copyableText(for: message),
-            deliveryDisplay: IMChatMessageRowSnapshot.deliveryDisplay(
-                for: message,
-                deliveryOverrideText: deliveryOverrideText(for: message)
-            ),
-            canRetry: isRetryableFailure(message),
-            canCancel: message.canCancelQueuedSend,
-            canReply: message.canReply,
-            canRecall: message.canRecall,
-            canEdit: message.canEdit,
-            canReact: message.canReact,
-            deliveryOverrideText: deliveryOverrideText(for: message)
-        )
-    }
-
-    func pendingMessageRowSnapshot(
-        for message: IMPendingConversationMessage,
-        isRetryableFailure: (IMPendingConversationMessage) -> Bool
-    ) -> IMChatPendingMessageRowSnapshot {
-        IMChatPendingMessageRowSnapshot(
-            localMessageID: message.id,
-            senderUserID: message.senderUserID,
-            text: message.text,
-            createdAtText: message.createdAt.formatted(date: .omitted, time: .shortened),
-            deliveryDisplay: IMChatMessageDeliverySnapshot.deliveryDisplay(for: message.deliveryState),
-            canCancel: message.canCancelQueuedSend,
-            canRetry: isRetryableFailure(message)
-        )
-    }
-
-    var contextSnapshot: IMChatContextSnapshot {
-        let kind = conversation?.kind ?? .group
-        let memberCount = conversation?.memberCount ?? conversation?.memberUserIDs.count ?? 0
-        return IMChatContextSnapshot(
-            kind: kind,
-            memberCount: memberCount,
-            currentGroupRole: currentGroupRole,
-            isPinned: conversation?.isPinned == true,
-            isMuted: conversation?.isMuted == true,
-            isMuteAll: conversation?.muteAll == true,
-            notice: conversation?.notice,
-            directMessagingStatusMessage: directMessagingStatusMessage,
-            showsLoadingIndicator: isLoadingMembers || isLoadingMessages
-        )
     }
 
     static func selectableMessageID(for message: IMConversationMessage) -> String? {
@@ -260,6 +171,64 @@ struct IMChatPageSnapshot: Equatable {
     }
 }
 
+/// Scroll position of a timeline row relative to the chat viewport top edge.
+struct IMChatScrollAnchorSnapshot: Equatable, Sendable {
+    let itemID: String
+    let offsetFromTop: Double
+}
+
+/// Target content offset calculated after older history changes timeline height.
+struct IMChatHistoryScrollAnchorRestoration: Equatable, Sendable {
+    let targetContentOffsetY: Double
+}
+
+/// Converts a saved row offset and a new measured row offset into a scroll target.
+///
+/// When older messages are inserted above the anchor row, the measured offset grows
+/// by the inserted height. Adding that delta to the current content offset keeps the
+/// same row visually pinned in the viewport.
+struct IMChatHistoryScrollAnchorRestorer: Equatable, Sendable {
+    func restoration(
+        anchor: IMChatScrollAnchorSnapshot,
+        measuredOffsetFromTop: Double,
+        currentContentOffsetY: Double
+    ) -> IMChatHistoryScrollAnchorRestoration {
+        let adjustment = measuredOffsetFromTop - anchor.offsetFromTop
+        return IMChatHistoryScrollAnchorRestoration(
+            targetContentOffsetY: max(0, currentContentOffsetY + adjustment)
+        )
+    }
+}
+
+/// Read and delivery projection used by outgoing message rows.
+struct IMChatReceiptSummarySnapshot: Equatable, Sendable {
+    let deliveredThroughSequence: UInt64
+    let readThroughSequence: UInt64
+    let readableMemberCount: Int
+
+    init(
+        deliveredThroughSequence: UInt64,
+        readThroughSequence: UInt64,
+        readableMemberCount: Int
+    ) {
+        self.deliveredThroughSequence = deliveredThroughSequence
+        self.readThroughSequence = readThroughSequence
+        self.readableMemberCount = readableMemberCount
+    }
+
+    init(_ receiptSummary: IMConversationReceiptSummaryResponseBody) {
+        self.init(
+            deliveredThroughSequence: receiptSummary.deliveredThroughSequence,
+            readThroughSequence: receiptSummary.readThroughSequence,
+            readableMemberCount: receiptSummary.readableMemberCount
+        )
+    }
+}
+
+/// Projects raw conversation state into a chat-page snapshot.
+///
+/// This is the only layer in the detail page path that inspects messages, members,
+/// pending queue state, and receipt summaries directly.
 struct IMChatPageSnapshotBuilder {
     func build(
         conversationID: String,
@@ -267,6 +236,7 @@ struct IMChatPageSnapshotBuilder {
         conversations: [IMConversation],
         queueSummary: IMConversationQueueSummary,
         receiptSummary: IMConversationReceiptSummaryResponseBody?,
+        statusMessage: String? = nil,
         isLoadingMessages: Bool,
         isLoadingMembers: Bool,
         currentUserID: UUID?,
@@ -277,17 +247,32 @@ struct IMChatPageSnapshotBuilder {
         let conversation = conversations.first { $0.id == conversationID }
         let messages = conversation?.messages ?? []
         let timelineItems = conversation?.timelineItems ?? []
+        let currentMember = currentUserID.flatMap { currentUserID in
+            conversation?.members.first { $0.id == currentUserID }
+        }
+        let currentGroupRole = currentMember?.role
+        let directPeer = conversation?.kind == .direct ? conversation?.directPeer : nil
+        let receiptSummarySnapshot = receiptSummary.map(IMChatReceiptSummarySnapshot.init)
+        let isDirectPeerBlocked = directPeer.map { blockedUserIDs.contains($0.id) } ?? false
+        let canSendMessages = Self.canSendMessages(
+            conversation: conversation,
+            currentGroupRole: currentGroupRole,
+            isDirectPeerBlocked: isDirectPeerBlocked
+        )
+        let contextSnapshot = Self.contextSnapshot(
+            conversation: conversation,
+            currentGroupRole: currentGroupRole,
+            isLoadingMessages: isLoadingMessages,
+            isLoadingMembers: isLoadingMembers
+        )
         return IMChatPageSnapshot(
             conversationID: conversationID,
             generation: generation,
-            conversation: conversation,
-            messages: messages,
-            timelineItems: timelineItems,
             timelineRows: timelineRows(
                 from: timelineItems,
                 messages: messages,
                 conversationKind: conversation?.kind,
-                receiptSummary: receiptSummary,
+                receiptSummary: receiptSummarySnapshot,
                 isRetryableMessageFailure: isRetryableMessageFailure,
                 isRetryablePendingMessageFailure: isRetryablePendingMessageFailure
             ),
@@ -297,12 +282,61 @@ struct IMChatPageSnapshotBuilder {
                 timelineItemCount: timelineItems.count
             ),
             hasMoreHistory: conversation?.hasMoreHistory == true,
+            metadata: IMChatConversationMetadataSnapshot(
+                conversationID: conversationID,
+                title: conversation?.title ?? "会话",
+                notice: conversation?.notice ?? "",
+                avatarPreset: conversation?.avatarPreset ?? .ocean,
+                muteAll: conversation?.muteAll == true
+            ),
+            contextSnapshot: contextSnapshot,
             queueSummary: queueSummary,
-            receiptSummary: receiptSummary,
+            receiptSummary: receiptSummarySnapshot,
+            statusMessage: statusMessage,
             isLoadingMessages: isLoadingMessages,
             isLoadingMembers: isLoadingMembers,
             currentUserID: currentUserID,
-            blockedUserIDs: blockedUserIDs
+            currentGroupRole: currentGroupRole,
+            currentMemberNickname: currentMember?.memberNickname,
+            directPeerSnapshot: directPeer.map(IMChatDirectPeerSnapshot.init),
+            isDirectPeerBlocked: isDirectPeerBlocked,
+            canSendMessages: canSendMessages
+        )
+    }
+
+    private static func canSendMessages(
+        conversation: IMConversation?,
+        currentGroupRole: IMConversationMemberRole?,
+        isDirectPeerBlocked: Bool
+    ) -> Bool {
+        guard let conversation else {
+            return true
+        }
+        if conversation.kind == .group {
+            return !(conversation.muteAll && currentGroupRole == .member)
+        }
+        if isDirectPeerBlocked {
+            return false
+        }
+        return conversation.canSendMessages
+    }
+
+    private static func contextSnapshot(
+        conversation: IMConversation?,
+        currentGroupRole: IMConversationMemberRole?,
+        isLoadingMessages: Bool,
+        isLoadingMembers: Bool
+    ) -> IMChatContextSnapshot {
+        IMChatContextSnapshot(
+            kind: conversation?.kind ?? .group,
+            memberCount: conversation?.memberCount ?? conversation?.memberUserIDs.count ?? 0,
+            currentGroupRole: currentGroupRole,
+            isPinned: conversation?.isPinned == true,
+            isMuted: conversation?.isMuted == true,
+            isMuteAll: conversation?.muteAll == true,
+            notice: conversation?.notice,
+            directMessagingStatusMessage: conversation?.directMessagingStatusMessage,
+            showsLoadingIndicator: isLoadingMembers || isLoadingMessages
         )
     }
 
@@ -310,7 +344,7 @@ struct IMChatPageSnapshotBuilder {
         from timelineItems: [IMConversationTimelineItem],
         messages: [IMConversationMessage],
         conversationKind: IMConversationKind?,
-        receiptSummary: IMConversationReceiptSummaryResponseBody?,
+        receiptSummary: IMChatReceiptSummarySnapshot?,
         isRetryableMessageFailure: (IMConversationMessage) -> Bool,
         isRetryablePendingMessageFailure: (IMPendingConversationMessage) -> Bool
     ) -> [IMChatTimelineRowSnapshot] {
@@ -392,6 +426,7 @@ extension IMConversationStore {
             conversations: conversations,
             queueSummary: queueSummary(for: conversationID),
             receiptSummary: receiptSummary(for: conversationID),
+            statusMessage: statusMessage,
             isLoadingMessages: isLoadingMessages,
             isLoadingMembers: isLoadingMembers,
             currentUserID: currentUserID,
@@ -406,7 +441,8 @@ extension IMConversationStore {
     }
 }
 
-enum IMChatTimelineRowSnapshot: Identifiable, Equatable {
+/// Heterogeneous timeline row rendered by the chat detail list.
+enum IMChatTimelineRowSnapshot: Identifiable, Equatable, Sendable {
     case message(IMChatMessageRowSnapshot)
     case notice(IMChatNoticeRowSnapshot)
     case pendingMessage(IMChatPendingMessageRowSnapshot)
@@ -423,13 +459,24 @@ enum IMChatTimelineRowSnapshot: Identifiable, Equatable {
     }
 }
 
-struct IMChatPageMetricsSnapshot: Equatable {
+/// Lightweight counters used for logging and snapshot regression tests.
+struct IMChatPageMetricsSnapshot: Equatable, Sendable {
     let pendingMessageCount: Int
     let messageCount: Int
     let timelineItemCount: Int
 }
 
-struct IMChatDirectPeerSnapshot: Equatable {
+/// Header-level conversation metadata for the detail page.
+struct IMChatConversationMetadataSnapshot: Equatable, Sendable {
+    let conversationID: String
+    let title: String
+    let notice: String
+    let avatarPreset: IMConversationAvatarPreset
+    let muteAll: Bool
+}
+
+/// Direct-peer fields needed by the detail page after projection.
+struct IMChatDirectPeerSnapshot: Equatable, Sendable {
     let id: UUID
     let email: String
     let avatarPreset: UserAvatarPreset?
@@ -441,8 +488,9 @@ struct IMChatDirectPeerSnapshot: Equatable {
     }
 }
 
-struct IMChatMessageContentSnapshot: Equatable {
-    enum Body: Equatable {
+/// Renderable message content extracted from the aggregate message model.
+struct IMChatMessageContentSnapshot: Equatable, Sendable {
+    enum Body: Equatable, Sendable {
         case richText(body: IMRichTextContent, fallbackText: String)
         case reply(referenceMessageID: String, body: IMRichTextContent, fallbackText: String)
         case image(asset: IMMediaAsset, subtitle: String)
@@ -518,8 +566,8 @@ struct IMChatMessageContentSnapshot: Equatable {
     }
 }
 
-struct IMChatMessageDeliverySnapshot: Equatable {
-    enum Tone: Equatable {
+struct IMChatMessageDeliverySnapshot: Equatable, Sendable {
+    enum Tone: Equatable, Sendable {
         case secondary
         case blue
         case orange
@@ -562,7 +610,7 @@ struct IMChatMessageDeliverySnapshot: Equatable {
     }
 }
 
-struct IMChatReplyTargetSnapshot: Equatable {
+struct IMChatReplyTargetSnapshot: Equatable, Sendable {
     let localMessageID: String
     let reference: IMReplyReference
 
@@ -588,25 +636,99 @@ struct IMChatReplyTargetSnapshot: Equatable {
     }
 }
 
-struct IMChatEditingTargetSnapshot: Equatable {
+struct IMChatEditingTargetSnapshot: Equatable, Sendable {
     let localMessageID: String
     let serverMessageID: String
     let previewText: String
     let initialComposerText: String
+
+    init(
+        localMessageID: String,
+        serverMessageID: String,
+        previewText: String,
+        initialComposerText: String
+    ) {
+        self.localMessageID = localMessageID
+        self.serverMessageID = serverMessageID
+        self.previewText = previewText
+        self.initialComposerText = initialComposerText
+    }
 
     init?(message: IMConversationMessage) {
         guard message.canEdit else {
             return nil
         }
         let text = MessagePresentation(aggregate: message.aggregate).textValue ?? ""
-        self.localMessageID = message.id
-        self.serverMessageID = message.serverMessageID
-        self.previewText = text.isEmpty ? "消息内容不可编辑" : text
-        self.initialComposerText = text
+        self.init(
+            localMessageID: message.id,
+            serverMessageID: message.serverMessageID,
+            previewText: text.isEmpty ? "消息内容不可编辑" : text,
+            initialComposerText: text
+        )
     }
 }
 
-struct IMChatMediaDownloadSnapshot: Equatable {
+/// Value-only composer presentation state for send and edit modes.
+///
+/// The composer renders this snapshot while user input remains local `@State`;
+/// domain restrictions such as mute-all or blocked peer are already projected.
+struct IMConversationComposerSnapshot: Equatable, Sendable {
+    enum ActionKind: Equatable, Sendable {
+        case send
+        case saveEdit
+    }
+
+    let text: String
+    let canSendMessages: Bool
+    let disabledReason: String?
+    let replyTarget: IMChatReplyTargetSnapshot?
+    let editingTarget: IMChatEditingTargetSnapshot?
+
+    var actionKind: ActionKind {
+        editingTarget == nil ? .send : .saveEdit
+    }
+
+    var placeholder: String {
+        disabledReason ?? "输入消息"
+    }
+
+    var trimmedText: String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var isSendEnabled: Bool {
+        canSendMessages && !trimmedText.isEmpty
+    }
+
+    var shouldShowTopPadding: Bool {
+        replyTarget == nil && editingTarget == nil
+    }
+
+    var shouldShowTextFieldTopPadding: Bool {
+        shouldShowTopPadding && disabledReason == nil
+    }
+
+    var actionSystemImage: String {
+        switch actionKind {
+        case .send:
+            return "paperplane.fill"
+        case .saveEdit:
+            return "square.and.arrow.down.fill"
+        }
+    }
+
+    var actionAccessibilityLabel: String {
+        switch actionKind {
+        case .send:
+            return "发送消息"
+        case .saveEdit:
+            return "保存编辑"
+        }
+    }
+}
+
+/// Media download state attached to a specific rendered message row.
+struct IMChatMediaDownloadSnapshot: Equatable, Sendable {
     let localMessageID: String
     let asset: IMMediaAsset
     let localDownloadState: IMMessageLocalDownloadState?
@@ -621,7 +743,8 @@ struct IMChatMediaDownloadSnapshot: Equatable {
     }
 }
 
-struct IMChatMessageRowSnapshot: Equatable {
+/// Stable presentation row for a persisted message.
+struct IMChatMessageRowSnapshot: Equatable, Sendable {
     let content: IMChatMessageContentSnapshot
     let replyReference: IMReplyReferenceResolution?
     let replyTarget: IMChatReplyTargetSnapshot?
@@ -674,13 +797,15 @@ struct IMChatMessageRowSnapshot: Equatable {
     }
 }
 
-struct IMChatNoticeRowSnapshot: Equatable {
+/// Timeline notice row with display text resolved before rendering.
+struct IMChatNoticeRowSnapshot: Equatable, Sendable {
     let id: String
     let noticeKind: String
     let displayText: String
 }
 
-struct IMChatPendingMessageRowSnapshot: Equatable {
+/// Timeline row for a locally queued or sending message.
+struct IMChatPendingMessageRowSnapshot: Equatable, Sendable {
     let localMessageID: String
     let senderUserID: UUID
     let text: String
@@ -690,7 +815,8 @@ struct IMChatPendingMessageRowSnapshot: Equatable {
     let canRetry: Bool
 }
 
-struct IMChatContextSnapshot: Equatable {
+/// Conversation context strip and capability state for the detail page.
+struct IMChatContextSnapshot: Equatable, Sendable {
     let kind: IMConversationKind
     let memberCount: Int
     let currentGroupRole: IMConversationMemberRole?

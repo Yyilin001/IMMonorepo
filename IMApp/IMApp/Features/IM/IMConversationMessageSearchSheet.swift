@@ -1,6 +1,35 @@
 import IMClientKit
 import SwiftUI
 
+/// Search-result row rendered by the in-conversation message search sheet.
+struct IMConversationMessageSearchResultSnapshot: Identifiable, Equatable {
+    let id: String
+    let snippet: String
+    let previewText: String
+    let createdAtText: String?
+
+    init(
+        id: String,
+        snippet: String,
+        previewText: String,
+        createdAtText: String?
+    ) {
+        self.id = id
+        self.snippet = snippet
+        self.previewText = previewText
+        self.createdAtText = createdAtText
+    }
+
+    init(hit: IMConversationMessageSearchHitResponseBody) {
+        self.init(
+            id: hit.messageID.uuidString,
+            snippet: hit.snippet,
+            previewText: hit.previewText,
+            createdAtText: hit.createdAt?.formatted(date: .abbreviated, time: .shortened)
+        )
+    }
+}
+
 struct IMConversationMessageSearchSheet: View {
     @Environment(\.dismiss) private var dismiss
 
@@ -9,7 +38,7 @@ struct IMConversationMessageSearchSheet: View {
     let onSelect: (String) -> Void
 
     @State private var query = ""
-    @State private var results: [IMConversationMessageSearchHitResponseBody] = []
+    @State private var results: [IMConversationMessageSearchResultSnapshot] = []
     @State private var nextCursor: String?
     @State private var isSearching = false
     @State private var statusMessage: String?
@@ -34,20 +63,25 @@ struct IMConversationMessageSearchSheet: View {
                 }
             } else {
                 Section("搜索结果") {
-                    ForEach(results, id: \.messageID) { hit in
+                    ForEach(results) { result in
                         Button {
                             dismiss()
-                            onSelect(hit.messageID.uuidString)
+                            onSelect(result.id)
                         } label: {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text(hit.snippet)
+                                Text(result.snippet)
                                     .font(.body)
                                     .foregroundStyle(.primary)
                                     .multilineTextAlignment(.leading)
-                                Text(hit.content.previewText)
+                                Text(result.previewText)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(2)
+                                if let createdAtText = result.createdAtText {
+                                    Text(createdAtText)
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -131,9 +165,9 @@ struct IMConversationMessageSearchSheet: View {
         }
 
         if reset {
-            results = page.items
+            results = page.items.map(IMConversationMessageSearchResultSnapshot.init)
         } else {
-            results.append(contentsOf: page.items)
+            results.append(contentsOf: page.items.map(IMConversationMessageSearchResultSnapshot.init))
         }
         nextCursor = page.nextCursor
         statusMessage = results.isEmpty ? "没有找到匹配消息。" : nil

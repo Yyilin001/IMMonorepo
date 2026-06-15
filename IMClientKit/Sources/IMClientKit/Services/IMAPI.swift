@@ -789,6 +789,7 @@ enum IMRequest {
 
         let conversationID: String
         let afterSequence: UInt64
+        let targetSequence: UInt64?
         let limit: Int?
 
         var baseRequestSpec: HTTPRequestSpec {
@@ -800,6 +801,9 @@ enum IMRequest {
 
         private var queryItems: [URLQueryItem] {
             var items = [URLQueryItem(name: "afterSequence", value: String(afterSequence))]
+            if let targetSequence {
+                items.append(URLQueryItem(name: "targetSequence", value: String(targetSequence)))
+            }
             if let limit {
                 items.append(URLQueryItem(name: "limit", value: String(limit)))
             }
@@ -1259,11 +1263,13 @@ enum IMRequest {
     public static func timelineSince(
         conversationID: String,
         afterSequence: UInt64,
+        targetSequence: UInt64? = nil,
         limit: Int? = nil
     ) -> TimelineSince {
         TimelineSince(
             conversationID: conversationID,
             afterSequence: afterSequence,
+            targetSequence: targetSequence,
             limit: limit
         )
     }

@@ -10,7 +10,7 @@ extension AuthManager {
     }
 
     func handleIMDataRequestError(_ error: Error) async {
-        imConversationStore.setStatusMessage(error.localizedDescription)
+        await imConversationStore.setStatusMessageAsync(error.localizedDescription)
 
         if await shouldPreserveSession(for: error) {
             await markServerUnavailableIfNeeded(for: error)

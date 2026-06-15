@@ -3,6 +3,10 @@ import IMClientKit
 
 extension IMConversationDetailView {
     var composerBar: some View {
+        composerBar(snapshot: composerSnapshot)
+    }
+
+    func composerBar(snapshot: IMConversationComposerSnapshot) -> some View {
         VStack(spacing: 0) {
             if let directMessagingStatusMessage {
                 AppStatusBanner(message: directMessagingStatusMessage, tone: .warning)
@@ -85,13 +89,13 @@ extension IMConversationDetailView {
                         .frame(width: 34, height: 38)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(canSendMessages ? Color.accentColor : .secondary)
-                .disabled(!canSendMessages)
+                .foregroundStyle(snapshot.canSendMessages ? Color.accentColor : .secondary)
+                .disabled(!snapshot.canSendMessages)
                 .accessibilityLabel("添加附件")
                 .accessibilityIdentifier("conversation.composer.attachButton")
             } content: {
                 VStack(alignment: .leading, spacing: 8) {
-                    if let editingTarget {
+                    if let editingTarget = snapshot.editingTarget {
                         HStack(alignment: .top, spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("编辑消息")
@@ -118,7 +122,7 @@ extension IMConversationDetailView {
                         }
                         .padding(.horizontal, 14)
                         .padding(.top, 10)
-                    } else if let replyTarget {
+                    } else if let replyTarget = snapshot.replyTarget {
                         HStack(alignment: .top, spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("回复消息")
@@ -146,21 +150,21 @@ extension IMConversationDetailView {
                         .padding(.top, 10)
                     }
 
-                    if let composerDisabledReason {
-                        Label(composerDisabledReason, systemImage: "lock.circle")
+                    if let disabledReason = snapshot.disabledReason {
+                        Label(disabledReason, systemImage: "lock.circle")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 14)
-                            .padding(.top, (replyTarget == nil && editingTarget == nil) ? 10 : 0)
+                            .padding(.top, snapshot.shouldShowTopPadding ? 10 : 0)
                     }
 
-                    TextField(composerDisabledReason ?? "输入消息", text: $composerText, axis: .vertical)
+                    TextField(snapshot.placeholder, text: $composerText, axis: .vertical)
                         .lineLimit(1...4)
                         .textInputAutocapitalization(.sentences)
-                        .disabled(!canSendMessages)
+                        .disabled(!snapshot.canSendMessages)
                         .padding(.horizontal, 14)
                         .padding(.bottom, 10)
-                        .padding(.top, (replyTarget == nil && editingTarget == nil && composerDisabledReason == nil) ? 10 : 0)
+                        .padding(.top, snapshot.shouldShowTextFieldTopPadding ? 10 : 0)
                         .accessibilityIdentifier("conversation.composer.textEditor")
                 }
                 .background(AppSurface.primaryGrouped, in: RoundedRectangle(cornerRadius: AppCornerRadius.large))
@@ -168,13 +172,13 @@ extension IMConversationDetailView {
                 Button {
                     Task {
                         let didSend: Bool
-                        if let editingTarget {
+                        if let editingTarget = snapshot.editingTarget {
                             didSend = await runtimeStore.editMessage(
                                 messageID: editingTarget.serverMessageID,
                                 text: composerText,
                                 in: conversationID
                             )
-                        } else if let replyTarget {
+                        } else if let replyTarget = snapshot.replyTarget {
                             didSend = await runtimeStore.sendReply(
                                 reference: replyTarget.reference,
                                 text: composerText,
@@ -190,14 +194,14 @@ extension IMConversationDetailView {
                         }
                     }
                 } label: {
-                    Image(systemName: editingTarget == nil ? "paperplane.fill" : "square.and.arrow.down.fill")
+                    Image(systemName: snapshot.actionSystemImage)
                         .font(.headline)
                         .frame(width: 42, height: 42)
                 }
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.roundedRectangle(radius: 21))
-                .disabled(!canSendMessages || composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .accessibilityLabel(editingTarget == nil ? "发送消息" : "保存编辑")
+                .disabled(!snapshot.isSendEnabled)
+                .accessibilityLabel(snapshot.actionAccessibilityLabel)
                 .accessibilityIdentifier("conversation.composer.sendButton")
             }
         }

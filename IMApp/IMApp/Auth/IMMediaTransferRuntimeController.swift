@@ -20,7 +20,7 @@ extension ConversationRuntimeController {
 
         let resolvedFilename = resolvedMediaFilename(for: fileURL, filename: filename)
         guard !resolvedFilename.isEmpty else {
-            imConversationStore.setStatusMessage("附件文件名不能为空。")
+            await imConversationStore.setStatusMessageAsync("附件文件名不能为空。")
             return false
         }
 
@@ -28,7 +28,7 @@ extension ConversationRuntimeController {
         do {
             resolvedByteSize = try resolvedMediaByteSize(for: fileURL, byteSize: byteSize)
         } catch {
-            imConversationStore.setStatusMessage("无法读取附件大小。")
+            await imConversationStore.setStatusMessageAsync("无法读取附件大小。")
             return false
         }
 
@@ -44,7 +44,7 @@ extension ConversationRuntimeController {
             previewAssetID: previewAssetID
         )
 
-        guard let placeholder = imConversationStore.stageOutgoingMediaUpload(
+        guard let placeholder = await imConversationStore.stageOutgoingMediaUploadAsync(
             asset: placeholderAsset,
             conversationID: conversationID,
             senderUserID: user.id,
@@ -55,7 +55,7 @@ extension ConversationRuntimeController {
         scheduleConversationCachePersist()
 
         do {
-            imConversationStore.markOutgoingPreparing(
+            await imConversationStore.markOutgoingPreparingAsync(
                 localMessageID: placeholder.localMessageID,
                 message: "正在创建上传会话。"
             )
@@ -71,7 +71,7 @@ extension ConversationRuntimeController {
             )
             markServerOnline()
 
-            imConversationStore.markOutgoingUploading(
+            await imConversationStore.markOutgoingUploadingAsync(
                 localMessageID: placeholder.localMessageID,
                 message: "正在上传附件。",
                 uploadID: session.uploadID
@@ -84,7 +84,7 @@ extension ConversationRuntimeController {
             markServerOnline()
 
             if let connection = imConnection {
-                guard let request = imConversationStore.prepareUploadedOutgoingMedia(
+                guard let request = await imConversationStore.prepareUploadedOutgoingMediaAsync(
                     asset: uploadedAsset,
                     localMessageID: placeholder.localMessageID,
                     conversationID: conversationID
@@ -104,7 +104,7 @@ extension ConversationRuntimeController {
                 }
             }
 
-            let didQueue = imConversationStore.queueUploadedOutgoingMedia(
+            let didQueue = await imConversationStore.queueUploadedOutgoingMediaAsync(
                 asset: uploadedAsset,
                 localMessageID: placeholder.localMessageID,
                 conversationID: conversationID
@@ -115,7 +115,7 @@ extension ConversationRuntimeController {
             }
             return didQueue
         } catch {
-            imConversationStore.markOutgoingUploadFailed(
+            await imConversationStore.markOutgoingUploadFailedAsync(
                 localMessageID: placeholder.localMessageID,
                 message: "附件上传失败，请稍后重试。"
             )
@@ -195,7 +195,7 @@ extension ConversationRuntimeController {
 
         let sourceFileURL = pendingUpload.transferState.sourceFileURL
         guard FileManager.default.fileExists(atPath: sourceFileURL.path) else {
-            imConversationStore.abandonRecoverableOutgoingMediaUpload(
+            await imConversationStore.abandonRecoverableOutgoingMediaUploadAsync(
                 localMessageID: pendingUpload.localMessageID,
                 message: "附件原文件不存在，无法继续上传。"
             )
@@ -206,7 +206,7 @@ extension ConversationRuntimeController {
         do {
             var uploadID = pendingUpload.transferState.uploadID
             if uploadID == nil {
-                imConversationStore.markOutgoingPreparing(
+                await imConversationStore.markOutgoingPreparingAsync(
                     localMessageID: pendingUpload.localMessageID,
                     message: "正在恢复附件上传。"
                 )
@@ -225,7 +225,7 @@ extension ConversationRuntimeController {
             }
 
             guard let uploadID else {
-                imConversationStore.abandonRecoverableOutgoingMediaUpload(
+                await imConversationStore.abandonRecoverableOutgoingMediaUploadAsync(
                     localMessageID: pendingUpload.localMessageID,
                     message: "附件上传会话无效，无法恢复。"
                 )
@@ -233,7 +233,7 @@ extension ConversationRuntimeController {
                 return
             }
 
-            imConversationStore.markOutgoingUploading(
+            await imConversationStore.markOutgoingUploadingAsync(
                 localMessageID: pendingUpload.localMessageID,
                 message: "正在恢复上传附件。",
                 uploadID: uploadID
@@ -248,7 +248,7 @@ extension ConversationRuntimeController {
             markServerOnline()
 
             if let connection = imConnection {
-                guard let request = imConversationStore.prepareUploadedOutgoingMedia(
+                guard let request = await imConversationStore.prepareUploadedOutgoingMediaAsync(
                     asset: uploadedAsset,
                     localMessageID: pendingUpload.localMessageID,
                     conversationID: pendingUpload.conversationID
@@ -267,7 +267,7 @@ extension ConversationRuntimeController {
                 return
             }
 
-            let didQueue = imConversationStore.queueUploadedOutgoingMedia(
+            let didQueue = await imConversationStore.queueUploadedOutgoingMediaAsync(
                 asset: uploadedAsset,
                 localMessageID: pendingUpload.localMessageID,
                 conversationID: pendingUpload.conversationID
@@ -277,7 +277,7 @@ extension ConversationRuntimeController {
                 scheduleConnectionIfNeeded()
             }
         } catch {
-            imConversationStore.markOutgoingUploadFailed(
+            await imConversationStore.markOutgoingUploadFailedAsync(
                 localMessageID: pendingUpload.localMessageID,
                 message: "附件上传失败，请稍后重试。"
             )

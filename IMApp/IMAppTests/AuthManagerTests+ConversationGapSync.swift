@@ -477,6 +477,1042 @@ extension AuthManagerTests {
     }
 
 
+    @Test func appDidBecomeActiveSyncsSelectedConversationGapAfterSummaryRefresh() async throws {
+        let harness = IMConnectionTestHarness()
+        let gapCounter = IMGapSyncCounter()
+        let summarySequenceState = IMSummarySequenceState()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path, request.url?.query) {
+            case ("POST", "/api/auth/login", _):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/conversations", _):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationsBody(
+                        conversationID: conversationID,
+                        latestServerSequence: await summarySequenceState.currentLatestServerSequence()
+                    )
+                )
+            case ("GET", "/api/im/conversations/changes", _):
+                let latestSequence = await summarySequenceState.currentLatestServerSequence()
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationChangesBody(
+                        upserts: [
+                            Self.imConversationSummary(
+                                id: conversationID,
+                                latestServerSequence: latestSequence,
+                                updatedAt: Date(timeIntervalSince1970: 1_700_001_000 + Double(latestSequence - 1)),
+                                title: latestSequence == 1 ? "来自历史接口" : "前台摘要更新"
+                            )
+                        ],
+                        targetToken: "snapshot-\(conversationID.uuidString.lowercased())-\(latestSequence)"
+                    )
+                )
+            case ("GET", "/api/im/domain-events", _):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyDomainEventsBody())
+            case ("POST", "/api/im/client-health", _):
+                return HTTPFixtures.response(statusCode: 204, body: Data())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members", _):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationMembersBody()
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline", _):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imTimelineBody(conversationID: conversationID)
+                )
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read", _):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationReadBody(for: request)
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since", "afterSequence=1&limit=100"):
+                await gapCounter.increment()
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imTimelineSinceBody(conversationID: conversationID)
+                )
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+
+        await summarySequenceState.setLatestServerSequence(1)
+        let manager = AuthManager(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: transport),
+            tokenStore: InMemoryTokenStore(),
+            userCache: InMemoryUserSessionCache(),
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            shouldRestoreSession: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.count == 1
+                    && manager.imConnectionStatus == .connected
+            }
+        }
+
+        await summarySequenceState.setLatestServerSequence(2)
+        await manager.appDidBecomeActive()
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.count == 2
+                    && manager.imConversationStore.selectedConversation?.messages.last?.text == "来自补洞接口"
+            }
+        }
+
+        #expect(await gapCounter.currentValue() >= 1)
+    }
+
+
+    @Test func foregroundPeriodicSyncCatchesUpSelectedConversationAndSummaryThenStopsInBackground() async throws {
+        let harness = IMConnectionTestHarness()
+        let requestCounter = IMRequestCounter()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let initialSummary = Self.imConversationSummary(
+            id: conversationID,
+            latestServerSequence: 1,
+            updatedAt: Date(timeIntervalSince1970: 1_700_001_000),
+            title: "initial"
+        )
+        let changedSummary = Self.imConversationSummary(
+            id: conversationID,
+            latestServerSequence: 2,
+            updatedAt: Date(timeIntervalSince1970: 1_700_001_100),
+            title: "changed"
+        )
+        let tokenStore = InMemoryTokenStore()
+        try tokenStore.save("access-1", for: "access_token")
+        try tokenStore.save("refresh-1", for: "refresh_token")
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/refresh"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/domain-events"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyDomainEventsBody())
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationSummaryPageBody(
+                        items: [initialSummary],
+                        nextCursor: nil,
+                        hasMore: false,
+                        snapshotToken: "snapshot-periodic-1"
+                    )
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                await requestCounter.increment("summaryChanges")
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationChangesBody(
+                        upserts: [changedSummary],
+                        targetToken: "snapshot-periodic-2"
+                    )
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                await requestCounter.increment("timelineSince")
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imTimelineSinceBody(conversationID: conversationID)
+                )
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+        let store = IMConversationStore()
+        store.replaceConversationSummaries([initialSummary])
+        store.replaceTimelineItems(
+            in: conversationID.uuidString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: UUID(uuidString: "dddddddd-1111-2222-3333-eeeeeeeeeeee")!,
+                    conversationID: conversationID,
+                    senderUserID: Self.user.id,
+                    clientMessageID: "client-history-1",
+                    serverSequence: 1,
+                    kind: "rich_text",
+                    body: ["text": "来自历史接口"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_001_000)
+                )
+            ],
+            currentUserID: Self.user.id
+        )
+        store.openConversation(id: conversationID.uuidString)
+        var latestSummaries = [initialSummary]
+        var summaryRefreshAt: Date?
+        var summaryToken: String?
+        let controller = ConversationRuntimeController(
+            sessionClient: SessionClient(
+                httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: transport),
+                tokenStore: tokenStore,
+                userCache: InMemoryUserSessionCache()
+            ),
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            imConversationStore: store,
+            currentUserProvider: { Self.user },
+            isSignedInProvider: { true },
+            latestConversationSummariesProvider: { latestSummaries },
+            setLatestConversationSummaries: { latestSummaries = $0 },
+            conversationSummaryRefreshAtProvider: { summaryRefreshAt },
+            setConversationSummaryRefreshAt: { summaryRefreshAt = $0 },
+            conversationSummarySyncTokenProvider: { summaryToken },
+            setConversationSummarySyncToken: { summaryToken = $0 },
+            markServerOnline: { },
+            clearSession: { _ in },
+            handleIMDataRequestError: { _ in },
+            syncContactStateAfterConnection: { },
+            scheduleConversationCachePersist: { },
+            flushConversationCache: { },
+            flushContactStateCache: { },
+            applyContactDomainEvent: { _ in },
+            setConnectionStatus: { _ in },
+            setQueuedFlushActive: { _ in },
+            backgroundTransferMonitor: AuthManagerBackgroundTransferMonitor(),
+            foregroundSyncIntervals: ConversationRuntimeController.ForegroundSyncIntervals(
+                selectedConversationCatchUpNanoseconds: 20_000_000,
+                conversationSummaryRefreshNanoseconds: 20_000_000
+            )
+        )
+
+        controller.scheduleConnectionIfNeeded()
+        try await Self.waitUntil {
+            await requestCounter.count(for: "timelineSince") >= 1
+        }
+        try await Self.waitUntil {
+            await requestCounter.count(for: "summaryChanges") >= 1
+        }
+        let timelineCountBeforeBackground = await requestCounter.count(for: "timelineSince")
+        let summaryCountBeforeBackground = await requestCounter.count(for: "summaryChanges")
+
+        controller.appDidEnterBackground()
+        try await Task.sleep(for: .milliseconds(120))
+
+        #expect(await requestCounter.count(for: "timelineSince") == timelineCountBeforeBackground)
+        #expect(await requestCounter.count(for: "summaryChanges") == summaryCountBeforeBackground)
+        await controller.disconnect(flushCache: false)
+    }
+
+
+    @Test func selectedLightweightHintFetchesTimelineUntilTargetSequence() async throws {
+        let harness = IMConnectionTestHarness()
+        let requestCounter = IMRequestCounter()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let peerUserID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        let hintMessageID = UUID(uuidString: "eeeeeeee-1111-2222-3333-ffffffffffff")!
+        let hintDate = Date(timeIntervalSince1970: 1_700_002_003)
+
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationsBody(conversationID: conversationID)
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.emptyConversationChangesBody()
+                )
+            case ("GET", "/api/im/domain-events"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.emptyDomainEventsBody()
+                )
+            case ("POST", "/api/im/client-health"):
+                return HTTPFixtures.response(statusCode: 204, body: Data())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationMembersBody()
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imTimelineBody(conversationID: conversationID)
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                await requestCounter.increment("timelineSince")
+                #expect(Self.afterSequence(from: request) == 1)
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imTimelinePageBody(
+                        conversationID: conversationID,
+                        messages: [
+                            Self.gapMessage(conversationID: conversationID, serverSequence: 2),
+                            Self.gapMessage(conversationID: conversationID, serverSequence: 3)
+                        ],
+                        hasMore: true,
+                        nextAfterSequence: 3
+                    )
+                )
+            case ("GET", let path?) where path.hasSuffix("/receipts/summary"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationReceiptSummaryBody(for: request)
+                )
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationReadBody(for: request)
+                )
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+
+        let manager = AuthManager(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: transport),
+            tokenStore: InMemoryTokenStore(),
+            userCache: InMemoryUserSessionCache(),
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            shouldRestoreSession: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.count == 1
+                    && manager.imConnectionStatus == .connected
+            }
+        }
+
+        await harness.yield(
+            .conversationEvent(
+                requestID: UUID(uuidString: "99999999-1111-2222-3333-aaaaaaaaaaaa")!,
+                payload: TestConversationEventPayload(
+                    eventType: .conversationActivityHint,
+                    conversation: IMConversationSummaryResponseBody(
+                        id: conversationID,
+                        title: nil,
+                        kind: IMConversationKind.group.rawValue,
+                        memberCount: 0,
+                        memberUserIDs: [],
+                        lastMessage: IMMessagePreviewResponseBody(
+                            id: hintMessageID,
+                            senderUserID: peerUserID,
+                            serverSequence: 3,
+                            timelineSequence: 3,
+                            content: .richText(.plain("hint target")),
+                            createdAt: hintDate
+                        ),
+                        lastReadSequence: 0,
+                        unreadCount: 0,
+                        createdAt: nil,
+                        updatedAt: hintDate
+                    ),
+                    actorUserID: peerUserID,
+                    serverTimestamp: hintDate
+                )
+            )
+        )
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.map(\.text) == [
+                    "来自历史接口",
+                    "gap-2",
+                    "gap-3"
+                ]
+            }
+        }
+
+        #expect(await requestCounter.count(for: "timelineSince") == 1)
+        #expect(manager.imConversationStore.latestLoadedTimelineSequence(for: conversationID.uuidString) == 3)
+        let diagnostics = manager.imConversationStore.healthSnapshot.timelineCatchUpDiagnostics
+        #expect(diagnostics.hintQueuedCount == 1)
+        #expect(diagnostics.sinceRequestCount == 1)
+        #expect(diagnostics.sinceSuccessCount == 1)
+        #expect(diagnostics.appliedPageCount == 1)
+        #expect(diagnostics.appliedItemCount == 2)
+        #expect(diagnostics.lastConversationID == conversationID.uuidString)
+        #expect(diagnostics.lastTargetTimelineSequence == 3)
+        #expect(diagnostics.lastAppliedLatestTimelineSequence == 3)
+        #expect(diagnostics.lastHintToRequestMilliseconds != nil)
+        #expect(diagnostics.lastRequestMilliseconds != nil)
+        #expect(diagnostics.lastHintToApplyMilliseconds != nil)
+    }
+
+    @Test func selectedLightweightHintsWithinMicroBatchShareOneTimelineSinceRequest() async throws {
+        let harness = IMConnectionTestHarness()
+        let requestCounter = IMRequestCounter()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let peerUserID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        let firstHintMessageID = UUID(uuidString: "eeeeeeee-1111-2222-3333-000000000012")!
+        let secondHintMessageID = UUID(uuidString: "eeeeeeee-1111-2222-3333-000000000013")!
+        let hintDate = Date(timeIntervalSince1970: 1_700_002_003)
+
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationsBody(conversationID: conversationID)
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.emptyConversationChangesBody()
+                )
+            case ("GET", "/api/im/domain-events"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.emptyDomainEventsBody()
+                )
+            case ("POST", "/api/im/client-health"):
+                return HTTPFixtures.response(statusCode: 204, body: Data())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationMembersBody()
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imTimelineBody(conversationID: conversationID)
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                await requestCounter.increment("timelineSince")
+                #expect(Self.afterSequence(from: request) == 1)
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imTimelinePageBody(
+                        conversationID: conversationID,
+                        messages: [
+                            Self.gapMessage(conversationID: conversationID, serverSequence: 2),
+                            Self.gapMessage(conversationID: conversationID, serverSequence: 3)
+                        ],
+                        hasMore: false,
+                        nextAfterSequence: 3
+                    )
+                )
+            case ("GET", let path?) where path.hasSuffix("/receipts/summary"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationReceiptSummaryBody(for: request)
+                )
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationReadBody(for: request)
+                )
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+
+        let manager = AuthManager(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: transport),
+            tokenStore: InMemoryTokenStore(),
+            userCache: InMemoryUserSessionCache(),
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            shouldRestoreSession: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.count == 1
+                    && manager.imConnectionStatus == .connected
+            }
+        }
+
+        await harness.yield(
+            .conversationEvent(
+                requestID: UUID(uuidString: "99999999-1111-2222-3333-000000000012")!,
+                payload: TestConversationEventPayload(
+                    eventType: .conversationActivityHint,
+                    conversation: IMConversationSummaryResponseBody(
+                        id: conversationID,
+                        title: nil,
+                        kind: IMConversationKind.group.rawValue,
+                        memberCount: 0,
+                        memberUserIDs: [],
+                        lastMessage: IMMessagePreviewResponseBody(
+                            id: firstHintMessageID,
+                            senderUserID: peerUserID,
+                            serverSequence: 2,
+                            timelineSequence: 2,
+                            content: .richText(.plain("hint target 2")),
+                            createdAt: hintDate
+                        ),
+                        lastReadSequence: 0,
+                        unreadCount: 0,
+                        createdAt: nil,
+                        updatedAt: hintDate
+                    ),
+                    actorUserID: peerUserID,
+                    serverTimestamp: hintDate
+                )
+            )
+        )
+        await harness.yield(
+            .conversationEvent(
+                requestID: UUID(uuidString: "99999999-1111-2222-3333-000000000013")!,
+                payload: TestConversationEventPayload(
+                    eventType: .conversationActivityHint,
+                    conversation: IMConversationSummaryResponseBody(
+                        id: conversationID,
+                        title: nil,
+                        kind: IMConversationKind.group.rawValue,
+                        memberCount: 0,
+                        memberUserIDs: [],
+                        lastMessage: IMMessagePreviewResponseBody(
+                            id: secondHintMessageID,
+                            senderUserID: peerUserID,
+                            serverSequence: 3,
+                            timelineSequence: 3,
+                            content: .richText(.plain("hint target 3")),
+                            createdAt: hintDate.addingTimeInterval(0.01)
+                        ),
+                        lastReadSequence: 0,
+                        unreadCount: 0,
+                        createdAt: nil,
+                        updatedAt: hintDate.addingTimeInterval(0.01)
+                    ),
+                    actorUserID: peerUserID,
+                    serverTimestamp: hintDate.addingTimeInterval(0.01)
+                )
+            )
+        )
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.map(\.text) == [
+                    "来自历史接口",
+                    "gap-2",
+                    "gap-3"
+                ]
+            }
+        }
+
+        #expect(await requestCounter.count(for: "timelineSince") == 1)
+        let diagnostics = manager.imConversationStore.healthSnapshot.timelineCatchUpDiagnostics
+        #expect(diagnostics.hintQueuedCount == 2)
+        #expect(diagnostics.sinceRequestCount == 1)
+        #expect(diagnostics.sinceSuccessCount == 1)
+        #expect(diagnostics.appliedPageCount == 1)
+        #expect(diagnostics.appliedItemCount == 2)
+        #expect(diagnostics.lastConversationID == conversationID.uuidString)
+        #expect(diagnostics.lastTargetTimelineSequence == 3)
+        #expect(diagnostics.lastAppliedLatestTimelineSequence == 3)
+    }
+
+
+    @Test func selectedLightweightHintCoalescesNewTargetWithoutThrottlingSelectedConversation() async throws {
+        let harness = IMConnectionTestHarness()
+        let requestCounter = IMRequestCounter()
+        let afterSequenceRecorder = IMReadSequenceRecorder()
+        let firstFetchGate = RestoreGate()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let peerUserID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        let firstHintMessageID = UUID(uuidString: "eeeeeeee-1111-2222-3333-000000000002")!
+        let secondHintMessageID = UUID(uuidString: "eeeeeeee-1111-2222-3333-000000000003")!
+        let hintDate = Date(timeIntervalSince1970: 1_700_002_003)
+
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationsBody(conversationID: conversationID)
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.emptyConversationChangesBody()
+                )
+            case ("GET", "/api/im/domain-events"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.emptyDomainEventsBody()
+                )
+            case ("POST", "/api/im/client-health"):
+                return HTTPFixtures.response(statusCode: 204, body: Data())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationMembersBody()
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imTimelineBody(conversationID: conversationID)
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                await requestCounter.increment("timelineSince")
+                await afterSequenceRecorder.record(Self.afterSequence(from: request) ?? 0)
+                let requestCount = await requestCounter.count(for: "timelineSince")
+                if requestCount == 1 {
+                    await firstFetchGate.markStarted()
+                    await firstFetchGate.waitForResume()
+                    #expect(Self.afterSequence(from: request) == 1)
+                    return HTTPFixtures.response(
+                        statusCode: 200,
+                        body: try Self.imTimelinePageBody(
+                            conversationID: conversationID,
+                            messages: [
+                                Self.gapMessage(conversationID: conversationID, serverSequence: 2)
+                            ],
+                            hasMore: false,
+                            nextAfterSequence: 2
+                        )
+                    )
+                }
+                #expect(Self.afterSequence(from: request) == 2)
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imTimelinePageBody(
+                        conversationID: conversationID,
+                        messages: [
+                            Self.gapMessage(conversationID: conversationID, serverSequence: 3)
+                        ],
+                        hasMore: false,
+                        nextAfterSequence: 3
+                    )
+                )
+            case ("GET", let path?) where path.hasSuffix("/receipts/summary"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationReceiptSummaryBody(for: request)
+                )
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationReadBody(for: request)
+                )
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+
+        let manager = AuthManager(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: transport),
+            tokenStore: InMemoryTokenStore(),
+            userCache: InMemoryUserSessionCache(),
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            shouldRestoreSession: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.count == 1
+                    && manager.imConnectionStatus == .connected
+            }
+        }
+
+        await harness.yield(
+            .conversationEvent(
+                requestID: UUID(uuidString: "99999999-1111-2222-3333-000000000002")!,
+                payload: TestConversationEventPayload(
+                    eventType: .conversationActivityHint,
+                    conversation: IMConversationSummaryResponseBody(
+                        id: conversationID,
+                        title: nil,
+                        kind: IMConversationKind.group.rawValue,
+                        memberCount: 0,
+                        memberUserIDs: [],
+                        lastMessage: IMMessagePreviewResponseBody(
+                            id: firstHintMessageID,
+                            senderUserID: peerUserID,
+                            serverSequence: 2,
+                            timelineSequence: 2,
+                            content: .richText(.plain("hint target 2")),
+                            createdAt: hintDate
+                        ),
+                        lastReadSequence: 0,
+                        unreadCount: 0,
+                        createdAt: nil,
+                        updatedAt: hintDate
+                    ),
+                    actorUserID: peerUserID,
+                    serverTimestamp: hintDate
+                )
+            )
+        )
+
+        await firstFetchGate.waitUntilStarted()
+        await harness.yield(
+            .conversationEvent(
+                requestID: UUID(uuidString: "99999999-1111-2222-3333-000000000003")!,
+                payload: TestConversationEventPayload(
+                    eventType: .conversationActivityHint,
+                    conversation: IMConversationSummaryResponseBody(
+                        id: conversationID,
+                        title: nil,
+                        kind: IMConversationKind.group.rawValue,
+                        memberCount: 0,
+                        memberUserIDs: [],
+                        lastMessage: IMMessagePreviewResponseBody(
+                            id: secondHintMessageID,
+                            senderUserID: peerUserID,
+                            serverSequence: 3,
+                            timelineSequence: 3,
+                            content: .richText(.plain("hint target 3")),
+                            createdAt: hintDate.addingTimeInterval(1)
+                        ),
+                        lastReadSequence: 0,
+                        unreadCount: 0,
+                        createdAt: nil,
+                        updatedAt: hintDate.addingTimeInterval(1)
+                    ),
+                    actorUserID: peerUserID,
+                    serverTimestamp: hintDate.addingTimeInterval(1)
+                )
+            )
+        )
+
+        await firstFetchGate.resume()
+        do {
+            try await Self.waitUntil {
+                await requestCounter.count(for: "timelineSince") == 2
+            }
+            try await Self.waitUntil {
+                await MainActor.run {
+                    manager.imConversationStore.selectedConversation?.messages.map(\.text) == [
+                        "来自历史接口",
+                        "gap-2",
+                        "gap-3"
+                    ]
+                }
+            }
+        } catch {
+            let afterSequences = await afterSequenceRecorder.allSequences()
+            let messages = await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.map(\.text) ?? []
+            }
+            Issue.record("timeline/since afterSequences=\(afterSequences) messages=\(messages)")
+            throw error
+        }
+        #expect(await afterSequenceRecorder.allSequences() == [1, 2])
+        #expect(await requestCounter.count(for: "timelineSince") == 2)
+        #expect(manager.imConversationStore.latestLoadedTimelineSequence(for: conversationID.uuidString) == 3)
+        let diagnostics = manager.imConversationStore.healthSnapshot.timelineCatchUpDiagnostics
+        #expect(diagnostics.hintQueuedCount == 2)
+        #expect(diagnostics.sinceRequestCount == 2)
+        #expect(diagnostics.sinceSuccessCount == 2)
+        #expect(diagnostics.appliedPageCount == 2)
+        #expect(diagnostics.appliedItemCount == 2)
+        #expect(diagnostics.lastConversationID == conversationID.uuidString)
+        #expect(diagnostics.lastTargetTimelineSequence == 3)
+        #expect(diagnostics.lastAppliedLatestTimelineSequence == 3)
+    }
+
+
+    @Test func selectedLightweightHintWaitsForInitialTimelineCursorBeforeCatchUp() async throws {
+        let harness = IMConnectionTestHarness()
+        let requestCounter = IMRequestCounter()
+        let healthRecorder = IMClientHealthReportRecorder()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let peerUserID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        let hintMessageID = UUID(uuidString: "eeeeeeee-1111-2222-3333-ffffffffffff")!
+        let hintDate = Date(timeIntervalSince1970: 1_700_002_003)
+
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationsBody(conversationID: conversationID)
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.emptyConversationChangesBody()
+                )
+            case ("GET", "/api/im/domain-events"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.emptyDomainEventsBody()
+                )
+            case ("POST", "/api/im/client-health"):
+                try await healthRecorder.record(request)
+                return HTTPFixtures.response(statusCode: 204, body: Data())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationMembersBody()
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                await requestCounter.increment("timelineSince")
+                #expect(Self.afterSequence(from: request) == 1)
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imTimelinePageBody(
+                        conversationID: conversationID,
+                        messages: [
+                            Self.gapMessage(conversationID: conversationID, serverSequence: 2),
+                            Self.gapMessage(conversationID: conversationID, serverSequence: 3)
+                        ],
+                        hasMore: false,
+                        nextAfterSequence: 3
+                    )
+                )
+            case ("GET", let path?) where path.hasSuffix("/receipts/summary"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationReceiptSummaryBody(for: request)
+                )
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationReadBody(for: request)
+                )
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+
+        let manager = AuthManager(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: transport),
+            tokenStore: InMemoryTokenStore(),
+            userCache: InMemoryUserSessionCache(),
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            shouldRestoreSession: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversationID == conversationID.uuidString
+                    && manager.imConnectionStatus == .connected
+                    && manager.imConversationStore.latestLoadedTimelineSequence(
+                        for: conversationID.uuidString
+                    ) == nil
+            }
+        }
+        manager.conversationRuntimeController.lastClientHealthReportAt = Date()
+
+        await harness.yield(
+            .conversationEvent(
+                requestID: UUID(uuidString: "99999999-1111-2222-3333-aaaaaaaaaaaa")!,
+                payload: TestConversationEventPayload(
+                    eventType: .summaryUpdated,
+                    conversation: IMConversationSummaryResponseBody(
+                        id: conversationID,
+                        title: nil,
+                        kind: IMConversationKind.group.rawValue,
+                        memberCount: 0,
+                        memberUserIDs: [],
+                        lastMessage: IMMessagePreviewResponseBody(
+                            id: hintMessageID,
+                            senderUserID: peerUserID,
+                            serverSequence: 3,
+                            timelineSequence: 3,
+                            content: .richText(.plain("hint target")),
+                            createdAt: hintDate
+                        ),
+                        lastReadSequence: 0,
+                        unreadCount: 0,
+                        createdAt: nil,
+                        updatedAt: hintDate
+                    ),
+                    actorUserID: peerUserID,
+                    serverTimestamp: hintDate
+                )
+            )
+        )
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.healthSnapshot.timelineCatchUpDiagnostics.deferredCount == 1
+            }
+        }
+        #expect(await requestCounter.count(for: "timelineSince") == 0)
+        #expect(manager.imConversationStore.healthSnapshot.timelineCatchUpDiagnostics.deferredCount == 1)
+        #expect(await healthRecorder.count(for: "timeline-catch-up-deferred") == 1)
+
+        let firstMessage = IMConversationMessageResponseBody(
+            id: UUID(uuidString: "dddddddd-1111-2222-3333-eeeeeeeeeeee")!,
+            conversationID: conversationID,
+            senderUserID: Self.user.id,
+            clientMessageID: "client-history-1",
+            serverSequence: 1,
+            kind: "rich_text",
+            body: ["text": "来自历史接口"],
+            createdAt: Date(timeIntervalSince1970: 1_700_001_000)
+        )
+        manager.imConversationStore.appendTimelineItems(
+            in: conversationID.uuidString,
+            items: [
+                IMTimelineItemResponseBody(
+                    type: .message,
+                    timelineSequence: firstMessage.timelineSequence,
+                    message: firstMessage,
+                    notice: nil
+                )
+            ],
+            currentUserID: Self.user.id
+        )
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.map(\.text) == [
+                    "来自历史接口",
+                    "gap-2",
+                    "gap-3"
+                ]
+            }
+        }
+
+        #expect(await requestCounter.count(for: "timelineSince") == 1)
+        #expect(manager.imConversationStore.latestLoadedTimelineSequence(for: conversationID.uuidString) == 3)
+        let diagnostics = manager.imConversationStore.healthSnapshot.timelineCatchUpDiagnostics
+        #expect(diagnostics.hintQueuedCount == 1)
+        #expect(diagnostics.deferredCount == 1)
+        #expect(diagnostics.sinceRequestCount == 1)
+        #expect(diagnostics.sinceSuccessCount == 1)
+        #expect(diagnostics.appliedPageCount == 1)
+        #expect(diagnostics.appliedItemCount == 2)
+    }
+
+
+    @Test func selectedLightweightHintDoesNotFetchTimelineWhenTargetAlreadyLoaded() async throws {
+        let harness = IMConnectionTestHarness()
+        let requestCounter = IMRequestCounter()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let peerUserID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        let hintDate = Date(timeIntervalSince1970: 1_700_002_001)
+
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/auth/login"):
+                return HTTPFixtures.response(statusCode: 200, body: try Self.authResponseBody())
+            case ("GET", "/api/im/conversations"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationsBody(conversationID: conversationID)
+                )
+            case ("GET", "/api/im/conversations/changes"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.emptyConversationChangesBody()
+                )
+            case ("GET", "/api/im/domain-events"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.emptyDomainEventsBody()
+                )
+            case ("POST", "/api/im/client-health"):
+                return HTTPFixtures.response(statusCode: 204, body: Data())
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/members"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationMembersBody()
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imTimelineBody(conversationID: conversationID)
+                )
+            case ("GET", "/api/im/conversations/\(conversationID.uuidString)/timeline/since"):
+                await requestCounter.increment("timelineSince")
+                return HTTPFixtures.response(statusCode: 500)
+            case ("GET", let path?) where path.hasSuffix("/receipts/summary"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationReceiptSummaryBody(for: request)
+                )
+            case ("POST", "/api/im/conversations/\(conversationID.uuidString)/read"):
+                return HTTPFixtures.response(
+                    statusCode: 200,
+                    body: try Self.imConversationReadBody(for: request)
+                )
+            default:
+                return try Self.defaultOrUnexpectedIMResponse(for: request)
+            }
+        }
+
+        let manager = AuthManager(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: transport),
+            tokenStore: InMemoryTokenStore(),
+            userCache: InMemoryUserSessionCache(),
+            openIMConnection: {
+                await harness.makeConnection()
+            },
+            shouldRestoreSession: false
+        )
+
+        await manager.login(email: Self.user.email, password: "password123")
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.messages.count == 1
+                    && manager.imConnectionStatus == .connected
+            }
+        }
+
+        await harness.yield(
+            .conversationEvent(
+                requestID: UUID(uuidString: "99999999-1111-2222-3333-bbbbbbbbbbbb")!,
+                payload: TestConversationEventPayload(
+                    eventType: .summaryUpdated,
+                    conversation: IMConversationSummaryResponseBody(
+                        id: conversationID,
+                        title: nil,
+                        kind: IMConversationKind.group.rawValue,
+                        memberCount: 0,
+                        memberUserIDs: [],
+                        lastMessage: IMMessagePreviewResponseBody(
+                            id: UUID(uuidString: "eeeeeeee-1111-2222-3333-ffffffffffff")!,
+                            senderUserID: peerUserID,
+                            serverSequence: 1,
+                            timelineSequence: 1,
+                            content: .richText(.plain("already loaded hint")),
+                            createdAt: hintDate
+                        ),
+                        lastReadSequence: 0,
+                        unreadCount: 0,
+                        createdAt: nil,
+                        updatedAt: hintDate
+                    ),
+                    actorUserID: peerUserID,
+                    serverTimestamp: hintDate
+                )
+            )
+        )
+
+        try await Self.waitUntil {
+            await MainActor.run {
+                manager.imConversationStore.selectedConversation?.lastMessagePreviewText == "already loaded hint"
+            }
+        }
+        try await Task.sleep(for: .milliseconds(900))
+
+        #expect(await requestCounter.count(for: "timelineSince") == 0)
+        #expect(manager.imConversationStore.selectedConversation?.messages.map(\.text) == ["来自历史接口"])
+        let diagnostics = manager.imConversationStore.healthSnapshot.timelineCatchUpDiagnostics
+        #expect(diagnostics.hintQueuedCount == 1)
+        #expect(diagnostics.hintSkippedAlreadyLoadedCount == 1)
+        #expect(diagnostics.sinceRequestCount == 0)
+    }
+
 
     @Test func gapSyncFailureDoesNotClearLoadedMessages() async throws {
         let harness = IMConnectionTestHarness()

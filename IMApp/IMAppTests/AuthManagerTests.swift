@@ -395,6 +395,10 @@ struct AuthManagerTests {
             return HTTPFixtures.response(statusCode: 200, body: try Self.emptyConversationsBody())
         case ("GET", "/api/im/conversations/changes"):
             return HTTPFixtures.response(statusCode: 200, body: try Self.emptyConversationChangesBody())
+        case ("GET", "/api/im/domain-events"):
+            return HTTPFixtures.response(statusCode: 200, body: try Self.emptyDomainEventsBody())
+        case ("POST", "/api/im/client-health"):
+            return HTTPFixtures.response(statusCode: 204, body: Data())
         case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/members") == true:
             return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
         case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/timeline/since") == true:
@@ -493,6 +497,15 @@ struct AuthManagerTests {
                 nextCursor: nil,
                 hasMore: false,
                 targetToken: "snapshot-empty"
+            )
+        )
+    }
+    nonisolated static func emptyDomainEventsBody() throws -> Data {
+        try HTTPFixtures.jsonBody(
+            IMDomainEventChangesResponseBody(
+                items: [],
+                nextCursor: 0,
+                hasMore: false
             )
         )
     }

@@ -110,6 +110,45 @@ extension IMConversationStoreTests {
         #expect(store.selectedConversation?.lastMessagePreview == "queued text")
     }
 
+    @Test func asyncOutgoingQueueUsesClientStateEngineAndProjectsMainActorState() async throws {
+        let store = IMConversationStore()
+        let conversationID = "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+
+        let didQueue = await store.queueOutgoingTextAsync(
+            "queued through actor",
+            conversationID: conversationID,
+            senderUserID: Self.currentUserID
+        )
+
+        #expect(didQueue)
+        let queuedMessage = try #require(store.selectedConversation?.pendingMessages.first)
+        let clientMessageID = queuedMessage.clientMessageID
+        #expect(queuedMessage.deliveryState == .queued(message: "等待 IM 长连接恢复后发送。"))
+
+        let requests = await store.queuedOutgoingMessageRequestsAsync(limit: 1)
+
+        #expect(requests.count == 1)
+        #expect(requests[0].localMessageID == queuedMessage.id)
+        #expect(requests[0].payload.clientMessageID == clientMessageID)
+        #expect(requests[0].payload.body["text"] == "queued through actor")
+        #expect(store.selectedConversation?.pendingMessages.first?.deliveryState == .sending)
+
+        await store.applyOutgoingAcknowledgementAsync(
+            requestID: requests[0].requestID,
+            payload: IMTCPAckPayload(
+                messageID: "server-actor-queued-1",
+                conversationID: conversationID,
+                status: "accepted"
+            )
+        )
+
+        let sentMessage = try #require(store.selectedConversation?.pendingMessages.first)
+        #expect(sentMessage.clientMessageID == clientMessageID)
+        #expect(sentMessage.serverMessageID == "server-actor-queued-1")
+        #expect(sentMessage.deliveryState == .sent)
+        #expect(store.selectedConversation?.lastMessagePreview == "queued through actor")
+    }
+
 
     @Test func duplicateOutgoingAcknowledgementDoesNotMutateSentMessageAgain() throws {
         let store = IMConversationStore()
@@ -903,6 +942,49 @@ extension IMConversationStoreTests {
                 laterStaleConversationID.uuidString
             ]
         )
+    }
+
+    @Test func gapSyncTargetsUsesTimelineSequenceInsteadOfServerSequence() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let messageID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+        let createdAt = Date(timeIntervalSince1970: 1_700_400_000)
+        let summary = IMConversationSummaryResponseBody(
+            id: conversationID,
+            title: "Large Group",
+            memberUserIDs: [Self.currentUserID, Self.peerUserID],
+            lastMessage: IMMessagePreviewResponseBody(
+                id: messageID,
+                senderUserID: Self.peerUserID,
+                serverSequence: 10,
+                timelineSequence: 12,
+                content: testMessageContent(kind: "rich_text", body: ["text": "new timeline item"]),
+                createdAt: createdAt
+            ),
+            createdAt: createdAt,
+            updatedAt: createdAt
+        )
+
+        store.replaceConversationSummaries([summary])
+        store.replaceTimelineItems(
+            in: conversationID.uuidString,
+            messages: [
+                IMConversationMessageResponseBody(
+                    id: messageID,
+                    conversationID: conversationID,
+                    senderUserID: Self.peerUserID,
+                    clientMessageID: nil,
+                    serverSequence: 10,
+                    timelineSequence: 11,
+                    kind: "rich_text",
+                    body: ["text": "local message"],
+                    createdAt: createdAt
+                )
+            ],
+            currentUserID: Self.currentUserID
+        )
+
+        #expect(store.gapSyncTargets(from: [summary]) == [conversationID.uuidString])
     }
 
 }

@@ -116,7 +116,7 @@ final class QueuedMessageFlushCoordinator {
             return .failed
         }
 
-        let requests = runtime.imConversationStore.queuedOutgoingMessageRequests(limit: limit)
+        let requests = await runtime.imConversationStore.queuedOutgoingMessageRequestsAsync(limit: limit)
         guard !requests.isEmpty else {
             return .drained
         }
@@ -129,7 +129,7 @@ final class QueuedMessageFlushCoordinator {
                 try await connection.sendMessage(request.payload, requestID: request.requestID)
             } catch {
                 for unsentRequest in requests.dropFirst(index + 1) {
-                    runtime.imConversationStore.markOutgoingQueued(
+                    await runtime.imConversationStore.markOutgoingQueuedAsync(
                         requestID: unsentRequest.requestID,
                         message: "等待 IM 长连接恢复后发送。"
                     )

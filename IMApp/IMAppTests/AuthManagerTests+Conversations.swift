@@ -125,7 +125,7 @@ extension AuthManagerTests {
         )
 
         await manager.login(email: Self.user.email, password: "password123")
-        manager.imConversationStore.replaceConversationSummaryWindow(
+        await manager.imConversationStore.replaceConversationSummaryWindowAsync(
             [
                 Self.imConversationSummary(
                     id: firstConversationID,
@@ -299,7 +299,7 @@ extension AuthManagerTests {
                 .queryItems?
                 .contains(where: { $0.name == "cursor" && $0.value == "cursor-page-2" }) == true
         })
-        manager.imConversationStore.appendConversationSummaryWindow(
+        await manager.imConversationStore.appendConversationSummaryWindowAsync(
             [
                 Self.imConversationSummary(
                     id: thirdConversationID,

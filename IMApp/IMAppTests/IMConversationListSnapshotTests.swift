@@ -167,6 +167,10 @@ struct IMConversationListSnapshotTests {
             )
         ])
         store.openConversation(id: groupID)
+        store.setStatusMessage("列表同步提示")
+        store.setLoadingConversations(true)
+        store.setLoadingMoreConversationSummaries(true)
+        store.setConversationSearchText("Group")
 
         let snapshot = store.conversationListSnapshot(
             filter: .groups,
@@ -181,6 +185,11 @@ struct IMConversationListSnapshotTests {
 
         let row = try #require(snapshot.rows.first)
         #expect(snapshot.generation > 0)
+        #expect(snapshot.statusMessage == "列表同步提示")
+        #expect(snapshot.isLoadingConversations)
+        #expect(snapshot.isLoadingMoreConversationSummaries)
+        #expect(!snapshot.hasMoreConversationSummaries)
+        #expect(snapshot.searchText == "Group")
         #expect(snapshot.rows.map(\.id) == [groupID])
         #expect(row.title == "Projected Group")
         #expect(row.isActive)

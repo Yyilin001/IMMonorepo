@@ -3,20 +3,30 @@ import IMClientKit
 import OSLog
 import UniformTypeIdentifiers
 
+/// Scroll geometry reduced to the fields needed for bottom-stickiness and history restore.
+private struct IMChatScrollGeometrySnapshot: Equatable {
+    let contentOffsetY: Double
+    let isNearBottom: Bool
+}
+
 extension IMConversationDetailView {
     func applyingScrollStateHandlers<Content: View>(
         to content: Content,
         proxy: ScrollViewProxy
     ) -> some View {
         content
-            .onScrollGeometryChange(for: Bool.self) { geometry in
+            .onScrollGeometryChange(for: IMChatScrollGeometrySnapshot.self) { geometry in
                 let distanceFromBottom = geometry.contentSize.height
                     - geometry.containerSize.height
                     - geometry.contentOffset.y
-                return distanceFromBottom < 120
+                return IMChatScrollGeometrySnapshot(
+                    contentOffsetY: geometry.contentOffset.y,
+                    isNearBottom: distanceFromBottom < 120
+                )
             } action: { _, newValue in
-                isNearBottom = newValue
-                if newValue {
+                detailScrollContentOffsetY = newValue.contentOffsetY
+                isNearBottom = newValue.isNearBottom
+                if newValue.isNearBottom {
                     unseenNewMessageCount = 0
                 }
             }
@@ -47,26 +57,32 @@ extension IMConversationDetailView {
                     lastObservedMessageID = latestMessageID
                 }
             }
+            .onChange(of: chatPageSnapshot.generation) { _, _ in
+                restorePendingHistoryScrollAnchor(proxy: proxy)
+            }
+            .onChange(of: timelineRowOffsetsFromTop) { _, _ in
+                restorePendingHistoryScrollAnchor(proxy: proxy)
+            }
             .onChange(of: conversationStore.conversationMutationGeneration) { _, generation in
-                refreshChatPageSnapshot(reason: "generationChanged:\(generation)")
+                refreshChatPageSnapshot(invalidation: .conversationGenerationChanged(generation))
                 IMAppLog.imUI.debug(
                     "Conversation store generation changed conversationID=\(conversationID, privacy: .public) generation=\(generation, privacy: .public) pending=\(chatPageSnapshot.metrics.pendingMessageCount, privacy: .public) messages=\(chatPageSnapshot.metrics.messageCount, privacy: .public) timeline=\(chatPageSnapshot.metrics.timelineItemCount, privacy: .public) latestID=\(latestMessageID ?? "nil", privacy: .public) isNearBottom=\(isNearBottom, privacy: .public)"
                 )
             }
             .onChange(of: conversationStore.isLoadingMessages) { _, isLoading in
-                refreshChatPageSnapshot(reason: "messagesLoadingChanged:\(isLoading)")
+                refreshChatPageSnapshot(invalidation: .messagesLoadingChanged(isLoading))
             }
             .onChange(of: conversationStore.isLoadingMembers) { _, isLoading in
-                refreshChatPageSnapshot(reason: "membersLoadingChanged:\(isLoading)")
+                refreshChatPageSnapshot(invalidation: .membersLoadingChanged(isLoading))
             }
             .onChange(of: conversationStore.receiptSummary(for: conversationID)) { _, _ in
-                refreshChatPageSnapshot(reason: "receiptChanged")
+                refreshChatPageSnapshot(invalidation: .receiptChanged(conversationID))
             }
             .onChange(of: runtimeStore.currentUserID) { _, currentUserID in
-                refreshChatPageSnapshot(reason: "currentUserChanged:\(currentUserID?.uuidString ?? "nil")")
+                refreshChatPageSnapshot(invalidation: .currentUserChanged(currentUserID))
             }
             .onChange(of: runtimeStore.blockedUserIDs) { _, _ in
-                refreshChatPageSnapshot(reason: "blockedUsersChanged")
+                refreshChatPageSnapshot(invalidation: .blockedUsersChanged)
             }
             .onChange(of: conversationStore.replyJumpMatchedMessageID) { _, matchedMessageID in
                 guard conversationStore.replyJumpConversationID == conversationID,
@@ -87,6 +103,41 @@ extension IMConversationDetailView {
                     }
                 }
             }
+    }
+
+    /// Restores the saved history anchor once its row has been remeasured after pagination.
+    ///
+    /// If the anchor row exists but does not have geometry yet, the row is first
+    /// scrolled into view so SwiftUI can report its offset on the next pass.
+    func restorePendingHistoryScrollAnchor(proxy: ScrollViewProxy) {
+        guard let anchor = pendingHistoryScrollAnchor,
+              chatPageSnapshot.timelineRows.contains(where: { $0.id == anchor.itemID })
+        else {
+            return
+        }
+
+        guard let measuredOffsetFromTop = timelineRowOffsetsFromTop[anchor.itemID] else {
+            Task { @MainActor in
+                await Task.yield()
+                detailScrollPosition.scrollTo(id: anchor.itemID, anchor: .top)
+            }
+            return
+        }
+
+        let restoration = IMChatHistoryScrollAnchorRestorer().restoration(
+            anchor: anchor,
+            measuredOffsetFromTop: measuredOffsetFromTop,
+            currentContentOffsetY: detailScrollContentOffsetY
+        )
+
+        pendingHistoryScrollAnchor = nil
+        Task { @MainActor in
+            await Task.yield()
+            detailScrollPosition.scrollTo(y: restoration.targetContentOffsetY)
+            IMAppLog.imUI.debug(
+                "Conversation restored history scroll anchor conversationID=\(conversationID, privacy: .public) anchor=\(anchor.itemID, privacy: .public) savedOffset=\(anchor.offsetFromTop, privacy: .public) measuredOffset=\(measuredOffsetFromTop, privacy: .public) targetY=\(restoration.targetContentOffsetY, privacy: .public)"
+            )
+        }
     }
 
     @MainActor
@@ -215,7 +266,7 @@ extension IMConversationDetailView {
             .sheet(isPresented: $isPresentingRenameGroup) {
                 NavigationStack {
                     IMRenameConversationSheet(
-                        initialTitle: conversation?.title ?? "",
+                        initialTitle: chatPageSnapshot.metadata.title,
                         onSubmit: { title in
                             await runtimeStore.renameConversation(conversationID, title: title)
                         }
@@ -226,10 +277,10 @@ extension IMConversationDetailView {
             .sheet(isPresented: $isPresentingEditMetadata) {
                 NavigationStack {
                     IMEditConversationMetadataSheet(
-                        initialTitle: conversation?.title ?? "",
-                        initialNotice: conversation?.notice ?? "",
-                        initialAvatarPreset: conversation?.avatarPreset ?? .ocean,
-                        initialMuteAll: conversation?.muteAll ?? false,
+                        initialTitle: chatPageSnapshot.metadata.title,
+                        initialNotice: chatPageSnapshot.metadata.notice,
+                        initialAvatarPreset: chatPageSnapshot.metadata.avatarPreset,
+                        initialMuteAll: chatPageSnapshot.metadata.muteAll,
                         onSubmit: { title, notice, avatarPreset, muteAll in
                             await runtimeStore.updateConversationMetadata(
                                 conversationID,
@@ -348,31 +399,55 @@ extension IMConversationDetailView {
     }
 
     var chatPageSnapshot: IMChatPageSnapshot {
-        snapshotStore.chatPageSnapshot(for: conversationID)
+        observedChatPageSnapshot ?? .empty(conversationID: conversationID)
     }
 
-    func refreshChatPageSnapshot(reason: String) {
-        let commit = snapshotStore.commitChatPageSnapshot(
-            from: conversationStore,
-            conversationID: conversationID,
-            currentUserID: runtimeStore.currentUserID,
-            blockedUserIDs: runtimeStore.blockedUserIDs
-        )
-        IMAppLog.imUI.debug(
-            "Conversation detail snapshot refreshed reason=\(reason, privacy: .public) committed=\(commit.didCommit, privacy: .public) revision=\(commit.revision, privacy: .public) conversationID=\(conversationID, privacy: .public) generation=\(chatPageSnapshot.generation, privacy: .public) latestID=\(chatPageSnapshot.latestItemID ?? "nil", privacy: .public)"
-        )
+    @MainActor
+    func observeChatPageSnapshotEvents() async {
+        let currentEvent = await snapshotStore.currentChatPageSnapshotEvent(for: conversationID)
+        observedChatPageSnapshot = currentEvent.snapshot
+        observedChatPageRevision = currentEvent.revision
+
+        for await event in await snapshotStore.chatPageSnapshotEvents(for: conversationID) {
+            observedChatPageSnapshot = event.snapshot
+            observedChatPageRevision = event.revision
+            IMAppLog.imUI.debug(
+                "Conversation detail snapshot event conversationID=\(event.conversationID, privacy: .public) revision=\(event.revision, privacy: .public) generation=\(event.snapshot.generation, privacy: .public) latestID=\(event.snapshot.latestItemID ?? "nil", privacy: .public)"
+            )
+        }
     }
 
-    var conversation: IMConversation? {
-        chatPageSnapshot.conversation
+    func refreshChatPageSnapshot(invalidation: IMConversationSnapshotInvalidation) {
+        Task { @MainActor in
+            await snapshotCommitPipeline.scheduleChatCommit(
+                IMConversationSnapshotCommitEvent(
+                    invalidation,
+                    chatPages: [
+                        IMChatPageSnapshotCommitRequest(
+                            conversationID: conversationID,
+                            currentUserID: runtimeStore.currentUserID,
+                            blockedUserIDs: runtimeStore.blockedUserIDs
+                        )
+                    ]
+                ),
+                from: conversationStore,
+                to: snapshotStore,
+                didCommit: { execution in
+                    let commit = execution.batchCommit.chatPages[conversationID] ?? IMConversationSnapshotCommitResult(
+                        didCommit: false,
+                        revision: observedChatPageRevision
+                    )
+                    let snapshot = execution.chatPageSnapshots[conversationID] ?? chatPageSnapshot
+                    IMAppLog.imUI.debug(
+                        "Conversation detail snapshot refreshed reason=\(execution.plan.reasonSummary, privacy: .public) committed=\(commit.didCommit, privacy: .public) revision=\(commit.revision, privacy: .public) conversationID=\(conversationID, privacy: .public) generation=\(snapshot.generation, privacy: .public) latestID=\(snapshot.latestItemID ?? "nil", privacy: .public)"
+                    )
+                }
+            )
+        }
     }
 
     var latestTimelineItemIsCurrentUserOutgoing: Bool {
         chatPageSnapshot.latestTimelineItemIsCurrentUserOutgoing
-    }
-
-    func deliveryOverrideText(for message: IMConversationMessage) -> String? {
-        chatPageSnapshot.deliveryOverrideText(for: message)
     }
 
     var latestMessageID: String? {

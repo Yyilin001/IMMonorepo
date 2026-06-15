@@ -134,7 +134,7 @@ final class IMReadReportCoordinator {
                 readSequence: readSequence
             )
             runtime.markServerOnline()
-            runtime.imConversationStore.applyServerExplicitReadResponse(response)
+            await runtime.imConversationStore.applyServerExplicitReadResponseAsync(response)
             runtime.scheduleConversationCachePersist()
         } catch {
             await runtime.handleIMDataRequestError(error)

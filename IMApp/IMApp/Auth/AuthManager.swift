@@ -21,7 +21,7 @@ struct DirectPeerRelationshipPresentation: Equatable {
     let requestID: UUID?
 }
 
-struct IMConversationIdentityPresentation: Equatable {
+struct IMConversationIdentityPresentation: Equatable, Sendable {
     let title: String
     let detailSummary: String
     let rowSecondaryLabel: String?
@@ -212,6 +212,7 @@ final class AuthManager {
     let probeManager: ProbeManager
     let fileTransferManager: FileTransferManager
     let imConversationStore: IMConversationStore
+    let timelineCatchUpConfiguration: ConversationRuntimeController.TimelineCatchUpConfiguration
     @ObservationIgnored
     lazy var sessionRuntimeController = makeSessionRuntimeController()
     @ObservationIgnored
@@ -231,7 +232,8 @@ final class AuthManager {
         backgroundTransferMonitor: any BackgroundTransferMonitoring = BackgroundTransferCoordinator.shared,
         imConversationCache: IMConversationCacheHandler = ClientPersistenceFactory().makeIMConversationCacheHandler(),
         contactStateCache: ContactStateCacheHandler = ClientPersistenceFactory().makeContactStateCacheHandler(),
-        shouldRestoreSession: Bool = true
+        shouldRestoreSession: Bool = true,
+        timelineCatchUpConfiguration: ConversationRuntimeController.TimelineCatchUpConfiguration = .production
     ) {
         let sessionClient = SessionClient(
             network: network,
@@ -247,7 +249,8 @@ final class AuthManager {
                 backgroundTransferMonitor: backgroundTransferMonitor,
                 imConversationCache: imConversationCache,
                 contactStateCache: contactStateCache,
-                shouldRestoreSession: shouldRestoreSession
+                shouldRestoreSession: shouldRestoreSession,
+                timelineCatchUpConfiguration: timelineCatchUpConfiguration
             )
         )
     }
@@ -261,7 +264,8 @@ final class AuthManager {
         backgroundTransferMonitor: any BackgroundTransferMonitoring = BackgroundTransferCoordinator.shared,
         imConversationCache: IMConversationCacheHandler = IMConversationCacheHandler(NoopIMConversationCache()),
         contactStateCache: ContactStateCacheHandler = ContactStateCacheHandler(NoopContactStateCache()),
-        shouldRestoreSession: Bool = true
+        shouldRestoreSession: Bool = true,
+        timelineCatchUpConfiguration: ConversationRuntimeController.TimelineCatchUpConfiguration = .production
     ) {
         let sessionClient = SessionClient(
             httpClient: httpClient,
@@ -278,7 +282,8 @@ final class AuthManager {
                 backgroundTransferMonitor: backgroundTransferMonitor,
                 imConversationCache: imConversationCache,
                 contactStateCache: contactStateCache,
-                shouldRestoreSession: shouldRestoreSession
+                shouldRestoreSession: shouldRestoreSession,
+                timelineCatchUpConfiguration: timelineCatchUpConfiguration
             )
         )
     }
@@ -298,6 +303,7 @@ final class AuthManager {
         self.openIMConnection = dependencies.openIMConnection
         self.backgroundTransferMonitor = dependencies.backgroundTransferMonitor
         self.imConversationCache = dependencies.imConversationCache
+        self.timelineCatchUpConfiguration = dependencies.timelineCatchUpConfiguration
         let sessionStore = AppSessionStore()
         let contactStore = ContactStore()
         let conversationStore = IMConversationStore()
@@ -384,7 +390,8 @@ final class AuthManager {
             setQueuedFlushActive: { [weak self] isActive in
                 self?.isFlushingQueuedIMTextMessages = isActive
             },
-            backgroundTransferMonitor: backgroundTransferMonitor
+            backgroundTransferMonitor: backgroundTransferMonitor,
+            timelineCatchUpConfiguration: timelineCatchUpConfiguration
         ))
     }
 

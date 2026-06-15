@@ -63,7 +63,19 @@ extension AuthManager {
             return
         }
 
+        let previousConversationID = imConversationStore.selectedConversationID
+        if let previousConversationID,
+           previousConversationID != conversationID {
+            await conversationRuntimeController.reportConversationActivity(
+                conversationID: previousConversationID,
+                isActive: false
+            )
+        }
         imConversationStore.openConversation(id: conversationID)
+        await conversationRuntimeController.reportConversationActivity(
+            conversationID: conversationID,
+            isActive: true
+        )
         scheduleIMConversationCachePersist()
         await conversationRuntimeController.loadConversationMembers(for: conversationID)
         await conversationRuntimeController.loadMessagesIfNeeded(for: conversationID)

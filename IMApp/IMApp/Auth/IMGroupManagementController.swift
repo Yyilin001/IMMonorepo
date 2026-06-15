@@ -31,7 +31,7 @@ extension AuthManager {
         ).sorted()
 
         guard !normalizedEmails.isEmpty else {
-            imConversationStore.setStatusMessage("至少需要填写一个成员邮箱。")
+            await imConversationStore.setStatusMessageAsync("至少需要填写一个成员邮箱。")
             return false
         }
 
@@ -42,7 +42,7 @@ extension AuthManager {
                 memberEmails: normalizedEmails
             )
             markServerOnline()
-            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
+            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
             scheduleIMConversationCachePersist()
             await openIMConversation(conversation.id.uuidString)
             return true
@@ -55,7 +55,7 @@ extension AuthManager {
     func createDirectIMConversation(memberEmail: String) async -> String? {
         let normalizedEmail = memberEmail.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalizedEmail.isEmpty else {
-            imConversationStore.setStatusMessage("联系人邮箱不能为空。")
+            await imConversationStore.setStatusMessageAsync("联系人邮箱不能为空。")
             return nil
         }
 
@@ -66,7 +66,7 @@ extension AuthManager {
                 memberEmails: [normalizedEmail]
             )
             markServerOnline()
-            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
+            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
             scheduleIMConversationCachePersist()
             let conversationID = conversation.id.uuidString
             await openIMConversation(conversationID)
@@ -89,12 +89,12 @@ extension AuthManager {
         ).sorted()
 
         guard !trimmedConversationID.isEmpty else {
-            imConversationStore.setStatusMessage("会话 ID 无效。")
+            await imConversationStore.setStatusMessageAsync("会话 ID 无效。")
             return false
         }
 
         guard !normalizedEmails.isEmpty else {
-            imConversationStore.setStatusMessage("至少需要填写一个成员邮箱。")
+            await imConversationStore.setStatusMessageAsync("至少需要填写一个成员邮箱。")
             return false
         }
 
@@ -104,7 +104,7 @@ extension AuthManager {
                 memberEmails: normalizedEmails
             )
             markServerOnline()
-            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
+            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
             await conversationRuntimeController.loadConversationMembers(for: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
@@ -137,7 +137,7 @@ extension AuthManager {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !trimmedConversationID.isEmpty else {
-            imConversationStore.setStatusMessage("会话 ID 无效。")
+            await imConversationStore.setStatusMessageAsync("会话 ID 无效。")
             return false
         }
 
@@ -150,7 +150,7 @@ extension AuthManager {
                 muteAll: muteAll
             )
             markServerOnline()
-            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
+            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
             scheduleIMConversationCachePersist()
             return true
         } catch {
@@ -166,7 +166,7 @@ extension AuthManager {
     ) async -> Bool {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty else {
-            imConversationStore.setStatusMessage("会话 ID 无效。")
+            await imConversationStore.setStatusMessageAsync("会话 ID 无效。")
             return false
         }
 
@@ -177,7 +177,7 @@ extension AuthManager {
                 isMuted: isMuted
             )
             markServerOnline()
-            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
+            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
             scheduleIMConversationCachePersist()
             return true
         } catch {
@@ -192,7 +192,7 @@ extension AuthManager {
     ) async -> Bool {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty else {
-            imConversationStore.setStatusMessage("会话 ID 无效。")
+            await imConversationStore.setStatusMessageAsync("会话 ID 无效。")
             return false
         }
 
@@ -202,7 +202,7 @@ extension AuthManager {
                 memberUserID: memberUserID
             )
             markServerOnline()
-            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
+            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
             await conversationRuntimeController.loadConversationMembers(for: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
@@ -220,7 +220,7 @@ extension AuthManager {
     ) async -> Bool {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty else {
-            imConversationStore.setStatusMessage("会话 ID 无效。")
+            await imConversationStore.setStatusMessageAsync("会话 ID 无效。")
             return false
         }
 
@@ -231,7 +231,7 @@ extension AuthManager {
                 role: role
             )
             markServerOnline()
-            conversationRuntimeController.applyConversationSummaryReadModel([conversation])
+            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
             await conversationRuntimeController.loadConversationMembers(for: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
@@ -245,7 +245,7 @@ extension AuthManager {
     func leaveIMConversation(_ conversationID: String) async -> Bool {
         let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedConversationID.isEmpty else {
-            imConversationStore.setStatusMessage("会话 ID 无效。")
+            await imConversationStore.setStatusMessageAsync("会话 ID 无效。")
             return false
         }
 
@@ -256,7 +256,7 @@ extension AuthManager {
                 upserts: [],
                 removedConversationIDs: [UUID(uuidString: trimmedConversationID)].compactMap { $0 }
             )
-            imConversationStore.removeConversation(id: trimmedConversationID)
+            await imConversationStore.removeConversationAsync(id: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
         } catch {

@@ -16,7 +16,7 @@ extension ConversationRuntimeController {
         }
 
         guard let connection = imConnection else {
-            let didQueue = imConversationStore.queueOutgoingText(
+            let didQueue = await imConversationStore.queueOutgoingTextAsync(
                 text,
                 conversationID: conversationID,
                 senderUserID: user.id
@@ -31,7 +31,7 @@ extension ConversationRuntimeController {
             return didQueue
         }
 
-        guard let request = imConversationStore.prepareOutgoingText(
+        guard let request = await imConversationStore.prepareOutgoingTextAsync(
             text,
             conversationID: conversationID,
             senderUserID: user.id
@@ -73,7 +73,7 @@ extension ConversationRuntimeController {
         }
 
         guard let connection = imConnection else {
-            let didQueue = imConversationStore.queueOutgoingReply(
+            let didQueue = await imConversationStore.queueOutgoingReplyAsync(
                 reference: reference,
                 text: text,
                 conversationID: conversationID,
@@ -86,7 +86,7 @@ extension ConversationRuntimeController {
             return didQueue
         }
 
-        guard let request = imConversationStore.prepareOutgoingReply(
+        guard let request = await imConversationStore.prepareOutgoingReplyAsync(
             reference: reference,
             text: text,
             conversationID: conversationID,
@@ -113,7 +113,7 @@ extension ConversationRuntimeController {
         }
 
         guard let connection = imConnection else {
-            let didQueue = imConversationStore.queueRetryableOutgoingMessage(
+            let didQueue = await imConversationStore.queueRetryableOutgoingMessageAsync(
                 localMessageID: localMessageID,
                 conversationID: conversationID
             )
@@ -124,7 +124,7 @@ extension ConversationRuntimeController {
             return didQueue
         }
 
-        guard let request = imConversationStore.retryOutgoingMessage(
+        guard let request = await imConversationStore.retryOutgoingMessageAsync(
             localMessageID: localMessageID,
             conversationID: conversationID
         ) else {

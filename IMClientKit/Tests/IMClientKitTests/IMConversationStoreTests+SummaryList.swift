@@ -100,6 +100,73 @@ extension IMConversationStoreTests {
         #expect(store.isLoadingMoreConversationSummaries == false)
     }
 
+    @Test func asyncSummaryWindowUsesClientStateEngineAndProjectsMainActorState() async {
+        let store = IMConversationStore()
+        let firstConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let secondConversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+        let thirdConversationID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
+
+        await store.replaceConversationSummaryWindowAsync(
+            [
+                Self.gapSummary(conversationID: firstConversationID, latestServerSequence: 30),
+                Self.gapSummary(conversationID: secondConversationID, latestServerSequence: 20)
+            ],
+            nextCursor: "cursor-page-2",
+            hasMore: true
+        )
+        store.setLoadingMoreConversationSummaries(true)
+        await store.appendConversationSummaryWindowAsync(
+            [Self.gapSummary(conversationID: thirdConversationID, latestServerSequence: 10)],
+            nextCursor: nil,
+            hasMore: false
+        )
+
+        #expect(store.conversations.map(\.id) == [
+            firstConversationID.uuidString,
+            secondConversationID.uuidString,
+            thirdConversationID.uuidString
+        ])
+        #expect(store.selectedConversationID == firstConversationID.uuidString)
+        #expect(store.conversationSummaryNextCursor == nil)
+        #expect(store.hasMoreConversationSummaries == false)
+        #expect(store.conversationSummaryPaginationAnchorID == thirdConversationID.uuidString)
+        #expect(store.isLoadingMoreConversationSummaries == false)
+    }
+
+    @Test func asyncMessageRemovalUsesClientStateEngineAndProjectsMainActorState() async throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let firstMessage = Self.messageResponse(conversationID: conversationID, serverSequence: 1)
+        let secondMessage = Self.messageResponse(conversationID: conversationID, serverSequence: 2)
+
+        await store.replaceConversationSummaryWindowAsync(
+            [Self.gapSummary(conversationID: conversationID, latestServerSequence: 2)],
+            nextCursor: nil,
+            hasMore: false
+        )
+        store.replaceTimelineItems(
+            in: conversationID.uuidString,
+            messages: [firstMessage, secondMessage],
+            currentUserID: Self.currentUserID
+        )
+
+        await store.removeMessagesAsync(
+            ids: [secondMessage.id.uuidString],
+            from: conversationID.uuidString
+        )
+
+        let conversationAfterRemove = try #require(store.conversations.first)
+        #expect(conversationAfterRemove.messages.map(\.serverMessageID) == [firstMessage.id.uuidString])
+        #expect(conversationAfterRemove.lastMessagePreviewText == "local 1")
+
+        await store.clearMessagesAsync(in: conversationID.uuidString)
+
+        let conversationAfterClear = try #require(store.conversations.first)
+        #expect(conversationAfterClear.messages.isEmpty)
+        #expect(conversationAfterClear.lastMessagePreviewText == "")
+        #expect(conversationAfterClear.unreadCount == 0)
+    }
+
     @Test func appendConversationSummaryWindowAppendsOlderPageAndUpdatesCursor() {
         let store = IMConversationStore()
         let newestConversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
@@ -248,6 +315,109 @@ extension IMConversationStoreTests {
 
         #expect(request != nil)
         #expect(store.draftText(for: matchingConversationID.uuidString).isEmpty)
+    }
+
+    @Test func asyncDraftUpdateUsesClientStateEngineAndProjectsMainActorState() async {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Draft",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_420_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_420_100)
+                )
+            ]
+        )
+
+        await store.updateDraftAsync("Need to send agenda", for: conversationID.uuidString)
+        #expect(store.draftText(for: conversationID.uuidString) == "Need to send agenda")
+        #expect(store.conversations.first?.draftUpdatedAt != nil)
+
+        await store.updateDraftAsync("", for: conversationID.uuidString)
+        #expect(store.draftText(for: conversationID.uuidString).isEmpty)
+        #expect(store.conversations.first?.draftUpdatedAt == nil)
+    }
+
+    @Test func asyncStatusMessageUsesClientStateEngineAndProjectsMainActorState() async {
+        let store = IMConversationStore()
+
+        await store.setStatusMessageAsync("消息内容不能为空。")
+        #expect(store.statusMessage == "消息内容不能为空。")
+
+        await store.setStatusMessageAsync(nil)
+        #expect(store.statusMessage == nil)
+    }
+
+    @Test func asyncLoadingStateUsesClientStateEngineAndProjectsMainActorState() async {
+        let store = IMConversationStore()
+
+        await store.setLoadingConversationsAsync(true)
+        await store.setLoadingMoreConversationSummariesAsync(true)
+        await store.setLoadingMembersAsync(true)
+        await store.setLoadingMessagesAsync(true)
+
+        #expect(store.isLoadingConversations)
+        #expect(store.isLoadingMoreConversationSummaries)
+        #expect(store.isLoadingMembers)
+        #expect(store.isLoadingMessages)
+
+        await store.setLoadingConversationsAsync(false)
+        await store.setLoadingMoreConversationSummariesAsync(false)
+        await store.setLoadingMembersAsync(false)
+        await store.setLoadingMessagesAsync(false)
+
+        #expect(!store.isLoadingConversations)
+        #expect(!store.isLoadingMoreConversationSummaries)
+        #expect(!store.isLoadingMembers)
+        #expect(!store.isLoadingMessages)
+    }
+
+    @Test func resetProjectsEmptyClientSnapshotAndAdvancesMutationGeneration() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+
+        store.replaceConversationSummaryWindow(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Reset Target",
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_420_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_420_100)
+                )
+            ],
+            nextCursor: "next-page",
+            hasMore: true
+        )
+        store.openConversation(id: conversationID.uuidString)
+        store.setStatusMessage("stale status")
+        store.setLoadingConversations(true)
+        store.setLoadingMoreConversationSummaries(true)
+        store.setLoadingMembers(true)
+        store.setLoadingMessages(true)
+        store.setConversationSearchText("reset")
+        let generation = store.conversationMutationGeneration
+
+        store.reset()
+
+        #expect(store.conversations.isEmpty)
+        #expect(store.selectedConversationID == nil)
+        #expect(store.statusMessage == nil)
+        #expect(!store.isLoadingConversations)
+        #expect(store.conversationSummaryNextCursor == nil)
+        #expect(!store.hasMoreConversationSummaries)
+        #expect(!store.isLoadingMoreConversationSummaries)
+        #expect(!store.isLoadingMembers)
+        #expect(!store.isLoadingMessages)
+        #expect(store.searchText.isEmpty)
+        #expect(store.replyJumpState == .idle)
+        #expect(store.conversationMutationGeneration == generation + 1)
     }
 
     @Test func replaceConversationSummariesStoresDirectMessagingState() {

@@ -6,6 +6,7 @@ import Observation
 protocol IMConversationPresentationProviding: AnyObject {
     var imConnectionStatus: AuthManager.IMConnectionStatus { get }
 
+    func conversationIdentityPresentation(for conversationID: String) -> IMConversationIdentityPresentation?
     func conversationIdentityPresentation(for conversation: IMConversation) -> IMConversationIdentityPresentation
     func directPeerRelationshipPresentation(for conversationID: String) -> DirectPeerRelationshipPresentation?
     func directRelationshipNotice(for conversationID: String) -> DirectRelationshipNotice?
@@ -123,6 +124,10 @@ final class IMConversationPresentationStore {
             )
     }
 
+    func conversationIdentityPresentation(for conversationID: String) -> IMConversationIdentityPresentation? {
+        provider?.conversationIdentityPresentation(for: conversationID)
+    }
+
     func directPeerRelationshipPresentation(
         for conversationID: String
     ) -> DirectPeerRelationshipPresentation? {
@@ -202,8 +207,8 @@ final class IMConversationRuntimeStore {
         await provider?.markIMConversationReadUpToLatestLoadedSequence(for: conversationID)
     }
 
-    func markConversationUnread(_ conversationID: String) {
-        provider?.imConversationStore.markConversationUnread(id: conversationID)
+    func markConversationUnread(_ conversationID: String) async {
+        await provider?.imConversationStore.markConversationUnreadAsync(id: conversationID)
         provider?.persistIMConversationCacheSoon()
     }
 

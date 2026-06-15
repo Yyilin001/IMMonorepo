@@ -33,7 +33,7 @@ extension ConversationRuntimeController {
                 memberNickname: memberNickname?.trimmingCharacters(in: .whitespacesAndNewlines)
             )
             markServerOnline()
-            applyConversationSummaryReadModel([conversation])
+            await applyConversationSummaryReadModelAsync([conversation])
             await loadConversationMembers(for: trimmedConversationID)
             scheduleConversationCachePersist()
             return true

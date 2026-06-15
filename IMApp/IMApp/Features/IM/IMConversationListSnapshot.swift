@@ -1,24 +1,57 @@
 import Foundation
 import IMClientKit
 
-struct IMConversationListSnapshot: Equatable {
+/// Trimmed status message safe to render from sheet and list snapshots.
+struct IMConversationStatusSnapshot: Equatable, Sendable {
+    let message: String?
+
+    init(message: String?) {
+        let trimmedMessage = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.message = trimmedMessage.isEmpty ? nil : trimmedMessage
+    }
+}
+
+/// Immutable conversation-list projection consumed by SwiftUI.
+///
+/// Rows and list metadata are committed together so loading, pagination, search,
+/// and active-row state cannot drift between separate store reads during render.
+struct IMConversationListSnapshot: Equatable, Sendable {
     let generation: UInt64
     let filter: IMConversationListFilter
+    let statusMessage: String?
+    let isLoadingConversations: Bool
+    let isLoadingMoreConversationSummaries: Bool
+    let hasMoreConversationSummaries: Bool
+    let searchText: String
     let rows: [IMConversationRowSnapshot]
 
     init(
         generation: UInt64,
         filter: IMConversationListFilter,
+        statusMessage: String? = nil,
+        isLoadingConversations: Bool = false,
+        isLoadingMoreConversationSummaries: Bool = false,
+        hasMoreConversationSummaries: Bool = false,
+        searchText: String = "",
         rows: [IMConversationRowSnapshot]
     ) {
         self.generation = generation
         self.filter = filter
+        self.statusMessage = statusMessage
+        self.isLoadingConversations = isLoadingConversations
+        self.isLoadingMoreConversationSummaries = isLoadingMoreConversationSummaries
+        self.hasMoreConversationSummaries = hasMoreConversationSummaries
+        self.searchText = searchText
         self.rows = rows
     }
 }
 
-struct IMConversationRowSnapshot: Identifiable, Equatable {
-    enum PreviewTone: Equatable {
+/// Stable row value for one conversation in the list.
+///
+/// The row contains only presentation fields and action flags; views should not
+/// reach back into `IMConversation` while rendering a cell.
+struct IMConversationRowSnapshot: Identifiable, Equatable, Sendable {
+    enum PreviewTone: Equatable, Sendable {
         case normal
         case unread
         case draft
@@ -61,12 +94,21 @@ struct IMConversationRowSnapshot: Identifiable, Equatable {
     }
 }
 
+/// Projects store conversations into list snapshots for a selected filter.
+///
+/// Raw conversation objects are accepted only at this boundary and are converted
+/// into stable row values before SwiftUI observes them.
 struct IMConversationListSnapshotBuilder {
     func build(
         conversations: [IMConversation],
         selectedConversationID: String?,
         filter: IMConversationListFilter,
         generation: UInt64,
+        statusMessage: String? = nil,
+        isLoadingConversations: Bool = false,
+        isLoadingMoreConversationSummaries: Bool = false,
+        hasMoreConversationSummaries: Bool = false,
+        searchText: String = "",
         identityForConversation: (IMConversation) -> IMConversationIdentityPresentation,
         queueSummaryForConversationID: (String) -> IMConversationQueueSummary
     ) -> IMConversationListSnapshot {
@@ -83,6 +125,11 @@ struct IMConversationListSnapshotBuilder {
         return IMConversationListSnapshot(
             generation: generation,
             filter: filter,
+            statusMessage: statusMessage,
+            isLoadingConversations: isLoadingConversations,
+            isLoadingMoreConversationSummaries: isLoadingMoreConversationSummaries,
+            hasMoreConversationSummaries: hasMoreConversationSummaries,
+            searchText: searchText,
             rows: displayedConversations.map { conversation in
                 let identity = identityForConversation(conversation)
                 let queueSummary = queueSummaryForConversationID(conversation.id)
@@ -159,6 +206,11 @@ extension IMConversationStore {
             selectedConversationID: selectedConversationID,
             filter: filter,
             generation: conversationMutationGeneration,
+            statusMessage: statusMessage,
+            isLoadingConversations: isLoadingConversations,
+            isLoadingMoreConversationSummaries: isLoadingMoreConversationSummaries,
+            hasMoreConversationSummaries: hasMoreConversationSummaries,
+            searchText: searchText,
             identityForConversation: identityForConversation,
             queueSummaryForConversationID: { conversationID in
                 self.queueSummary(for: conversationID)

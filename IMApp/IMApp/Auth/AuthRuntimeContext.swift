@@ -9,6 +9,7 @@ struct AuthManagerDependencies {
     let imConversationCache: IMConversationCacheHandler
     let contactStateCache: ContactStateCacheHandler
     let shouldRestoreSession: Bool
+    var timelineCatchUpConfiguration: ConversationRuntimeController.TimelineCatchUpConfiguration = .production
 }
 
 @MainActor
@@ -35,6 +36,7 @@ struct AuthRuntimeContext {
     let setConnectionStatus: (AuthManager.IMConnectionStatus) -> Void
     let setQueuedFlushActive: (Bool) -> Void
     let backgroundTransferMonitor: any BackgroundTransferMonitoring
+    var timelineCatchUpConfiguration: ConversationRuntimeController.TimelineCatchUpConfiguration = .production
 }
 
 @MainActor
@@ -62,7 +64,8 @@ enum ConversationRuntimeFactory {
             applyContactDomainEvent: context.applyContactDomainEvent,
             setConnectionStatus: context.setConnectionStatus,
             setQueuedFlushActive: context.setQueuedFlushActive,
-            backgroundTransferMonitor: context.backgroundTransferMonitor
+            backgroundTransferMonitor: context.backgroundTransferMonitor,
+            timelineCatchUpConfiguration: context.timelineCatchUpConfiguration
         )
     }
 }

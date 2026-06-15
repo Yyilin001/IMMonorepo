@@ -96,6 +96,26 @@ actor IMReadSequenceRecorder {
     }
 }
 
+actor IMClientHealthReportRecorder {
+    private var reasons: [String] = []
+
+    func record(_ request: URLRequest) throws {
+        let payload = try JSONDecoder().decode(
+            IMClientHealthReportRequestBody.self,
+            from: request.httpBody ?? Data()
+        )
+        reasons.append(payload.reason)
+    }
+
+    func allReasons() -> [String] {
+        reasons
+    }
+
+    func count(for reason: String) -> Int {
+        reasons.filter { $0 == reason }.count
+    }
+}
+
 actor IMConversationMutationState {
     private var didMutate = false
 

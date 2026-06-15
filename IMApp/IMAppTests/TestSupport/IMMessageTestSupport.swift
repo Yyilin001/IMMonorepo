@@ -90,6 +90,7 @@ enum TestConversationEventType: String {
     case membersUpdated = "members_updated"
     case conversationRemovedForSelf = "conversation_removed_for_self"
     case summaryUpdated = "summary_updated"
+    case conversationActivityHint = "conversation_activity_hint"
     case messageUpdated = "message_updated"
     case messageRecalled = "message_recalled"
     case messageVisibilityChanged = "message_visibility_changed"
@@ -114,6 +115,7 @@ struct TestConversationEventPayload {
     let favoriteChangedMessageID: UUID?
     let isFavorited: Bool?
     let visibilityAction: IMTCPConversationVisibilityAction?
+    let activityHint: IMConversationActivityHintResponseBody?
 
     init(
         eventType: TestConversationEventType,
@@ -125,7 +127,8 @@ struct TestConversationEventPayload {
         messageIDs: [UUID] = [],
         favoriteChangedMessageID: UUID? = nil,
         isFavorited: Bool? = nil,
-        visibilityAction: IMTCPConversationVisibilityAction? = nil
+        visibilityAction: IMTCPConversationVisibilityAction? = nil,
+        activityHint: IMConversationActivityHintResponseBody? = nil
     ) {
         self.eventType = eventType
         self.conversation = conversation
@@ -137,6 +140,7 @@ struct TestConversationEventPayload {
         self.favoriteChangedMessageID = favoriteChangedMessageID
         self.isFavorited = isFavorited
         self.visibilityAction = visibilityAction
+        self.activityHint = activityHint
     }
 }
 
@@ -276,6 +280,9 @@ extension IMTCPConnectionEvent {
         case .conversationRemovedForSelf:
             eventType = .conversationRemovedForSelf
             body = .conversationRemovedForSelf
+        case .conversationActivityHint:
+            eventType = .conversationActivityHint
+            body = .conversationActivityHint(payload.activityHint ?? payload.derivedActivityHint())
         case .conversationSettingsChanged:
             eventType = .conversationSettingsChanged
             body = .conversationChanged
@@ -318,10 +325,13 @@ extension IMTCPConnectionEvent {
                 eventType: eventType,
                 aggregateType: "conversation",
                 aggregateID: payload.conversation.id,
-                aggregateSequence: max(payload.message?.serverSequence ?? 1, 1),
+                aggregateSequence: max(
+                    payload.activityHint?.serverSequence ?? UInt64(payload.message?.serverSequence ?? 1),
+                    1
+                ),
                 occurredAt: payload.serverTimestamp,
                 actorUserID: payload.actorUserID,
-                conversation: payload.conversation,
+                conversation: eventType == .conversationActivityHint ? nil : payload.conversation,
                 body: body
             )
         )
@@ -375,6 +385,25 @@ private extension IMMessageContent {
         default:
             return .plain(textValue ?? "")
         }
+    }
+}
+
+private extension TestConversationEventPayload {
+    func derivedActivityHint() -> IMConversationActivityHintResponseBody {
+        let preview = conversation.lastMessage
+        let messageID = preview?.id ?? message?.id ?? UUID()
+        let senderUserID = preview?.senderUserID ?? message?.senderUserID ?? actorUserID ?? UUID()
+        let serverSequence = preview?.serverSequence ?? UInt64(message?.serverSequence ?? 1)
+        let timelineSequence = preview?.timelineSequence ?? UInt64(message?.timelineSequence ?? message?.serverSequence ?? 1)
+        return IMConversationActivityHintResponseBody(
+            messageID: messageID,
+            senderUserID: senderUserID,
+            serverSequence: serverSequence,
+            timelineSequence: timelineSequence,
+            previewText: preview?.previewText ?? message?.content.previewText ?? "",
+            messageCreatedAt: preview?.createdAt ?? message?.createdAt,
+            updatedAt: conversation.updatedAt
+        )
     }
 }
 

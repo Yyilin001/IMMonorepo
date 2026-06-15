@@ -28,6 +28,8 @@ final class ConversationRuntimeController {
     let setConnectionStatus: (AuthManager.IMConnectionStatus) -> Void
     let setQueuedFlushActive: (Bool) -> Void
     let backgroundTransferMonitor: any BackgroundTransferMonitoring
+    let foregroundSyncIntervals: ForegroundSyncIntervals
+    let timelineCatchUpConfiguration: TimelineCatchUpConfiguration
     let transferProjectionState = TransferProjectionState()
 
     lazy var connectionCoordinator = IMConnectionCoordinator(runtime: self)
@@ -44,10 +46,12 @@ final class ConversationRuntimeController {
     var imConversationMembersTask: Task<Void, Never>?
     var imConversationMessagesTask: Task<Void, Never>?
     var imConversationRefreshTask: Task<Void, Never>?
+    var pendingConversationSummaryRefreshRequest: ConversationSummaryRefreshRequest?
     var mediaUploadRecoveryTasks: [String: Task<Void, Never>] = [:]
     var mediaDownloadBackgroundObserveTask: Task<Void, Never>?
     var mediaTransferStore = TransferStore()
     var lastClientHealthReportAt: Date?
+    var lastTimelineCatchUpHealthReportAt: Date?
 
     init(
         sessionClient: SessionClient,
@@ -71,7 +75,9 @@ final class ConversationRuntimeController {
         applyContactDomainEvent: @escaping (IMTCPChatDomainEventPayload) -> Void,
         setConnectionStatus: @escaping (AuthManager.IMConnectionStatus) -> Void,
         setQueuedFlushActive: @escaping (Bool) -> Void,
-        backgroundTransferMonitor: any BackgroundTransferMonitoring
+        backgroundTransferMonitor: any BackgroundTransferMonitoring,
+        foregroundSyncIntervals: ForegroundSyncIntervals = .production,
+        timelineCatchUpConfiguration: TimelineCatchUpConfiguration = .production
     ) {
         self.sessionClient = sessionClient
         self.openIMConnection = openIMConnection
@@ -95,6 +101,8 @@ final class ConversationRuntimeController {
         self.setConnectionStatus = setConnectionStatus
         self.setQueuedFlushActive = setQueuedFlushActive
         self.backgroundTransferMonitor = backgroundTransferMonitor
+        self.foregroundSyncIntervals = foregroundSyncIntervals
+        self.timelineCatchUpConfiguration = timelineCatchUpConfiguration
         startObservingBackgroundMediaDownloads()
     }
 
@@ -104,6 +112,35 @@ final class ConversationRuntimeController {
 
     var imConnectionGeneration: UInt64 {
         connectionCoordinator.generation
+    }
+
+    func reportConversationActivity(conversationID: String, isActive: Bool) async {
+        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedConversationID.isEmpty,
+              let connection = imConnection
+        else {
+            return
+        }
+
+        do {
+            try await connection.sendConversationActivity(
+                conversationID: trimmedConversationID,
+                isActive: isActive
+            )
+        } catch {
+            await connectionCoordinator.handleFailure(error, generation: imConnectionGeneration)
+        }
+    }
+
+    func reportSelectedConversationActivity(isActive: Bool) async {
+        guard let selectedConversationID = imConversationStore.selectedConversationID else {
+            return
+        }
+
+        await reportConversationActivity(
+            conversationID: selectedConversationID,
+            isActive: isActive
+        )
     }
 
     func syncConversationAfterOpen(_ conversationID: String) async {
@@ -119,6 +156,8 @@ final class ConversationRuntimeController {
             enqueueConversationGapSyncCatchUp(for: conversationID, prioritize: true)
             await markConversationReadIfSelectedUpToLatestLoadedSequence(for: conversationID)
             syncActiveMessageStreamSnapshots()
+        case .deferred:
+            enqueueConversationGapSyncCatchUp(for: conversationID, prioritize: true)
         case .failed:
             return
         }
@@ -159,10 +198,7 @@ final class ConversationRuntimeController {
             return
         }
 
-        imConversationStore.setLoadingMoreConversationSummaries(true)
-        defer {
-            imConversationStore.setLoadingMoreConversationSummaries(false)
-        }
+        await imConversationStore.setLoadingMoreConversationSummariesAsync(true)
 
         do {
             let response = try await sessionClient.fetchIMConversationSummaries(
@@ -171,19 +207,22 @@ final class ConversationRuntimeController {
                 kind: kind
             )
             guard currentUserProvider()?.id == user.id else {
+                await imConversationStore.setLoadingMoreConversationSummariesAsync(false)
                 return
             }
 
             markServerOnline()
-            imConversationStore.appendConversationSummaryWindow(
+            await imConversationStore.appendConversationSummaryWindowAsync(
                 response.items,
                 nextCursor: response.nextCursor,
                 hasMore: response.hasMore
             )
             setLatestConversationSummaries(latestConversationSummariesProvider() + response.items)
             scheduleConversationCachePersist()
+            await imConversationStore.setLoadingMoreConversationSummariesAsync(false)
         } catch {
             await handleIMDataRequestError(error)
+            await imConversationStore.setLoadingMoreConversationSummariesAsync(false)
         }
     }
 
@@ -233,7 +272,7 @@ final class ConversationRuntimeController {
                 }
 
                 self.markServerOnline()
-                self.imConversationStore.applyMemberPage(
+                await self.imConversationStore.applyMemberPageAsync(
                     membersPage,
                     in: trimmedConversationID,
                     query: normalizedQuery,
@@ -291,7 +330,7 @@ final class ConversationRuntimeController {
             }
 
             markServerOnline()
-            imConversationStore.applyMemberPage(
+            await imConversationStore.applyMemberPageAsync(
                 membersPage,
                 in: trimmedConversationID,
                 query: query,
@@ -473,32 +512,72 @@ final class ConversationRuntimeController {
     }
 
     func scheduleConversationSummaryReadModelCorrection(force: Bool = false) {
-        imConversationRefreshTask?.cancel()
+        scheduleConversationSummaryReadModelCorrection(
+            ConversationSummaryRefreshRequest(
+                force: force,
+                bypassMinimumInterval: force,
+                debounceNanoseconds: force ? 0 : HistoryConfig.summaryRefreshDebounceNanoseconds
+            )
+        )
+    }
+
+    func scheduleLightweightConversationSummaryReadModelCorrection() {
+        scheduleConversationSummaryReadModelCorrection(
+            ConversationSummaryRefreshRequest(
+                force: false,
+                bypassMinimumInterval: true,
+                debounceNanoseconds: HistoryConfig.summaryRefreshDebounceNanoseconds
+            )
+        )
+    }
+
+    private func scheduleConversationSummaryReadModelCorrection(_ request: ConversationSummaryRefreshRequest) {
+        if var pending = pendingConversationSummaryRefreshRequest {
+            pending.merge(request)
+            pendingConversationSummaryRefreshRequest = pending
+        } else {
+            pendingConversationSummaryRefreshRequest = request
+        }
+
+        guard imConversationRefreshTask == nil else {
+            return
+        }
+
         imConversationRefreshTask = Task { [weak self] in
             guard let self else {
                 return
             }
 
-            if !force {
-                try? await Task.sleep(nanoseconds: HistoryConfig.summaryRefreshDebounceNanoseconds)
-            }
+            while true {
+                guard let request = self.pendingConversationSummaryRefreshRequest else {
+                    self.imConversationRefreshTask = nil
+                    return
+                }
+                self.pendingConversationSummaryRefreshRequest = nil
 
-            guard !Task.isCancelled else {
-                return
-            }
+                if request.debounceNanoseconds > 0 {
+                    try? await Task.sleep(nanoseconds: request.debounceNanoseconds)
+                }
 
-            _ = await self.reconcileConversationSummaryReadModel(force: force)
-            self.imConversationRefreshTask = nil
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                _ = await self.reconcileConversationSummaryReadModel(
+                    force: request.force,
+                    respectMinimumInterval: !request.bypassMinimumInterval
+                )
+            }
         }
     }
 
-    func applyConversationSummaryReadModel(_ conversations: [IMConversationSummaryResponseBody]) {
+    func applyConversationSummaryReadModelAsync(_ conversations: [IMConversationSummaryResponseBody]) async {
         applyLatestConversationSummaryChanges(
             upserts: conversations,
             removedConversationIDs: []
         )
         imConversationStore.replaceConversationSummaries(conversations)
-        imConversationStore.applyServerSummaryReadStates(conversations)
+        await imConversationStore.applyServerSummaryReadStatesAsync(conversations)
         scheduleConversationCachePersist()
     }
 
@@ -532,10 +611,12 @@ final class ConversationRuntimeController {
     @discardableResult
     func reconcileConversationSummaryReadModel(
         force: Bool = true,
-        kind: IMConversationKind? = nil
+        kind: IMConversationKind? = nil,
+        respectMinimumInterval: Bool = true
     ) async -> Bool {
         if kind == nil,
            !force,
+           respectMinimumInterval,
            let lastRefreshAt = conversationSummaryRefreshAtProvider(),
            !imConversationStore.conversations.isEmpty,
            Date().timeIntervalSince(lastRefreshAt) < HistoryConfig.minimumSummaryRefreshInterval {
@@ -553,10 +634,7 @@ final class ConversationRuntimeController {
             return false
         }
 
-        imConversationStore.setLoadingConversations(true)
-        defer {
-            imConversationStore.setLoadingConversations(false)
-        }
+        await imConversationStore.setLoadingConversationsAsync(true)
 
         do {
             let didRefresh: Bool
@@ -570,13 +648,16 @@ final class ConversationRuntimeController {
             }
 
             guard currentUserProvider()?.id == user.id else {
+                await imConversationStore.setLoadingConversationsAsync(false)
                 return false
             }
             markServerOnline()
             setConversationSummaryRefreshAt(Date())
+            await imConversationStore.setLoadingConversationsAsync(false)
             return didRefresh
         } catch {
             await handleIMDataRequestError(error)
+            await imConversationStore.setLoadingConversationsAsync(false)
             return false
         }
     }
@@ -598,12 +679,12 @@ final class ConversationRuntimeController {
             setConversationSummarySyncToken(response.snapshotToken)
         }
         setLatestConversationSummaries(response.items)
-        imConversationStore.replaceConversationSummaryWindow(
+        await imConversationStore.replaceConversationSummaryWindowAsync(
             response.items,
             nextCursor: response.nextCursor,
             hasMore: response.hasMore
         )
-        imConversationStore.applyServerSummaryReadStates(response.items)
+        await imConversationStore.applyServerSummaryReadStatesAsync(response.items)
         scheduleConversationCachePersist()
         return true
     }
@@ -631,7 +712,7 @@ final class ConversationRuntimeController {
                 upserts: response.upserts,
                 removedConversationIDs: response.removedConversationIDs
             )
-            imConversationStore.applyServerSummaryReadStates(response.upserts)
+            await imConversationStore.applyServerSummaryReadStatesAsync(response.upserts)
             upserts.append(contentsOf: response.upserts)
             removedConversationIDs.append(contentsOf: response.removedConversationIDs)
             targetToken = response.targetToken
@@ -663,11 +744,7 @@ final class ConversationRuntimeController {
                 return
             }
 
-            self.imConversationStore.setLoadingMessages(true)
-            defer {
-                self.imConversationStore.setLoadingMessages(false)
-                self.imConversationMessagesTask = nil
-            }
+            await self.imConversationStore.setLoadingMessagesAsync(true)
 
             do {
                 let response = try await self.sessionClient.fetchIMTimeline(
@@ -676,9 +753,13 @@ final class ConversationRuntimeController {
                     limit: HistoryConfig.latestHistoryLimit
                 )
                 guard self.currentUserProvider()?.id == currentUserID else {
+                    await self.imConversationStore.setLoadingMessagesAsync(false)
+                    self.imConversationMessagesTask = nil
                     return
                 }
                 guard self.imConversationStore.containsConversation(id: conversationID) else {
+                    await self.imConversationStore.setLoadingMessagesAsync(false)
+                    self.imConversationMessagesTask = nil
                     return
                 }
 
@@ -699,8 +780,12 @@ final class ConversationRuntimeController {
                     )
                 }
                 self.scheduleConversationCachePersist()
+                await self.imConversationStore.setLoadingMessagesAsync(false)
+                self.imConversationMessagesTask = nil
             } catch {
                 await self.handleIMDataRequestError(error)
+                await self.imConversationStore.setLoadingMessagesAsync(false)
+                self.imConversationMessagesTask = nil
             }
         }
 

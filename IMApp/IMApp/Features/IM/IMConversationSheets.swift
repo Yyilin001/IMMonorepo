@@ -1,6 +1,115 @@
 import SwiftUI
 import IMClientKit
 
+/// Favorite-message row rendered by the favorites sheet.
+struct IMFavoriteMessageSnapshot: Identifiable, Equatable, Sendable {
+    let id: String
+    let conversationID: String
+    let messageID: String
+    let title: String
+    let iconName: String
+    let previewText: String
+    let createdAtText: String
+
+    init(message: IMConversationMessageResponseBody, title: String) {
+        let messageID = message.id.uuidString
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.id = messageID
+        self.conversationID = message.conversationID.uuidString
+        self.messageID = messageID
+        self.title = trimmedTitle.isEmpty ? "会话" : trimmedTitle
+        self.iconName = Self.iconName(for: message.content)
+        self.previewText = message.previewText
+        self.createdAtText = message.createdAt?.formatted(date: .abbreviated, time: .shortened) ?? "时间未知"
+    }
+
+    private static func iconName(for content: IMMessageContent) -> String {
+        switch content {
+        case .richText:
+            return "text.bubble"
+        case .reply:
+            return "arrowshape.turn.up.left"
+        case .image:
+            return "photo"
+        case .audio:
+            return "waveform"
+        case .file:
+            return "doc"
+        }
+    }
+}
+
+/// Stable conversation title used by sheets that receive message-only data.
+struct IMConversationTitleSnapshot: Identifiable, Equatable, Sendable {
+    let id: String
+    let title: String
+
+    init(conversation: IMConversation) {
+        id = conversation.id
+        let trimmedTitle = conversation.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        title = trimmedTitle.isEmpty ? "会话" : trimmedTitle
+    }
+}
+
+/// Builds a title lookup so sheets do not repeatedly read raw conversations in body.
+struct IMConversationTitleSnapshotBuilder {
+    func build(conversations: [IMConversation]) -> [String: String] {
+        Dictionary(
+            uniqueKeysWithValues: conversations.map { conversation in
+                let snapshot = IMConversationTitleSnapshot(conversation: conversation)
+                return (snapshot.id, snapshot.title)
+            }
+        )
+    }
+}
+
+/// Forward-target row rendered by the message forward picker.
+struct IMForwardConversationCandidateSnapshot: Identifiable, Equatable, Sendable {
+    let id: String
+    let title: String
+    let previewText: String
+
+    init(conversation: IMConversation) {
+        id = conversation.id
+
+        let trimmedTitle = conversation.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        title = trimmedTitle.isEmpty ? "会话" : trimmedTitle
+
+        let trimmedPreview = conversation.lastMessagePreviewText.trimmingCharacters(in: .whitespacesAndNewlines)
+        previewText = trimmedPreview.isEmpty ? "\(conversation.memberCount) 位成员" : trimmedPreview
+    }
+}
+
+/// Builds sorted forward candidates at the sheet refresh boundary.
+struct IMForwardConversationCandidateSnapshotBuilder {
+    func build(
+        conversations: [IMConversation],
+        excluding sourceConversationID: String
+    ) -> [IMForwardConversationCandidateSnapshot] {
+        conversations
+            .filter { $0.id != sourceConversationID }
+            .sorted {
+                if $0.updatedAt == $1.updatedAt {
+                    return $0.id < $1.id
+                }
+                return $0.updatedAt > $1.updatedAt
+            }
+            .map(IMForwardConversationCandidateSnapshot.init)
+    }
+}
+
+@MainActor
+extension IMConversationStore {
+    func forwardConversationCandidateSnapshots(
+        excluding sourceConversationID: String
+    ) -> [IMForwardConversationCandidateSnapshot] {
+        IMForwardConversationCandidateSnapshotBuilder().build(
+            conversations: conversations,
+            excluding: sourceConversationID
+        )
+    }
+}
+
 struct IMFavoritesSheet: View {
     @Environment(\.dismiss) var dismiss
 
@@ -9,11 +118,12 @@ struct IMFavoritesSheet: View {
 
     let onSelect: (String, String) -> Void
 
-    @State var messages: [IMConversationMessageResponseBody] = []
+    @State var messages: [IMFavoriteMessageSnapshot] = []
     @State var nextCursor: String?
     @State var hasMore = false
     @State var isLoading = false
     @State var statusMessage: String?
+    @State var titleSnapshotByConversationID: [String: String] = [:]
 
     var body: some View {
         List {
@@ -29,16 +139,16 @@ struct IMFavoritesSheet: View {
                 ContentUnavailableView("暂无收藏", systemImage: "star", description: Text("收藏后的消息会出现在这里。"))
             } else {
                 Section {
-                    ForEach(messages, id: \.id) { message in
+                    ForEach(messages) { message in
                         Button {
-                            onSelect(message.conversationID.uuidString, message.id.uuidString)
+                            onSelect(message.conversationID, message.messageID)
                         } label: {
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack(spacing: 8) {
-                                    Image(systemName: iconName(for: message.content))
+                                    Image(systemName: message.iconName)
                                         .foregroundStyle(.secondary)
 
-                                    Text(title(for: message))
+                                    Text(message.title)
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(.primary)
                                         .lineLimit(1)
@@ -49,7 +159,7 @@ struct IMFavoritesSheet: View {
                                     .foregroundStyle(.secondary)
                                     .lineLimit(2)
 
-                                Text(message.createdAt?.formatted(date: .abbreviated, time: .shortened) ?? "时间未知")
+                                Text(message.createdAtText)
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
                             }
@@ -83,9 +193,13 @@ struct IMFavoritesSheet: View {
             }
         }
         .task {
+            refreshTitleSnapshots()
             if messages.isEmpty {
                 await reload()
             }
+        }
+        .onChange(of: conversationStore.conversationMutationGeneration) { _, _ in
+            refreshTitleSnapshots()
         }
         .refreshable {
             await reload()
@@ -104,6 +218,7 @@ struct IMFavoritesSheet: View {
             return
         }
 
+        refreshTitleSnapshots()
         isLoading = true
         defer { isLoading = false }
 
@@ -113,34 +228,26 @@ struct IMFavoritesSheet: View {
         }
 
         statusMessage = nil
-        messages.append(contentsOf: page.items)
+        messages.append(
+            contentsOf: page.items.map { message in
+                IMFavoriteMessageSnapshot(
+                    message: message,
+                    title: title(forConversationID: message.conversationID.uuidString)
+                )
+            }
+        )
         nextCursor = page.nextCursor
         hasMore = page.hasMore
     }
 
-    func title(for message: IMConversationMessageResponseBody) -> String {
-        conversationStore.conversations
-            .first { $0.id == message.conversationID.uuidString }
-            .map { conversation in
-                conversation.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "会话"
-                    : conversation.title
-            } ?? "会话"
+    func refreshTitleSnapshots() {
+        titleSnapshotByConversationID = IMConversationTitleSnapshotBuilder().build(
+            conversations: conversationStore.conversations
+        )
     }
 
-    func iconName(for content: IMMessageContent) -> String {
-        switch content {
-        case .richText:
-            return "text.bubble"
-        case .reply:
-            return "arrowshape.turn.up.left"
-        case .image:
-            return "photo"
-        case .audio:
-            return "waveform"
-        case .file:
-            return "doc"
-        }
+    func title(forConversationID conversationID: String) -> String {
+        titleSnapshotByConversationID[conversationID] ?? "会话"
     }
 }
 
@@ -154,14 +261,9 @@ struct IMForwardMessagePickerSheet: View {
     let onForward: ([String]) async -> Bool
 
     @State var selectedConversationIDs: Set<String> = []
+    @State var candidates: [IMForwardConversationCandidateSnapshot] = []
     @State var isForwarding = false
     @State var statusMessage: String?
-
-    var candidates: [IMConversation] {
-        conversationStore.conversations
-            .filter { $0.id != sourceConversationID }
-            .sorted { $0.updatedAt > $1.updatedAt }
-    }
 
     var body: some View {
         List {
@@ -191,7 +293,7 @@ struct IMForwardMessagePickerSheet: View {
                                         .foregroundStyle(.primary)
                                         .lineLimit(1)
 
-                                    Text(conversation.lastMessagePreviewText.isEmpty ? "\(conversation.memberCount) 位成员" : conversation.lastMessagePreviewText)
+                                    Text(conversation.previewText)
                                         .font(.footnote)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
@@ -226,6 +328,18 @@ struct IMForwardMessagePickerSheet: View {
                 .disabled(selectedConversationIDs.isEmpty || isForwarding)
             }
         }
+        .onAppear {
+            refreshCandidates()
+        }
+        .onChange(of: conversationStore.conversationMutationGeneration) { _, _ in
+            refreshCandidates()
+        }
+    }
+
+    func refreshCandidates() {
+        candidates = conversationStore.forwardConversationCandidateSnapshots(excluding: sourceConversationID)
+        let candidateIDs = Set(candidates.map(\.id))
+        selectedConversationIDs.formIntersection(candidateIDs)
     }
 
     func toggle(_ conversationID: String) {

@@ -1,6 +1,6 @@
 import Foundation
 
-struct ConversationListStore {
+struct ConversationListStore: Sendable {
     func replaceSummaryWindow(
         _ responses: [IMConversationSummaryResponseBody],
         conversations: inout [IMConversation],
@@ -81,56 +81,6 @@ struct ConversationListStore {
                     || !conversations.contains(where: { $0.id == selectedConversationID }) {
             selectedConversationID = conversations.first?.id
         }
-    }
-
-    func applyServerSummaryReadState(
-        lastReadSequence: UInt64,
-        unreadCount: Int,
-        for conversationID: String,
-        conversations: inout [IMConversation],
-        reconciledLocalUnreadDelta: (String, UInt64, Int, Int, UInt64, Int) -> Int
-    ) {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty,
-              let index = conversations.firstIndex(where: { $0.id == trimmedConversationID })
-        else {
-            return
-        }
-
-        let previousServerLastReadSequence = conversations[index].serverLastReadSequence
-        let previousServerUnreadCount = conversations[index].serverUnreadCount
-        let previousLocalUnreadDelta = conversations[index].localUnreadDelta
-        conversations[index].serverLastReadSequence = lastReadSequence
-        conversations[index].serverUnreadCount = max(0, unreadCount)
-        conversations[index].localUnreadDelta = reconciledLocalUnreadDelta(
-            trimmedConversationID,
-            previousServerLastReadSequence,
-            previousServerUnreadCount,
-            previousLocalUnreadDelta,
-            lastReadSequence,
-            max(0, unreadCount)
-        )
-    }
-
-    func applyRealtimeUnreadIncrement(
-        for conversationID: String,
-        conversations: inout [IMConversation],
-        selectedConversationID: String?,
-        resetUnreadState: (Int, inout [IMConversation]) -> Void
-    ) {
-        let trimmedConversationID = conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedConversationID.isEmpty,
-              let index = conversations.firstIndex(where: { $0.id == trimmedConversationID })
-        else {
-            return
-        }
-
-        guard selectedConversationID != trimmedConversationID else {
-            resetUnreadState(index, &conversations)
-            return
-        }
-
-        conversations[index].localUnreadDelta += 1
     }
 
     func applyConversationPreferences(

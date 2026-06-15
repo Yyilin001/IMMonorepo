@@ -57,6 +57,13 @@ enum IMSelectionActionState: Equatable {
     case deleting
 }
 
+struct IMConversationListObservedStoreMetadata: Equatable {
+    let statusMessage: String?
+    let isLoadingConversations: Bool
+    let isLoadingMoreConversationSummaries: Bool
+    let hasMoreConversationSummaries: Bool
+}
+
 enum IMConversationRelationshipActionKey: Hashable, Sendable {
     case sendRequest(String)
     case accept(String)
@@ -67,7 +74,7 @@ enum IMConversationRelationshipActionKey: Hashable, Sendable {
     case report(UUID)
 }
 
-enum IMConversationListFilter: String, CaseIterable, Identifiable {
+enum IMConversationListFilter: String, CaseIterable, Identifiable, Sendable {
     case all
     case unread
     case groups
@@ -118,6 +125,13 @@ struct IMConversationView: View {
     @State var isPresentingFavorites = false
     @State var conversationListFilter: IMConversationListFilter = .all
     @State var pendingListAction: IMConversationListPendingAction?
+    @State var observedConversationListSnapshot = IMConversationListSnapshot(
+        generation: 0,
+        filter: .all,
+        rows: []
+    )
+    @State var observedConversationListRevision: UInt64 = 0
+    @State var snapshotCommitPipeline = IMConversationSnapshotCommitPipeline()
 
     var body: some View {
         conversationList
@@ -131,19 +145,25 @@ struct IMConversationView: View {
         }
         .listStyle(.insetGrouped)
         .onAppear {
-            refreshConversationListSnapshot(reason: "appear")
+            refreshConversationListSnapshot(invalidation: .appear)
+        }
+        .task {
+            await observeConversationListSnapshotEvents()
         }
         .onChange(of: conversationStore.conversationMutationGeneration) { _, generation in
-            refreshConversationListSnapshot(reason: "generationChanged:\(generation)")
+            refreshConversationListSnapshot(invalidation: .conversationGenerationChanged(generation))
         }
         .onChange(of: conversationStore.selectedConversationID) { _, selectedConversationID in
-            refreshConversationListSnapshot(reason: "selectedChanged:\(selectedConversationID ?? "nil")")
+            refreshConversationListSnapshot(invalidation: .selectedConversationChanged(selectedConversationID))
         }
         .onChange(of: conversationStore.searchText) { _, searchText in
-            refreshConversationListSnapshot(reason: "searchChanged:\(searchText)")
+            refreshConversationListSnapshot(invalidation: .searchChanged(searchText))
         }
         .onChange(of: conversationListFilter) { _, filter in
-            refreshConversationListSnapshot(reason: "filterChanged:\(filter.rawValue)")
+            refreshConversationListSnapshot(invalidation: .filterChanged(filter))
+        }
+        .onChange(of: conversationListObservedStoreMetadata) { _, _ in
+            refreshConversationListSnapshot(invalidation: .listMetadataChanged)
         }
         .navigationTitle("消息")
         .background(AppSurface.groupedBackground)
@@ -155,12 +175,18 @@ struct IMConversationView: View {
             prompt: "搜索会话、公告、预览"
         )
         .task {
-            if conversationStore.conversations.isEmpty {
+            if conversationListSnapshot.generation == 0,
+               conversationListSnapshot.rows.isEmpty {
                 await reloadConversationsForCurrentFilter()
             }
         }
         .refreshable {
             await reloadConversationsForCurrentFilter()
+        }
+        .onDisappear {
+            Task { @MainActor in
+                await snapshotCommitPipeline.cancelPending(in: snapshotStore)
+            }
         }
         .onChange(of: conversationListFilter) { _, newValue in
             Task {
@@ -176,7 +202,7 @@ struct IMConversationView: View {
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                .disabled(conversationStore.isLoadingConversations)
+                .disabled(conversationListSnapshot.isLoadingConversations)
                 .accessibilityIdentifier("messages.refreshButton")
 
                 Button {
@@ -266,7 +292,7 @@ struct IMConversationView: View {
 
     @ViewBuilder
     var storeStatusSection: some View {
-        if let message = conversationStore.statusMessage, !message.isEmpty {
+        if let message = conversationListSnapshot.statusMessage, !message.isEmpty {
             Section {
                 AppStatusBanner(message: message, tone: .info)
                     .accessibilityIdentifier("messages.status")
@@ -295,7 +321,7 @@ struct IMConversationView: View {
         } header: {
             AppSectionHeader(
                 title: "最近会话",
-                detail: conversationStore.isLoadingConversations ? "同步中" : conversationCountText
+                detail: conversationListSnapshot.isLoadingConversations ? "同步中" : conversationCountText
             )
         }
     }
@@ -317,7 +343,7 @@ struct IMConversationView: View {
 
     @ViewBuilder
     var historicalConversationLoader: some View {
-        if conversationStore.isLoadingMoreConversationSummaries {
+        if conversationListSnapshot.isLoadingMoreConversationSummaries {
             HStack {
                 Spacer()
                 ProgressView()
@@ -325,7 +351,7 @@ struct IMConversationView: View {
                 Spacer()
             }
             .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-        } else if conversationStore.hasMoreConversationSummaries {
+        } else if conversationListSnapshot.hasMoreConversationSummaries {
             Button {
                 loadMoreHistoricalConversations()
             } label: {
@@ -333,7 +359,7 @@ struct IMConversationView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
-            .disabled(conversationStore.isLoadingMoreConversationSummaries)
+            .disabled(conversationListSnapshot.isLoadingMoreConversationSummaries)
             .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
             .onAppear {
                 loadMoreHistoricalConversations()
@@ -377,31 +403,102 @@ struct IMConversationView: View {
     }
 
     var conversationListSnapshot: IMConversationListSnapshot {
-        snapshotStore.listSnapshot
+        observedConversationListSnapshot
     }
 
-    func refreshConversationListSnapshot(reason: String) {
-        let commit = snapshotStore.commitListSnapshot(
-            from: conversationStore,
-            filter: conversationListFilter,
-            identityForConversation: { conversation in
-                presentationStore.conversationIdentityPresentation(for: conversation)
-            }
+    @MainActor
+    func observeConversationListSnapshotEvents() async {
+        let currentEvent = await snapshotStore.currentListSnapshotEvent()
+        observedConversationListSnapshot = currentEvent.snapshot
+        observedConversationListRevision = currentEvent.revision
+
+        for await event in await snapshotStore.listSnapshotEvents() {
+            observedConversationListSnapshot = event.snapshot
+            observedConversationListRevision = event.revision
+            logConversationListSnapshotEvent(event)
+        }
+    }
+
+    func refreshConversationListSnapshot(invalidation: IMConversationSnapshotInvalidation) {
+        Task { @MainActor in
+            await snapshotCommitPipeline.scheduleListAndChatCommit(
+                IMConversationSnapshotCommitEvent(
+                    invalidation,
+                    list: IMConversationListSnapshotCommitPlan(filter: conversationListFilter),
+                    chatPages: selectedChatPageSnapshotCommitRequests
+                ),
+                from: conversationStore,
+                to: snapshotStore,
+                identityForConversation: { conversation in
+                    presentationStore.conversationIdentityPresentation(for: conversation)
+                },
+                didCommit: { execution in
+                    let listCommit = execution.batchCommit.list ?? IMConversationSnapshotCommitResult(
+                        didCommit: false,
+                        revision: observedConversationListRevision
+                    )
+                    logConversationListSnapshot(
+                        reason: execution.plan.reasonSummary,
+                        commit: listCommit,
+                        snapshot: execution.listSnapshot ?? conversationListSnapshot
+                    )
+                    logSelectedChatSnapshotCommit(
+                        reason: execution.plan.reasonSummary,
+                        execution: execution
+                    )
+                }
+            )
+        }
+    }
+
+    var selectedChatPageSnapshotCommitRequests: [IMChatPageSnapshotCommitRequest] {
+        guard let conversationID = conversationStore.selectedConversationID else {
+            return []
+        }
+        return [
+            IMChatPageSnapshotCommitRequest(
+                conversationID: conversationID,
+                currentUserID: runtimeStore.currentUserID,
+                blockedUserIDs: runtimeStore.blockedUserIDs
+            )
+        ]
+    }
+
+    func logConversationListSnapshotEvent(_ event: IMConversationListSnapshotEvent) {
+        let head = event.snapshot.rows.prefix(5).map { row in
+            "\(row.id)|unread=\(row.unreadCount)|preview=\(row.primaryPreviewText)|updated=\(row.updatedAt.timeIntervalSince1970)|pending=\(row.pendingMessageCount)|messages=\(row.messageCount)|timeline=\(row.timelineItemCount)"
+        }.joined(separator: " || ")
+        IMAppLog.imUI.debug(
+            "Conversation list snapshot event revision=\(event.revision, privacy: .public) generation=\(event.snapshot.generation, privacy: .public) filter=\(event.snapshot.filter.rawValue, privacy: .public) displayedCount=\(event.snapshot.rows.count, privacy: .public) head=\(head, privacy: .public)"
         )
-        logConversationListSnapshot(reason: reason, commit: commit)
     }
 
     func logConversationListSnapshot(
         reason: String,
-        commit: IMConversationSnapshotCommitResult
+        commit: IMConversationSnapshotCommitResult,
+        snapshot: IMConversationListSnapshot
     ) {
-        let snapshot = conversationListSnapshot
-        let allConversations = conversationStore.conversations
         let head = snapshot.rows.prefix(5).map { row in
             "\(row.id)|unread=\(row.unreadCount)|preview=\(row.primaryPreviewText)|updated=\(row.updatedAt.timeIntervalSince1970)|pending=\(row.pendingMessageCount)|messages=\(row.messageCount)|timeline=\(row.timelineItemCount)"
         }.joined(separator: " || ")
+        let activeConversationID = snapshot.rows.first(where: \.isActive)?.id ?? "nil"
         IMAppLog.imUI.debug(
-            "Conversation list snapshot reason=\(reason, privacy: .public) committed=\(commit.didCommit, privacy: .public) revision=\(commit.revision, privacy: .public) generation=\(snapshot.generation, privacy: .public) filter=\(snapshot.filter.rawValue, privacy: .public) allCount=\(allConversations.count, privacy: .public) displayedCount=\(snapshot.rows.count, privacy: .public) selected=\(conversationStore.selectedConversationID ?? "nil", privacy: .public) head=\(head, privacy: .public)"
+            "Conversation list snapshot reason=\(reason, privacy: .public) committed=\(commit.didCommit, privacy: .public) revision=\(commit.revision, privacy: .public) observedRevision=\(observedConversationListRevision, privacy: .public) generation=\(snapshot.generation, privacy: .public) filter=\(snapshot.filter.rawValue, privacy: .public) displayedCount=\(snapshot.rows.count, privacy: .public) active=\(activeConversationID, privacy: .public) head=\(head, privacy: .public)"
+        )
+    }
+
+    func logSelectedChatSnapshotCommit(
+        reason: String,
+        execution: IMConversationSnapshotCommitExecution
+    ) {
+        guard let selectedConversationID = conversationStore.selectedConversationID,
+              let commit = execution.batchCommit.chatPages[selectedConversationID]
+        else {
+            return
+        }
+        let snapshot = execution.chatPageSnapshots[selectedConversationID] ?? .empty(conversationID: selectedConversationID)
+        IMAppLog.imUI.debug(
+            "Conversation selected chat snapshot reason=\(reason, privacy: .public) committed=\(commit.didCommit, privacy: .public) revision=\(commit.revision, privacy: .public) conversationID=\(selectedConversationID, privacy: .public) generation=\(snapshot.generation, privacy: .public) latestID=\(snapshot.latestItemID ?? "nil", privacy: .public)"
         )
     }
 
@@ -412,9 +509,18 @@ struct IMConversationView: View {
         return "\(conversationListSnapshot.rows.count) 个"
     }
 
+    var conversationListObservedStoreMetadata: IMConversationListObservedStoreMetadata {
+        IMConversationListObservedStoreMetadata(
+            statusMessage: conversationStore.statusMessage,
+            isLoadingConversations: conversationStore.isLoadingConversations,
+            isLoadingMoreConversationSummaries: conversationStore.isLoadingMoreConversationSummaries,
+            hasMoreConversationSummaries: conversationStore.hasMoreConversationSummaries
+        )
+    }
+
     @ViewBuilder
     var conversationEmptyState: some View {
-        if !conversationStore.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if !conversationListSnapshot.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             AppEmptyState(
                 title: "没有找到会话",
                 message: "当前搜索没有匹配的联系人、群名或消息预览。",
@@ -459,7 +565,9 @@ struct IMConversationView: View {
                 await runtimeStore.markConversationRead(snapshot.id)
             }
         case .markUnread:
-            runtimeStore.markConversationUnread(snapshot.id)
+            Task {
+                await runtimeStore.markConversationUnread(snapshot.id)
+            }
         case .clearHistory, .delete:
             pendingListAction = IMConversationListPendingAction(
                 conversationID: snapshot.id,
@@ -577,6 +685,14 @@ struct IMConversationDetailView: View {
     @State var replyTarget: IMChatReplyTargetSnapshot?
     @State var editingTarget: IMChatEditingTargetSnapshot?
     @State var highlightedMessageID: String?
+    /// Row anchor captured before loading older history and consumed after snapshot commit.
+    @State var pendingHistoryScrollAnchor: IMChatScrollAnchorSnapshot?
+    /// Programmatic scroll position used for bottom jumps and content-offset restoration.
+    @State var detailScrollPosition = ScrollPosition(idType: String.self, edge: .bottom)
+    /// Latest scroll content offset reported by SwiftUI scroll geometry.
+    @State var detailScrollContentOffsetY = 0.0
+    /// Visible timeline row offsets keyed by snapshot row id.
+    @State var timelineRowOffsetsFromTop: [String: Double] = [:]
     @State var isNearBottom = true
     @State var unseenNewMessageCount = 0
     @State var lastObservedMessageID: String?
@@ -584,6 +700,9 @@ struct IMConversationDetailView: View {
     @State var mediaDownloadTasks: [String: Task<Void, Never>] = [:]
     @State var previewedMediaItem: IMDownloadedMediaPreviewItem?
     @State var runningRelationshipActions: Set<IMConversationRelationshipActionKey> = []
+    @State var observedChatPageSnapshot: IMChatPageSnapshot?
+    @State var observedChatPageRevision: UInt64 = 0
+    @State var snapshotCommitPipeline = IMConversationSnapshotCommitPipeline()
 
     var body: some View {
         detailContent
@@ -626,15 +745,21 @@ struct IMConversationDetailView: View {
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .onAppear {
-                refreshChatPageSnapshot(reason: "appear")
+                refreshChatPageSnapshot(invalidation: .appear)
             }
             .task(id: conversationID) {
-                refreshChatPageSnapshot(reason: "task:\(conversationID)")
+                await observeChatPageSnapshotEvents()
+            }
+            .task(id: conversationID) {
+                refreshChatPageSnapshot(invalidation: .task(conversationID))
                 await runtimeStore.openConversation(conversationID)
                 await loadConversationFavoriteCache()
-                refreshChatPageSnapshot(reason: "opened:\(conversationID)")
+                refreshChatPageSnapshot(invalidation: .opened(conversationID))
             }
             .onDisappear {
+                Task { @MainActor in
+                    await snapshotCommitPipeline.cancelPending(in: snapshotStore)
+                }
                 pauseAllMediaDownloads()
                 resetSelection()
                 runningRelationshipActions.removeAll()

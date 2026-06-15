@@ -5,6 +5,25 @@ import UIKit
 import CoreImage
 #endif
 
+/// Invite row rendered by the group invite management sheet.
+struct IMGroupInviteRowSnapshot: Identifiable, Equatable {
+    let id: String
+    let token: String
+    let inviteURL: String
+    let statusText: String
+    let expirationSummaryText: String
+    let canRevoke: Bool
+
+    init(invite: IMGroupInviteResponseBody) {
+        id = invite.token
+        token = invite.token
+        inviteURL = invite.inviteURL
+        canRevoke = invite.revokedAt == nil
+        statusText = canRevoke ? "可用邀请" : "已撤销"
+        expirationSummaryText = "使用 \(invite.useCount) 次 · \(invite.expiresAt.formatted(date: .abbreviated, time: .shortened)) 过期"
+    }
+}
+
 struct IMGroupInviteManagementSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var submitter = IMAsyncSubmitter()
@@ -14,7 +33,7 @@ struct IMGroupInviteManagementSheet: View {
     let createInvite: () async -> IMGroupInviteResponseBody?
     let revokeInvite: (String) async -> Bool
 
-    @State private var invites: [IMGroupInviteResponseBody] = []
+    @State private var invites: [IMGroupInviteRowSnapshot] = []
     @State private var isLoading = false
 
     var body: some View {
@@ -24,7 +43,7 @@ struct IMGroupInviteManagementSheet: View {
                     Task {
                         await submitter.run(messageOnFailure: "创建邀请链接失败。") {
                             if let invite = await createInvite() {
-                                invites.insert(invite, at: 0)
+                                invites.insert(IMGroupInviteRowSnapshot(invite: invite), at: 0)
                                 return true
                             }
                             return false
@@ -42,20 +61,20 @@ struct IMGroupInviteManagementSheet: View {
                     Text("暂无邀请链接。")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(invites, id: \.token) { invite in
+                    ForEach(invites) { invite in
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(alignment: .top, spacing: 12) {
                                 IMInviteQRCodeView(text: invite.inviteURL)
                                     .frame(width: 72, height: 72)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(invite.revokedAt == nil ? "可用邀请" : "已撤销")
+                                    Text(invite.statusText)
                                         .font(.headline)
                                     Text(invite.inviteURL)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(2)
-                                    Text("使用 \(invite.useCount) 次 · \(invite.expiresAt.formatted(date: .abbreviated, time: .shortened)) 过期")
+                                    Text(invite.expirationSummaryText)
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                 }
@@ -71,7 +90,7 @@ struct IMGroupInviteManagementSheet: View {
                                     Label("复制", systemImage: "doc.on.doc")
                                 }
 
-                                if invite.revokedAt == nil {
+                                if invite.canRevoke {
                                     Button(role: .destructive) {
                                         Task {
                                             await submitter.run(messageOnFailure: "撤销邀请失败。") {
@@ -120,7 +139,7 @@ struct IMGroupInviteManagementSheet: View {
     private func reload() async {
         isLoading = true
         defer { isLoading = false }
-        invites = await loadInvites()
+        invites = await loadInvites().map(IMGroupInviteRowSnapshot.init)
     }
 }
 

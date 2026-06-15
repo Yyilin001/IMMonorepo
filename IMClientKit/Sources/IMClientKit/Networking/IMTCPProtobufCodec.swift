@@ -58,6 +58,11 @@ enum IMTCPProtobufCodec {
                 throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
             }
             packet.sendMessage = payload.protobuf
+        case .conversationActivity:
+            guard let payload = payload as? IMTCPConversationActivityPayload else {
+                throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
+            }
+            packet.conversationActivity = payload.protobuf
         case .ack:
             guard let payload = payload as? IMTCPAckPayload else {
                 throw IMTCPClientError.invalidPayload(type, reason: "payload type mismatch")
@@ -104,6 +109,8 @@ enum IMTCPProtobufCodec {
             return IMTCPInboundPacket(type: .heartbeatAck, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: payload.domainValue)
         case .sendMessage(let payload):
             return IMTCPInboundPacket(type: .sendMessage, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: try payload.domainValue())
+        case .conversationActivity(let payload):
+            return IMTCPInboundPacket(type: .conversationActivity, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: try payload.domainValue())
         case .ack(let payload):
             return IMTCPInboundPacket(type: .ack, requestID: requestID, timestamp: timestamp, protocolVersion: Int(packet.protocolVersion), payload: payload.domainValue)
         case .domainEvent(let payload):
@@ -283,6 +290,27 @@ private extension IMRTSendMessageCommand {
             serverTimestamp: nil,
             content: try content.domainValue(),
             derivedState: IMMessageDerivedState()
+        )
+    }
+}
+
+private extension IMTCPConversationActivityPayload {
+    var protobuf: IMRTConversationActivityCommand {
+        var value = IMRTConversationActivityCommand()
+        value.conversationID = conversationID
+        value.isActive = isActive
+        return value
+    }
+}
+
+private extension IMRTConversationActivityCommand {
+    func domainValue() throws -> IMTCPConversationActivityPayload {
+        guard UUID(uuidString: conversationID) != nil else {
+            throw IMTCPClientError.invalidPayload(.conversationActivity)
+        }
+        return IMTCPConversationActivityPayload(
+            conversationID: conversationID,
+            isActive: isActive
         )
     }
 }
@@ -695,6 +723,10 @@ private extension IMTCPChatDomainEventPayload {
             default:
                 value.conversationUpdated = event
             }
+        case .conversationActivityHint(let hint):
+            value.conversationActivityHint = hint.protobuf
+        case .timelineGapHint(let hint):
+            value.timelineGapHint = hint.protobuf
         case .conversationRemovedForSelf:
             value.conversationRemovedForSelf = IMRTConversationRemovedForSelfEvent()
         case .conversationVisibilityChanged(let visibilityAction, let messageIDs):
@@ -852,6 +884,10 @@ private extension IMRTChatDomainEvent {
             )
         case .conversationCreated, .conversationUpdated, .conversationSettingsChanged:
             return .conversationChanged
+        case .conversationActivityHint(let event):
+            return .conversationActivityHint(try event.domainValue())
+        case .timelineGapHint(let event):
+            return .timelineGapHint(try event.domainValue())
         case .conversationRemovedForSelf:
             return .conversationRemovedForSelf
         case .conversationVisibilityChanged(let event):
@@ -891,6 +927,8 @@ private extension IMTCPChatDomainEventBody {
              (.conversationChanged, .conversationCreated),
              (.conversationChanged, .conversationUpdated),
              (.conversationChanged, .conversationSettingsChanged),
+             (.conversationActivityHint, .conversationActivityHint),
+             (.timelineGapHint, .timelineGapHint),
              (.conversationRemovedForSelf, .conversationRemovedForSelf),
              (.conversationVisibilityChanged, .conversationVisibilityChanged),
              (.memberChanged, .memberAdded),
@@ -914,6 +952,78 @@ private extension IMTCPChatDomainEventType {
         default:
             "conversation"
         }
+    }
+}
+
+private extension IMConversationActivityHintResponseBody {
+    var protobuf: IMRTConversationActivityHintEvent {
+        var value = IMRTConversationActivityHintEvent()
+        value.messageID = messageID.uuidString
+        value.senderUserID = senderUserID.uuidString
+        value.serverSequence = serverSequence
+        value.timelineSequence = timelineSequence
+        value.previewText = previewText
+        if let messageCreatedAt {
+            value.messageCreatedAtMs = messageCreatedAt.millisecondsSince1970
+        }
+        value.updatedAtMs = updatedAt.millisecondsSince1970
+        return value
+    }
+}
+
+private extension IMRTConversationActivityHintEvent {
+    func domainValue() throws -> IMConversationActivityHintResponseBody {
+        guard let messageID = UUID(uuidString: messageID),
+              let senderUserID = UUID(uuidString: senderUserID),
+              hasServerSequence,
+              serverSequence > 0,
+              hasTimelineSequence,
+              timelineSequence > 0
+        else {
+            throw IMTCPClientError.invalidPayload(.domainEvent)
+        }
+        return IMConversationActivityHintResponseBody(
+            messageID: messageID,
+            senderUserID: senderUserID,
+            serverSequence: serverSequence,
+            timelineSequence: timelineSequence,
+            previewText: previewText,
+            messageCreatedAt: hasMessageCreatedAtMs ? Date(millisecondsSince1970: messageCreatedAtMs) : nil,
+            updatedAt: Date(millisecondsSince1970: updatedAtMs)
+        )
+    }
+}
+
+private extension IMTimelineGapHintResponseBody {
+    var protobuf: IMRTTimelineGapHintEvent {
+        var value = IMRTTimelineGapHintEvent()
+        value.messageID = messageID.uuidString
+        value.senderUserID = senderUserID.uuidString
+        value.serverSequence = serverSequence
+        value.timelineSequence = timelineSequence
+        value.updatedAtMs = updatedAt.millisecondsSince1970
+        return value
+    }
+}
+
+private extension IMRTTimelineGapHintEvent {
+    func domainValue() throws -> IMTimelineGapHintResponseBody {
+        guard let messageID = UUID(uuidString: messageID),
+              let senderUserID = UUID(uuidString: senderUserID),
+              hasServerSequence,
+              serverSequence > 0,
+              hasTimelineSequence,
+              timelineSequence > 0
+        else {
+            throw IMTCPClientError.invalidPayload(.domainEvent)
+        }
+        return IMTimelineGapHintResponseBody(
+            messageID: messageID,
+            senderUserID: senderUserID,
+            serverSequence: serverSequence,
+            timelineSequence: timelineSequence,
+            updatedAt: Date(millisecondsSince1970: updatedAtMs)
+        )
     }
 }
 

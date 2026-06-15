@@ -500,12 +500,14 @@ public actor SessionClient {
     public func fetchIMTimelineSince(
         conversationID: String,
         afterSequence: UInt64,
+        targetSequence: UInt64? = nil,
         limit: Int? = nil
     ) async throws -> IMConversationTimelineResponseBody {
         try await executor.execute(
             IMRequest.timelineSince(
                 conversationID: conversationID,
                 afterSequence: afterSequence,
+                targetSequence: targetSequence,
                 limit: limit
             )
         )

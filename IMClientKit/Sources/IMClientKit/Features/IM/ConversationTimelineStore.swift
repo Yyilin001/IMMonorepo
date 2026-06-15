@@ -1,7 +1,7 @@
 import Foundation
 import OSLog
 
-struct ConversationTimelineStore {
+struct ConversationTimelineStore: Sendable {
     func replaceTimelineItems(
         in conversationID: String,
         items: [IMTimelineItemResponseBody],

@@ -10,8 +10,11 @@ final class IMConnectionCoordinator {
     private var eventTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var selectedConversationCatchUpTask: Task<Void, Never>?
+    private var foregroundSummaryRefreshTask: Task<Void, Never>?
     private(set) var generation: UInt64 = 0
     private var reconnectAttempt = 0
+    private var isAppActive = true
 
     init(runtime: ConversationRuntimeController) {
         self.runtime = runtime
@@ -82,7 +85,13 @@ final class IMConnectionCoordinator {
         currentReconnectTask?.cancel()
         reconnectAttempt = 0
 
+        selectedConversationCatchUpTask?.cancel()
+        selectedConversationCatchUpTask = nil
+        foregroundSummaryRefreshTask?.cancel()
+        foregroundSummaryRefreshTask = nil
+
         if let currentConnection {
+            await sendSelectedConversationInactiveIfNeeded(on: currentConnection)
             await currentConnection.disconnect()
         }
 
@@ -105,6 +114,7 @@ final class IMConnectionCoordinator {
         runtime.imConversationMessagesTask = nil
         runtime.imConversationRefreshTask?.cancel()
         runtime.imConversationRefreshTask = nil
+        runtime.pendingConversationSummaryRefreshRequest = nil
         runtime.cancelMessageStreamSnapshotSync()
         for task in runtime.mediaUploadRecoveryTasks.values {
             task.cancel()
@@ -115,8 +125,19 @@ final class IMConnectionCoordinator {
     }
 
     func appDidBecomeActive() {
+        isAppActive = true
         scheduleIfNeeded()
+        startSelectedConversationCatchUpLoopIfNeeded()
+        startForegroundSummaryRefreshLoopIfNeeded()
         runtime?.syncActiveMessageStreamSnapshots()
+    }
+
+    func appDidEnterBackground() {
+        isAppActive = false
+        selectedConversationCatchUpTask?.cancel()
+        selectedConversationCatchUpTask = nil
+        foregroundSummaryRefreshTask?.cancel()
+        foregroundSummaryRefreshTask = nil
     }
 
     func handleFailure(_ error: Error, generation targetGeneration: UInt64) async {
@@ -136,6 +157,10 @@ final class IMConnectionCoordinator {
         eventTask = nil
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        selectedConversationCatchUpTask?.cancel()
+        selectedConversationCatchUpTask = nil
+        foregroundSummaryRefreshTask?.cancel()
+        foregroundSummaryRefreshTask = nil
         connection = nil
 
         if error is CancellationError {
@@ -151,18 +176,18 @@ final class IMConnectionCoordinator {
                 if isSessionInvalidatingKick(reason) {
                     await runtime.clearSession(message)
                 } else {
-                    markPendingMessagesUnknownAndReconnect(
+                    await markPendingMessagesUnknownAndReconnect(
                         message: message,
                         generation: targetGeneration
                     )
                 }
             case .connectionClosed:
-                markPendingMessagesUnknownAndReconnect(
+                await markPendingMessagesUnknownAndReconnect(
                     message: "IM 连接已断开。",
                     generation: targetGeneration
                 )
             default:
-                markPendingMessagesUnknownAndReconnect(
+                await markPendingMessagesUnknownAndReconnect(
                     message: tcpError.localizedDescription,
                     generation: targetGeneration
                 )
@@ -170,7 +195,7 @@ final class IMConnectionCoordinator {
             return
         }
 
-        markPendingMessagesUnknownAndReconnect(
+        await markPendingMessagesUnknownAndReconnect(
             message: error.localizedDescription,
             generation: targetGeneration
         )
@@ -200,13 +225,43 @@ final class IMConnectionCoordinator {
         runtime.setConnectionStatus(.connected)
         startEventLoop(newConnection, generation: targetGeneration)
         startHeartbeatLoop(newConnection, generation: targetGeneration)
+        if let selectedConversationID = runtime.imConversationStore.selectedConversationID {
+            await runtime.reportConversationActivity(conversationID: selectedConversationID, isActive: true)
+        }
         await runtime.syncDomainEventsAfterConnection()
         await runtime.syncConversationGapsAfterConnection()
+        runtime.syncSelectedConversationTimelineCatchUp(
+            reason: "connection-established",
+            bypassRateLimit: true
+        )
         await runtime.syncContactStateAfterConnection()
         await runtime.flushQueuedTextMessagesAfterConnection(limit: ConversationRuntimeController.HistoryConfig.queuedFlushLimit)
         runtime.startConversationGapSyncCatchUpIfNeeded()
+        startSelectedConversationCatchUpLoopIfNeeded()
+        startForegroundSummaryRefreshLoopIfNeeded()
         runtime.syncActiveMessageStreamSnapshots()
         runtime.scheduleConversationCachePersist()
+    }
+
+    private func sendSelectedConversationInactiveIfNeeded(on connection: IMTCPConnection) async {
+        guard let rawSelectedConversationID = runtime?.imConversationStore.selectedConversationID else {
+            return
+        }
+        let selectedConversationID = rawSelectedConversationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selectedConversationID.isEmpty else {
+            return
+        }
+
+        do {
+            try await connection.sendConversationActivity(
+                conversationID: selectedConversationID,
+                isActive: false
+            )
+        } catch {
+            IMAppLog.imRuntime.debug(
+                "Failed to report selected conversation inactive before disconnect conversationID=\(selectedConversationID, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
+        }
     }
 
     private func startEventLoop(_ connection: IMTCPConnection, generation targetGeneration: UInt64) {
@@ -254,6 +309,90 @@ final class IMConnectionCoordinator {
         }
     }
 
+    private func startSelectedConversationCatchUpLoopIfNeeded() {
+        guard isAppActive,
+              connection != nil,
+              selectedConversationCatchUpTask == nil
+        else {
+            return
+        }
+
+        selectedConversationCatchUpTask = Task { [weak self] in
+            let intervalNanoseconds = self?.runtime?.foregroundSyncIntervals
+                .selectedConversationCatchUpNanoseconds
+                ?? ConversationRuntimeController.ForegroundSyncIntervals.production
+                    .selectedConversationCatchUpNanoseconds
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: intervalNanoseconds)
+                    try Task.checkCancellation()
+                } catch {
+                    return
+                }
+
+                await self?.runSelectedConversationPeriodicCatchUp()
+            }
+        }
+    }
+
+    private func runSelectedConversationPeriodicCatchUp() async {
+        guard let runtime,
+              isAppActive,
+              connection != nil,
+              runtime.isSignedInProvider()
+        else {
+            selectedConversationCatchUpTask?.cancel()
+            selectedConversationCatchUpTask = nil
+            return
+        }
+
+        runtime.syncSelectedConversationTimelineCatchUp(
+            reason: "foreground-periodic",
+            forceProbe: true
+        )
+    }
+
+    private func startForegroundSummaryRefreshLoopIfNeeded() {
+        guard isAppActive,
+              connection != nil,
+              foregroundSummaryRefreshTask == nil
+        else {
+            return
+        }
+
+        foregroundSummaryRefreshTask = Task { [weak self] in
+            let intervalNanoseconds = self?.runtime?.foregroundSyncIntervals
+                .conversationSummaryRefreshNanoseconds
+                ?? ConversationRuntimeController.ForegroundSyncIntervals.production
+                    .conversationSummaryRefreshNanoseconds
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: intervalNanoseconds)
+                    try Task.checkCancellation()
+                } catch {
+                    return
+                }
+
+                await self?.runForegroundSummaryRefresh()
+            }
+        }
+    }
+
+    private func runForegroundSummaryRefresh() async {
+        guard let runtime,
+              isAppActive,
+              connection != nil,
+              runtime.isSignedInProvider()
+        else {
+            foregroundSummaryRefreshTask?.cancel()
+            foregroundSummaryRefreshTask = nil
+            return
+        }
+
+        IMAppLog.imRuntime.debug("Foreground summary refresh enqueued")
+        runtime.scheduleConversationSummaryReadModelCorrection(force: false)
+    }
+
     private func handleEvent(_ event: IMTCPConnectionEvent, generation targetGeneration: UInt64) async {
         guard let runtime,
               targetGeneration == generation
@@ -268,7 +407,7 @@ final class IMConnectionCoordinator {
             IMAppLog.imRuntime.debug(
                 "TCP ACK event requestID=\(requestID?.uuidString ?? "nil", privacy: .public) status=\(payload.status, privacy: .public) messageID=\(payload.messageID, privacy: .public) conversationID=\(payload.conversationID ?? "nil", privacy: .public) generation=\(targetGeneration, privacy: .public)"
             )
-            runtime.imConversationStore.applyOutgoingAcknowledgement(requestID: requestID, payload: payload)
+            await runtime.imConversationStore.applyOutgoingAcknowledgementAsync(requestID: requestID, payload: payload)
             if payload.status == "accepted",
                let conversationID = payload.conversationID {
                 let selectedConversationID = runtime.imConversationStore.selectedConversationID ?? "nil"
@@ -292,13 +431,13 @@ final class IMConnectionCoordinator {
 
             if case .contactChanged = payload.body {
                 runtime.applyContactDomainEvent(payload)
-                _ = runtime.imConversationStore.applyDomainEvent(payload, currentUserID: currentUserID)
+                _ = await runtime.imConversationStore.applyDomainEventAsync(payload, currentUserID: currentUserID)
                 return
             }
 
-            let outcome = runtime.imConversationStore.applyDomainEvent(payload, currentUserID: currentUserID)
+            let outcome = await runtime.imConversationStore.applyDomainEventAsync(payload, currentUserID: currentUserID)
             IMAppLog.imRuntime.debug(
-                "TCP domain event applied eventType=\(payload.eventType.rawValue, privacy: .public) aggregateID=\(payload.aggregateID.uuidString, privacy: .public) shouldFetchDomainEvents=\(outcome.shouldFetchDomainEvents, privacy: .public) didConsumeEvent=\(outcome.didConsumeEvent, privacy: .public)"
+                "TCP domain event applied eventType=\(payload.eventType.rawValue, privacy: .public) aggregateID=\(payload.aggregateID.uuidString, privacy: .public) shouldFetchDomainEvents=\(outcome.shouldFetchDomainEvents, privacy: .public) shouldRefreshConversationSummaries=\(outcome.shouldRefreshConversationSummaries, privacy: .public) didConsumeEvent=\(outcome.didConsumeEvent, privacy: .public)"
             )
             if case .messageCreated(let message, _) = payload.body,
                outcome.shouldFetchDomainEvents || !outcome.didConsumeEvent {
@@ -311,6 +450,29 @@ final class IMConnectionCoordinator {
                     prioritize: conversationID == runtime.imConversationStore.selectedConversationID
                 )
                 runtime.scheduleConversationSummaryReadModelCorrection(force: true)
+            }
+            if outcome.shouldRefreshConversationSummaries {
+                IMAppLog.imRuntime.debug(
+                    "Domain event requested conversation summary refresh eventType=\(payload.eventType.rawValue, privacy: .public) aggregateID=\(payload.aggregateID.uuidString, privacy: .public)"
+                )
+                runtime.scheduleLightweightConversationSummaryReadModelCorrection()
+            }
+            if let conversationID = outcome.shouldSyncTimelineForConversationID {
+                let targetTimelineSequence = outcome.timelineSyncTargetSequence
+                let isSelectedConversation = conversationID == runtime.imConversationStore.selectedConversationID
+                runtime.imConversationStore.recordTimelineCatchUpHintQueued(
+                    conversationID: conversationID,
+                    targetTimelineSequence: targetTimelineSequence
+                )
+                IMAppLog.imRuntime.debug(
+                    "Lightweight selected conversation hint scheduling timeline catch-up conversationID=\(conversationID, privacy: .public) eventType=\(payload.eventType.rawValue, privacy: .public) targetTimelineSequence=\(targetTimelineSequence ?? 0, privacy: .public) bypassRateLimit=\(isSelectedConversation, privacy: .public)"
+                )
+                runtime.enqueueConversationGapSyncCatchUp(
+                    for: conversationID,
+                    prioritize: true,
+                    targetTimelineSequence: targetTimelineSequence,
+                    bypassRateLimit: isSelectedConversation
+                )
             }
             if outcome.shouldFetchDomainEvents {
                 await runtime.syncDomainEventsAfterConnection()
@@ -353,7 +515,7 @@ final class IMConnectionCoordinator {
             guard let currentUserID = runtime.currentUserProvider()?.id else {
                 return
             }
-            runtime.imConversationStore.applyStreamSignal(payload, currentUserID: currentUserID)
+            await runtime.imConversationStore.applyStreamSignalAsync(payload, currentUserID: currentUserID)
             runtime.syncPendingMessageStreamSnapshotsIfNeeded()
             runtime.scheduleConversationCachePersist()
         case .kick(let payload):
@@ -377,12 +539,12 @@ final class IMConnectionCoordinator {
         }
     }
 
-    private func markPendingMessagesUnknownAndReconnect(message: String, generation targetGeneration: UInt64) {
+    private func markPendingMessagesUnknownAndReconnect(message: String, generation targetGeneration: UInt64) async {
         guard let runtime else {
             return
         }
 
-        runtime.imConversationStore.markAllPendingMessagesUnknown(message: "发送状态未确认，请重试。")
+        await runtime.imConversationStore.markAllPendingMessagesUnknownAsync(message: "发送状态未确认，请重试。")
         runtime.setConnectionStatus(.failed(message: reconnectingStatusMessage(message)))
         runtime.scheduleConversationCachePersist()
         scheduleReconnectIfNeeded(generation: targetGeneration)
@@ -461,6 +623,10 @@ extension ConversationRuntimeController {
 
     func appDidBecomeActive() {
         connectionCoordinator.appDidBecomeActive()
+    }
+
+    func appDidEnterBackground() {
+        connectionCoordinator.appDidEnterBackground()
     }
 
     func handleIMConnectionFailure(_ error: Error, generation: UInt64) async {

@@ -1,7 +1,7 @@
 import Foundation
 
 struct DomainEventProjectionReducer: Sendable {
-    struct DependencySnapshot: Sendable {
+    struct DependencySnapshot: Equatable, Sendable {
         var processedEventIDs: Set<UUID>
         var ownerAggregateHighWatermarks: [IMOwnerAggregateKey: UInt64]
         var existingMessageKeys: Set<MessageKey>
@@ -211,6 +211,13 @@ struct DomainEventProjectionReducer: Sendable {
                 )
         case .conversationChanged:
             return .applyConversationChange(notice: notice, summary: event.conversation)
+        case .conversationActivityHint(let hint):
+            return .applyConversationChange(
+                notice: notice,
+                summary: Self.activityOnlySummary(from: hint, event: event)
+            )
+        case .timelineGapHint:
+            return .applyConversationChange(notice: notice, summary: nil)
         case .conversationRemovedForSelf:
             return .removeConversation(conversationID: event.aggregateID.uuidString, notice: notice)
         case .conversationVisibilityChanged(let visibilityAction, let messageIDs):
@@ -250,6 +257,32 @@ struct DomainEventProjectionReducer: Sendable {
             direction: response.senderUserID == currentUserID ? .outgoing : .incoming,
             createdAt: response.createdAt ?? Date(),
             deliveryState: response.senderUserID == currentUserID ? .sent : .received
+        )
+    }
+
+    private static func activityOnlySummary(
+        from hint: IMConversationActivityHintResponseBody,
+        event: IMTCPChatDomainEventPayload
+    ) -> IMConversationSummaryResponseBody {
+        IMConversationSummaryResponseBody(
+            id: event.aggregateID,
+            title: nil,
+            kind: IMConversationKind.group.rawValue,
+            memberCount: 0,
+            memberUserIDs: [],
+            lastMessage: IMMessagePreviewResponseBody(
+                id: hint.messageID,
+                senderUserID: hint.senderUserID,
+                serverSequence: hint.serverSequence,
+                timelineSequence: hint.timelineSequence,
+                content: .richText(.plain(hint.previewText)),
+                derivedState: IMMessageDerivedState(),
+                createdAt: hint.messageCreatedAt
+            ),
+            lastReadSequence: 0,
+            unreadCount: 0,
+            createdAt: nil,
+            updatedAt: hint.updatedAt
         )
     }
 
@@ -299,6 +332,8 @@ struct DomainEventProjectionReducer: Sendable {
         case .messageStream(let stream, _):
             return .stream(conversationID: stream.conversationID, messageID: stream.messageID)
         case .conversationChanged,
+             .conversationActivityHint,
+             .timelineGapHint,
              .conversationRemovedForSelf,
              .conversationVisibilityChanged,
              .memberChanged:
@@ -323,6 +358,8 @@ struct DomainEventProjectionReducer: Sendable {
         case .messageStream(let stream, _):
             return stream.conversationID
         case .conversationChanged,
+             .conversationActivityHint,
+             .timelineGapHint,
              .conversationRemovedForSelf,
              .conversationVisibilityChanged,
              .memberChanged:

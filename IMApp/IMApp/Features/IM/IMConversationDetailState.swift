@@ -3,15 +3,15 @@ import IMClientKit
 
 extension IMConversationDetailView {
     var conversationIdentity: IMConversationIdentityPresentation {
-        guard let conversation else {
-            return IMConversationIdentityPresentation(
-                title: "会话",
-                detailSummary: conversationStore.isLoadingMembers ? "正在加载成员信息" : "当前还没有成员信息",
-                rowSecondaryLabel: nil
-            )
+        if let identity = presentationStore.conversationIdentityPresentation(for: conversationID) {
+            return identity
         }
 
-        return presentationStore.conversationIdentityPresentation(for: conversation)
+        return IMConversationIdentityPresentation(
+            title: chatPageSnapshot.metadata.title,
+            detailSummary: chatPageSnapshot.isLoadingMembers ? "正在加载成员信息" : "当前还没有成员信息",
+            rowSecondaryLabel: nil
+        )
     }
 
     var conversationKindText: String {
@@ -37,6 +37,16 @@ extension IMConversationDetailView {
 
     var composerDisabledReason: String? {
         chatPageSnapshot.composerDisabledReason
+    }
+
+    var composerSnapshot: IMConversationComposerSnapshot {
+        IMConversationComposerSnapshot(
+            text: composerText,
+            canSendMessages: canSendMessages,
+            disabledReason: composerDisabledReason,
+            replyTarget: replyTarget,
+            editingTarget: editingTarget
+        )
     }
 
     var currentGroupRole: IMConversationMemberRole? {
@@ -68,7 +78,7 @@ extension IMConversationDetailView {
     }
 
     var directMessagingStatusMessage: String? {
-        chatPageSnapshot.directMessagingStatusMessage
+        chatPageSnapshot.contextSnapshot.directMessagingStatusMessage
     }
 
     var directRelationshipPresentation: DirectPeerRelationshipPresentation? {

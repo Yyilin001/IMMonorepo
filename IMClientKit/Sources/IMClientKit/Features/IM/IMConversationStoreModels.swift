@@ -682,16 +682,25 @@ public struct IMConversationQueueSummary: Equatable, Sendable {
 
 public struct IMConversationEventApplyOutcome: Equatable, Sendable {
     public let shouldReloadMembersForConversationID: String?
+    public let shouldSyncTimelineForConversationID: String?
+    public let timelineSyncTargetSequence: UInt64?
     public let shouldFetchDomainEvents: Bool
+    public let shouldRefreshConversationSummaries: Bool
     public let didConsumeEvent: Bool
 
     public init(
         shouldReloadMembersForConversationID: String?,
+        shouldSyncTimelineForConversationID: String? = nil,
+        timelineSyncTargetSequence: UInt64? = nil,
         shouldFetchDomainEvents: Bool = false,
+        shouldRefreshConversationSummaries: Bool = false,
         didConsumeEvent: Bool = true
     ) {
         self.shouldReloadMembersForConversationID = shouldReloadMembersForConversationID
+        self.shouldSyncTimelineForConversationID = shouldSyncTimelineForConversationID
+        self.timelineSyncTargetSequence = timelineSyncTargetSequence
         self.shouldFetchDomainEvents = shouldFetchDomainEvents
+        self.shouldRefreshConversationSummaries = shouldRefreshConversationSummaries
         self.didConsumeEvent = didConsumeEvent
     }
 }
@@ -726,22 +735,65 @@ public struct IMDomainEventDebugMetrics: Codable, Equatable, Sendable {
     public init() {}
 }
 
+public struct IMTimelineCatchUpDiagnostics: Codable, Equatable, Sendable {
+    public var hintQueuedCount = 0
+    public var hintSkippedAlreadyLoadedCount = 0
+    public var deferredCount = 0
+    public var sinceRequestCount = 0
+    public var sinceSuccessCount = 0
+    public var sinceFailureCount = 0
+    public var appliedPageCount = 0
+    public var appliedItemCount = 0
+    public var lastHintToRequestMilliseconds: Int?
+    public var lastRequestMilliseconds: Int?
+    public var lastHintToApplyMilliseconds: Int?
+    public var lastConversationID: String?
+    public var lastTargetTimelineSequence: UInt64?
+    public var lastAfterSequence: UInt64?
+    public var lastAppliedLatestTimelineSequence: UInt64?
+    public var lastFailureReason: String?
+
+    public init() {}
+}
+
+public struct IMTimelineCatchUpConfigurationSnapshot: Codable, Equatable, Sendable {
+    public let selectedHintInitialJitterMilliseconds: Int
+    public let selectedHintMinimumIntervalMilliseconds: Int
+    public let selectedHintMicroBatchMilliseconds: Int
+
+    public init(
+        selectedHintInitialJitterMilliseconds: Int,
+        selectedHintMinimumIntervalMilliseconds: Int,
+        selectedHintMicroBatchMilliseconds: Int
+    ) {
+        self.selectedHintInitialJitterMilliseconds = max(0, selectedHintInitialJitterMilliseconds)
+        self.selectedHintMinimumIntervalMilliseconds = max(0, selectedHintMinimumIntervalMilliseconds)
+        self.selectedHintMicroBatchMilliseconds = max(0, selectedHintMicroBatchMilliseconds)
+    }
+}
+
 public struct IMConversationHealthSnapshot: Codable, Equatable, Sendable {
     public let domainEventCursor: UInt64
     public let deferredDomainEventCount: Int
     public let fullRefreshConversationCount: Int
     public let domainEventMetrics: IMDomainEventDebugMetrics
+    public let timelineCatchUpDiagnostics: IMTimelineCatchUpDiagnostics
+    public let timelineCatchUpConfiguration: IMTimelineCatchUpConfigurationSnapshot?
 
     public init(
         domainEventCursor: UInt64,
         deferredDomainEventCount: Int,
         fullRefreshConversationCount: Int,
-        domainEventMetrics: IMDomainEventDebugMetrics
+        domainEventMetrics: IMDomainEventDebugMetrics,
+        timelineCatchUpDiagnostics: IMTimelineCatchUpDiagnostics = IMTimelineCatchUpDiagnostics(),
+        timelineCatchUpConfiguration: IMTimelineCatchUpConfigurationSnapshot? = nil
     ) {
         self.domainEventCursor = domainEventCursor
         self.deferredDomainEventCount = deferredDomainEventCount
         self.fullRefreshConversationCount = fullRefreshConversationCount
         self.domainEventMetrics = domainEventMetrics
+        self.timelineCatchUpDiagnostics = timelineCatchUpDiagnostics
+        self.timelineCatchUpConfiguration = timelineCatchUpConfiguration
     }
 }
 

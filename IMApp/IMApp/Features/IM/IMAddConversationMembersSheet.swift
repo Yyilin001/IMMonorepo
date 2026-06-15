@@ -10,6 +10,7 @@ struct IMAddConversationMembersSheet: View {
 
     @State private var memberEmails = ""
     @State private var isSubmitting = false
+    @State private var statusSnapshot = IMConversationStatusSnapshot(message: nil)
 
     var body: some View {
         Form {
@@ -20,13 +21,19 @@ struct IMAddConversationMembersSheet: View {
                     .autocorrectionDisabled()
             }
 
-            if let message = conversationStore.statusMessage, !message.isEmpty {
+            if let message = statusSnapshot.message {
                 Section {
                     IMInlineStatusBanner(message: message)
                         .listRowInsets(EdgeInsets())
                         .listRowBackground(Color.clear)
                 }
             }
+        }
+        .onAppear {
+            refreshStatusSnapshot()
+        }
+        .onChange(of: conversationStore.statusMessage) { _, _ in
+            refreshStatusSnapshot()
         }
         .navigationTitle("添加成员")
         .navigationBarTitleDisplayMode(.inline)
@@ -66,5 +73,9 @@ struct IMAddConversationMembersSheet: View {
             .components(separatedBy: CharacterSet(charactersIn: ",\n"))
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { !$0.isEmpty }
+    }
+
+    private func refreshStatusSnapshot() {
+        statusSnapshot = IMConversationStatusSnapshot(message: conversationStore.statusMessage)
     }
 }
