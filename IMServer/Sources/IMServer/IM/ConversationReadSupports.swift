@@ -36,7 +36,10 @@ struct ConversationSummaryReadSupport {
                conversationRevision == summaryRevision,
                summary.memberUserIDs.contains(userID)
             {
-                return makeConversationResponse(from: summary)
+                return try await ConversationSummaryResponseOverlay.responseLoadingActivity(
+                    from: summary,
+                    on: db
+                )
             }
         }
 
@@ -169,39 +172,34 @@ struct ConversationSummaryReadSupport {
         )
     }
 
-    private func makeConversationResponse(from row: ConversationUserSummary) -> IMConversationResponse {
-        IMConversationResponse(
-            id: row.conversationID,
-            title: row.title,
-            kind: row.kind,
-            directMessagingState: row.directMessagingState,
-            directPeer: row.directPeerUserID.map { directPeerUserID in
-                IMDirectPeerResponse(
-                    id: directPeerUserID,
-                    email: row.directPeerEmail ?? "",
-                    displayName: row.directPeerDisplayName,
-                    avatarPreset: row.directPeerAvatarPresetEnum
-                )
-            },
-            notice: row.notice,
-            avatarPreset: row.avatarPresetEnum,
-            muteAll: row.muteAll,
-            memberCount: row.memberCount,
-            memberUserIDs: row.memberUserIDs.sorted { $0.uuidString < $1.uuidString },
-            lastMessage: row.lastMessage,
-            lastReadSequence: UInt64(row.lastReadSequence),
-            unreadCount: row.unreadCount,
-            isPinned: row.isPinned,
-            pinnedAt: row.pinnedAt,
-            isMuted: row.isMuted,
-            createdAt: nil,
-            updatedAt: row.lastActivityAt
-        )
-    }
 }
 
 struct ConversationTimelineReadSupport {
     let db: any Database
+    let metrics: IMTimelineReadMetrics?
+    let configuration: IMTimelineReadConfiguration
+    let sinceHotCache: IMTimelineSinceHotCache?
+    let sinceRecentCache: IMTimelineSinceRecentCache?
+    let sinceVisibilitySafetyCache: IMTimelineSinceVisibilitySafetyCache?
+    let sinceResponseCoalescer: IMTimelineSinceResponseCoalescer?
+
+    init(
+        db: any Database,
+        metrics: IMTimelineReadMetrics? = nil,
+        configuration: IMTimelineReadConfiguration = IMTimelineReadConfiguration(),
+        sinceHotCache: IMTimelineSinceHotCache? = nil,
+        sinceRecentCache: IMTimelineSinceRecentCache? = nil,
+        sinceVisibilitySafetyCache: IMTimelineSinceVisibilitySafetyCache? = nil,
+        sinceResponseCoalescer: IMTimelineSinceResponseCoalescer? = nil
+    ) {
+        self.db = db
+        self.metrics = metrics
+        self.configuration = configuration
+        self.sinceHotCache = sinceHotCache
+        self.sinceRecentCache = sinceRecentCache
+        self.sinceVisibilitySafetyCache = sinceVisibilitySafetyCache
+        self.sinceResponseCoalescer = sinceResponseCoalescer
+    }
 
     private var membershipService: ConversationMembershipService {
         ConversationMembershipService(db: db)
@@ -229,86 +227,588 @@ struct ConversationTimelineReadSupport {
         beforeSequence: Int? = nil,
         limit requestedLimit: Int? = nil
     ) async throws -> IMTimelinePageResponse {
-        let membership = try await membershipService.requireMembershipRecord(
-            conversationID: conversationID,
-            userID: userID
-        )
-        let limit = try ConversationReadPaginationSupport.normalizedHistoryLimit(requestedLimit)
-        let upperBound = beforeSequence ?? Int.max
-        if upperBound <= 0 {
-            throw Abort(.badRequest, reason: "分页游标无效。")
-        }
-
-        let messages = try await ConversationMessage.query(on: db)
-            .filter(\.$conversation.$id == conversationID)
-            .filter(\.$serverSequence >= membership.visibleFromSequence)
-            .filter(\.$timelineSequence < upperBound)
-            .sort(\.$timelineSequence, .descending)
-            .limit(limit + 1)
-            .all()
-        let visibleMessages = try await IMCommonFeatureService(db: db).filterVisible(messages, for: userID)
-        let notices = try visibleNotices(
-            try await ConversationTimelineNotice.query(on: db)
-            .filter(\.$conversationID == conversationID)
-            .filter(\.$timelineSequence < upperBound)
-            .sort(\.$timelineSequence, .descending)
-            .limit(limit + 1)
-            .all(),
-            for: userID
-        )
-
-        var items = try makeTimelineItems(messages: visibleMessages, notices: notices, conversationID: conversationID)
-            .sorted { lhs, rhs in
-                if lhs.timelineSequence == rhs.timelineSequence {
-                    return lhs.type.rawValue < rhs.type.rawValue
-                }
-                return lhs.timelineSequence > rhs.timelineSequence
+        let startedAt = Date()
+        do {
+            let membership = try await membershipService.requireMembershipRecord(
+                conversationID: conversationID,
+                userID: userID
+            )
+            let visibilityOverride = try await conversationVisibilityOverride(
+                conversationID: conversationID,
+                userID: userID
+            )
+            if visibilityOverride?.isDeleted == true {
+                let response = IMTimelinePageResponse(items: [], hasMore: false, nextAfterSequence: nil)
+                await recordTimelineRead(.history, response: response, scan: .empty, startedAt: startedAt)
+                return response
             }
-        let hasMore = items.count > limit
-        if hasMore {
-            items = Array(items.prefix(limit))
+
+            let limit = try ConversationReadPaginationSupport.normalizedHistoryLimit(requestedLimit)
+            let upperBound = beforeSequence ?? Int.max
+            if upperBound <= 0 {
+                throw Abort(.badRequest, reason: "分页游标无效。")
+            }
+            let lowerTimelineBound = timelineLowerBound(
+                membership: membership,
+                visibilityOverride: visibilityOverride
+            )
+            let minimumVisibleServerSequence = membership.visibleFromSequence
+
+            let visibleMessages = try await visibleMessagesBefore(
+                conversationID: conversationID,
+                userID: userID,
+                visibilityOverride: visibilityOverride,
+                minimumVisibleServerSequence: minimumVisibleServerSequence,
+                lowerTimelineBound: lowerTimelineBound,
+                upperTimelineBound: upperBound,
+                visibleLimit: limit + 1
+            )
+            let notices = try await visibleNoticesBefore(
+                conversationID: conversationID,
+                for: userID,
+                lowerTimelineBound: lowerTimelineBound,
+                upperTimelineBound: upperBound,
+                visibleLimit: limit + 1
+            )
+
+            var items = try makeTimelineItems(messages: visibleMessages.items, notices: notices.items, conversationID: conversationID)
+                .sorted { lhs, rhs in
+                    if lhs.timelineSequence == rhs.timelineSequence {
+                        return lhs.type.rawValue < rhs.type.rawValue
+                    }
+                    return lhs.timelineSequence > rhs.timelineSequence
+                }
+            let hasMore = items.count > limit
+            if hasMore {
+                items = Array(items.prefix(limit))
+            }
+            items.reverse()
+            let response = IMTimelinePageResponse(
+                items: items,
+                hasMore: hasMore,
+                nextAfterSequence: items.last?.timelineSequence
+            )
+            await recordTimelineRead(.history, response: response, scan: visibleMessages.scan + notices.scan, startedAt: startedAt)
+            return response
+        } catch let error as TimelineVisibilityScanLimitExceeded {
+            await recordTimelineReadError(scan: error.scan, startedAt: startedAt, didExceedScanLimit: true)
+            throw Abort(.serviceUnavailable, reason: "Timeline visibility scan limit exceeded.")
+        } catch {
+            await recordTimelineReadError(scan: .empty, startedAt: startedAt, didExceedScanLimit: false)
+            throw error
         }
-        items.reverse()
-        return IMTimelinePageResponse(
-            items: items,
-            hasMore: hasMore,
-            nextAfterSequence: items.last?.timelineSequence
-        )
     }
 
     func listTimelineSince(
         in conversationID: UUID,
         for userID: UUID,
         afterSequence: Int,
-        limit requestedLimit: Int? = nil
+        targetSequence: Int? = nil,
+        limit requestedLimit: Int? = nil,
+        useSharedCache: Bool = true
     ) async throws -> IMTimelinePageResponse {
-        let membership = try await membershipService.requireMembershipRecord(
-            conversationID: conversationID,
-            userID: userID
-        )
-        guard afterSequence >= 0 else {
-            throw Abort(.badRequest, reason: "增量游标无效。")
+        let startedAt = Date()
+        do {
+            let membership = try await membershipService.requireMembershipRecord(
+                conversationID: conversationID,
+                userID: userID
+            )
+            let visibilityOverride = try await conversationVisibilityOverride(
+                conversationID: conversationID,
+                userID: userID
+            )
+            guard afterSequence >= 0 else {
+                throw Abort(.badRequest, reason: "增量游标无效。")
+            }
+            if visibilityOverride?.isDeleted == true {
+                let response = IMTimelinePageResponse(items: [], hasMore: false, nextAfterSequence: UInt64(afterSequence))
+                await recordTimelineRead(.since, response: response, scan: .empty, startedAt: startedAt)
+                return response
+            }
+
+            let limit = try ConversationReadPaginationSupport.normalizedIncrementalLimit(requestedLimit)
+            let lowerTimelineBound = max(
+                afterSequence,
+                timelineLowerBound(membership: membership, visibilityOverride: visibilityOverride)
+            )
+            let minimumVisibleServerSequence = membership.visibleFromSequence
+
+            if useSharedCache,
+               visibilityOverride == nil,
+               let response = try await cachedTimelineSinceResponseIfSafe(
+                conversationID: conversationID,
+                lowerTimelineBound: lowerTimelineBound,
+                minimumVisibleServerSequence: minimumVisibleServerSequence,
+                limit: limit,
+                targetSequence: targetSequence
+            ) {
+                await recordTimelineRead(.since, response: response, scan: .empty, startedAt: startedAt)
+                return response
+            }
+
+            let cacheKey = timelineSinceHotCacheKey(
+                conversationID: conversationID,
+                lowerTimelineBound: lowerTimelineBound,
+                minimumVisibleServerSequence: minimumVisibleServerSequence,
+                limit: limit
+            )
+            if useSharedCache,
+               visibilityOverride == nil,
+               try await canUseSharedTimelineSinceCache(
+                   conversationID: conversationID,
+                   lowerTimelineBound: lowerTimelineBound
+               ) {
+                if let response = await cachedRecentTimelineSinceResponseIfSafe(
+                    conversationID: conversationID,
+                    minimumVisibleServerSequence: minimumVisibleServerSequence,
+                    lowerTimelineBound: lowerTimelineBound,
+                    limit: limit,
+                    targetSequence: targetSequence
+                ) {
+                    await recordTimelineRead(.since, response: response, scan: .empty, startedAt: startedAt)
+                    return response
+                }
+
+                let result = try await sharedTimelineSinceResponse(
+                    cacheKey: cacheKey,
+                    conversationID: conversationID,
+                    userID: userID,
+                    visibilityOverride: visibilityOverride,
+                    minimumVisibleServerSequence: minimumVisibleServerSequence,
+                    lowerTimelineBound: lowerTimelineBound,
+                    limit: limit,
+                    targetSequence: targetSequence
+                )
+                await recordTimelineRead(
+                    .since,
+                    response: result.response,
+                    scan: TimelineVisibilityScan(
+                        rawRowsScanned: result.scannedRows,
+                        queryPages: result.scannedPages
+                    ),
+                    startedAt: startedAt
+                )
+                return result.response
+            }
+
+            let response = try await visibleTimelineSinceResponse(
+                conversationID: conversationID,
+                userID: userID,
+                visibilityOverride: visibilityOverride,
+                minimumVisibleServerSequence: minimumVisibleServerSequence,
+                lowerTimelineBound: lowerTimelineBound,
+                limit: limit
+            )
+            await recordTimelineRead(.since, response: response.response, scan: response.scan, startedAt: startedAt)
+            return response.response
+        } catch let error as TimelineVisibilityScanLimitExceeded {
+            await recordTimelineReadError(scan: error.scan, startedAt: startedAt, didExceedScanLimit: true)
+            throw Abort(.serviceUnavailable, reason: "Timeline visibility scan limit exceeded.")
+        } catch {
+            await recordTimelineReadError(scan: .empty, startedAt: startedAt, didExceedScanLimit: false)
+            throw error
         }
-        let limit = try ConversationReadPaginationSupport.normalizedIncrementalLimit(requestedLimit)
-        let messages = try await ConversationMessage.query(on: db)
-            .filter(\.$conversation.$id == conversationID)
-            .filter(\.$serverSequence >= membership.visibleFromSequence)
-            .filter(\.$timelineSequence > afterSequence)
-            .sort(\.$timelineSequence, .ascending)
-            .limit(limit + 1)
-            .all()
-        let visibleMessages = try await IMCommonFeatureService(db: db).filterVisible(messages, for: userID)
-        let notices = try visibleNotices(
-            try await ConversationTimelineNotice.query(on: db)
-            .filter(\.$conversationID == conversationID)
-            .filter(\.$timelineSequence > afterSequence)
-            .sort(\.$timelineSequence, .ascending)
-            .limit(limit + 1)
-            .all(),
-            for: userID
+    }
+
+    private func visibleTimelineSinceResponse(
+        conversationID: UUID,
+        userID: UUID,
+        visibilityOverride: ConversationVisibilityOverride?,
+        minimumVisibleServerSequence: Int,
+        lowerTimelineBound: Int,
+        limit: Int
+    ) async throws -> (response: IMTimelinePageResponse, scan: TimelineVisibilityScan) {
+        let visibleMessages = try await visibleMessagesSince(
+            conversationID: conversationID,
+            userID: userID,
+            visibilityOverride: visibilityOverride,
+            minimumVisibleServerSequence: minimumVisibleServerSequence,
+            lowerTimelineBound: lowerTimelineBound,
+            visibleLimit: limit + 1
+        )
+        let notices = try await visibleNoticesSince(
+            conversationID: conversationID,
+            for: userID,
+            lowerTimelineBound: lowerTimelineBound,
+            visibleLimit: limit + 1
         )
 
-        var items = try makeTimelineItems(messages: visibleMessages, notices: notices, conversationID: conversationID)
+        let response = try timelineSinceResponse(
+            messages: visibleMessages.items,
+            notices: notices.items,
+            conversationID: conversationID,
+            lowerTimelineBound: lowerTimelineBound,
+            limit: limit
+        )
+        return (response, visibleMessages.scan + notices.scan)
+    }
+
+    private func cachedTimelineSinceResponseIfSafe(
+        conversationID: UUID,
+        lowerTimelineBound: Int,
+        minimumVisibleServerSequence: Int,
+        limit: Int,
+        targetSequence: Int?
+    ) async throws -> IMTimelinePageResponse? {
+        guard let cacheKey = timelineSinceHotCacheKey(
+            conversationID: conversationID,
+            lowerTimelineBound: lowerTimelineBound,
+            minimumVisibleServerSequence: minimumVisibleServerSequence,
+            limit: limit
+        ) else {
+            return nil
+        }
+
+        guard let cached = sinceHotCache?.response(for: cacheKey) else {
+            await metrics?.recordSinceHotCacheMiss()
+            return nil
+        }
+        guard cached.items.allSatisfy({ $0.notice == nil }) else {
+            await metrics?.recordSinceHotCacheUnsafeBypass()
+            return nil
+        }
+        guard timelineSinceResponse(cached, satisfiesTargetSequence: targetSequence) else {
+            await metrics?.recordSinceHotCacheTargetSequenceBypass()
+            return nil
+        }
+        guard try await canUseSharedTimelineSinceCache(
+            conversationID: conversationID,
+            lowerTimelineBound: lowerTimelineBound
+        ) else {
+            await metrics?.recordSinceHotCacheUnsafeBypass()
+            return nil
+        }
+
+        await metrics?.recordSinceHotCacheHit()
+        return cached
+    }
+
+    private func cachedRecentTimelineSinceResponseIfSafe(
+        conversationID: UUID,
+        minimumVisibleServerSequence: Int,
+        lowerTimelineBound: Int,
+        limit: Int,
+        targetSequence: Int?
+    ) async -> IMTimelinePageResponse? {
+        guard configuration.isSinceRecentCacheEnabled,
+              let sinceRecentCache
+        else {
+            return nil
+        }
+        guard let cached = sinceRecentCache.response(
+            conversationID: conversationID,
+            minimumVisibleServerSequence: minimumVisibleServerSequence,
+            lowerTimelineBound: lowerTimelineBound,
+            limit: limit
+        ) else {
+            await metrics?.recordSinceRecentCacheMiss()
+            return nil
+        }
+        guard cached.items.allSatisfy({ $0.notice == nil }) else {
+            await metrics?.recordSinceRecentCacheMiss()
+            return nil
+        }
+        guard timelineSinceResponse(cached, satisfiesTargetSequence: targetSequence) else {
+            await metrics?.recordSinceRecentCacheTargetSequenceBypass()
+            return nil
+        }
+        await metrics?.recordSinceRecentCacheHit()
+        return cached
+    }
+
+    private func canUseSharedTimelineSinceCache(
+        conversationID: UUID,
+        lowerTimelineBound: Int
+    ) async throws -> Bool {
+        guard let sinceVisibilitySafetyCache else {
+            return false
+        }
+        let key = IMTimelineSinceVisibilitySafetyCache.Key(
+            conversationID: conversationID,
+            lowerTimelineBound: lowerTimelineBound
+        )
+        let result = try await sinceVisibilitySafetyCache.hasHiddenOverrides(
+            for: key,
+            ttlMilliseconds: configuration.sinceHotCacheTTLMilliseconds,
+            loader: {
+                try await MessageVisibilityOverride.query(on: db)
+                    .filter(\.$conversationID == conversationID)
+                    .filter(\.$serverSequence > lowerTimelineBound)
+                    .filter(\.$isHidden == true)
+                    .count() > 0
+            }
+        )
+        await metrics?.recordSinceVisibilitySafetyCache(
+            cacheHit: result.cacheHit,
+            joinedInFlight: result.joinedInFlight,
+            hasHiddenOverrides: result.hasHiddenOverrides
+        )
+        guard !result.hasHiddenOverrides else {
+            return false
+        }
+
+        let hasTimelineNotices = try await ConversationTimelineNotice.query(on: db)
+            .filter(\.$conversationID == conversationID)
+            .filter(\.$timelineSequence > lowerTimelineBound)
+            .count() > 0
+        if hasTimelineNotices {
+            await metrics?.recordSinceVisibilitySafetyNoticeBypass()
+            return false
+        }
+        return true
+    }
+
+    private func sharedTimelineSinceResponse(
+        cacheKey: IMTimelineSinceHotCache.Key?,
+        conversationID: UUID,
+        userID: UUID,
+        visibilityOverride: ConversationVisibilityOverride?,
+        minimumVisibleServerSequence: Int,
+        lowerTimelineBound: Int,
+        limit: Int,
+        targetSequence: Int?
+    ) async throws -> IMTimelineSinceResponseCoalescer.PageResult {
+        guard let cacheKey,
+              let sinceResponseCoalescer
+        else {
+            let response = try await visibleTimelineSinceResponse(
+                conversationID: conversationID,
+                userID: userID,
+                visibilityOverride: visibilityOverride,
+                minimumVisibleServerSequence: minimumVisibleServerSequence,
+                lowerTimelineBound: lowerTimelineBound,
+                limit: limit
+            )
+            await storeTimelineSinceCacheResponseIfSafe(
+                response.response,
+                for: cacheKey,
+                conversationID: conversationID,
+                minimumVisibleServerSequence: minimumVisibleServerSequence,
+                lowerTimelineBound: lowerTimelineBound
+            )
+            return IMTimelineSinceResponseCoalescer.PageResult(
+                response: response.response,
+                scannedRows: response.scan.rawRowsScanned,
+                scannedPages: response.scan.queryPages
+            )
+        }
+
+        if let targetSequence,
+           configuration.sinceTargetSequenceCoalesceWindowMilliseconds > 0 {
+            let coalesced = try await sinceResponseCoalescer.targetSequenceResponse(
+                for: cacheKey,
+                targetSequence: targetSequence,
+                coalescingWindowMilliseconds: configuration.sinceTargetSequenceCoalesceWindowMilliseconds
+            ) { coalescedLowerTimelineBound, coalescedLimit in
+                let coalescedCacheKey = IMTimelineSinceHotCache.Key(
+                    conversationID: conversationID,
+                    lowerTimelineBound: coalescedLowerTimelineBound,
+                    minimumVisibleServerSequence: minimumVisibleServerSequence,
+                    limit: coalescedLimit
+                )
+                if let cached = sinceHotCache?.response(for: coalescedCacheKey),
+                   cached.items.allSatisfy({ $0.notice == nil }),
+                   timelineSinceResponse(cached, satisfiesTargetSequence: targetSequence) {
+                    return IMTimelineSinceResponseCoalescer.PageResult(
+                        response: cached,
+                        scannedRows: 0,
+                        scannedPages: 0
+                    )
+                }
+                let response = try await visibleTimelineSinceResponse(
+                    conversationID: conversationID,
+                    userID: userID,
+                    visibilityOverride: visibilityOverride,
+                    minimumVisibleServerSequence: minimumVisibleServerSequence,
+                    lowerTimelineBound: coalescedLowerTimelineBound,
+                    limit: coalescedLimit
+                )
+                await storeTimelineSinceCacheResponseIfSafe(
+                    response.response,
+                    for: coalescedCacheKey,
+                    conversationID: conversationID,
+                    minimumVisibleServerSequence: minimumVisibleServerSequence,
+                    lowerTimelineBound: coalescedLowerTimelineBound
+                )
+                return IMTimelineSinceResponseCoalescer.PageResult(
+                    response: response.response,
+                    scannedRows: response.scan.rawRowsScanned,
+                    scannedPages: response.scan.queryPages
+                )
+            }
+            if coalesced.joinedWindow {
+                await metrics?.recordSinceResponseSingleflightJoined()
+                await metrics?.recordSinceTargetSequenceSingleflightJoined()
+                await metrics?.recordSinceTargetSequenceWindowJoined()
+                if timelineSinceResponseContainsNotice(coalesced.result.response) {
+                    return try await timelineSinceNoticeSafeBypass(
+                        conversationID: conversationID,
+                        userID: userID,
+                        visibilityOverride: visibilityOverride,
+                        minimumVisibleServerSequence: minimumVisibleServerSequence,
+                        lowerTimelineBound: lowerTimelineBound,
+                        limit: limit
+                    )
+                }
+            }
+            return coalesced.result
+        }
+
+        let coalesced = try await sinceResponseCoalescer.response(
+            for: cacheKey,
+            targetSequence: targetSequence
+        ) {
+            if let cached = sinceHotCache?.response(for: cacheKey),
+               cached.items.allSatisfy({ $0.notice == nil }),
+               timelineSinceResponse(cached, satisfiesTargetSequence: targetSequence) {
+                return IMTimelineSinceResponseCoalescer.PageResult(
+                    response: cached,
+                    scannedRows: 0,
+                    scannedPages: 0
+                )
+            }
+            let response = try await visibleTimelineSinceResponse(
+                conversationID: conversationID,
+                userID: userID,
+                visibilityOverride: visibilityOverride,
+                minimumVisibleServerSequence: minimumVisibleServerSequence,
+                lowerTimelineBound: lowerTimelineBound,
+                limit: limit
+            )
+            await storeTimelineSinceCacheResponseIfSafe(
+                response.response,
+                for: cacheKey,
+                conversationID: conversationID,
+                minimumVisibleServerSequence: minimumVisibleServerSequence,
+                lowerTimelineBound: lowerTimelineBound
+            )
+            return IMTimelineSinceResponseCoalescer.PageResult(
+                response: response.response,
+                scannedRows: response.scan.rawRowsScanned,
+                scannedPages: response.scan.queryPages
+            )
+        }
+        if coalesced.joinedInFlight {
+            await metrics?.recordSinceResponseSingleflightJoined()
+            if targetSequence != nil {
+                await metrics?.recordSinceTargetSequenceSingleflightJoined()
+            }
+            if timelineSinceResponseContainsNotice(coalesced.result.response) {
+                return try await timelineSinceNoticeSafeBypass(
+                    conversationID: conversationID,
+                    userID: userID,
+                    visibilityOverride: visibilityOverride,
+                    minimumVisibleServerSequence: minimumVisibleServerSequence,
+                    lowerTimelineBound: lowerTimelineBound,
+                    limit: limit
+                )
+            }
+        }
+        return coalesced.result
+    }
+
+    private func timelineSinceNoticeSafeBypass(
+        conversationID: UUID,
+        userID: UUID,
+        visibilityOverride: ConversationVisibilityOverride?,
+        minimumVisibleServerSequence: Int,
+        lowerTimelineBound: Int,
+        limit: Int
+    ) async throws -> IMTimelineSinceResponseCoalescer.PageResult {
+        await metrics?.recordSinceResponseSingleflightNoticeBypass()
+        let response = try await visibleTimelineSinceResponse(
+            conversationID: conversationID,
+            userID: userID,
+            visibilityOverride: visibilityOverride,
+            minimumVisibleServerSequence: minimumVisibleServerSequence,
+            lowerTimelineBound: lowerTimelineBound,
+            limit: limit
+        )
+        return IMTimelineSinceResponseCoalescer.PageResult(
+            response: response.response,
+            scannedRows: response.scan.rawRowsScanned,
+            scannedPages: response.scan.queryPages
+        )
+    }
+
+    private func timelineSinceResponseContainsNotice(_ response: IMTimelinePageResponse) -> Bool {
+        response.items.contains { $0.notice != nil }
+    }
+
+    private func storeTimelineSinceCacheResponseIfSafe(
+        _ response: IMTimelinePageResponse,
+        for cacheKey: IMTimelineSinceHotCache.Key?,
+        conversationID: UUID,
+        minimumVisibleServerSequence: Int,
+        lowerTimelineBound: Int
+    ) async {
+        guard response.items.allSatisfy({ $0.notice == nil }) else {
+            return
+        }
+        if let cacheKey {
+            sinceHotCache?.store(
+                response,
+                for: cacheKey,
+                ttlMilliseconds: configuration.sinceHotCacheTTLMilliseconds,
+                maxEntries: configuration.sinceHotCacheMaxEntries
+            )
+        }
+        if configuration.isSinceRecentCacheEnabled,
+           let sinceRecentCache,
+           sinceRecentCache.store(
+               response,
+               conversationID: conversationID,
+               minimumVisibleServerSequence: minimumVisibleServerSequence,
+               lowerTimelineBound: lowerTimelineBound,
+               ttlMilliseconds: configuration.sinceRecentCacheTTLMilliseconds,
+               maxConversations: configuration.sinceRecentCacheMaxConversations,
+               maxItemsPerConversation: configuration.sinceRecentCacheMaxItemsPerConversation
+           ) {
+            await metrics?.recordSinceRecentCacheStore()
+        }
+    }
+
+    private func timelineSinceHotCacheKey(
+        conversationID: UUID,
+        lowerTimelineBound: Int,
+        minimumVisibleServerSequence: Int,
+        limit: Int
+    ) -> IMTimelineSinceHotCache.Key? {
+        guard configuration.isSinceHotCacheEnabled,
+              sinceHotCache != nil
+        else {
+            return nil
+        }
+        return IMTimelineSinceHotCache.Key(
+            conversationID: conversationID,
+            lowerTimelineBound: lowerTimelineBound,
+            minimumVisibleServerSequence: minimumVisibleServerSequence,
+            limit: limit
+        )
+    }
+
+    private func timelineSinceResponse(
+        _ response: IMTimelinePageResponse,
+        satisfiesTargetSequence targetSequence: Int?
+    ) -> Bool {
+        guard let targetSequence else {
+            return true
+        }
+        return latestTimelineSequence(in: response) >= UInt64(targetSequence)
+    }
+
+    private func latestTimelineSequence(in response: IMTimelinePageResponse) -> UInt64 {
+        response.items.map(\.timelineSequence).max() ?? response.nextAfterSequence ?? 0
+    }
+
+    private func timelineSinceResponse(
+        messages: [ConversationMessage],
+        notices: [ConversationTimelineNotice],
+        conversationID: UUID,
+        lowerTimelineBound: Int,
+        limit: Int
+    ) throws -> IMTimelinePageResponse {
+        var items = try makeTimelineItems(messages: messages, notices: notices, conversationID: conversationID)
             .sorted { lhs, rhs in
                 if lhs.timelineSequence == rhs.timelineSequence {
                     return lhs.type.rawValue < rhs.type.rawValue
@@ -323,13 +823,299 @@ struct ConversationTimelineReadSupport {
         if let lastItem = items.last {
             nextAfterSequence = lastItem.timelineSequence
         } else {
-            nextAfterSequence = UInt64(afterSequence)
+            nextAfterSequence = UInt64(lowerTimelineBound)
         }
         return IMTimelinePageResponse(
             items: items,
             hasMore: hasMore,
             nextAfterSequence: nextAfterSequence
         )
+    }
+
+    private func conversationVisibilityOverride(
+        conversationID: UUID,
+        userID: UUID
+    ) async throws -> ConversationVisibilityOverride? {
+        try await ConversationVisibilityOverride.find(
+            ConversationVisibilityOverride.recordID(ownerUserID: userID, conversationID: conversationID),
+            on: db
+        )
+    }
+
+    private func timelineLowerBound(
+        membership: ConversationMember,
+        visibilityOverride: ConversationVisibilityOverride?
+    ) -> Int {
+        max(
+            max(0, membership.visibleFromSequence - 1),
+            visibilityOverride?.hiddenBeforeSequence ?? 0
+        )
+    }
+
+    private func visibleMessagesBefore(
+        conversationID: UUID,
+        userID: UUID,
+        visibilityOverride: ConversationVisibilityOverride?,
+        minimumVisibleServerSequence: Int,
+        lowerTimelineBound: Int,
+        upperTimelineBound: Int,
+        visibleLimit: Int
+    ) async throws -> TimelineVisibilityScanResult<ConversationMessage> {
+        guard visibleLimit > 0 else {
+            return TimelineVisibilityScanResult(items: [], scan: .empty)
+        }
+        let pageSize = visibleLimit
+        var cursor = upperTimelineBound
+        var visibleMessages: [ConversationMessage] = []
+        visibleMessages.reserveCapacity(visibleLimit)
+        var scan = TimelineVisibilityScan()
+
+        while visibleMessages.count < visibleLimit {
+            let rawMessages = try await ConversationMessage.query(on: db)
+                .filter(\.$conversation.$id == conversationID)
+                .filter(\.$serverSequence >= minimumVisibleServerSequence)
+                .filter(\.$timelineSequence > lowerTimelineBound)
+                .filter(\.$timelineSequence < cursor)
+                .sort(\.$timelineSequence, .descending)
+                .limit(pageSize)
+                .all()
+            scan.record(rawRows: rawMessages.count)
+            guard !rawMessages.isEmpty else {
+                break
+            }
+            visibleMessages.append(
+                contentsOf: try await filterVisibleMessages(
+                    rawMessages,
+                    for: userID,
+                    visibilityOverride: visibilityOverride
+                )
+            )
+            if rawMessages.count < pageSize {
+                break
+            }
+            guard let nextCursor = rawMessages.last?.timelineSequence,
+                  nextCursor < cursor
+            else {
+                break
+            }
+            cursor = nextCursor
+            try enforceVisibilityScanBudget(scan)
+        }
+        return TimelineVisibilityScanResult(items: Array(visibleMessages.prefix(visibleLimit)), scan: scan)
+    }
+
+    private func visibleMessagesSince(
+        conversationID: UUID,
+        userID: UUID,
+        visibilityOverride: ConversationVisibilityOverride?,
+        minimumVisibleServerSequence: Int,
+        lowerTimelineBound: Int,
+        visibleLimit: Int
+    ) async throws -> TimelineVisibilityScanResult<ConversationMessage> {
+        guard visibleLimit > 0 else {
+            return TimelineVisibilityScanResult(items: [], scan: .empty)
+        }
+        let pageSize = visibleLimit
+        var cursor = lowerTimelineBound
+        var visibleMessages: [ConversationMessage] = []
+        visibleMessages.reserveCapacity(visibleLimit)
+        var scan = TimelineVisibilityScan()
+
+        while visibleMessages.count < visibleLimit {
+            let rawMessages = try await ConversationMessage.query(on: db)
+                .filter(\.$conversation.$id == conversationID)
+                .filter(\.$serverSequence >= minimumVisibleServerSequence)
+                .filter(\.$timelineSequence > cursor)
+                .sort(\.$timelineSequence, .ascending)
+                .limit(pageSize)
+                .all()
+            scan.record(rawRows: rawMessages.count)
+            guard !rawMessages.isEmpty else {
+                break
+            }
+            visibleMessages.append(
+                contentsOf: try await filterVisibleMessages(
+                    rawMessages,
+                    for: userID,
+                    visibilityOverride: visibilityOverride
+                )
+            )
+            if rawMessages.count < pageSize {
+                break
+            }
+            guard let nextCursor = rawMessages.last?.timelineSequence,
+                  nextCursor > cursor
+            else {
+                break
+            }
+            cursor = nextCursor
+            try enforceVisibilityScanBudget(scan)
+        }
+        return TimelineVisibilityScanResult(items: Array(visibleMessages.prefix(visibleLimit)), scan: scan)
+    }
+
+    private func filterVisibleMessages(
+        _ messages: [ConversationMessage],
+        for userID: UUID,
+        visibilityOverride: ConversationVisibilityOverride?
+    ) async throws -> [ConversationMessage] {
+        guard !messages.isEmpty else {
+            return []
+        }
+        if visibilityOverride?.isDeleted == true {
+            return []
+        }
+
+        let hiddenBeforeSequence = visibilityOverride?.hiddenBeforeSequence
+        let messageIDs = messages.compactMap(\.id)
+        let messageOverridesByMessageID: [UUID: MessageVisibilityOverride]
+        if messageIDs.isEmpty {
+            messageOverridesByMessageID = [:]
+        } else {
+            let messageOverrides = try await MessageVisibilityOverride.query(on: db)
+                .filter(\.$ownerUserID == userID)
+                .filter(\.$messageID ~~ messageIDs)
+                .all()
+            messageOverridesByMessageID = Dictionary(
+                uniqueKeysWithValues: messageOverrides.map { ($0.messageID, $0) }
+            )
+        }
+
+        return messages.filter { message in
+            if let hiddenBeforeSequence, message.serverSequence <= hiddenBeforeSequence {
+                return false
+            }
+            guard let messageID = message.id,
+                  let row = messageOverridesByMessageID[messageID]
+            else {
+                return true
+            }
+            return !row.isHidden
+        }
+    }
+
+    private func visibleNoticesBefore(
+        conversationID: UUID,
+        for userID: UUID,
+        lowerTimelineBound: Int,
+        upperTimelineBound: Int,
+        visibleLimit: Int
+    ) async throws -> TimelineVisibilityScanResult<ConversationTimelineNotice> {
+        guard visibleLimit > 0 else {
+            return TimelineVisibilityScanResult(items: [], scan: .empty)
+        }
+        let pageSize = visibleLimit
+        var cursor = upperTimelineBound
+        var notices: [ConversationTimelineNotice] = []
+        notices.reserveCapacity(visibleLimit)
+        var scan = TimelineVisibilityScan()
+
+        while notices.count < visibleLimit {
+            let rawNotices = try await ConversationTimelineNotice.query(on: db)
+                .filter(\.$conversationID == conversationID)
+                .filter(\.$timelineSequence > lowerTimelineBound)
+                .filter(\.$timelineSequence < cursor)
+                .sort(\.$timelineSequence, .descending)
+                .limit(pageSize)
+                .all()
+            scan.record(rawRows: rawNotices.count)
+            guard !rawNotices.isEmpty else {
+                break
+            }
+            notices.append(contentsOf: try visibleNotices(rawNotices, for: userID))
+            if rawNotices.count < pageSize {
+                break
+            }
+            guard let nextCursor = rawNotices.last?.timelineSequence,
+                  nextCursor < cursor
+            else {
+                break
+            }
+            cursor = nextCursor
+            try enforceVisibilityScanBudget(scan)
+        }
+        return TimelineVisibilityScanResult(items: Array(notices.prefix(visibleLimit)), scan: scan)
+    }
+
+    private func visibleNoticesSince(
+        conversationID: UUID,
+        for userID: UUID,
+        lowerTimelineBound: Int,
+        visibleLimit: Int
+    ) async throws -> TimelineVisibilityScanResult<ConversationTimelineNotice> {
+        guard visibleLimit > 0 else {
+            return TimelineVisibilityScanResult(items: [], scan: .empty)
+        }
+        let pageSize = visibleLimit
+        var cursor = lowerTimelineBound
+        var notices: [ConversationTimelineNotice] = []
+        notices.reserveCapacity(visibleLimit)
+        var scan = TimelineVisibilityScan()
+
+        while notices.count < visibleLimit {
+            let rawNotices = try await ConversationTimelineNotice.query(on: db)
+                .filter(\.$conversationID == conversationID)
+                .filter(\.$timelineSequence > cursor)
+                .sort(\.$timelineSequence, .ascending)
+                .limit(pageSize)
+                .all()
+            scan.record(rawRows: rawNotices.count)
+            guard !rawNotices.isEmpty else {
+                break
+            }
+            notices.append(contentsOf: try visibleNotices(rawNotices, for: userID))
+            if rawNotices.count < pageSize {
+                break
+            }
+            guard let nextCursor = rawNotices.last?.timelineSequence,
+                  nextCursor > cursor
+            else {
+                break
+            }
+            cursor = nextCursor
+            try enforceVisibilityScanBudget(scan)
+        }
+        return TimelineVisibilityScanResult(items: Array(notices.prefix(visibleLimit)), scan: scan)
+    }
+
+    private func enforceVisibilityScanBudget(_ scan: TimelineVisibilityScan) throws {
+        if scan.rawRowsScanned >= configuration.visibilityScanMaxRows ||
+            scan.queryPages >= configuration.visibilityScanMaxPages
+        {
+            throw TimelineVisibilityScanLimitExceeded(scan: scan)
+        }
+    }
+
+    private func recordTimelineRead(
+        _ kind: IMTimelineReadMetrics.ReadKind,
+        response: IMTimelinePageResponse,
+        scan: TimelineVisibilityScan,
+        startedAt: Date
+    ) async {
+        await metrics?.recordRead(
+            kind: kind,
+            itemCount: response.items.count,
+            scannedRows: scan.rawRowsScanned,
+            scannedPages: scan.queryPages,
+            elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
+        )
+    }
+
+    private func recordTimelineReadError(
+        scan: TimelineVisibilityScan,
+        startedAt: Date,
+        didExceedScanLimit: Bool
+    ) async {
+        await metrics?.recordReadError(
+            scannedRows: scan.rawRowsScanned,
+            scannedPages: scan.queryPages,
+            elapsedMilliseconds: elapsedMilliseconds(since: startedAt),
+            didExceedScanLimit: didExceedScanLimit
+        )
+    }
+
+    private func elapsedMilliseconds(since startedAt: Date) -> Int {
+        max(0, Int(Date().timeIntervalSince(startedAt) * 1_000))
     }
 
     private func makeTimelineItems(
@@ -379,6 +1165,34 @@ struct ConversationTimelineReadSupport {
             try notice.targetUserIDs.contains(userID)
         }
     }
+}
+
+private struct TimelineVisibilityScan: Sendable {
+    static let empty = TimelineVisibilityScan()
+
+    var rawRowsScanned: Int = 0
+    var queryPages: Int = 0
+
+    mutating func record(rawRows: Int) {
+        rawRowsScanned += max(0, rawRows)
+        queryPages += 1
+    }
+
+    static func + (lhs: TimelineVisibilityScan, rhs: TimelineVisibilityScan) -> TimelineVisibilityScan {
+        TimelineVisibilityScan(
+            rawRowsScanned: lhs.rawRowsScanned + rhs.rawRowsScanned,
+            queryPages: lhs.queryPages + rhs.queryPages
+        )
+    }
+}
+
+private struct TimelineVisibilityScanResult<Element> {
+    let items: [Element]
+    let scan: TimelineVisibilityScan
+}
+
+private struct TimelineVisibilityScanLimitExceeded: Error {
+    let scan: TimelineVisibilityScan
 }
 
 struct ConversationSearchReadSupport {
@@ -526,13 +1340,17 @@ struct ConversationReadSupport {
         in conversationID: UUID,
         for userID: UUID,
         afterSequence: Int,
-        limit requestedLimit: Int? = nil
+        targetSequence: Int? = nil,
+        limit requestedLimit: Int? = nil,
+        useSharedCache: Bool = true
     ) async throws -> IMTimelinePageResponse {
         try await timelineReadSupport.listTimelineSince(
             in: conversationID,
             for: userID,
             afterSequence: afterSequence,
-            limit: requestedLimit
+            targetSequence: targetSequence,
+            limit: requestedLimit,
+            useSharedCache: useSharedCache
         )
     }
 

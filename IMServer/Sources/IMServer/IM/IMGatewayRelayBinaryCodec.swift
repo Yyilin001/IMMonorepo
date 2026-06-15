@@ -2,12 +2,24 @@ import Foundation
 
 enum IMGatewayRelayBinaryCodec {
     private static let magic = Array("IMRP1".utf8)
+    private static let batchMagic = Array("IMRB1".utf8)
     private static let uuidByteCount = 16
 
     struct DomainEventPacket: Sendable {
         let requestID: UUID?
         let payloadData: Data
         let recipientUserIDs: [UUID]
+    }
+
+    struct DomainEventPacketBatch: Sendable {
+        let requestID: UUID?
+        let entries: [DomainEventPacketBatchEntry]
+    }
+
+    struct DomainEventPacketBatchEntry: Sendable {
+        let payloadData: Data
+        let recipientUserIDs: [UUID]
+        let fanoutIntent: IMGatewayDomainEventFanoutIntent
     }
 
     static func encodeDomainEventPacket(
@@ -40,6 +52,86 @@ enum IMGatewayRelayBinaryCodec {
             appendUUID(userID, to: &data)
         }
         return data
+    }
+
+    static func encodedDomainEventPacketByteCount(
+        payloadByteCount: Int,
+        recipientCount: Int,
+        includesRequestID: Bool
+    ) -> Int {
+        magic.count
+            + 1
+            + (includesRequestID ? uuidByteCount : 0)
+            + 4
+            + max(0, payloadByteCount)
+            + 4
+            + max(0, recipientCount) * uuidByteCount
+    }
+
+    static func encodeDomainEventPacketBatch(
+        entries: [DomainEventPacketBatchEntry],
+        requestID: UUID?
+    ) throws -> Data {
+        guard !entries.isEmpty else {
+            throw BinaryRelayCodecError.emptyBatch
+        }
+        guard entries.count <= Int(UInt32.max) else {
+            throw BinaryRelayCodecError.valueTooLarge
+        }
+        for entry in entries {
+            guard !entry.recipientUserIDs.isEmpty else {
+                throw BinaryRelayCodecError.emptyRecipients
+            }
+            guard entry.payloadData.count <= Int(UInt32.max),
+                  entry.recipientUserIDs.count <= Int(UInt32.max)
+            else {
+                throw BinaryRelayCodecError.valueTooLarge
+            }
+        }
+
+        var data = Data()
+        data.reserveCapacity(encodedDomainEventPacketBatchByteCount(
+            entries: entries.map {
+                (payloadByteCount: $0.payloadData.count, recipientCount: $0.recipientUserIDs.count)
+            },
+            includesRequestID: requestID != nil
+        ))
+        data.append(contentsOf: Self.batchMagic)
+        if let requestID {
+            data.append(1)
+            appendUUID(requestID, to: &data)
+        } else {
+            data.append(0)
+        }
+        appendUInt32(UInt32(entries.count), to: &data)
+        for entry in entries {
+            data.append(fanoutIntentCode(entry.fanoutIntent))
+            appendUInt32(UInt32(entry.payloadData.count), to: &data)
+            data.append(entry.payloadData)
+            appendUInt32(UInt32(entry.recipientUserIDs.count), to: &data)
+            for userID in entry.recipientUserIDs {
+                appendUUID(userID, to: &data)
+            }
+        }
+        return data
+    }
+
+    static func encodedDomainEventPacketBatchByteCount(
+        entries: [(payloadByteCount: Int, recipientCount: Int)],
+        includesRequestID: Bool
+    ) -> Int {
+        batchMagic.count
+            + 1
+            + (includesRequestID ? uuidByteCount : 0)
+            + 4
+            + entries.reduce(0) { partial, entry in
+                partial
+                    + 1
+                    + 4
+                    + max(0, entry.payloadByteCount)
+                    + 4
+                    + max(0, entry.recipientCount) * uuidByteCount
+            }
     }
 
     static func decodeDomainEventPacket(_ data: Data) throws -> DomainEventPacket {
@@ -90,6 +182,70 @@ enum IMGatewayRelayBinaryCodec {
             payloadData: Data(payloadData),
             recipientUserIDs: recipientUserIDs
         )
+    }
+
+    static func decodeDomainEventPacketBatch(_ data: Data) throws -> DomainEventPacketBatch {
+        var cursor = 0
+        guard data.count >= Self.batchMagic.count + 1 + 4,
+              Array(data.prefix(Self.batchMagic.count)) == Self.batchMagic
+        else {
+            throw BinaryRelayCodecError.invalidMagic
+        }
+        cursor += Self.batchMagic.count
+
+        let hasRequestID = try readByte(from: data, cursor: &cursor)
+        let requestID: UUID?
+        switch hasRequestID {
+        case 0:
+            requestID = nil
+        case 1:
+            requestID = try readUUID(from: data, cursor: &cursor)
+        default:
+            throw BinaryRelayCodecError.invalidRequestIDFlag
+        }
+
+        let entryCount = Int(try readUInt32(from: data, cursor: &cursor))
+        guard entryCount > 0 else {
+            throw BinaryRelayCodecError.emptyBatch
+        }
+
+        var entries: [DomainEventPacketBatchEntry] = []
+        entries.reserveCapacity(entryCount)
+        for _ in 0..<entryCount {
+            let fanoutIntent = try fanoutIntent(fromCode: try readByte(from: data, cursor: &cursor))
+            let payloadLength = Int(try readUInt32(from: data, cursor: &cursor))
+            guard payloadLength >= 0,
+                  data.count - cursor >= payloadLength
+            else {
+                throw BinaryRelayCodecError.truncatedPayload
+            }
+            let payloadData = data[cursor..<(cursor + payloadLength)]
+            cursor += payloadLength
+
+            let recipientCount = Int(try readUInt32(from: data, cursor: &cursor))
+            guard recipientCount > 0 else {
+                throw BinaryRelayCodecError.emptyRecipients
+            }
+            guard data.count - cursor >= recipientCount * Self.uuidByteCount else {
+                throw BinaryRelayCodecError.invalidRecipientBytes
+            }
+
+            var recipientUserIDs: [UUID] = []
+            recipientUserIDs.reserveCapacity(recipientCount)
+            for _ in 0..<recipientCount {
+                recipientUserIDs.append(try readUUID(from: data, cursor: &cursor))
+            }
+            entries.append(DomainEventPacketBatchEntry(
+                payloadData: Data(payloadData),
+                recipientUserIDs: recipientUserIDs,
+                fanoutIntent: fanoutIntent
+            ))
+        }
+        guard cursor == data.count else {
+            throw BinaryRelayCodecError.invalidRecipientBytes
+        }
+
+        return DomainEventPacketBatch(requestID: requestID, entries: entries)
     }
 
     private static func appendUInt32(_ value: UInt32, to data: inout Data) {
@@ -164,10 +320,40 @@ enum IMGatewayRelayBinaryCodec {
         defer { cursor += 1 }
         return data[cursor]
     }
+
+    private static func fanoutIntentCode(_ intent: IMGatewayDomainEventFanoutIntent) -> UInt8 {
+        switch intent {
+        case .unspecified:
+            return 0
+        case .preSplitActiveFull:
+            return 1
+        case .preSplitActiveCompact:
+            return 3
+        case .preSplitInactiveHint:
+            return 2
+        }
+    }
+
+    private static func fanoutIntent(fromCode code: UInt8) throws -> IMGatewayDomainEventFanoutIntent {
+        switch code {
+        case 0:
+            return .unspecified
+        case 1:
+            return .preSplitActiveFull
+        case 2:
+            return .preSplitInactiveHint
+        case 3:
+            return .preSplitActiveCompact
+        default:
+            throw BinaryRelayCodecError.invalidFanoutIntent
+        }
+    }
 }
 
 enum BinaryRelayCodecError: Error {
+    case emptyBatch
     case emptyRecipients
+    case invalidFanoutIntent
     case invalidMagic
     case invalidRecipientBytes
     case invalidRequestIDFlag

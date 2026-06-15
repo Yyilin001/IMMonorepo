@@ -48,12 +48,10 @@ actor KafkaConversationEventStreamProducer: ConversationEventStreamProducer {
         additionalHeaders: [KafkaHeader]
     ) async throws {
         let producer = try ensureProducer()
-        let payload = try JSONEncoder().encode(envelope)
-        let message = KafkaProducerMessage(
+        let message = try KafkaConversationEventStreamMessageFactory.makeMessage(
+            envelope: envelope,
             topic: topicOverride ?? configuration.topic,
-            headers: makeHeaders(for: envelope) + additionalHeaders,
-            key: envelope.conversationID.uuidString,
-            value: [UInt8](payload)
+            additionalHeaders: additionalHeaders
         )
         let messageID = try producer.send(message)
         try await waitForDelivery(messageID)
@@ -105,12 +103,12 @@ actor KafkaConversationEventStreamProducer: ConversationEventStreamProducer {
                     "Kafka producer run loop exited with error",
                     metadata: ["error": .string(String(describing: error))]
                 )
-                await self.failPendingDeliveries(error)
+                self.failPendingDeliveries(error)
             }
         }
         eventsTask = Task {
             for await event in events {
-                await self.handleProducerEvent(event)
+                self.handleProducerEvent(event)
             }
         }
 
@@ -156,7 +154,7 @@ actor KafkaConversationEventStreamProducer: ConversationEventStreamProducer {
                 group.cancelAll()
             } catch {
                 group.cancelAll()
-                await self.cancelPendingDelivery(messageID)
+                self.cancelPendingDelivery(messageID)
                 throw error
             }
         }
@@ -209,7 +207,26 @@ actor KafkaConversationEventStreamProducer: ConversationEventStreamProducer {
         UInt64(max(1, configuration.messageTimeoutMilliseconds)) * 1_000_000
     }
 
-    private func makeHeaders(for envelope: ConversationEventStreamEnvelope) -> [KafkaHeader] {
+}
+
+enum KafkaConversationEventStreamMessageFactory {
+    typealias Message = KafkaProducerMessage<String, [UInt8]>
+
+    static func makeMessage(
+        envelope: ConversationEventStreamEnvelope,
+        topic: String,
+        additionalHeaders: [KafkaHeader] = []
+    ) throws -> Message {
+        let payload = try JSONEncoder().encode(envelope)
+        return KafkaProducerMessage(
+            topic: topic,
+            headers: makeHeaders(for: envelope) + additionalHeaders,
+            key: envelope.conversationID.uuidString,
+            value: [UInt8](payload)
+        )
+    }
+
+    private static func makeHeaders(for envelope: ConversationEventStreamEnvelope) -> [KafkaHeader] {
         [
             kafkaHeader(key: "event-id", value: envelope.eventID.uuidString),
             kafkaHeader(key: "event-version", value: String(envelope.eventVersion)),
@@ -220,7 +237,7 @@ actor KafkaConversationEventStreamProducer: ConversationEventStreamProducer {
         ]
     }
 
-    private func kafkaHeader(key: String, value: String) -> KafkaHeader {
+    private static func kafkaHeader(key: String, value: String) -> KafkaHeader {
         var buffer = ByteBufferAllocator().buffer(capacity: value.utf8.count)
         buffer.writeString(value)
         return KafkaHeader(key: key, value: buffer)

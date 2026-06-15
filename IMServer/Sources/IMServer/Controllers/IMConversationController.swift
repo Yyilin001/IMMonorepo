@@ -55,5 +55,27 @@ struct IMConversationController: RouteCollection {
         else {
             throw Abort(.badRequest, reason: "客户端健康上报计数无效。")
         }
+        if let diagnostics = report.snapshot.timelineCatchUpDiagnostics {
+            guard diagnostics.hintQueuedCount >= 0,
+                  diagnostics.hintSkippedAlreadyLoadedCount >= 0,
+                  diagnostics.deferredCount >= 0,
+                  diagnostics.sinceRequestCount >= 0,
+                  diagnostics.sinceSuccessCount >= 0,
+                  diagnostics.sinceFailureCount >= 0,
+                  diagnostics.appliedPageCount >= 0,
+                  diagnostics.appliedItemCount >= 0
+            else {
+                throw Abort(.badRequest, reason: "客户端 timeline 补洞健康上报计数无效。")
+            }
+        }
+        if let configuration = report.snapshot.timelineCatchUpConfiguration {
+            let maximumMilliseconds = 600_000
+            guard (0...maximumMilliseconds).contains(configuration.selectedHintInitialJitterMilliseconds),
+                  (0...maximumMilliseconds).contains(configuration.selectedHintMinimumIntervalMilliseconds),
+                  (0...maximumMilliseconds).contains(configuration.selectedHintMicroBatchMilliseconds)
+            else {
+                throw Abort(.badRequest, reason: "客户端 timeline 补洞配置上报无效。")
+            }
+        }
     }
 }

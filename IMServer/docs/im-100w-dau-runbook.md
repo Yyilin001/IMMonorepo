@@ -40,7 +40,7 @@ Production must not run `combined` or `projection-worker`.
 - `IM_OUTBOX_CLAIM_TIMEOUT_MS=60000`
 - `IM_METRICS_ENABLED=true`
 - `IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT=200`
-- `IM_GROUP_MEMBER_LIMIT=500`
+- `IM_GROUP_MEMBER_LIMIT=1000` on `command-api` and `stream-consumer` for the current large-group posture; pure small-group deployments can lower this only with matching large-group thresholds.
 - `IM_SEQUENCE_ALLOCATION_MODE=block`
 - `IM_MESSAGE_WRITE_BATCH_ENABLED=true`
 - `IM_REDIS_MAX_CONNECTIONS=32`
@@ -59,6 +59,9 @@ Production must not run `combined` or `projection-worker`.
 - DB operation count/failure/average/max latency.
 - projection lag, search lag, and replay pending/failed counts.
 - hot conversation rejection and tracked window counts.
+- query-api `timeline/since` latency histogram, visibility scan limits, hot/recent
+  cache hit/miss/bypass counters, target-sequence fallback/satisfied/miss/error
+  counters, target-sequence singleflight joins, and target-sequence window joins.
 
 Keep `/internal/metrics` on private networking only.
 
@@ -75,7 +78,7 @@ Keep `/internal/metrics` on private networking only.
 
 Go only when:
 
-- `IM_GROUP_MEMBER_LIMIT=500` is enforced for create and add-member flows.
+- `IM_GROUP_MEMBER_LIMIT` is explicitly enforced for create/add-member flows, present on stream consumers, and at least every enabled large-group protection threshold.
 - `3,000 msg/s` write pressure holds `P95 < 150ms` and `P99 < 300ms`.
 - `conversations/changes` convergence holds `P95 < 2s`.
 - Outbox backlog drains after relay or consumer pause.
@@ -90,6 +93,9 @@ No-Go if:
 - `query-api` uses legacy summary reads.
 - Any production stream consumer runs multiple groups without a temporary explicit override.
 - `messages/since` cannot repair realtime gaps.
+- Targeted `timeline/since` catch-up has non-zero strong misses/errors, or high
+  fallback without corresponding target-sequence singleflight joins during hot
+  large-group compact-hint validation.
 - Large groups/channels or media traffic are included in the claim without separate capacity validation.
 
 ## Load Test Entrypoints

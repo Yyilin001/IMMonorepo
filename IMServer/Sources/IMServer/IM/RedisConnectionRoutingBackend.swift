@@ -35,7 +35,14 @@ final class RedisConnectionRoutingBackend: ConnectionRoutingBackend, @unchecked 
             boundEventLoop: eventLoop
         )
         self.pool = pool
-        self.presenceStore = RedisPresenceStore(pool: pool, nodeID: nodeID, logger: logger)
+        self.presenceStore = RedisPresenceStore(
+            pool: pool,
+            nodeID: nodeID,
+            logger: logger,
+            heartbeatTimeoutSeconds: configuration.presenceHeartbeatTimeoutSeconds,
+            activeConversationRouteTTLSeconds: configuration.activeConversationRouteTTLSeconds,
+            activeConversationRouteCacheTTLSeconds: configuration.activeConversationRouteCacheTTLSeconds
+        )
         self.dispatchService = RedisNodeMessageDispatchService(pool: pool, nodeID: nodeID, logger: logger)
     }
 

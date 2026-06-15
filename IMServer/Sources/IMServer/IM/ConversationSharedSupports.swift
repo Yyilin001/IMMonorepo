@@ -149,9 +149,15 @@ struct ConversationSequenceAllocator {
 
 struct ConversationOutboxEnqueuer {
     let db: any Database
+    let domainEventMetrics: ConversationDomainEventMetrics?
+
+    init(db: any Database, domainEventMetrics: ConversationDomainEventMetrics? = nil) {
+        self.db = db
+        self.domainEventMetrics = domainEventMetrics
+    }
 
     private var eventBus: any ConversationEventBus {
-        DatabaseOutboxConversationEventBus(db: db)
+        DatabaseOutboxConversationEventBus(db: db, domainEventMetrics: domainEventMetrics)
     }
 
     func enqueueSummaryRefreshEvent(
@@ -161,11 +167,13 @@ struct ConversationOutboxEnqueuer {
         recipientUserIDs: [UUID],
         on database: (any Database)? = nil
     ) async throws {
-        try await eventBus.publish(
+        _ = try await eventBus.publish(
             type: type,
             conversationID: conversationID,
             actorUserID: actorUserID,
             payload: summaryRefreshPayload(type: type, recipientUserIDs: recipientUserIDs, actorUserID: actorUserID),
+            recipientSnapshotUserIDs: nil,
+            recipientSnapshotDeduplicationThreshold: 0,
             on: database ?? db
         )
     }
@@ -176,11 +184,13 @@ struct ConversationOutboxEnqueuer {
         affectedUserID: UUID,
         on database: (any Database)? = nil
     ) async throws {
-        try await eventBus.publish(
+        _ = try await eventBus.publish(
             type: .conversationRemovedForUser,
             conversationID: conversationID,
             actorUserID: actorUserID,
             payload: .conversationRemovedForSelf(ownerUserID: affectedUserID),
+            recipientSnapshotUserIDs: nil,
+            recipientSnapshotDeduplicationThreshold: 0,
             on: database ?? db
         )
     }
@@ -191,13 +201,28 @@ struct ConversationOutboxEnqueuer {
         actorUserID: UUID,
         recipientUserIDs: [UUID],
         messageID: UUID,
+        messageCreatedPreview: ConversationMessageCreatedPreview? = nil,
+        messageCreatedRecipientInlineThreshold: Int = 0,
+        recipientSnapshotDeduplicationThreshold: Int = 0,
         on database: (any Database)? = nil
     ) async throws {
-        try await eventBus.publish(
+        let payload = try messagePayload(
+            type: type,
+            messageID: messageID,
+            recipientUserIDs: recipientUserIDs,
+            messageCreatedPreview: messageCreatedPreview,
+            messageCreatedRecipientInlineThreshold: messageCreatedRecipientInlineThreshold
+        )
+        let recipientSnapshotUserIDs = type == .messageCreated && payload.recipientUserIDs.isEmpty
+            ? recipientUserIDs
+            : nil
+        _ = try await eventBus.publish(
             type: type,
             conversationID: conversationID,
             actorUserID: actorUserID,
-            payload: messagePayload(type: type, messageID: messageID, recipientUserIDs: recipientUserIDs),
+            payload: payload,
+            recipientSnapshotUserIDs: recipientSnapshotUserIDs,
+            recipientSnapshotDeduplicationThreshold: recipientSnapshotDeduplicationThreshold,
             on: database ?? db
         )
     }
@@ -251,11 +276,19 @@ struct ConversationOutboxEnqueuer {
     private func messagePayload(
         type: ConversationDomainEventType,
         messageID: UUID,
-        recipientUserIDs: [UUID]
+        recipientUserIDs: [UUID],
+        messageCreatedPreview: ConversationMessageCreatedPreview?,
+        messageCreatedRecipientInlineThreshold: Int
     ) throws -> ConversationDomainEventPayload {
         switch type {
         case .messageCreated:
-            return .messageCreated(messageID: messageID, recipientUserIDs: recipientUserIDs)
+            let shouldInlineRecipients = messageCreatedRecipientInlineThreshold == 0
+                || recipientUserIDs.count < messageCreatedRecipientInlineThreshold
+            return .messageCreated(
+                messageID: messageID,
+                recipientUserIDs: shouldInlineRecipients ? recipientUserIDs : [],
+                preview: messageCreatedPreview
+            )
         case .messageUpdated:
             return .messageUpdated(messageID: messageID, recipientUserIDs: recipientUserIDs)
         case .messageRecalled:

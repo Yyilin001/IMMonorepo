@@ -7,6 +7,7 @@ enum IMTCPPacketType: String, Codable, Sendable {
     case heartbeat
     case heartbeatAck = "heartbeat_ack"
     case sendMessage = "send_message"
+    case conversationActivity = "conversation_activity"
     case domainEvent = "domain_event"
     case streamSignal = "stream_signal"
     case ack
@@ -104,6 +105,11 @@ struct IMTCPMessagePayload: Codable, Sendable {
     }
 }
 
+struct IMTCPConversationActivityPayload: Codable, Sendable {
+    let conversationID: String
+    let isActive: Bool
+}
+
 struct IMTCPMessageStreamPayload: Codable, Equatable, Sendable {
     let streamID: String
     let messageID: String
@@ -135,12 +141,32 @@ enum IMTCPChatDomainEventType: String, Codable, Sendable {
     case conversationRemovedForSelf = "conversation_removed_for_self"
     case conversationSettingsChanged = "conversation_settings_changed"
     case conversationVisibilityChanged = "conversation_visibility_changed"
+    case conversationActivityHint = "conversation_activity_hint"
+    case timelineGapHint = "timeline_gap_hint"
     case memberAdded = "member_added"
     case memberRemoved = "member_removed"
     case memberRoleUpdated = "member_role_updated"
     case contactRequestCreated = "contact_request_created"
     case contactRequestAccepted = "contact_request_accepted"
     case contactRequestUpdated = "contact_request_updated"
+}
+
+struct IMConversationActivityHint: Codable, Equatable, Sendable {
+    let messageID: UUID
+    let senderUserID: UUID
+    let serverSequence: UInt64
+    let timelineSequence: UInt64
+    let previewText: String
+    let messageCreatedAt: Date?
+    let updatedAt: Date
+}
+
+struct IMTimelineGapHint: Codable, Equatable, Sendable {
+    let messageID: UUID
+    let senderUserID: UUID
+    let serverSequence: UInt64
+    let timelineSequence: UInt64
+    let updatedAt: Date
 }
 
 enum IMTCPChatDomainEventBody: Sendable {
@@ -151,6 +177,8 @@ enum IMTCPChatDomainEventBody: Sendable {
     case messageFavoriteChanged(messageID: UUID, isFavorited: Bool)
     case messageStream(IMTCPMessageStreamPayload, message: IMMessageResponse?)
     case conversationChanged
+    case conversationActivityHint(IMConversationActivityHint)
+    case timelineGapHint(IMTimelineGapHint)
     case conversationRemovedForSelf
     case conversationVisibilityChanged(visibilityAction: ConversationVisibilityAction, messageIDs: [UUID])
     case memberChanged(memberUserIDs: [UUID])

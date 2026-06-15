@@ -43,7 +43,10 @@ struct IMAPNSConfiguration: Sendable {
 struct IMAPNSPushService {
     let app: Application
 
-    func sendOfflinePushIfNeeded(for envelope: ConversationEventEnvelope) async {
+    func sendOfflinePushIfNeeded(
+        for envelope: ConversationEventEnvelope,
+        candidateUserIDs: [UUID]? = nil
+    ) async {
         guard envelope.eventType == .messageCreated,
               let configuration = IMAPNSConfiguration.load(),
               let messageID = envelope.payload.messageID
@@ -65,7 +68,9 @@ struct IMAPNSPushService {
                 configuration: configuration,
                 envelope: envelope,
                 message: message,
-                content: try message.decodedContent()
+                content: try message.decodedContent(),
+                sourceDB: db,
+                candidateUserIDs: candidateUserIDs
             )
         } catch {
             app.logger.warning(
@@ -82,10 +87,19 @@ struct IMAPNSPushService {
         configuration: IMAPNSConfiguration,
         envelope: ConversationEventEnvelope,
         message: ConversationMessage,
-        content: IMMessageContent
+        content: IMMessageContent,
+        sourceDB: any Database,
+        candidateUserIDs: [UUID]?
     ) async throws {
         let senderUserID = message.$sender.id
-        let candidateUserIDs = Array(Set(envelope.payload.recipientUserIDs)).filter { $0 != senderUserID }
+        let resolvedCandidateUserIDs: [UUID]
+        if let candidateUserIDs {
+            resolvedCandidateUserIDs = candidateUserIDs
+        } else {
+            resolvedCandidateUserIDs = try await ConversationDomainEventRecipientResolver(db: sourceDB, app: app)
+                .recipientUserIDs(for: envelope)
+        }
+        let candidateUserIDs = resolvedCandidateUserIDs.filter { $0 != senderUserID }
         guard !candidateUserIDs.isEmpty else {
             return
         }

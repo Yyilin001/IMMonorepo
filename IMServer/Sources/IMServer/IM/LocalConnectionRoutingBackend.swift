@@ -12,6 +12,13 @@ struct LocalPresenceStore: PresenceStore {
     func deactivatePresence(forUserID userID: UUID) async throws {}
     func activatePresence(forSessionID sessionID: UUID, userID: UUID) async throws {}
     func deactivatePresence(forSessionID sessionID: UUID, userID: UUID) async throws {}
+    func activateConversationPresence(conversationID: UUID, userID: UUID) async throws {}
+    func deactivateConversationPresence(conversationID: UUID, userID: UUID) async throws {}
+    func routeNodeIDs(
+        forActiveConversationID conversationID: UUID,
+        amongUserIDs userIDs: [UUID]
+    ) async throws -> [UUID: Set<String>] { [:] }
+    func routeNodeIDs(forActiveConversationID conversationID: UUID) async throws -> [UUID: Set<String>] { [:] }
     func routeNodeIDs(forUserIDs userIDs: [UUID]) async throws -> [UUID: Set<String>] { [:] }
     func routeNodeIDs(forSessionIDs sessionIDs: [UUID]) async throws -> [UUID: Set<String>] { [:] }
     func activeNodeIDs() async throws -> Set<String> { [] }

@@ -30,20 +30,52 @@ protocol ConversationSearchAdapter: Sendable {
 
 struct DatabaseSummaryReadModelStore: SummaryReadModelStore {
     let summaryDB: any Database
+    let summaryReadMetrics: IMSummaryReadMetrics?
+    let responseMemberUserIDsLimit: Int
 
     private var summaryProjectionService: IMConversationSummaryProjectionService {
-        IMConversationSummaryProjectionService(db: summaryDB)
+        IMConversationSummaryProjectionService(
+            db: summaryDB,
+            summaryReadMetrics: summaryReadMetrics,
+            responseMemberUserIDsLimit: responseMemberUserIDsLimit
+        )
+    }
+
+    init(
+        summaryDB: any Database,
+        summaryReadMetrics: IMSummaryReadMetrics? = nil,
+        responseMemberUserIDsLimit: Int = 0
+    ) {
+        self.summaryDB = summaryDB
+        self.summaryReadMetrics = summaryReadMetrics
+        self.responseMemberUserIDsLimit = max(0, responseMemberUserIDsLimit)
     }
 
     func conversationSummary(conversationID: UUID, for userID: UUID) async throws -> IMConversationResponse {
-        let recordID = ConversationUserSummary.recordID(ownerUserID: userID, conversationID: conversationID)
-        guard let summary = try await ConversationUserSummary.find(recordID, on: summaryDB) else {
-            throw Abort(.notFound, reason: "会话不存在。")
+        let startedAt = Date()
+        do {
+            let recordID = ConversationUserSummary.recordID(ownerUserID: userID, conversationID: conversationID)
+            guard let summary = try await ConversationUserSummary.find(recordID, on: summaryDB) else {
+                throw Abort(.notFound, reason: "会话不存在。")
+            }
+            guard !summary.isRemoved else {
+                throw Abort(.notFound, reason: "会话不存在。")
+            }
+            let response = try await ConversationSummaryResponseOverlay.responseLoadingActivity(
+                from: summary,
+                on: summaryDB,
+                memberUserIDsLimit: responseMemberUserIDsLimit
+            )
+            await summaryReadMetrics?.recordSummaryRead(
+                elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
+            )
+            return response
+        } catch {
+            await summaryReadMetrics?.recordSummaryReadError(
+                elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
+            )
+            throw error
         }
-        guard !summary.isRemoved else {
-            throw Abort(.notFound, reason: "会话不存在。")
-        }
-        return makeConversationResponse(from: summary)
     }
 
     func listConversations(
@@ -69,34 +101,8 @@ struct DatabaseSummaryReadModelStore: SummaryReadModelStore {
         )
     }
 
-    private func makeConversationResponse(from row: ConversationUserSummary) -> IMConversationResponse {
-        IMConversationResponse(
-            id: row.conversationID,
-            title: row.title,
-            kind: row.kind,
-            directMessagingState: row.directMessagingState,
-            directPeer: row.directPeerUserID.map { directPeerUserID in
-                IMDirectPeerResponse(
-                    id: directPeerUserID,
-                    email: row.directPeerEmail ?? "",
-                    displayName: row.directPeerDisplayName,
-                    avatarPreset: row.directPeerAvatarPresetEnum
-                )
-            },
-            notice: row.notice,
-            avatarPreset: row.avatarPresetEnum,
-            muteAll: row.muteAll,
-            memberCount: row.memberCount,
-            memberUserIDs: row.memberUserIDs.sorted { $0.uuidString < $1.uuidString },
-            lastMessage: row.lastMessage,
-            lastReadSequence: UInt64(row.lastReadSequence),
-            unreadCount: row.unreadCount,
-            isPinned: row.isPinned,
-            pinnedAt: row.pinnedAt,
-            isMuted: row.isMuted,
-            createdAt: nil,
-            updatedAt: row.lastActivityAt
-        )
+    private func elapsedMilliseconds(since startedAt: Date) -> Int {
+        max(0, Int(Date().timeIntervalSince(startedAt) * 1_000))
     }
 }
 
@@ -132,7 +138,11 @@ struct OwnerShardedSummaryReadModelStore: SummaryReadModelStore {
     }
 
     private func store(for userID: UUID) -> DatabaseSummaryReadModelStore {
-        DatabaseSummaryReadModelStore(summaryDB: router.database(forOwnerUserID: userID))
+        DatabaseSummaryReadModelStore(
+            summaryDB: router.database(forOwnerUserID: userID),
+            summaryReadMetrics: app.summaryReadMetrics,
+            responseMemberUserIDsLimit: app.summaryReadModelConfiguration.responseMemberUserIDsLimit
+        )
     }
 }
 

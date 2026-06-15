@@ -5,11 +5,26 @@ import Vapor
 struct IMCleanupConfiguration: Sendable {
     let enabled: Bool
     let intervalSeconds: Int
+    let recipientSetRetentionDays: Int
+    let recipientSetBatchSize: Int
 
     static func load() -> IMCleanupConfiguration {
         let enabled = (Environment.get("IM_CLEANUP_ENABLED") ?? "false").lowercased() == "true"
         let intervalSeconds = max(60, Environment.get("IM_CLEANUP_INTERVAL_SECONDS").flatMap(Int.init(_:)) ?? 86_400)
-        return IMCleanupConfiguration(enabled: enabled, intervalSeconds: intervalSeconds)
+        let recipientSetRetentionDays = max(
+            1,
+            Environment.get("IM_CLEANUP_RECIPIENT_SET_RETENTION_DAYS").flatMap(Int.init(_:)) ?? 30
+        )
+        let recipientSetBatchSize = max(
+            1,
+            Environment.get("IM_CLEANUP_RECIPIENT_SET_BATCH_SIZE").flatMap(Int.init(_:)) ?? 1_000
+        )
+        return IMCleanupConfiguration(
+            enabled: enabled,
+            intervalSeconds: intervalSeconds,
+            recipientSetRetentionDays: recipientSetRetentionDays,
+            recipientSetBatchSize: recipientSetBatchSize
+        )
     }
 }
 
@@ -28,7 +43,7 @@ final class IMCleanupLifecycle: LifecycleHandler, @unchecked Sendable {
                     return
                 }
                 do {
-                    try await IMCleanupService(app: application).runOnce()
+                    try await IMCleanupService(app: application).runOnce(configuration: configuration)
                 } catch {
                     application.logger.warning(
                         "IM cleanup task failed",
@@ -50,18 +65,20 @@ final class IMCleanupLifecycle: LifecycleHandler, @unchecked Sendable {
 struct IMCleanupService {
     let app: Application
 
-    func runOnce(now: Date = Date()) async throws {
+    func runOnce(now: Date = Date(), configuration: IMCleanupConfiguration = .load()) async throws {
         async let inviteCount = deleteExpiredUnusedInvites(now: now)
         async let pushTokenCount = deleteInactivePushTokens(now: now)
         async let visibilityCount = deleteOldVisibilityOverlays(now: now)
+        async let recipientSetCount = deleteUnreferencedRecipientSets(now: now, configuration: configuration)
 
-        let counts = try await (inviteCount, pushTokenCount, visibilityCount)
+        let counts = try await (inviteCount, pushTokenCount, visibilityCount, recipientSetCount)
         app.logger.info(
             "IM cleanup completed",
             metadata: [
                 "expired_invites": .stringConvertible(counts.0),
                 "inactive_push_tokens": .stringConvertible(counts.1),
-                "visibility_overlays": .stringConvertible(counts.2)
+                "visibility_overlays": .stringConvertible(counts.2),
+                "recipient_sets": .stringConvertible(counts.3)
             ]
         )
     }
@@ -102,5 +119,41 @@ struct IMCleanupService {
         }
         return deletedCount
     }
-}
 
+    private func deleteUnreferencedRecipientSets(
+        now: Date,
+        configuration: IMCleanupConfiguration
+    ) async throws -> Int {
+        let cutoff = now.addingTimeInterval(-TimeInterval(configuration.recipientSetRetentionDays * 24 * 60 * 60))
+        var deletedCount = 0
+        var scannedCount = 0
+        for shard in app.conversationShardRouter.allCommandDatabases() {
+            let candidates = try await ConversationDomainEventRecipientSet.query(on: shard.database)
+                .filter(\.$createdAt < cutoff)
+                .limit(configuration.recipientSetBatchSize)
+                .all()
+            scannedCount += candidates.count
+            for candidate in candidates {
+                guard let recipientHash = candidate.id else {
+                    continue
+                }
+                let referenceCount = try await ConversationDomainEventRecipientSnapshot.query(on: shard.database)
+                    .filter(\.$recipientHash == recipientHash)
+                    .count()
+                guard referenceCount == 0 else {
+                    continue
+                }
+                try await ConversationDomainEventRecipientSetMember.query(on: shard.database)
+                    .filter(\.$recipientHash == recipientHash)
+                    .delete()
+                try await candidate.delete(on: shard.database)
+                deletedCount += 1
+            }
+        }
+        await app.conversationDomainEventMetrics.recordRecipientSetCleanup(
+            scannedCount: scannedCount,
+            deletedCount: deletedCount
+        )
+        return deletedCount
+    }
+}

@@ -57,6 +57,7 @@ struct ConversationCommonFeatureCommandService {
                 on: database
             )
         }
+        app.invalidateTimelineSinceHotCache(conversationID: conversationID)
     }
 
     func clearConversation(userID: UUID, conversationID: UUID, deleteFromList: Bool) async throws {
@@ -77,6 +78,7 @@ struct ConversationCommonFeatureCommandService {
                 on: database
             )
         }
+        app.invalidateTimelineSinceHotCache(conversationID: conversationID)
     }
 
     func forwardMessages(
@@ -128,11 +130,31 @@ struct ConversationCommonFeatureCommandService {
                         .filter(\.$conversation.$id == targetConversationID)
                         .all()
                         .map(\.$user.id)
-                    try await ConversationOutboxService(db: database).enqueue(
+                    let shouldInlineRecipients = app.messageCreatedRecipientInlineConfiguration.shouldInlineRecipients(
+                        recipientCount: recipientUserIDs.count
+                    )
+                    try await ConversationOutboxService(
+                        db: database,
+                        domainEventMetrics: app.conversationDomainEventMetrics
+                    ).enqueue(
                         type: .messageCreated,
                         conversationID: targetConversationID,
                         actorUserID: userID,
-                        payload: .messageCreated(messageID: forwardedID, recipientUserIDs: recipientUserIDs),
+                        payload: .messageCreated(
+                            messageID: forwardedID,
+                            recipientUserIDs: shouldInlineRecipients ? recipientUserIDs : [],
+                            preview: try ConversationMessageCreatedPreview(
+                                senderUserID: forwarded.$sender.id,
+                                serverSequence: imPositiveUInt64Sequence(forwarded.serverSequence, field: "server_sequence"),
+                                timelineSequence: imPositiveUInt64Sequence(forwarded.timelineSequence, field: "timeline_sequence"),
+                                previewText: forwarded.decodedContent().previewText,
+                                createdAt: forwarded.createdAt
+                            )
+                        ),
+                        recipientSnapshotUserIDs: shouldInlineRecipients ? nil : recipientUserIDs,
+                        recipientSnapshotDeduplicationThreshold: app
+                            .domainEventRecipientSnapshotConfiguration
+                            .deduplicationThreshold,
                         on: database
                     )
                     return try ConversationMessageService(db: database).messageResponse(
@@ -140,6 +162,7 @@ struct ConversationCommonFeatureCommandService {
                         conversationID: targetConversationID
                     )
                 }
+                app.invalidateTimelineSinceHotCache(conversationID: targetConversationID)
                 responses.append(response)
             }
         }

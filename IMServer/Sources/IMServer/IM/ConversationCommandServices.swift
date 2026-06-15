@@ -340,8 +340,27 @@ struct ConversationStrongReadService {
     }
 
     func latestMessage(in conversationID: UUID) async throws -> IMMessageResponse? {
-        try await ConversationTimelineReadSupport(db: database(forConversationID: conversationID))
+        try await timelineReadSupport(for: conversationID)
             .latestMessage(in: conversationID)
+    }
+
+    func listTimelineSince(
+        in conversationID: UUID,
+        for userID: UUID,
+        afterSequence: Int,
+        targetSequence: Int? = nil,
+        limit: Int?,
+        useSharedCache: Bool = true
+    ) async throws -> IMTimelinePageResponse {
+        try await timelineReadSupport(for: conversationID)
+            .listTimelineSince(
+                in: conversationID,
+                for: userID,
+                afterSequence: afterSequence,
+                targetSequence: targetSequence,
+                limit: limit,
+                useSharedCache: useSharedCache
+            )
     }
 
     func conversationSummary(
@@ -360,6 +379,22 @@ struct ConversationStrongReadService {
             throw Abort(.internalServerError, reason: "ConversationStrongReadService missing both app and database.")
         }
         return try await app.conversationShardRouter.strongReadDatabase(forConversationID: conversationID)
+    }
+
+    private func timelineReadSupport(for conversationID: UUID) async throws -> ConversationTimelineReadSupport {
+        let db = try await database(forConversationID: conversationID)
+        guard let app else {
+            return ConversationTimelineReadSupport(db: db)
+        }
+        return ConversationTimelineReadSupport(
+            db: db,
+            metrics: app.timelineReadMetrics,
+            configuration: app.timelineReadConfiguration,
+            sinceHotCache: app.timelineSinceHotCache,
+            sinceRecentCache: app.timelineSinceRecentCache,
+            sinceVisibilitySafetyCache: app.timelineSinceVisibilitySafetyCache,
+            sinceResponseCoalescer: app.timelineSinceResponseCoalescer
+        )
     }
 }
 
@@ -425,7 +460,7 @@ struct ConversationEventualReadService {
         beforeSequence: Int?,
         limit: Int?
     ) async throws -> IMTimelinePageResponse {
-        try await ConversationTimelineReadSupport(db: database(forConversationID: conversationID))
+        try await timelineReadSupport(for: conversationID)
             .listTimeline(in: conversationID, for: userID, beforeSequence: beforeSequence, limit: limit)
     }
 
@@ -433,10 +468,19 @@ struct ConversationEventualReadService {
         in conversationID: UUID,
         for userID: UUID,
         afterSequence: Int,
-        limit: Int?
+        targetSequence: Int? = nil,
+        limit: Int?,
+        useSharedCache: Bool = true
     ) async throws -> IMTimelinePageResponse {
-        try await ConversationTimelineReadSupport(db: database(forConversationID: conversationID))
-            .listTimelineSince(in: conversationID, for: userID, afterSequence: afterSequence, limit: limit)
+        try await timelineReadSupport(for: conversationID)
+            .listTimelineSince(
+                in: conversationID,
+                for: userID,
+                afterSequence: afterSequence,
+                targetSequence: targetSequence,
+                limit: limit,
+                useSharedCache: useSharedCache
+            )
     }
 
     func searchMessages(
@@ -468,6 +512,22 @@ struct ConversationEventualReadService {
             throw Abort(.internalServerError, reason: "ConversationEventualReadService missing both app and database.")
         }
         return try await app.conversationShardRouter.eventualReadDatabase(forConversationID: conversationID)
+    }
+
+    private func timelineReadSupport(for conversationID: UUID) async throws -> ConversationTimelineReadSupport {
+        let db = try await database(forConversationID: conversationID)
+        guard let app else {
+            return ConversationTimelineReadSupport(db: db)
+        }
+        return ConversationTimelineReadSupport(
+            db: db,
+            metrics: app.timelineReadMetrics,
+            configuration: app.timelineReadConfiguration,
+            sinceHotCache: app.timelineSinceHotCache,
+            sinceRecentCache: app.timelineSinceRecentCache,
+            sinceVisibilitySafetyCache: app.timelineSinceVisibilitySafetyCache,
+            sinceResponseCoalescer: app.timelineSinceResponseCoalescer
+        )
     }
 }
 

@@ -1,4 +1,4 @@
-# IM TCP Realtime Protocol v8
+# IM TCP Realtime Protocol v12
 
 ## Scope
 
@@ -11,7 +11,7 @@ TCP clients authenticate with an HTTP-issued access token during the first packe
 - Protocol: plain TCP behind the existing deployment boundary
 - Framing: 4-byte big-endian unsigned length prefix followed by one Protobuf packet
 - Encoding: `Protocol/im_realtime/v1/im_realtime.proto`
-- Current protocol version: `7`
+- Current protocol version: `12`
 - Direction: full duplex
 
 Each frame is:
@@ -71,7 +71,7 @@ Server to client:
 
 ## Handshake
 
-The client must send `auth` as the first packet before the auth timeout. `Packet.protocol_version` must be `8`; unsupported versions are rejected. `AuthRequest` does not carry a second protocol version.
+The client must send `auth` as the first packet before the auth timeout. `Packet.protocol_version` must be `12`; unsupported versions are rejected. `AuthRequest` does not carry a second protocol version.
 
 On success, the server binds the TCP channel to the resolved `userID`, `sessionID`, and connection metadata, then sends `auth_ok`. On failure, it sends `auth_error` and closes.
 
@@ -80,6 +80,11 @@ On success, the server binds the TCP channel to the resolved `userID`, `sessionI
 Local fanout writes `domain_event` PB packets to active TCP channels. Client commands only receive `ack`; realtime message, conversation, member, and contact changes are emitted by the conversation/contact outbox consumers after durable projection and owner delivery logging. High-frequency AI stream chunks use `stream_signal` and are intentionally excluded from the durable outbox, delivery log, applied-event cache, and owner cursor.
 
 Cross-node Redis dispatch and gateway HTTP relay keep a JSON envelope for observability and routing metadata, but realtime payload data is `packetBase64`, a base64 encoded serialized PB `Packet`. Message content is modeled from the protobuf schema; HTTP/REST still transports JSON DTOs with the same rich-text content shape.
+
+Large active conversations use lightweight realtime events:
+
+- `conversation_activity_hint` carries message identity, sender, sequence targets, optional bounded preview text, and `updated_at_ms`. In production it is also used as the active-chat compact message-lite hint for hot rooms, so clients already viewing the conversation can render immediately and then reconcile through targeted `timeline/since`. Inactive or list-only clients may use the same event to update conversation-list ordering, preview, and unread state.
+- `timeline_gap_hint` is the compatibility active-chat hint for deployments using `IM_REALTIME_ACTIVE_COMPACT_HINT_BODY=timeline-gap`. It carries only message identity, sender, sequence targets, and `updated_at_ms`. Clients must not update list preview or unread state from this event; they use it only to trigger targeted `timeline/since` catch-up for the selected conversation.
 
 ## Server Structure
 

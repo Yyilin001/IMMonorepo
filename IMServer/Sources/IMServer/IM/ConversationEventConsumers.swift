@@ -33,6 +33,187 @@ struct ConversationEventEnvelope: Sendable {
 protocol ConversationEventConsumer: Sendable {
     var supportedEventTypes: Set<ConversationDomainEventType> { get }
     func consume(_ envelope: ConversationEventEnvelope) async throws
+    func consumeMessageCreatedRun(_ envelopes: [ConversationEventEnvelope]) async throws
+}
+
+extension ConversationEventConsumer {
+    func consumeMessageCreatedRun(_ envelopes: [ConversationEventEnvelope]) async throws {
+        for envelope in envelopes {
+            try await consume(envelope)
+        }
+    }
+}
+
+private func sharedResolvedMessageCreatedRunRecipients(
+    for envelopes: [ConversationEventEnvelope],
+    sourceDB: any Database,
+    app: Application
+) async throws -> ConversationDomainEventResolvedRecipients? {
+    guard envelopes.count > 1,
+          let first = envelopes.first,
+          first.eventType == .messageCreated,
+          first.payload.messageID != nil
+    else {
+        return nil
+    }
+    guard envelopes.allSatisfy({
+        $0.eventType == .messageCreated
+            && $0.payload.messageID != nil
+            && $0.conversationID == first.conversationID
+    }) else {
+        return nil
+    }
+
+    let resolver = ConversationDomainEventRecipientResolver(db: sourceDB, app: app)
+    let inlineRecipientSets = envelopes.map { Set($0.payload.recipientUserIDs) }
+    if inlineRecipientSets.allSatisfy({ !$0.isEmpty }) {
+        guard let firstRecipientSet = inlineRecipientSets.first,
+              inlineRecipientSets.allSatisfy({ $0 == firstRecipientSet })
+        else {
+            return nil
+        }
+        return try await resolver.resolveRecipients(for: first)
+    }
+
+    let eventIDs = envelopes.compactMap(\.eventID)
+    if eventIDs.count == envelopes.count {
+        let snapshots = try await ConversationDomainEventRecipientSnapshot.query(on: sourceDB)
+            .filter(\.$id ~~ eventIDs)
+            .all()
+        let snapshotsByEventID = Dictionary(
+            uniqueKeysWithValues: snapshots.compactMap { snapshot in
+                snapshot.id.map { ($0, snapshot) }
+            }
+        )
+        let orderedSnapshots = eventIDs.compactMap { snapshotsByEventID[$0] }
+        if orderedSnapshots.count == envelopes.count {
+            let snapshotHashes = orderedSnapshots.map(\.recipientHash)
+            if snapshotHashes.allSatisfy({ $0 != nil }) {
+                guard let firstHash = snapshotHashes.first.flatMap({ $0 }),
+                      snapshotHashes.allSatisfy({ $0 == firstHash })
+                else {
+                    return nil
+                }
+                return try await resolver.resolveRecipients(for: first)
+            }
+
+            var snapshotRecipientSets: [Set<UUID>] = []
+            snapshotRecipientSets.reserveCapacity(orderedSnapshots.count)
+            for snapshot in orderedSnapshots {
+                snapshotRecipientSets.append(Set(try await snapshot.recipientUserIDs(on: sourceDB)))
+            }
+            guard let firstRecipientSet = snapshotRecipientSets.first,
+                  snapshotRecipientSets.allSatisfy({ $0 == firstRecipientSet })
+            else {
+                return nil
+            }
+            return try await resolver.resolveRecipients(for: first)
+        }
+    }
+
+    return try await resolver.resolveRecipients(for: first)
+}
+
+private struct ActiveConversationRouteLookupResult: Sendable {
+    let routes: [UUID: Set<String>]
+    let cacheHit: Bool
+    let cachePartialHit: Bool
+    let cachedUserCount: Int
+    let missedUserCount: Int
+    let joinedInFlight: Bool
+}
+
+private func activeConversationRoutes(
+    app: Application,
+    conversationID: UUID,
+    recipientUserIDs: [UUID]?
+) async throws -> ActiveConversationRouteLookupResult {
+    let configuration = app.streamConsumerConfiguration
+    let ttlMilliseconds = configuration.realtimeActiveConversationRouteCacheTTLMilliseconds
+    let maxEntries = configuration.realtimeActiveConversationRouteCacheMaxEntries
+    let usesActiveOnlyLookup = !app.gatewayLocalFanoutConfiguration.relaysInactiveConversationHints
+    let lookup: ActiveConversationRouteLookupCache.ResolveResult
+    if ttlMilliseconds > 0, maxEntries > 0 {
+        if usesActiveOnlyLookup {
+            lookup = try await app.activeConversationRouteLookupCache.resolveActiveConversation(
+                conversationID: conversationID,
+                ttlMilliseconds: ttlMilliseconds,
+                maxEntries: maxEntries
+            ) {
+                try await app.connectionRoutingService.backend.presenceStore.routeNodeIDs(
+                    forActiveConversationID: conversationID
+                )
+            }
+        } else {
+            lookup = try await app.activeConversationRouteLookupCache.resolve(
+                conversationID: conversationID,
+                recipientUserIDs: recipientUserIDs ?? [],
+                ttlMilliseconds: ttlMilliseconds,
+                maxEntries: maxEntries
+            ) { missingUserIDs in
+                try await app.connectionRoutingService.backend.presenceStore.routeNodeIDs(
+                    forActiveConversationID: conversationID,
+                    amongUserIDs: missingUserIDs
+                )
+            }
+        }
+    } else {
+        let fetchedRoutes = if usesActiveOnlyLookup {
+            try await app.connectionRoutingService.backend.presenceStore.routeNodeIDs(
+                forActiveConversationID: conversationID
+            )
+        } else {
+            try await app.connectionRoutingService.backend.presenceStore.routeNodeIDs(
+                forActiveConversationID: conversationID,
+                amongUserIDs: Array(Set(recipientUserIDs ?? []))
+            )
+        }
+        lookup = ActiveConversationRouteLookupCache.ResolveResult(
+            routes: fetchedRoutes,
+            cachedUserCount: 0,
+            missedUserCount: fetchedRoutes.count,
+            joinedInFlight: false,
+            cacheHit: false
+        )
+    }
+    let filteredRoutes: [UUID: Set<String>]
+    if let recipientUserIDs {
+        let recipientUserIDSet = Set(recipientUserIDs)
+        filteredRoutes = lookup.routes.filter { recipientUserIDSet.contains($0.key) }
+    } else {
+        filteredRoutes = lookup.routes
+    }
+    if lookup.cacheHit {
+        await app.routingMetrics.recordRealtimeActiveConversationRouteCache(
+            hit: true,
+            cachedUserCount: filteredRoutes.count,
+            joinedInFlight: lookup.joinedInFlight
+        )
+        return ActiveConversationRouteLookupResult(
+            routes: filteredRoutes,
+            cacheHit: true,
+            cachePartialHit: false,
+            cachedUserCount: filteredRoutes.count,
+            missedUserCount: 0,
+            joinedInFlight: lookup.joinedInFlight
+        )
+    }
+
+    await app.routingMetrics.recordRealtimeActiveConversationRouteCache(
+        hit: false,
+        partialHit: lookup.cachedUserCount > 0,
+        cachedUserCount: lookup.cachedUserCount,
+        missedUserCount: lookup.missedUserCount,
+        joinedInFlight: lookup.joinedInFlight
+    )
+    return ActiveConversationRouteLookupResult(
+        routes: filteredRoutes,
+        cacheHit: false,
+        cachePartialHit: lookup.cachedUserCount > 0,
+        cachedUserCount: lookup.cachedUserCount,
+        missedUserCount: lookup.missedUserCount,
+        joinedInFlight: lookup.joinedInFlight
+    )
 }
 
 struct ConversationProjectionConsumer: ConversationEventConsumer {
@@ -43,6 +224,32 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
         Set(ConversationDomainEventType.allCases)
     }
 
+    func consumeMessageCreatedRun(_ envelopes: [ConversationEventEnvelope]) async throws {
+        guard let collapsedRun = try await collapsibleActivityOnlyMessageCreatedRun(envelopes) else {
+            for envelope in envelopes {
+                try await consume(envelope)
+            }
+            return
+        }
+
+        for (index, target) in activityProjectionTargets().enumerated() {
+            try await IMConversationSummaryProjectionService(
+                sourceDB: sourceDB,
+                readModelDB: target.readModelDB,
+                streamConsumerConfiguration: app.streamConsumerConfiguration,
+                domainEventMetrics: app.conversationDomainEventMetrics,
+                activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
+            ).applyMessageCreatedActivityOnly(
+                conversationID: collapsedRun.envelope.conversationID,
+                messageID: collapsedRun.messageID,
+                recipientCount: collapsedRun.recipientCount,
+                on: sourceDB,
+                readModelKey: target.shardID,
+                recordMetrics: index == 0
+            )
+        }
+    }
+
     func consume(_ envelope: ConversationEventEnvelope) async throws {
         switch envelope.eventType {
         case .conversationRemovedForUser:
@@ -50,7 +257,10 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
                 for target in projectionTargets(for: [affectedUserID]) {
                     try await IMConversationSummaryProjectionService(
                         sourceDB: sourceDB,
-                        readModelDB: target.readModelDB
+                        readModelDB: target.readModelDB,
+                        streamConsumerConfiguration: app.streamConsumerConfiguration,
+                        domainEventMetrics: app.conversationDomainEventMetrics,
+                        activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
                     ).markConversationRemoved(
                         conversationID: envelope.conversationID,
                         recipientUserID: affectedUserID,
@@ -61,10 +271,14 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
             }
         case .messageCreated:
             guard let messageID = envelope.payload.messageID else {
-                for target in projectionTargets(for: envelope.payload.recipientUserIDs) {
+                let recipientUserIDs = try await recipientUserIDs(for: envelope)
+                for target in projectionTargets(for: recipientUserIDs) {
                     try await IMConversationSummaryProjectionService(
                         sourceDB: sourceDB,
-                        readModelDB: target.readModelDB
+                        readModelDB: target.readModelDB,
+                        streamConsumerConfiguration: app.streamConsumerConfiguration,
+                        domainEventMetrics: app.conversationDomainEventMetrics,
+                        activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
                     ).refreshConversationSummaries(
                         conversationID: envelope.conversationID,
                         recipientUserIDs: target.recipientUserIDs,
@@ -75,10 +289,34 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
                 return
             }
 
-            for target in projectionTargets(for: envelope.payload.recipientUserIDs) {
+            if let recipientCount = try await activityOnlyRecipientCountIfNeeded(for: envelope) {
+                for (index, target) in activityProjectionTargets().enumerated() {
+                    try await IMConversationSummaryProjectionService(
+                        sourceDB: sourceDB,
+                        readModelDB: target.readModelDB,
+                        streamConsumerConfiguration: app.streamConsumerConfiguration,
+                        domainEventMetrics: app.conversationDomainEventMetrics,
+                        activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
+                    ).applyMessageCreatedActivityOnly(
+                        conversationID: envelope.conversationID,
+                        messageID: messageID,
+                        recipientCount: recipientCount,
+                        on: sourceDB,
+                        readModelKey: target.shardID,
+                        recordMetrics: index == 0
+                    )
+                }
+                return
+            }
+
+            let recipientUserIDs = try await recipientUserIDs(for: envelope)
+            for target in projectionTargets(for: recipientUserIDs) {
                 try await IMConversationSummaryProjectionService(
                     sourceDB: sourceDB,
-                    readModelDB: target.readModelDB
+                    readModelDB: target.readModelDB,
+                    streamConsumerConfiguration: app.streamConsumerConfiguration,
+                    domainEventMetrics: app.conversationDomainEventMetrics,
+                    activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
                 ).applyMessageCreated(
                     conversationID: envelope.conversationID,
                     messageID: messageID,
@@ -88,11 +326,15 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
                 )
             }
         case .readAdvanced:
-            for target in projectionTargets(for: envelope.payload.recipientUserIDs) {
+            let recipientUserIDs = try await recipientUserIDs(for: envelope)
+            for target in projectionTargets(for: recipientUserIDs) {
                 for recipientUserID in target.recipientUserIDs {
                     try await IMConversationSummaryProjectionService(
                         sourceDB: sourceDB,
-                        readModelDB: target.readModelDB
+                        readModelDB: target.readModelDB,
+                        streamConsumerConfiguration: app.streamConsumerConfiguration,
+                        domainEventMetrics: app.conversationDomainEventMetrics,
+                        activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
                     ).applyReadAdvanced(
                         conversationID: envelope.conversationID,
                         recipientUserID: recipientUserID,
@@ -117,10 +359,14 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
              .conversationVisibilityChanged,
              .conversationSettingsChanged,
              .inviteChanged:
-            for target in projectionTargets(for: envelope.payload.recipientUserIDs) {
+            let recipientUserIDs = try await recipientUserIDs(for: envelope)
+            for target in projectionTargets(for: recipientUserIDs) {
                 try await IMConversationSummaryProjectionService(
                     sourceDB: sourceDB,
-                    readModelDB: target.readModelDB
+                    readModelDB: target.readModelDB,
+                    streamConsumerConfiguration: app.streamConsumerConfiguration,
+                    domainEventMetrics: app.conversationDomainEventMetrics,
+                    activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
                 ).refreshConversationSummaries(
                     conversationID: envelope.conversationID,
                     recipientUserIDs: target.recipientUserIDs,
@@ -133,6 +379,86 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
 
     private func projectionTargets(for recipientUserIDs: [UUID]) -> [SummaryProjectionTarget] {
         summaryProjectionTargets(app: app, recipientUserIDs: recipientUserIDs)
+    }
+
+    private func activityProjectionTargets() -> [SummaryActivityProjectionTarget] {
+        summaryProjectionActivityTargets(app: app)
+    }
+
+    private func recipientUserIDs(for envelope: ConversationEventEnvelope) async throws -> [UUID] {
+        try await ConversationDomainEventRecipientResolver(db: sourceDB, app: app).recipientUserIDs(for: envelope)
+    }
+
+    private func collapsibleActivityOnlyMessageCreatedRun(
+        _ envelopes: [ConversationEventEnvelope]
+    ) async throws -> (envelope: ConversationEventEnvelope, messageID: UUID, recipientCount: Int)? {
+        guard envelopes.count > 1,
+              let first = envelopes.first,
+              first.eventType == .messageCreated,
+              first.payload.messageID != nil
+        else {
+            return nil
+        }
+        guard envelopes.allSatisfy({
+            $0.eventType == .messageCreated
+                && $0.payload.messageID != nil
+                && $0.conversationID == first.conversationID
+        }) else {
+            return nil
+        }
+
+        let threshold = app.streamConsumerConfiguration.summaryProjectionMessageCreatedActivityOnlyRecipientThreshold
+        guard threshold > 0 else {
+            return nil
+        }
+        let recipientCount = try await messageCreatedRecipientCountHint(for: first)
+        guard recipientCount >= threshold else {
+            return nil
+        }
+
+        let latestEnvelope = envelopes.max { lhs, rhs in
+            lhs.event.aggregateSequence < rhs.event.aggregateSequence
+        } ?? first
+        guard let latestMessageID = latestEnvelope.payload.messageID else {
+            return nil
+        }
+        return (latestEnvelope, latestMessageID, recipientCount)
+    }
+
+    private func activityOnlyRecipientCountIfNeeded(
+        for envelope: ConversationEventEnvelope
+    ) async throws -> Int? {
+        let threshold = app.streamConsumerConfiguration.summaryProjectionMessageCreatedActivityOnlyRecipientThreshold
+        guard threshold > 0,
+              envelope.eventType == .messageCreated,
+              envelope.payload.messageID != nil
+        else {
+            return nil
+        }
+        let recipientCount = try await messageCreatedRecipientCountHint(for: envelope)
+        return recipientCount >= threshold ? recipientCount : nil
+    }
+
+    private func messageCreatedRecipientCountHint(for envelope: ConversationEventEnvelope) async throws -> Int {
+        let inlineCount = Set(envelope.payload.recipientUserIDs).count
+        if inlineCount > 0 {
+            return inlineCount
+        }
+        guard let eventID = envelope.eventID,
+              let snapshot = try await ConversationDomainEventRecipientSnapshot.find(eventID, on: sourceDB)
+        else {
+            if app.streamConsumerConfiguration.streamConsumerRequiresMessageCreatedRecipientSnapshot {
+                await app.conversationDomainEventMetrics.recordRecipientResolutionMissingSnapshot()
+                throw ConversationEventTransientProcessingError.messageCreatedRecipientSnapshotMissing(
+                    eventID: envelope.eventID,
+                    conversationID: envelope.conversationID
+                )
+            }
+            return try await ConversationMember.query(on: sourceDB)
+                .filter(\.$conversation.$id == envelope.conversationID)
+                .count()
+        }
+        return snapshot.recipientCount
     }
 }
 
@@ -223,7 +549,10 @@ struct ChangesLogConsumer: ConversationEventConsumer {
                 for target in projectionTargets(for: [affectedUserID]) {
                     try await IMConversationSummaryProjectionService(
                         sourceDB: sourceDB,
-                        readModelDB: target.readModelDB
+                        readModelDB: target.readModelDB,
+                        streamConsumerConfiguration: app.streamConsumerConfiguration,
+                        domainEventMetrics: app.conversationDomainEventMetrics,
+                        activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
                     ).recordConversationRemovedChange(
                         conversationID: envelope.conversationID,
                         recipientUserID: affectedUserID
@@ -252,7 +581,10 @@ struct ChangesLogConsumer: ConversationEventConsumer {
             for target in projectionTargets(for: envelope.payload.recipientUserIDs) {
                 try await IMConversationSummaryProjectionService(
                     sourceDB: sourceDB,
-                    readModelDB: target.readModelDB
+                    readModelDB: target.readModelDB,
+                    streamConsumerConfiguration: app.streamConsumerConfiguration,
+                    domainEventMetrics: app.conversationDomainEventMetrics,
+                    activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
                 ).recordConversationSummaryChanges(
                     conversationID: envelope.conversationID,
                     recipientUserIDs: target.recipientUserIDs
@@ -270,11 +602,33 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
     enum PayloadDetail: Sendable {
         case full
         case lightweightMessageCreatedIfLarge
+        case activeCompactMessageCreatedIfLarge
+        case fullMessageCreatedWithoutSummaryIfLarge
     }
 
     struct DomainEventPayloadBatch: Sendable {
         let payload: IMTCPChatDomainEventPayload
         let recipientUserIDs: [UUID]
+        let fanoutIntent: IMGatewayDomainEventFanoutIntent
+
+        init(
+            payload: IMTCPChatDomainEventPayload,
+            recipientUserIDs: [UUID],
+            fanoutIntent: IMGatewayDomainEventFanoutIntent = .unspecified
+        ) {
+            self.payload = payload
+            self.recipientUserIDs = recipientUserIDs
+            self.fanoutIntent = fanoutIntent
+        }
+    }
+
+    private struct LightweightMessagePreview: Sendable {
+        let id: UUID
+        let senderUserID: UUID
+        let serverSequence: UInt64
+        let timelineSequence: UInt64
+        let previewText: String
+        let createdAt: Date?
     }
 
     let app: Application
@@ -288,7 +642,7 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
         guard envelope.eventID != nil else {
             return
         }
-        let payloads = try await domainEventPayloads(for: envelope)
+        let payloads = try await domainEventPayloads(for: envelope, detail: .lightweightMessageCreatedIfLarge)
         await app.gatewaySessionService.sendDomainEventPayloads(
             payloads.map { recipientUserID, payload in
                 IMCanonicalDomainEventDelivery(
@@ -301,11 +655,57 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
         )
     }
 
+    func consumeMessageCreatedRun(_ envelopes: [ConversationEventEnvelope]) async throws {
+        guard !envelopes.isEmpty else {
+            return
+        }
+        let sharedResolvedRecipients = try await sharedMessageCreatedRunRecipients(for: envelopes)
+        let payloadSourceEnvelopes = shouldCollapseLightweightMessageCreatedRun(
+            envelopes,
+            resolvedRecipients: sharedResolvedRecipients
+        )
+            ? Array(envelopes.suffix(1))
+            : envelopes
+        var deliveries: [IMCanonicalDomainEventDelivery] = []
+        var requestID: UUID?
+        for envelope in payloadSourceEnvelopes {
+            guard envelope.eventType == .messageCreated,
+                  envelope.payload.messageID != nil
+            else {
+                throw Abort(.internalServerError, reason: "messageCreated run realtime delivery only accepts message_created events with messageID.")
+            }
+            guard envelope.eventID != nil else {
+                continue
+            }
+            requestID = requestID ?? envelope.eventID
+            let payloads = try await domainEventPayloads(
+                for: envelope,
+                detail: .lightweightMessageCreatedIfLarge,
+                resolvedRecipients: sharedResolvedRecipients
+            )
+            deliveries.append(
+                contentsOf: payloads.map { recipientUserID, payload in
+                    IMCanonicalDomainEventDelivery(
+                        ownerUserID: recipientUserID,
+                        eventID: payload.eventID,
+                        payload: payload
+                    )
+                }
+            )
+        }
+        await app.gatewaySessionService.sendDomainEventPayloads(deliveries, requestID: requestID)
+    }
+
     func domainEventPayloads(
         for envelope: ConversationEventEnvelope,
-        detail: PayloadDetail = .full
+        detail: PayloadDetail = .full,
+        resolvedRecipients: ConversationDomainEventResolvedRecipients? = nil
     ) async throws -> [(UUID, IMTCPChatDomainEventPayload)] {
-        let batches = try await domainEventPayloadBatches(for: envelope, detail: detail)
+        let batches = try await domainEventPayloadBatches(
+            for: envelope,
+            detail: detail,
+            resolvedRecipients: resolvedRecipients
+        )
         return batches.flatMap { batch in
             batch.recipientUserIDs.map { recipientUserID in
                 (recipientUserID, batch.payload)
@@ -315,14 +715,17 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
 
     func domainEventPayloadBatches(
         for envelope: ConversationEventEnvelope,
-        detail: PayloadDetail = .full
+        detail: PayloadDetail = .full,
+        resolvedRecipients: ConversationDomainEventResolvedRecipients? = nil
     ) async throws -> [DomainEventPayloadBatch] {
-        let recipientUserIDs = realtimeRecipientUserIDs(for: envelope)
+        let recipientUserIDs = try await resolvedRecipientUserIDs(
+            for: envelope,
+            resolvedRecipients: resolvedRecipients
+        )
         guard !recipientUserIDs.isEmpty else {
             return []
         }
 
-        let message = try await messageResponse(for: envelope)
         guard let eventID = envelope.eventID else {
             throw Abort(.internalServerError, reason: "领域事件缺少 eventID。")
         }
@@ -335,52 +738,97 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
             recipientCount: recipientUserIDs.count,
             detail: detail
         )
-        let bodyMessage = shouldUseLightweightMessageCreated
-            ? lightweightMessageCreatedResponse(from: message)
-            : message
-        let body = try domainEventBody(for: envelope, message: bodyMessage)
-        let conversationsByRecipient: [UUID: IMConversationResponse]
-        if envelope.eventType.shouldIncludeRealtimeConversationSummary {
-            conversationsByRecipient = await conversationSummaries(
-                for: envelope.conversationID,
-                recipientUserIDs: recipientUserIDs,
-                includeMemberUserIDs: envelope.eventType.shouldIncludeRealtimeSummaryMemberUserIDs
-            )
+        let shouldOmitConversationSummary = shouldOmitMessageCreatedConversationSummary(
+            for: envelope,
+            recipientCount: recipientUserIDs.count,
+            detail: detail
+        )
+        let payloadBatches: [DomainEventPayloadBatch]
+        if shouldUseLightweightMessageCreated,
+           let lightweightPreview = try await lightweightMessagePreview(for: envelope) {
+            if detail == .activeCompactMessageCreatedIfLarge {
+                payloadBatches = [
+                    DomainEventPayloadBatch(
+                        payload: activeCompactMessageCreatedPayload(
+                            from: lightweightPreview,
+                            eventID: lightweightMessageCreatedHintEventID(for: eventID),
+                            conversationID: envelope.conversationID,
+                            aggregateSequence: aggregateSequence,
+                            occurredAt: envelope.event.createdAt,
+                            actorUserID: envelope.event.actorUserID
+                        ),
+                        recipientUserIDs: recipientUserIDs
+                    )
+                ]
+            } else {
+                let activityHint = lightweightConversationActivityHint(
+                    from: lightweightPreview,
+                    updatedAt: envelope.event.createdAt,
+                    maxPreviewCharacters: previewMaxCharacters(for: detail)
+                )
+                let payload = IMTCPChatDomainEventPayload(
+                    eventID: lightweightMessageCreatedHintEventID(for: eventID),
+                    eventType: .conversationActivityHint,
+                    aggregateType: "conversation",
+                    aggregateID: envelope.conversationID,
+                    aggregateSequence: aggregateSequence,
+                    occurredAt: envelope.event.createdAt,
+                    actorUserID: envelope.event.actorUserID,
+                    conversation: nil,
+                    requiresTimelineNotice: false,
+                    body: .conversationActivityHint(activityHint)
+                )
+                payloadBatches = [DomainEventPayloadBatch(payload: payload, recipientUserIDs: recipientUserIDs)]
+            }
         } else {
-            conversationsByRecipient = [:]
-        }
+            let message = try await messageResponse(for: envelope)
+            let body = try domainEventBody(for: envelope, message: message)
+            let conversationsByRecipient: [UUID: IMConversationResponse]
+            if shouldOmitConversationSummary {
+                conversationsByRecipient = [:]
+            } else if envelope.eventType.shouldIncludeRealtimeConversationSummary {
+                conversationsByRecipient = await conversationSummaries(
+                    for: envelope.conversationID,
+                    recipientUserIDs: recipientUserIDs,
+                    includeMemberUserIDs: envelope.eventType.shouldIncludeRealtimeSummaryMemberUserIDs
+                )
+            } else {
+                conversationsByRecipient = [:]
+            }
 
-        if conversationsByRecipient.isEmpty {
-            let payload = IMTCPChatDomainEventPayload(
-                eventID: eventID,
-                eventType: envelope.eventType.chatDomainEventType,
-                aggregateType: "conversation",
-                aggregateID: envelope.conversationID,
-                aggregateSequence: aggregateSequence,
-                occurredAt: envelope.event.createdAt,
-                actorUserID: envelope.event.actorUserID,
-                conversation: nil,
-                requiresTimelineNotice: envelope.eventType.requiresTimelineNotice,
-                body: body
-            )
-            return [DomainEventPayloadBatch(payload: payload, recipientUserIDs: recipientUserIDs)]
+            if conversationsByRecipient.isEmpty {
+                let payload = IMTCPChatDomainEventPayload(
+                    eventID: eventID,
+                    eventType: envelope.eventType.chatDomainEventType,
+                    aggregateType: "conversation",
+                    aggregateID: envelope.conversationID,
+                    aggregateSequence: aggregateSequence,
+                    occurredAt: envelope.event.createdAt,
+                    actorUserID: envelope.event.actorUserID,
+                    conversation: nil,
+                    requiresTimelineNotice: envelope.eventType.requiresTimelineNotice,
+                    body: body
+                )
+                payloadBatches = [DomainEventPayloadBatch(payload: payload, recipientUserIDs: recipientUserIDs)]
+            } else {
+                payloadBatches = recipientUserIDs.map { recipientUserID in
+                    let payload = IMTCPChatDomainEventPayload(
+                        eventID: eventID,
+                        eventType: envelope.eventType.chatDomainEventType,
+                        aggregateType: "conversation",
+                        aggregateID: envelope.conversationID,
+                        aggregateSequence: aggregateSequence,
+                        occurredAt: envelope.event.createdAt,
+                        actorUserID: envelope.event.actorUserID,
+                        conversation: conversationsByRecipient[recipientUserID],
+                        requiresTimelineNotice: envelope.eventType.requiresTimelineNotice,
+                        body: body
+                    )
+                    return DomainEventPayloadBatch(payload: payload, recipientUserIDs: [recipientUserID])
+                }
+            }
         }
-
-        return recipientUserIDs.map { recipientUserID in
-            let payload = IMTCPChatDomainEventPayload(
-                eventID: eventID,
-                eventType: envelope.eventType.chatDomainEventType,
-                aggregateType: "conversation",
-                aggregateID: envelope.conversationID,
-                aggregateSequence: aggregateSequence,
-                occurredAt: envelope.event.createdAt,
-                actorUserID: envelope.event.actorUserID,
-                conversation: conversationsByRecipient[recipientUserID],
-                requiresTimelineNotice: envelope.eventType.requiresTimelineNotice,
-                body: body
-            )
-            return DomainEventPayloadBatch(payload: payload, recipientUserIDs: [recipientUserID])
-        }
+        return payloadBatches
     }
 
     private func shouldUseLightweightMessageCreatedPayload(
@@ -388,7 +836,7 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
         recipientCount: Int,
         detail: PayloadDetail
     ) -> Bool {
-        guard detail == .lightweightMessageCreatedIfLarge,
+        guard detail == .lightweightMessageCreatedIfLarge || detail == .activeCompactMessageCreatedIfLarge,
               envelope.eventType == .messageCreated
         else {
             return false
@@ -397,26 +845,213 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
         return threshold > 0 && recipientCount >= threshold
     }
 
-    private func lightweightMessageCreatedResponse(from message: IMMessageResponse?) -> IMMessageResponse? {
-        guard let message else {
-            return nil
+    private func shouldOmitMessageCreatedConversationSummary(
+        for envelope: ConversationEventEnvelope,
+        recipientCount: Int,
+        detail: PayloadDetail
+    ) -> Bool {
+        guard detail == .fullMessageCreatedWithoutSummaryIfLarge,
+              envelope.eventType == .messageCreated
+        else {
+            return false
         }
-        let maxCharacters = app.streamConsumerConfiguration.realtimeMessageCreatedLightweightPreviewMaxCharacters
-        let preview = truncatedPreview(message.content.previewText, maxCharacters: maxCharacters)
-        return IMMessageResponse(
-            id: message.id,
-            conversationID: message.conversationID,
+        let threshold = app.streamConsumerConfiguration.realtimeMessageCreatedLightweightRecipientThreshold
+        return threshold > 0 && recipientCount >= threshold
+    }
+
+    private func shouldCollapseLightweightMessageCreatedRun(
+        _ envelopes: [ConversationEventEnvelope],
+        resolvedRecipients: ConversationDomainEventResolvedRecipients?
+    ) -> Bool {
+        guard envelopes.count > 1,
+              let resolvedRecipients,
+              let first = envelopes.first,
+              first.eventType == .messageCreated,
+              first.payload.messageID != nil
+        else {
+            return false
+        }
+        guard envelopes.allSatisfy({
+            $0.eventType == .messageCreated
+                && $0.payload.messageID != nil
+                && $0.conversationID == first.conversationID
+        }) else {
+            return false
+        }
+        let threshold = app.streamConsumerConfiguration.realtimeMessageCreatedLightweightRecipientThreshold
+        return threshold > 0 && resolvedRecipients.userIDs.count >= threshold
+    }
+
+    private func sharedMessageCreatedRunRecipients(
+        for envelopes: [ConversationEventEnvelope]
+    ) async throws -> ConversationDomainEventResolvedRecipients? {
+        try await sharedResolvedMessageCreatedRunRecipients(
+            for: envelopes,
+            sourceDB: sourceDB,
+            app: app
+        )
+    }
+
+    private func lightweightMessageCreatedHintEventID(for eventID: UUID) -> UUID {
+        imLightweightMessageCreatedHintEventID(for: eventID)
+    }
+
+    private func resolvedRecipientUserIDs(
+        for envelope: ConversationEventEnvelope,
+        resolvedRecipients: ConversationDomainEventResolvedRecipients?
+    ) async throws -> [UUID] {
+        if let resolvedRecipients {
+            return resolvedRecipients.userIDs
+        }
+        return try await ConversationDomainEventRecipientResolver(db: sourceDB, app: app)
+            .resolveRecipients(for: envelope)
+            .userIDs
+    }
+
+    private func lightweightConversationActivityHint(
+        from message: LightweightMessagePreview,
+        updatedAt: Date,
+        maxPreviewCharacters: Int? = nil
+    ) -> IMConversationActivityHint {
+        let maxCharacters = maxPreviewCharacters
+            ?? app.streamConsumerConfiguration.realtimeMessageCreatedLightweightPreviewMaxCharacters
+        let preview = truncatedPreview(message.previewText, maxCharacters: maxCharacters)
+        return IMConversationActivityHint(
+            messageID: message.id,
             senderUserID: message.senderUserID,
-            clientMessageID: message.clientMessageID,
             serverSequence: message.serverSequence,
             timelineSequence: message.timelineSequence,
-            content: .richText(.plain(preview)),
-            derivedState: IMMessageDerivedState(),
+            previewText: preview,
+            messageCreatedAt: preview.isEmpty ? nil : message.createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    private func activeCompactMessageCreatedPayload(
+        from message: LightweightMessagePreview,
+        eventID: UUID,
+        conversationID: UUID,
+        aggregateSequence: UInt64,
+        occurredAt: Date,
+        actorUserID: UUID?
+    ) -> IMTCPChatDomainEventPayload {
+        switch app.streamConsumerConfiguration.realtimeActiveCompactHintBody {
+        case .conversationActivity:
+            return IMTCPChatDomainEventPayload(
+                eventID: eventID,
+                eventType: .conversationActivityHint,
+                aggregateType: "conversation",
+                aggregateID: conversationID,
+                aggregateSequence: aggregateSequence,
+                occurredAt: occurredAt,
+                actorUserID: actorUserID,
+                conversation: nil,
+                requiresTimelineNotice: false,
+                body: .conversationActivityHint(
+                    lightweightConversationActivityHint(
+                        from: message,
+                        updatedAt: occurredAt,
+                        maxPreviewCharacters: previewMaxCharacters(for: .activeCompactMessageCreatedIfLarge)
+                    )
+                )
+            )
+        case .timelineGap:
+            return IMTCPChatDomainEventPayload(
+                eventID: eventID,
+                eventType: .timelineGapHint,
+                aggregateType: "conversation",
+                aggregateID: conversationID,
+                aggregateSequence: aggregateSequence,
+                occurredAt: occurredAt,
+                actorUserID: actorUserID,
+                conversation: nil,
+                requiresTimelineNotice: false,
+                body: .timelineGapHint(
+                    lightweightTimelineGapHint(
+                        from: message,
+                        updatedAt: occurredAt
+                    )
+                )
+            )
+        }
+    }
+
+    private func lightweightTimelineGapHint(
+        from message: LightweightMessagePreview,
+        updatedAt: Date
+    ) -> IMTimelineGapHint {
+        IMTimelineGapHint(
+            messageID: message.id,
+            senderUserID: message.senderUserID,
+            serverSequence: message.serverSequence,
+            timelineSequence: message.timelineSequence,
+            updatedAt: updatedAt
+        )
+    }
+
+    private func previewMaxCharacters(for detail: PayloadDetail) -> Int {
+        switch detail {
+        case .activeCompactMessageCreatedIfLarge:
+            return app.streamConsumerConfiguration.realtimeActiveCompactHintPreviewMaxCharacters
+        case .full, .lightweightMessageCreatedIfLarge, .fullMessageCreatedWithoutSummaryIfLarge:
+            return app.streamConsumerConfiguration.realtimeMessageCreatedLightweightPreviewMaxCharacters
+        }
+    }
+
+    private func lightweightMessagePreview(for envelope: ConversationEventEnvelope) async throws -> LightweightMessagePreview? {
+        guard envelope.eventType == .messageCreated,
+              let messageID = envelope.payload.messageID
+        else {
+            return nil
+        }
+        if let preview = envelope.payload.messageCreatedPreview {
+            await app.conversationDomainEventMetrics.recordMessageCreatedEmbeddedPreviewUsed()
+            return LightweightMessagePreview(
+                id: messageID,
+                senderUserID: preview.senderUserID,
+                serverSequence: preview.serverSequence,
+                timelineSequence: preview.timelineSequence,
+                previewText: preview.previewText,
+                createdAt: preview.createdAt
+            )
+        }
+        guard app.streamConsumerConfiguration.realtimeMessageCreatedPreviewLookupEnabled else {
+            await app.conversationDomainEventMetrics.recordMessageCreatedPreviewMissing()
+            guard let actorUserID = envelope.event.actorUserID,
+                  envelope.event.aggregateSequence > 0
+            else {
+                return nil
+            }
+            let sequence = UInt64(envelope.event.aggregateSequence)
+            return LightweightMessagePreview(
+                id: messageID,
+                senderUserID: actorUserID,
+                serverSequence: sequence,
+                timelineSequence: sequence,
+                previewText: "",
+                createdAt: envelope.event.createdAt
+            )
+        }
+        guard let message = try await ConversationMessage.find(messageID, on: sourceDB) else {
+            await app.conversationDomainEventMetrics.recordMessageCreatedPreviewMissing()
+            return nil
+        }
+        await app.conversationDomainEventMetrics.recordMessageCreatedPreviewMessageLookup()
+        let content = try message.decodedContent()
+        return try LightweightMessagePreview(
+            id: message.requireID(),
+            senderUserID: message.$sender.id,
+            serverSequence: imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence"),
+            timelineSequence: imPositiveUInt64Sequence(message.timelineSequence, field: "timeline_sequence"),
+            previewText: content.previewText,
             createdAt: message.createdAt
         )
     }
 
     private func truncatedPreview(_ preview: String, maxCharacters: Int) -> String {
+        guard maxCharacters > 0 else {
+            return ""
+        }
         guard maxCharacters > 0, preview.count > maxCharacters else {
             return preview
         }
@@ -452,7 +1087,8 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
                                 summary.ownerUserID,
                                 Self.makeConversationResponse(
                                     from: summary,
-                                    includeMemberUserIDs: includeMemberUserIDs
+                                    includeMemberUserIDs: includeMemberUserIDs,
+                                    memberUserIDsLimit: app.summaryReadModelConfiguration.responseMemberUserIDsLimit
                                 )
                             )
                         }
@@ -476,9 +1112,18 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
 
     private static func makeConversationResponse(
         from row: ConversationUserSummary,
-        includeMemberUserIDs: Bool = true
+        includeMemberUserIDs: Bool = true,
+        memberUserIDsLimit: Int = 0
     ) -> IMConversationResponse {
-        IMConversationResponse(
+        let memberUserIDs: [UUID]
+        if includeMemberUserIDs,
+           (memberUserIDsLimit <= 0 || row.memberCount <= memberUserIDsLimit) {
+            memberUserIDs = row.memberUserIDs.sorted { $0.uuidString < $1.uuidString }
+        } else {
+            memberUserIDs = []
+        }
+
+        return IMConversationResponse(
             id: row.conversationID,
             title: row.title,
             kind: row.kind,
@@ -495,7 +1140,7 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
             avatarPreset: row.avatarPresetEnum,
             muteAll: row.muteAll,
             memberCount: row.memberCount,
-            memberUserIDs: includeMemberUserIDs ? row.memberUserIDs.sorted { $0.uuidString < $1.uuidString } : [],
+            memberUserIDs: memberUserIDs,
             lastMessage: row.lastMessage,
             lastReadSequence: UInt64(row.lastReadSequence),
             unreadCount: row.unreadCount,
@@ -505,32 +1150,6 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
             createdAt: nil,
             updatedAt: row.lastActivityAt
         )
-    }
-
-    private func realtimeRecipientUserIDs(for envelope: ConversationEventEnvelope) -> [UUID] {
-        switch envelope.eventType {
-        case .conversationRemovedForUser:
-            return envelope.payload.affectedUserID.map { [$0] } ?? []
-        case .messageCreated,
-             .messageUpdated,
-             .messageRecalled,
-             .messageStreamStarted,
-             .messageStreamCompleted,
-             .messageStreamFailed,
-             .messageStreamCancelled,
-             .readAdvanced,
-             .metadataUpdated,
-             .membershipAdded,
-             .membershipRemoved,
-             .membershipRoleUpdated,
-             .directPeerUpdated,
-             .messageFavoriteChanged,
-             .messageVisibilityChanged,
-             .conversationVisibilityChanged,
-             .conversationSettingsChanged,
-             .inviteChanged:
-            return Array(Set(envelope.payload.recipientUserIDs)).sorted { $0.uuidString < $1.uuidString }
-        }
     }
 
     private func messageResponse(for envelope: ConversationEventEnvelope) async throws -> IMMessageResponse? {
@@ -665,6 +1284,53 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
 }
 
 struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
+    private struct ActiveConversationFanoutSplit: Sendable {
+        var activeFullBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch] = []
+        var activeCompactBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch] = []
+        var inactiveHintBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch] = []
+        var activeFullRecipientCount = 0
+        var activeCompactRecipientCount = 0
+        var inactiveHintRecipientCount = 0
+        var downgradedActiveRecipientCount = 0
+        var routeMilliseconds = 0
+        var didSplit = false
+    }
+
+    private struct ActiveConversationFanoutPlan: Sendable {
+        let fullActiveUserIDs: [UUID]
+        let compactActiveUserIDs: [UUID]
+        let hintUserIDs: [UUID]
+        let downgradedActiveUserIDs: [UUID]
+        let payloadBudget: IMActiveConversationFullFanoutBudget?
+        let activeCandidateCount: Int
+
+        var payloadBudgetDowngradedRecipientCount: Int {
+            payloadBudget?.budgetDowngradedRecipientCount(candidateCount: activeCandidateCount) ?? 0
+        }
+    }
+
+    private struct InactiveHintRecipientKey: Hashable, Sendable {
+        let conversationID: UUID
+        let userID: UUID
+    }
+
+    private struct InactiveHintPayloadKey: Hashable, Sendable {
+        let conversationID: UUID
+        let eventID: UUID
+        let aggregateSequence: UInt64
+    }
+
+    private struct ActiveConversationRouteCacheKey: Hashable, Sendable {
+        let conversationID: UUID
+        let recipientUserIDs: Set<UUID>
+    }
+
+    private struct InactiveHintCoalescingResult: Sendable {
+        var batches: [ConversationRealtimeConsumer.DomainEventPayloadBatch] = []
+        var relayRecipientCount = 0
+        var suppressedRecipientCount = 0
+    }
+
     let app: Application
     let sourceDB: any Database
 
@@ -673,31 +1339,91 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
     }
 
     func consume(_ envelope: ConversationEventEnvelope) async throws {
+        try await consumeMessageCreatedEnvelopes([envelope])
+    }
+
+    func consumeMessageCreatedRun(_ envelopes: [ConversationEventEnvelope]) async throws {
+        guard !envelopes.isEmpty else {
+            return
+        }
+        let conversationID = envelopes[0].conversationID
+        guard envelopes.allSatisfy({
+            $0.eventType == .messageCreated
+                && $0.payload.messageID != nil
+                && $0.conversationID == conversationID
+        }) else {
+            for envelope in envelopes {
+                try await consume(envelope)
+            }
+            return
+        }
+        try await consumeMessageCreatedEnvelopes(envelopes)
+    }
+
+    private func consumeMessageCreatedEnvelopes(_ envelopes: [ConversationEventEnvelope]) async throws {
+        guard !envelopes.isEmpty else {
+            return
+        }
         let startedAt = Date()
         let slowLogMilliseconds = app.streamConsumerConfiguration.realtimeDeliverySlowLogMilliseconds
-        let eventLagMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(from: envelope.event.createdAt, to: startedAt)
+        let eventLagMilliseconds = envelopes.map {
+            IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(from: $0.event.createdAt, to: startedAt)
+        }.max() ?? 0
         let realtimeConsumer = ConversationRealtimeConsumer(app: app, sourceDB: sourceDB)
-        let payloadDetail: ConversationRealtimeConsumer.PayloadDetail = .lightweightMessageCreatedIfLarge
+        let payloadDetail: ConversationRealtimeConsumer.PayloadDetail = .fullMessageCreatedWithoutSummaryIfLarge
+        let sharedResolvedRecipients = shouldDeferMessageCreatedRunRecipientResolutionForActiveOnlyFanout(envelopes)
+            ? nil
+            : try await sharedMessageCreatedRunRecipients(for: envelopes)
+        let payloadSourceEnvelopes = envelopes
+        let requestID = payloadSourceEnvelopes.first?.eventID
         guard app.streamConsumerConfiguration.realtimeDeliveryAsyncRelayEnabled else {
-            let payloadBatches = try await realtimeConsumer.domainEventPayloadBatches(for: envelope, detail: payloadDetail)
-            for batch in payloadBatches {
-                await app.gatewaySessionService.sendDomainEventPayload(
-                    batch.payload,
-                    toUserIDs: batch.recipientUserIDs,
-                    requestID: envelope.eventID
-                )
-            }
+            let split = try await preparedMessageCreatedFanoutSplit(
+                envelopes: payloadSourceEnvelopes,
+                realtimeConsumer: realtimeConsumer,
+                payloadDetail: payloadDetail,
+                sharedResolvedRecipients: sharedResolvedRecipients
+            )
+            let inactiveHintResult = coalescedInactiveHintBatches(
+                split.inactiveHintBatches,
+                suppressingOlderHintsCoveredBy: split.activeFullBatches + split.activeCompactBatches
+            )
+            await app.routingMetrics.recordRealtimeDeliveryConsumerInactiveHintRelay(
+                payloadBatchCount: inactiveHintResult.batches.count,
+                recipientCount: inactiveHintResult.relayRecipientCount,
+                suppressedRecipientCount: inactiveHintResult.suppressedRecipientCount
+            )
+            let relayBatches = split.activeFullBatches
+                + split.activeCompactBatches
+                + inactiveHintResult.batches
+            await app.gatewaySessionService.sendDomainEventPayloadBatches(
+                relayBatches.map {
+                    IMGatewayDomainEventPayloadBatch(
+                        payload: $0.payload,
+                        recipientUserIDs: $0.recipientUserIDs,
+                        fanoutIntent: $0.fanoutIntent
+                    )
+                },
+                requestID: requestID
+            )
             let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
             if IMRealtimeDeliveryDiagnostics.shouldLogAny(
                 [eventLagMilliseconds, totalMilliseconds],
                 thresholdMilliseconds: slowLogMilliseconds
             ) {
                 app.logger.info("Realtime delivery consumer slow synchronous relay.", metadata: [
-                    "event_id": .string(envelope.eventID?.uuidString ?? ""),
-                    "conversation_id": .string(envelope.conversationID.uuidString),
-                    "event_type": .string(envelope.eventType.rawValue),
-                    "recipient_count": .stringConvertible(payloadBatches.reduce(0) { $0 + $1.recipientUserIDs.count }),
-                    "payload_batch_count": .stringConvertible(payloadBatches.count),
+                    "event_id": .string(requestID?.uuidString ?? ""),
+                    "conversation_id": .string(envelopes.first?.conversationID.uuidString ?? ""),
+                    "event_type": .string(ConversationDomainEventType.messageCreated.rawValue),
+                    "event_count": .stringConvertible(envelopes.count),
+                    "recipient_count": .stringConvertible(relayBatches.reduce(0) { $0 + $1.recipientUserIDs.count }),
+                    "payload_batch_count": .stringConvertible(relayBatches.count),
+                    "active_full_recipient_count": .stringConvertible(split.activeFullRecipientCount),
+                    "active_compact_recipient_count": .stringConvertible(split.activeCompactRecipientCount),
+                    "inactive_hint_recipient_count": .stringConvertible(split.inactiveHintRecipientCount),
+                    "inactive_hint_relay_recipient_count": .stringConvertible(inactiveHintResult.relayRecipientCount),
+                    "inactive_hint_suppressed_recipient_count": .stringConvertible(inactiveHintResult.suppressedRecipientCount),
+                    "downgraded_active_recipient_count": .stringConvertible(split.downgradedActiveRecipientCount),
+                    "active_route_ms": .stringConvertible(split.routeMilliseconds),
                     "lightweight_threshold": .stringConvertible(app.streamConsumerConfiguration.realtimeMessageCreatedLightweightRecipientThreshold),
                     "event_lag_ms": .stringConvertible(eventLagMilliseconds),
                     "total_ms": .stringConvertible(totalMilliseconds)
@@ -707,39 +1433,534 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
         }
 
         let payloadStartedAt = Date()
-        let payloadBatches = try await realtimeConsumer.domainEventPayloadBatches(for: envelope, detail: payloadDetail)
+        let split = try await preparedMessageCreatedFanoutSplit(
+            envelopes: payloadSourceEnvelopes,
+            realtimeConsumer: realtimeConsumer,
+            payloadDetail: payloadDetail,
+            sharedResolvedRecipients: sharedResolvedRecipients
+        )
         let payloadBuildMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: payloadStartedAt)
-        let recipientCount = payloadBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
-        let coalescingWindowMilliseconds = realtimeMessageCreatedCoalescingWindowMilliseconds(
-            for: envelope,
-            recipientCount: recipientCount
+        let splitMilliseconds = split.routeMilliseconds
+        let activeFullRecipientCount = split.activeFullRecipientCount
+        let activeCompactRecipientCount = split.activeCompactRecipientCount
+        let inactiveHintRecipientCount = split.inactiveHintRecipientCount
+        let downgradedActiveRecipientCount = split.downgradedActiveRecipientCount
+        let activeFullBatches = split.activeFullBatches
+        let activeCompactBatches = split.activeCompactBatches
+        let inactiveHintResult = coalescedInactiveHintBatches(
+            split.inactiveHintBatches,
+            suppressingOlderHintsCoveredBy: split.activeFullBatches + split.activeCompactBatches
         )
+        await app.routingMetrics.recordRealtimeDeliveryConsumerInactiveHintRelay(
+            payloadBatchCount: inactiveHintResult.batches.count,
+            recipientCount: inactiveHintResult.relayRecipientCount,
+            suppressedRecipientCount: inactiveHintResult.suppressedRecipientCount
+        )
+        let inactiveHintBatches = inactiveHintResult.batches
+        let recipientCount = activeFullBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
+            + activeCompactBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
+            + inactiveHintBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
         let dispatchStartedAt = Date()
-        await app.realtimeDeliveryAsyncDispatcher.dispatchPayloadBatches(
-            payloadBatches,
-            requestID: envelope.eventID,
-            coalescingKey: coalescingWindowMilliseconds > 0 ? envelope.conversationID : nil,
-            coalescingWindowMilliseconds: coalescingWindowMilliseconds
-        )
+        if !activeFullBatches.isEmpty {
+            await app.realtimeDeliveryAsyncDispatcher.dispatchPayloadBatches(
+                activeFullBatches,
+                requestID: requestID,
+                coalescingKey: nil,
+                coalescingWindowMilliseconds: 0
+            )
+        }
+        if !activeCompactBatches.isEmpty {
+            let coalescingWindowMilliseconds = activeCompactHintCoalescingWindowMilliseconds(
+                for: envelopes,
+                recipientCount: activeCompactRecipientCount
+            )
+            await app.realtimeDeliveryAsyncDispatcher.dispatchPayloadBatches(
+                activeCompactBatches,
+                requestID: requestID,
+                coalescingKey: coalescingWindowMilliseconds > 0 ? envelopes.first?.conversationID : nil,
+                coalescingScope: .activeCompactHint,
+                coalescingWindowMilliseconds: coalescingWindowMilliseconds
+            )
+        }
+        if !inactiveHintBatches.isEmpty {
+            let coalescingWindowMilliseconds = inactiveHintCoalescingWindowMilliseconds(
+                for: envelopes,
+                recipientCount: activeFullRecipientCount + activeCompactRecipientCount + inactiveHintRecipientCount
+            )
+            await app.realtimeDeliveryAsyncDispatcher.dispatchPayloadBatches(
+                inactiveHintBatches,
+                requestID: requestID,
+                coalescingKey: coalescingWindowMilliseconds > 0 ? envelopes.first?.conversationID : nil,
+                coalescingScope: .inactiveHint,
+                coalescingWindowMilliseconds: coalescingWindowMilliseconds
+            )
+        }
         let dispatchEnqueueMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: dispatchStartedAt)
         let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
         if IMRealtimeDeliveryDiagnostics.shouldLogAny(
-            [eventLagMilliseconds, payloadBuildMilliseconds, dispatchEnqueueMilliseconds, totalMilliseconds],
+            [eventLagMilliseconds, payloadBuildMilliseconds, splitMilliseconds, dispatchEnqueueMilliseconds, totalMilliseconds],
             thresholdMilliseconds: slowLogMilliseconds
         ) {
             app.logger.info("Realtime delivery consumer slow async enqueue.", metadata: [
-                "event_id": .string(envelope.eventID?.uuidString ?? ""),
-                "conversation_id": .string(envelope.conversationID.uuidString),
-                "event_type": .string(envelope.eventType.rawValue),
+                "event_id": .string(requestID?.uuidString ?? ""),
+                "conversation_id": .string(envelopes.first?.conversationID.uuidString ?? ""),
+                "event_type": .string(ConversationDomainEventType.messageCreated.rawValue),
+                "event_count": .stringConvertible(envelopes.count),
                 "recipient_count": .stringConvertible(recipientCount),
-                "payload_batch_count": .stringConvertible(payloadBatches.count),
+                "payload_batch_count": .stringConvertible(activeFullBatches.count + activeCompactBatches.count + inactiveHintBatches.count),
+                "active_full_recipient_count": .stringConvertible(activeFullRecipientCount),
+                "active_compact_recipient_count": .stringConvertible(activeCompactRecipientCount),
+                "inactive_hint_recipient_count": .stringConvertible(inactiveHintRecipientCount),
+                "inactive_hint_relay_recipient_count": .stringConvertible(inactiveHintResult.relayRecipientCount),
+                "inactive_hint_suppressed_recipient_count": .stringConvertible(inactiveHintResult.suppressedRecipientCount),
+                "downgraded_active_recipient_count": .stringConvertible(downgradedActiveRecipientCount),
                 "lightweight_threshold": .stringConvertible(app.streamConsumerConfiguration.realtimeMessageCreatedLightweightRecipientThreshold),
-                "coalescing_window_ms": .stringConvertible(coalescingWindowMilliseconds),
+                "active_compact_coalescing_window_ms": .stringConvertible(activeCompactHintCoalescingWindowMilliseconds(
+                    for: envelopes,
+                    recipientCount: activeCompactRecipientCount
+                )),
+                "inactive_hint_coalescing_window_ms": .stringConvertible(inactiveHintCoalescingWindowMilliseconds(
+                    for: envelopes,
+                    recipientCount: activeFullRecipientCount + activeCompactRecipientCount + inactiveHintRecipientCount
+                )),
                 "event_lag_ms": .stringConvertible(eventLagMilliseconds),
                 "payload_build_ms": .stringConvertible(payloadBuildMilliseconds),
+                "split_ms": .stringConvertible(splitMilliseconds),
+                "active_route_ms": .stringConvertible(split.routeMilliseconds),
                 "dispatch_enqueue_ms": .stringConvertible(dispatchEnqueueMilliseconds),
                 "total_ms": .stringConvertible(totalMilliseconds)
             ])
+        }
+    }
+
+    private func preparedMessageCreatedFanoutSplit(
+        envelopes: [ConversationEventEnvelope],
+        realtimeConsumer: ConversationRealtimeConsumer,
+        payloadDetail: ConversationRealtimeConsumer.PayloadDetail,
+        sharedResolvedRecipients: ConversationDomainEventResolvedRecipients?
+    ) async throws -> ActiveConversationFanoutSplit {
+        if let preSplit = try await preSplitLargeGroupMessageCreatedFanoutBeforePayloadBuild(
+            envelopes: envelopes,
+            realtimeConsumer: realtimeConsumer,
+            sharedResolvedRecipients: sharedResolvedRecipients
+        ) {
+            return preSplit
+        }
+
+        var payloadBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch] = []
+        for envelope in envelopes {
+            payloadBatches.append(
+                contentsOf: try await realtimeConsumer.domainEventPayloadBatches(
+                    for: envelope,
+                    detail: payloadDetail,
+                    resolvedRecipients: sharedResolvedRecipients
+                )
+            )
+        }
+        return await splitActiveConversationFanoutIfNeeded(payloadBatches)
+    }
+
+    private func shouldDeferMessageCreatedRunRecipientResolutionForActiveOnlyFanout(
+        _ envelopes: [ConversationEventEnvelope]
+    ) -> Bool {
+        guard app.gatewayLocalFanoutConfiguration.activeConversationFanoutEnabled,
+              app.hasConnectionRoutingServiceConfigured,
+              !app.gatewayLocalFanoutConfiguration.relaysInactiveConversationHints,
+              let first = envelopes.first,
+              first.eventType == .messageCreated,
+              first.payload.messageID != nil
+        else {
+            return false
+        }
+        return envelopes.allSatisfy {
+            $0.eventType == .messageCreated
+                && $0.payload.messageID != nil
+                && $0.conversationID == first.conversationID
+        }
+    }
+
+    private func messageCreatedRecipientCountHint(
+        for envelope: ConversationEventEnvelope
+    ) async throws -> Int {
+        let inlineCount = Set(envelope.payload.recipientUserIDs).count
+        if inlineCount > 0 {
+            return inlineCount
+        }
+        guard let eventID = envelope.eventID,
+              let snapshot = try await ConversationDomainEventRecipientSnapshot.find(eventID, on: sourceDB)
+        else {
+            if app.streamConsumerConfiguration.streamConsumerRequiresMessageCreatedRecipientSnapshot {
+                await app.conversationDomainEventMetrics.recordRecipientResolutionMissingSnapshot()
+                throw ConversationEventTransientProcessingError.messageCreatedRecipientSnapshotMissing(
+                    eventID: envelope.eventID,
+                    conversationID: envelope.conversationID
+                )
+            }
+            return try await ConversationMember.query(on: sourceDB)
+                .filter(\.$conversation.$id == envelope.conversationID)
+                .count()
+        }
+        return snapshot.recipientCount
+    }
+
+    private func preSplitLargeGroupMessageCreatedFanoutBeforePayloadBuild(
+        envelopes: [ConversationEventEnvelope],
+        realtimeConsumer: ConversationRealtimeConsumer,
+        sharedResolvedRecipients: ConversationDomainEventResolvedRecipients?
+    ) async throws -> ActiveConversationFanoutSplit? {
+        guard app.gatewayLocalFanoutConfiguration.activeConversationFanoutEnabled,
+              app.hasConnectionRoutingServiceConfigured,
+              let first = envelopes.first,
+              first.eventType == .messageCreated,
+              first.payload.messageID != nil
+        else {
+            return nil
+        }
+        guard envelopes.allSatisfy({
+            $0.eventType == .messageCreated
+                && $0.payload.messageID != nil
+                && $0.conversationID == first.conversationID
+        }) else {
+            return nil
+        }
+
+        if !app.gatewayLocalFanoutConfiguration.relaysInactiveConversationHints,
+           let split = try await preSplitPullOnlyMessageCreatedFanoutBeforeRecipientExpansion(
+               envelopes: envelopes,
+               realtimeConsumer: realtimeConsumer,
+               first: first
+           )
+        {
+            return split
+        }
+
+        let resolvedRecipients: ConversationDomainEventResolvedRecipients
+        if let sharedResolvedRecipients {
+            resolvedRecipients = sharedResolvedRecipients
+        } else {
+            resolvedRecipients = try await ConversationDomainEventRecipientResolver(db: sourceDB, app: app)
+                .resolveRecipients(for: first)
+        }
+        let recipientUserIDs = resolvedRecipients.userIDs
+        let recipientCount = recipientUserIDs.count
+        let lightweightThreshold = app.streamConsumerConfiguration.realtimeMessageCreatedLightweightRecipientThreshold
+        let fanoutThreshold = app.gatewayLocalFanoutConfiguration.activeConversationFanoutRecipientThreshold
+        guard lightweightThreshold > 0,
+              fanoutThreshold > 0,
+              recipientCount >= lightweightThreshold,
+              recipientCount >= fanoutThreshold
+        else {
+            return nil
+        }
+
+        let routeStartedAt = Date()
+        do {
+            let routeLookup = try await activeConversationRoutes(
+                app: app,
+                conversationID: first.conversationID,
+                recipientUserIDs: recipientUserIDs
+            )
+            let activeRoutes = routeLookup.routes
+            var split = ActiveConversationFanoutSplit()
+            split.didSplit = true
+            split.routeMilliseconds = routeLookup.cacheHit
+                ? 0
+                : IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: routeStartedAt)
+
+            for envelope in envelopes {
+                let aggregateSequence = try imPositiveUInt64Sequence(
+                    envelope.event.aggregateSequence,
+                    field: "aggregate_sequence"
+                )
+                var plan = activeConversationFanoutPlan(
+                    recipientUserIDs: recipientUserIDs,
+                    activeRoutes: activeRoutes,
+                    aggregateSequence: aggregateSequence
+                )
+
+                let fullBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch]
+                if !plan.fullActiveUserIDs.isEmpty {
+                    fullBatches = try await realtimeConsumer.domainEventPayloadBatches(
+                        for: envelope,
+                        detail: .fullMessageCreatedWithoutSummaryIfLarge,
+                        resolvedRecipients: resolvedRecipients
+                    )
+                    if let payload = fullBatches.first?.payload {
+                        plan = activeConversationFanoutPlan(
+                            recipientUserIDs: recipientUserIDs,
+                            activeRoutes: activeRoutes,
+                            aggregateSequence: aggregateSequence,
+                            payload: payload
+                        )
+                        await recordActiveConversationFanoutPayloadBudgetIfNeeded(plan)
+                    }
+                    split.activeFullRecipientCount += plan.fullActiveUserIDs.count
+                    split.activeCompactRecipientCount += plan.compactActiveUserIDs.count
+                    split.inactiveHintRecipientCount += plan.hintUserIDs.count
+                    split.downgradedActiveRecipientCount += plan.downgradedActiveUserIDs.count
+                    await app.routingMetrics.recordActiveConversationFanoutSplit(
+                        activeRecipientCount: plan.fullActiveUserIDs.count,
+                        compactActiveRecipientCount: plan.compactActiveUserIDs.count,
+                        inactiveHintRecipientCount: plan.hintUserIDs.count,
+                        downgradedActiveRecipientCount: plan.downgradedActiveUserIDs.count
+                    )
+                    split.activeFullBatches.append(
+                        contentsOf: fullBatches.map {
+                            ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                                payload: $0.payload,
+                                recipientUserIDs: plan.fullActiveUserIDs,
+                                fanoutIntent: .preSplitActiveFull
+                            )
+                        }
+                    )
+                    if !plan.compactActiveUserIDs.isEmpty {
+                        split.activeCompactBatches.append(
+                            contentsOf: compactActiveHintBatches(
+                                from: fullBatches,
+                                recipientUserIDs: plan.compactActiveUserIDs,
+                                eventID: envelope.eventID
+                            )
+                        )
+                    }
+                } else {
+                    fullBatches = []
+                    split.activeFullRecipientCount += plan.fullActiveUserIDs.count
+                    split.activeCompactRecipientCount += plan.compactActiveUserIDs.count
+                    split.inactiveHintRecipientCount += plan.hintUserIDs.count
+                    split.downgradedActiveRecipientCount += plan.downgradedActiveUserIDs.count
+                    await app.routingMetrics.recordActiveConversationFanoutSplit(
+                        activeRecipientCount: plan.fullActiveUserIDs.count,
+                        compactActiveRecipientCount: plan.compactActiveUserIDs.count,
+                        inactiveHintRecipientCount: plan.hintUserIDs.count,
+                        downgradedActiveRecipientCount: plan.downgradedActiveUserIDs.count
+                    )
+                    if !plan.compactActiveUserIDs.isEmpty {
+                        let compactBatches = try await realtimeConsumer.domainEventPayloadBatches(
+                            for: envelope,
+                            detail: .activeCompactMessageCreatedIfLarge,
+                            resolvedRecipients: resolvedRecipients
+                        )
+                        split.activeCompactBatches.append(
+                            contentsOf: compactBatches.map {
+                                ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                                    payload: $0.payload,
+                                    recipientUserIDs: plan.compactActiveUserIDs,
+                                    fanoutIntent: .preSplitActiveCompact
+                                )
+                            }
+                        )
+                    }
+                }
+
+                if !plan.hintUserIDs.isEmpty {
+                    if fullBatches.isEmpty {
+                        let hintBatches = try await realtimeConsumer.domainEventPayloadBatches(
+                            for: envelope,
+                            detail: .lightweightMessageCreatedIfLarge,
+                            resolvedRecipients: resolvedRecipients
+                        )
+                        split.inactiveHintBatches.append(
+                            contentsOf: hintBatches.map {
+                                ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                                    payload: $0.payload,
+                                    recipientUserIDs: plan.hintUserIDs,
+                                    fanoutIntent: .preSplitInactiveHint
+                                )
+                            }
+                        )
+                    } else {
+                        let hintEventID = envelope.eventID.map(imLightweightMessageCreatedHintEventID)
+                        split.inactiveHintBatches.append(
+                            contentsOf: fullBatches.compactMap { batch in
+                                batch.payload.conversationActivityHintForRealtimeInactiveRecipient(
+                                    maxPreviewCharacters: app.streamConsumerConfiguration.realtimeMessageCreatedLightweightPreviewMaxCharacters,
+                                    eventID: hintEventID
+                                ).map {
+                                    ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                                        payload: $0,
+                                        recipientUserIDs: plan.hintUserIDs,
+                                        fanoutIntent: .preSplitInactiveHint
+                                    )
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+            return split
+        } catch {
+            if !app.streamConsumerConfiguration.realtimeActiveConversationUnsplitFallbackEnabled {
+                await app.routingMetrics.recordActiveConversationFanoutDroppedFallback(
+                    recipientCount: recipientCount
+                )
+                app.logger.warning("Realtime delivery consumer pre-split failed; dropping unsplit fallback.", metadata: [
+                    "conversation_id": .string(first.conversationID.uuidString),
+                    "recipient_count": .stringConvertible(recipientCount),
+                    "error": .string(String(describing: error))
+                ])
+                return ActiveConversationFanoutSplit(didSplit: true)
+            }
+            await app.routingMetrics.recordActiveConversationFanoutUnsplitFallback()
+            app.logger.warning("Realtime delivery consumer pre-split failed; falling back to payload-built fanout split.", metadata: [
+                "conversation_id": .string(first.conversationID.uuidString),
+                "recipient_count": .stringConvertible(recipientCount),
+                "error": .string(String(describing: error))
+            ])
+            return nil
+        }
+    }
+
+    private func preSplitPullOnlyMessageCreatedFanoutBeforeRecipientExpansion(
+        envelopes: [ConversationEventEnvelope],
+        realtimeConsumer: ConversationRealtimeConsumer,
+        first: ConversationEventEnvelope
+    ) async throws -> ActiveConversationFanoutSplit? {
+        guard shouldDeferMessageCreatedRunRecipientResolutionForActiveOnlyFanout(envelopes) else {
+            return nil
+        }
+        let recipientCount = try await messageCreatedRecipientCountHint(for: first)
+        let lightweightThreshold = app.streamConsumerConfiguration.realtimeMessageCreatedLightweightRecipientThreshold
+        let fanoutThreshold = app.gatewayLocalFanoutConfiguration.activeConversationFanoutRecipientThreshold
+        guard lightweightThreshold > 0,
+              fanoutThreshold > 0,
+              recipientCount >= lightweightThreshold,
+              recipientCount >= fanoutThreshold
+        else {
+            return nil
+        }
+
+        let routeStartedAt = Date()
+        do {
+            let routeLookup = try await activeConversationRoutes(
+                app: app,
+                conversationID: first.conversationID,
+                recipientUserIDs: nil
+            )
+            let activeCandidateUserIDs = Array(routeLookup.routes.keys)
+            let resolvedActiveRecipients = try await ConversationDomainEventRecipientResolver(db: sourceDB, app: app)
+                .filterRecipients(for: first, candidateUserIDs: activeCandidateUserIDs)
+            let activeRecipientUserIDs = resolvedActiveRecipients.userIDs
+            let activeRecipientSet = Set(activeRecipientUserIDs)
+            let activeRoutes = routeLookup.routes.filter { activeRecipientSet.contains($0.key) }
+            var split = ActiveConversationFanoutSplit()
+            split.didSplit = true
+            split.routeMilliseconds = routeLookup.cacheHit
+                ? 0
+                : IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: routeStartedAt)
+
+            for envelope in envelopes {
+                let aggregateSequence = try imPositiveUInt64Sequence(
+                    envelope.event.aggregateSequence,
+                    field: "aggregate_sequence"
+                )
+                var plan = activeConversationFanoutPlan(
+                    recipientUserIDs: activeRecipientUserIDs,
+                    activeRoutes: activeRoutes,
+                    aggregateSequence: aggregateSequence
+                )
+
+                let fullBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch]
+                if !plan.fullActiveUserIDs.isEmpty {
+                    let resolvedRecipients = ConversationDomainEventResolvedRecipients(
+                        userIDs: activeRecipientUserIDs,
+                        source: resolvedActiveRecipients.source
+                    )
+                    fullBatches = try await realtimeConsumer.domainEventPayloadBatches(
+                        for: envelope,
+                        detail: .fullMessageCreatedWithoutSummaryIfLarge,
+                        resolvedRecipients: resolvedRecipients
+                    )
+                    if let payload = fullBatches.first?.payload {
+                        plan = activeConversationFanoutPlan(
+                            recipientUserIDs: activeRecipientUserIDs,
+                            activeRoutes: activeRoutes,
+                            aggregateSequence: aggregateSequence,
+                            payload: payload
+                        )
+                        await recordActiveConversationFanoutPayloadBudgetIfNeeded(plan)
+                    }
+                    split.activeFullRecipientCount += plan.fullActiveUserIDs.count
+                    split.activeCompactRecipientCount += plan.compactActiveUserIDs.count
+                    split.inactiveHintRecipientCount += plan.hintUserIDs.count
+                    split.downgradedActiveRecipientCount += plan.downgradedActiveUserIDs.count
+                    await app.routingMetrics.recordActiveConversationFanoutSplit(
+                        activeRecipientCount: plan.fullActiveUserIDs.count,
+                        compactActiveRecipientCount: plan.compactActiveUserIDs.count,
+                        inactiveHintRecipientCount: plan.hintUserIDs.count,
+                        downgradedActiveRecipientCount: plan.downgradedActiveUserIDs.count
+                    )
+                    split.activeFullBatches.append(
+                        contentsOf: fullBatches.map {
+                            ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                                payload: $0.payload,
+                                recipientUserIDs: plan.fullActiveUserIDs,
+                                fanoutIntent: .preSplitActiveFull
+                            )
+                        }
+                    )
+                    if !plan.compactActiveUserIDs.isEmpty {
+                        split.activeCompactBatches.append(
+                            contentsOf: compactActiveHintBatches(
+                                from: fullBatches,
+                                recipientUserIDs: plan.compactActiveUserIDs,
+                                eventID: envelope.eventID
+                            )
+                        )
+                    }
+                } else {
+                    fullBatches = []
+                    split.activeFullRecipientCount += plan.fullActiveUserIDs.count
+                    split.activeCompactRecipientCount += plan.compactActiveUserIDs.count
+                    split.inactiveHintRecipientCount += plan.hintUserIDs.count
+                    split.downgradedActiveRecipientCount += plan.downgradedActiveUserIDs.count
+                    await app.routingMetrics.recordActiveConversationFanoutSplit(
+                        activeRecipientCount: plan.fullActiveUserIDs.count,
+                        compactActiveRecipientCount: plan.compactActiveUserIDs.count,
+                        inactiveHintRecipientCount: plan.hintUserIDs.count,
+                        downgradedActiveRecipientCount: plan.downgradedActiveUserIDs.count
+                    )
+                    if !plan.compactActiveUserIDs.isEmpty {
+                        let resolvedRecipients = ConversationDomainEventResolvedRecipients(
+                            userIDs: activeRecipientUserIDs,
+                            source: resolvedActiveRecipients.source
+                        )
+                        let compactBatches = try await realtimeConsumer.domainEventPayloadBatches(
+                            for: envelope,
+                            detail: .activeCompactMessageCreatedIfLarge,
+                            resolvedRecipients: resolvedRecipients
+                        )
+                        split.activeCompactBatches.append(
+                            contentsOf: compactBatches.map {
+                                ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                                    payload: $0.payload,
+                                    recipientUserIDs: plan.compactActiveUserIDs,
+                                    fanoutIntent: .preSplitActiveCompact
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+            return split
+        } catch {
+            if !app.streamConsumerConfiguration.realtimeActiveConversationUnsplitFallbackEnabled {
+                await app.routingMetrics.recordActiveConversationFanoutDroppedFallback(
+                    recipientCount: recipientCount
+                )
+                app.logger.warning("Realtime delivery consumer pull-only pre-split failed; dropping unsplit fallback.", metadata: [
+                    "conversation_id": .string(first.conversationID.uuidString),
+                    "recipient_count": .stringConvertible(recipientCount),
+                    "error": .string(String(describing: error))
+                ])
+                return ActiveConversationFanoutSplit(didSplit: true)
+            }
+            await app.routingMetrics.recordActiveConversationFanoutUnsplitFallback()
+            app.logger.warning("Realtime delivery consumer pull-only pre-split failed; falling back to payload-built fanout split.", metadata: [
+                "conversation_id": .string(first.conversationID.uuidString),
+                "recipient_count": .stringConvertible(recipientCount),
+                "error": .string(String(describing: error))
+            ])
+            return nil
         }
     }
 
@@ -757,9 +1978,408 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
         }
         return configuration.realtimeMessageCreatedCoalesceWindowMilliseconds
     }
+
+    private func inactiveHintCoalescingWindowMilliseconds(
+        for envelopes: [ConversationEventEnvelope],
+        recipientCount: Int
+    ) -> Int {
+        guard let first = envelopes.first,
+              first.eventType == .messageCreated,
+              first.payload.messageID != nil
+        else {
+            return 0
+        }
+        guard envelopes.allSatisfy({
+            $0.eventType == .messageCreated
+                && $0.payload.messageID != nil
+                && $0.conversationID == first.conversationID
+        }) else {
+            return 0
+        }
+        return realtimeMessageCreatedCoalescingWindowMilliseconds(
+            for: first,
+            recipientCount: recipientCount
+        )
+    }
+
+    private func activeCompactHintCoalescingWindowMilliseconds(
+        for envelopes: [ConversationEventEnvelope],
+        recipientCount: Int
+    ) -> Int {
+        guard let first = envelopes.first,
+              first.eventType == .messageCreated,
+              first.payload.messageID != nil
+        else {
+            return 0
+        }
+        guard envelopes.allSatisfy({
+            $0.eventType == .messageCreated
+                && $0.payload.messageID != nil
+                && $0.conversationID == first.conversationID
+        }) else {
+            return 0
+        }
+        let configuration = app.streamConsumerConfiguration
+        let threshold = configuration.realtimeMessageCreatedLightweightRecipientThreshold
+        guard threshold > 0, recipientCount >= threshold else {
+            return 0
+        }
+        return configuration.realtimeActiveCompactHintCoalesceWindowMilliseconds
+    }
+
+    private func compactActiveHintBatches(
+        from fullBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch],
+        recipientUserIDs: [UUID],
+        eventID: UUID?
+    ) -> [ConversationRealtimeConsumer.DomainEventPayloadBatch] {
+        guard !recipientUserIDs.isEmpty else {
+            return []
+        }
+        let hintEventID = eventID.map(imLightweightMessageCreatedHintEventID)
+        return fullBatches.compactMap { batch in
+            batch.payload.activeCompactHintForRealtimeActiveRecipient(
+                body: app.streamConsumerConfiguration.realtimeActiveCompactHintBody,
+                maxPreviewCharacters: app.streamConsumerConfiguration.realtimeActiveCompactHintPreviewMaxCharacters,
+                eventID: hintEventID
+            ).map {
+                ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                    payload: $0,
+                    recipientUserIDs: recipientUserIDs,
+                    fanoutIntent: .preSplitActiveCompact
+                )
+            }
+        }
+    }
+
+    private func splitActiveConversationFanoutIfNeeded(
+        _ payloadBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch]
+    ) async -> ActiveConversationFanoutSplit {
+        var split = ActiveConversationFanoutSplit()
+        guard app.gatewayLocalFanoutConfiguration.activeConversationFanoutEnabled,
+              app.hasConnectionRoutingServiceConfigured
+        else {
+            split.activeFullBatches = payloadBatches
+            return split
+        }
+
+        var activeRouteCache: [ActiveConversationRouteCacheKey: [UUID: Set<String>]] = [:]
+        for batch in payloadBatches {
+            guard shouldSplitActiveConversationFanout(batch) else {
+                split.activeFullBatches.append(batch)
+                continue
+            }
+
+            do {
+                let cacheKey = activeConversationRouteCacheKey(for: batch)
+                let activeRoutes: [UUID: Set<String>]
+                if let cachedRoutes = activeRouteCache[cacheKey] {
+                    activeRoutes = cachedRoutes
+                } else {
+                    let routeStartedAt = Date()
+                    let routeLookup = try await activeConversationRoutes(
+                        app: app,
+                        conversationID: batch.payload.aggregateID,
+                        recipientUserIDs: batch.recipientUserIDs
+                    )
+                    let fetchedRoutes = routeLookup.routes
+                    if !routeLookup.cacheHit {
+                        split.routeMilliseconds += IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: routeStartedAt)
+                    }
+                    activeRouteCache[cacheKey] = fetchedRoutes
+                    activeRoutes = fetchedRoutes
+                }
+                let plan = activeConversationFanoutPlan(for: batch, activeRoutes: activeRoutes)
+                await recordActiveConversationFanoutPayloadBudgetIfNeeded(plan)
+                split.didSplit = true
+                split.activeFullRecipientCount += plan.fullActiveUserIDs.count
+                split.activeCompactRecipientCount += plan.compactActiveUserIDs.count
+                split.inactiveHintRecipientCount += plan.hintUserIDs.count
+                split.downgradedActiveRecipientCount += plan.downgradedActiveUserIDs.count
+                await app.routingMetrics.recordActiveConversationFanoutSplit(
+                    activeRecipientCount: plan.fullActiveUserIDs.count,
+                    compactActiveRecipientCount: plan.compactActiveUserIDs.count,
+                    inactiveHintRecipientCount: plan.hintUserIDs.count,
+                    downgradedActiveRecipientCount: plan.downgradedActiveUserIDs.count
+                )
+
+                if !plan.fullActiveUserIDs.isEmpty {
+                    split.activeFullBatches.append(
+                        ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                            payload: batch.payload,
+                            recipientUserIDs: plan.fullActiveUserIDs,
+                            fanoutIntent: .preSplitActiveFull
+                        )
+                    )
+                }
+                if !plan.compactActiveUserIDs.isEmpty {
+                    split.activeCompactBatches.append(
+                        contentsOf: compactActiveHintBatches(
+                            from: [batch],
+                            recipientUserIDs: plan.compactActiveUserIDs,
+                            eventID: batch.payload.eventID
+                        )
+                    )
+                }
+                if !plan.hintUserIDs.isEmpty,
+                   let hintPayload = batch.payload.conversationActivityHintForRealtimeInactiveRecipient(
+                       maxPreviewCharacters: app.streamConsumerConfiguration.realtimeMessageCreatedLightweightPreviewMaxCharacters
+                   ) {
+                    split.inactiveHintBatches.append(
+                        ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                            payload: hintPayload,
+                            recipientUserIDs: plan.hintUserIDs,
+                            fanoutIntent: .preSplitInactiveHint
+                        )
+                    )
+                }
+            } catch {
+                if !app.streamConsumerConfiguration.realtimeActiveConversationUnsplitFallbackEnabled {
+                    await app.routingMetrics.recordActiveConversationFanoutDroppedFallback(
+                        recipientCount: batch.recipientUserIDs.count
+                    )
+                    app.logger.warning("Realtime delivery consumer active conversation split failed; dropping unsplit fallback.", metadata: [
+                        "event_id": .string(batch.payload.eventID.uuidString),
+                        "conversation_id": .string(batch.payload.aggregateID.uuidString),
+                        "recipient_count": .stringConvertible(batch.recipientUserIDs.count),
+                        "error": .string(String(describing: error))
+                    ])
+                } else {
+                    await app.routingMetrics.recordActiveConversationFanoutUnsplitFallback()
+                    app.logger.warning("Realtime delivery consumer active conversation split failed; falling back to unsplit fanout.", metadata: [
+                        "event_id": .string(batch.payload.eventID.uuidString),
+                        "conversation_id": .string(batch.payload.aggregateID.uuidString),
+                        "recipient_count": .stringConvertible(batch.recipientUserIDs.count),
+                        "error": .string(String(describing: error))
+                    ])
+                    split.activeFullBatches.append(batch)
+                }
+            }
+        }
+        return split
+    }
+
+    private func activeConversationRouteCacheKey(
+        for batch: ConversationRealtimeConsumer.DomainEventPayloadBatch
+    ) -> ActiveConversationRouteCacheKey {
+        return ActiveConversationRouteCacheKey(
+            conversationID: batch.payload.aggregateID,
+            recipientUserIDs: Set(batch.recipientUserIDs)
+        )
+    }
+
+    private func shouldSplitActiveConversationFanout(
+        _ batch: ConversationRealtimeConsumer.DomainEventPayloadBatch
+    ) -> Bool {
+        guard batch.payload.eventType == .messageCreated else {
+            return false
+        }
+        let threshold = app.gatewayLocalFanoutConfiguration.activeConversationFanoutRecipientThreshold
+        guard threshold > 0 else {
+            return false
+        }
+        if let conversation = batch.payload.conversation,
+           conversation.kind == IMConversationKind.group.rawValue {
+            return conversation.memberCount >= threshold
+        }
+        return Set(batch.recipientUserIDs).count >= threshold
+    }
+
+    private func recordActiveConversationFanoutPayloadBudgetIfNeeded(
+        _ plan: ActiveConversationFanoutPlan
+    ) async {
+        guard let budget = plan.payloadBudget else {
+            return
+        }
+        let downgradedCount = plan.payloadBudgetDowngradedRecipientCount
+        guard downgradedCount > 0 else {
+            return
+        }
+        await app.routingMetrics.recordActiveConversationFanoutPayloadBudgetApplied(
+            payloadByteCount: budget.payloadByteCount,
+            effectiveFullFanoutLimit: budget.limit,
+            downgradedActiveRecipientCount: downgradedCount
+        )
+    }
+
+    private func activeConversationFanoutPlan(
+        for batch: ConversationRealtimeConsumer.DomainEventPayloadBatch,
+        activeRoutes: [UUID: Set<String>]
+    ) -> ActiveConversationFanoutPlan {
+        activeConversationFanoutPlan(
+            recipientUserIDs: batch.recipientUserIDs,
+            activeRoutes: activeRoutes,
+            aggregateSequence: batch.payload.aggregateSequence,
+            payload: batch.payload
+        )
+    }
+
+    private func activeConversationFanoutPlan(
+        recipientUserIDs: [UUID],
+        activeRoutes: [UUID: Set<String>],
+        aggregateSequence: UInt64,
+        payload: IMTCPChatDomainEventPayload? = nil
+    ) -> ActiveConversationFanoutPlan {
+        var seenUserIDs = Set<UUID>()
+        let orderedUserIDs = recipientUserIDs.filter { seenUserIDs.insert($0).inserted }
+        let activeUserIDs = orderedUserIDs.filter { !(activeRoutes[$0] ?? []).isEmpty }
+        let fanoutConfiguration = app.gatewayLocalFanoutConfiguration
+        let relaysInactiveHints = fanoutConfiguration.relaysInactiveConversationHints
+        if fanoutConfiguration.usesCompactOnlyActiveConversationFanout {
+            let activeUserIDSet = Set(activeUserIDs)
+            return ActiveConversationFanoutPlan(
+                fullActiveUserIDs: [],
+                compactActiveUserIDs: activeUserIDs,
+                hintUserIDs: relaysInactiveHints ? orderedUserIDs.filter { !activeUserIDSet.contains($0) } : [],
+                downgradedActiveUserIDs: activeUserIDs,
+                payloadBudget: nil,
+                activeCandidateCount: activeUserIDs.count
+            )
+        }
+        let fullFanoutLimit: Int
+        let budget: IMActiveConversationFullFanoutBudget?
+        if let payload {
+            let computedBudget = IMActiveConversationFullFanoutBudget.effectiveLimit(
+                baseLimit: fanoutConfiguration.activeConversationFullFanoutRecipientLimit,
+                payloadByteBudget: fanoutConfiguration.activeConversationFullFanoutPayloadByteBudget,
+                payload: payload
+            )
+            budget = computedBudget
+            fullFanoutLimit = computedBudget.limit
+        } else {
+            budget = nil
+            fullFanoutLimit = fanoutConfiguration.activeConversationFullFanoutRecipientLimit
+        }
+        let selection = IMActiveConversationFullFanoutSelector.select(
+            from: activeUserIDs,
+            limit: fullFanoutLimit,
+            aggregateSequence: aggregateSequence
+        )
+        let fullActiveUserIDSet = Set(selection.fullUserIDs)
+        let activeUserIDSet = Set(activeUserIDs)
+        return ActiveConversationFanoutPlan(
+            fullActiveUserIDs: selection.fullUserIDs,
+            compactActiveUserIDs: selection.downgradedUserIDs,
+            hintUserIDs: relaysInactiveHints ? orderedUserIDs.filter {
+                !fullActiveUserIDSet.contains($0) && !activeUserIDSet.contains($0)
+            } : [],
+            downgradedActiveUserIDs: selection.downgradedUserIDs,
+            payloadBudget: budget,
+            activeCandidateCount: activeUserIDs.count
+        )
+    }
+
+    private func coalescedInactiveHintBatches(
+        _ batches: [ConversationRealtimeConsumer.DomainEventPayloadBatch],
+        suppressingOlderHintsCoveredBy fullBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch]
+    ) -> InactiveHintCoalescingResult {
+        let candidateRecipientCount = batches.reduce(0) { $0 + $1.recipientUserIDs.count }
+        var latestFullSequenceByRecipient: [InactiveHintRecipientKey: UInt64] = [:]
+        for batch in fullBatches {
+            for userID in batch.recipientUserIDs {
+                let key = InactiveHintRecipientKey(conversationID: batch.payload.aggregateID, userID: userID)
+                latestFullSequenceByRecipient[key] = max(
+                    latestFullSequenceByRecipient[key] ?? 0,
+                    batch.payload.aggregateSequence
+                )
+            }
+        }
+
+        var latestPayloadByRecipient: [InactiveHintRecipientKey: IMTCPChatDomainEventPayload] = [:]
+        for batch in batches {
+            for userID in batch.recipientUserIDs {
+                let key = InactiveHintRecipientKey(conversationID: batch.payload.aggregateID, userID: userID)
+                if let fullSequence = latestFullSequenceByRecipient[key],
+                   fullSequence >= batch.payload.aggregateSequence {
+                    continue
+                }
+                latestPayloadByRecipient[key] = batch.payload
+            }
+        }
+
+        var grouped: [InactiveHintPayloadKey: (payload: IMTCPChatDomainEventPayload, userIDs: [UUID])] = [:]
+        for (recipient, payload) in latestPayloadByRecipient {
+            let key = InactiveHintPayloadKey(
+                conversationID: payload.aggregateID,
+                eventID: payload.eventID,
+                aggregateSequence: payload.aggregateSequence
+            )
+            if grouped[key] == nil {
+                grouped[key] = (payload: payload, userIDs: [])
+            }
+            grouped[key]?.userIDs.append(recipient.userID)
+        }
+
+        let relayBatches = grouped.values
+            .sorted { lhs, rhs in
+                if lhs.payload.aggregateID == rhs.payload.aggregateID {
+                    if lhs.payload.aggregateSequence == rhs.payload.aggregateSequence {
+                        return lhs.payload.eventID.uuidString < rhs.payload.eventID.uuidString
+                    }
+                    return lhs.payload.aggregateSequence < rhs.payload.aggregateSequence
+                }
+                return lhs.payload.aggregateID.uuidString < rhs.payload.aggregateID.uuidString
+            }
+            .map { group in
+                ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                    payload: group.payload,
+                    recipientUserIDs: group.userIDs.sorted { $0.uuidString < $1.uuidString },
+                    fanoutIntent: .preSplitInactiveHint
+                )
+            }
+        let relayRecipientCount = relayBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
+        return InactiveHintCoalescingResult(
+            batches: relayBatches,
+            relayRecipientCount: relayRecipientCount,
+            suppressedRecipientCount: max(0, candidateRecipientCount - relayRecipientCount)
+        )
+    }
+
+    private func sharedMessageCreatedRunRecipients(
+        for envelopes: [ConversationEventEnvelope]
+    ) async throws -> ConversationDomainEventResolvedRecipients? {
+        try await sharedResolvedMessageCreatedRunRecipients(
+            for: envelopes,
+            sourceDB: sourceDB,
+            app: app
+        )
+    }
 }
 
 struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
+    private struct RelayAfterRecordInactiveHintRecipientKey: Hashable, Sendable {
+        let conversationID: UUID
+        let userID: UUID
+    }
+
+    private struct RelayAfterRecordInactiveHintPayloadKey: Hashable, Sendable {
+        let conversationID: UUID
+        let eventID: UUID
+        let aggregateSequence: UInt64
+    }
+
+    private struct RelayAfterRecordActiveRouteCacheKey: Hashable, Sendable {
+        let conversationID: UUID
+        let recipientUserIDs: [UUID]
+    }
+
+    private struct RelayAfterRecordCoalescingResult: Sendable {
+        let immediateBatches: [IMGatewayDomainEventPayloadBatch]
+        let inactiveHintBatches: [IMGatewayDomainEventPayloadBatch]
+        let suppressedRecipientCount: Int
+
+        var batches: [IMGatewayDomainEventPayloadBatch] {
+            immediateBatches + inactiveHintBatches
+        }
+    }
+
+    private struct OwnerDeliveryRecordEntry: Sendable {
+        let ownerUserID: UUID
+        let payload: IMTCPChatDomainEventPayload
+        let timelineNotice: IMTimelineNoticeResponse?
+        let sourceEventID: UUID
+        let createdAt: Date
+    }
+
     let app: Application
     let sourceDB: any Database
     let relayRealtimeAfterRecord: Bool
@@ -779,74 +2399,177 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
     }
 
     func consume(_ envelope: ConversationEventEnvelope) async throws {
-        guard let sourceEventID = envelope.eventID else {
+        _ = try await consume([envelope])
+    }
+
+    func consumeMessageCreatedRun(_ envelopes: [ConversationEventEnvelope]) async throws {
+        guard !envelopes.isEmpty else {
             return
         }
-        if envelope.eventType == .messageCreated,
-           app.streamConsumerConfiguration.domainDeliverySkipsMessageCreatedOwnerDelivery {
-            app.logger.debug("Domain delivery skipped messageCreated owner delivery.", metadata: [
-                "event_id": .string(sourceEventID.uuidString),
-                "conversation_id": .string(envelope.conversationID.uuidString),
-                "recipient_count": .stringConvertible(envelope.payload.recipientUserIDs.count)
-            ])
-            return
+        for envelope in envelopes {
+            guard envelope.eventType == .messageCreated,
+                  envelope.payload.messageID != nil
+            else {
+                throw Abort(.internalServerError, reason: "messageCreated run owner delivery only accepts message_created events with messageID.")
+            }
         }
-        let payloads = try await ConversationRealtimeConsumer(app: app, sourceDB: sourceDB)
-            .domainEventPayloads(for: envelope)
-        let timelineNotice = envelope.eventType.requiresTimelineNotice
-            ? try await waitForTimelineNotice(forEventID: sourceEventID)
-            : try await timelineNotice(forEventID: sourceEventID)
-        if envelope.eventType.requiresTimelineNotice, timelineNotice == nil {
-            throw ConversationEventTransientProcessingError.timelineNoticeMissing(
-                eventID: sourceEventID,
-                waitedMilliseconds: app.streamConsumerConfiguration.domainDeliveryTimelineNoticeMaxWaitMilliseconds
+        _ = try await consume(envelopes)
+    }
+
+    @discardableResult
+    private func consume(_ envelopes: [ConversationEventEnvelope]) async throws -> [IMCanonicalDomainEventDelivery] {
+        let realtimeConsumer = ConversationRealtimeConsumer(app: app, sourceDB: sourceDB)
+        var entries: [OwnerDeliveryRecordEntry] = []
+        var expectedPayloadCount = 0
+        var relayRequestID: UUID?
+        var relayAfterRecordBatches: [IMGatewayDomainEventPayloadBatch] = []
+        var relayAfterRecordActiveRouteCache: [RelayAfterRecordActiveRouteCacheKey: [UUID: Set<String>]] = [:]
+        let sharedResolvedRecipients = try await sharedMessageCreatedRunRecipients(for: envelopes)
+
+        for envelope in envelopes {
+            guard let sourceEventID = envelope.eventID else {
+                continue
+            }
+            relayRequestID = relayRequestID ?? sourceEventID
+            let resolvedRecipients = if let sharedResolvedRecipients {
+                sharedResolvedRecipients
+            } else {
+                try await ConversationDomainEventRecipientResolver(db: sourceDB, app: app)
+                    .resolveRecipients(for: envelope)
+            }
+            let recipientUserIDs = resolvedRecipients.userIDs
+            if let skipReason = messageCreatedOwnerDeliverySkipReason(
+                for: envelope,
+                recipientCount: recipientUserIDs.count
+            ) {
+                try validateMessageCreatedOwnerDeliverySkipRealtimePath(
+                    eventID: sourceEventID,
+                    conversationID: envelope.conversationID,
+                    skipReason: skipReason
+                )
+                await app.conversationDomainEventMetrics.recordMessageCreatedOwnerDeliverySkipped(
+                    recipientCount: recipientUserIDs.count
+                )
+                await app.conversationDomainEventMetrics.recordMessageCreatedTimelinePullDelivery(
+                    recipientCount: recipientUserIDs.count
+                )
+                app.logger.info("Domain delivery skipped messageCreated owner delivery.", metadata: [
+                    "event_id": .string(sourceEventID.uuidString),
+                    "conversation_id": .string(envelope.conversationID.uuidString),
+                    "recipient_count": .stringConvertible(recipientUserIDs.count),
+                    "skip_reason": .string(skipReason)
+                ])
+                if relayRealtimeAfterRecord {
+                    relayAfterRecordBatches.append(
+                        contentsOf: try await realtimeRelayBatchesWithoutOwnerDelivery(
+                            for: envelope,
+                            resolvedRecipients: resolvedRecipients,
+                            activeRouteCache: &relayAfterRecordActiveRouteCache
+                        )
+                    )
+                }
+                continue
+            }
+            let payloads = try await realtimeConsumer.domainEventPayloads(
+                for: envelope,
+                resolvedRecipients: resolvedRecipients
+            )
+            let timelineNotice = envelope.eventType.requiresTimelineNotice
+                ? try await waitForTimelineNotice(forEventID: sourceEventID)
+                : try await timelineNotice(forEventID: sourceEventID)
+            if envelope.eventType.requiresTimelineNotice, timelineNotice == nil {
+                throw ConversationEventTransientProcessingError.timelineNoticeMissing(
+                    eventID: sourceEventID,
+                    waitedMilliseconds: app.streamConsumerConfiguration.domainDeliveryTimelineNoticeMaxWaitMilliseconds
+                )
+            }
+            expectedPayloadCount += payloads.count
+            entries.append(
+                contentsOf: payloads.map { ownerUserID, payload in
+                    OwnerDeliveryRecordEntry(
+                        ownerUserID: ownerUserID,
+                        payload: payload,
+                        timelineNotice: timelineNotice,
+                        sourceEventID: sourceEventID,
+                        createdAt: envelope.event.createdAt
+                    )
+                }
             )
         }
-        _ = try await recordOwnerDeliveries(
-            payloads: payloads,
-            timelineNotice: timelineNotice,
-            sourceEventID: sourceEventID,
-            createdAt: envelope.event.createdAt,
+
+        if !relayAfterRecordBatches.isEmpty {
+            let coalescedRelay = coalescedRelayAfterRecordInactiveHintBatches(relayAfterRecordBatches)
+            await app.routingMetrics.recordDomainRelayAfterRecordInactiveHintCoalescing(
+                suppressedRecipientCount: coalescedRelay.suppressedRecipientCount
+            )
+            await dispatchRelayAfterRecordBatches(
+                coalescedRelay,
+                requestID: relayRequestID
+            )
+        }
+
+        return try await recordOwnerDeliveries(
+            entries: entries,
+            expectedPayloadCount: expectedPayloadCount,
+            relayRequestID: relayRequestID,
             relayRealtimeAfterRecord: relayRealtimeAfterRecord
         )
     }
 
+    private func validateMessageCreatedOwnerDeliverySkipRealtimePath(
+        eventID: UUID,
+        conversationID: UUID,
+        skipReason: String
+    ) throws {
+        guard relayRealtimeAfterRecord
+            || app.streamConsumerConfiguration.isEnabled("realtime-delivery-consumer")
+        else {
+            throw Abort(
+                .internalServerError,
+                reason: "Refusing to skip messageCreated owner delivery without realtime delivery path. Enable realtime-delivery-consumer or IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true. eventID=\(eventID.uuidString) conversationID=\(conversationID.uuidString) skipReason=\(skipReason)"
+            )
+        }
+    }
+
     private func recordOwnerDeliveries(
-        payloads: [(UUID, IMTCPChatDomainEventPayload)],
-        timelineNotice: IMTimelineNoticeResponse?,
-        sourceEventID: UUID,
-        createdAt: Date,
+        entries: [OwnerDeliveryRecordEntry],
+        expectedPayloadCount: Int,
+        relayRequestID: UUID?,
         relayRealtimeAfterRecord: Bool
     ) async throws -> [IMCanonicalDomainEventDelivery] {
-        let payloadsByOwner = Dictionary(uniqueKeysWithValues: payloads)
-        let targets = summaryProjectionTargets(app: app, recipientUserIDs: payloads.map(\.0))
+        let targets = summaryProjectionTargets(app: app, recipientUserIDs: entries.map(\.ownerUserID))
         var deliveries: [IMCanonicalDomainEventDelivery] = []
-        deliveries.reserveCapacity(payloads.count)
+        deliveries.reserveCapacity(expectedPayloadCount)
 
         try await withThrowingTaskGroup(of: [IMCanonicalDomainEventDelivery].self) { group in
             for target in targets {
                 group.addTask {
-                    let deliveryService = OwnerDomainEventDeliveryService(db: target.readModelDB)
-                    let requests = target.recipientUserIDs.compactMap { ownerUserID -> OwnerDomainEventDeliveryService.RecordRequest? in
-                        guard let payload = payloadsByOwner[ownerUserID] else {
+                    let deliveryService = OwnerDomainEventDeliveryService(
+                        db: target.readModelDB,
+                        domainEventMetrics: app.conversationDomainEventMetrics,
+                        postgresRecordBatchMaxRequests: app.streamConsumerConfiguration.domainDeliveryOwnerRecordBatchMaxRequests
+                    )
+                    let targetOwnerIDs = Set(target.recipientUserIDs)
+                    let requests = entries.compactMap { entry -> OwnerDomainEventDeliveryService.RecordRequest? in
+                        guard targetOwnerIDs.contains(entry.ownerUserID) else {
                             return nil
                         }
                         return OwnerDomainEventDeliveryService.RecordRequest(
-                            ownerUserID: ownerUserID,
-                            payload: payload.withTimelineNotice(timelineNotice),
+                            ownerUserID: entry.ownerUserID,
+                            payload: entry.payload.withTimelineNotice(entry.timelineNotice),
                             sourceType: .conversation,
-                            sourceEventID: sourceEventID,
-                            createdAt: createdAt
+                            sourceEventID: entry.sourceEventID,
+                            createdAt: entry.createdAt
                         )
                     }
-                    let rows = try await deliveryService.recordBatch(
-                        requests,
-                        returningRows: relayRealtimeAfterRecord
-                    )
                     guard relayRealtimeAfterRecord else {
+                        _ = try await deliveryService.recordBatch(
+                            requests,
+                            returningRows: false
+                        )
                         return []
                     }
-                    let canonicalDeliveries = try rows.map(deliveryService.canonicalDelivery)
+                    let canonicalDeliveries = try await deliveryService.recordBatchCanonicalDeliveries(requests)
                     await app.gatewaySessionService.sendDomainEventPayloads(
                         canonicalDeliveries.map {
                             IMCanonicalDomainEventDelivery(
@@ -855,7 +2578,7 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
                                 payload: $0.payload
                             )
                         },
-                        requestID: sourceEventID
+                        requestID: relayRequestID
                     )
                     return canonicalDeliveries
                 }
@@ -867,6 +2590,547 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
         }
 
         return deliveries
+    }
+
+    private func relayRealtimeWithoutOwnerDelivery(
+        for envelope: ConversationEventEnvelope,
+        resolvedRecipients: ConversationDomainEventResolvedRecipients
+    ) async throws {
+        var activeRouteCache: [RelayAfterRecordActiveRouteCacheKey: [UUID: Set<String>]] = [:]
+        let batches = try await realtimeRelayBatchesWithoutOwnerDelivery(
+            for: envelope,
+            resolvedRecipients: resolvedRecipients,
+            activeRouteCache: &activeRouteCache
+        )
+        await app.gatewaySessionService.sendDomainEventPayloadBatches(batches, requestID: envelope.eventID)
+    }
+
+    private func realtimeRelayBatchesWithoutOwnerDelivery(
+        for envelope: ConversationEventEnvelope,
+        resolvedRecipients: ConversationDomainEventResolvedRecipients,
+        activeRouteCache: inout [RelayAfterRecordActiveRouteCacheKey: [UUID: Set<String>]]
+    ) async throws -> [IMGatewayDomainEventPayloadBatch] {
+        if let preSplitBatches = try await preSplitRelayRealtimeWithoutOwnerDelivery(
+            for: envelope,
+            resolvedRecipients: resolvedRecipients,
+            activeRouteCache: &activeRouteCache
+        ) {
+            return preSplitBatches
+        }
+
+        let batches = try await ConversationRealtimeConsumer(app: app, sourceDB: sourceDB)
+            .domainEventPayloadBatches(
+                for: envelope,
+                detail: .fullMessageCreatedWithoutSummaryIfLarge,
+                resolvedRecipients: resolvedRecipients
+            )
+        return batches.map {
+            IMGatewayDomainEventPayloadBatch(
+                payload: $0.payload,
+                recipientUserIDs: $0.recipientUserIDs
+            )
+        }
+    }
+
+    private func coalescedRelayAfterRecordInactiveHintBatches(
+        _ batches: [IMGatewayDomainEventPayloadBatch]
+    ) -> RelayAfterRecordCoalescingResult {
+        var latestFullSequenceByRecipient: [RelayAfterRecordInactiveHintRecipientKey: UInt64] = [:]
+        var passthroughBatches: [IMGatewayDomainEventPayloadBatch] = []
+        passthroughBatches.reserveCapacity(batches.count)
+
+        for batch in batches {
+            guard batch.fanoutIntent == .preSplitInactiveHint,
+                  batch.payload.eventType == .conversationActivityHint
+            else {
+                passthroughBatches.append(batch)
+                if batch.payload.eventType == .messageCreated {
+                    for userID in batch.recipientUserIDs {
+                        let key = RelayAfterRecordInactiveHintRecipientKey(
+                            conversationID: batch.payload.aggregateID,
+                            userID: userID
+                        )
+                        latestFullSequenceByRecipient[key] = max(
+                            latestFullSequenceByRecipient[key] ?? 0,
+                            batch.payload.aggregateSequence
+                        )
+                    }
+                }
+                continue
+            }
+        }
+
+        var latestHintPayloadByRecipient: [RelayAfterRecordInactiveHintRecipientKey: IMTCPChatDomainEventPayload] = [:]
+        var candidateHintRecipientCount = 0
+        for batch in batches where batch.fanoutIntent == .preSplitInactiveHint && batch.payload.eventType == .conversationActivityHint {
+            for userID in batch.recipientUserIDs {
+                candidateHintRecipientCount += 1
+                let recipientKey = RelayAfterRecordInactiveHintRecipientKey(
+                    conversationID: batch.payload.aggregateID,
+                    userID: userID
+                )
+                if let fullSequence = latestFullSequenceByRecipient[recipientKey],
+                   fullSequence >= batch.payload.aggregateSequence {
+                    continue
+                }
+                if let currentPayload = latestHintPayloadByRecipient[recipientKey],
+                   currentPayload.aggregateSequence > batch.payload.aggregateSequence {
+                    continue
+                } else {
+                    latestHintPayloadByRecipient[recipientKey] = batch.payload
+                }
+            }
+        }
+
+        var groupedHints: [RelayAfterRecordInactiveHintPayloadKey: (payload: IMTCPChatDomainEventPayload, userIDs: [UUID])] = [:]
+        for (recipient, payload) in latestHintPayloadByRecipient {
+            let key = RelayAfterRecordInactiveHintPayloadKey(
+                conversationID: payload.aggregateID,
+                eventID: payload.eventID,
+                aggregateSequence: payload.aggregateSequence
+            )
+            if groupedHints[key] == nil {
+                groupedHints[key] = (payload: payload, userIDs: [])
+            }
+            groupedHints[key]?.userIDs.append(recipient.userID)
+        }
+
+        let hintBatches = groupedHints.values
+            .sorted { lhs, rhs in
+                if lhs.payload.aggregateID == rhs.payload.aggregateID {
+                    if lhs.payload.aggregateSequence == rhs.payload.aggregateSequence {
+                        return lhs.payload.eventID.uuidString < rhs.payload.eventID.uuidString
+                    }
+                    return lhs.payload.aggregateSequence < rhs.payload.aggregateSequence
+                }
+                return lhs.payload.aggregateID.uuidString < rhs.payload.aggregateID.uuidString
+            }
+            .map { group in
+                IMGatewayDomainEventPayloadBatch(
+                    payload: group.payload,
+                    recipientUserIDs: group.userIDs.sorted { $0.uuidString < $1.uuidString },
+                    fanoutIntent: .preSplitInactiveHint
+                )
+        }
+        let relayedHintRecipientCount = hintBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
+        return RelayAfterRecordCoalescingResult(
+            immediateBatches: passthroughBatches,
+            inactiveHintBatches: hintBatches,
+            suppressedRecipientCount: max(0, candidateHintRecipientCount - relayedHintRecipientCount)
+        )
+    }
+
+    private func dispatchRelayAfterRecordBatches(
+        _ relay: RelayAfterRecordCoalescingResult,
+        requestID: UUID?
+    ) async {
+        guard app.streamConsumerConfiguration.realtimeDeliveryAsyncRelayEnabled else {
+            await app.gatewaySessionService.sendDomainEventPayloadBatches(
+                relay.batches,
+                requestID: requestID
+            )
+            return
+        }
+
+        let activeCompactBatches = relay.immediateBatches.filter {
+            $0.fanoutIntent == .preSplitActiveCompact
+                && $0.payload.eventType == .timelineGapHint
+        }
+        let immediatePassthroughBatches = relay.immediateBatches.filter { batch in
+            !(batch.fanoutIntent == .preSplitActiveCompact
+                && batch.payload.eventType == .timelineGapHint)
+        }
+
+        if !immediatePassthroughBatches.isEmpty {
+            await app.realtimeDeliveryAsyncDispatcher.dispatchPayloadBatches(
+                immediatePassthroughBatches.map {
+                    ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                        payload: $0.payload,
+                        recipientUserIDs: $0.recipientUserIDs,
+                        fanoutIntent: $0.fanoutIntent
+                    )
+                },
+                requestID: requestID,
+                coalescingKey: nil,
+                coalescingWindowMilliseconds: 0
+            )
+        }
+
+        let activeCompactBatchesByConversation = Dictionary(grouping: activeCompactBatches) {
+            $0.payload.aggregateID
+        }
+        for (conversationID, activeCompactBatches) in activeCompactBatchesByConversation {
+            let coalescingWindowMilliseconds = relayAfterRecordActiveCompactHintCoalescingWindowMilliseconds(
+                for: activeCompactBatches
+            )
+            await app.realtimeDeliveryAsyncDispatcher.dispatchPayloadBatches(
+                activeCompactBatches.map {
+                    ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                        payload: $0.payload,
+                        recipientUserIDs: $0.recipientUserIDs,
+                        fanoutIntent: $0.fanoutIntent
+                    )
+                },
+                requestID: requestID,
+                coalescingKey: coalescingWindowMilliseconds > 0 ? conversationID : nil,
+                coalescingScope: .activeCompactHint,
+                coalescingWindowMilliseconds: coalescingWindowMilliseconds
+            )
+        }
+
+        let inactiveHintBatchesByConversation = Dictionary(grouping: relay.inactiveHintBatches) {
+            $0.payload.aggregateID
+        }
+        for (conversationID, inactiveHintBatches) in inactiveHintBatchesByConversation {
+            let coalescingWindowMilliseconds = relayAfterRecordInactiveHintCoalescingWindowMilliseconds(
+                for: inactiveHintBatches
+            )
+            await app.realtimeDeliveryAsyncDispatcher.dispatchPayloadBatches(
+                inactiveHintBatches.map {
+                    ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                        payload: $0.payload,
+                        recipientUserIDs: $0.recipientUserIDs,
+                        fanoutIntent: $0.fanoutIntent
+                    )
+                },
+                requestID: requestID,
+                coalescingKey: coalescingWindowMilliseconds > 0 ? conversationID : nil,
+                coalescingScope: .inactiveHint,
+                coalescingWindowMilliseconds: coalescingWindowMilliseconds
+            )
+        }
+    }
+
+    private func relayAfterRecordActiveCompactHintCoalescingWindowMilliseconds(
+        for activeCompactBatches: [IMGatewayDomainEventPayloadBatch]
+    ) -> Int {
+        guard !activeCompactBatches.isEmpty,
+              activeCompactBatches.allSatisfy({
+                  $0.fanoutIntent == .preSplitActiveCompact
+                      && ($0.payload.eventType == .timelineGapHint || $0.payload.eventType == .conversationActivityHint)
+              })
+        else {
+            return 0
+        }
+        let configuration = app.streamConsumerConfiguration
+        let threshold = configuration.realtimeMessageCreatedLightweightRecipientThreshold
+        let recipientCount = activeCompactBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
+        guard threshold > 0, recipientCount >= threshold else {
+            return 0
+        }
+        return configuration.realtimeActiveCompactHintCoalesceWindowMilliseconds
+    }
+
+    private func relayAfterRecordInactiveHintCoalescingWindowMilliseconds(
+        for inactiveHintBatches: [IMGatewayDomainEventPayloadBatch]
+    ) -> Int {
+        guard !inactiveHintBatches.isEmpty,
+              inactiveHintBatches.allSatisfy({
+                  $0.fanoutIntent == .preSplitInactiveHint
+                      && $0.payload.eventType == .conversationActivityHint
+              })
+        else {
+            return 0
+        }
+        let configuration = app.streamConsumerConfiguration
+        let threshold = configuration.realtimeMessageCreatedLightweightRecipientThreshold
+        let recipientCount = inactiveHintBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
+        guard threshold > 0, recipientCount >= threshold else {
+            return 0
+        }
+        return configuration.realtimeMessageCreatedCoalesceWindowMilliseconds
+    }
+
+    private func compactActiveRelayHintBatches(
+        from fullBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch],
+        recipientUserIDs: [UUID],
+        eventID: UUID?
+    ) -> [IMGatewayDomainEventPayloadBatch] {
+        guard !recipientUserIDs.isEmpty else {
+            return []
+        }
+        let hintEventID = eventID.map(imLightweightMessageCreatedHintEventID)
+        return fullBatches.compactMap { batch in
+            batch.payload.activeCompactHintForRealtimeActiveRecipient(
+                body: app.streamConsumerConfiguration.realtimeActiveCompactHintBody,
+                maxPreviewCharacters: app.streamConsumerConfiguration.realtimeActiveCompactHintPreviewMaxCharacters,
+                eventID: hintEventID
+            ).map {
+                IMGatewayDomainEventPayloadBatch(
+                    payload: $0,
+                    recipientUserIDs: recipientUserIDs,
+                    fanoutIntent: .preSplitActiveCompact
+                )
+            }
+        }
+    }
+
+    private func preSplitRelayRealtimeWithoutOwnerDelivery(
+        for envelope: ConversationEventEnvelope,
+        resolvedRecipients: ConversationDomainEventResolvedRecipients,
+        activeRouteCache: inout [RelayAfterRecordActiveRouteCacheKey: [UUID: Set<String>]]
+    ) async throws -> [IMGatewayDomainEventPayloadBatch]? {
+        guard app.gatewayLocalFanoutConfiguration.activeConversationFanoutEnabled,
+              app.hasConnectionRoutingServiceConfigured,
+              envelope.eventType == .messageCreated,
+              envelope.payload.messageID != nil
+        else {
+            return nil
+        }
+        let recipientUserIDs = resolvedRecipients.userIDs
+        let recipientCount = recipientUserIDs.count
+        let lightweightThreshold = app.streamConsumerConfiguration.realtimeMessageCreatedLightweightRecipientThreshold
+        let fanoutThreshold = app.gatewayLocalFanoutConfiguration.activeConversationFanoutRecipientThreshold
+        guard lightweightThreshold > 0,
+              fanoutThreshold > 0,
+              recipientCount >= lightweightThreshold,
+              recipientCount >= fanoutThreshold
+        else {
+            return nil
+        }
+
+        let startedAt = Date()
+        do {
+            var seenUserIDs = Set<UUID>()
+            let orderedUserIDs = recipientUserIDs.filter { seenUserIDs.insert($0).inserted }
+            let cacheKey = RelayAfterRecordActiveRouteCacheKey(
+                conversationID: envelope.conversationID,
+                recipientUserIDs: orderedUserIDs.sorted { $0.uuidString < $1.uuidString }
+            )
+            let routeStartedAt = Date()
+            let activeRoutes: [UUID: Set<String>]
+            let routeCacheHit: Bool
+            let routeCachePartialHit: Bool
+            let routeCachedUserCount: Int
+            let routeMissedUserCount: Int
+            let routeJoinedInFlight: Bool
+            if let cachedRoutes = activeRouteCache[cacheKey] {
+                activeRoutes = cachedRoutes
+                routeCacheHit = true
+                routeCachePartialHit = false
+                routeCachedUserCount = orderedUserIDs.count
+                routeMissedUserCount = 0
+                routeJoinedInFlight = false
+            } else {
+                let routeLookup = try await activeConversationRoutes(
+                    app: app,
+                    conversationID: envelope.conversationID,
+                    recipientUserIDs: recipientUserIDs
+                )
+                activeRoutes = routeLookup.routes
+                activeRouteCache[cacheKey] = activeRoutes
+                routeCacheHit = routeLookup.cacheHit
+                routeCachePartialHit = routeLookup.cachePartialHit
+                routeCachedUserCount = routeLookup.cachedUserCount
+                routeMissedUserCount = routeLookup.missedUserCount
+                routeJoinedInFlight = routeLookup.joinedInFlight
+            }
+            let routeMilliseconds = routeCacheHit
+                ? 0
+                : IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: routeStartedAt)
+            await app.routingMetrics.recordDomainRelayAfterRecordActiveRouteCache(
+                hit: routeCacheHit,
+                partialHit: routeCachePartialHit,
+                cachedUserCount: routeCachedUserCount,
+                missedUserCount: routeMissedUserCount,
+                joinedInFlight: routeJoinedInFlight
+            )
+            let activeUserIDs = orderedUserIDs.filter { !(activeRoutes[$0] ?? []).isEmpty }
+            let aggregateSequence = try imPositiveUInt64Sequence(
+                envelope.event.aggregateSequence,
+                field: "aggregate_sequence"
+            )
+            var selection = IMActiveConversationFullFanoutSelector.select(
+                from: activeUserIDs,
+                limit: app.gatewayLocalFanoutConfiguration.activeConversationFullFanoutRecipientLimit,
+                aggregateSequence: aggregateSequence
+            )
+
+            let realtimeConsumer = ConversationRealtimeConsumer(app: app, sourceDB: sourceDB)
+            var relayBatches: [IMGatewayDomainEventPayloadBatch] = []
+            var finalHintRecipientCount = 0
+            if !activeUserIDs.isEmpty || orderedUserIDs.count > activeUserIDs.count {
+                let fullBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch]
+                if !selection.fullUserIDs.isEmpty {
+                    fullBatches = try await realtimeConsumer.domainEventPayloadBatches(
+                        for: envelope,
+                        detail: .fullMessageCreatedWithoutSummaryIfLarge,
+                        resolvedRecipients: resolvedRecipients
+                    )
+                    if let payload = fullBatches.first?.payload {
+                        let budget = IMActiveConversationFullFanoutBudget.effectiveLimit(
+                            baseLimit: app.gatewayLocalFanoutConfiguration.activeConversationFullFanoutRecipientLimit,
+                            payloadByteBudget: app.gatewayLocalFanoutConfiguration.activeConversationFullFanoutPayloadByteBudget,
+                            payload: payload
+                        )
+                        selection = IMActiveConversationFullFanoutSelector.select(
+                            from: activeUserIDs,
+                            limit: budget.limit,
+                            aggregateSequence: aggregateSequence
+                        )
+                        let budgetDowngradedCount = budget.budgetDowngradedRecipientCount(
+                            candidateCount: activeUserIDs.count
+                        )
+                        if budgetDowngradedCount > 0 {
+                            await app.routingMetrics.recordActiveConversationFanoutPayloadBudgetApplied(
+                                payloadByteCount: budget.payloadByteCount,
+                                effectiveFullFanoutLimit: budget.limit,
+                                downgradedActiveRecipientCount: budgetDowngradedCount
+                            )
+                        }
+                    }
+                    relayBatches.append(
+                        contentsOf: fullBatches.map {
+                            IMGatewayDomainEventPayloadBatch(
+                                payload: $0.payload,
+                                recipientUserIDs: selection.fullUserIDs,
+                                fanoutIntent: .preSplitActiveFull
+                            )
+                        }
+                    )
+                } else {
+                    fullBatches = []
+                }
+                let fullActiveUserIDSet = Set(selection.fullUserIDs)
+                let activeUserIDSet = Set(activeUserIDs)
+                let compactActiveUserIDs = selection.downgradedUserIDs
+                let hintUserIDs = app.gatewayLocalFanoutConfiguration.relaysInactiveConversationHints ? orderedUserIDs.filter {
+                    !fullActiveUserIDSet.contains($0) && !activeUserIDSet.contains($0)
+                } : []
+                finalHintRecipientCount = hintUserIDs.count
+                await app.routingMetrics.recordActiveConversationFanoutSplit(
+                    activeRecipientCount: selection.fullUserIDs.count,
+                    compactActiveRecipientCount: compactActiveUserIDs.count,
+                    inactiveHintRecipientCount: hintUserIDs.count,
+                    downgradedActiveRecipientCount: selection.downgradedUserIDs.count
+                )
+                await app.routingMetrics.recordDomainRelayAfterRecordPreSplit(
+                    activeRecipientCount: selection.fullUserIDs.count,
+                    compactActiveRecipientCount: compactActiveUserIDs.count,
+                    inactiveHintRecipientCount: hintUserIDs.count,
+                    downgradedActiveRecipientCount: selection.downgradedUserIDs.count
+                )
+                if !compactActiveUserIDs.isEmpty {
+                    relayBatches.append(
+                        contentsOf: compactActiveRelayHintBatches(
+                            from: fullBatches,
+                            recipientUserIDs: compactActiveUserIDs,
+                            eventID: envelope.eventID
+                        )
+                    )
+                }
+                if !hintUserIDs.isEmpty {
+                    if fullBatches.isEmpty {
+                        let hintBatches = try await realtimeConsumer.domainEventPayloadBatches(
+                            for: envelope,
+                            detail: .lightweightMessageCreatedIfLarge,
+                            resolvedRecipients: resolvedRecipients
+                        )
+                        relayBatches.append(
+                            contentsOf: hintBatches.map {
+                                IMGatewayDomainEventPayloadBatch(
+                                    payload: $0.payload,
+                                    recipientUserIDs: hintUserIDs,
+                                    fanoutIntent: .preSplitInactiveHint
+                                )
+                            }
+                        )
+                    } else {
+                        let hintEventID = envelope.eventID.map(imLightweightMessageCreatedHintEventID)
+                        relayBatches.append(
+                            contentsOf: fullBatches.compactMap { batch in
+                                batch.payload.conversationActivityHintForRealtimeInactiveRecipient(
+                                    maxPreviewCharacters: app.streamConsumerConfiguration.realtimeMessageCreatedLightweightPreviewMaxCharacters,
+                                    eventID: hintEventID
+                                ).map {
+                                    IMGatewayDomainEventPayloadBatch(
+                                        payload: $0,
+                                        recipientUserIDs: hintUserIDs,
+                                        fanoutIntent: .preSplitInactiveHint
+                                    )
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+            let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
+            if IMRealtimeDeliveryDiagnostics.shouldLogAny(
+                [routeMilliseconds, totalMilliseconds],
+                thresholdMilliseconds: app.streamConsumerConfiguration.realtimeDeliverySlowLogMilliseconds
+            ) {
+                app.logger.info("Domain delivery relay-after-record pre-split realtime relay.", metadata: [
+                    "event_id": .string(envelope.eventID?.uuidString ?? ""),
+                    "conversation_id": .string(envelope.conversationID.uuidString),
+                    "recipient_count": .stringConvertible(recipientCount),
+                    "active_full_recipient_count": .stringConvertible(selection.fullUserIDs.count),
+                    "active_compact_recipient_count": .stringConvertible(selection.downgradedUserIDs.count),
+                    "inactive_hint_recipient_count": .stringConvertible(finalHintRecipientCount),
+                    "downgraded_active_recipient_count": .stringConvertible(selection.downgradedUserIDs.count),
+                    "payload_batch_count": .stringConvertible(relayBatches.count),
+                    "active_route_cache_hit": .stringConvertible(routeCacheHit),
+                    "active_route_ms": .stringConvertible(routeMilliseconds),
+                    "total_ms": .stringConvertible(totalMilliseconds)
+                ])
+            }
+            return relayBatches
+        } catch {
+            await app.routingMetrics.recordDomainRelayAfterRecordPreSplitFallback()
+            if !app.streamConsumerConfiguration.realtimeActiveConversationUnsplitFallbackEnabled {
+                await app.routingMetrics.recordActiveConversationFanoutDroppedFallback(
+                    recipientCount: recipientCount
+                )
+                app.logger.warning("Domain delivery relay-after-record pre-split failed; dropping unsplit realtime relay.", metadata: [
+                    "event_id": .string(envelope.eventID?.uuidString ?? ""),
+                    "conversation_id": .string(envelope.conversationID.uuidString),
+                    "recipient_count": .stringConvertible(recipientCount),
+                    "error": .string(String(describing: error))
+                ])
+                return []
+            }
+            await app.routingMetrics.recordActiveConversationFanoutUnsplitFallback()
+            app.logger.warning("Domain delivery relay-after-record pre-split failed; falling back to unsplit realtime relay.", metadata: [
+                "event_id": .string(envelope.eventID?.uuidString ?? ""),
+                "conversation_id": .string(envelope.conversationID.uuidString),
+                "recipient_count": .stringConvertible(recipientCount),
+                "error": .string(String(describing: error))
+            ])
+            return nil
+        }
+    }
+
+    private func messageCreatedOwnerDeliverySkipReason(
+        for envelope: ConversationEventEnvelope,
+        recipientCount: Int
+    ) -> String? {
+        guard envelope.eventType == .messageCreated else {
+            return nil
+        }
+        let configuration = app.streamConsumerConfiguration
+        if configuration.domainDeliverySkipsMessageCreatedOwnerDelivery {
+            return "timeline_pull_all_message_created"
+        }
+        guard configuration.domainDeliveryMessageCreatedLargeGroupMode == .timelinePull else {
+            return nil
+        }
+        let threshold = configuration.domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold
+        guard threshold > 0 else {
+            return nil
+        }
+        guard recipientCount >= threshold else {
+            return nil
+        }
+        return "timeline_pull_recipient_threshold_\(threshold)"
+    }
+
+    private func sharedMessageCreatedRunRecipients(
+        for envelopes: [ConversationEventEnvelope]
+    ) async throws -> ConversationDomainEventResolvedRecipients? {
+        try await sharedResolvedMessageCreatedRunRecipients(
+            for: envelopes,
+            sourceDB: sourceDB,
+            app: app
+        )
     }
 
     private func timelineNotice(forEventID eventID: UUID) async throws -> IMTimelineNoticeResponse? {
@@ -938,7 +3202,24 @@ struct ConversationNotificationConsumer: ConversationEventConsumer {
             return
         }
 
-        let recipientUserIDs = notificationRecipientUserIDs(for: envelope)
+        let resolvedRecipients = try await notificationRecipientResolution(for: envelope)
+        let recipientUserIDs = resolvedRecipients.userIDs
+        if let skipReason = messageCreatedOwnerNotificationSkipReason(
+            for: envelope,
+            recipientCount: recipientUserIDs.count,
+            configuration: app.streamConsumerConfiguration
+        ) {
+            await app.conversationDomainEventMetrics.recordMessageCreatedOwnerNotificationSkipped(
+                recipientCount: recipientUserIDs.count
+            )
+            app.logger.info("Notification consumer skipped messageCreated owner notifications.", metadata: [
+                "event_id": .string(eventID.uuidString),
+                "conversation_id": .string(envelope.conversationID.uuidString),
+                "recipient_count": .stringConvertible(recipientUserIDs.count),
+                "skip_reason": .string(skipReason)
+            ])
+            return
+        }
         let now = Date()
 
         let recipientUserIDsByShard = Dictionary(grouping: recipientUserIDs) {
@@ -964,33 +3245,18 @@ struct ConversationNotificationConsumer: ConversationEventConsumer {
             try await ConversationNotificationBatchWriter(database: db).upsert(rows)
         }
 
-        await IMAPNSPushService(app: app).sendOfflinePushIfNeeded(for: envelope)
+        await IMAPNSPushService(app: app).sendOfflinePushIfNeeded(
+            for: envelope,
+            candidateUserIDs: recipientUserIDs
+        )
     }
 
-    private func notificationRecipientUserIDs(for envelope: ConversationEventEnvelope) -> [UUID] {
-        switch envelope.eventType {
-        case .conversationRemovedForUser:
-            return envelope.payload.affectedUserID.map { [$0] } ?? []
-        case .messageCreated,
-             .messageUpdated,
-             .messageRecalled,
-             .messageStreamStarted,
-             .messageStreamCompleted,
-             .messageStreamFailed,
-             .messageStreamCancelled,
-             .readAdvanced,
-             .metadataUpdated,
-             .membershipAdded,
-             .membershipRemoved,
-             .membershipRoleUpdated,
-             .directPeerUpdated,
-             .messageFavoriteChanged,
-             .messageVisibilityChanged,
-             .conversationVisibilityChanged,
-             .conversationSettingsChanged,
-             .inviteChanged:
-            return Array(Set(envelope.payload.recipientUserIDs)).sorted { $0.uuidString < $1.uuidString }
-        }
+    private func notificationRecipientResolution(
+        for envelope: ConversationEventEnvelope
+    ) async throws -> ConversationDomainEventResolvedRecipients {
+        let db = try await app.conversationShardRouter.strongReadDatabase(forConversationID: envelope.conversationID)
+        return try await ConversationDomainEventRecipientResolver(db: db, app: app)
+            .resolveRecipients(for: envelope)
     }
 }
 
@@ -1005,7 +3271,23 @@ struct ConversationNotificationRunWriter {
             guard let eventID = envelope.eventID else {
                 continue
             }
-            let recipientUserIDs = notificationRecipientUserIDs(for: envelope)
+            let recipientUserIDs = try await notificationRecipientUserIDs(for: envelope)
+            if let skipReason = messageCreatedOwnerNotificationSkipReason(
+                for: envelope,
+                recipientCount: recipientUserIDs.count,
+                configuration: app.streamConsumerConfiguration
+            ) {
+                await app.conversationDomainEventMetrics.recordMessageCreatedOwnerNotificationSkipped(
+                    recipientCount: recipientUserIDs.count
+                )
+                app.logger.info("Notification run writer skipped messageCreated owner notifications.", metadata: [
+                    "event_id": .string(eventID.uuidString),
+                    "conversation_id": .string(envelope.conversationID.uuidString),
+                    "recipient_count": .stringConvertible(recipientUserIDs.count),
+                    "skip_reason": .string(skipReason)
+                ])
+                continue
+            }
             for ownerUserID in recipientUserIDs {
                 let shardID = app.summaryShardRouter.shardID(forOwnerUserID: ownerUserID)
                 rowsByShard[shardID, default: []].append(
@@ -1031,31 +3313,29 @@ struct ConversationNotificationRunWriter {
         }
     }
 
-    private func notificationRecipientUserIDs(for envelope: ConversationEventEnvelope) -> [UUID] {
-        switch envelope.eventType {
-        case .conversationRemovedForUser:
-            return envelope.payload.affectedUserID.map { [$0] } ?? []
-        case .messageCreated,
-             .messageUpdated,
-             .messageRecalled,
-             .messageStreamStarted,
-             .messageStreamCompleted,
-             .messageStreamFailed,
-             .messageStreamCancelled,
-             .readAdvanced,
-             .metadataUpdated,
-             .membershipAdded,
-             .membershipRemoved,
-             .membershipRoleUpdated,
-             .directPeerUpdated,
-             .messageFavoriteChanged,
-             .messageVisibilityChanged,
-             .conversationVisibilityChanged,
-             .conversationSettingsChanged,
-             .inviteChanged:
-            return Array(Set(envelope.payload.recipientUserIDs)).sorted { $0.uuidString < $1.uuidString }
-        }
+    private func notificationRecipientUserIDs(for envelope: ConversationEventEnvelope) async throws -> [UUID] {
+        let db = try await app.conversationShardRouter.strongReadDatabase(forConversationID: envelope.conversationID)
+        return try await ConversationDomainEventRecipientResolver(db: db, app: app)
+            .recipientUserIDs(for: envelope)
     }
+}
+
+private func messageCreatedOwnerNotificationSkipReason(
+    for envelope: ConversationEventEnvelope,
+    recipientCount: Int,
+    configuration: IMStreamConsumerConfiguration
+) -> String? {
+    guard envelope.eventType == .messageCreated else {
+        return nil
+    }
+    if configuration.notificationSkipsMessageCreatedOwnerNotifications {
+        return "message_created_owner_notifications_disabled"
+    }
+    let threshold = configuration.notificationMessageCreatedOwnerNotificationSkipRecipientThreshold
+    guard threshold > 0, recipientCount >= threshold else {
+        return nil
+    }
+    return "recipient_threshold_\(threshold)"
 }
 
 struct ConversationSearchIndexConsumer: ConversationEventConsumer {
@@ -1105,6 +3385,24 @@ struct ConversationEventConsumerRegistry: Sendable {
     func consume(_ envelope: ConversationEventEnvelope) async throws {
         for consumer in consumers where consumer.supportedEventTypes.contains(envelope.eventType) {
             try await consumer.consume(envelope)
+        }
+    }
+
+    func consumeMessageCreatedRun(_ envelopes: [ConversationEventEnvelope]) async throws {
+        guard !envelopes.isEmpty else {
+            return
+        }
+        let isMessageCreatedRun = envelopes.allSatisfy { envelope in
+            envelope.eventType == .messageCreated && envelope.payload.messageID != nil
+        }
+        guard isMessageCreatedRun else {
+            for envelope in envelopes {
+                try await consume(envelope)
+            }
+            return
+        }
+        for consumer in consumers where consumer.supportedEventTypes.contains(.messageCreated) {
+            try await consumer.consumeMessageCreatedRun(envelopes)
         }
     }
 
@@ -1158,11 +3456,14 @@ private struct ConversationEventConsumerTimeoutError: Error {}
 
 enum ConversationEventTransientProcessingError: Error, CustomStringConvertible {
     case timelineNoticeMissing(eventID: UUID, waitedMilliseconds: Int)
+    case messageCreatedRecipientSnapshotMissing(eventID: UUID?, conversationID: UUID)
 
     var description: String {
         switch self {
         case .timelineNoticeMissing(let eventID, let waitedMilliseconds):
             return "Transient timeline notice missing after \(waitedMilliseconds)ms for event \(eventID.uuidString)."
+        case .messageCreatedRecipientSnapshotMissing(let eventID, let conversationID):
+            return "Transient message_created recipient snapshot missing for event \(eventID?.uuidString ?? "unknown") conversation \(conversationID.uuidString)."
         }
     }
 }
@@ -1284,9 +3585,154 @@ private extension ConversationDomainEventType {
     }
 }
 
+private extension IMTCPChatDomainEventPayload {
+    func activeCompactHintForRealtimeActiveRecipient(
+        body: IMStreamConsumerConfiguration.ActiveCompactHintBody,
+        maxPreviewCharacters: Int,
+        eventID hintEventID: UUID? = nil
+    ) -> IMTCPChatDomainEventPayload? {
+        switch body {
+        case .conversationActivity:
+            return conversationActivityHintForRealtimeActiveRecipient(
+                maxPreviewCharacters: maxPreviewCharacters,
+                eventID: hintEventID
+            )
+        case .timelineGap:
+            return timelineGapHintForRealtimeActiveRecipient(eventID: hintEventID)
+        }
+    }
+
+    func timelineGapHintForRealtimeActiveRecipient(
+        eventID hintEventID: UUID? = nil
+    ) -> IMTCPChatDomainEventPayload? {
+        guard eventType == .messageCreated else {
+            return nil
+        }
+        guard let timelineGapHint = realtimeTimelineGapHint() else {
+            return nil
+        }
+        return IMTCPChatDomainEventPayload(
+            eventID: hintEventID ?? eventID,
+            eventType: .timelineGapHint,
+            aggregateType: aggregateType,
+            aggregateID: aggregateID,
+            aggregateSequence: aggregateSequence,
+            occurredAt: occurredAt,
+            actorUserID: actorUserID,
+            conversation: nil,
+            timelineNotice: nil,
+            requiresTimelineNotice: false,
+            ownerCursor: nil,
+            ownerAggregateSequence: nil,
+            body: .timelineGapHint(timelineGapHint)
+        )
+    }
+
+    func conversationActivityHintForRealtimeActiveRecipient(
+        maxPreviewCharacters: Int,
+        eventID hintEventID: UUID? = nil
+    ) -> IMTCPChatDomainEventPayload? {
+        guard eventType == .messageCreated else {
+            return nil
+        }
+        guard let activityHint = realtimeConversationActivityHint(maxPreviewCharacters: maxPreviewCharacters) else {
+            return nil
+        }
+        return IMTCPChatDomainEventPayload(
+            eventID: hintEventID ?? eventID,
+            eventType: .conversationActivityHint,
+            aggregateType: aggregateType,
+            aggregateID: aggregateID,
+            aggregateSequence: aggregateSequence,
+            occurredAt: occurredAt,
+            actorUserID: actorUserID,
+            conversation: nil,
+            timelineNotice: nil,
+            requiresTimelineNotice: false,
+            ownerCursor: nil,
+            ownerAggregateSequence: nil,
+            body: .conversationActivityHint(activityHint)
+        )
+    }
+
+    func conversationActivityHintForRealtimeInactiveRecipient(
+        maxPreviewCharacters: Int,
+        eventID hintEventID: UUID? = nil
+    ) -> IMTCPChatDomainEventPayload? {
+        guard eventType == .messageCreated else {
+            return nil
+        }
+        guard let activityHint = realtimeConversationActivityHint(maxPreviewCharacters: maxPreviewCharacters) else {
+            return nil
+        }
+        return IMTCPChatDomainEventPayload(
+            eventID: hintEventID ?? eventID,
+            eventType: .conversationActivityHint,
+            aggregateType: aggregateType,
+            aggregateID: aggregateID,
+            aggregateSequence: aggregateSequence,
+            occurredAt: occurredAt,
+            actorUserID: actorUserID,
+            conversation: nil,
+            timelineNotice: nil,
+            requiresTimelineNotice: false,
+            ownerCursor: nil,
+            ownerAggregateSequence: nil,
+            body: .conversationActivityHint(activityHint)
+        )
+    }
+
+    private func realtimeTimelineGapHint() -> IMTimelineGapHint? {
+        guard case .messageCreated(let message, _) = body else {
+            return nil
+        }
+        return IMTimelineGapHint(
+            messageID: message.id,
+            senderUserID: message.senderUserID,
+            serverSequence: message.serverSequence,
+            timelineSequence: message.timelineSequence,
+            updatedAt: message.createdAt ?? occurredAt
+        )
+    }
+
+    private func realtimeConversationActivityHint(maxPreviewCharacters: Int) -> IMConversationActivityHint? {
+        guard case .messageCreated(let message, _) = body else {
+            return nil
+        }
+        let preview = Self.truncatedPreview(
+            message.content.previewText,
+            maxCharacters: maxPreviewCharacters
+        )
+        return IMConversationActivityHint(
+            messageID: message.id,
+            senderUserID: message.senderUserID,
+            serverSequence: message.serverSequence,
+            timelineSequence: message.timelineSequence,
+            previewText: preview,
+            messageCreatedAt: preview.isEmpty ? nil : message.createdAt,
+            updatedAt: message.createdAt ?? occurredAt
+        )
+    }
+
+    private static func truncatedPreview(_ preview: String, maxCharacters: Int) -> String {
+        guard maxCharacters > 0 else {
+            return ""
+        }
+        guard maxCharacters > 0, preview.count > maxCharacters else {
+            return preview
+        }
+        return String(preview.prefix(maxCharacters))
+    }
+}
+
 struct SummaryProjectionTarget {
     let readModelDB: any Database
     let recipientUserIDs: [UUID]
+}
+
+struct SummaryActivityProjectionTarget {
+    let shardID: String
+    let readModelDB: any Database
 }
 
 func summaryProjectionTargets(
@@ -1299,6 +3745,19 @@ func summaryProjectionTargets(
     }
 
     return shardedSummaryProjectionTargets(app: app, recipientUserIDs: uniqueRecipientUserIDs)
+}
+
+func summaryProjectionActivityTargets(app: Application) -> [SummaryActivityProjectionTarget] {
+    let shardIDs = app.summaryShardRouter.shardIDs
+    guard !shardIDs.isEmpty else {
+        return [SummaryActivityProjectionTarget(shardID: "default", readModelDB: app.imSummaryDB)]
+    }
+    return shardIDs.map {
+        SummaryActivityProjectionTarget(
+            shardID: $0,
+            readModelDB: app.summaryShardRouter.database(forShardID: $0)
+        )
+    }
 }
 
 private func shardedSummaryProjectionTargets(

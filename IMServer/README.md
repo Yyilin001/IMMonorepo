@@ -64,7 +64,7 @@
 
 协议草案见 [docs/im-tcp-protocol.md](docs/im-tcp-protocol.md)。
 
-运行模式与生产上线检查清单见 [docs/im-runtime-operating-modes.md](docs/im-runtime-operating-modes.md)。多端同时在线的上线验收门禁见 [docs/im-multidevice-release-gate.md](docs/im-multidevice-release-gate.md)。
+运行模式与生产上线检查清单见 [docs/im-runtime-operating-modes.md](docs/im-runtime-operating-modes.md)。生产发布门禁见 [docs/im-production-release-gate.md](docs/im-production-release-gate.md)。多端同时在线的上线验收门禁见 [docs/im-multidevice-release-gate.md](docs/im-multidevice-release-gate.md)。
 
 ## 技术栈
 

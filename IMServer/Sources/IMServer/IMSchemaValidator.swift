@@ -12,7 +12,9 @@ enum IMSchemaValidator {
             role: "primary",
             environment: app.environment,
             logger: app.logger,
-            resetAllowed: app.environment == .development || app.environment == .testing
+            resetAllowed: app.environment == .development || app.environment == .testing,
+            tableRequirements: imSchemaRequirements,
+            indexRequirements: imIndexRequirements
         )
 
         if app.imReplicaDatabaseEnabled,
@@ -22,7 +24,29 @@ enum IMSchemaValidator {
                 role: "replica",
                 environment: app.environment,
                 logger: app.logger,
-                resetAllowed: false
+                resetAllowed: false,
+                tableRequirements: imSchemaRequirements,
+                indexRequirements: imIndexRequirements
+            )
+        }
+
+        try await validateSummaryShardSchemas(app)
+    }
+
+    private static func validateSummaryShardSchemas(_ app: Application) async throws {
+        let router = app.summaryShardRouter
+        for shardID in router.shardIDs {
+            guard let summarySQL = router.database(forShardID: shardID) as? any SQLDatabase else {
+                continue
+            }
+            try await validateIMSchema(
+                on: summarySQL,
+                role: "summary-shard:\(shardID)",
+                environment: app.environment,
+                logger: app.logger,
+                resetAllowed: app.environment == .development || app.environment == .testing,
+                tableRequirements: imSummaryReadModelSchemaRequirements,
+                indexRequirements: imSummaryReadModelIndexRequirements
             )
         }
     }
@@ -32,9 +56,11 @@ enum IMSchemaValidator {
         role: String,
         environment: Environment,
         logger: Logger,
-        resetAllowed: Bool
+        resetAllowed: Bool,
+        tableRequirements: [IMTableSchemaRequirement],
+        indexRequirements: [IMTableIndexRequirement]
     ) async throws {
-        for requirement in imSchemaRequirements {
+        for requirement in tableRequirements {
             let existingColumns = try await fetchColumnNames(
                 in: requirement.table,
                 on: sql
@@ -47,6 +73,26 @@ enum IMSchemaValidator {
                     reason = "IM schema validation failed on \(role): table \(requirement.table) is missing columns [\(missing)]. This database is from an older incompatible IM schema. Restart with --reset-im-schema to rebuild the IM tables from current migrations."
                 } else {
                     reason = "IM schema validation failed on \(role): table \(requirement.table) is missing columns [\(missing)]. The database schema does not match the current IM server build."
+                }
+
+                logger.critical(.init(stringLiteral: reason))
+                throw Abort(.internalServerError, reason: reason)
+            }
+        }
+
+        for requirement in indexRequirements {
+            let existingIndexes = try await fetchIndexNames(
+                in: requirement.table,
+                on: sql
+            )
+            let missingIndexes = requirement.requiredIndexes.subtracting(existingIndexes)
+            guard missingIndexes.isEmpty else {
+                let missing = missingIndexes.sorted().joined(separator: ", ")
+                let reason: String
+                if resetAllowed {
+                    reason = "IM schema validation failed on \(role): table \(requirement.table) is missing indexes [\(missing)]. This database is from an older incompatible IM schema. Restart with --reset-im-schema to rebuild the IM tables from current migrations."
+                } else {
+                    reason = "IM schema validation failed on \(role): table \(requirement.table) is missing indexes [\(missing)]. Run the current IM migrations before starting this role."
                 }
 
                 logger.critical(.init(stringLiteral: reason))
@@ -89,11 +135,51 @@ enum IMSchemaValidator {
             return []
         }
     }
+
+    private static func fetchIndexNames(
+        in table: String,
+        on sql: any SQLDatabase
+    ) async throws -> Set<String> {
+        switch sql.dialect.name {
+        case "postgresql":
+            struct PostgresIndexRow: Decodable {
+                let indexname: String
+            }
+
+            let rows = try await sql.raw(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = 'public'
+                  AND tablename = \(bind: table)
+                """
+            ).all(decoding: PostgresIndexRow.self)
+            return Set(rows.map(\.indexname))
+
+        case "sqlite":
+            struct SQLiteIndexRow: Decodable {
+                let name: String
+            }
+
+            let rows = try await sql.raw(
+                "PRAGMA index_list(\(unsafeRaw: table));"
+            ).all(decoding: SQLiteIndexRow.self)
+            return Set(rows.map(\.name))
+
+        default:
+            return []
+        }
+    }
 }
 
 private struct IMTableSchemaRequirement {
     let table: String
     let requiredColumns: Set<String>
+}
+
+private struct IMTableIndexRequirement {
+    let table: String
+    let requiredIndexes: Set<String>
 }
 
 private let imSchemaRequirements: [IMTableSchemaRequirement] = [
@@ -262,5 +348,95 @@ private let imSchemaRequirements: [IMTableSchemaRequirement] = [
             "created_at",
             "updated_at"
         ]
+    ),
+    IMTableSchemaRequirement(
+        table: ConversationDomainEventRecipientSet.schema,
+        requiredColumns: [
+            "recipient_hash",
+            "recipient_user_ids_json",
+            "recipient_count",
+            "created_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
+        table: ConversationDomainEventRecipientSetMember.schema,
+        requiredColumns: [
+            "id",
+            "recipient_hash",
+            "user_id",
+            "created_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
+        table: ConversationDomainEventRecipientSnapshot.schema,
+        requiredColumns: [
+            "event_id",
+            "conversation_id",
+            "recipient_user_ids_json",
+            "recipient_count",
+            "recipient_hash",
+            "created_at"
+        ]
     )
 ]
+
+private let imIndexRequirements: [IMTableIndexRequirement] = [
+    IMTableIndexRequirement(
+        table: ConversationMessage.schema,
+        requiredIndexes: [
+            "im_messages_conversation_timeline_sequence_idx",
+            "im_messages_conversation_timeline_server_sequence_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: ConversationUserSummary.schema,
+        requiredIndexes: [
+            "im_conversation_user_summaries_list_order_idx",
+            "im_conversation_user_summaries_kind_list_order_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: ConversationChangesLogEntry.schema,
+        requiredIndexes: [
+            "conversation_changes_log_owner_updated_idx",
+            "conversation_changes_log_owner_conversation_updated_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: ConversationReadModelToken.schema,
+        requiredIndexes: [
+            "conversation_read_model_tokens_owner_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: ConversationActivitySummary.schema,
+        requiredIndexes: [
+            "conversation_activity_summaries_updated_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: ConversationDomainEventRecipientSetMember.schema,
+        requiredIndexes: [
+            "conversation_domain_event_recipient_set_members_hash_user_idx",
+            "conversation_domain_event_recipient_set_members_user_idx"
+        ]
+    )
+]
+
+private let imSummaryReadModelSchemaRequirements: [IMTableSchemaRequirement] = imSchemaRequirements.filter {
+    [
+        ConversationUserSummary.schema,
+        ConversationChangesLogEntry.schema,
+        ConversationReadModelToken.schema,
+        ConversationActivitySummary.schema
+    ].contains($0.table)
+}
+
+private let imSummaryReadModelIndexRequirements: [IMTableIndexRequirement] = imIndexRequirements.filter {
+    [
+        ConversationUserSummary.schema,
+        ConversationChangesLogEntry.schema,
+        ConversationReadModelToken.schema,
+        ConversationActivitySummary.schema
+    ].contains($0.table)
+}

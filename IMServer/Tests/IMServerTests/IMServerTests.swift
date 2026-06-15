@@ -45,7 +45,7 @@ struct IMServerTests {
         let configuration = IMTCPConfiguration.load(from: .production)
 
         #expect(configuration.protocolVersion == IMRealtimeProtocolVersion.currentInt)
-        #expect(configuration.protocolVersion == 9)
+        #expect(configuration.protocolVersion == 11)
     }
 
     @Test("Reset IM schema rebuilds testing database cleanly")

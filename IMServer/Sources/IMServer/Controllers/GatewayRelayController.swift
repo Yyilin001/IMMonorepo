@@ -2,27 +2,46 @@ import NIOCore
 import Vapor
 
 struct GatewayRelayController: RouteCollection {
+    private let configuration: IMGatewayRelayConfiguration
+
+    init(
+        configuration: IMGatewayRelayConfiguration = IMGatewayRelayConfiguration(
+            mode: .local,
+            baseURL: nil,
+            sharedSecret: nil
+        )
+    ) {
+        self.configuration = configuration
+    }
+
     func boot(routes: any RoutesBuilder) throws {
         let relayRoutes = routes.grouped("internal", "gateway", "realtime")
+            .grouped(InternalGatewayRelayMetricsMiddleware())
             .grouped(InternalGatewayRelaySecretMiddleware())
 
         relayRoutes.post("domain-event", use: relayDomainEvent)
         relayRoutes.on(
             .POST,
             "domain-event-packet",
-            body: .collect(maxSize: "1mb"),
+            body: .collect(maxSize: configuration.domainEventPacketMaxBodySize),
             use: relayDomainEventPacket
         )
         relayRoutes.on(
             .POST,
             "domain-event-packet-bin",
-            body: .collect(maxSize: "1mb"),
+            body: .collect(maxSize: configuration.domainEventPacketBinaryMaxBodySize),
             use: relayDomainEventPacketBinary
         )
         relayRoutes.on(
             .POST,
+            "domain-event-packets-bin",
+            body: .collect(maxSize: configuration.domainEventPacketBinaryMaxBodySize),
+            use: relayDomainEventPacketsBinary
+        )
+        relayRoutes.on(
+            .POST,
             "domain-event-packets",
-            body: .collect(maxSize: "256kb"),
+            body: .collect(maxSize: configuration.domainEventPacketsMaxBodySize),
             use: relayDomainEventPackets
         )
         relayRoutes.post("stream-signal", use: relayStreamSignal)
@@ -78,9 +97,14 @@ struct GatewayRelayController: RouteCollection {
         let payload = try IMTCPProtobufCodec.decodeDomainEvent(payloadData)
         let payloadDecodeMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: payloadDecodeStartedAt)
         let localSendStartedAt = Date()
-        await req.application.gatewaySessionService.sendDomainEventPayload(
-            payload,
-            toUserIDs: body.recipientUserIDs,
+        await req.application.gatewaySessionService.sendDomainEventPayloadBatches(
+            [
+                IMGatewayDomainEventPayloadBatch(
+                    payload: payload,
+                    recipientUserIDs: body.recipientUserIDs,
+                    fanoutIntent: body.fanoutIntent ?? .unspecified
+                )
+            ],
             requestID: body.requestID ?? payload.eventID
         )
         let localSendMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: localSendStartedAt)
@@ -121,9 +145,14 @@ struct GatewayRelayController: RouteCollection {
         let payloadDecodeMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: payloadDecodeStartedAt)
 
         let localSendStartedAt = Date()
-        await req.application.gatewaySessionService.sendDomainEventPayload(
-            payload,
-            toUserIDs: packet.recipientUserIDs,
+        await req.application.gatewaySessionService.sendDomainEventPayloadBatches(
+            [
+                IMGatewayDomainEventPayloadBatch(
+                    payload: payload,
+                    recipientUserIDs: packet.recipientUserIDs,
+                    fanoutIntent: fanoutIntent(from: req)
+                )
+            ],
             requestID: packet.requestID ?? payload.eventID
         )
         let localSendMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: localSendStartedAt)
@@ -139,6 +168,55 @@ struct GatewayRelayController: RouteCollection {
                 "recipient_count": .stringConvertible(packet.recipientUserIDs.count),
                 "body_bytes": .stringConvertible(body.readableBytes),
                 "payload_bytes": .stringConvertible(packet.payloadData.count),
+                "request_decode_ms": .stringConvertible(requestDecodeMilliseconds),
+                "payload_decode_ms": .stringConvertible(payloadDecodeMilliseconds),
+                "local_send_ms": .stringConvertible(localSendMilliseconds),
+                "total_ms": .stringConvertible(totalMilliseconds)
+            ])
+        }
+        return .ok
+    }
+
+    func relayDomainEventPacketsBinary(req: Request) async throws -> HTTPStatus {
+        let startedAt = Date()
+        guard let body = req.body.data,
+              body.readableBytes > 0
+        else {
+            throw Abort(.badRequest, reason: "Binary domain event payload batch is empty.")
+        }
+
+        let requestDecodeStartedAt = Date()
+        let packetBatch = try IMGatewayRelayBinaryCodec.decodeDomainEventPacketBatch(Data(buffer: body))
+        let requestDecodeMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: requestDecodeStartedAt)
+
+        let payloadDecodeStartedAt = Date()
+        let batches = try packetBatch.entries.map { entry in
+            IMGatewayDomainEventPayloadBatch(
+                payload: try IMTCPProtobufCodec.decodeDomainEvent(entry.payloadData),
+                recipientUserIDs: entry.recipientUserIDs,
+                fanoutIntent: entry.fanoutIntent
+            )
+        }
+        let payloadDecodeMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: payloadDecodeStartedAt)
+
+        let localSendStartedAt = Date()
+        await req.application.gatewaySessionService.sendDomainEventPayloadBatches(
+            batches,
+            requestID: packetBatch.requestID ?? batches.first?.payload.eventID
+        )
+        let localSendMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: localSendStartedAt)
+        let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
+        let slowLogMilliseconds = req.application.streamConsumerConfiguration.realtimeDeliverySlowLogMilliseconds
+        if IMRealtimeDeliveryDiagnostics.shouldLogAny(
+            [requestDecodeMilliseconds, payloadDecodeMilliseconds, localSendMilliseconds, totalMilliseconds],
+            thresholdMilliseconds: slowLogMilliseconds
+        ) {
+            req.application.logger.info("Gateway relay binary domain-event packet batch slow.", metadata: [
+                "request_id": .string((packetBatch.requestID ?? batches.first?.payload.eventID)?.uuidString ?? ""),
+                "payload_batch_count": .stringConvertible(batches.count),
+                "recipient_count": .stringConvertible(packetBatch.entries.reduce(0) { $0 + $1.recipientUserIDs.count }),
+                "body_bytes": .stringConvertible(body.readableBytes),
+                "payload_bytes": .stringConvertible(packetBatch.entries.reduce(0) { $0 + $1.payloadData.count }),
                 "request_decode_ms": .stringConvertible(requestDecodeMilliseconds),
                 "payload_decode_ms": .stringConvertible(payloadDecodeMilliseconds),
                 "local_send_ms": .stringConvertible(localSendMilliseconds),
@@ -231,6 +309,39 @@ struct GatewayRelayController: RouteCollection {
             return try IMTCPProtobufCodec.decode(data)
         } catch {
             throw Abort(.badRequest, reason: "Invalid realtime packet.")
+        }
+    }
+
+    private func fanoutIntent(from req: Request) -> IMGatewayDomainEventFanoutIntent {
+        guard let value = req.headers.first(name: "X-IM-Fanout-Intent"),
+              let intent = IMGatewayDomainEventFanoutIntent(rawValue: value)
+        else {
+            return .unspecified
+        }
+        return intent
+    }
+}
+
+struct InternalGatewayRelayMetricsMiddleware: AsyncMiddleware {
+    func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
+        let startedAt = Date()
+        let bodyBytes = request.body.data?.readableBytes ?? 0
+        do {
+            let response = try await next.respond(to: request)
+            await request.application.routingMetrics.recordGatewayHTTPRelayInboundRequest(
+                statusCode: Int(response.status.code),
+                durationMilliseconds: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt),
+                bodyBytes: bodyBytes
+            )
+            return response
+        } catch {
+            let statusCode = (error as? any AbortError)?.status.code ?? HTTPResponseStatus.internalServerError.code
+            await request.application.routingMetrics.recordGatewayHTTPRelayInboundRequest(
+                statusCode: Int(statusCode),
+                durationMilliseconds: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt),
+                bodyBytes: bodyBytes
+            )
+            throw error
         }
     }
 }

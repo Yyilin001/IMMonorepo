@@ -98,6 +98,9 @@ extension IMConversationController {
                 in: conversationID,
                 for: try user.requireID(),
                 afterSequence: try imIntSequence(query.afterSequence, field: "afterSequence"),
+                targetSequence: try query.targetSequence.map {
+                    try imIntSequence($0, field: "targetSequence")
+                },
                 limit: query.limit
             )
     }

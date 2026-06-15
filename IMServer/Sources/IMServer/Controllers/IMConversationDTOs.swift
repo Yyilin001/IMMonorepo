@@ -48,11 +48,54 @@ struct IMClientDomainEventDebugMetricsRequest: Content, Equatable, Sendable {
     var invalidDeferredPayload: Int = 0
 }
 
+struct IMClientTimelineCatchUpDiagnosticsRequest: Content, Equatable, Sendable {
+    var hintQueuedCount: Int = 0
+    var hintSkippedAlreadyLoadedCount: Int = 0
+    var deferredCount: Int = 0
+    var sinceRequestCount: Int = 0
+    var sinceSuccessCount: Int = 0
+    var sinceFailureCount: Int = 0
+    var appliedPageCount: Int = 0
+    var appliedItemCount: Int = 0
+    var lastHintToRequestMilliseconds: Int?
+    var lastRequestMilliseconds: Int?
+    var lastHintToApplyMilliseconds: Int?
+    var lastConversationID: String?
+    var lastTargetTimelineSequence: UInt64?
+    var lastAfterSequence: UInt64?
+    var lastAppliedLatestTimelineSequence: UInt64?
+    var lastFailureReason: String?
+}
+
+struct IMClientTimelineCatchUpConfigurationRequest: Content, Equatable, Sendable {
+    let selectedHintInitialJitterMilliseconds: Int
+    let selectedHintMinimumIntervalMilliseconds: Int
+    let selectedHintMicroBatchMilliseconds: Int
+}
+
 struct IMClientHealthSnapshotRequest: Content, Equatable, Sendable {
     let domainEventCursor: UInt64
     let deferredDomainEventCount: Int
     let fullRefreshConversationCount: Int
     let domainEventMetrics: IMClientDomainEventDebugMetricsRequest
+    let timelineCatchUpDiagnostics: IMClientTimelineCatchUpDiagnosticsRequest?
+    let timelineCatchUpConfiguration: IMClientTimelineCatchUpConfigurationRequest?
+
+    init(
+        domainEventCursor: UInt64,
+        deferredDomainEventCount: Int,
+        fullRefreshConversationCount: Int,
+        domainEventMetrics: IMClientDomainEventDebugMetricsRequest,
+        timelineCatchUpDiagnostics: IMClientTimelineCatchUpDiagnosticsRequest? = nil,
+        timelineCatchUpConfiguration: IMClientTimelineCatchUpConfigurationRequest? = nil
+    ) {
+        self.domainEventCursor = domainEventCursor
+        self.deferredDomainEventCount = deferredDomainEventCount
+        self.fullRefreshConversationCount = fullRefreshConversationCount
+        self.domainEventMetrics = domainEventMetrics
+        self.timelineCatchUpDiagnostics = timelineCatchUpDiagnostics
+        self.timelineCatchUpConfiguration = timelineCatchUpConfiguration
+    }
 }
 
 struct IMClientHealthReportRequest: Content, Equatable, Sendable {
@@ -64,6 +107,7 @@ struct IMClientHealthReportRequest: Content, Equatable, Sendable {
 struct IMTimelineSinceQuery: Content {
     let afterSequence: UInt64
     let limit: Int?
+    let targetSequence: UInt64?
 }
 
 struct IMConversationMessageEditRequest: Content {

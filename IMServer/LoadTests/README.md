@@ -1,6 +1,10 @@
 # IMServer Load Tests
 
-These load tests target the private-chat and small-group text IM path only. They do not claim large-group/channel or media delivery capacity.
+These load tests cover the text IM capacity paths that are currently production
+gated: HTTP login, private/small-group baseline traffic, TCP online capacity,
+and hot large-group message delivery through lightweight realtime hints plus
+`timeline/since` catch-up. They do not claim media delivery, push notification,
+or channel/broadcast capacity unless a profile explicitly says so.
 
 ## Profiles
 
@@ -22,6 +26,19 @@ For the full multi-device release gate, including service tests, client tests, o
 ```bash
 cd IMServer
 ./scripts/multidevice_release_gate.sh --env-file LoadTests/staging-baseline.env --staging-baseline
+```
+
+## Load-Test Gate Self-Test
+
+Run this after changing TCP ladder metrics, gates, message-send wrappers, or
+shell helpers. It does not open network connections or run the Swift TCP driver;
+it sources the ladder functions and verifies the release-gate behavior for
+metrics snapshots, timeline/since P95/P99, visibility scan limits, and
+message-send production defaults.
+
+```bash
+cd IMServer
+./LoadTests/tcp_capacity_ladder_test.sh
 ```
 
 ## HTTP k6
@@ -462,7 +479,10 @@ PREWARM_LOGIN_CACHE=false \
 REQUIRE_LOGIN_CACHE=true \
 LOGIN_CACHE_FILE=/tmp/imtcp-login-cache-slow/tcp-login-cache-lg1-1000.json \
 LOGIN_CACHE_TTL_GUARD_SECONDS=600 \
-COLLECT_REMOTE_METRICS=false \
+MESSAGE_METRICS_GATE_MODE=fail \
+MESSAGE_COLLECT_REMOTE_METRICS=true \
+MESSAGE_COLLECT_IM_METRICS=true \
+MESSAGE_COLLECT_IM_METRICS_DELTA=true \
 ./tcp_message_send_ladder.sh
 ```
 
@@ -496,6 +516,18 @@ CONNECTION_LOG_DIR=/tmp/imtcp-driver-logs-local-shards \
 ./tcp_capacity_local_shards.sh
 ```
 
+`tcp_capacity_local_shards.sh` passes the same active-room controls as the main
+ladder, including `ACTIVE_CONVERSATION_USERS` and
+`GLOBAL_HOLD_BARRIER_MIN_RATIO`, so single-machine sharding can still model
+"all users authenticated before hold" and "N users actively viewing this
+conversation" scenarios. It also uses the same remote `/internal/metrics`
+delta and `IM_METRICS_GATE_MODE` checks as the main ladder; in `fail` mode a
+local-shards run is invalid without `SSH_HOST`, remote metrics collection, and
+before/after IM metrics deltas. Use `LOCAL_SHARDS_DRY_RUN=true` to print the
+per-shard TCPDriver arguments without building or opening network connections.
+`LOCAL_DRIVER_SHARDS` must be less than or equal to `CONNECTIONS`; each shard
+must own at least one connection.
+
 Acceptance for each generator:
 
 - `loginCacheHit=true`, `loginCacheRecords >= connections`, and no HTTP
@@ -513,6 +545,13 @@ Use this workflow after online capacity is known. It keeps users online with
 cached login tokens, then sends messages at a controlled global rate and verifies
 that the paired receiver observes the realtime message event.
 
+`tcp_message_send_ladder.sh` is fail-closed by default for production-style
+runs: it prewarms login cache, requires the formal TCP run to use that cache,
+collects remote `/internal/metrics` deltas, and sets
+`IM_METRICS_GATE_MODE=fail` for the delegated `tcp_capacity_ladder.sh` step.
+Override with `MESSAGE_METRICS_GATE_MODE=warn|off` only for local exploratory
+runs whose results will not be used as production evidence.
+
 Do not start with the server's maximum idle-online connection count. For the
 current 2 vCPU / 2 GiB single-node server, use `1000`, `2000`, then `3000`
 connections first; avoid `4000+` message tests until idle-online capacity has
@@ -529,6 +568,7 @@ ONLINE_LADDER="1000 2000 3000" \
 MESSAGE_RATES="10 50 100" \
 MESSAGE_HOLD_SECONDS=600 \
 MESSAGE_CONNECT_RAMP_SECONDS=300 \
+MESSAGE_METRICS_GATE_MODE=fail \
 ./tcp_message_send_ladder.sh
 ```
 
@@ -544,6 +584,16 @@ Message profile parameters:
   `MESSAGE_RATE_PER_SECOND * HOLD_SECONDS`, spread evenly across senders.
 - `MESSAGE_SENDER_EVERY=1` means every connection sends. Use `2`, `5`, or `10`
   to reduce the active sender population while keeping receivers online.
+- `MESSAGE_PREWARM_LOGIN_CACHE=true` and `MESSAGE_REQUIRE_LOGIN_CACHE=true` are
+  the production defaults. A formal message-send run must not perform JIT HTTP
+  login.
+- `MESSAGE_METRICS_GATE_MODE=fail` is the production default. It fails a step on
+  active fanout fallback, gateway relay failures, timeline/since misses,
+  visibility scan-limit hits, slow timeline reads, owner batch write stalls, or
+  projection lag beyond the configured gate thresholds.
+- `MESSAGE_SEND_LADDER_DRY_RUN=true` prints the delegated
+  `tcp_capacity_ladder.sh` settings without opening network connections; this is
+  used by the shell self-test.
 
 Recommended ladder for the current single-node server:
 
@@ -568,6 +618,153 @@ Message send acceptance:
 - `deliveryLatencyMs p95 < 1000ms`, `deliveryLatencyMs p99 < 3000ms`.
 - Kafka lag, outbox backlog, and projection lag do not grow without draining.
 - TCP close/reconnect counters do not spike during steady state.
+- Remote metrics snapshots include selected `/internal/metrics` values when
+  `SSH_HOST` and `COLLECT_REMOTE_METRICS=true` are set. Use `IM_METRICS_URL`
+  to override the remote endpoint and `IM_METRICS_SECRET`,
+  `IM_METRICS_INTERNAL_SECRET`, or `IM_INTERNAL_SHARED_SECRET` for the
+  `X-IM-Metrics-Secret` header. Override `IM_METRICS_NAMES` to sample a custom
+  space-separated metric set. The default metric set includes TCP write pressure,
+  local fanout, compact large-group hinting, timeline/since cache, timeline read
+  latency and visibility scans, client timeline catch-up health, owner-delivery
+  batch write, projection lag, and stream-consumer counters. Each ladder step
+  also prints an `im metrics delta` section when `/internal/metrics` is
+  reachable: counters ending in `_total` show the step delta, while gauges show
+  the final value and change from the pre-step snapshot.
+- Remote snapshots print service activity for `REMOTE_SERVICE_NAMES`. The
+  default list includes gateway, outbox relay, generic stream-consumer, and
+  split summary/domain/realtime/notification consumer service names. Missing or
+  inactive services are reported but do not stop the snapshot, so Kafka lag and
+  `/internal/metrics` collection still run on partially split deployments.
+- Remote snapshots also describe Kafka lag for
+  `KAFKA_CONSUMER_GROUPS`, defaulting to `domain-delivery-consumer`,
+  `summary-projection-consumer`, `realtime-delivery-consumer`, and
+  `notification-consumer`. Override `KAFKA_BOOTSTRAP_SERVER` when Kafka is not
+  reachable at `127.0.0.1:9092`, and override `KAFKA_CONSUMER_GROUPS` when a
+  deployment splits or renames stream-consumer groups. Override
+  `KAFKA_CONSUMER_GROUPS_CMD` when `kafka-consumer-groups.sh` is installed
+  somewhere other than `/opt/kafka/bin/kafka-consumer-groups.sh`, exposed on
+  `PATH`, or wrapped by a container command. If the command is unavailable, the
+  snapshot prints a warning and continues collecting service and `/internal/metrics`
+  data. Treat realtime lag growth separately from domain/summary lag; a hot group
+  can have healthy writes but still back up live delivery.
+- `IM_METRICS_GATE_MODE=warn|fail|off` evaluates the same before/after metrics
+  snapshot after each ladder step. Defaults are intentionally strict for
+  correctness counters: client catch-up failures/deferred,
+  timeline/since distributed invalidation errors, stream failed events, TCP
+  write backpressure/drops, active-conversation dropped fallback counters,
+  realtime async relay dropped dispatch/recipient counters, gateway HTTP relay
+  skipped recipients/request failures/binary fallbacks/inbound failures, and
+  `im_timeline_since_target_sequence_strong_misses_total` /
+  `im_timeline_since_target_sequence_errors_total` /
+  `im_timeline_read_visibility_scan_limit_exceeded_total` all default to max
+  `0`. Targeted strong catch-up also fails when
+  `im_timeline_since_target_sequence_strong_fallbacks_total` increases by at
+  least `IM_GATE_TARGET_SEQUENCE_SINGLEFLIGHT_MIN_FALLBACKS` (default `10`) but
+  `im_timeline_since_target_sequence_singleflight_joined_total` does not increase.
+  It also fails when targeted strong fallback rate exceeds
+  `IM_GATE_TARGET_SEQUENCE_STRONG_FALLBACK_RATE_MAX_PERCENT` (default `25`) after
+  at least `IM_GATE_TARGET_SEQUENCE_STRONG_FALLBACK_RATE_MIN_REQUESTS` targeted
+  pulls (default `20`), because strong catch-up is a bounded lag fallback, not
+  the steady-state active-room read path.
+  Gateway HTTP relay outbound and inbound max body gauges default to max
+  `1048576` bytes so large realtime payload regressions fail release-candidate
+  runs before they rely on JSON fallback or gateway body-limit errors.
+  Step-level server-side `timeline/since` read latency is computed from the
+  histogram delta for the current ladder step; P95 defaults to max `2000`, P99
+  defaults to max `5000`, and the raw
+  `im_timeline_read_latency_max_millis` gauge defaults to max `10000`. Use
+  `fail` for release-candidate runs so a step exits non-zero on any violation;
+  keep `warn` for exploratory tuning. In `fail` mode the script validates before
+  building or opening TCP connections that `SSH_HOST`,
+  `COLLECT_REMOTE_METRICS=true`, `COLLECT_IM_METRICS=true`, and
+  `COLLECT_IM_METRICS_DELTA=true` are all set. A missing before/after
+  `/internal/metrics` snapshot still fails the step instead of silently skipping
+  the gate.
+- Gate thresholds are configured with `IM_GATE_CLIENT_CATCH_UP_FAILURES_MAX`,
+  `IM_GATE_CLIENT_CATCH_UP_DEFERRED_MAX`,
+  `IM_GATE_TIMELINE_INVALIDATION_ERRORS_MAX`,
+  `IM_GATE_STREAM_FAILED_EVENTS_MAX`,
+  `IM_GATE_TCP_DROPPED_BACKPRESSURE_MAX`, `IM_GATE_TCP_BACKPRESSURE_MAX`,
+  `IM_GATE_ACTIVE_FANOUT_UNSPLIT_FALLBACKS_MAX`,
+  `IM_GATE_ACTIVE_FANOUT_HINT_FALLBACK_RECIPIENTS_MAX`,
+  `IM_GATE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX`,
+  `IM_GATE_REMOTE_ACTIVE_FANOUT_FALLBACKS_MAX`,
+  `IM_GATE_REMOTE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX`,
+  `IM_GATE_REALTIME_ASYNC_RELAY_DROPPED_DISPATCHES_MAX`,
+  `IM_GATE_REALTIME_ASYNC_RELAY_DROPPED_RECIPIENT_DELIVERIES_MAX`,
+  `IM_GATE_GATEWAY_HTTP_RELAY_SKIPPED_RECIPIENTS_MAX`,
+  `IM_GATE_GATEWAY_HTTP_RELAY_REQUEST_FAILURES_MAX`,
+  `IM_GATE_GATEWAY_HTTP_RELAY_BINARY_FALLBACKS_MAX`,
+  `IM_GATE_GATEWAY_HTTP_RELAY_INBOUND_FAILURES_MAX`,
+  `IM_GATE_GATEWAY_HTTP_RELAY_REQUEST_MAX_BODY_BYTES`,
+  `IM_GATE_GATEWAY_HTTP_RELAY_INBOUND_MAX_BODY_BYTES`,
+  `IM_GATE_TARGET_SEQUENCE_STRONG_MISSES_MAX`,
+  `IM_GATE_TARGET_SEQUENCE_ERRORS_MAX`,
+  `IM_GATE_TARGET_SEQUENCE_STRONG_FALLBACK_RATE_MAX_PERCENT`,
+  `IM_GATE_TARGET_SEQUENCE_STRONG_FALLBACK_RATE_MIN_REQUESTS`,
+  `IM_GATE_CATCH_UP_REQUEST_MAX_MS`,
+  `IM_GATE_CATCH_UP_HINT_TO_APPLY_MAX_MS`,
+  `IM_GATE_TIMELINE_READ_MAX_MS`,
+  `IM_GATE_TIMELINE_SINCE_READ_P95_MAX_MS`,
+  `IM_GATE_TIMELINE_SINCE_READ_P99_MAX_MS`,
+  `IM_GATE_TIMELINE_VISIBILITY_SCAN_LIMIT_EXCEEDED_MAX`,
+  `IM_GATE_TIMELINE_SINCE_NOTICE_BYPASSES_MAX`,
+  `IM_GATE_TIMELINE_SINCE_VISIBILITY_NOTICE_BYPASSES_MAX`,
+  `IM_GATE_OWNER_BATCH_WRITE_MAX_MS`, and
+  `IM_GATE_PROJECTION_LAG_MAX_MS`.
+
+Message fanout interpretation:
+
+- `im_realtime_active_conversation_fanout_active_recipients_total` is the number
+  of recipients who were actively viewing the conversation and received live
+  message fanout.
+- `im_realtime_active_conversation_fanout_inactive_hint_recipients_total` is the
+  number of inactive recipients selected for lightweight conversation-list hints
+  in `IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=relay`. In production
+  `pull-only` mode this should stay near zero because inactive online users use
+  conversation changes and `timeline/since` catch-up instead of realtime fanout.
+- `im_realtime_active_conversation_fanout_downgraded_active_recipients_total`
+  is the number of active conversation viewers downgraded from full live message
+  fanout by the full-fanout limit, payload budget, or gateway write
+  backpressure protection.
+- `im_realtime_active_conversation_fanout_compact_active_recipients_total`
+  is the subset of downgraded active viewers that received a lightweight
+  `timeline_gap_hint` instead of the full `message_created` payload.
+  These viewers are actively in the conversation but must use `timeline/since`
+  to fetch the message body.
+- `im_domain_relay_after_record_pre_split_compact_active_recipients_total`
+  is the same compact-active signal on the domain-delivery relay-after-record
+  path. It should rise with downgraded active viewers when owner delivery is
+  skipped, while `im_domain_relay_after_record_pre_split_inactive_hint_recipients_total`
+  should stay near zero in production `pull-only` mode.
+- `im_realtime_active_conversation_fanout_backpressure_downgraded_active_recipients_total`
+  is the subset downgraded because all local connections for that active user
+  were non-writable when `IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE=true`. These
+  recipients are not converted into inactive `conversation_activity_hint`
+  recipients; they recover through the normal selected-chat timeline catch-up
+  or reconnect path instead of receiving a list-summary hint while active.
+- `im_realtime_inactive_conversation_hint_recipients_total` shows how many hint
+  recipients were actually flushed after debounce/coalescing in relay mode.
+  Production `pull-only` runs should not depend on this metric for list
+  freshness.
+- `im_realtime_inactive_conversation_hint_suppressed_recipients_total` shows
+  how many pending inactive hints were replaced before flush when relay mode is
+  intentionally enabled for comparison or rollback.
+- If active recipients dominate and TCP write latency/backpressure rises, the
+  bottleneck is gateway live fanout or slow clients.
+- If downgraded active recipients grow while backpressure downgrades stay flat,
+  `IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT` or the payload byte budget
+  is protecting full-message fanout. Compact active recipients receive a
+  realtime activity hint and must catch up through `timeline/since`. If
+  backpressure downgrades grow, the gateway/client network path is saturated;
+  affected clients also catch up through `timeline/since`.
+- If inactive hint recipients dominate in a production run, the deployment is
+  not using `IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=pull-only` everywhere.
+  Fix the gateway/stream-consumer env before treating the result as a production
+  capacity number.
+- If `im_realtime_coalesced_*` and `im_realtime_async_relay_*` grow while
+  active/inactive recipient counts are low, tune the stream-consumer relay
+  dispatcher before raising message rate.
 
 Realtime relay tuning:
 
@@ -582,18 +779,507 @@ Realtime relay tuning:
   Start with `32`; if gateway CPU, relay errors, or TCP send completion latency
   spikes, lower it. If realtime Kafka lag grows while gateway has headroom, raise
   it cautiously.
+- `IM_REALTIME_DELIVERY_ASYNC_MAX_QUEUED` caps relay jobs waiting for an async
+  dispatcher slot. Start with `1024`; lower it if stream-consumer memory grows
+  during hot-group bursts. When this queue is saturated, the server drops the
+  best-effort live relay and relies on owner-delivery cursor or timeline catch-up;
+  track `im_realtime_async_relay_*` metrics before increasing in-flight relay
+  concurrency.
+- `IM_REALTIME_REMOTE_DISPATCH_USER_BATCH_SIZE` caps the number of target users
+  in one cross-node realtime packet. Start with `512`; lower it if gateway relay
+  body size, Redis dispatch latency, or TCP local fanout latency spikes.
+  Production gateway validation rejects values above `2048`.
+- `IM_REALTIME_REMOTE_DISPATCH_MAX_IN_FLIGHT` caps concurrent cross-node dispatch
+  requests from one process. Start with `8`; raise it only when remote gateway
+  nodes have CPU/network headroom and dispatch queues stay flat. Production
+  gateway validation requires `> 1` and rejects values above `64`.
+- Metrics expose `im_realtime_remote_dispatch_config_user_batch_size` and
+  `im_realtime_remote_dispatch_config_max_in_flight`; include them in every
+  remote metrics snapshot so cross-node dispatch latency and body-size results
+  can be interpreted against the actual runtime config.
+- Use `im_cross_node_dispatch_latency_avg_millis` and
+  `im_cross_node_dispatch_latency_max_millis` to separate remote gateway relay
+  latency from local TCP fanout latency during multi-gateway large-group tests.
+- `IM_GATEWAY_LOCAL_FANOUT_BATCH_SIZE` caps how many local TCP connections one
+  fanout chunk writes to. Start with `64`; lower it if a single hot-room relay
+  monopolizes gateway EventLoops. Production gateway validation rejects values
+  above `1024` because one chunk is not preempted until all writes in that chunk
+  have been queued.
+- `IM_GATEWAY_LOCAL_FANOUT_EVENT_LOOP_YIELD_CHUNKS` caps how many local fanout
+  chunks one EventLoop runner processes before rescheduling itself. Start with
+  `64`; lower it if heartbeat/ACK latency rises during hot-room fanout, and
+  raise it only when `im_local_fanout_event_loop_jobs_total` is high while TCP
+  write latency is healthy.
+- Local fanout metrics cover pre-split domain-event batches plus generic encoded
+  single-packet fanout such as stream signals, so a spike in
+  `im_local_fanout_event_loop_jobs_total` should be checked against packet type
+  and active hot-room traffic before raising the yield or batch limits.
+- Use `im_local_fanout_chunks_total` and
+  `im_local_fanout_max_chunks_per_event_loop_job` with
+  `im_local_fanout_event_loop_jobs_total` to tune
+  `IM_GATEWAY_LOCAL_FANOUT_BATCH_SIZE` and
+  `IM_GATEWAY_LOCAL_FANOUT_EVENT_LOOP_YIELD_CHUNKS`; if chunks/job stays pinned
+  at the configured yield while ACK or heartbeat latency rises, lower the yield
+  before increasing relay concurrency.
+- `IM_TCP_WRITE_BUFFER_LOW_WATERMARK` and
+  `IM_TCP_WRITE_BUFFER_HIGH_WATERMARK` configure NIO per-channel write-buffer
+  watermarks on gateway TCP connections. Start with `524288` / `1048576`; lower
+  them if slow clients retain too much memory, and raise them only when
+  `im_local_fanout_*` metrics show gateway fanout is healthy but brief network
+  bursts trigger unnecessary writability churn.
+- `IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE=true` drops best-effort realtime
+  domain-event fanout for a connection that is already non-writable. ACK/kick
+  control packets still use the normal write path. Keep this enabled for
+  large-group tests so slow clients catch up through owner cursor or
+  `timeline/since` instead of retaining unbounded gateway buffers.
+- `im_tcp_write_completions_total`, `im_tcp_write_failures_total`,
+  `im_tcp_write_backpressure_total`,
+  `im_tcp_write_dropped_backpressure_total`, and
+  `im_tcp_write_latency_*_millis` show whether fanout work is reaching the socket
+  layer cleanly. Treat rising backpressure or write latency during steady load as
+  a gateway/client-network bottleneck before increasing realtime relay
+  concurrency.
 - `IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD` enables a
   large-conversation realtime optimization for `message_created`. When the
   recipient count is greater than or equal to the threshold, realtime relay sends
-  a minimal message payload while owner delivery still stores the full payload for
-  catch-up pulls. Start with `100` for hot-group testing.
+  a lightweight hint for non-full-fanout recipients while owner delivery or
+  timeline reads remain the catch-up source for the message body. Inactive or
+  list-only recipients receive `conversation_activity_hint`; production active
+  chat viewers downgraded from full fanout also receive a bounded
+  `conversation_activity_hint` message-lite payload. Start with `500` for
+  production hot-group testing and keep it aligned with the summary
+  activity-only and owner-delivery skip thresholds.
 - `IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_PREVIEW_MAX_CHARS` caps the preview
-  text used in that lightweight realtime payload; the default is `120`.
+  text used in inactive `conversation_activity_hint` payloads; the default is
+  `120`.
+- `IM_REALTIME_ACTIVE_COMPACT_HINT_BODY=conversation-activity` is required in
+  production so active chat viewers can render a new hot-room message from the
+  realtime hint while still reconciling through `timeline/since`.
+  `IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS` must be `1...120`;
+  `timeline-gap` remains a rollback compatibility mode, not the production
+  posture.
+- `IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED=false` is the production
+  setting for hot large-group realtime. New `message_created` events must carry
+  an embedded preview, so the realtime consumer can build inactive conversation
+  hints without reading the message row on the hot path. Track
+  `im_domain_event_message_created_preview_embedded_total`,
+  `im_domain_event_message_created_preview_message_lookup_total`, and
+  `im_domain_event_message_created_preview_missing_total`; production hot-group
+  tests should show embedded previews growing, message lookups staying flat, and
+  missing previews at zero except during legacy-event replay.
+- `IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false` is the
+  production setting for hot large-group realtime. When active-conversation
+  route lookup or pre-split fanout fails, the system drops the best-effort
+  realtime fanout instead of falling back to full unsplit group fanout or
+  converting active-chat delivery into inactive `conversation_activity_hint`
+  semantics. Track
+  `im_realtime_active_conversation_fanout_unsplit_fallbacks_total`,
+  `im_realtime_active_conversation_fanout_hint_fallback_recipients_total`,
+  `im_realtime_active_conversation_fanout_dropped_fallbacks_total`,
+  `im_realtime_active_conversation_fanout_dropped_fallback_recipients_total`, and
+  `im_realtime_remote_active_conversation_fanout_dropped_fallbacks_total` plus
+  `im_realtime_remote_active_conversation_fanout_dropped_fallback_recipients_total`.
+  In production, hint fallback recipients must stay at `0`; non-zero values mean
+  an old rollback path is running and large-group active-chat delivery semantics
+  are no longer clean.
 - `IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS` coalesces large
-  `message_created` realtime relays by conversation. Within the window, only the
-  latest lightweight realtime event is pushed; clients must use owner-delivery
-  cursor or message-list pull to catch up. This is the production path for hot
-  large groups, not a per-message delivery guarantee.
+  `message_created` inactive-list hints by conversation for rollback modes and
+  non-`pull-only` deployments. Production active chat viewers should use a short
+  active compact window, for example
+  `IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS=25`, so hot rooms collapse
+  repeated compact hints by recipient while keeping visible-message catch-up
+  latency below one frame. Inactive online users are not realtime-fanout targets
+  in production `pull-only` mode; they use conversation changes and
+  `timeline/since` catch-up. This is the production path for hot large groups,
+  not a per-message delivery guarantee. Track `im_realtime_coalesced_*` metrics
+  to see how much hint fanout pressure is being collapsed. Domain-delivery
+  `IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true` follows the same split: active
+  compact hints use the active compact window, inactive hints use the inactive
+  coalescing window.
+- `IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED=true` is required on
+  production gateways. It splits active chat viewers from inactive online users;
+  production `compact-only` plus `pull-only` keeps realtime delivery focused on
+  active viewers, while inactive recipients advance conversation-list state via
+  changes/timeline pull. This prevents a hot large group from forcing every idle
+  client to receive every realtime message or list hint.
+- `IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD` controls when the
+  active/inactive split starts. Keep it aligned with the large-group threshold
+  used by owner-delivery skip and lightweight realtime payloads; start with
+  `500` for production gateway tests.
+- `IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT` caps how many active
+  viewers of one conversation receive full live `message_created` fanout from a
+  gateway split. The default `0` is only for local compatibility checks.
+  Production validation requires a value above `0`, less than or equal to
+  `IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD`, and no higher
+  than the hard cap `128`. For production hot-room tests, start with `128`;
+  lower it if TCP write latency or backpressure grows. Overflow writable active
+  viewers receive the configured active compact hint; production uses bounded
+  `conversation_activity_hint` message-lite payloads. Inactive or non-writable viewers rely on timeline catch-up instead of
+  realtime hint fanout in production `pull-only` mode. Do not raise this above
+  `128` in a production load test; use a local/experimental branch if you need
+  to compare unsafe upper bounds.
+- `IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE=compact-only` is the
+  production large-group mode. In this mode even active chat viewers receive a
+  bounded active compact hint and use `timeline/since` to reconcile the
+  message body. Keep `bounded` only for local A/B tests that intentionally
+  measure limited full realtime fanout; production validation rejects bounded
+  mode because it makes hot-room capacity depend on full-message socket fanout.
+- `IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET` caps the
+  estimated full-payload bytes sent per hot-conversation message before fanout
+  replication. When a message payload is large, the effective full fanout limit
+  becomes `min(IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT,
+  budget / encoded_payload_bytes)` and remaining writable active viewers receive
+  compact-active message-lite hints. Inactive or non-writable viewers use
+  timeline/since catch-up instead of realtime hint fanout in production
+  `pull-only` mode. Start with `262144` and keep it at least `65536` in
+  production; set `0` only for local A/B comparison. Track
+  `im_realtime_active_conversation_fanout_payload_budget_applied_total`,
+  `im_realtime_active_conversation_fanout_payload_budget_downgraded_active_recipients_total`,
+  `im_realtime_active_conversation_fanout_payload_budget_max_payload_bytes`, and
+  `im_realtime_active_conversation_fanout_payload_budget_max_effective_limit`
+  together with `im_realtime_active_conversation_fanout_compact_active_recipients_total`
+  to see whether large payloads, rather than active-room size alone, are moving
+  users from full to compact realtime.
+- `IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=pull-only` is the production
+  setting. It disables realtime fanout to inactive online users for hot groups;
+  clients use conversation changes and `timeline/since` catch-up for list and
+  message freshness. Keep `relay` only for local A/B comparison or rollback.
+- `IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS` only matters when
+  `IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=relay`. Production `pull-only`
+  deployments should not tune this to improve hot-group list freshness.
+- `IM_TIMELINE_SINCE_HOT_CACHE_TTL_MS` protects query-api from synchronized
+	  `timeline/since` pulls after lightweight large-group hints. It is a short
+	  in-process cache keyed by conversation, lower timeline bound, visible sequence
+	  floor, and limit; it only serves pages that are safe to share, and bypasses
+	  cache when notices or user-hidden messages require exact per-user visibility.
+	  Start with `250`, keep production between `50` and `5000`, keep it below the
+	  iOS selected-hint catch-up throttle, and
+	  track `im_timeline_since_hot_cache_hits_total`,
+	  `im_timeline_since_hot_cache_misses_total`, and
+	  `im_timeline_since_hot_cache_unsafe_bypasses_total` during 1000-user hot-group
+	  tests. When targeted catch-up uses `targetSequence`, also track
+	  `im_timeline_since_hot_cache_target_sequence_bypasses_total`; a high value
+	  means the exact hot-cache entry exists but is older than the hinted sequence,
+	  so the request correctly falls through to shared strong catch-up instead of
+	  returning a stale page.
+- `IM_TIMELINE_SINCE_RECENT_CACHE_TTL_MS` adds a short per-conversation recent
+  page cache for adjacent safe `timeline/since` cursors. The exact hot cache
+  only helps when clients request the same `afterSequence`; the recent cache lets
+  nearby cursors reuse the latest safe page suffix after compact large-group
+  hints. It is checked only after the same shared-read safety gate as the hot
+  cache, never serves pages containing notices, and is invalidated by the same
+  local or Redis-distributed conversation invalidations. Start with `2000` and
+  keep production between `1000` and `30000`.
+- `IM_TIMELINE_SINCE_RECENT_CACHE_MAX_CONVERSATIONS` bounds the number of
+  conversation/visible-floor recent entries kept by each query-api process. Start
+  with `1024`; production must keep at least `512`, and should raise only when
+  hot-group tests show useful hit rate but eviction pressure.
+- `IM_TIMELINE_SINCE_RECENT_CACHE_MAX_ITEMS_PER_CONVERSATION` caps the cached
+  latest timeline items per entry. Start with `512`; production must keep at
+  least `128`, lower it if query-api memory grows during many concurrent hot
+  conversations, and raise it only when
+  `im_timeline_since_recent_cache_misses_total` stays high because client cursors
+  are spread across a wider recent window.
+- Track `im_timeline_since_recent_cache_hits_total`,
+  `im_timeline_since_recent_cache_misses_total`,
+  `im_timeline_since_recent_cache_target_sequence_bypasses_total`,
+  `im_timeline_since_recent_cache_stores_total`,
+  `im_timeline_since_recent_cache_invalidations_total`, and
+  `im_timeline_since_recent_cache_invalidated_entries_total` together with the
+  exact hot-cache counters. In a healthy 1000-user hot-group compact-hint run,
+  recent-cache hits should rise when clients catch up from slightly different
+  local cursors; zero hits means synchronized pulls are either already exact-key
+  hits or still falling through to DB. A high target-sequence bypass count means
+  the cached recent suffix does not extend far enough to the hinted sequence;
+  raise `IM_TIMELINE_SINCE_RECENT_CACHE_MAX_ITEMS_PER_CONVERSATION` only if query
+  memory and invalidation rates remain safe.
+- Targeted `timeline/since` catch-up requests from realtime lightweight hints include
+  `targetSequence`. Query-api passes that target through the eventual read path
+  first, so target-aware hot/recent cache checks, target-sequence singleflight,
+  and the short target-sequence coalescing window can satisfy active-viewer pulls
+  before any strong read is attempted. Cached pages are used only when their
+  latest timeline sequence reaches `targetSequence`; stale entries are counted as
+  target-sequence bypasses and do not satisfy the request. If the eventual
+  response still does not reach the target, query-api retries against the strong
+  timeline source through the same target-aware shared path. This prevents a
+  stale empty hot cache entry or replica lag from turning a delivered hint into a
+  visible `target_not_reached` delay while still collapsing synchronized catch-up
+  from many active viewers. Untargeted history/gap reads keep the normal
+  eventual-read hot-cache path.
+- `IM_TIMELINE_SINCE_HOT_CACHE_MAX_ENTRIES` bounds that query-api process cache.
+	  Start with `4096`; raise it only when hit rate is low because many hot
+	  conversations or cursor windows are active at once.
+- iOS selected-conversation lightweight hints are micro-batched for a short
+  window before issuing `timeline/since`; adjacent hints keep only the latest
+  target timeline sequence. This keeps active viewers close to realtime while
+  reducing synchronized hot-room pull amplification. During hot-group tests,
+  track `im_client_timeline_catch_up_hint_queued_total`,
+  `im_client_timeline_catch_up_since_requests_total`,
+  `im_client_timeline_catch_up_since_successes_total`,
+  `im_client_timeline_catch_up_since_failures_total`,
+  `im_client_timeline_catch_up_deferred_total`,
+  `im_client_timeline_catch_up_applied_items_total`,
+  `im_client_timeline_catch_up_hint_to_request_max_millis`,
+  `im_client_timeline_catch_up_hint_to_request_avg_millis`,
+  `im_client_timeline_catch_up_request_max_millis`,
+  `im_client_timeline_catch_up_request_avg_millis`,
+  `im_client_timeline_catch_up_hint_to_apply_max_millis`, and
+  `im_client_timeline_catch_up_hint_to_apply_avg_millis`. Avg gauges show the
+  current reporting-client trend; max gauges catch individual client spikes. A high
+  hint-to-request max points at client-side batching/rate-limit pressure; a high
+  request max with healthy hint-to-request points at query-api/timeline read
+  pressure; a high hint-to-apply max with low request max points at local client
+  merge or UI-store pressure. Normal client-health reports remain rate-limited,
+  but timeline catch-up `deferred`, `incomplete`, `failed`, and slow catch-up
+  paths bypass the normal 60s interval with their own short cooldown so hot-room
+  tests surface bad catch-up behavior quickly without flooding the health
+  endpoint.
+- iOS selected-conversation catch-up tuning can be overridden per build/run with
+  `IM_SELECTED_HINT_CATCH_UP_INITIAL_JITTER_MS`,
+  `IM_SELECTED_HINT_CATCH_UP_MIN_INTERVAL_MS`, and
+  `IM_SELECTED_HINT_CATCH_UP_MICRO_BATCH_MS` through the process environment or
+  matching `UserDefaults` keys. Explicit `0` is accepted for jitter; interval and
+  micro-batch values are clamped to the client's minimum safe delay. The client
+  includes the effective values in health reports; metrics expose
+  `im_client_timeline_catch_up_config_selected_hint_initial_jitter_*_millis`,
+  `im_client_timeline_catch_up_config_selected_hint_min_interval_*_millis`, and
+  `im_client_timeline_catch_up_config_selected_hint_micro_batch_*_millis`.
+  Always compare hint-to-request latency against these config gauges before
+  treating slow selected-chat catch-up as a server-side timeline read issue.
+- `IM_TIMELINE_SINCE_CACHE_INVALIDATION_MODE=redis` is required in production when
+  any shared `timeline/since` cache is enabled. Command/stream nodes publish conversation invalidations
+  after message and timeline-notice writes; query nodes subscribe and clear local
+  hot cache, visibility-safety cache, and in-flight `timeline/since` singleflight
+  work. Track `im_timeline_since_distributed_invalidations_published_total`,
+  `im_timeline_since_distributed_invalidations_received_total`, and
+  `im_timeline_since_distributed_invalidation_errors_total`. Any non-zero error
+  count during hot-group tests means cache TTL must stay very short until Redis
+  pub/sub connectivity is fixed.
+- `IM_REDIS_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_SECONDS` controls the short
+  in-process Redis presence cache used for active conversation user-set snapshots
+  and per-user active route lookups. Cold misses use Redis-side membership
+  probes against the conversation-node active user indexes, so the gateway only
+  receives matched routes instead of full active-user sets for each node. Start
+  with `2`; lower it if active-chat presence changes must be reflected faster,
+  and raise it only when
+  `im_redis_presence_active_conversation_node_index_*` metrics show hot groups
+  are still repeatedly probing Redis node indexes.
+- `IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS` controls the
+  stream-consumer hot-conversation route cache. In production
+  `IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=pull-only`, it stores a short-lived
+  active-room route snapshot for the conversation, so adjacent `message_created`
+  relays query Redis by active viewers instead of probing every group member. In
+  relay-hint comparison mode, it falls back to the per-recipient route cache,
+  including negative inactive results, because inactive hint fanout still needs
+  recipient-level routing. A 1000-member group at 5-10 msg/s should therefore
+  avoid rebuilding the same active-room route query for every message even when
+  recipient windows differ slightly. Start with `1000`; set `0` only for A/B
+  comparison tests. Track
+  `im_realtime_active_conversation_route_cache_hits_total`,
+  `im_realtime_active_conversation_route_cache_partial_hits_total`,
+  `im_realtime_active_conversation_route_cache_missed_users_total`,
+  `im_realtime_active_conversation_route_cache_joined_in_flight_total`, and the
+  matching domain relay-after-record route cache metrics together with Redis
+  presence metrics to separate stream-consumer cache misses from Redis cache
+  misses. A rising joined-in-flight counter means concurrent hot-group route
+  misses were collapsed behind one Redis lookup instead of stampeding Redis.
+- `IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_MAX_ENTRIES` bounds that
+  stream-consumer cache. Each entry contains a conversation ID plus one cached
+  user route result, including negative inactive results, so leaving it
+  unbounded is unsafe for production hot-group tests with many active
+  conversations or large recipient windows. Start with `4096`;
+  lower it if stream-consumer memory grows, and raise it only when the hit ratio
+  is low while memory remains flat.
+- `IM_SUMMARY_PROJECTION_MESSAGE_CREATED_ACTIVITY_ONLY_RECIPIENT_THRESHOLD`
+  makes `summary-projection-consumer` update a shared conversation activity row
+  instead of writing one per-owner summary/change-log row for every large-group
+  message. Production `summary-projection-consumer` deployments must set this
+  above `0`; start with `500`. For omitted-recipient `message_created` events,
+  the projection consumer uses the event snapshot's `recipient_count` hint to
+  choose this path, so hot large-group summary projection does not need to decode
+  the full shared recipient JSON before writing `ConversationActivitySummary`.
+- `IM_SUMMARY_PROJECTION_ACTIVITY_COALESCE_WINDOW_MS` coalesces hot large-group
+  `ConversationActivitySummary` writes by conversation. Within the window, only
+  the latest activity row is written, while clients still use timeline/cursor
+  catch-up for exact message history. Start with `500`; production must keep it
+  between `50` and `1000`, lower it if conversation list freshness needs tighter
+  bounds, and track
+  `im_domain_event_summary_activity_coalesced_*` to confirm write pressure is
+  actually collapsing.
+- `IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT` caps summary/list/change response
+  and realtime conversation summary member ID payloads. When `member_count` is
+  greater than this value, summary responses keep the true `member_count` but
+  return an empty `memberUserIDs` array, and clients must use the paged members
+  API for member details. Start with `500` so 1000+ member group list/change
+  reads and membership/settings realtime payloads do not repeatedly transfer or
+  decode full member JSON.
+- Track `im_realtime_payload_summary_member_ids_omitted_total` and
+  `im_realtime_payload_summary_member_ids_omitted_members_total` during large
+  membership/settings realtime tests. They should increase for 1000+ member
+  groups; if `im_realtime_payload_summary_member_ids_emitted_members_total`
+  grows at the same rate, realtime summaries are still carrying full member ID
+  arrays.
+- `IM_MESSAGE_CREATED_RECIPIENT_INLINE_THRESHOLD` keeps small-group
+  `message_created` outbox events self-contained, but omits the full
+  `recipientUserIDs` list at or above the threshold. Consumers expand large
+  message-created recipients from the conversation membership read path, so
+  Kafka/outbox payload size no longer grows linearly with large-group member
+  count. Production command-api deployments must set this above `0`; keep it
+  aligned with the other large-group thresholds and start with `500`.
+- `IM_DOMAIN_EVENT_RECIPIENT_SNAPSHOT_DEDUP_THRESHOLD` stores large omitted
+  recipient snapshots once per unique recipient hash, then lets per-event
+  snapshot rows reference that shared set. Shared recipient sets also maintain a
+  `conversation_domain_event_recipient_set_members` index; production
+  `pull-only` realtime delivery uses that index to filter current active viewers
+  without decoding the full UUID JSON for every hot-group message. Production
+  command-api deployments must set this above `0` and no higher than
+  `IM_MESSAGE_CREATED_RECIPIENT_INLINE_THRESHOLD`; start with `500`. This keeps
+  hot 1000/2000 member groups from writing or decoding the same UUID list for
+  every message.
+- `IM_DOMAIN_DELIVERY_MESSAGE_CREATED_LARGE_GROUP_MODE=timeline-pull` is the
+  production large-group delivery model. At or above
+  `IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD`,
+  `domain-delivery-consumer` does not write durable per-owner `message_created`
+  copies; offline and gap catch-up come from the conversation timeline
+  (`timeline/since`) instead of one owner-delivery protobuf per member per
+  message. Keep `owner-delivery` plus threshold `0` only for small-group/full
+  owner-delivery validation.
+- `IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD`
+  is the recipient count where `timeline-pull` starts. The iOS client treats
+  active `timeline_gap_hint` events for the currently opened conversation as a
+  `timeline/since` catch-up trigger, so active viewers can recover the real
+  message body even when they receive a lightweight hint instead of an owner
+  cursor event. Inactive `conversation_activity_hint` remains a conversation-list
+  summary hint. The server timeline reader must scan past hidden or cleared
+  candidate rows before deciding there are no visible items; otherwise large-group
+  hint catch-up can stop on an empty filtered page. Start with `500`.
+- `IM_TIMELINE_READ_VISIBILITY_SCAN_MAX_ROWS` and
+  `IM_TIMELINE_READ_VISIBILITY_SCAN_MAX_PAGES` cap how far `timeline` and
+  `timeline/since` scan through hidden or cleared candidate rows while searching
+  for visible items. Start with `5000` rows and `50` pages on production
+  command/query API nodes. The production schema validator requires
+  `im_messages_conversation_timeline_server_sequence_idx` so these scans can use
+  the conversation timeline cursor while checking the message server-sequence
+  visibility floor. During hot-group tests, watch
+  `im_timeline_read_visibility_scan_rows_total`,
+  `im_timeline_read_visibility_scan_max_rows`,
+  `im_timeline_read_visibility_scan_pages_total`,
+  `im_timeline_read_visibility_scan_max_pages`, and
+  `im_timeline_read_visibility_scan_limit_exceeded_total`. Any non-zero scan
+  limit count means clients are protected from a misleading empty catch-up
+  response, but the read path needs either a higher budget, better visibility
+  indexes, or product cleanup of extreme hidden-message histories.
+- `im_timeline_read_latency_millis_bucket{kind="since",...}` is the primary
+  server-side tail-latency signal for large-group hint catch-up. Use
+  `histogram_quantile(0.95, rate(im_timeline_read_latency_millis_bucket{kind="since"}[5m]))`
+  and the matching P99 query to separate query-api/timeline read pressure from
+  client-side hint batching or UI merge delays. The ladder scripts collect the
+  histogram bucket/count/sum samples by default, print a step-level
+  `timeline read latency summary`, and can gate the current step with
+  `IM_GATE_TIMELINE_SINCE_READ_P95_MAX_MS` and
+  `IM_GATE_TIMELINE_SINCE_READ_P99_MAX_MS`.
+- Targeted `timeline/since` catch-up also reports
+  `im_timeline_since_target_sequence_requests_total`,
+  `im_timeline_since_target_sequence_eventual_satisfied_total`,
+  `im_timeline_since_target_sequence_strong_fallbacks_total`,
+  `im_timeline_since_target_sequence_strong_satisfied_total`, and
+  `im_timeline_since_target_sequence_strong_misses_total`, and
+  `im_timeline_since_target_sequence_errors_total`. Pair these with
+  `im_timeline_since_hot_cache_target_sequence_bypasses_total`,
+  `im_timeline_since_recent_cache_target_sequence_bypasses_total`, and
+  `im_timeline_since_target_sequence_singleflight_joined_total`. The companion
+  `im_timeline_since_target_sequence_window_joined_total` isolates the short
+  target-sequence coalescing window that can merge active-viewer pulls even when
+  their `afterSequence` cursors differ slightly. In a healthy active compact-hint
+  run where the eventual read model keeps up, eventual-satisfied should rise and
+  strong fallback should not grow linearly with active viewers. A high fallback
+  rate with high
+  target-sequence singleflight joins means the target-aware shared catch-up is
+  absorbing synchronized active-viewer pulls. A high fallback rate with low
+  target-sequence singleflight joins means clients are too spread out by cursor,
+  limit, visible floor, target sequence, or query-api process locality to
+  coalesce. A non-zero strong miss count means the strong timeline source also
+  did not reach the hinted sequence, while
+  target-sequence errors mean the targeted catch-up request failed before it
+  could prove convergence. Investigate command write, sequence allocation, hint
+  payload correctness, and query-api health before tuning caches.
+  `im_timeline_since_visibility_notice_bypasses_total` and
+  `im_timeline_since_response_singleflight_notice_bypasses_total` protect
+  user-specific timeline notices from being shared through cached or in-flight
+  catch-up. They should stay near zero in pure large-group message tests; high
+  values mean the run includes membership/notice traffic and should not be used
+  as a clean hot-message read-path benchmark.
+  `IM_GATE_TIMELINE_SINCE_VISIBILITY_NOTICE_BYPASSES_MAX` and
+  `IM_GATE_TIMELINE_SINCE_NOTICE_BYPASSES_MAX` default to `0` in fail mode for
+  this reason.
+  `IM_TIMELINE_SINCE_TARGET_SEQUENCE_COALESCE_WINDOW_MS` controls that short
+  merge window; start with `5`, and only raise it after confirming P95/P99
+  `timeline/since` latency still meets the gate.
+  The ladder prints a `target-sequence catch-up summary` for each step. In
+  `IM_METRICS_GATE_MODE=fail`, when strong fallbacks reach
+	  `IM_GATE_TARGET_SEQUENCE_SINGLEFLIGHT_MIN_FALLBACKS` and
+	  `im_timeline_since_target_sequence_singleflight_joined_total` does not
+	  increase, the step fails because targeted strong catch-up is not coalescing.
+	  The same fail-mode gate rejects a high targeted strong fallback rate through
+	  `IM_GATE_TARGET_SEQUENCE_STRONG_FALLBACK_RATE_MAX_PERCENT` once
+	  `IM_GATE_TARGET_SEQUENCE_STRONG_FALLBACK_RATE_MIN_REQUESTS` has been
+	  reached. Raise that threshold only for a measured read-model lag experiment,
+	  not for a production capacity claim.
+- `IM_DOMAIN_DELIVERY_OWNER_RECORD_BATCH_MAX_REQUESTS` caps each Postgres owner
+  delivery write/sequence allocation statement. The default is `1000`, which
+  keeps 5000/10000 member runs from producing oversized single SQL statements
+  while preserving per-owner cursor semantics. Production validation rejects
+  values below `100` or above `5000`; keep the default unless database metrics
+  show that larger chunks are safe. Track
+  `im_domain_event_owner_delivery_batch_write_chunked_total` and
+  `im_domain_event_owner_delivery_batch_write_chunks_total` during hot-group
+  tests to confirm large owner-delivery writes are being split as expected.
+  `im_domain_event_owner_delivery_batch_write_materialized_fast_paths_total`
+  shows how often Postgres batch writes reused the rows already materialized for
+  insert and avoided a follow-up owner-delivery row refetch.
+- `IM_STREAM_CONSUMER_BATCH_FILL_WAIT_MS` gives the Kafka consumer a short
+  in-process queue fill window after the first message in a processing batch.
+  This helps adjacent same-partition `message_created` events enter the same
+  run so summary/domain/realtime consumers can coalesce hot-conversation work.
+  Start with `10`; production validation requires `1...100`, and values near
+  the upper bound should be treated as a latency tradeoff, not a free throughput
+  gain.
+- The wait window is only applied when the first queued event is a valid
+  `message_created` event with a message ID. Other event types bypass the wait
+  and increment `im_stream_batch_fill_skipped_batches_total`, so membership,
+  read-state, malformed, or dead-letter-bound events do not pay avoidable
+  batch-fill latency. The consumer checks the Kafka `event-type` header before
+  decoding the JSON payload; keep that header on custom producers so non-message
+  events can skip batch-fill with minimal CPU overhead.
+- This optimization assumes conversation events are produced to Kafka with the
+  conversation ID as the message key, so one hot conversation remains partition
+  ordered. The server has a regression test for this invariant; if a custom
+  producer is introduced, keep the same keying strategy.
+- Watch `im_stream_processing_batches_total`,
+  `im_stream_processing_batch_events_total`,
+  `im_stream_processing_batch_events_avg`,
+  `im_stream_message_created_run_events_total`,
+  `im_stream_message_created_run_events_avg`,
+  `im_stream_batch_fill_waits_total`, and
+  `im_stream_batch_fill_events_total` per `consumer_group` after changing the
+  batch-fill wait. A healthy hot-conversation run should show processing batch
+  events above `1`, message-created run events above `1`, and non-zero fill
+  events without a matching increase in `im_stream_run_event_lag_*` or Kafka
+  lag. Prefer the message-created run metrics over generic run averages when
+  judging hot-group fanout, because non-message events can legitimately remain
+  single-event runs. If fill waits rise but fill events stay near zero, the wait
+  window is not helping; check Kafka partitioning, producer ordering, or lower
+  the wait to reduce added latency.
+- `tcp_capacity_ladder.sh` prints a `stream batch-fill summary` after each step
+  when remote `/internal/metrics` snapshots are available. Treat
+  `batchFillEffect=useful` as evidence that the wait window is improving
+  `message_created` run coalescing, not merely generic queue batching. Treat
+  `batchFillEffect=none` or `weak` as a signal to avoid raising
+  `IM_STREAM_CONSUMER_BATCH_FILL_WAIT_MS` blindly; first verify that
+  hot-conversation messages are landing on the same Kafka partition and arriving
+  contiguously enough for the consumer to coalesce them. `generic-useful` means
+  the queue batch got larger but no `message_created` run evidence was observed,
+  so it should not be used as proof that hot-group fanout improved.
 
 Use `MESSAGES`, `DEVICES_PER_USER`, `SEND_INTERVAL_MS`, `TIMEOUT_SECONDS`, and
 `COOLDOWN_SECONDS` to tune each step. Set `MESSAGES=0` plus `HOLD_SECONDS` for
@@ -642,9 +1328,10 @@ On a single Mac load generator, observed signs of generator saturation are
 `connect_timeout_fired`, and HTTP `login_attempt_failed` while the server gateway
 CPU and memory remain low. Treat that as a load-generator limit and split the run
 across multiple machines; do not treat it as the IM server's online-user limit.
-`PROTOCOL_VERSION` defaults to `9`; set it only when the generated
-realtime protocol version changes. Run it from a load generator, not from the
-IMServer host.
+`PROTOCOL_VERSION` defaults to the value in
+`Protocol/im_realtime/v1/protocol_version.txt`; override it only for an explicit
+backward-compatibility test. Run it from a load generator, not from the IMServer
+host.
 
 ## Go/No-Go
 

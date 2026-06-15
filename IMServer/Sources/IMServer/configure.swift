@@ -20,6 +20,7 @@ private func configureShared(_ app: Application) async throws {
     let authSecurityConfiguration = try AuthSecurityConfiguration.load(from: app.environment)
     let authSessionCacheConfiguration = AuthSessionCacheConfiguration.load(from: app.environment)
     let imTCPConfiguration = IMTCPConfiguration.load(from: app.environment)
+    let gatewayLocalFanoutConfiguration = IMGatewayLocalFanoutConfiguration.load()
     app.authClientIPResolver = AuthClientIPResolver.load(from: app.environment)
     app.gatewayRelayConfiguration = IMGatewayRelayConfiguration.load(from: app.environment)
     app.commandAPIIngressConfiguration = IMCommandAPIIngressConfiguration.load(from: app.environment)
@@ -35,7 +36,11 @@ private func configureShared(_ app: Application) async throws {
     app.commandOwnerRoutingConfiguration = IMCommandOwnerRoutingConfiguration.load(from: app.environment)
     app.conversationMemberCacheConfiguration = IMConversationMemberCacheConfiguration.load(from: app.environment)
     app.messageWriteBatchConfiguration = IMMessageWriteBatchConfiguration.load(from: app.environment)
+    app.messageCreatedRecipientInlineConfiguration = IMMessageCreatedRecipientInlineConfiguration.load(from: app.environment)
+    app.domainEventRecipientSnapshotConfiguration = IMDomainEventRecipientSnapshotConfiguration.load(from: app.environment)
     app.consistencyRepairConfiguration = IMConsistencyRepairConfiguration.load(from: app.environment)
+    app.imTCPConfiguration = imTCPConfiguration
+    app.gatewayLocalFanoutConfiguration = gatewayLocalFanoutConfiguration
 
     try app.metricsConfiguration.validateStartup(environment: app.environment)
     try IMMigrationStartupPolicy.validateStartup(app: app)
@@ -52,7 +57,6 @@ private func configureShared(_ app: Application) async throws {
     )
     app.authLoginRateLimiter = try await AuthRateLimiterFactory.make(app: app, configuration: authSecurityConfiguration)
     app.authEmailSender = try AuthEmailSenderFactory.make(app: app, configuration: authSecurityConfiguration)
-    app.imTCPConfiguration = imTCPConfiguration
     app.lifecycle.use(ConversationEventStreamProducerLifecycle())
     app.lifecycle.use(IMConsistencyRepairLifecycle())
     app.lifecycle.use(IMCleanupLifecycle())

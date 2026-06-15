@@ -10,7 +10,7 @@ func routes(_ app: Application) throws {
 
     if app.imRuntimeRole.servesGateway {
         try app.register(collection: AuthController())
-        try app.register(collection: GatewayRelayController())
+        try app.register(collection: GatewayRelayController(configuration: app.gatewayRelayConfiguration))
         if app.commandAPIIngressConfiguration.isEnabled {
             try app.register(collection: GatewayCommandBridgeController())
         }

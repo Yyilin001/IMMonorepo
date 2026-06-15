@@ -3,6 +3,10 @@ import Kafka
 import Vapor
 
 struct IMGatewayRelayConfiguration: Sendable {
+    static let defaultDomainEventPacketMaxBodyBytes = 1_048_576
+    static let defaultDomainEventPacketBinaryMaxBodyBytes = 1_048_576
+    static let defaultDomainEventPacketsMaxBodyBytes = 262_144
+
     enum Mode: String, Sendable {
         case local
         case http
@@ -11,6 +15,37 @@ struct IMGatewayRelayConfiguration: Sendable {
     let mode: Mode
     let baseURL: String?
     let sharedSecret: String?
+    let domainEventPacketMaxBodyBytes: Int
+    let domainEventPacketBinaryMaxBodyBytes: Int
+    let domainEventPacketsMaxBodyBytes: Int
+
+    init(
+        mode: Mode,
+        baseURL: String?,
+        sharedSecret: String?,
+        domainEventPacketMaxBodyBytes: Int = IMGatewayRelayConfiguration.defaultDomainEventPacketMaxBodyBytes,
+        domainEventPacketBinaryMaxBodyBytes: Int = IMGatewayRelayConfiguration.defaultDomainEventPacketBinaryMaxBodyBytes,
+        domainEventPacketsMaxBodyBytes: Int = IMGatewayRelayConfiguration.defaultDomainEventPacketsMaxBodyBytes
+    ) {
+        self.mode = mode
+        self.baseURL = baseURL
+        self.sharedSecret = sharedSecret
+        self.domainEventPacketMaxBodyBytes = max(1, domainEventPacketMaxBodyBytes)
+        self.domainEventPacketBinaryMaxBodyBytes = max(1, domainEventPacketBinaryMaxBodyBytes)
+        self.domainEventPacketsMaxBodyBytes = max(1, domainEventPacketsMaxBodyBytes)
+    }
+
+    var domainEventPacketMaxBodySize: ByteCount {
+        ByteCount(value: domainEventPacketMaxBodyBytes)
+    }
+
+    var domainEventPacketBinaryMaxBodySize: ByteCount {
+        ByteCount(value: domainEventPacketBinaryMaxBodyBytes)
+    }
+
+    var domainEventPacketsMaxBodySize: ByteCount {
+        ByteCount(value: domainEventPacketsMaxBodyBytes)
+    }
 
     static func load(from environment: Environment) -> IMGatewayRelayConfiguration {
         let mode = Environment.get("IM_GATEWAY_RELAY_MODE")
@@ -19,7 +54,13 @@ struct IMGatewayRelayConfiguration: Sendable {
         return IMGatewayRelayConfiguration(
             mode: mode,
             baseURL: Environment.get("IM_GATEWAY_INTERNAL_BASE_URL"),
-            sharedSecret: Environment.get("IM_INTERNAL_SHARED_SECRET")
+            sharedSecret: Environment.get("IM_INTERNAL_SHARED_SECRET"),
+            domainEventPacketMaxBodyBytes: Environment.get("IM_GATEWAY_RELAY_DOMAIN_EVENT_PACKET_MAX_BODY_BYTES")
+                .flatMap(Int.init(_:)) ?? defaultDomainEventPacketMaxBodyBytes,
+            domainEventPacketBinaryMaxBodyBytes: Environment.get("IM_GATEWAY_RELAY_DOMAIN_EVENT_PACKET_BIN_MAX_BODY_BYTES")
+                .flatMap(Int.init(_:)) ?? defaultDomainEventPacketBinaryMaxBodyBytes,
+            domainEventPacketsMaxBodyBytes: Environment.get("IM_GATEWAY_RELAY_DOMAIN_EVENT_PACKETS_MAX_BODY_BYTES")
+                .flatMap(Int.init(_:)) ?? defaultDomainEventPacketsMaxBodyBytes
         )
     }
 }
@@ -284,11 +325,27 @@ struct IMSummaryReadModelConfiguration: Sendable {
 
     let projectionWriteMode: ProjectionWriteMode
     let queryReadSource: QueryReadSource
+    let responseMemberUserIDsLimit: Int
+
+    init(
+        projectionWriteMode: ProjectionWriteMode,
+        queryReadSource: QueryReadSource,
+        responseMemberUserIDsLimit: Int = 0
+    ) {
+        self.projectionWriteMode = projectionWriteMode
+        self.queryReadSource = queryReadSource
+        self.responseMemberUserIDsLimit = max(0, responseMemberUserIDsLimit)
+    }
 
     static func load(from environment: Environment) -> IMSummaryReadModelConfiguration {
         IMSummaryReadModelConfiguration(
             projectionWriteMode: .sharded,
-            queryReadSource: .sharded
+            queryReadSource: .sharded,
+            responseMemberUserIDsLimit: max(
+                0,
+                Environment.get("IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT")
+                    .flatMap(Int.init(_:)) ?? 0
+            )
         )
     }
 }
@@ -315,6 +372,16 @@ struct IMSearchIndexConfiguration: Sendable {
 }
 
 struct IMStreamConsumerConfiguration: Sendable {
+    enum MessageCreatedLargeGroupDeliveryMode: String, Sendable {
+        case ownerDelivery = "owner-delivery"
+        case timelinePull = "timeline-pull"
+    }
+
+    enum ActiveCompactHintBody: String, Sendable {
+        case timelineGap = "timeline-gap"
+        case conversationActivity = "conversation-activity"
+    }
+
     static let defaultGroups = [
         "summary-projection-consumer",
         "realtime-delivery-consumer",
@@ -327,17 +394,38 @@ struct IMStreamConsumerConfiguration: Sendable {
 
     let enabledGroups: Set<String>
     let preservesGroupedDeploymentsInProduction: Bool
+    let streamConsumerQueueCapacity: Int
+    let streamConsumerRunBatchSize: Int
+    let streamConsumerBatchFillWaitMilliseconds: Int
     let domainDeliveryFanoutConcurrency: Int
     let domainDeliveryRelayBatchSize: Int
+    let domainDeliveryOwnerRecordBatchMaxRequests: Int
     let domainDeliveryReplayRecordsEnabled: Bool
     let domainDeliveryRelayAfterRecord: Bool
     let domainDeliverySkipsMessageCreatedOwnerDelivery: Bool
+    let domainDeliveryMessageCreatedLargeGroupMode: MessageCreatedLargeGroupDeliveryMode
+    let domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold: Int
+    let notificationSkipsMessageCreatedOwnerNotifications: Bool
+    let notificationMessageCreatedOwnerNotificationSkipRecipientThreshold: Int
     let realtimeDeliveryAsyncRelayEnabled: Bool
     let realtimeDeliveryAsyncMaxInFlight: Int
+    let realtimeDeliveryAsyncMaxQueued: Int
     let realtimeDeliverySlowLogMilliseconds: Int
+    let realtimeRemoteDispatchUserBatchSize: Int
+    let realtimeRemoteDispatchMaxInFlight: Int
     let realtimeMessageCreatedLightweightRecipientThreshold: Int
+    let realtimeActiveCompactHintBody: ActiveCompactHintBody
     let realtimeMessageCreatedLightweightPreviewMaxCharacters: Int
+    let realtimeActiveCompactHintPreviewMaxCharacters: Int
+    let realtimeMessageCreatedPreviewLookupEnabled: Bool
+    let realtimeActiveConversationUnsplitFallbackEnabled: Bool
+    let realtimeActiveConversationRouteCacheTTLMilliseconds: Int
+    let realtimeActiveConversationRouteCacheMaxEntries: Int
     let realtimeMessageCreatedCoalesceWindowMilliseconds: Int
+    let realtimeActiveCompactHintCoalesceWindowMilliseconds: Int
+    let summaryProjectionMessageCreatedActivityOnlyRecipientThreshold: Int
+    let summaryProjectionActivityCoalesceWindowMilliseconds: Int
+    let streamConsumerRequiresMessageCreatedRecipientSnapshot: Bool
     let domainDeliveryTransientMaxAttempts: Int
     let domainDeliveryTimelineNoticeMaxWaitMilliseconds: Int
     let domainDeliveryTimelineNoticeRetryDelayMilliseconds: Int
@@ -347,13 +435,46 @@ struct IMStreamConsumerConfiguration: Sendable {
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        let domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold = max(
+            0,
+            Environment.get("IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD")
+                .flatMap(Int.init(_:)) ?? 0
+        )
+        let domainDeliveryMessageCreatedLargeGroupMode = Environment.get(
+            "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_LARGE_GROUP_MODE"
+        )
+        .flatMap {
+            MessageCreatedLargeGroupDeliveryMode(
+                rawValue: $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            )
+        } ?? (domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold > 0 ? .timelinePull : .ownerDelivery)
         return IMStreamConsumerConfiguration(
             enabledGroups: Set(configured.isEmpty ? defaultGroups : configured),
             preservesGroupedDeploymentsInProduction: Environment.get("IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP")
                 .map { ["1", "true", "yes"].contains($0.lowercased()) }
                 ?? false,
+            streamConsumerQueueCapacity: max(
+                1,
+                Environment.get("IM_STREAM_CONSUMER_QUEUE_CAPACITY").flatMap(Int.init(_:)) ?? 512
+            ),
+            streamConsumerRunBatchSize: max(
+                1,
+                Environment.get("IM_STREAM_CONSUMER_RUN_BATCH_SIZE").flatMap(Int.init(_:)) ?? 32
+            ),
+            streamConsumerBatchFillWaitMilliseconds: min(
+                1_000,
+                max(
+                    0,
+                    Environment.get("IM_STREAM_CONSUMER_BATCH_FILL_WAIT_MS").flatMap(Int.init(_:)) ?? 0
+                )
+            ),
             domainDeliveryFanoutConcurrency: max(1, Environment.get("IM_DOMAIN_DELIVERY_FANOUT_CONCURRENCY").flatMap(Int.init(_:)) ?? 4),
             domainDeliveryRelayBatchSize: max(1, Environment.get("IM_DOMAIN_DELIVERY_RELAY_BATCH_SIZE").flatMap(Int.init(_:)) ?? 16),
+            domainDeliveryOwnerRecordBatchMaxRequests: max(
+                1,
+                Environment.get("IM_DOMAIN_DELIVERY_OWNER_RECORD_BATCH_MAX_REQUESTS")
+                    .flatMap(Int.init(_:)) ?? OwnerDomainEventDeliveryService.defaultPostgresRecordBatchMaxRequests
+            ),
             domainDeliveryReplayRecordsEnabled: parseBooleanEnvironment(
                 "IM_DOMAIN_DELIVERY_REPLAY_RECORDS_ENABLED",
                 defaultValue: false
@@ -366,6 +487,17 @@ struct IMStreamConsumerConfiguration: Sendable {
                 "IM_DOMAIN_DELIVERY_SKIP_MESSAGE_CREATED_OWNER_DELIVERY",
                 defaultValue: false
             ),
+            domainDeliveryMessageCreatedLargeGroupMode: domainDeliveryMessageCreatedLargeGroupMode,
+            domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold: domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold,
+            notificationSkipsMessageCreatedOwnerNotifications: parseBooleanEnvironment(
+                "IM_NOTIFICATION_SKIP_MESSAGE_CREATED_OWNER_NOTIFICATIONS",
+                defaultValue: false
+            ),
+            notificationMessageCreatedOwnerNotificationSkipRecipientThreshold: max(
+                0,
+                Environment.get("IM_NOTIFICATION_MESSAGE_CREATED_OWNER_NOTIFICATION_SKIP_RECIPIENT_THRESHOLD")
+                    .flatMap(Int.init(_:)) ?? 0
+            ),
             realtimeDeliveryAsyncRelayEnabled: parseBooleanEnvironment(
                 "IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED",
                 defaultValue: false
@@ -374,21 +506,76 @@ struct IMStreamConsumerConfiguration: Sendable {
                 1,
                 Environment.get("IM_REALTIME_DELIVERY_ASYNC_MAX_IN_FLIGHT").flatMap(Int.init(_:)) ?? 32
             ),
+            realtimeDeliveryAsyncMaxQueued: max(
+                0,
+                Environment.get("IM_REALTIME_DELIVERY_ASYNC_MAX_QUEUED").flatMap(Int.init(_:)) ?? 1024
+            ),
             realtimeDeliverySlowLogMilliseconds: max(
                 0,
                 Environment.get("IM_REALTIME_DELIVERY_SLOW_LOG_MS").flatMap(Int.init(_:)) ?? 1000
+            ),
+            realtimeRemoteDispatchUserBatchSize: max(
+                1,
+                Environment.get("IM_REALTIME_REMOTE_DISPATCH_USER_BATCH_SIZE").flatMap(Int.init(_:)) ?? 512
+            ),
+            realtimeRemoteDispatchMaxInFlight: max(
+                1,
+                Environment.get("IM_REALTIME_REMOTE_DISPATCH_MAX_IN_FLIGHT").flatMap(Int.init(_:)) ?? 8
             ),
             realtimeMessageCreatedLightweightRecipientThreshold: max(
                 0,
                 Environment.get("IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD").flatMap(Int.init(_:)) ?? 0
             ),
+            realtimeActiveCompactHintBody: Environment.get("IM_REALTIME_ACTIVE_COMPACT_HINT_BODY")
+                .flatMap {
+                    ActiveCompactHintBody(rawValue: $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+                }
+                ?? .timelineGap,
             realtimeMessageCreatedLightweightPreviewMaxCharacters: max(
                 0,
                 Environment.get("IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_PREVIEW_MAX_CHARS").flatMap(Int.init(_:)) ?? 120
             ),
+            realtimeActiveCompactHintPreviewMaxCharacters: max(
+                0,
+                Environment.get("IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS").flatMap(Int.init(_:)) ?? 0
+            ),
+            realtimeMessageCreatedPreviewLookupEnabled: parseBooleanEnvironment(
+                "IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED",
+                defaultValue: true
+            ),
+            realtimeActiveConversationUnsplitFallbackEnabled: parseBooleanEnvironment(
+                "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED",
+                defaultValue: false
+            ),
+            realtimeActiveConversationRouteCacheTTLMilliseconds: max(
+                0,
+                Environment.get("IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS").flatMap(Int.init(_:)) ?? 1000
+            ),
+            realtimeActiveConversationRouteCacheMaxEntries: max(
+                0,
+                Environment.get("IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_MAX_ENTRIES").flatMap(Int.init(_:)) ?? 4096
+            ),
             realtimeMessageCreatedCoalesceWindowMilliseconds: max(
                 0,
                 Environment.get("IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS").flatMap(Int.init(_:)) ?? 0
+            ),
+            realtimeActiveCompactHintCoalesceWindowMilliseconds: max(
+                0,
+                Environment.get("IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS").flatMap(Int.init(_:)) ?? 0
+            ),
+            summaryProjectionMessageCreatedActivityOnlyRecipientThreshold: max(
+                0,
+                Environment.get("IM_SUMMARY_PROJECTION_MESSAGE_CREATED_ACTIVITY_ONLY_RECIPIENT_THRESHOLD")
+                    .flatMap(Int.init(_:)) ?? 0
+            ),
+            summaryProjectionActivityCoalesceWindowMilliseconds: max(
+                0,
+                Environment.get("IM_SUMMARY_PROJECTION_ACTIVITY_COALESCE_WINDOW_MS")
+                    .flatMap(Int.init(_:)) ?? 0
+            ),
+            streamConsumerRequiresMessageCreatedRecipientSnapshot: parseBooleanEnvironment(
+                "IM_STREAM_CONSUMER_REQUIRE_MESSAGE_CREATED_RECIPIENT_SNAPSHOT",
+                defaultValue: false
             ),
             domainDeliveryTransientMaxAttempts: max(
                 1,

@@ -249,10 +249,15 @@ struct ConversationOutboxProcessor {
                 return 0
             }
 
+            let hasOmittedRecipients = envelopes.contains { envelope in
+                envelope.payload.recipientUserIDs.isEmpty
+            }
             let coalescedPayload = ConversationDomainEventPayload.messageCreated(
                 messageID: lastMessageID,
-                recipientUserIDs: Array(Set(envelopes.flatMap(\.payload.recipientUserIDs)))
-                    .sorted { $0.uuidString < $1.uuidString }
+                recipientUserIDs: hasOmittedRecipients
+                    ? []
+                    : Array(Set(envelopes.flatMap(\.payload.recipientUserIDs)))
+                        .sorted { $0.uuidString < $1.uuidString }
             )
             let coalescedEnvelope = try ConversationEventEnvelope(
                 event: lastEnvelope.event,
@@ -260,9 +265,8 @@ struct ConversationOutboxProcessor {
                 deliveryContext: nil
             )
             try await ConversationProjectionConsumer(app: app, sourceDB: db).consume(coalescedEnvelope)
-            for envelope in envelopes {
-                try await OwnerDomainEventDeliveryConsumer(app: app, sourceDB: db).consume(envelope)
-            }
+            try await OwnerDomainEventDeliveryConsumer(app: app, sourceDB: db)
+                .consumeMessageCreatedRun(envelopes)
 
             await processMessageCreatedRunSideEffects(
                 envelopes,
@@ -434,9 +438,7 @@ struct ConversationOutboxProcessor {
             group.addTask {
                 do {
                     let consumer = ConversationRealtimeConsumer(app: app, sourceDB: db)
-                    for envelope in envelopes {
-                        try await consumer.consume(envelope)
-                    }
+                    try await consumer.consumeMessageCreatedRun(envelopes)
                     return ("ConversationRealtimeConsumer", envelopes.last, nil)
                 } catch {
                     return ("ConversationRealtimeConsumer", envelopes.last, error)
@@ -472,7 +474,7 @@ struct ConversationOutboxProcessor {
                 ConversationMediaAssetReferenceConsumer(db: db, app: app),
                 ConversationProjectionConsumer(app: app, sourceDB: db),
                 ChangesLogConsumer(app: app, sourceDB: db),
-                ConversationTimelineNoticeProjectionConsumer(db: db),
+                ConversationTimelineNoticeProjectionConsumer(db: db, app: app),
                 OwnerDomainEventDeliveryConsumer(app: app, sourceDB: db)
             ]),
             sideEffects: ConversationEventConsumerRegistry(consumers: [

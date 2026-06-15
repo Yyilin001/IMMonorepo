@@ -48,24 +48,57 @@ struct CreateDomainEventSequencesAndTimelineNotices: AsyncMigration {
         guard let sql = database as? any SQLDatabase else {
             return
         }
-        try await sql.raw("""
-            ALTER TABLE conversation_domain_events
-            ADD COLUMN IF NOT EXISTS aggregate_sequence BIGINT NOT NULL DEFAULT 1
-            """).run()
-        try await sql.raw("""
-            ALTER TABLE im_messages
-            ADD COLUMN IF NOT EXISTS timeline_sequence BIGINT
-            """).run()
-        try await sql.raw("""
-            UPDATE im_messages
-            SET timeline_sequence = server_sequence
-            WHERE timeline_sequence IS NULL
-            """).run()
-        try await sql.raw("""
-            ALTER TABLE im_messages
-            ALTER COLUMN timeline_sequence SET DEFAULT 1,
-            ALTER COLUMN timeline_sequence SET NOT NULL
-            """).run()
+        switch sql.dialect.name {
+        case "postgresql":
+            try await sql.raw("""
+                ALTER TABLE conversation_domain_events
+                ADD COLUMN IF NOT EXISTS aggregate_sequence BIGINT NOT NULL DEFAULT 1
+                """).run()
+            try await sql.raw("""
+                ALTER TABLE im_messages
+                ADD COLUMN IF NOT EXISTS timeline_sequence BIGINT
+                """).run()
+            try await sql.raw("""
+                UPDATE im_messages
+                SET timeline_sequence = server_sequence
+                WHERE timeline_sequence IS NULL
+                """).run()
+            try await sql.raw("""
+                ALTER TABLE im_messages
+                ALTER COLUMN timeline_sequence SET DEFAULT 1,
+                ALTER COLUMN timeline_sequence SET NOT NULL
+                """).run()
+        case "sqlite":
+            try await addSQLiteColumnIfMissing(
+                table: ConversationDomainEvent.schema,
+                column: "aggregate_sequence",
+                definition: "INTEGER NOT NULL DEFAULT 1",
+                on: sql
+            )
+            try await addSQLiteColumnIfMissing(
+                table: ConversationMessage.schema,
+                column: "timeline_sequence",
+                definition: "INTEGER",
+                on: sql
+            )
+            try await sql.raw("""
+                UPDATE im_messages
+                SET timeline_sequence = server_sequence
+                WHERE timeline_sequence IS NULL
+                """).run()
+        default:
+            try await database.schema(ConversationDomainEvent.schema)
+                .field("aggregate_sequence", .int, .required, .sql(.default(1)))
+                .update()
+            try await database.schema(ConversationMessage.schema)
+                .field("timeline_sequence", .int)
+                .update()
+            try await sql.raw("""
+                UPDATE im_messages
+                SET timeline_sequence = server_sequence
+                WHERE timeline_sequence IS NULL
+                """).run()
+        }
         try await sql.raw("""
             CREATE INDEX IF NOT EXISTS conversation_timeline_notices_conversation_sequence_idx
             ON conversation_timeline_notices (conversation_id, timeline_sequence ASC)
@@ -96,5 +129,25 @@ struct CreateDomainEventSequencesAndTimelineNotices: AsyncMigration {
         try await database.schema(OwnerDomainEventDeliveryCursor.schema).delete()
         try await database.schema(OwnerContactEventSequence.schema).delete()
         try await database.schema(ConversationDomainEventSequence.schema).delete()
+    }
+
+    private func addSQLiteColumnIfMissing(
+        table: String,
+        column: String,
+        definition: String,
+        on sql: any SQLDatabase
+    ) async throws {
+        struct SQLiteColumnRow: Decodable {
+            let name: String
+        }
+        let rows = try await sql.raw("PRAGMA table_info(\(unsafeRaw: table))")
+            .all(decoding: SQLiteColumnRow.self)
+        guard !rows.contains(where: { $0.name == column }) else {
+            return
+        }
+        try await sql.raw("""
+            ALTER TABLE \(unsafeRaw: table)
+            ADD COLUMN \(unsafeRaw: column) \(unsafeRaw: definition)
+            """).run()
     }
 }

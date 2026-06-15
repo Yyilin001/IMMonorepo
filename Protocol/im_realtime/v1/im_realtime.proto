@@ -22,6 +22,7 @@ message Packet {
     ChatDomainEvent domain_event = 40;
     MessageStreamSignal stream_signal = 41;
     Kick kick = 50;
+    ConversationActivityCommand conversation_activity = 60;
   }
 }
 
@@ -62,6 +63,11 @@ message SendMessageCommand {
   MessageContent content = 7;
 }
 
+message ConversationActivityCommand {
+  string conversation_id = 1;
+  bool is_active = 2;
+}
+
 message ChatDomainEvent {
   string event_id = 1;
   string event_type = 2;
@@ -92,6 +98,8 @@ message ChatDomainEvent {
     ConversationRemovedForSelfEvent conversation_removed_for_self = 32;
     ConversationChangedEvent conversation_settings_changed = 33;
     ConversationVisibilityChangedEvent conversation_visibility_changed = 34;
+    ConversationActivityHintEvent conversation_activity_hint = 35;
+    TimelineGapHintEvent timeline_gap_hint = 36;
     MemberChangedEvent member_added = 40;
     MemberChangedEvent member_removed = 41;
     MemberChangedEvent member_role_updated = 42;
@@ -142,6 +150,24 @@ message MessageStreamSignal {
 }
 
 message ConversationChangedEvent {}
+
+message ConversationActivityHintEvent {
+  string message_id = 1;
+  string sender_user_id = 2;
+  optional uint64 server_sequence = 3;
+  optional uint64 timeline_sequence = 4;
+  string preview_text = 5;
+  optional int64 message_created_at_ms = 6;
+  int64 updated_at_ms = 7;
+}
+
+message TimelineGapHintEvent {
+  string message_id = 1;
+  string sender_user_id = 2;
+  optional uint64 server_sequence = 3;
+  optional uint64 timeline_sequence = 4;
+  int64 updated_at_ms = 5;
+}
 
 message ConversationRemovedForSelfEvent {}
 

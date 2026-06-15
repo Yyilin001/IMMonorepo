@@ -60,6 +60,8 @@ If more than two domains are checked:
 ## Validation
 
 - [ ] Governance: `./scripts/check_governance_boundaries.sh`
+- [ ] IMServer production gate: `cd IMServer && ./scripts/production_release_gate.sh`
+  - Local fast smoke only: `cd IMServer && ./scripts/production_release_gate.sh --skip-swift-tests`
 - [ ] IMServer: `swift test --no-parallel`
 - [ ] iOS core: `cd IMClientKit && swift test`
 - [ ] iOS app: `xcodebuild ... build/test -only-testing:IMAppTests`

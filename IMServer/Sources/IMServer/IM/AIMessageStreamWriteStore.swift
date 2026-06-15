@@ -55,14 +55,31 @@ struct AIMessageStreamWriteStore {
                     readSequence: sequence,
                     on: database
                 )
-                try await ConversationOutboxService(db: database).enqueue(
+                let shouldInlineRecipients = app.messageCreatedRecipientInlineConfiguration.shouldInlineRecipients(
+                    recipientCount: membership.memberUserIDs.count
+                )
+                try await ConversationOutboxService(
+                    db: database,
+                    domainEventMetrics: app.conversationDomainEventMetrics
+                ).enqueue(
                     type: .messageCreated,
                     conversationID: conversationID,
                     actorUserID: userID,
                     payload: .messageCreated(
                         messageID: messageID,
-                        recipientUserIDs: membership.memberUserIDs
+                        recipientUserIDs: shouldInlineRecipients ? membership.memberUserIDs : [],
+                        preview: try ConversationMessageCreatedPreview(
+                            senderUserID: message.$sender.id,
+                            serverSequence: imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence"),
+                            timelineSequence: imPositiveUInt64Sequence(message.timelineSequence, field: "timeline_sequence"),
+                            previewText: "",
+                            createdAt: message.createdAt
+                        )
                     ),
+                    recipientSnapshotUserIDs: shouldInlineRecipients ? nil : membership.memberUserIDs,
+                    recipientSnapshotDeduplicationThreshold: app
+                        .domainEventRecipientSnapshotConfiguration
+                        .deduplicationThreshold,
                     on: database
                 )
                 try await ConversationOutboxService(db: database).enqueue(
@@ -99,6 +116,7 @@ struct AIMessageStreamWriteStore {
             }
         }
 
+        app.invalidateTimelineSinceHotCache(conversationID: conversationID)
         return AIMessageStreamStartEnvelope(
             response: envelope.response,
             recipientUserIDs: envelope.recipients
@@ -116,7 +134,7 @@ struct AIMessageStreamWriteStore {
         errorCode: String? = nil,
         errorMessage: String? = nil
     ) async throws -> IMMessageResponse {
-        try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
+        let update = try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
             let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
             return try await db.transaction { database in
                 guard let message = try await ConversationMessage.query(on: database)
@@ -134,15 +152,21 @@ struct AIMessageStreamWriteStore {
                 }
                 guard existing.state == .streaming else {
                     await app.aiStreamMetrics.recordTerminalCASConflict()
-                    return try ConversationMessageService(db: database).messageResponse(
-                        from: message,
-                        conversationID: conversationID
+                    return (
+                        response: try ConversationMessageService(db: database).messageResponse(
+                            from: message,
+                            conversationID: conversationID
+                        ),
+                        didMutateTimeline: false
                     )
                 }
                 guard chunkIndex >= existing.lastChunkIndex else {
-                    return try ConversationMessageService(db: database).messageResponse(
-                        from: message,
-                        conversationID: conversationID
+                    return (
+                        response: try ConversationMessageService(db: database).messageResponse(
+                            from: message,
+                            conversationID: conversationID
+                        ),
+                        didMutateTimeline: false
                     )
                 }
 
@@ -172,12 +196,19 @@ struct AIMessageStreamWriteStore {
                     }
                     try await index.update(on: database)
                 }
-                return try ConversationMessageService(db: database).messageResponse(
-                    from: message,
-                    conversationID: conversationID
+                return (
+                    response: try ConversationMessageService(db: database).messageResponse(
+                        from: message,
+                        conversationID: conversationID
+                    ),
+                    didMutateTimeline: true
                 )
             }
         }
+        if update.didMutateTimeline {
+            app.invalidateTimelineSinceHotCache(conversationID: conversationID)
+        }
+        return update.response
     }
 
     @discardableResult
@@ -191,7 +222,7 @@ struct AIMessageStreamWriteStore {
         errorCode: String?,
         errorMessage: String?
     ) async throws -> AIMessageStreamPublishEnvelope {
-        try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
+        let envelope = try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
             let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
             return try await db.transaction { database in
                 guard let message = try await ConversationMessage.query(on: database)
@@ -300,6 +331,10 @@ struct AIMessageStreamWriteStore {
                 )
             }
         }
+        if envelope.shouldPublish {
+            app.invalidateTimelineSinceHotCache(conversationID: conversationID)
+        }
+        return envelope
     }
 
     @discardableResult

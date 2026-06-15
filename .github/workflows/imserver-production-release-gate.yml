@@ -1,0 +1,77 @@
+name: IMServer Production Release Gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/imserver-production-release-gate.yml"
+      - "IMServer/**"
+      - "Protocol/im_realtime/**"
+      - "scripts/check_protobuf_generated.sh"
+      - "scripts/generate_protobuf.sh"
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/imserver-production-release-gate.yml"
+      - "IMServer/**"
+      - "Protocol/im_realtime/**"
+      - "scripts/check_protobuf_generated.sh"
+      - "scripts/generate_protobuf.sh"
+  workflow_dispatch:
+    inputs:
+      run_swift_tests:
+        description: "Run swift test --no-parallel as part of the production gate"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: imserver-production-release-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  production-release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librdkafka-dev libssl-dev protobuf-compiler
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Run production release gate
+        working-directory: IMServer
+        env:
+          RUN_SWIFT_TESTS_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.run_swift_tests || 'true' }}
+        run: |
+          if [ "${RUN_SWIFT_TESTS_INPUT}" = "false" ]; then
+            ./scripts/production_release_gate.sh --skip-swift-tests
+          else
+            ./scripts/production_release_gate.sh
+          fi
+
+      - name: Upload production release gate reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: imserver-production-release-gate-reports
+          path: |
+            IMServer/reports/
+          if-no-files-found: warn

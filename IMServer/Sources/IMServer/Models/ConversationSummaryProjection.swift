@@ -212,6 +212,82 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
 
 enum ConversationProjectionCodingError: Error {
     case invalidJSON
+    case missingRecipientSet
+}
+
+final class ConversationActivitySummary: Model, @unchecked Sendable {
+    static let schema = "conversation_activity_summaries"
+
+    @ID(custom: "conversation_id", generatedBy: .user)
+    var id: UUID?
+
+    @OptionalField(key: "last_message_json")
+    private var lastMessageJSON: String?
+
+    @Field(key: "last_message_server_sequence")
+    var lastMessageServerSequence: Int
+
+    @Field(key: "last_activity_at")
+    var lastActivityAt: Date
+
+    @Field(key: "updated_at")
+    var updatedAt: Date
+
+    init() {}
+
+    init(
+        conversationID: UUID,
+        lastMessage: IMMessagePreviewResponse?,
+        lastMessageServerSequence: Int,
+        lastActivityAt: Date,
+        updatedAt: Date
+    ) throws {
+        self.id = conversationID
+        self.lastMessageJSON = try lastMessage.map(Self.encodeLastMessage)
+        self.lastMessageServerSequence = lastMessageServerSequence
+        self.lastActivityAt = lastActivityAt
+        self.updatedAt = updatedAt
+    }
+
+    var conversationID: UUID {
+        get { id ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")! }
+        set { id = newValue }
+    }
+
+    var lastMessage: IMMessagePreviewResponse? {
+        get {
+            guard let lastMessageJSON else {
+                return nil
+            }
+            return try? Self.decodeLastMessage(lastMessageJSON)
+        }
+        set {
+            lastMessageJSON = try? newValue.map(Self.encodeLastMessage)
+        }
+    }
+
+    static func encodeLastMessageForStorage(_ value: IMMessagePreviewResponse?) throws -> String? {
+        try value.map(encodeLastMessage)
+    }
+
+    private static func encodeLastMessage(_ value: IMMessagePreviewResponse) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(value)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw ConversationProjectionCodingError.invalidJSON
+        }
+        return json
+    }
+
+    private static func decodeLastMessage(_ json: String) throws -> IMMessagePreviewResponse {
+        guard let data = json.data(using: .utf8) else {
+            throw ConversationProjectionCodingError.invalidJSON
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(IMMessagePreviewResponse.self, from: data)
+    }
 }
 
 final class ConversationChangesLogEntry: Model, @unchecked Sendable {

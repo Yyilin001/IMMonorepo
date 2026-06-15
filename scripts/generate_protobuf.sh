@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROTO_DIR="$ROOT_DIR/Protocol/im_realtime/v1"
@@ -7,16 +7,56 @@ CLIENT_OUT="$ROOT_DIR/IMClientKit/Sources/IMClientKit/Generated/Protobuf"
 SERVER_OUT="$ROOT_DIR/IMServer/Sources/IMServer/Generated/Protobuf"
 CLIENT_GENERATED_DIR="$ROOT_DIR/IMClientKit/Sources/IMClientKit/Generated"
 SERVER_GENERATED_DIR="$ROOT_DIR/IMServer/Sources/IMServer/Generated"
+SWIFT_PROTOBUF_CHECKOUT="$ROOT_DIR/IMServer/.build/checkouts/swift-protobuf"
 PROTOCOL_VERSION="$(tr -d '[:space:]' < "$PROTO_DIR/protocol_version.txt")"
+
+fail() {
+  echo "generate protobuf failed: $1" >&2
+  exit 1
+}
+
+resolve_protoc_gen_swift() {
+  if [[ -n "${PROTOC_GEN_SWIFT:-}" ]]; then
+    [[ -x "${PROTOC_GEN_SWIFT}" ]] || fail "PROTOC_GEN_SWIFT is not executable: ${PROTOC_GEN_SWIFT}"
+    printf '%s' "${PROTOC_GEN_SWIFT}"
+    return 0
+  fi
+
+  if command -v protoc-gen-swift >/dev/null 2>&1; then
+    command -v protoc-gen-swift
+    return 0
+  fi
+
+  if [[ ! -d "${SWIFT_PROTOBUF_CHECKOUT}" ]]; then
+    swift package --package-path "${ROOT_DIR}/IMServer" resolve >/dev/null
+  fi
+  [[ -d "${SWIFT_PROTOBUF_CHECKOUT}" ]] || fail "swift-protobuf checkout is missing after SwiftPM resolve"
+
+  swift build \
+    --package-path "${SWIFT_PROTOBUF_CHECKOUT}" \
+    -c release \
+    --product protoc-gen-swift >/dev/null
+
+  local built
+  built="$(find "${SWIFT_PROTOBUF_CHECKOUT}/.build" -path "*/release/protoc-gen-swift" -type f | sort | head -n 1)"
+  [[ -n "${built}" && -x "${built}" ]] || fail "unable to locate built protoc-gen-swift under ${SWIFT_PROTOBUF_CHECKOUT}/.build"
+  printf '%s' "${built}"
+}
+
+command -v protoc >/dev/null 2>&1 || fail "protoc is required. Install protobuf compiler, then rerun."
+[[ "${PROTOCOL_VERSION}" =~ ^[0-9]+$ ]] || fail "protocol_version.txt must contain an integer"
+PROTOC_GEN_SWIFT_BIN="$(resolve_protoc_gen_swift)"
 
 mkdir -p "$CLIENT_OUT" "$SERVER_OUT" "$CLIENT_GENERATED_DIR" "$SERVER_GENERATED_DIR"
 
 protoc \
+  --plugin="protoc-gen-swift=$PROTOC_GEN_SWIFT_BIN" \
   --proto_path="$ROOT_DIR/Protocol" \
   --swift_out="$CLIENT_OUT" \
   "$PROTO_DIR/im_realtime.proto"
 
 protoc \
+  --plugin="protoc-gen-swift=$PROTOC_GEN_SWIFT_BIN" \
   --proto_path="$ROOT_DIR/Protocol" \
   --swift_out="$SERVER_OUT" \
   "$PROTO_DIR/im_realtime.proto"

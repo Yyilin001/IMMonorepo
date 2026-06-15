@@ -31,7 +31,7 @@ struct IMMessagePersistencePipeline {
             )
         })
 
-        return try await diagnostics.measure("transaction", operation: {
+        let results = try await diagnostics.measure("transaction", operation: {
             try await routedDatabase.transaction { database in
                 let membershipContext = try await diagnostics.measure("membershipContext", operation: {
                     try await service.requireConversationMembershipContext(
@@ -116,6 +116,10 @@ struct IMMessagePersistencePipeline {
             return results
             }
         })
+        if results.contains(where: \.didCreateMessage) {
+            service.app?.invalidateTimelineSinceHotCache(conversationID: conversationID)
+        }
+        return results
     }
 
     private func existingResult(
@@ -181,14 +185,31 @@ struct IMMessagePersistencePipeline {
             )
         })
         try await diagnostics.measure("outboxEnqueue", operation: {
-            try await ConversationOutboxService(db: database).enqueue(
+            let shouldInlineRecipients = service.app?
+                .messageCreatedRecipientInlineConfiguration
+                .shouldInlineRecipients(recipientCount: recipientUserIDs.count) ?? true
+            try await ConversationOutboxService(
+                db: database,
+                domainEventMetrics: service.app?.conversationDomainEventMetrics
+            ).enqueue(
                 type: .messageCreated,
                 conversationID: conversationID,
                 actorUserID: prepared.senderUserID,
                 payload: .messageCreated(
                     messageID: try message.requireID(),
-                    recipientUserIDs: recipientUserIDs
+                    recipientUserIDs: shouldInlineRecipients ? recipientUserIDs : [],
+                    preview: try ConversationMessageCreatedPreview(
+                        senderUserID: message.$sender.id,
+                        serverSequence: imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence"),
+                        timelineSequence: imPositiveUInt64Sequence(message.timelineSequence, field: "timeline_sequence"),
+                        previewText: canonicalContent.previewText,
+                        createdAt: message.createdAt
+                    )
                 ),
+                recipientSnapshotUserIDs: shouldInlineRecipients ? nil : recipientUserIDs,
+                recipientSnapshotDeduplicationThreshold: service.app?
+                    .domainEventRecipientSnapshotConfiguration
+                    .deduplicationThreshold ?? 0,
                 preallocatedAggregateSequence: aggregateSequence,
                 updatesMessageTimelineSequence: false
             )

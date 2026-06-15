@@ -8,38 +8,144 @@ enum IMTCPChannelWriter {
         type: IMTCPPacketType,
         requestID: UUID?,
         payload: Payload,
-        on channel: any Channel
+        on channel: any Channel,
+        metrics: RoutingMetrics? = nil,
+        dropWhenNotWritable: Bool = false,
+        channelIsWritable: Bool? = nil,
+        slowWriteThresholdMilliseconds: Int = 1000,
+        slowWriteHandler: (@Sendable (Int) -> Void)? = nil,
+        writeCompletionHandler: (@Sendable (Bool) -> Void)? = nil
     ) {
+        let isWritable = channelIsWritable ?? channel.isWritable
+        if dropWhenNotWritable, !isWritable {
+            if let metrics {
+                Task {
+                    await metrics.recordTCPWriteBackpressure()
+                    await metrics.recordTCPWriteDroppedBackpressure()
+                }
+            }
+            return
+        }
         do {
             let data = try IMTCPProtobufCodec.encode(type: type, requestID: requestID, payload: payload)
             var buffer = channel.allocator.buffer(capacity: data.count + 4)
             buffer.writeInteger(UInt32(data.count), endianness: .big)
             buffer.writeBytes(data)
-            channel.writeAndFlush(buffer, promise: nil)
+            writeAndFlush(
+                buffer,
+                on: channel,
+                metrics: metrics,
+                dropWhenNotWritable: dropWhenNotWritable,
+                channelIsWritable: isWritable,
+                slowWriteThresholdMilliseconds: slowWriteThresholdMilliseconds,
+                slowWriteHandler: slowWriteHandler,
+                writeCompletionHandler: writeCompletionHandler
+            )
         } catch {
             channel.close(promise: nil)
         }
     }
 
-    static func writeEncodedPacket(_ data: Data, on channel: any Channel) {
+    static func writeEncodedPacket(
+        _ data: Data,
+        on channel: any Channel,
+        metrics: RoutingMetrics? = nil,
+        dropWhenNotWritable: Bool = false,
+        channelIsWritable: Bool? = nil,
+        slowWriteThresholdMilliseconds: Int = 1000,
+        slowWriteHandler: (@Sendable (Int) -> Void)? = nil,
+        writeCompletionHandler: (@Sendable (Bool) -> Void)? = nil
+    ) {
+        let isWritable = channelIsWritable ?? channel.isWritable
+        if dropWhenNotWritable, !isWritable {
+            if let metrics {
+                Task {
+                    await metrics.recordTCPWriteBackpressure()
+                    await metrics.recordTCPWriteDroppedBackpressure()
+                }
+            }
+            return
+        }
         var buffer = channel.allocator.buffer(capacity: data.count + 4)
         buffer.writeInteger(UInt32(data.count), endianness: .big)
         buffer.writeBytes(data)
-        channel.writeAndFlush(buffer, promise: nil)
+        writeAndFlush(
+            buffer,
+            on: channel,
+            metrics: metrics,
+            dropWhenNotWritable: dropWhenNotWritable,
+            channelIsWritable: isWritable,
+            slowWriteThresholdMilliseconds: slowWriteThresholdMilliseconds,
+            slowWriteHandler: slowWriteHandler,
+            writeCompletionHandler: writeCompletionHandler
+        )
     }
 
     static func sendKickAndClose(
         on channel: any Channel,
         reason: IMTCPKickReason,
-        message: String
+        message: String,
+        metrics: RoutingMetrics? = nil
     ) {
         writePacket(
             type: .kick,
             requestID: nil,
             payload: IMTCPKickPayload(reason: reason, message: message),
-            on: channel
+            on: channel,
+            metrics: metrics
         )
         channel.close(promise: nil)
+    }
+
+    private static func writeAndFlush(
+        _ buffer: ByteBuffer,
+        on channel: any Channel,
+        metrics: RoutingMetrics?,
+        dropWhenNotWritable: Bool = false,
+        channelIsWritable: Bool? = nil,
+        slowWriteThresholdMilliseconds: Int = 1000,
+        slowWriteHandler: (@Sendable (Int) -> Void)? = nil,
+        writeCompletionHandler: (@Sendable (Bool) -> Void)? = nil
+    ) {
+        let isWritable = channelIsWritable ?? channel.isWritable
+        if let metrics, !isWritable {
+            Task {
+                await metrics.recordTCPWriteBackpressure()
+                if dropWhenNotWritable {
+                    await metrics.recordTCPWriteDroppedBackpressure()
+                }
+            }
+            if dropWhenNotWritable {
+                return
+            }
+        }
+        guard let metrics else {
+            channel.writeAndFlush(buffer, promise: nil)
+            return
+        }
+
+        let startedAt = Date()
+        let slowWriteThresholdMilliseconds = max(0, slowWriteThresholdMilliseconds)
+        channel.writeAndFlush(buffer).whenComplete { result in
+            let latencyMilliseconds = max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
+            let didWriteSlow = slowWriteThresholdMilliseconds > 0
+                && latencyMilliseconds >= slowWriteThresholdMilliseconds
+            if didWriteSlow {
+                slowWriteHandler?(latencyMilliseconds)
+            }
+            writeCompletionHandler?(didWriteSlow)
+            Task {
+                if didWriteSlow {
+                    await metrics.recordTCPWriteSlow(latencyMilliseconds: latencyMilliseconds)
+                }
+                switch result {
+                case .success:
+                    await metrics.recordTCPWriteCompleted(latencyMilliseconds: latencyMilliseconds)
+                case .failure:
+                    await metrics.recordTCPWriteFailed(latencyMilliseconds: latencyMilliseconds)
+                }
+            }
+        }
     }
 }
 
@@ -217,6 +323,17 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if let closeReasonEvent = event as? IMTCPConnectionCloseReasonEvent {
+            closeReason = closeReasonEvent.reason
+            application.logger.info(
+                "IM TCP close reason event",
+                metadata: logMetadata(context: context, extra: [
+                    "close_reason": .string(closeReasonEvent.reason)
+                ])
+            )
+            return
+        }
+
         if let channelEvent = event as? ChannelEvent {
             switch channelEvent {
             case .inputClosed:
@@ -340,7 +457,13 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                     appVersion: payload.appVersion
                 )
 
-                let control = IMConnectionControl(connectionID: connection.connectionID, channel: channel)
+                let control = IMConnectionControl(
+                    connectionID: connection.connectionID,
+                    channel: channel,
+                    metrics: self.application.routingMetrics,
+                    slowWriteThresholdMilliseconds: self.application.imTCPConfiguration.slowWriteThresholdMilliseconds,
+                    slowWriteCloseConsecutiveCount: self.application.imTCPConfiguration.slowWriteCloseConsecutiveCount
+                )
 
                 try await application.connectionRoutingService.bind(connection, control: control)
 
@@ -400,6 +523,13 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         switch packet.type {
         case .heartbeat:
             let payload = (try? packet.payload.decodePayload(IMTCPHeartbeatPayload.self)) ?? IMTCPHeartbeatPayload(sequence: 0)
+            if case .authenticated(let connection) = state {
+                Task {
+                    await self.application.connectionRoutingService.refreshActiveConversationPresence(
+                        connectionID: connection.connectionID
+                    )
+                }
+            }
             writePacket(
                 type: .heartbeatAck,
                 requestID: packet.requestID,
@@ -496,6 +626,38 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             }
 
+        case .conversationActivity:
+            guard
+                let payload = try? packet.payload.decodePayload(IMTCPConversationActivityPayload.self),
+                let conversationID = UUID(uuidString: payload.conversationID),
+                case .authenticated(let connection) = state
+            else {
+                sendKickAndClose(
+                    channel: channel,
+                    reason: .protocolError,
+                    message: "Invalid conversation activity payload."
+                )
+                return
+            }
+
+            Task {
+                let didUpdate = await self.application.connectionRoutingService.updateConversationActivity(
+                    connectionID: connection.connectionID,
+                    conversationID: conversationID,
+                    isActive: payload.isActive
+                )
+                self.application.logger.debug(
+                    "IM TCP conversation activity updated",
+                    metadata: [
+                        "connectionID": .string(connection.connectionID.uuidString),
+                        "userID": .string(connection.userID.uuidString),
+                        "conversationID": .string(conversationID.uuidString),
+                        "isActive": .stringConvertible(payload.isActive),
+                        "didUpdate": .stringConvertible(didUpdate)
+                    ]
+                )
+            }
+
         case .ack:
             return
 
@@ -514,7 +676,13 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         payload: Payload,
         channel: any Channel
     ) {
-        IMTCPChannelWriter.writePacket(type: type, requestID: requestID, payload: payload, on: channel)
+        IMTCPChannelWriter.writePacket(
+            type: type,
+            requestID: requestID,
+            payload: payload,
+            on: channel,
+            metrics: application.routingMetrics
+        )
     }
 
     private func sendAuthErrorAndClose(
@@ -566,7 +734,12 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
             )
             removeAuthenticatedConnectionIfNeeded()
             state = .closing
-            IMTCPChannelWriter.sendKickAndClose(on: channel, reason: reason, message: message)
+            IMTCPChannelWriter.sendKickAndClose(
+                on: channel,
+                reason: reason,
+                message: message,
+                metrics: application.routingMetrics
+            )
             return
         }
     }

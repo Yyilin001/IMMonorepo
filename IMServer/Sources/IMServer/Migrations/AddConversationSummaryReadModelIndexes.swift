@@ -21,6 +21,11 @@ struct AddConversationSummaryReadModelIndexes: AsyncMigration {
             CREATE UNIQUE INDEX IF NOT EXISTS conversation_read_model_tokens_owner_idx
             ON conversation_read_model_tokens (owner_user_id)
             """).run()
+
+        try await sql.raw("""
+            CREATE INDEX IF NOT EXISTS conversation_activity_summaries_updated_idx
+            ON conversation_activity_summaries (updated_at ASC, conversation_id ASC)
+            """).run()
     }
 
     func revert(on database: any Database) async throws {
@@ -28,6 +33,7 @@ struct AddConversationSummaryReadModelIndexes: AsyncMigration {
             return
         }
 
+        try await sql.raw("DROP INDEX IF EXISTS conversation_activity_summaries_updated_idx").run()
         try await sql.raw("DROP INDEX IF EXISTS conversation_read_model_tokens_owner_idx").run()
         try await sql.raw("DROP INDEX IF EXISTS conversation_changes_log_owner_conversation_idx").run()
         try await sql.raw("DROP INDEX IF EXISTS conversation_changes_log_owner_updated_idx").run()

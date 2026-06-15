@@ -37,8 +37,16 @@ enum ConversationVisibilityAction: String, Codable, Equatable, Sendable {
     case conversationDeleted = "conversation_deleted"
 }
 
+struct ConversationMessageCreatedPreview: Codable, Equatable, Sendable {
+    let senderUserID: UUID
+    let serverSequence: UInt64
+    let timelineSequence: UInt64
+    let previewText: String
+    let createdAt: Date?
+}
+
 enum ConversationDomainEventPayload: Codable, Equatable, Sendable {
-    case messageCreated(messageID: UUID, recipientUserIDs: [UUID])
+    case messageCreated(messageID: UUID, recipientUserIDs: [UUID], preview: ConversationMessageCreatedPreview? = nil)
     case messageUpdated(messageID: UUID, recipientUserIDs: [UUID])
     case messageRecalled(messageID: UUID, recipientUserIDs: [UUID])
     case messageVisibilityChanged(messageIDs: [UUID], action: ConversationVisibilityAction, affectedUserID: UUID)
@@ -94,11 +102,12 @@ enum ConversationDomainEventPayload: Codable, Equatable, Sendable {
         case isFavorited
         case action
         case streamID
+        case messagePreview
     }
 
     var recipientUserIDs: [UUID] {
         switch self {
-        case .messageCreated(_, let ids),
+        case .messageCreated(_, let ids, _),
              .messageUpdated(_, let ids),
              .messageRecalled(_, let ids),
              .conversationCreated(let ids),
@@ -155,7 +164,7 @@ enum ConversationDomainEventPayload: Codable, Equatable, Sendable {
 
     var messageID: UUID? {
         switch self {
-        case .messageCreated(let id, _),
+        case .messageCreated(let id, _, _),
              .messageUpdated(let id, _),
              .messageRecalled(let id, _),
              .messageFavoriteChanged(let id, _, _),
@@ -212,6 +221,13 @@ enum ConversationDomainEventPayload: Codable, Equatable, Sendable {
             return nil
         }
         return id
+    }
+
+    var messageCreatedPreview: ConversationMessageCreatedPreview? {
+        guard case .messageCreated(_, _, let preview) = self else {
+            return nil
+        }
+        return preview
     }
 
     var isFavorited: Bool? {
@@ -298,8 +314,9 @@ enum ConversationDomainEventPayload: Codable, Equatable, Sendable {
         }
 
         switch self {
-        case .messageCreated(let messageID, let recipients),
-             .messageUpdated(let messageID, let recipients),
+        case .messageCreated(let messageID, _, _):
+            try Self.require(messageID)
+        case .messageUpdated(let messageID, let recipients),
              .messageRecalled(let messageID, let recipients):
             try Self.require(messageID)
             try Self.requireRecipients(recipients)
@@ -350,7 +367,8 @@ enum ConversationDomainEventPayload: Codable, Equatable, Sendable {
         case .messageCreated:
             self = .messageCreated(
                 messageID: try container.decode(UUID.self, forKey: .messageID),
-                recipientUserIDs: try container.decode([UUID].self, forKey: .recipientUserIDs)
+                recipientUserIDs: try container.decode([UUID].self, forKey: .recipientUserIDs),
+                preview: try container.decodeIfPresent(ConversationMessageCreatedPreview.self, forKey: .messagePreview)
             )
         case .messageUpdated:
             self = .messageUpdated(
@@ -439,10 +457,11 @@ enum ConversationDomainEventPayload: Codable, Equatable, Sendable {
     func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .messageCreated(let messageID, let recipients):
+        case .messageCreated(let messageID, let recipients, let preview):
             try container.encode(Kind.messageCreated, forKey: .kind)
             try container.encode(messageID, forKey: .messageID)
             try container.encode(recipients, forKey: .recipientUserIDs)
+            try container.encodeIfPresent(preview, forKey: .messagePreview)
         case .messageUpdated(let messageID, let recipients):
             try container.encode(Kind.messageUpdated, forKey: .kind)
             try container.encode(messageID, forKey: .messageID)

@@ -5,19 +5,29 @@ import Vapor
 
 struct DatabaseOutboxConversationEventBus: ConversationEventBus {
     let db: any Database
+    let domainEventMetrics: ConversationDomainEventMetrics?
+
+    init(db: any Database, domainEventMetrics: ConversationDomainEventMetrics? = nil) {
+        self.db = db
+        self.domainEventMetrics = domainEventMetrics
+    }
 
     func publish(
         type: ConversationDomainEventType,
         conversationID: UUID,
         actorUserID: UUID?,
         payload: ConversationDomainEventPayload,
+        recipientSnapshotUserIDs: [UUID]? = nil,
+        recipientSnapshotDeduplicationThreshold: Int = 0,
         on database: (any Database)? = nil
-    ) async throws {
-        try await ConversationOutboxService(db: db).enqueue(
+    ) async throws -> ConversationDomainEvent {
+        try await ConversationOutboxService(db: db, domainEventMetrics: domainEventMetrics).enqueue(
             type: type,
             conversationID: conversationID,
             actorUserID: actorUserID,
             payload: payload,
+            recipientSnapshotUserIDs: recipientSnapshotUserIDs,
+            recipientSnapshotDeduplicationThreshold: recipientSnapshotDeduplicationThreshold,
             on: database
         )
     }

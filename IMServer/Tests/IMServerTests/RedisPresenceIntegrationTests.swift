@@ -4,6 +4,47 @@ import Vapor
 
 @Suite("Redis presence integration tests")
 struct RedisPresenceIntegrationTests {
+    @Test("Active conversation route cache batches hits misses and negative routes")
+    func activeConversationRouteCacheBatchesHitsMissesAndNegativeRoutes() async throws {
+        let cache = RedisActiveConversationRouteCache(ttl: 60)
+        let conversationID = UUID()
+        let activeUserID = UUID()
+        let inactiveUserID = UUID()
+        let missingUserID = UUID()
+
+        await cache.store(
+            [
+                activeUserID: ["node-a"],
+                inactiveUserID: []
+            ],
+            conversationID: conversationID
+        )
+
+        let lookup = await cache.nodes(
+            conversationID: conversationID,
+            userIDs: [activeUserID, inactiveUserID, missingUserID]
+        )
+        #expect(lookup.cached[activeUserID] == ["node-a"])
+        #expect(lookup.cached[inactiveUserID] == [])
+        #expect(lookup.missing == [missingUserID])
+    }
+
+    @Test("Active conversation route cache ttl zero disables storage")
+    func activeConversationRouteCacheTTLZeroDisablesStorage() async throws {
+        let cache = RedisActiveConversationRouteCache(ttl: 0)
+        let conversationID = UUID()
+        let userID = UUID()
+
+        await cache.store([userID: ["node-a"]], conversationID: conversationID)
+
+        let lookup = await cache.nodes(
+            conversationID: conversationID,
+            userIDs: [userID]
+        )
+        #expect(lookup.cached.isEmpty)
+        #expect(lookup.missing == [userID])
+    }
+
     @Test("Redis presence routes user and session nodes when enabled")
     func redisPresenceRoutesUserAndSessionNodes() async throws {
         guard let redisURL = Environment.get("IM_REDIS_INTEGRATION_URL"), !redisURL.isEmpty else {
@@ -54,6 +95,189 @@ struct RedisPresenceIntegrationTests {
             #expect(sessionRoutes[sessionID] == [nodeB])
             #expect(activeNodes.contains(nodeA))
             #expect(activeNodes.contains(nodeB))
+
+            await backendB.shutdown()
+            await backendA.shutdown()
+            try await appB.asyncShutdown()
+            try await appA.asyncShutdown()
+        } catch {
+            await backendB.shutdown()
+            await backendA.shutdown()
+            try? await appB.asyncShutdown()
+            try? await appA.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("Redis presence routes active conversation users through conversation index")
+    func redisPresenceRoutesActiveConversationUsersThroughConversationIndex() async throws {
+        guard let redisURL = Environment.get("IM_REDIS_INTEGRATION_URL"), !redisURL.isEmpty else {
+            return
+        }
+
+        let suffix = UUID().uuidString.lowercased()
+        let nodeA = "redis-active-conversation-a-\(suffix)"
+        let nodeB = "redis-active-conversation-b-\(suffix)"
+        let configuration = IMRedisRoutingConfiguration(
+            url: redisURL,
+            mode: .redis,
+            maximumConnectionCount: 2,
+            activeConversationRouteTTLSeconds: 60
+        )
+        let appA = try await Application.make(.testing)
+        let appB = try await Application.make(.testing)
+        appA.imNodeID = nodeA
+        appB.imNodeID = nodeB
+        let backendA = try RedisConnectionRoutingBackend(
+            configuration: configuration,
+            nodeID: nodeA,
+            logger: appA.logger,
+            eventLoop: appA.eventLoopGroup.next()
+        )
+        let backendB = try RedisConnectionRoutingBackend(
+            configuration: configuration,
+            nodeID: nodeB,
+            logger: appB.logger,
+            eventLoop: appB.eventLoopGroup.next()
+        )
+
+        do {
+            try await backendA.start(app: appA)
+            try await backendB.start(app: appB)
+
+            let conversationID = UUID()
+            let activeUserA = UUID()
+            let activeUserB = UUID()
+            let inactiveUser = UUID()
+            try await backendA.presenceStore.activatePresence(forUserID: activeUserA)
+            try await backendB.presenceStore.activatePresence(forUserID: activeUserB)
+            try await backendA.presenceStore.activateConversationPresence(
+                conversationID: conversationID,
+                userID: activeUserA
+            )
+            try await backendB.presenceStore.activateConversationPresence(
+                conversationID: conversationID,
+                userID: activeUserB
+            )
+
+            var routes = try await backendA.presenceStore.routeNodeIDs(
+                forActiveConversationID: conversationID,
+                amongUserIDs: [activeUserA, activeUserB, inactiveUser]
+            )
+            #expect(routes[activeUserA] == [nodeA])
+            #expect(routes[activeUserB] == [nodeB])
+            #expect(routes[inactiveUser] == nil)
+
+            try await backendB.presenceStore.deactivateConversationPresence(
+                conversationID: conversationID,
+                userID: activeUserB
+            )
+            routes = try await backendA.presenceStore.routeNodeIDs(
+                forActiveConversationID: conversationID,
+                amongUserIDs: [activeUserA, activeUserB, inactiveUser]
+            )
+            #expect(routes[activeUserA] == [nodeA])
+            #expect(routes[activeUserB] == nil)
+
+            await backendB.shutdown()
+            await backendA.shutdown()
+            try await appB.asyncShutdown()
+            try await appA.asyncShutdown()
+        } catch {
+            await backendB.shutdown()
+            await backendA.shutdown()
+            try? await appB.asyncShutdown()
+            try? await appA.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("Redis presence reuses cached active conversation route nodes")
+    func redisPresenceReusesCachedActiveConversationRouteNodes() async throws {
+        guard let redisURL = Environment.get("IM_REDIS_INTEGRATION_URL"), !redisURL.isEmpty else {
+            return
+        }
+
+        let suffix = UUID().uuidString.lowercased()
+        let nodeA = "redis-active-conversation-cache-a-\(suffix)"
+        let nodeB = "redis-active-conversation-cache-b-\(suffix)"
+        let configuration = IMRedisRoutingConfiguration(
+            url: redisURL,
+            mode: .redis,
+            maximumConnectionCount: 2,
+            activeConversationRouteTTLSeconds: 60
+        )
+        let appA = try await Application.make(.testing)
+        let appB = try await Application.make(.testing)
+        appA.imNodeID = nodeA
+        appB.imNodeID = nodeB
+        let backendA = try RedisConnectionRoutingBackend(
+            configuration: configuration,
+            nodeID: nodeA,
+            logger: appA.logger,
+            eventLoop: appA.eventLoopGroup.next()
+        )
+        let backendB = try RedisConnectionRoutingBackend(
+            configuration: configuration,
+            nodeID: nodeB,
+            logger: appB.logger,
+            eventLoop: appB.eventLoopGroup.next()
+        )
+
+        do {
+            try await backendA.start(app: appA)
+            try await backendB.start(app: appB)
+
+            let conversationID = UUID()
+            let activeUserA = UUID()
+            let activeUserB = UUID()
+            let inactiveUser = UUID()
+            try await backendA.presenceStore.activatePresence(forUserID: activeUserA)
+            try await backendB.presenceStore.activatePresence(forUserID: activeUserB)
+            try await backendA.presenceStore.activateConversationPresence(
+                conversationID: conversationID,
+                userID: activeUserA
+            )
+            try await backendB.presenceStore.activateConversationPresence(
+                conversationID: conversationID,
+                userID: activeUserB
+            )
+
+            let firstRoutes = try await backendA.presenceStore.routeNodeIDs(
+                forActiveConversationID: conversationID,
+                amongUserIDs: [activeUserA, activeUserB, inactiveUser]
+            )
+            #expect(firstRoutes[activeUserA] == [nodeA])
+            #expect(firstRoutes[activeUserB] == [nodeB])
+            #expect(firstRoutes[inactiveUser] == nil)
+
+            let afterFirstLookup = await appA.routingMetrics.currentSnapshot()
+            let secondRoutes = try await backendA.presenceStore.routeNodeIDs(
+                forActiveConversationID: conversationID,
+                amongUserIDs: [activeUserA, activeUserB, inactiveUser]
+            )
+            #expect(secondRoutes[activeUserA] == [nodeA])
+            #expect(secondRoutes[activeUserB] == [nodeB])
+            #expect(secondRoutes[inactiveUser] == nil)
+
+            let afterSecondLookup = await appA.routingMetrics.currentSnapshot()
+            #expect(
+                afterSecondLookup.redisPresencePipelineLookupCount
+                    == afterFirstLookup.redisPresencePipelineLookupCount
+            )
+            #expect(
+                afterFirstLookup.redisPresenceRouteCacheMisses >= 2
+            )
+            #expect(
+                afterFirstLookup.redisPresenceActiveConversationNodeIndexLookupCount >= 1
+            )
+            #expect(
+                afterFirstLookup.redisPresenceActiveConversationNodeIndexLookupNodeCount <= 2
+            )
+            #expect(
+                afterSecondLookup.redisPresenceRouteCacheHits
+                    >= afterFirstLookup.redisPresenceRouteCacheHits + 3
+            )
 
             await backendB.shutdown()
             await backendA.shutdown()

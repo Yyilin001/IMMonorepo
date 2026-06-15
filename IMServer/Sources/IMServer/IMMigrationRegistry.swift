@@ -58,12 +58,45 @@ enum IMMigrationRegistry {
         app.migrations.add(AddConversationSummaryReadModelIndexes())
         app.migrations.add(CreateConversationEventAuxiliaryReadModelTables())
         app.migrations.add(AddConversationEventAuxiliaryReadModelIndexes())
+        app.migrations.add(CreateConversationDomainEventRecipientSet())
+        app.migrations.add(CreateConversationDomainEventRecipientSetMembers())
+        app.migrations.add(CreateConversationDomainEventRecipientSnapshot())
+        app.migrations.add(AddConversationDomainEventRecipientSnapshotHash())
         app.migrations.add(AddConversationSearchIndexLowerTrigramIndex())
         app.migrations.add(CreateIMCommonFeatureTables())
+        app.migrations.add(AddIMCommonFeatureVisibilityIndexes())
         app.migrations.add(AddReportSnapshotFields())
         app.migrations.add(CreateAIMessageStreamIndex())
         app.migrations.add(EnforceV8SequenceInvariants())
         app.migrations.add(RepairLegacyUserProfileColumns())
+        app.migrations.add(CreateConversationActivitySummaryReadModel())
+        app.migrations.add(AddLargeGroupSummaryReadPathIndexes())
+        app.migrations.add(AddTimelineReadPathIndexes())
+        registerSummaryReadModelMigrations(app)
+    }
+
+    private static func registerSummaryReadModelMigrations(_ app: Application) {
+        var databaseIDs: Set<DatabaseID> = []
+        if app.imSummaryDatabaseEnabled {
+            databaseIDs.insert(.imSummary)
+        }
+        for databaseID in app.summaryShardDatabaseIDs.values {
+            databaseIDs.insert(databaseID)
+        }
+
+        for databaseID in databaseIDs {
+            app.migrations.add([
+                CreateConversationUserSummary(),
+                AddConversationUserSummaryMembershipRevision(),
+                AddConversationUserSummaryDirectPeerProfileFields(),
+                AddConversationUserSummaryIndexes(),
+                AddConversationUserSummaryListOrderIndex(),
+                CreateConversationSummaryReadModelTables(),
+                AddConversationSummaryReadModelIndexes(),
+                CreateConversationActivitySummaryReadModel(),
+                AddLargeGroupSummaryReadPathIndexes()
+            ], to: databaseID)
+        }
     }
 
     static func resetIMSchemaIfRequested(_ app: Application) async throws {
@@ -87,7 +120,11 @@ enum IMMigrationRegistry {
             ConversationDirectoryEntry.schema,
             ConversationReadModelToken.schema,
             ConversationChangesLogEntry.schema,
+            ConversationActivitySummary.schema,
             ConversationReplayRecord.schema,
+            ConversationDomainEventRecipientSnapshot.schema,
+            ConversationDomainEventRecipientSetMember.schema,
+            ConversationDomainEventRecipientSet.schema,
             ConversationNotificationEntry.schema,
             MessageReceipt.schema,
             AIMessageStreamIndex.schema,
@@ -204,11 +241,19 @@ private let imMigrationNames: [String] = [
     "AddConversationSummaryReadModelIndexes",
     "CreateConversationEventAuxiliaryReadModelTables",
     "AddConversationEventAuxiliaryReadModelIndexes",
+    "CreateConversationDomainEventRecipientSet",
+    "CreateConversationDomainEventRecipientSetMembers",
+    "CreateConversationDomainEventRecipientSnapshot",
+    "AddConversationDomainEventRecipientSnapshotHash",
     "AddConversationSearchIndexLowerTrigramIndex",
     "CreateIMCommonFeatureTables",
+    "AddIMCommonFeatureVisibilityIndexes",
     "AddReportSnapshotFields",
     "CreateAIMessageStreamIndex",
-    "CreateContactChangesLog"
+    "CreateContactChangesLog",
+    "CreateConversationActivitySummaryReadModel",
+    "AddLargeGroupSummaryReadPathIndexes",
+    "AddTimelineReadPathIndexes"
 ]
 
 private struct ResetIMSchemaStorageKey: StorageKey {

@@ -59,13 +59,17 @@ Required production posture:
 - `IM_AUTO_MIGRATE_ON_START` is unset or `false` for `gateway`, `command-api`, `query-api`, `outbox-relay`, and `stream-consumer`.
 - `IM_AUTO_MIGRATE_ON_START=true` is allowed only for the `ops` role during an explicit migration window.
 - `IM_INLINE_OUTBOX_PROJECTION` is unset or `false`; production event flow must use `outbox-relay` and `stream-consumer`.
+- Gateway sets `IM_COMMAND_API_INTERNAL_BASE_URL` and `IM_INTERNAL_SHARED_SECRET` so IM command ingress is proxied to command-api over authenticated internal traffic.
+- `domain-delivery-consumer` and `realtime-delivery-consumer` stream processes set `IM_GATEWAY_RELAY_MODE=http`, `IM_GATEWAY_INTERNAL_BASE_URL`, and the same `IM_INTERNAL_SHARED_SECRET` as gateway, so large-group realtime relay cannot silently fall back to local-only delivery.
 - `IM_EVENT_STREAM_DRIVER=kafka` for command, relay, and stream roles.
+- `IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE=compact-only` on gateway and realtime/domain delivery stream roles, so hot large groups use lightweight realtime hints plus `timeline/since` catch-up instead of bounded full-message realtime fanout.
+- Kafka production env uses `IM_KAFKA_REQUIRED_ACKS=all`, `IM_KAFKA_SECURITY_PROTOCOL=sasl_tls`, `IM_KAFKA_SASL_MECHANISM=scram-sha-512`, and explicit SASL username/password plus `IM_KAFKA_TLS_CA_FILE`.
 - `IM_SUMMARY_PROJECTION_WRITE_MODE=sharded` outside temporary `ops` migration windows.
 - `IM_SUMMARY_QUERY_READ_SOURCE=sharded` outside temporary `ops` migration windows.
-- `IM_CONVERSATION_SHARD_IDS` and all matching `DATABASE_CONVERSATION_<SHARD>_*` values are present.
-- `IM_SUMMARY_SHARD_IDS` and all matching `DATABASE_SUMMARY_<SHARD>_*` values are present.
-- `MEDIA_STORAGE_PROVIDER=s3compatible` for `command-api`.
-- `IM_SEQUENCE_ALLOCATION_MODE=block`, `IM_MESSAGE_WRITE_BATCH_ENABLED=true`, and `IM_GROUP_MEMBER_LIMIT=500` for production small-group capacity.
+- `IM_CONVERSATION_SHARD_IDS` and every matching `DATABASE_CONVERSATION_<SHARD>_{HOST,PORT,USERNAME,PASSWORD,NAME}` value are present.
+- `IM_SUMMARY_SHARD_IDS` and every matching `DATABASE_SUMMARY_<SHARD>_{HOST,PORT,USERNAME,PASSWORD,NAME}` value are present.
+- `MEDIA_STORAGE_PROVIDER=s3compatible` for `command-api`, with explicit S3 endpoint, bucket, access key, secret key, region, and path-style setting.
+- `IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT`, `IM_SEQUENCE_ALLOCATION_MODE=block`, matching `IM_COMMAND_NODE_ID` / `IM_COMMAND_NODE_URLS`, `IM_COMMAND_INTERNAL_SHARED_SECRET` or `IM_INTERNAL_SHARED_SECRET`, `IM_MESSAGE_WRITE_BATCH_ENABLED=true`, and an explicit `IM_GROUP_MEMBER_LIMIT` for production capacity. The current large-group template uses `1000`; keep the same value on `command-api` and `stream-consumer`, and keep it at or above `IM_MESSAGE_CREATED_RECIPIENT_INLINE_THRESHOLD`.
 - `/internal/metrics` is enabled only on private networking.
 
 ## Production Startup Guards
@@ -88,6 +92,16 @@ Required production posture:
 
 ## Production Acceptance Commands
 
+The command-level release gate is documented in
+[im-production-release-gate.md](im-production-release-gate.md). Use that runbook
+as the source of truth for local smoke gates, full release gates, real env
+preflight, CI artifacts, and failure handling.
+
+- `cd IMServer && scripts/production_release_gate.sh --command-api /etc/im/command-api.env --gateway /etc/im/gateway.env --query-api /etc/im/query-api.env --outbox-relay /etc/im/outbox-relay.env --ops /etc/im/ops.env --stream-consumer /etc/im/stream-summary.env --stream-consumer /etc/im/stream-domain.env --stream-consumer /etc/im/stream-realtime.env --stream-consumer /etc/im/stream-notification.env --strict-secrets --require-groups summary-projection-consumer,domain-delivery-consumer,realtime-delivery-consumer,notification-consumer`
+- `cd IMServer && scripts/production_env_preflight.sh`
+- `cd IMServer && scripts/production_env_preflight_test.sh`
+- `cd IMServer && LoadTests/tcp_capacity_ladder_test.sh`
+- `cd IMServer && scripts/production_env_preflight.sh --command-api /etc/im/command-api.env --gateway /etc/im/gateway.env --query-api /etc/im/query-api.env --outbox-relay /etc/im/outbox-relay.env --ops /etc/im/ops.env --stream-consumer /etc/im/stream-summary.env --stream-consumer /etc/im/stream-domain.env --stream-consumer /etc/im/stream-realtime.env --stream-consumer /etc/im/stream-notification.env --strict-secrets --require-groups summary-projection-consumer,domain-delivery-consumer,realtime-delivery-consumer,notification-consumer`
 - `cd IMServer && swift test --no-parallel`
 - `cd IMServer && IM_POSTGRES_SMOKE_DATABASE_URL=postgres://user:password@127.0.0.1:5432/imserver_smoke swift test --no-parallel`
 - `IM_ENV=production IM_RUNTIME_ROLE=combined swift run IMServer serve` must fail.
@@ -95,6 +109,12 @@ Required production posture:
 - `IM_ENV=production IM_RUNTIME_ROLE=gateway IM_AUTO_MIGRATE_ON_START=true swift run IMServer serve` must fail.
 - `IM_ENV=production IM_RUNTIME_ROLE=command-api IM_INLINE_OUTBOX_PROJECTION=true swift run IMServer serve` must fail.
 - Start each production role with its required env and confirm only role-owned routes are reachable.
+
+`production_release_gate.sh` writes a timestamped markdown report plus per-step
+`.log` files under `reports/`; CI uploads them as the
+`imserver-production-release-gate-reports` artifact. The release gate runs
+`swift test --no-parallel` by default; use `--skip-swift-tests` only for a local
+fast smoke gate that is not release acceptance evidence.
 
 ## Production Go / No-Go Checklist
 
@@ -110,4 +130,4 @@ Go only when all checks pass:
 - OpenSearch failure, when enabled, does not break primary message writes.
 - Hot conversation limiter rejects overload without changing the TCP packet shape.
 
-No-Go if any production process runs `combined`, runs `projection-worker`, auto-migrates outside `ops`, enables inline outbox projection, reads legacy summaries, writes legacy summaries outside an explicit `ops` transition, exposes public metrics, or bypasses conversation shard routing.
+No-Go if any production process runs `combined`, runs `projection-worker`, auto-migrates outside `ops`, enables inline outbox projection, reads legacy summaries, writes legacy summaries outside an explicit `ops` transition, exposes public metrics, bypasses conversation shard routing, enables active-conversation unsplit fallback, uses non-`compact-only` active full fanout, or uses non-`pull-only` inactive conversation hints.

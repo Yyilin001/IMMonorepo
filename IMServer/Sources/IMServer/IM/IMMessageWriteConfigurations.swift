@@ -79,7 +79,7 @@ struct IMConversationMemberCacheConfiguration: Sendable {
 
     static func load(from environment: Environment) -> IMConversationMemberCacheConfiguration {
         IMConversationMemberCacheConfiguration(
-            ttlSeconds: max(0, Environment.get("IM_CONVERSATION_MEMBER_CACHE_TTL_SECONDS").flatMap(Int.init(_:)) ?? 10)
+            ttlSeconds: max(0, Environment.get("IM_CONVERSATION_MEMBER_CACHE_TTL_SECONDS").flatMap(Int.init(_:)) ?? 300)
         )
     }
 }
@@ -106,6 +106,41 @@ struct IMMessageWriteBatchConfiguration: Sendable {
                 Environment.get("IM_MESSAGE_WRITE_BATCH_MAX_QUEUE_DEPTH").flatMap(Int.init(_:)) ?? 1_024
             )
         )
+    }
+}
+
+struct IMMessageCreatedRecipientInlineConfiguration: Sendable {
+    let threshold: Int
+
+    static func load(from environment: Environment) -> IMMessageCreatedRecipientInlineConfiguration {
+        IMMessageCreatedRecipientInlineConfiguration(
+            threshold: max(
+                0,
+                Environment.get("IM_MESSAGE_CREATED_RECIPIENT_INLINE_THRESHOLD").flatMap(Int.init(_:)) ?? 0
+            )
+        )
+    }
+
+    func shouldInlineRecipients(recipientCount: Int) -> Bool {
+        threshold == 0 || recipientCount < threshold
+    }
+}
+
+struct IMDomainEventRecipientSnapshotConfiguration: Sendable {
+    let deduplicationThreshold: Int
+
+    static func load(from environment: Environment) -> IMDomainEventRecipientSnapshotConfiguration {
+        let inlineThreshold = Environment.get("IM_MESSAGE_CREATED_RECIPIENT_INLINE_THRESHOLD").flatMap(Int.init(_:)) ?? 0
+        return IMDomainEventRecipientSnapshotConfiguration(
+            deduplicationThreshold: max(
+                0,
+                Environment.get("IM_DOMAIN_EVENT_RECIPIENT_SNAPSHOT_DEDUP_THRESHOLD").flatMap(Int.init(_:)) ?? inlineThreshold
+            )
+        )
+    }
+
+    func shouldDeduplicateSnapshot(recipientCount: Int) -> Bool {
+        deduplicationThreshold > 0 && recipientCount >= deduplicationThreshold
     }
 }
 

@@ -20,11 +20,12 @@ struct Options: Sendable {
         .flatMap(Double.init(_:)) ?? 0
     var messageSenderEvery = ProcessInfo.processInfo.environment["IM_TCP_MESSAGE_SENDER_EVERY"].flatMap(Int.init(_:)) ?? 1
     var messageReceiverOffset = ProcessInfo.processInfo.environment["IM_TCP_MESSAGE_RECEIVER_OFFSET"].flatMap(Int.init(_:)) ?? 1
+    var activeConversationUsers = ProcessInfo.processInfo.environment["IM_TCP_ACTIVE_CONVERSATION_USERS"].flatMap(Int.init(_:)) ?? 0
     var holdSeconds = 0
     var connectRampSeconds = 0
     var loginConcurrency = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_CONCURRENCY"].flatMap(Int.init(_:)) ?? 5
     var timeoutSeconds = 20
-    var protocolVersion = ProcessInfo.processInfo.environment["IM_TCP_PROTOCOL_VERSION"].flatMap(UInt64.init(_:)) ?? 9
+    var protocolVersion = ProcessInfo.processInfo.environment["IM_TCP_PROTOCOL_VERSION"].flatMap(UInt64.init(_:)) ?? 12
     var connectionLogFile: String?
     var heartbeatIntervalSeconds = ProcessInfo.processInfo.environment["IM_TCP_HEARTBEAT_INTERVAL"].flatMap(Int.init(_:)) ?? 0
     var heartbeatJitterSeconds = ProcessInfo.processInfo.environment["IM_TCP_HEARTBEAT_JITTER_SECONDS"].flatMap(Int.init(_:)) ?? -1
@@ -43,6 +44,8 @@ struct Options: Sendable {
     var reconnectDelayMillis = ProcessInfo.processInfo.environment["IM_TCP_RECONNECT_DELAY_MS"].flatMap(Int.init(_:)) ?? 1_000
     var loginRetries = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_RETRIES"].flatMap(Int.init(_:)) ?? 2
     var loginRetryDelayMillis = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_RETRY_DELAY_MS"].flatMap(Int.init(_:)) ?? 1_000
+    var globalHoldBarrierMinRatio = ProcessInfo.processInfo.environment["IM_TCP_GLOBAL_HOLD_BARRIER_MIN_RATIO"]
+        .flatMap(Double.init(_:)) ?? 1.0
 }
 
 struct LoginResponse: Codable, Sendable {
@@ -452,6 +455,8 @@ func parseOptions() -> Options {
             options.messageSenderEvery = max(1, Int(value) ?? options.messageSenderEvery)
         case "--message-receiver-offset":
             options.messageReceiverOffset = Int(value) ?? options.messageReceiverOffset
+        case "--active-conversation-users":
+            options.activeConversationUsers = max(0, Int(value) ?? options.activeConversationUsers)
         case "--hold-seconds":
             options.holdSeconds = max(0, Int(value) ?? options.holdSeconds)
         case "--connect-ramp-seconds":
@@ -492,10 +497,14 @@ func parseOptions() -> Options {
             options.loginRetries = max(0, Int(value) ?? options.loginRetries)
         case "--login-retry-delay-ms":
             options.loginRetryDelayMillis = max(0, Int(value) ?? options.loginRetryDelayMillis)
+        case "--global-hold-barrier-min-ratio":
+            options.globalHoldBarrierMinRatio = Double(value) ?? options.globalHoldBarrierMinRatio
         default:
             continue
         }
     }
+    options.globalHoldBarrierMinRatio = min(1.0, max(0.0, options.globalHoldBarrierMinRatio))
+    options.activeConversationUsers = min(options.connections, max(0, options.activeConversationUsers))
     options.messageProfile = options.messageProfile.lowercased()
     if !["per-connection", "pair-delivery"].contains(options.messageProfile) {
         options.messageProfile = "per-connection"
@@ -927,6 +936,21 @@ enum ProtoWire {
 
         var packet = packetBase(requestID: requestID, protocolVersion: protocolVersion)
         packet.writeMessage(field: 20, heartbeat)
+        return frame(packet)
+    }
+
+    static func conversationActivityFrame(
+        conversationID: String,
+        isActive: Bool,
+        requestID: String,
+        protocolVersion: UInt64
+    ) -> Data {
+        var activity = Data()
+        activity.writeString(field: 1, conversationID)
+        activity.writeVarint(field: 2, isActive ? 1 : 0)
+
+        var packet = packetBase(requestID: requestID, protocolVersion: protocolVersion)
+        packet.writeMessage(field: 60, activity)
         return frame(packet)
     }
 
@@ -1527,9 +1551,17 @@ func expectedDeliveryCounts(options: Options, senders: [Int]) -> [Int] {
     }
     for senderIndex in senders {
         let receiverIndex = (senderIndex + options.messageReceiverOffset) % options.connections
+        if options.activeConversationUsers > 0,
+           !isActiveConversationConnection(index: receiverIndex, options: options) {
+            continue
+        }
         counts[receiverIndex] += scheduledMessagesForConnection(index: senderIndex, options: options, senders: senders).count
     }
     return counts
+}
+
+func isActiveConversationConnection(index: Int, options: Options) -> Bool {
+    options.activeConversationUsers > 0 && index < options.activeConversationUsers
 }
 
 func receiveFrames(
@@ -1781,6 +1813,47 @@ func runConnection(
         }
 
         @Sendable func scheduleWorkAfterAuth(connection: NWConnection, generation: Int, shouldStartMessages: Bool) {
+            if isActiveConversationConnection(index: index, options: options) {
+                let requestID = UUID().uuidString
+                let activityPacket = ProtoWire.conversationActivityFrame(
+                    conversationID: options.conversationID,
+                    isActive: true,
+                    requestID: requestID,
+                    protocolVersion: options.protocolVersion
+                )
+                logger.log(
+                    "conversation_activity_send_start",
+                    connectionIndex: index,
+                    loginIndex: login.loginIndex,
+                    fields: [
+                        "generation": String(generation),
+                        "requestID": requestID,
+                        "conversationID": options.conversationID,
+                        "isActive": "true"
+                    ]
+                )
+                connection.send(content: activityPacket, completion: .contentProcessed { error in
+                    if let error {
+                        logger.log(
+                            "conversation_activity_send_error",
+                            connectionIndex: index,
+                            loginIndex: login.loginIndex,
+                            fields: [
+                                "generation": String(generation),
+                                "error": String(describing: error)
+                            ]
+                        )
+                        handleDisconnected(generation: generation, reason: "send_conversation_activity_error:\(error)")
+                        return
+                    }
+                    logger.log(
+                        "conversation_activity_send_ok",
+                        connectionIndex: index,
+                        loginIndex: login.loginIndex,
+                        fields: ["generation": String(generation)]
+                    )
+                })
+            }
             scheduleHeartbeatLoop(
                 connection: connection,
                 state: state,
@@ -2246,6 +2319,7 @@ connectionLogger.log(
         "messageRatePerSecond": String(options.messageRatePerSecond),
         "messageSenderEvery": String(options.messageSenderEvery),
         "messageReceiverOffset": String(options.messageReceiverOffset),
+        "activeConversationUsers": String(options.activeConversationUsers),
         "holdSeconds": String(options.holdSeconds),
         "connectRampSeconds": String(options.connectRampSeconds),
         "loginConcurrency": String(options.loginConcurrency),
@@ -2264,7 +2338,8 @@ connectionLogger.log(
         "requireLoginCache": String(options.requireLoginCache),
         "loginCacheTTLGuardSeconds": String(options.loginCacheTTLGuardSeconds),
         "loginOnly": String(options.loginOnly),
-        "loginMode": options.loginMode
+        "loginMode": options.loginMode,
+        "globalHoldBarrierMinRatio": String(options.globalHoldBarrierMinRatio)
     ]
 )
 let accountCredentials = try loadAccountCredentials(options: options)
@@ -2332,8 +2407,9 @@ let globalLastMessageDelayMillis = scheduledMessagesByConnection.flatMap { $0 }.
 let messageResultTimeoutDelayMillis = globalLastMessageDelayMillis + options.timeoutSeconds * 1_000
 let messageDeliveryTracker = options.messageProfile == "pair-delivery" ? MessageDeliveryTracker() : nil
 let usesGlobalStartBarrier = options.messagesPerConnection == 0 || options.messageProfile == "pair-delivery"
+let globalHoldBarrierTarget = max(1, Int(ceil(Double(options.connections) * options.globalHoldBarrierMinRatio)))
 let globalHoldBarrier = usesGlobalStartBarrier
-    ? GlobalHoldBarrier(target: options.connections, logger: connectionLogger)
+    ? GlobalHoldBarrier(target: globalHoldBarrierTarget, logger: connectionLogger)
     : nil
 if let globalHoldBarrier {
     let barrierTimeoutSeconds = options.connectRampSeconds + options.timeoutSeconds + 5
@@ -2341,7 +2417,9 @@ if let globalHoldBarrier {
     connectionLogger.log(
         "global_hold_barrier_enabled",
         fields: [
-            "target": String(options.connections),
+            "target": String(globalHoldBarrierTarget),
+            "connections": String(options.connections),
+            "minRatio": String(options.globalHoldBarrierMinRatio),
             "messageProfile": options.messageProfile,
             "messageCompletionMode": options.messageCompletionMode,
             "timeoutSeconds": String(barrierTimeoutSeconds)
@@ -2469,7 +2547,7 @@ let deliverySuccessRate = expectedDeliveries == 0 ? 0 : Double(deliveredMessages
 
 print("profile=\(options.profile) connections=\(options.connections) accounts=\(accountCredentials.count) devicesPerUser=\(options.devicesPerUser) queuePoolSize=\(connectionQueuePool.size) maxReconnects=\(options.maxReconnects) successes=\(successes) elapsed=\(String(format: "%.2f", elapsed))s")
 print("loginCacheHit=\(loginCacheHit) loginCacheRecords=\(loginCacheRecords) loginCacheValidForSeconds=\(loginCacheValidForSeconds) requireLoginCache=\(options.requireLoginCache)")
-print("globalHoldBarrier=\(globalHoldBarrier != nil) messageProfile=\(options.messageProfile) messageCompletionMode=\(options.messageCompletionMode) messageRatePerSecond=\(options.messageRatePerSecond) expectedCanonical=\(expectedCanonicalMessages) expectedDeliveries=\(expectedDeliveries)")
+print("globalHoldBarrier=\(globalHoldBarrier != nil) globalHoldBarrierTarget=\(globalHoldBarrierTarget) globalHoldBarrierMinRatio=\(options.globalHoldBarrierMinRatio) messageProfile=\(options.messageProfile) messageCompletionMode=\(options.messageCompletionMode) messageRatePerSecond=\(options.messageRatePerSecond) activeConversationUsers=\(options.activeConversationUsers) expectedCanonical=\(expectedCanonicalMessages) expectedDeliveries=\(expectedDeliveries)")
 print("sent=\(sent) ack=\(acknowledgements) canonical=\(canonicalMessages) duplicateCanonical=\(duplicateCanonicalMessages) delivered=\(deliveredMessages) duplicateDelivered=\(duplicateDeliveredMessages) fanout=\(fanoutMessages) reconnects=\(reconnects) serverErrors=\(serverErrors)")
 print("heartbeat sent=\(heartbeatSends) ack=\(heartbeatAcks) intervalSeconds=\(options.heartbeatIntervalSeconds)")
 print("heartbeatSendCompletionMs p50=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.50))) p95=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.95))) p99=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.99)))")
@@ -2514,9 +2592,12 @@ connectionLogger.log(
         "messageProfile": options.messageProfile,
         "messageCompletionMode": options.messageCompletionMode,
         "messageRatePerSecond": String(options.messageRatePerSecond),
+        "activeConversationUsers": String(options.activeConversationUsers),
         "loginCacheHit": String(loginCacheHit),
         "loginCacheRecords": String(loginCacheRecords),
         "loginCacheValidForSeconds": String(loginCacheValidForSeconds),
+        "globalHoldBarrierTarget": String(globalHoldBarrierTarget),
+        "globalHoldBarrierMinRatio": String(options.globalHoldBarrierMinRatio),
         "elapsedMs": String(Int(elapsed * 1_000))
     ]
 )

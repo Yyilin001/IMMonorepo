@@ -52,15 +52,24 @@ extension Application {
     }
 
     var gatewaySessionService: GatewaySessionService {
+        if !imRuntimeRole.servesGateway, gatewayRelayConfiguration.mode == .http {
+            return GatewaySessionService(
+                transport: HTTPGatewaySessionTransport(app: self, configuration: gatewayRelayConfiguration),
+                routingMetrics: routingMetrics
+            )
+        }
+
         if hasConnectionRoutingServiceConfigured {
             return GatewaySessionService(
-                transport: LocalGatewaySessionTransport(routingService: connectionRoutingService)
+                transport: LocalGatewaySessionTransport(routingService: connectionRoutingService),
+                routingMetrics: routingMetrics
             )
         }
 
         if gatewayRelayConfiguration.mode == .http {
             return GatewaySessionService(
-                transport: HTTPGatewaySessionTransport(app: self, configuration: gatewayRelayConfiguration)
+                transport: HTTPGatewaySessionTransport(app: self, configuration: gatewayRelayConfiguration),
+                routingMetrics: routingMetrics
             )
         }
 
@@ -68,7 +77,8 @@ extension Application {
             transport: LoggingUnavailableGatewaySessionTransport(
                 logger: logger,
                 role: imRuntimeRole
-            )
+            ),
+            routingMetrics: routingMetrics
         )
     }
 
@@ -173,6 +183,19 @@ struct GatewayRelayDomainEventPayloadRequest: Content {
     let payloadBase64: String
     let recipientUserIDs: [UUID]
     let requestID: UUID?
+    let fanoutIntent: IMGatewayDomainEventFanoutIntent?
+
+    init(
+        payloadBase64: String,
+        recipientUserIDs: [UUID],
+        requestID: UUID?,
+        fanoutIntent: IMGatewayDomainEventFanoutIntent? = nil
+    ) {
+        self.payloadBase64 = payloadBase64
+        self.recipientUserIDs = recipientUserIDs
+        self.requestID = requestID
+        self.fanoutIntent = fanoutIntent
+    }
 }
 
 struct GatewayRelayDomainEventPayloadBatchRequest: Content {

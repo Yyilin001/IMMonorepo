@@ -8,17 +8,30 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
     private let nodeID: String
     private let logger: Logger
     private let heartbeatTimeoutSeconds: Int
+    private let activeConversationRouteTTLSeconds: Int
     private let routeCache = RedisPresenceRouteCache(ttl: 2)
     private let sessionRouteCache = RedisPresenceRouteCache(ttl: 2)
+    private let activeConversationRouteCache: RedisActiveConversationRouteCache
     private let activeNodeCache = RedisPresenceActiveNodeCache(ttl: 2)
     private let heartbeatThrottle = RedisPresenceHeartbeatThrottle(minimumInterval: 1)
     private var metrics: RoutingMetrics?
 
-    init(pool: RedisConnectionPool, nodeID: String, logger: Logger, heartbeatTimeoutSeconds: Int = 90) {
+    init(
+        pool: RedisConnectionPool,
+        nodeID: String,
+        logger: Logger,
+        heartbeatTimeoutSeconds: Int = 90,
+        activeConversationRouteTTLSeconds: Int = 900,
+        activeConversationRouteCacheTTLSeconds: Int = 2
+    ) {
         self.pool = pool
         self.nodeID = nodeID
         self.logger = logger
         self.heartbeatTimeoutSeconds = heartbeatTimeoutSeconds
+        self.activeConversationRouteTTLSeconds = max(heartbeatTimeoutSeconds, activeConversationRouteTTLSeconds)
+        self.activeConversationRouteCache = RedisActiveConversationRouteCache(
+            ttl: TimeInterval(max(0, activeConversationRouteCacheTTLSeconds))
+        )
     }
 
     var backendName: String { "redis" }
@@ -64,6 +77,130 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         _ = try await pool.srem(nodeID, from: sessionRouteKey(for: sessionID)).get()
         _ = try await pool.srem(sessionID.uuidString.lowercased(), from: nodeSessionsKey(for: nodeID)).get()
         await sessionRouteCache.invalidate(sessionID)
+    }
+
+    func activateConversationPresence(conversationID: UUID, userID: UUID) async throws {
+        try await refreshHeartbeat()
+        let routeKey = activeConversationRouteKey(conversationID: conversationID, userID: userID)
+        let nodeIndexKey = nodeActiveConversationUsersKey(for: nodeID)
+        let conversationIndexKey = activeConversationUsersKey(conversationID: conversationID)
+        let nodeConversationUsersKey = activeConversationNodeUsersKey(
+            conversationID: conversationID,
+            nodeID: nodeID
+        )
+        let userIDString = userID.uuidString.lowercased()
+        _ = try await pool.sadd(nodeID, to: routeKey).get()
+        _ = try await pool.sadd(
+            activeConversationRouteEntry(conversationID: conversationID, userID: userID),
+            to: nodeIndexKey
+        ).get()
+        _ = try await pool.sadd(userIDString, to: conversationIndexKey).get()
+        _ = try await pool.sadd(userIDString, to: nodeConversationUsersKey).get()
+        try await refreshActiveConversationRouteTTL(
+            routeKey: routeKey,
+            nodeIndexKey: nodeIndexKey,
+            conversationIndexKey: conversationIndexKey,
+            nodeConversationUsersKey: nodeConversationUsersKey
+        )
+        await activeConversationRouteCache.store([nodeID], conversationID: conversationID, userID: userID)
+        await activeNodeCache.invalidate()
+    }
+
+    func deactivateConversationPresence(conversationID: UUID, userID: UUID) async throws {
+        try await refreshHeartbeat()
+        _ = try await pool.srem(nodeID, from: activeConversationRouteKey(conversationID: conversationID, userID: userID)).get()
+        _ = try await pool.srem(
+            activeConversationRouteEntry(conversationID: conversationID, userID: userID),
+            from: nodeActiveConversationUsersKey(for: nodeID)
+        ).get()
+        _ = try await pool.srem(userID.uuidString.lowercased(), from: activeConversationUsersKey(conversationID: conversationID)).get()
+        let nodeConversationUsersKey = activeConversationNodeUsersKey(
+            conversationID: conversationID,
+            nodeID: nodeID
+        )
+        _ = try await pool.srem(userID.uuidString.lowercased(), from: nodeConversationUsersKey).get()
+        if try await pool.scard(of: nodeConversationUsersKey).get() == 0 {
+            _ = try await pool.delete(nodeConversationUsersKey).get()
+        }
+        await activeConversationRouteCache.invalidate(conversationID: conversationID, userID: userID)
+    }
+
+    func routeNodeIDs(
+        forActiveConversationID conversationID: UUID,
+        amongUserIDs userIDs: [UUID]
+    ) async throws -> [UUID: Set<String>] {
+        try await refreshHeartbeat()
+        let requestedUserIDs = Set(userIDs)
+        let activeNodeIDs = Set(try await cachedActiveNodeIDs())
+        guard !requestedUserIDs.isEmpty, !activeNodeIDs.isEmpty else {
+            return [:]
+        }
+
+        let cachedLookup = await activeConversationRouteCache.nodes(
+            conversationID: conversationID,
+            userIDs: requestedUserIDs
+        )
+        if !cachedLookup.cached.isEmpty {
+            await metrics?.recordRedisPresenceRouteCacheHit(count: cachedLookup.cached.count)
+        }
+        if !cachedLookup.missing.isEmpty {
+            await metrics?.recordRedisPresenceRouteCacheMiss(count: cachedLookup.missing.count)
+        }
+
+        var result: [UUID: Set<String>] = [:]
+        for (userID, cachedRoutes) in cachedLookup.cached {
+            let activeRoutes = cachedRoutes.intersection(activeNodeIDs)
+            if !activeRoutes.isEmpty {
+                result[userID] = activeRoutes
+            }
+        }
+        guard !cachedLookup.missing.isEmpty else {
+            return result
+        }
+
+        let fetchedRoutes = try await activeConversationNodeRoutes(
+            conversationID: conversationID,
+            requestedUserIDs: cachedLookup.missing,
+            activeNodeIDs: activeNodeIDs
+        )
+        let inactiveUserIDs = cachedLookup.missing.subtracting(fetchedRoutes.keys)
+        if !inactiveUserIDs.isEmpty {
+            await activeConversationRouteCache.store(
+                Dictionary(uniqueKeysWithValues: inactiveUserIDs.map { ($0, Set<String>()) }),
+                conversationID: conversationID
+            )
+        }
+        guard !fetchedRoutes.isEmpty else {
+            return result
+        }
+
+        var routesToCache: [UUID: Set<String>] = [:]
+        routesToCache.reserveCapacity(fetchedRoutes.count)
+        for (userID, activeRoutes) in fetchedRoutes {
+            routesToCache[userID] = activeRoutes
+            if !activeRoutes.isEmpty {
+                result[userID] = activeRoutes
+            }
+        }
+        await activeConversationRouteCache.store(routesToCache, conversationID: conversationID)
+        return result
+    }
+
+    func routeNodeIDs(forActiveConversationID conversationID: UUID) async throws -> [UUID: Set<String>] {
+        try await refreshHeartbeat()
+        let activeNodeIDs = Set(try await cachedActiveNodeIDs())
+        guard !activeNodeIDs.isEmpty else {
+            return [:]
+        }
+
+        let routes = try await activeConversationNodeRoutes(
+            conversationID: conversationID,
+            activeNodeIDs: activeNodeIDs
+        )
+        if !routes.isEmpty {
+            await activeConversationRouteCache.store(routes, conversationID: conversationID)
+        }
+        return routes
     }
 
     func routeNodeIDs(forUserIDs userIDs: [UUID]) async throws -> [UUID: Set<String>] {
@@ -162,6 +299,193 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         RedisKey("im:route:node:\(nodeID):sessions")
     }
 
+    private func activeConversationRouteKey(conversationID: UUID, userID: UUID) -> RedisKey {
+        RedisKey(
+            "im:route:conversation:\(conversationID.uuidString.lowercased()):user:\(userID.uuidString.lowercased()):nodes"
+        )
+    }
+
+    private func nodeActiveConversationUsersKey(for nodeID: String) -> RedisKey {
+        RedisKey("im:route:node:\(nodeID):active_conversation_users")
+    }
+
+    private func activeConversationUsersKey(conversationID: UUID) -> RedisKey {
+        RedisKey("im:route:conversation:\(conversationID.uuidString.lowercased()):active_users")
+    }
+
+    private func activeConversationNodeUsersKey(conversationID: UUID, nodeID: String) -> RedisKey {
+        RedisKey(
+            "im:route:conversation:\(conversationID.uuidString.lowercased()):node:\(nodeID):active_users"
+        )
+    }
+
+    private func activeConversationRouteEntry(conversationID: UUID, userID: UUID) -> String {
+        "\(conversationID.uuidString.lowercased()):\(userID.uuidString.lowercased())"
+    }
+
+    private func refreshActiveConversationRouteTTL(
+        routeKey: RedisKey,
+        nodeIndexKey: RedisKey,
+        conversationIndexKey: RedisKey,
+        nodeConversationUsersKey: RedisKey
+    ) async throws {
+        let ttl = Int64(activeConversationRouteTTLSeconds)
+        _ = try await pool.expire(routeKey, after: .seconds(ttl)).get()
+        _ = try await pool.expire(nodeIndexKey, after: .seconds(ttl)).get()
+        _ = try await pool.expire(conversationIndexKey, after: .seconds(ttl)).get()
+        _ = try await pool.expire(nodeConversationUsersKey, after: .seconds(ttl)).get()
+    }
+
+    private func activeConversationNodeRoutes(
+        conversationID: UUID,
+        requestedUserIDs: Set<UUID>,
+        activeNodeIDs: Set<String>
+    ) async throws -> [UUID: Set<String>] {
+        guard !requestedUserIDs.isEmpty, !activeNodeIDs.isEmpty else {
+            return [:]
+        }
+
+        await metrics?.recordRedisPresenceActiveConversationNodeIndexLookup(nodeCount: activeNodeIDs.count)
+        let nodeIDs = activeNodeIDs.sorted()
+        let requestedUserIDStrings = requestedUserIDs
+            .map { $0.uuidString.lowercased() }
+            .sorted()
+        let script = """
+        local nodeCount = tonumber(ARGV[1])
+        local result = {}
+        for userIndex = 2 + nodeCount, #ARGV do
+          local userID = ARGV[userIndex]
+          local nodeHits = {}
+          for nodeIndex = 1, nodeCount do
+            if redis.call('SISMEMBER', KEYS[nodeIndex], userID) == 1 then
+              table.insert(nodeHits, ARGV[1 + nodeIndex])
+            end
+          end
+          if #nodeHits > 0 then
+            table.insert(result, userID)
+            table.insert(result, table.concat(nodeHits, ','))
+          end
+        end
+        return result
+        """
+        var arguments: [RESPValue] = [
+            .init(from: script),
+            .init(from: nodeIDs.count)
+        ]
+        arguments.append(
+            contentsOf: nodeIDs.map {
+                .init(from: activeConversationNodeUsersKey(conversationID: conversationID, nodeID: $0))
+            }
+        )
+        arguments.append(.init(from: nodeIDs.count))
+        arguments.append(contentsOf: nodeIDs.map { .init(from: $0) })
+        arguments.append(contentsOf: requestedUserIDStrings.map { .init(from: $0) })
+
+        let values = try await pool.leaseConnection { connection in
+            connection.send(command: "EVAL", with: arguments)
+                .map { response in
+                    response.array?.compactMap(\.string) ?? []
+                }
+        }.get()
+        var routes: [UUID: Set<String>] = [:]
+        var index = values.startIndex
+        while index < values.endIndex {
+            let userIDValue = values[index]
+            let nextIndex = values.index(after: index)
+            guard nextIndex < values.endIndex else {
+                break
+            }
+            let nodeIDsValue = values[nextIndex]
+            if let userID = UUID(uuidString: userIDValue) {
+                let routeNodeIDs = nodeIDsValue
+                    .split(separator: ",")
+                    .map(String.init)
+                if !routeNodeIDs.isEmpty {
+                    routes[userID] = Set(routeNodeIDs)
+                }
+            }
+            index = values.index(after: nextIndex)
+        }
+        return routes
+    }
+
+    private func activeConversationNodeRoutes(
+        conversationID: UUID,
+        activeNodeIDs: Set<String>
+    ) async throws -> [UUID: Set<String>] {
+        guard !activeNodeIDs.isEmpty else {
+            return [:]
+        }
+
+        await metrics?.recordRedisPresenceActiveConversationNodeIndexLookup(nodeCount: activeNodeIDs.count)
+        let nodeIDs = activeNodeIDs.sorted()
+        let script = """
+        local nodeCount = tonumber(ARGV[1])
+        local routesByUser = {}
+        local userIDs = {}
+        for nodeIndex = 1, nodeCount do
+          local nodeID = ARGV[1 + nodeIndex]
+          local users = redis.call('SMEMBERS', KEYS[nodeIndex])
+          for _, userID in ipairs(users) do
+            if routesByUser[userID] == nil then
+              routesByUser[userID] = {}
+              table.insert(userIDs, userID)
+            end
+            table.insert(routesByUser[userID], nodeID)
+          end
+        end
+        table.sort(userIDs)
+        local result = {}
+        for _, userID in ipairs(userIDs) do
+          table.insert(result, userID)
+          table.insert(result, table.concat(routesByUser[userID], ','))
+        end
+        return result
+        """
+        var arguments: [RESPValue] = [
+            .init(from: script),
+            .init(from: nodeIDs.count)
+        ]
+        arguments.append(
+            contentsOf: nodeIDs.map {
+                .init(from: activeConversationNodeUsersKey(conversationID: conversationID, nodeID: $0))
+            }
+        )
+        arguments.append(.init(from: nodeIDs.count))
+        arguments.append(contentsOf: nodeIDs.map { .init(from: $0) })
+
+        let values = try await pool.leaseConnection { connection in
+            connection.send(command: "EVAL", with: arguments)
+                .map { response in
+                    response.array?.compactMap(\.string) ?? []
+                }
+        }.get()
+        return activeConversationRoutes(from: values)
+    }
+
+    private func activeConversationRoutes(from values: [String]) -> [UUID: Set<String>] {
+        var routes: [UUID: Set<String>] = [:]
+        var index = values.startIndex
+        while index < values.endIndex {
+            let userIDValue = values[index]
+            let nextIndex = values.index(after: index)
+            guard nextIndex < values.endIndex else {
+                break
+            }
+            let nodeIDsValue = values[nextIndex]
+            if let userID = UUID(uuidString: userIDValue) {
+                let routeNodeIDs = nodeIDsValue
+                    .split(separator: ",")
+                    .map(String.init)
+                if !routeNodeIDs.isEmpty {
+                    routes[userID] = Set(routeNodeIDs)
+                }
+            }
+            index = values.index(after: nextIndex)
+        }
+        return routes
+    }
+
     private func heartbeatKey(for nodeID: String) -> RedisKey {
         RedisKey("im:route:node:\(nodeID):heartbeat")
     }
@@ -246,8 +570,35 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
                 await sessionRouteCache.invalidate(sessionID)
             }
         }
+        let activeConversationUsers = try await pool.smembers(
+            of: nodeActiveConversationUsersKey(for: staleNodeID),
+            as: String.self
+        ).get().compactMap { $0 }
+        for rawEntry in activeConversationUsers {
+            let parts = rawEntry.split(separator: ":", maxSplits: 1).map(String.init)
+            guard parts.count == 2,
+                  let conversationID = UUID(uuidString: parts[0]),
+                  let userID = UUID(uuidString: parts[1])
+            else {
+                continue
+            }
+            _ = try await pool.srem(
+                staleNodeID,
+                from: activeConversationRouteKey(conversationID: conversationID, userID: userID)
+            ).get()
+            _ = try await pool.srem(
+                userID.uuidString.lowercased(),
+                from: activeConversationUsersKey(conversationID: conversationID)
+            ).get()
+            _ = try await pool.srem(
+                userID.uuidString.lowercased(),
+                from: activeConversationNodeUsersKey(conversationID: conversationID, nodeID: staleNodeID)
+            ).get()
+            await activeConversationRouteCache.invalidate(conversationID: conversationID, userID: userID)
+        }
         _ = try await pool.delete(nodeUsersKey(for: staleNodeID)).get()
         _ = try await pool.delete(nodeSessionsKey(for: staleNodeID)).get()
+        _ = try await pool.delete(nodeActiveConversationUsersKey(for: staleNodeID)).get()
         await activeNodeCache.invalidate()
     }
 }
@@ -322,6 +673,81 @@ private actor RedisPresenceRouteCache {
 
     func invalidate(_ userID: UUID) {
         entries[userID] = nil
+    }
+}
+
+actor RedisActiveConversationRouteCache {
+    private struct Key: Hashable {
+        let conversationID: UUID
+        let userID: UUID
+    }
+
+    private struct Entry {
+        let nodes: Set<String>
+        let expiresAt: Date
+    }
+
+    private let ttl: TimeInterval
+    private var entries: [Key: Entry] = [:]
+
+    init(ttl: TimeInterval) {
+        self.ttl = ttl
+    }
+
+    func nodes(
+        conversationID: UUID,
+        userIDs: Set<UUID>
+    ) -> (cached: [UUID: Set<String>], missing: Set<UUID>) {
+        guard ttl > 0, !userIDs.isEmpty else {
+            return ([:], userIDs)
+        }
+
+        let now = Date()
+        var cached: [UUID: Set<String>] = [:]
+        cached.reserveCapacity(userIDs.count)
+        var missing: Set<UUID> = []
+        missing.reserveCapacity(userIDs.count)
+        for userID in userIDs {
+            let key = Key(conversationID: conversationID, userID: userID)
+            guard let entry = entries[key] else {
+                missing.insert(userID)
+                continue
+            }
+            guard entry.expiresAt > now else {
+                entries[key] = nil
+                missing.insert(userID)
+                continue
+            }
+            cached[userID] = entry.nodes
+        }
+        return (cached, missing)
+    }
+
+    func store(_ nodes: Set<String>, conversationID: UUID, userID: UUID) {
+        guard ttl > 0 else {
+            return
+        }
+        entries[Key(conversationID: conversationID, userID: userID)] = Entry(
+            nodes: nodes,
+            expiresAt: Date().addingTimeInterval(ttl)
+        )
+    }
+
+    func store(_ routesByUserID: [UUID: Set<String>], conversationID: UUID) {
+        guard ttl > 0, !routesByUserID.isEmpty else {
+            return
+        }
+        let expiresAt = Date().addingTimeInterval(ttl)
+        for (userID, nodes) in routesByUserID {
+            entries[Key(conversationID: conversationID, userID: userID)] = Entry(
+                nodes: nodes,
+                expiresAt: expiresAt
+            )
+        }
+    }
+
+    func invalidate(conversationID: UUID, userID: UUID) {
+        entries[Key(conversationID: conversationID, userID: userID)] = nil
     }
 }
 

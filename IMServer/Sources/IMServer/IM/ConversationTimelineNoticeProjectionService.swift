@@ -4,6 +4,7 @@ import Vapor
 
 struct ConversationTimelineNoticeProjectionConsumer: ConversationEventConsumer {
     let db: any Database
+    let app: Application?
 
     var supportedEventTypes: Set<ConversationDomainEventType> {
         [
@@ -38,6 +39,7 @@ struct ConversationTimelineNoticeProjectionConsumer: ConversationEventConsumer {
         } else {
             try await notice.create(on: db)
         }
+        app?.invalidateTimelineSinceHotCache(conversationID: envelope.conversationID)
     }
 
     private func makeNotice(

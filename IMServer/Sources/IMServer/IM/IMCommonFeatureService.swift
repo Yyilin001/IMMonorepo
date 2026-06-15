@@ -49,13 +49,52 @@ struct IMCommonFeatureService {
     }
 
     func filterVisible(_ messages: [ConversationMessage], for userID: UUID) async throws -> [ConversationMessage] {
-        var visible: [ConversationMessage] = []
-        for message in messages {
-            if try await !isHidden(message: message, for: userID) {
-                visible.append(message)
-            }
+        guard !messages.isEmpty else {
+            return []
         }
-        return visible
+
+        let conversationIDs = Array(Set(messages.map { $0.$conversation.id }))
+        let conversationOverrides = try await ConversationVisibilityOverride.query(on: db)
+            .filter(\.$ownerUserID == userID)
+            .filter(\.$conversationID ~~ conversationIDs)
+            .all()
+        let conversationOverridesByConversationID = Dictionary(
+            uniqueKeysWithValues: conversationOverrides.map { ($0.conversationID, $0) }
+        )
+
+        let messageIDs = messages.compactMap(\.id)
+        let messageOverridesByMessageID: [UUID: MessageVisibilityOverride]
+        if messageIDs.isEmpty {
+            messageOverridesByMessageID = [:]
+        } else {
+            let messageOverrides = try await MessageVisibilityOverride.query(on: db)
+                .filter(\.$ownerUserID == userID)
+                .filter(\.$messageID ~~ messageIDs)
+                .all()
+            messageOverridesByMessageID = Dictionary(
+                uniqueKeysWithValues: messageOverrides.map { ($0.messageID, $0) }
+            )
+        }
+
+        return messages.filter { message in
+            let conversationID = message.$conversation.id
+            if let override = conversationOverridesByConversationID[conversationID] {
+                if override.isDeleted {
+                    return false
+                }
+                if let hiddenBeforeSequence = override.hiddenBeforeSequence,
+                   message.serverSequence <= hiddenBeforeSequence {
+                    return false
+                }
+            }
+
+            guard let messageID = message.id,
+                  let row = messageOverridesByMessageID[messageID]
+            else {
+                return true
+            }
+            return !row.isHidden
+        }
     }
 
     func favoriteMessage(conversationID: UUID, messageID: UUID, userID: UUID) async throws -> IMMessageResponse {

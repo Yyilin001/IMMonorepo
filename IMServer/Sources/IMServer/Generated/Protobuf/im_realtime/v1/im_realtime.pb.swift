@@ -120,6 +120,14 @@ struct IMRTPacket: Sendable {
     set {body = .kick(newValue)}
   }
 
+  var conversationActivity: IMRTConversationActivityCommand {
+    get {
+      if case .conversationActivity(let v)? = body {return v}
+      return IMRTConversationActivityCommand()
+    }
+    set {body = .conversationActivity(newValue)}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   enum OneOf_Body: Equatable, Sendable {
@@ -133,6 +141,7 @@ struct IMRTPacket: Sendable {
     case domainEvent(IMRTChatDomainEvent)
     case streamSignal(IMRTMessageStreamSignal)
     case kick(IMRTKick)
+    case conversationActivity(IMRTConversationActivityCommand)
 
   }
 
@@ -296,6 +305,20 @@ struct IMRTSendMessageCommand: Sendable {
 
   fileprivate var _clientMessageID: String? = nil
   fileprivate var _content: IMRTMessageContent? = nil
+}
+
+struct IMRTConversationActivityCommand: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var conversationID: String = String()
+
+  var isActive: Bool = false
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
 }
 
 struct IMRTChatDomainEvent: @unchecked Sendable {
@@ -504,6 +527,22 @@ struct IMRTChatDomainEvent: @unchecked Sendable {
     set {_uniqueStorage()._body = .conversationVisibilityChanged(newValue)}
   }
 
+  var conversationActivityHint: IMRTConversationActivityHintEvent {
+    get {
+      if case .conversationActivityHint(let v)? = _storage._body {return v}
+      return IMRTConversationActivityHintEvent()
+    }
+    set {_uniqueStorage()._body = .conversationActivityHint(newValue)}
+  }
+
+  var timelineGapHint: IMRTTimelineGapHintEvent {
+    get {
+      if case .timelineGapHint(let v)? = _storage._body {return v}
+      return IMRTTimelineGapHintEvent()
+    }
+    set {_uniqueStorage()._body = .timelineGapHint(newValue)}
+  }
+
   var memberAdded: IMRTMemberChangedEvent {
     get {
       if case .memberAdded(let v)? = _storage._body {return v}
@@ -569,6 +608,8 @@ struct IMRTChatDomainEvent: @unchecked Sendable {
     case conversationRemovedForSelf(IMRTConversationRemovedForSelfEvent)
     case conversationSettingsChanged(IMRTConversationChangedEvent)
     case conversationVisibilityChanged(IMRTConversationVisibilityChangedEvent)
+    case conversationActivityHint(IMRTConversationActivityHintEvent)
+    case timelineGapHint(IMRTTimelineGapHintEvent)
     case memberAdded(IMRTMemberChangedEvent)
     case memberRemoved(IMRTMemberChangedEvent)
     case memberRoleUpdated(IMRTMemberChangedEvent)
@@ -801,6 +842,92 @@ struct IMRTConversationChangedEvent: Sendable {
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
+}
+
+struct IMRTConversationActivityHintEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var messageID: String = String()
+
+  var senderUserID: String = String()
+
+  var serverSequence: UInt64 {
+    get {return _serverSequence ?? 0}
+    set {_serverSequence = newValue}
+  }
+  /// Returns true if `serverSequence` has been explicitly set.
+  var hasServerSequence: Bool {return self._serverSequence != nil}
+  /// Clears the value of `serverSequence`. Subsequent reads from it will return its default value.
+  mutating func clearServerSequence() {self._serverSequence = nil}
+
+  var timelineSequence: UInt64 {
+    get {return _timelineSequence ?? 0}
+    set {_timelineSequence = newValue}
+  }
+  /// Returns true if `timelineSequence` has been explicitly set.
+  var hasTimelineSequence: Bool {return self._timelineSequence != nil}
+  /// Clears the value of `timelineSequence`. Subsequent reads from it will return its default value.
+  mutating func clearTimelineSequence() {self._timelineSequence = nil}
+
+  var previewText: String = String()
+
+  var messageCreatedAtMs: Int64 {
+    get {return _messageCreatedAtMs ?? 0}
+    set {_messageCreatedAtMs = newValue}
+  }
+  /// Returns true if `messageCreatedAtMs` has been explicitly set.
+  var hasMessageCreatedAtMs: Bool {return self._messageCreatedAtMs != nil}
+  /// Clears the value of `messageCreatedAtMs`. Subsequent reads from it will return its default value.
+  mutating func clearMessageCreatedAtMs() {self._messageCreatedAtMs = nil}
+
+  var updatedAtMs: Int64 = 0
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _serverSequence: UInt64? = nil
+  fileprivate var _timelineSequence: UInt64? = nil
+  fileprivate var _messageCreatedAtMs: Int64? = nil
+}
+
+struct IMRTTimelineGapHintEvent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var messageID: String = String()
+
+  var senderUserID: String = String()
+
+  var serverSequence: UInt64 {
+    get {return _serverSequence ?? 0}
+    set {_serverSequence = newValue}
+  }
+  /// Returns true if `serverSequence` has been explicitly set.
+  var hasServerSequence: Bool {return self._serverSequence != nil}
+  /// Clears the value of `serverSequence`. Subsequent reads from it will return its default value.
+  mutating func clearServerSequence() {self._serverSequence = nil}
+
+  var timelineSequence: UInt64 {
+    get {return _timelineSequence ?? 0}
+    set {_timelineSequence = newValue}
+  }
+  /// Returns true if `timelineSequence` has been explicitly set.
+  var hasTimelineSequence: Bool {return self._timelineSequence != nil}
+  /// Clears the value of `timelineSequence`. Subsequent reads from it will return its default value.
+  mutating func clearTimelineSequence() {self._timelineSequence = nil}
+
+  var updatedAtMs: Int64 = 0
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _serverSequence: UInt64? = nil
+  fileprivate var _timelineSequence: UInt64? = nil
 }
 
 struct IMRTConversationRemovedForSelfEvent: Sendable {
@@ -1916,7 +2043,7 @@ fileprivate let _protobuf_package = "im.realtime.v1"
 
 extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Packet"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}timestamp_ms\0\u{3}protocol_version\0\u{2}\u{7}auth\0\u{3}auth_ok\0\u{3}auth_error\0\u{2}\u{8}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{9}send_message\0\u{1}ack\0\u{4}\u{9}domain_event\0\u{3}stream_signal\0\u{2}\u{9}kick\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}timestamp_ms\0\u{3}protocol_version\0\u{2}\u{7}auth\0\u{3}auth_ok\0\u{3}auth_error\0\u{2}\u{8}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{9}send_message\0\u{1}ack\0\u{4}\u{9}domain_event\0\u{3}stream_signal\0\u{2}\u{9}kick\0\u{4}\u{a}conversation_activity\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2057,6 +2184,19 @@ extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementatio
           self.body = .kick(v)
         }
       }()
+      case 60: try {
+        var v: IMRTConversationActivityCommand?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .conversationActivity(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .conversationActivity(v)
+        }
+      }()
       default: break
       }
     }
@@ -2116,6 +2256,10 @@ extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementatio
     case .kick?: try {
       guard case .kick(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 50)
+    }()
+    case .conversationActivity?: try {
+      guard case .conversationActivity(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 60)
     }()
     case nil: break
     }
@@ -2389,9 +2533,44 @@ extension IMRTSendMessageCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
+extension IMRTConversationActivityCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ConversationActivityCommand"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}conversation_id\0\u{3}is_active\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.conversationID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.isActive) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.conversationID.isEmpty {
+      try visitor.visitSingularStringField(value: self.conversationID, fieldNumber: 1)
+    }
+    if self.isActive != false {
+      try visitor.visitSingularBoolField(value: self.isActive, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTConversationActivityCommand, rhs: IMRTConversationActivityCommand) -> Bool {
+    if lhs.conversationID != rhs.conversationID {return false}
+    if lhs.isActive != rhs.isActive {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ChatDomainEvent"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_id\0\u{3}event_type\0\u{3}aggregate_type\0\u{3}aggregate_id\0\u{3}aggregate_sequence\0\u{3}occurred_at_ms\0\u{3}actor_user_id\0\u{1}conversation\0\u{3}timeline_notice\0\u{3}message_created\0\u{3}message_edited\0\u{3}message_revoked\0\u{3}message_visibility_changed\0\u{3}message_favorite_changed\0\u{4}\u{6}message_stream_started\0\u{4}\u{2}message_stream_completed\0\u{3}message_stream_failed\0\u{3}message_stream_cancelled\0\u{4}\u{6}conversation_created\0\u{3}conversation_updated\0\u{3}conversation_removed_for_self\0\u{3}conversation_settings_changed\0\u{3}conversation_visibility_changed\0\u{4}\u{6}member_added\0\u{3}member_removed\0\u{3}member_role_updated\0\u{4}\u{8}contact_request_created\0\u{3}contact_request_accepted\0\u{3}contact_request_updated\0\u{4}\u{8}owner_cursor\0\u{3}owner_aggregate_sequence\0\u{3}requires_timeline_notice\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_id\0\u{3}event_type\0\u{3}aggregate_type\0\u{3}aggregate_id\0\u{3}aggregate_sequence\0\u{3}occurred_at_ms\0\u{3}actor_user_id\0\u{1}conversation\0\u{3}timeline_notice\0\u{3}message_created\0\u{3}message_edited\0\u{3}message_revoked\0\u{3}message_visibility_changed\0\u{3}message_favorite_changed\0\u{4}\u{6}message_stream_started\0\u{4}\u{2}message_stream_completed\0\u{3}message_stream_failed\0\u{3}message_stream_cancelled\0\u{4}\u{6}conversation_created\0\u{3}conversation_updated\0\u{3}conversation_removed_for_self\0\u{3}conversation_settings_changed\0\u{3}conversation_visibility_changed\0\u{3}conversation_activity_hint\0\u{3}timeline_gap_hint\0\u{4}\u{4}member_added\0\u{3}member_removed\0\u{3}member_role_updated\0\u{4}\u{8}contact_request_created\0\u{3}contact_request_accepted\0\u{3}contact_request_updated\0\u{4}\u{8}owner_cursor\0\u{3}owner_aggregate_sequence\0\u{3}requires_timeline_notice\0")
 
   fileprivate class _StorageClass {
     var _eventID: String = String()
@@ -2639,6 +2818,32 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
             _storage._body = .conversationVisibilityChanged(v)
           }
         }()
+        case 35: try {
+          var v: IMRTConversationActivityHintEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .conversationActivityHint(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .conversationActivityHint(v)
+          }
+        }()
+        case 36: try {
+          var v: IMRTTimelineGapHintEvent?
+          var hadOneofValue = false
+          if let current = _storage._body {
+            hadOneofValue = true
+            if case .timelineGapHint(let m) = current {v = m}
+          }
+          try decoder.decodeSingularMessageField(value: &v)
+          if let v = v {
+            if hadOneofValue {try decoder.handleConflictingOneOf()}
+            _storage._body = .timelineGapHint(v)
+          }
+        }()
         case 40: try {
           var v: IMRTMemberChangedEvent?
           var hadOneofValue = false
@@ -2815,6 +3020,14 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
       case .conversationVisibilityChanged?: try {
         guard case .conversationVisibilityChanged(let v)? = _storage._body else { preconditionFailure() }
         try visitor.visitSingularMessageField(value: v, fieldNumber: 34)
+      }()
+      case .conversationActivityHint?: try {
+        guard case .conversationActivityHint(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 35)
+      }()
+      case .timelineGapHint?: try {
+        guard case .timelineGapHint(let v)? = _storage._body else { preconditionFailure() }
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 36)
       }()
       case .memberAdded?: try {
         guard case .memberAdded(let v)? = _storage._body else { preconditionFailure() }
@@ -3190,6 +3403,124 @@ extension IMRTConversationChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._Me
   }
 
   static func ==(lhs: IMRTConversationChangedEvent, rhs: IMRTConversationChangedEvent) -> Bool {
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTConversationActivityHintEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ConversationActivityHintEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}sender_user_id\0\u{3}server_sequence\0\u{3}timeline_sequence\0\u{3}preview_text\0\u{3}message_created_at_ms\0\u{3}updated_at_ms\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.senderUserID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self._serverSequence) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self._timelineSequence) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.previewText) }()
+      case 6: try { try decoder.decodeSingularInt64Field(value: &self._messageCreatedAtMs) }()
+      case 7: try { try decoder.decodeSingularInt64Field(value: &self.updatedAtMs) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.messageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 1)
+    }
+    if !self.senderUserID.isEmpty {
+      try visitor.visitSingularStringField(value: self.senderUserID, fieldNumber: 2)
+    }
+    try { if let v = self._serverSequence {
+      try visitor.visitSingularUInt64Field(value: v, fieldNumber: 3)
+    } }()
+    try { if let v = self._timelineSequence {
+      try visitor.visitSingularUInt64Field(value: v, fieldNumber: 4)
+    } }()
+    if !self.previewText.isEmpty {
+      try visitor.visitSingularStringField(value: self.previewText, fieldNumber: 5)
+    }
+    try { if let v = self._messageCreatedAtMs {
+      try visitor.visitSingularInt64Field(value: v, fieldNumber: 6)
+    } }()
+    if self.updatedAtMs != 0 {
+      try visitor.visitSingularInt64Field(value: self.updatedAtMs, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTConversationActivityHintEvent, rhs: IMRTConversationActivityHintEvent) -> Bool {
+    if lhs.messageID != rhs.messageID {return false}
+    if lhs.senderUserID != rhs.senderUserID {return false}
+    if lhs._serverSequence != rhs._serverSequence {return false}
+    if lhs._timelineSequence != rhs._timelineSequence {return false}
+    if lhs.previewText != rhs.previewText {return false}
+    if lhs._messageCreatedAtMs != rhs._messageCreatedAtMs {return false}
+    if lhs.updatedAtMs != rhs.updatedAtMs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+extension IMRTTimelineGapHintEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".TimelineGapHintEvent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}sender_user_id\0\u{3}server_sequence\0\u{3}timeline_sequence\0\u{3}updated_at_ms\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.senderUserID) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self._serverSequence) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self._timelineSequence) }()
+      case 5: try { try decoder.decodeSingularInt64Field(value: &self.updatedAtMs) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.messageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 1)
+    }
+    if !self.senderUserID.isEmpty {
+      try visitor.visitSingularStringField(value: self.senderUserID, fieldNumber: 2)
+    }
+    try { if let v = self._serverSequence {
+      try visitor.visitSingularUInt64Field(value: v, fieldNumber: 3)
+    } }()
+    try { if let v = self._timelineSequence {
+      try visitor.visitSingularUInt64Field(value: v, fieldNumber: 4)
+    } }()
+    if self.updatedAtMs != 0 {
+      try visitor.visitSingularInt64Field(value: self.updatedAtMs, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: IMRTTimelineGapHintEvent, rhs: IMRTTimelineGapHintEvent) -> Bool {
+    if lhs.messageID != rhs.messageID {return false}
+    if lhs.senderUserID != rhs.senderUserID {return false}
+    if lhs._serverSequence != rhs._serverSequence {return false}
+    if lhs._timelineSequence != rhs._timelineSequence {return false}
+    if lhs.updatedAtMs != rhs.updatedAtMs {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

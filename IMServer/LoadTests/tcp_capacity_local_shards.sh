@@ -3,6 +3,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TCP_DRIVER_DIR="${SCRIPT_DIR}/TCPDriver"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+default_protocol_version() {
+  local version_file="${REPO_ROOT}/Protocol/im_realtime/v1/protocol_version.txt"
+  if [[ -f "${version_file}" ]]; then
+    tr -d '[:space:]' <"${version_file}"
+  else
+    echo "12"
+  fi
+}
 
 BASE_URL="${BASE_URL:-http://120.25.106.200:8080}"
 TCP_HOST="${TCP_HOST:-120.25.106.200}"
@@ -19,6 +29,8 @@ MESSAGE_PROFILE="${MESSAGE_PROFILE:-per-connection}"
 MESSAGE_RATE_PER_SECOND="${MESSAGE_RATE_PER_SECOND:-0}"
 MESSAGE_SENDER_EVERY="${MESSAGE_SENDER_EVERY:-1}"
 MESSAGE_RECEIVER_OFFSET="${MESSAGE_RECEIVER_OFFSET:-1}"
+ACTIVE_CONVERSATION_USERS="${ACTIVE_CONVERSATION_USERS:-0}"
+GLOBAL_HOLD_BARRIER_MIN_RATIO="${GLOBAL_HOLD_BARRIER_MIN_RATIO:-1.0}"
 HOLD_SECONDS="${HOLD_SECONDS:-1800}"
 CONNECT_RAMP_SECONDS="${CONNECT_RAMP_SECONDS:-900}"
 LOGIN_CONCURRENCY="${LOGIN_CONCURRENCY:-5}"
@@ -36,10 +48,11 @@ LOGIN_MODE="${LOGIN_MODE:-upfront}"
 LOGIN_CACHE_DIR="${LOGIN_CACHE_DIR:-/tmp/imtcp-login-cache-local-shards}"
 LOGIN_CACHE_TTL_GUARD_SECONDS="${LOGIN_CACHE_TTL_GUARD_SECONDS:-60}"
 CONNECTION_LOG_DIR="${CONNECTION_LOG_DIR:-/tmp/imtcp-driver-logs-local-shards}"
-PROTOCOL_VERSION="${PROTOCOL_VERSION:-9}"
+PROTOCOL_VERSION="${PROTOCOL_VERSION:-$(default_protocol_version)}"
 SSH_HOST="${SSH_HOST:-}"
 PREWARM_LOGIN_CACHE="${PREWARM_LOGIN_CACHE:-true}"
 SAMPLE_DURING_SECONDS="${SAMPLE_DURING_SECONDS:-60}"
+LOCAL_SHARDS_DRY_RUN="${LOCAL_SHARDS_DRY_RUN:-false}"
 
 if [[ -z "${IM_CONVERSATION_ID}" ]]; then
   echo "IM_CONVERSATION_ID is required." >&2
@@ -51,6 +64,10 @@ if [[ -z "${ACCOUNT_FILE}" ]]; then
 fi
 if (( CONNECTIONS < 1 || LOCAL_DRIVER_SHARDS < 1 )); then
   echo "CONNECTIONS and LOCAL_DRIVER_SHARDS must be positive." >&2
+  exit 1
+fi
+if (( LOCAL_DRIVER_SHARDS > CONNECTIONS )); then
+  echo "LOCAL_DRIVER_SHARDS must be <= CONNECTIONS so every shard owns at least one connection." >&2
   exit 1
 fi
 
@@ -91,6 +108,9 @@ systemctl is-active imserver-gateway imserver-command-api imserver-outbox-relay 
 REMOTE
 }
 
+IM_TCP_CAPACITY_LADDER_SOURCE_ONLY=true source "${SCRIPT_DIR}/tcp_capacity_ladder.sh"
+unset IM_TCP_CAPACITY_LADDER_SOURCE_ONLY
+
 make_shard_file() {
   local shard_index="$1"
   local offset="$2"
@@ -127,6 +147,8 @@ driver_common_args() {
     --message-rate-per-second "${MESSAGE_RATE_PER_SECOND}" \
     --message-sender-every "${MESSAGE_SENDER_EVERY}" \
     --message-receiver-offset "${MESSAGE_RECEIVER_OFFSET}" \
+    --active-conversation-users "${ACTIVE_CONVERSATION_USERS}" \
+    --global-hold-barrier-min-ratio "${GLOBAL_HOLD_BARRIER_MIN_RATIO}" \
     --hold-seconds "${HOLD_SECONDS}" \
     --connect-ramp-seconds "${CONNECT_RAMP_SECONDS}" \
     --login-concurrency "${LOGIN_CONCURRENCY}" \
@@ -145,12 +167,6 @@ driver_common_args() {
     --login-cache-ttl-guard-seconds "${LOGIN_CACHE_TTL_GUARD_SECONDS}" \
     --account-file "${shard_account_file}"
 }
-
-echo "Building TCP load driver..."
-swift build -c release --package-path "${TCP_DRIVER_DIR}"
-
-mkdir -p "${LOGIN_CACHE_DIR}" "${CONNECTION_LOG_DIR}"
-collect_remote_metrics "before local-shards"
 
 base_connections=$(( CONNECTIONS / LOCAL_DRIVER_SHARDS ))
 remainder=$(( CONNECTIONS % LOCAL_DRIVER_SHARDS ))
@@ -176,6 +192,26 @@ for shard in $(seq 1 "${LOCAL_DRIVER_SHARDS}"); do
   shard_log_files+=("${CONNECTION_LOG_DIR}/tcp-driver-local-shard-${shard}-of-${LOCAL_DRIVER_SHARDS}.jsonl")
   shard_stdout_files+=("${CONNECTION_LOG_DIR}/tcp-driver-local-shard-${shard}-of-${LOCAL_DRIVER_SHARDS}.stdout")
 done
+
+if bool_enabled "${LOCAL_SHARDS_DRY_RUN}"; then
+  for index in "${!shard_connection_counts[@]}"; do
+    shard=$(( index + 1 ))
+    echo "dry-run local-shard ${shard}/${LOCAL_DRIVER_SHARDS}: connections=${shard_connection_counts[$index]} cacheFile=${shard_cache_files[$index]} logFile=${shard_log_files[$index]}"
+    driver_common_args "${shard_connection_counts[$index]}" "${shard_account_files[$index]}" | sed 's/^/  /'
+  done
+  exit 0
+fi
+
+validate_im_metrics_gate_runtime_config "local-shards preflight"
+step_metrics_before="$(mktemp "${TMPDIR:-/tmp}/im-local-shards-metrics-before.XXXXXX")"
+step_metrics_after="$(mktemp "${TMPDIR:-/tmp}/im-local-shards-metrics-after.XXXXXX")"
+
+echo "Building TCP load driver..."
+swift build -c release --package-path "${TCP_DRIVER_DIR}"
+
+mkdir -p "${LOGIN_CACHE_DIR}" "${CONNECTION_LOG_DIR}"
+capture_remote_im_metrics "${step_metrics_before}"
+collect_remote_metrics "before local-shards"
 
 if bool_enabled "${PREWARM_LOGIN_CACHE}"; then
   for index in "${!shard_connection_counts[@]}"; do
@@ -277,6 +313,14 @@ for index in "${!shard_connection_counts[@]}"; do
 done
 
 collect_remote_metrics "after local-shards"
+capture_remote_im_metrics "${step_metrics_after}"
+print_im_metrics_delta "${step_metrics_before}" "${step_metrics_after}" "local-shards"
+print_timeline_read_latency_summary "${step_metrics_before}" "${step_metrics_after}" "local-shards"
+print_stream_batch_fill_summary "${step_metrics_before}" "${step_metrics_after}" "local-shards"
+if ! evaluate_im_metrics_gate "${step_metrics_before}" "${step_metrics_after}" "local-shards"; then
+  exit_code=1
+fi
+rm -f "${step_metrics_before}" "${step_metrics_after}"
 echo
 echo "localShards=${LOCAL_DRIVER_SHARDS} totalSuccesses=${total_successes} totalExpected=${total_expected}"
 exit "${exit_code}"

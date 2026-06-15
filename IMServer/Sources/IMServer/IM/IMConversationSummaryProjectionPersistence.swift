@@ -4,6 +4,82 @@ import SQLKit
 import Vapor
 
 extension IMConversationSummaryProjectionService {
+    func upsertConversationActivity(
+        conversationID: UUID,
+        messageServerSequence: Int,
+        messagePreview: IMMessagePreviewResponse,
+        messageCreatedAt: Date?,
+        updatedAt: Date,
+        on database: any Database
+    ) async throws {
+        let lastMessageJSON = try ConversationActivitySummary.encodeLastMessageForStorage(messagePreview)
+        let lastActivityAt = messageCreatedAt ?? updatedAt
+        guard let sql = database as? any SQLDatabase else {
+            let existing = try await ConversationActivitySummary.find(conversationID, on: database)
+            if let existing {
+                guard messageServerSequence >= existing.lastMessageServerSequence else {
+                    return
+                }
+                existing.lastMessage = messagePreview
+                existing.lastMessageServerSequence = messageServerSequence
+                existing.lastActivityAt = lastActivityAt
+                existing.updatedAt = updatedAt
+                try await existing.update(on: database)
+            } else {
+                try await ConversationActivitySummary(
+                    conversationID: conversationID,
+                    lastMessage: messagePreview,
+                    lastMessageServerSequence: messageServerSequence,
+                    lastActivityAt: lastActivityAt,
+                    updatedAt: updatedAt
+                ).create(on: database)
+            }
+            return
+        }
+
+        try await sql.raw("""
+            INSERT INTO \(ident: ConversationActivitySummary.schema) (
+                \(ident: "conversation_id"),
+                \(ident: "last_message_json"),
+                \(ident: "last_message_server_sequence"),
+                \(ident: "last_activity_at"),
+                \(ident: "updated_at")
+            )
+            VALUES (
+                \(bind: conversationID),
+                \(bind: lastMessageJSON),
+                \(bind: messageServerSequence),
+                \(bind: lastActivityAt),
+                \(bind: updatedAt)
+            )
+            ON CONFLICT (\(ident: "conversation_id")) DO UPDATE SET
+                \(ident: "last_message_json") = CASE
+                    WHEN \(ident: "excluded").\(ident: "last_message_server_sequence")
+                       >= \(ident: ConversationActivitySummary.schema).\(ident: "last_message_server_sequence")
+                    THEN \(ident: "excluded").\(ident: "last_message_json")
+                    ELSE \(ident: ConversationActivitySummary.schema).\(ident: "last_message_json")
+                END,
+                \(ident: "last_message_server_sequence") = CASE
+                    WHEN \(ident: "excluded").\(ident: "last_message_server_sequence")
+                       >= \(ident: ConversationActivitySummary.schema).\(ident: "last_message_server_sequence")
+                    THEN \(ident: "excluded").\(ident: "last_message_server_sequence")
+                    ELSE \(ident: ConversationActivitySummary.schema).\(ident: "last_message_server_sequence")
+                END,
+                \(ident: "last_activity_at") = CASE
+                    WHEN \(ident: "excluded").\(ident: "last_message_server_sequence")
+                       >= \(ident: ConversationActivitySummary.schema).\(ident: "last_message_server_sequence")
+                    THEN \(ident: "excluded").\(ident: "last_activity_at")
+                    ELSE \(ident: ConversationActivitySummary.schema).\(ident: "last_activity_at")
+                END,
+                \(ident: "updated_at") = CASE
+                    WHEN \(ident: "excluded").\(ident: "last_message_server_sequence")
+                       >= \(ident: ConversationActivitySummary.schema).\(ident: "last_message_server_sequence")
+                    THEN \(ident: "excluded").\(ident: "updated_at")
+                    ELSE \(ident: ConversationActivitySummary.schema).\(ident: "updated_at")
+                END
+            """).run()
+    }
+
     func applyMessageCreatedExistingSummariesSQL(
         conversationID: UUID,
         messageServerSequence: Int,

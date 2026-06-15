@@ -22,10 +22,16 @@ struct InternalMetricsController: RouteCollection {
         let http = await req.application.httpMetrics.currentSnapshot()
         let database = await req.application.databaseMetrics.currentSnapshot()
         let stream = await req.application.streamMetrics.currentSnapshot()
+        let streamGroups = await req.application.streamMetrics.currentGroupSnapshots()
         let aiStream = await req.application.aiStreamMetrics.currentSnapshot()
         let messageWrite = await req.application.messageWriteMetrics.currentSnapshot()
+        let domainEvent = await req.application.conversationDomainEventMetrics.currentSnapshot()
+        let summaryRead = await req.application.summaryReadMetrics.currentSnapshot()
+        let timelineRead = await req.application.timelineReadMetrics.currentSnapshot()
         let authSessionCache = await req.application.authSessionCacheMetrics.currentSnapshot()
         let clientHealth = await req.application.clientHealthMetrics.currentSnapshot()
+        let fanoutConfiguration = req.application.gatewayLocalFanoutConfiguration
+        let streamConsumerConfiguration = req.application.streamConsumerConfiguration
         let liveLag = await collectLiveLagSnapshot(app: req.application)
 
         var lines: [String] = []
@@ -50,10 +56,37 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_tcp_close_error_total", value: routing.tcpCloseErrorCount, to: &lines)
         appendCounter("im_tcp_close_input_closed_total", value: routing.tcpCloseInputClosedCount, to: &lines)
         appendCounter("im_tcp_close_reset_by_peer_total", value: routing.tcpCloseResetByPeerCount, to: &lines)
+        appendCounter("im_tcp_close_slow_write_total", value: routing.tcpCloseSlowWriteCount, to: &lines)
         appendCounter("im_tcp_close_peer_waiting_for_auth_total", value: routing.tcpClosePeerWaitingForAuthCount, to: &lines)
         appendCounter("im_tcp_close_peer_authenticating_total", value: routing.tcpClosePeerAuthenticatingCount, to: &lines)
         appendCounter("im_tcp_close_peer_authenticated_total", value: routing.tcpClosePeerAuthenticatedCount, to: &lines)
         appendCounter("im_tcp_close_peer_or_unknown_total", value: routing.tcpClosePeerOrUnknownCount, to: &lines)
+        appendCounter("im_tcp_write_completions_total", value: routing.tcpWriteCompletionCount, to: &lines)
+        appendCounter("im_tcp_write_failures_total", value: routing.tcpWriteFailureCount, to: &lines)
+        appendCounter("im_tcp_write_backpressure_total", value: routing.tcpWriteBackpressureCount, to: &lines)
+        appendCounter(
+            "im_tcp_write_dropped_backpressure_total",
+            value: routing.tcpWriteDroppedBackpressureCount,
+            to: &lines
+        )
+        appendCounter("im_tcp_write_slow_total", value: routing.tcpWriteSlowCount, to: &lines)
+        appendGauge(
+            "im_tcp_write_latency_avg_millis",
+            value: average(total: routing.tcpWriteTotalLatencyMillis, count: routing.tcpWriteCompletionCount + routing.tcpWriteFailureCount),
+            to: &lines
+        )
+        appendGauge("im_tcp_write_latency_max_millis", value: routing.tcpWriteMaxLatencyMillis, to: &lines)
+        appendGauge(
+            "im_tcp_write_slow_latency_avg_millis",
+            value: average(total: routing.tcpWriteSlowTotalLatencyMillis, count: routing.tcpWriteSlowCount),
+            to: &lines
+        )
+        appendGauge("im_tcp_write_slow_latency_max_millis", value: routing.tcpWriteSlowMaxLatencyMillis, to: &lines)
+        appendCounter(
+            "im_tcp_write_slow_connection_closes_total",
+            value: routing.tcpWriteSlowConnectionClosedCount,
+            to: &lines
+        )
         appendCounter("im_user_fanout_total", value: routing.userFanoutCount, to: &lines)
         appendCounter("im_session_kick_total", value: routing.sessionKickCount, to: &lines)
         appendCounter("im_session_count_query_failures_total", value: routing.sessionCountQueryFailureCount, to: &lines)
@@ -68,11 +101,703 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_redis_presence_route_cache_misses_total", value: routing.redisPresenceRouteCacheMisses, to: &lines)
         appendCounter("im_redis_presence_pipeline_lookups_total", value: routing.redisPresencePipelineLookupCount, to: &lines)
         appendCounter("im_redis_presence_pipeline_lookup_users_total", value: routing.redisPresencePipelineLookupUserCount, to: &lines)
+        appendCounter(
+            "im_redis_presence_active_conversation_node_index_lookups_total",
+            value: routing.redisPresenceActiveConversationNodeIndexLookupCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_redis_presence_active_conversation_node_index_lookup_nodes_total",
+            value: routing.redisPresenceActiveConversationNodeIndexLookupNodeCount,
+            to: &lines
+        )
         appendCounter("im_redis_presence_stale_cleanup_total", value: routing.redisPresenceStaleCleanupCount, to: &lines)
         appendCounter("im_realtime_delivery_missing_row_total", value: routing.realtimeDeliveryMissingRowCount, to: &lines)
         appendCounter("im_realtime_delivery_invalid_payload_total", value: routing.invalidRealtimeDeliveryPayloadCount, to: &lines)
         appendCounter("im_cross_node_dispatch_total", value: routing.crossNodeDispatchCount, to: &lines)
         appendCounter("im_cross_node_dispatch_failures_total", value: routing.crossNodeDispatchFailureCount, to: &lines)
+        appendCounter("im_cross_node_dispatch_attempts_total", value: routing.crossNodeDispatchAttemptCount, to: &lines)
+        appendCounter("im_cross_node_dispatch_targets_total", value: routing.crossNodeDispatchTargetCount, to: &lines)
+        appendGauge(
+            "im_cross_node_dispatch_max_targets_per_packet",
+            value: routing.crossNodeDispatchMaxTargetsPerPacket,
+            to: &lines
+        )
+        appendGauge(
+            "im_cross_node_dispatch_latency_avg_millis",
+            value: average(
+                total: routing.crossNodeDispatchTotalLatencyMillis,
+                count: routing.crossNodeDispatchCount + routing.crossNodeDispatchFailureCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_cross_node_dispatch_latency_max_millis",
+            value: routing.crossNodeDispatchMaxLatencyMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_remote_dispatch_config_user_batch_size",
+            value: streamConsumerConfiguration.realtimeRemoteDispatchUserBatchSize,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_remote_dispatch_config_max_in_flight",
+            value: streamConsumerConfiguration.realtimeRemoteDispatchMaxInFlight,
+            to: &lines
+        )
+        appendCounter(
+            "im_remote_domain_event_encoded_packets_total",
+            value: routing.remoteDomainEventEncodedPacketCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_remote_domain_event_encode_cache_hits_total",
+            value: routing.remoteDomainEventEncodeCacheHitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_remote_domain_event_encoded_packet_bytes_total",
+            value: routing.remoteDomainEventEncodedPacketBytes,
+            to: &lines
+        )
+        appendGauge(
+            "im_remote_domain_event_max_encoded_packet_bytes",
+            value: routing.remoteDomainEventMaxEncodedPacketBytes,
+            to: &lines
+        )
+        appendCounter("im_gateway_http_relay_work_items_total", value: routing.gatewayHTTPRelayWorkItemCount, to: &lines)
+        appendCounter(
+            "im_gateway_http_relay_payload_batches_total",
+            value: routing.gatewayHTTPRelayPayloadBatchCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_recipients_total",
+            value: routing.gatewayHTTPRelayRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_skipped_recipients_total",
+            value: routing.gatewayHTTPRelaySkippedRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_encoded_payload_bytes_total",
+            value: routing.gatewayHTTPRelayEncodedPayloadBytes,
+            to: &lines
+        )
+        appendGauge(
+            "im_gateway_http_relay_max_recipients_per_work_item",
+            value: routing.gatewayHTTPRelayMaxRecipientsPerWorkItem,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_request_attempts_total",
+            value: routing.gatewayHTTPRelayRequestAttemptCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_request_successes_total",
+            value: routing.gatewayHTTPRelayRequestSuccessCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_request_failures_total",
+            value: routing.gatewayHTTPRelayRequestFailureCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_gateway_http_relay_request_latency_avg_millis",
+            value: average(
+                total: routing.gatewayHTTPRelayRequestTotalLatencyMillis,
+                count: routing.gatewayHTTPRelayRequestAttemptCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_gateway_http_relay_request_latency_max_millis",
+            value: routing.gatewayHTTPRelayRequestMaxLatencyMillis,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_request_body_bytes_total",
+            value: routing.gatewayHTTPRelayRequestBodyBytes,
+            to: &lines
+        )
+        appendGauge(
+            "im_gateway_http_relay_request_max_body_bytes",
+            value: routing.gatewayHTTPRelayRequestMaxBodyBytes,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_binary_fallbacks_total",
+            value: routing.gatewayHTTPRelayBinaryFallbackCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_inbound_requests_total",
+            value: routing.gatewayHTTPRelayInboundRequestCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_inbound_successes_total",
+            value: routing.gatewayHTTPRelayInboundSuccessCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_inbound_failures_total",
+            value: routing.gatewayHTTPRelayInboundFailureCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_inbound_body_bytes_total",
+            value: routing.gatewayHTTPRelayInboundBodyBytes,
+            to: &lines
+        )
+        appendGauge(
+            "im_gateway_http_relay_inbound_max_body_bytes",
+            value: routing.gatewayHTTPRelayInboundMaxBodyBytes,
+            to: &lines
+        )
+        appendGauge(
+            "im_gateway_http_relay_inbound_latency_avg_millis",
+            value: average(
+                total: routing.gatewayHTTPRelayInboundTotalLatencyMillis,
+                count: routing.gatewayHTTPRelayInboundRequestCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_gateway_http_relay_inbound_latency_max_millis",
+            value: routing.gatewayHTTPRelayInboundMaxLatencyMillis,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_payloads_built_total",
+            value: routing.realtimePayloadBuiltCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_payload_recipient_deliveries_total",
+            value: routing.realtimePayloadRecipientDeliveryCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_payloads_with_conversation_summary_total",
+            value: routing.realtimePayloadWithConversationSummaryCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_payload_summary_member_ids_omitted_total",
+            value: routing.realtimePayloadConversationSummaryMemberIDsOmittedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_payload_summary_member_ids_omitted_members_total",
+            value: routing.realtimePayloadConversationSummaryMemberIDsOmittedTotalMembers,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_payload_summary_member_ids_emitted_total",
+            value: routing.realtimePayloadConversationSummaryMemberIDsEmittedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_payload_summary_member_ids_emitted_members_total",
+            value: routing.realtimePayloadConversationSummaryMemberIDsEmittedTotalMembers,
+            to: &lines
+        )
+        appendCounter("im_local_fanout_packets_total", value: routing.localFanoutPacketCount, to: &lines)
+        appendCounter(
+            "im_local_fanout_target_connections_total",
+            value: routing.localFanoutTargetConnectionCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_local_fanout_max_target_connections_per_packet",
+            value: routing.localFanoutMaxTargetConnectionsPerPacket,
+            to: &lines
+        )
+        appendGauge("im_local_fanout_batch_size", value: routing.localFanoutBatchSize, to: &lines)
+        appendCounter("im_local_fanout_chunks_total", value: routing.localFanoutChunkCount, to: &lines)
+        appendGauge(
+            "im_local_fanout_max_chunks_per_event_loop_job",
+            value: routing.localFanoutMaxChunksPerEventLoopJob,
+            to: &lines
+        )
+        appendCounter(
+            "im_local_fanout_encoded_packets_total",
+            value: routing.localFanoutEncodedPacketCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_local_fanout_encode_cache_hits_total",
+            value: routing.localFanoutEncodeCacheHitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_local_fanout_encoded_packet_bytes_total",
+            value: routing.localFanoutEncodedPacketBytes,
+            to: &lines
+        )
+        appendGauge(
+            "im_local_fanout_max_encoded_packet_bytes",
+            value: routing.localFanoutMaxEncodedPacketBytes,
+            to: &lines
+        )
+        appendCounter(
+            "im_local_fanout_estimated_outbound_bytes_total",
+            value: routing.localFanoutEstimatedOutboundBytes,
+            to: &lines
+        )
+        appendGauge(
+            "im_local_fanout_max_estimated_outbound_bytes_per_packet",
+            value: routing.localFanoutMaxEstimatedOutboundBytesPerPacket,
+            to: &lines
+        )
+        appendGauge("im_gateway_local_fanout_config_batch_size", value: fanoutConfiguration.batchSize, to: &lines)
+        appendCounter(
+            "im_local_fanout_event_loop_jobs_started_total",
+            value: routing.localFanoutEventLoopJobStartedCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_local_fanout_event_loop_job_start_lag_avg_millis",
+            value: average(
+                total: routing.localFanoutEventLoopJobStartLagTotalMillis,
+                count: routing.localFanoutEventLoopJobStartedCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_local_fanout_event_loop_job_start_lag_max_millis",
+            value: routing.localFanoutEventLoopJobStartLagMaxMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_gateway_local_fanout_config_event_loop_yield_chunks",
+            value: fanoutConfiguration.eventLoopYieldChunkCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_active_conversation_fanout_config_enabled",
+            value: fanoutConfiguration.activeConversationFanoutEnabled ? 1 : 0,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_active_conversation_fanout_config_recipient_threshold",
+            value: fanoutConfiguration.activeConversationFanoutRecipientThreshold,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_active_conversation_fanout_config_full_fanout_limit",
+            value: fanoutConfiguration.activeConversationFullFanoutRecipientLimit,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_active_conversation_fanout_config_full_fanout_payload_byte_budget",
+            value: fanoutConfiguration.activeConversationFullFanoutPayloadByteBudget,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_inactive_conversation_hint_config_debounce_seconds",
+            value: Int(fanoutConfiguration.inactiveConversationHintDebounceSeconds),
+            to: &lines
+        )
+        appendCounter("im_local_fanout_event_loop_jobs_total", value: routing.localFanoutEventLoopJobCount, to: &lines)
+        appendCounter("im_local_fanout_encode_failures_total", value: routing.localFanoutEncodeFailureCount, to: &lines)
+        appendCounter(
+            "im_realtime_active_conversation_fanout_splits_total",
+            value: routing.realtimeActiveConversationFanoutSplitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_active_recipients_total",
+            value: routing.realtimeActiveConversationFanoutActiveRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_compact_active_recipients_total",
+            value: routing.realtimeActiveConversationFanoutCompactActiveRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_inactive_hint_recipients_total",
+            value: routing.realtimeActiveConversationFanoutInactiveHintRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_downgraded_active_recipients_total",
+            value: routing.realtimeActiveConversationFanoutDowngradedActiveRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_backpressure_downgraded_active_recipients_total",
+            value: routing.realtimeActiveConversationFanoutBackpressureDowngradedRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_payload_budget_applied_total",
+            value: routing.realtimeActiveConversationFanoutPayloadBudgetAppliedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_payload_budget_downgraded_active_recipients_total",
+            value: routing.realtimeActiveConversationFanoutPayloadBudgetDowngradedRecipientCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_active_conversation_fanout_payload_budget_max_payload_bytes",
+            value: routing.realtimeActiveConversationFanoutPayloadBudgetMaxPayloadBytes,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_active_conversation_fanout_payload_budget_max_effective_limit",
+            value: routing.realtimeActiveConversationFanoutPayloadBudgetMaxEffectiveLimit,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_unsplit_fallbacks_total",
+            value: routing.realtimeActiveConversationFanoutUnsplitFallbackCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_hint_fallback_recipients_total",
+            value: routing.realtimeActiveConversationFanoutHintFallbackRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_dropped_fallbacks_total",
+            value: routing.realtimeActiveConversationFanoutDroppedFallbackCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_dropped_fallback_recipients_total",
+            value: routing.realtimeActiveConversationFanoutDroppedFallbackRecipientCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_active_conversation_fanout_max_active_recipients_per_split",
+            value: routing.realtimeActiveConversationFanoutMaxActiveRecipientsPerSplit,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_active_conversation_fanout_max_compact_active_recipients_per_split",
+            value: routing.realtimeActiveConversationFanoutMaxCompactActiveRecipientsPerSplit,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_active_conversation_fanout_max_inactive_hint_recipients_per_split",
+            value: routing.realtimeActiveConversationFanoutMaxInactiveHintRecipientsPerSplit,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_active_conversation_fanout_max_downgraded_active_recipients_per_split",
+            value: routing.realtimeActiveConversationFanoutMaxDowngradedActiveRecipientsPerSplit,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_route_cache_hits_total",
+            value: routing.realtimeActiveConversationRouteCacheHitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_route_cache_partial_hits_total",
+            value: routing.realtimeActiveConversationRouteCachePartialHitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_route_cache_misses_total",
+            value: routing.realtimeActiveConversationRouteCacheMissCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_route_cache_cached_users_total",
+            value: routing.realtimeActiveConversationRouteCacheCachedUserCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_route_cache_missed_users_total",
+            value: routing.realtimeActiveConversationRouteCacheMissedUserCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_route_cache_joined_in_flight_total",
+            value: routing.realtimeActiveConversationRouteCacheJoinedInFlightCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_remote_active_conversation_fanout_splits_total",
+            value: routing.realtimeRemoteActiveConversationFanoutSplitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_remote_active_conversation_fanout_full_recipients_total",
+            value: routing.realtimeRemoteActiveConversationFanoutFullRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_remote_active_conversation_fanout_compact_recipients_total",
+            value: routing.realtimeRemoteActiveConversationFanoutCompactRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_remote_active_conversation_fanout_inactive_hint_recipients_total",
+            value: routing.realtimeRemoteActiveConversationFanoutInactiveHintRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_remote_active_conversation_fanout_downgraded_active_recipients_total",
+            value: routing.realtimeRemoteActiveConversationFanoutDowngradedActiveRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_remote_active_conversation_fanout_fallbacks_total",
+            value: routing.realtimeRemoteActiveConversationFanoutFallbackCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_remote_active_conversation_fanout_dropped_fallbacks_total",
+            value: routing.realtimeRemoteActiveConversationFanoutDroppedFallbackCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_remote_active_conversation_fanout_dropped_fallback_recipients_total",
+            value: routing.realtimeRemoteActiveConversationFanoutDroppedFallbackRecipientCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_remote_active_conversation_fanout_max_full_recipients_per_split",
+            value: routing.realtimeRemoteActiveConversationFanoutMaxFullRecipientsPerSplit,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_remote_active_conversation_fanout_max_compact_recipients_per_split",
+            value: routing.realtimeRemoteActiveConversationFanoutMaxCompactRecipientsPerSplit,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_remote_active_conversation_fanout_max_inactive_hint_recipients_per_split",
+            value: routing.realtimeRemoteActiveConversationFanoutMaxInactiveHintRecipientsPerSplit,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_remote_active_conversation_fanout_max_downgraded_active_recipients_per_split",
+            value: routing.realtimeRemoteActiveConversationFanoutMaxDowngradedActiveRecipientsPerSplit,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_inactive_conversation_hint_flushes_total",
+            value: routing.realtimeInactiveConversationHintFlushCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_inactive_conversation_hint_payload_batches_total",
+            value: routing.realtimeInactiveConversationHintPayloadBatchCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_inactive_conversation_hint_recipients_total",
+            value: routing.realtimeInactiveConversationHintRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_inactive_conversation_hint_suppressed_recipients_total",
+            value: routing.realtimeInactiveConversationHintSuppressedRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_delivery_consumer_inactive_hint_relay_payload_batches_total",
+            value: routing.realtimeDeliveryConsumerInactiveHintRelayPayloadBatchCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_delivery_consumer_inactive_hint_relay_recipients_total",
+            value: routing.realtimeDeliveryConsumerInactiveHintRelayRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_delivery_consumer_inactive_hint_suppressed_recipients_total",
+            value: routing.realtimeDeliveryConsumerInactiveHintSuppressedRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_pre_split_total",
+            value: routing.domainRelayAfterRecordPreSplitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_pre_split_active_recipients_total",
+            value: routing.domainRelayAfterRecordPreSplitActiveRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_pre_split_compact_active_recipients_total",
+            value: routing.domainRelayAfterRecordPreSplitCompactActiveRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_pre_split_inactive_hint_recipients_total",
+            value: routing.domainRelayAfterRecordPreSplitInactiveHintRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_pre_split_downgraded_active_recipients_total",
+            value: routing.domainRelayAfterRecordPreSplitDowngradedActiveRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_pre_split_fallback_total",
+            value: routing.domainRelayAfterRecordPreSplitFallbackCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_inactive_hint_suppressed_recipients_total",
+            value: routing.domainRelayAfterRecordInactiveHintSuppressedRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_active_route_cache_hits_total",
+            value: routing.domainRelayAfterRecordActiveRouteCacheHitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_active_route_cache_partial_hits_total",
+            value: routing.domainRelayAfterRecordActiveRouteCachePartialHitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_active_route_cache_misses_total",
+            value: routing.domainRelayAfterRecordActiveRouteCacheMissCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_active_route_cache_cached_users_total",
+            value: routing.domainRelayAfterRecordActiveRouteCacheCachedUserCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_active_route_cache_missed_users_total",
+            value: routing.domainRelayAfterRecordActiveRouteCacheMissedUserCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_active_route_cache_joined_in_flight_total",
+            value: routing.domainRelayAfterRecordActiveRouteCacheJoinedInFlightCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_relay_after_record_pre_split_max_active_recipients",
+            value: routing.domainRelayAfterRecordPreSplitMaxActiveRecipients,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_relay_after_record_pre_split_max_compact_active_recipients",
+            value: routing.domainRelayAfterRecordPreSplitMaxCompactActiveRecipients,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_relay_after_record_pre_split_max_inactive_hint_recipients",
+            value: routing.domainRelayAfterRecordPreSplitMaxInactiveHintRecipients,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_relay_after_record_pre_split_max_downgraded_active_recipients",
+            value: routing.domainRelayAfterRecordPreSplitMaxDowngradedActiveRecipients,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_coalesced_dispatch_replacements_total",
+            value: routing.realtimeCoalescedDispatchReplacementCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_coalesced_dropped_payload_batches_total",
+            value: routing.realtimeCoalescedDroppedPayloadBatchCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_coalesced_dropped_recipient_deliveries_total",
+            value: routing.realtimeCoalescedDroppedRecipientDeliveryCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_async_relay_dropped_dispatches_total",
+            value: routing.realtimeAsyncRelayDroppedDispatchCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_async_relay_dropped_payload_batches_total",
+            value: routing.realtimeAsyncRelayDroppedPayloadBatchCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_async_relay_dropped_recipient_deliveries_total",
+            value: routing.realtimeAsyncRelayDroppedRecipientDeliveryCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_async_relay_queue_saturation_total",
+            value: routing.realtimeAsyncRelayQueueSaturationCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_async_relay_queued_waiters",
+            value: routing.realtimeAsyncRelayQueuedWaiterCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_async_relay_max_queued_waiters",
+            value: routing.realtimeAsyncRelayMaxQueuedWaiters,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_async_relay_tasks_started_total",
+            value: routing.realtimeAsyncRelayTaskStartedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_async_relay_tasks_completed_total",
+            value: routing.realtimeAsyncRelayTaskCompletedCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_async_relay_in_flight",
+            value: routing.realtimeAsyncRelayCurrentInFlightCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_async_relay_max_in_flight",
+            value: routing.realtimeAsyncRelayMaxInFlightCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_async_relay_task_start_lag_avg_millis",
+            value: average(
+                total: routing.realtimeAsyncRelayTaskStartLagTotalMillis,
+                count: routing.realtimeAsyncRelayTaskStartedCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_async_relay_task_start_lag_max_millis",
+            value: routing.realtimeAsyncRelayTaskStartLagMaxMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_async_relay_latency_avg_millis",
+            value: average(
+                total: routing.realtimeAsyncRelayLatencyTotalMillis,
+                count: routing.realtimeAsyncRelayTaskCompletedCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_realtime_async_relay_latency_max_millis",
+            value: routing.realtimeAsyncRelayLatencyMaxMillis,
+            to: &lines
+        )
         appendCounter("im_outbox_processed_events_total", value: outbox.processedEvents, to: &lines)
         appendCounter("im_outbox_failed_events_total", value: outbox.failedEvents, to: &lines)
         appendGauge("im_outbox_backlog_events", value: outbox.backlogCount, to: &lines)
@@ -89,6 +814,64 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_stream_duplicate_events_total", value: stream.duplicateEvents, to: &lines)
         appendCounter("im_stream_failed_events_total", value: stream.failedEvents, to: &lines)
         appendCounter("im_stream_dead_letter_published_events_total", value: stream.deadLetterPublishedEvents, to: &lines)
+        appendCounter("im_stream_processed_runs_total", value: stream.processedRuns, to: &lines)
+        appendCounter("im_stream_message_created_runs_total", value: stream.messageCreatedRuns, to: &lines)
+        appendCounter(
+            "im_stream_message_created_run_events_total",
+            value: stream.messageCreatedRunEventCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_stream_message_created_run_events_avg",
+            value: stream.averageMessageCreatedRunEventCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_stream_message_created_run_max_events",
+            value: stream.maxMessageCreatedRunEventCount,
+            to: &lines
+        )
+        appendCounter("im_stream_slow_processing_runs_total", value: stream.slowProcessingRuns, to: &lines)
+        appendCounter("im_stream_lagged_runs_total", value: stream.laggedRuns, to: &lines)
+        appendCounter("im_stream_processing_batches_total", value: stream.processingBatches, to: &lines)
+        appendCounter("im_stream_processing_batch_events_total", value: stream.processingBatchEventCount, to: &lines)
+        appendGauge(
+            "im_stream_processing_batch_events_avg",
+            value: stream.averageProcessingBatchEventCount,
+            to: &lines
+        )
+        appendGauge("im_stream_processing_batch_max_events", value: stream.maxProcessingBatchEventCount, to: &lines)
+        appendCounter("im_stream_batch_fill_waits_total", value: stream.batchFillWaits, to: &lines)
+        appendCounter("im_stream_batch_fill_wait_millis_total", value: stream.batchFillWaitMillis, to: &lines)
+        appendGauge("im_stream_batch_fill_wait_avg_millis", value: stream.averageBatchFillWaitMillis, to: &lines)
+        appendCounter("im_stream_batch_fill_events_total", value: stream.batchFillEventCount, to: &lines)
+        appendCounter("im_stream_batch_fill_skipped_batches_total", value: stream.batchFillSkippedBatches, to: &lines)
+        appendCounter("im_stream_queue_producer_waits_total", value: stream.queueProducerWaits, to: &lines)
+        appendGauge("im_stream_queue_depth", value: stream.queueCurrentDepth, to: &lines)
+        appendGauge("im_stream_queue_max_depth", value: stream.queueMaxDepth, to: &lines)
+        appendCounter("im_stream_run_events_total", value: stream.runEventCount, to: &lines)
+        appendGauge("im_stream_run_max_events", value: stream.maxRunEventCount, to: &lines)
+        appendGauge(
+            "im_stream_run_processing_latency_avg_millis",
+            value: stream.averageRunProcessingMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_stream_run_processing_latency_max_millis",
+            value: stream.maxRunProcessingMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_stream_run_event_lag_avg_millis",
+            value: stream.averageRunEventLagMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_stream_run_event_lag_max_millis",
+            value: stream.maxRunEventLagMillis,
+            to: &lines
+        )
+        appendStreamGroupMetrics(streamGroups, to: &lines)
         appendGauge("im_ai_stream_active", value: aiStream.activeStreams, to: &lines)
         appendCounter("im_ai_stream_started_total", value: aiStream.startedStreams, to: &lines)
         appendCounter("im_ai_stream_completed_total", value: aiStream.completedStreams, to: &lines)
@@ -118,6 +901,552 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_message_write_batches_total", value: messageWrite.messageWriteBatches, to: &lines)
         appendCounter("im_message_write_batch_messages_total", value: messageWrite.messageWriteBatchMessages, to: &lines)
         appendCounter("im_message_write_queue_rejected_total", value: messageWrite.writeQueueRejected, to: &lines)
+        appendCounter(
+            "im_domain_event_recipient_resolve_total",
+            value: domainEvent.recipientResolveCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_resolve_inline_total",
+            value: domainEvent.recipientResolveInlineCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_resolve_event_snapshot_total",
+            value: domainEvent.recipientResolveEventSnapshotCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_resolve_membership_expansion_total",
+            value: domainEvent.recipientResolveMembershipExpansionCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_resolve_affected_user_total",
+            value: domainEvent.recipientResolveAffectedUserCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_resolve_empty_total",
+            value: domainEvent.recipientResolveEmptyCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_resolve_errors_total",
+            value: domainEvent.recipientResolveErrorCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_resolve_missing_snapshot_total",
+            value: domainEvent.recipientResolveMissingSnapshotCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_resolve_users_total",
+            value: domainEvent.recipientResolveUserCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_recipient_resolve_latency_avg_millis",
+            value: average(
+                total: domainEvent.recipientResolveTotalMillis,
+                count: domainEvent.recipientResolveCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_recipient_resolve_latency_max_millis",
+            value: domainEvent.recipientResolveMaxMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_recipient_resolve_max_users",
+            value: domainEvent.recipientResolveMaxUserCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_snapshot_inline_stores_total",
+            value: domainEvent.recipientSnapshotInlineStoreCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_snapshot_inline_store_recipients_total",
+            value: domainEvent.recipientSnapshotInlineStoreRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_snapshot_deduplicated_stores_total",
+            value: domainEvent.recipientSnapshotDeduplicatedStoreCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_snapshot_deduplicated_store_recipients_total",
+            value: domainEvent.recipientSnapshotDeduplicatedStoreRecipientCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_snapshot_resolve_inline_total",
+            value: domainEvent.recipientSnapshotResolveInlineCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_snapshot_resolve_shared_set_hits_total",
+            value: domainEvent.recipientSnapshotResolveSharedSetHitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_snapshot_resolve_shared_set_missing_total",
+            value: domainEvent.recipientSnapshotResolveSharedSetMissingCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_snapshot_resolve_recipients_total",
+            value: domainEvent.recipientSnapshotResolveRecipientCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_recipient_snapshot_resolve_latency_avg_millis",
+            value: average(
+                total: domainEvent.recipientSnapshotResolveTotalMillis,
+                count: domainEvent.recipientSnapshotResolveInlineCount
+                    + domainEvent.recipientSnapshotResolveSharedSetHitCount
+                    + domainEvent.recipientSnapshotResolveSharedSetMissingCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_recipient_snapshot_resolve_latency_max_millis",
+            value: domainEvent.recipientSnapshotResolveMaxMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_recipient_snapshot_resolve_max_recipients",
+            value: domainEvent.recipientSnapshotResolveMaxRecipients,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_set_cleanup_runs_total",
+            value: domainEvent.recipientSetCleanupRunCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_set_cleanup_scanned_total",
+            value: domainEvent.recipientSetCleanupScannedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_recipient_set_cleanup_deleted_total",
+            value: domainEvent.recipientSetCleanupDeletedCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_recipient_set_cleanup_max_deleted",
+            value: domainEvent.recipientSetCleanupMaxDeletedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_message_created_owner_delivery_skipped_total",
+            value: domainEvent.messageCreatedOwnerDeliverySkippedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_message_created_owner_delivery_skipped_recipients_total",
+            value: domainEvent.messageCreatedOwnerDeliverySkippedRecipientCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_message_created_owner_delivery_skipped_max_recipients",
+            value: domainEvent.messageCreatedOwnerDeliverySkippedMaxRecipients,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_message_created_timeline_pull_delivery_total",
+            value: domainEvent.messageCreatedTimelinePullDeliveryCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_message_created_timeline_pull_delivery_recipients_total",
+            value: domainEvent.messageCreatedTimelinePullDeliveryRecipientCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_message_created_timeline_pull_delivery_max_recipients",
+            value: domainEvent.messageCreatedTimelinePullDeliveryMaxRecipients,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_message_created_owner_notification_skipped_total",
+            value: domainEvent.messageCreatedOwnerNotificationSkippedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_message_created_owner_notification_skipped_recipients_total",
+            value: domainEvent.messageCreatedOwnerNotificationSkippedRecipientCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_message_created_owner_notification_skipped_max_recipients",
+            value: domainEvent.messageCreatedOwnerNotificationSkippedMaxRecipients,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_message_created_summary_activity_only_total",
+            value: domainEvent.messageCreatedSummaryActivityOnlyCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_message_created_summary_activity_only_recipients_total",
+            value: domainEvent.messageCreatedSummaryActivityOnlyRecipientCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_message_created_summary_activity_only_max_recipients",
+            value: domainEvent.messageCreatedSummaryActivityOnlyMaxRecipients,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_message_created_preview_embedded_total",
+            value: domainEvent.messageCreatedPreviewEmbeddedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_message_created_preview_message_lookup_total",
+            value: domainEvent.messageCreatedPreviewMessageLookupCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_message_created_preview_missing_total",
+            value: domainEvent.messageCreatedPreviewMissingCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_summary_activity_coalesced_replacements_total",
+            value: domainEvent.summaryActivityCoalescedReplacementCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_summary_activity_coalesced_flushes_total",
+            value: domainEvent.summaryActivityCoalescedFlushCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_summary_activity_coalesced_flush_requests_total",
+            value: domainEvent.summaryActivityCoalescedFlushRequestCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_summary_activity_coalesced_flush_failures_total",
+            value: domainEvent.summaryActivityCoalescedFlushFailureCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_summary_activity_coalesced_flush_failure_requests_total",
+            value: domainEvent.summaryActivityCoalescedFlushFailureRequestCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_summary_activity_coalesced_flush_latency_avg_millis",
+            value: average(
+                total: domainEvent.summaryActivityCoalescedFlushTotalMillis,
+                count: domainEvent.summaryActivityCoalescedFlushCount + domainEvent.summaryActivityCoalescedFlushFailureCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_summary_activity_coalesced_flush_latency_max_millis",
+            value: domainEvent.summaryActivityCoalescedFlushMaxMillis,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_owner_delivery_batch_writes_total",
+            value: domainEvent.ownerDeliveryBatchWriteCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_owner_delivery_batch_write_requests_total",
+            value: domainEvent.ownerDeliveryBatchWriteRequestCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_owner_delivery_batch_write_inserted_rows_total",
+            value: domainEvent.ownerDeliveryBatchWriteInsertedRowCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_owner_delivery_batch_write_returned_rows_total",
+            value: domainEvent.ownerDeliveryBatchWriteReturnedRowCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_owner_delivery_batch_write_fallbacks_total",
+            value: domainEvent.ownerDeliveryBatchWriteFallbackCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_owner_delivery_batch_write_canonical_fast_paths_total",
+            value: domainEvent.ownerDeliveryBatchWriteCanonicalFastPathCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_owner_delivery_batch_write_materialized_fast_paths_total",
+            value: domainEvent.ownerDeliveryBatchWriteMaterializedFastPathCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_owner_delivery_batch_write_chunked_total",
+            value: domainEvent.ownerDeliveryBatchWriteChunkedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_event_owner_delivery_batch_write_chunks_total",
+            value: domainEvent.ownerDeliveryBatchWriteChunkCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_owner_delivery_batch_write_chunked_max_requests",
+            value: domainEvent.ownerDeliveryBatchWriteChunkedMaxRequests,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_owner_delivery_batch_write_latency_avg_millis",
+            value: average(
+                total: domainEvent.ownerDeliveryBatchWriteTotalMillis,
+                count: domainEvent.ownerDeliveryBatchWriteCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_owner_delivery_batch_write_latency_max_millis",
+            value: domainEvent.ownerDeliveryBatchWriteMaxMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_domain_event_owner_delivery_batch_write_max_requests",
+            value: domainEvent.ownerDeliveryBatchWriteMaxRequests,
+            to: &lines
+        )
+        appendCounter("im_summary_read_summary_total", value: summaryRead.summaryReadCount, to: &lines)
+        appendCounter("im_summary_read_summary_errors_total", value: summaryRead.summaryReadErrorCount, to: &lines)
+        appendGauge(
+            "im_summary_read_summary_latency_avg_millis",
+            value: average(
+                total: summaryRead.summaryReadTotalMillis,
+                count: summaryRead.summaryReadCount + summaryRead.summaryReadErrorCount
+            ),
+            to: &lines
+        )
+        appendGauge("im_summary_read_summary_latency_max_millis", value: summaryRead.summaryReadMaxMillis, to: &lines)
+        appendCounter("im_summary_read_list_total", value: summaryRead.listReadCount, to: &lines)
+        appendCounter("im_summary_read_list_errors_total", value: summaryRead.listReadErrorCount, to: &lines)
+        appendCounter("im_summary_read_list_joined_total", value: summaryRead.listReadJoinedCount, to: &lines)
+        appendCounter("im_summary_read_list_fluent_total", value: summaryRead.listReadFluentCount, to: &lines)
+        appendCounter("im_summary_read_list_fallbacks_total", value: summaryRead.listReadFallbackCount, to: &lines)
+        appendCounter("im_summary_read_list_items_total", value: summaryRead.listReadItemCount, to: &lines)
+        appendGauge("im_summary_read_list_max_items", value: summaryRead.listReadMaxItems, to: &lines)
+        appendGauge(
+            "im_summary_read_list_latency_avg_millis",
+            value: average(
+                total: summaryRead.listReadTotalMillis,
+                count: summaryRead.listReadCount + summaryRead.listReadErrorCount
+            ),
+            to: &lines
+        )
+        appendGauge("im_summary_read_list_latency_max_millis", value: summaryRead.listReadMaxMillis, to: &lines)
+        appendCounter("im_summary_read_changes_total", value: summaryRead.changesReadCount, to: &lines)
+        appendCounter("im_summary_read_changes_errors_total", value: summaryRead.changesReadErrorCount, to: &lines)
+        appendCounter("im_summary_read_changes_joined_total", value: summaryRead.changesReadJoinedCount, to: &lines)
+        appendCounter("im_summary_read_changes_fluent_total", value: summaryRead.changesReadFluentCount, to: &lines)
+        appendCounter("im_summary_read_changes_fallbacks_total", value: summaryRead.changesReadFallbackCount, to: &lines)
+        appendCounter("im_summary_read_changes_upserts_total", value: summaryRead.changesReadUpsertCount, to: &lines)
+        appendCounter("im_summary_read_changes_removed_total", value: summaryRead.changesReadRemovedCount, to: &lines)
+        appendGauge("im_summary_read_changes_max_items", value: summaryRead.changesReadMaxItems, to: &lines)
+        appendGauge(
+            "im_summary_read_changes_latency_avg_millis",
+            value: average(
+                total: summaryRead.changesReadTotalMillis,
+                count: summaryRead.changesReadCount + summaryRead.changesReadErrorCount
+            ),
+            to: &lines
+        )
+        appendGauge("im_summary_read_changes_latency_max_millis", value: summaryRead.changesReadMaxMillis, to: &lines)
+        appendCounter("im_timeline_read_history_total", value: timelineRead.historyReadCount, to: &lines)
+        appendCounter("im_timeline_read_since_total", value: timelineRead.sinceReadCount, to: &lines)
+        appendCounter("im_timeline_read_errors_total", value: timelineRead.errorCount, to: &lines)
+        appendCounter(
+            "im_timeline_read_visibility_scan_limit_exceeded_total",
+            value: timelineRead.scanLimitExceededCount,
+            to: &lines
+        )
+        appendCounter("im_timeline_read_items_total", value: timelineRead.itemCount, to: &lines)
+        appendGauge("im_timeline_read_max_items", value: timelineRead.maxItems, to: &lines)
+        appendCounter("im_timeline_read_visibility_scan_rows_total", value: timelineRead.scanRowCount, to: &lines)
+        appendGauge("im_timeline_read_visibility_scan_max_rows", value: timelineRead.maxScanRows, to: &lines)
+        appendCounter("im_timeline_read_visibility_scan_pages_total", value: timelineRead.scanPageCount, to: &lines)
+        appendGauge("im_timeline_read_visibility_scan_max_pages", value: timelineRead.maxScanPages, to: &lines)
+        appendCounter("im_timeline_since_hot_cache_hits_total", value: timelineRead.sinceHotCacheHitCount, to: &lines)
+        appendCounter("im_timeline_since_hot_cache_misses_total", value: timelineRead.sinceHotCacheMissCount, to: &lines)
+        appendCounter(
+            "im_timeline_since_hot_cache_unsafe_bypasses_total",
+            value: timelineRead.sinceHotCacheUnsafeBypassCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_hot_cache_target_sequence_bypasses_total",
+            value: timelineRead.sinceHotCacheTargetSequenceBypassCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_hot_cache_invalidations_total",
+            value: timelineRead.sinceHotCacheInvalidationCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_hot_cache_invalidated_entries_total",
+            value: timelineRead.sinceHotCacheInvalidatedEntryCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_recent_cache_hits_total",
+            value: timelineRead.sinceRecentCacheHitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_recent_cache_misses_total",
+            value: timelineRead.sinceRecentCacheMissCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_recent_cache_target_sequence_bypasses_total",
+            value: timelineRead.sinceRecentCacheTargetSequenceBypassCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_recent_cache_stores_total",
+            value: timelineRead.sinceRecentCacheStoreCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_recent_cache_invalidations_total",
+            value: timelineRead.sinceRecentCacheInvalidationCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_recent_cache_invalidated_entries_total",
+            value: timelineRead.sinceRecentCacheInvalidatedEntryCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_visibility_safety_cache_hits_total",
+            value: timelineRead.sinceVisibilitySafetyCacheHitCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_visibility_safety_cache_misses_total",
+            value: timelineRead.sinceVisibilitySafetyCacheMissCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_visibility_safety_cache_joined_inflight_total",
+            value: timelineRead.sinceVisibilitySafetyCacheJoinedInFlightCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_visibility_hidden_override_bypasses_total",
+            value: timelineRead.sinceVisibilitySafetyHiddenOverrideBypassCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_visibility_notice_bypasses_total",
+            value: timelineRead.sinceVisibilitySafetyNoticeBypassCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_response_singleflight_joined_total",
+            value: timelineRead.sinceResponseSingleflightJoinedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_response_singleflight_notice_bypasses_total",
+            value: timelineRead.sinceResponseSingleflightNoticeBypassCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_distributed_invalidations_published_total",
+            value: timelineRead.sinceDistributedInvalidationPublishedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_distributed_invalidations_received_total",
+            value: timelineRead.sinceDistributedInvalidationReceivedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_distributed_invalidation_errors_total",
+            value: timelineRead.sinceDistributedInvalidationErrorCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_target_sequence_requests_total",
+            value: timelineRead.sinceTargetSequenceRequestCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_target_sequence_eventual_satisfied_total",
+            value: timelineRead.sinceTargetSequenceEventualSatisfiedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_target_sequence_strong_fallbacks_total",
+            value: timelineRead.sinceTargetSequenceStrongFallbackCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_target_sequence_strong_satisfied_total",
+            value: timelineRead.sinceTargetSequenceStrongSatisfiedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_target_sequence_strong_misses_total",
+            value: timelineRead.sinceTargetSequenceStrongMissCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_target_sequence_errors_total",
+            value: timelineRead.sinceTargetSequenceErrorCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_target_sequence_singleflight_joined_total",
+            value: timelineRead.sinceTargetSequenceSingleflightJoinedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_timeline_since_target_sequence_window_joined_total",
+            value: timelineRead.sinceTargetSequenceWindowJoinedCount,
+            to: &lines
+        )
+        lines.append("# TYPE im_timeline_read_latency_millis histogram")
+        appendHistogramSamples(
+            "im_timeline_read_latency_millis",
+            histogram: timelineRead.historyLatencyHistogram,
+            labels: ["kind": "history"],
+            to: &lines
+        )
+        appendHistogramSamples(
+            "im_timeline_read_latency_millis",
+            histogram: timelineRead.sinceLatencyHistogram,
+            labels: ["kind": "since"],
+            to: &lines
+        )
+        appendGauge(
+            "im_timeline_read_latency_avg_millis",
+            value: average(
+                total: timelineRead.totalMillis,
+                count: timelineRead.historyReadCount + timelineRead.sinceReadCount + timelineRead.errorCount
+            ),
+            to: &lines
+        )
+        appendGauge("im_timeline_read_latency_max_millis", value: timelineRead.maxMillis, to: &lines)
         appendCounter("im_client_health_reports_total", value: clientHealth.reports, to: &lines)
         appendGauge("im_client_health_reporting_users", value: clientHealth.activeReportingUsers, to: &lines)
         appendGauge(
@@ -164,6 +1493,106 @@ struct InternalMetricsController: RouteCollection {
             value: clientHealth.cacheDroppedTimelineNotices,
             to: &lines
         )
+        appendCounter(
+            "im_client_timeline_catch_up_hint_queued_total",
+            value: clientHealth.timelineCatchUpHintQueued,
+            to: &lines
+        )
+        appendCounter(
+            "im_client_timeline_catch_up_skipped_already_loaded_total",
+            value: clientHealth.timelineCatchUpSkippedAlreadyLoaded,
+            to: &lines
+        )
+        appendCounter(
+            "im_client_timeline_catch_up_deferred_total",
+            value: clientHealth.timelineCatchUpDeferred,
+            to: &lines
+        )
+        appendCounter(
+            "im_client_timeline_catch_up_since_requests_total",
+            value: clientHealth.timelineCatchUpSinceRequests,
+            to: &lines
+        )
+        appendCounter(
+            "im_client_timeline_catch_up_since_successes_total",
+            value: clientHealth.timelineCatchUpSinceSuccesses,
+            to: &lines
+        )
+        appendCounter(
+            "im_client_timeline_catch_up_since_failures_total",
+            value: clientHealth.timelineCatchUpSinceFailures,
+            to: &lines
+        )
+        appendCounter(
+            "im_client_timeline_catch_up_applied_pages_total",
+            value: clientHealth.timelineCatchUpAppliedPages,
+            to: &lines
+        )
+        appendCounter(
+            "im_client_timeline_catch_up_applied_items_total",
+            value: clientHealth.timelineCatchUpAppliedItems,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_hint_to_request_max_millis",
+            value: clientHealth.maxTimelineCatchUpHintToRequestMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_hint_to_request_avg_millis",
+            value: clientHealth.averageTimelineCatchUpHintToRequestMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_request_max_millis",
+            value: clientHealth.maxTimelineCatchUpRequestMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_request_avg_millis",
+            value: clientHealth.averageTimelineCatchUpRequestMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_hint_to_apply_max_millis",
+            value: clientHealth.maxTimelineCatchUpHintToApplyMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_hint_to_apply_avg_millis",
+            value: clientHealth.averageTimelineCatchUpHintToApplyMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_config_selected_hint_initial_jitter_max_millis",
+            value: clientHealth.maxTimelineCatchUpSelectedHintInitialJitterMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_config_selected_hint_initial_jitter_avg_millis",
+            value: clientHealth.averageTimelineCatchUpSelectedHintInitialJitterMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_config_selected_hint_min_interval_max_millis",
+            value: clientHealth.maxTimelineCatchUpSelectedHintMinimumIntervalMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_config_selected_hint_min_interval_avg_millis",
+            value: clientHealth.averageTimelineCatchUpSelectedHintMinimumIntervalMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_config_selected_hint_micro_batch_max_millis",
+            value: clientHealth.maxTimelineCatchUpSelectedHintMicroBatchMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_client_timeline_catch_up_config_selected_hint_micro_batch_avg_millis",
+            value: clientHealth.averageTimelineCatchUpSelectedHintMicroBatchMillis,
+            to: &lines
+        )
         appendGauge("im_projection_lag_millis", value: liveLag.projectionLagMillis, to: &lines)
         appendGauge("im_search_lag_millis", value: liveLag.searchLagMillis, to: &lines)
         appendGauge("im_replay_pending_events", value: liveLag.replayPendingEvents, to: &lines)
@@ -187,6 +1616,206 @@ struct InternalMetricsController: RouteCollection {
     private func appendCounter(_ name: String, value: Int, to lines: inout [String]) {
         lines.append("# TYPE \(name) counter")
         lines.append("\(name) \(value)")
+    }
+
+    private func appendCounterSample(
+        _ name: String,
+        value: Int,
+        labels: [String: String],
+        to lines: inout [String]
+    ) {
+        lines.append("\(name)\(labelString(labels)) \(value)")
+    }
+
+    private func appendGaugeSample(
+        _ name: String,
+        value: Int,
+        labels: [String: String],
+        to lines: inout [String]
+    ) {
+        lines.append("\(name)\(labelString(labels)) \(value)")
+    }
+
+    private func appendHistogramSamples(
+        _ name: String,
+        histogram: IMTimelineReadMetrics.LatencyHistogram,
+        labels: [String: String],
+        to lines: inout [String]
+    ) {
+        for (index, upperBound) in histogram.bucketUpperBoundsMilliseconds.enumerated() {
+            var bucketLabels = labels
+            bucketLabels["le"] = String(upperBound)
+            lines.append("\(name)_bucket\(labelString(bucketLabels)) \(histogram.bucketCounts[index])")
+        }
+        var infiniteBucketLabels = labels
+        infiniteBucketLabels["le"] = "+Inf"
+        lines.append("\(name)_bucket\(labelString(infiniteBucketLabels)) \(histogram.count)")
+        lines.append("\(name)_sum\(labelString(labels)) \(histogram.sumMilliseconds)")
+        lines.append("\(name)_count\(labelString(labels)) \(histogram.count)")
+    }
+
+    private func appendStreamGroupMetrics(
+        _ groups: [(groupID: String, snapshot: IMStreamMetrics.Snapshot)],
+        to lines: inout [String]
+    ) {
+        for group in groups {
+            let labels = ["consumer_group": group.groupID]
+            let stream = group.snapshot
+            appendCounterSample("im_stream_consumed_events_total", value: stream.consumedEvents, labels: labels, to: &lines)
+            appendCounterSample("im_stream_duplicate_events_total", value: stream.duplicateEvents, labels: labels, to: &lines)
+            appendCounterSample("im_stream_failed_events_total", value: stream.failedEvents, labels: labels, to: &lines)
+            appendCounterSample(
+                "im_stream_dead_letter_published_events_total",
+                value: stream.deadLetterPublishedEvents,
+                labels: labels,
+                to: &lines
+            )
+            appendCounterSample("im_stream_processed_runs_total", value: stream.processedRuns, labels: labels, to: &lines)
+            appendCounterSample(
+                "im_stream_message_created_runs_total",
+                value: stream.messageCreatedRuns,
+                labels: labels,
+                to: &lines
+            )
+            appendCounterSample(
+                "im_stream_message_created_run_events_total",
+                value: stream.messageCreatedRunEventCount,
+                labels: labels,
+                to: &lines
+            )
+            appendGaugeSample(
+                "im_stream_message_created_run_events_avg",
+                value: stream.averageMessageCreatedRunEventCount,
+                labels: labels,
+                to: &lines
+            )
+            appendGaugeSample(
+                "im_stream_message_created_run_max_events",
+                value: stream.maxMessageCreatedRunEventCount,
+                labels: labels,
+                to: &lines
+            )
+            appendCounterSample(
+                "im_stream_slow_processing_runs_total",
+                value: stream.slowProcessingRuns,
+                labels: labels,
+                to: &lines
+            )
+            appendCounterSample("im_stream_lagged_runs_total", value: stream.laggedRuns, labels: labels, to: &lines)
+            appendCounterSample(
+                "im_stream_processing_batches_total",
+                value: stream.processingBatches,
+                labels: labels,
+                to: &lines
+            )
+            appendCounterSample(
+                "im_stream_processing_batch_events_total",
+                value: stream.processingBatchEventCount,
+                labels: labels,
+                to: &lines
+            )
+            appendGaugeSample(
+                "im_stream_processing_batch_events_avg",
+                value: stream.averageProcessingBatchEventCount,
+                labels: labels,
+                to: &lines
+            )
+            appendGaugeSample(
+                "im_stream_processing_batch_max_events",
+                value: stream.maxProcessingBatchEventCount,
+                labels: labels,
+                to: &lines
+            )
+            appendCounterSample(
+                "im_stream_batch_fill_waits_total",
+                value: stream.batchFillWaits,
+                labels: labels,
+                to: &lines
+            )
+            appendCounterSample(
+                "im_stream_batch_fill_wait_millis_total",
+                value: stream.batchFillWaitMillis,
+                labels: labels,
+                to: &lines
+            )
+            appendGaugeSample(
+                "im_stream_batch_fill_wait_avg_millis",
+                value: stream.averageBatchFillWaitMillis,
+                labels: labels,
+                to: &lines
+            )
+            appendCounterSample(
+                "im_stream_batch_fill_events_total",
+                value: stream.batchFillEventCount,
+                labels: labels,
+                to: &lines
+            )
+            appendCounterSample(
+                "im_stream_batch_fill_skipped_batches_total",
+                value: stream.batchFillSkippedBatches,
+                labels: labels,
+                to: &lines
+            )
+            appendCounterSample(
+                "im_stream_queue_producer_waits_total",
+                value: stream.queueProducerWaits,
+                labels: labels,
+                to: &lines
+            )
+            appendGaugeSample("im_stream_queue_depth", value: stream.queueCurrentDepth, labels: labels, to: &lines)
+            appendGaugeSample("im_stream_queue_max_depth", value: stream.queueMaxDepth, labels: labels, to: &lines)
+            appendCounterSample("im_stream_run_events_total", value: stream.runEventCount, labels: labels, to: &lines)
+            appendGaugeSample("im_stream_run_max_events", value: stream.maxRunEventCount, labels: labels, to: &lines)
+            appendGaugeSample(
+                "im_stream_run_processing_latency_avg_millis",
+                value: stream.averageRunProcessingMillis,
+                labels: labels,
+                to: &lines
+            )
+            appendGaugeSample(
+                "im_stream_run_processing_latency_max_millis",
+                value: stream.maxRunProcessingMillis,
+                labels: labels,
+                to: &lines
+            )
+            appendGaugeSample(
+                "im_stream_run_event_lag_avg_millis",
+                value: stream.averageRunEventLagMillis,
+                labels: labels,
+                to: &lines
+            )
+            appendGaugeSample(
+                "im_stream_run_event_lag_max_millis",
+                value: stream.maxRunEventLagMillis,
+                labels: labels,
+                to: &lines
+            )
+        }
+    }
+
+    private func labelString(_ labels: [String: String]) -> String {
+        guard !labels.isEmpty else {
+            return ""
+        }
+        let body = labels
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\"\(escapeLabelValue($0.value))\"" }
+            .joined(separator: ",")
+        return "{\(body)}"
+    }
+
+    private func escapeLabelValue(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private func average(total: Int, count: Int) -> Int {
+        guard count > 0 else {
+            return 0
+        }
+        return total / count
     }
 
     private func collectLiveLagSnapshot(app: Application) async -> LiveLagSnapshot {

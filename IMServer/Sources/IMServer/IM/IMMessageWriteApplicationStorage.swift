@@ -16,6 +16,14 @@ private struct IMMessageWriteBatchConfigurationStorageKey: StorageKey {
     typealias Value = IMMessageWriteBatchConfiguration
 }
 
+private struct IMMessageCreatedRecipientInlineConfigurationStorageKey: StorageKey {
+    typealias Value = IMMessageCreatedRecipientInlineConfiguration
+}
+
+private struct IMDomainEventRecipientSnapshotConfigurationStorageKey: StorageKey {
+    typealias Value = IMDomainEventRecipientSnapshotConfiguration
+}
+
 private struct IMSequenceBlockAllocatorStorageKey: StorageKey {
     typealias Value = IMSequenceBlockAllocator
 }
@@ -87,6 +95,30 @@ extension Application {
             return configuration
         }
         set { storage[IMMessageWriteBatchConfigurationStorageKey.self] = newValue }
+    }
+
+    var messageCreatedRecipientInlineConfiguration: IMMessageCreatedRecipientInlineConfiguration {
+        get {
+            if let configuration = storage[IMMessageCreatedRecipientInlineConfigurationStorageKey.self] {
+                return configuration
+            }
+            let configuration = IMMessageCreatedRecipientInlineConfiguration.load(from: environment)
+            storage[IMMessageCreatedRecipientInlineConfigurationStorageKey.self] = configuration
+            return configuration
+        }
+        set { storage[IMMessageCreatedRecipientInlineConfigurationStorageKey.self] = newValue }
+    }
+
+    var domainEventRecipientSnapshotConfiguration: IMDomainEventRecipientSnapshotConfiguration {
+        get {
+            if let configuration = storage[IMDomainEventRecipientSnapshotConfigurationStorageKey.self] {
+                return configuration
+            }
+            let configuration = IMDomainEventRecipientSnapshotConfiguration.load(from: environment)
+            storage[IMDomainEventRecipientSnapshotConfigurationStorageKey.self] = configuration
+            return configuration
+        }
+        set { storage[IMDomainEventRecipientSnapshotConfigurationStorageKey.self] = newValue }
     }
 
     var sequenceBlockAllocator: IMSequenceBlockAllocator {

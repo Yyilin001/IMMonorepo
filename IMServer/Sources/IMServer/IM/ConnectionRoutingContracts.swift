@@ -5,6 +5,7 @@ struct NodeMessageDispatchEnvelope: Codable, Sendable {
     enum Action: String, Codable, Sendable {
         case domainEvent
         case domainEventPacket
+        case activeConversationDomainEventPacket
         case streamSignal
         case kickSession
         case kickUser
@@ -15,7 +16,17 @@ struct NodeMessageDispatchEnvelope: Codable, Sendable {
 
     enum Payload: Codable, Sendable {
         case domainEvent(ownerUserID: UUID, eventID: UUID)
-        case domainEventPacket(packetBase64: String, targetUserIDs: [UUID])
+        case domainEventPacket(
+            packetBase64: String,
+            targetUserIDs: [UUID],
+            fanoutIntent: IMGatewayDomainEventFanoutIntent? = nil
+        )
+        case activeConversationDomainEventPacket(
+            packetBase64: String,
+            conversationID: UUID,
+            allowedUserIDs: [UUID],
+            fanoutIntent: IMGatewayDomainEventFanoutIntent? = nil
+        )
         case streamSignal(packetBase64: String, targetUserIDs: [UUID])
         case kickSession(sessionID: UUID, reason: IMTCPKickReason, message: String)
         case kickUser(userID: UUID, reason: IMTCPKickReason, message: String)
@@ -27,6 +38,8 @@ struct NodeMessageDispatchEnvelope: Codable, Sendable {
             return .domainEvent
         case .domainEventPacket:
             return .domainEventPacket
+        case .activeConversationDomainEventPacket:
+            return .activeConversationDomainEventPacket
         case .streamSignal:
             return .streamSignal
         case .kickSession:
@@ -40,8 +53,10 @@ struct NodeMessageDispatchEnvelope: Codable, Sendable {
         switch payload {
         case .domainEvent(let ownerUserID, _):
             return [ownerUserID]
-        case .domainEventPacket(_, let targetUserIDs):
+        case .domainEventPacket(_, let targetUserIDs, _):
             return targetUserIDs
+        case .activeConversationDomainEventPacket(_, _, let allowedUserIDs, _):
+            return allowedUserIDs
         case .streamSignal(_, let targetUserIDs):
             return targetUserIDs
         case .kickSession:
@@ -62,10 +77,24 @@ struct NodeMessageDispatchEnvelope: Codable, Sendable {
 extension NodeMessageDispatchEnvelope {
     func withTargetUserIDs(_ targetUserIDs: [UUID]) -> NodeMessageDispatchEnvelope {
         switch payload {
-        case .domainEventPacket(let packetBase64, _):
+        case .domainEventPacket(let packetBase64, _, let fanoutIntent):
             return NodeMessageDispatchEnvelope(
                 requestID: requestID,
-                payload: .domainEventPacket(packetBase64: packetBase64, targetUserIDs: targetUserIDs)
+                payload: .domainEventPacket(
+                    packetBase64: packetBase64,
+                    targetUserIDs: targetUserIDs,
+                    fanoutIntent: fanoutIntent
+                )
+            )
+        case .activeConversationDomainEventPacket(let packetBase64, let conversationID, _, let fanoutIntent):
+            return NodeMessageDispatchEnvelope(
+                requestID: requestID,
+                payload: .activeConversationDomainEventPacket(
+                    packetBase64: packetBase64,
+                    conversationID: conversationID,
+                    allowedUserIDs: targetUserIDs,
+                    fanoutIntent: fanoutIntent
+                )
             )
         case .streamSignal(let packetBase64, _):
             return NodeMessageDispatchEnvelope(
@@ -103,6 +132,13 @@ protocol PresenceStore: Sendable {
     func deactivatePresence(forUserID userID: UUID) async throws
     func activatePresence(forSessionID sessionID: UUID, userID: UUID) async throws
     func deactivatePresence(forSessionID sessionID: UUID, userID: UUID) async throws
+    func activateConversationPresence(conversationID: UUID, userID: UUID) async throws
+    func deactivateConversationPresence(conversationID: UUID, userID: UUID) async throws
+    func routeNodeIDs(
+        forActiveConversationID conversationID: UUID,
+        amongUserIDs userIDs: [UUID]
+    ) async throws -> [UUID: Set<String>]
+    func routeNodeIDs(forActiveConversationID conversationID: UUID) async throws -> [UUID: Set<String>]
     func routeNodeIDs(forUserIDs userIDs: [UUID]) async throws -> [UUID: Set<String>]
     func routeNodeIDs(forSessionIDs sessionIDs: [UUID]) async throws -> [UUID: Set<String>]
     func activeNodeIDs() async throws -> Set<String>
@@ -137,13 +173,54 @@ struct IMRedisRoutingConfiguration: Sendable {
     let url: String?
     let mode: IMRoutingMode
     let maximumConnectionCount: Int
+    let presenceHeartbeatTimeoutSeconds: Int
+    let activeConversationRouteTTLSeconds: Int
+    let activeConversationRouteCacheTTLSeconds: Int
+
+    init(
+        url: String?,
+        mode: IMRoutingMode,
+        maximumConnectionCount: Int,
+        presenceHeartbeatTimeoutSeconds: Int = 90,
+        activeConversationRouteTTLSeconds: Int = 900,
+        activeConversationRouteCacheTTLSeconds: Int = 2
+    ) {
+        self.url = url
+        self.mode = mode
+        self.maximumConnectionCount = maximumConnectionCount
+        self.presenceHeartbeatTimeoutSeconds = max(1, presenceHeartbeatTimeoutSeconds)
+        self.activeConversationRouteTTLSeconds = max(
+            self.presenceHeartbeatTimeoutSeconds,
+            activeConversationRouteTTLSeconds
+        )
+        self.activeConversationRouteCacheTTLSeconds = max(0, activeConversationRouteCacheTTLSeconds)
+    }
 
     static func load(from environment: Environment) -> IMRedisRoutingConfiguration {
         let explicitMode = Environment.get("IM_ROUTING_MODE").flatMap(IMRoutingMode.init(rawValue:))
         let url = Environment.get("REDIS_URL")
         let mode = explicitMode ?? (url == nil ? .local : .redis)
         let maximumConnectionCount = max(2, Environment.get("IM_REDIS_MAX_CONNECTIONS").flatMap(Int.init(_:)) ?? 8)
-        return IMRedisRoutingConfiguration(url: url, mode: mode, maximumConnectionCount: maximumConnectionCount)
+        let heartbeatTimeoutSeconds = max(
+            1,
+            Environment.get("IM_REDIS_PRESENCE_HEARTBEAT_TIMEOUT_SECONDS").flatMap(Int.init(_:)) ?? 90
+        )
+        let activeConversationRouteTTLSeconds = max(
+            heartbeatTimeoutSeconds,
+            Environment.get("IM_REDIS_ACTIVE_CONVERSATION_ROUTE_TTL_SECONDS").flatMap(Int.init(_:)) ?? 900
+        )
+        let activeConversationRouteCacheTTLSeconds = max(
+            0,
+            Environment.get("IM_REDIS_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_SECONDS").flatMap(Int.init(_:)) ?? 2
+        )
+        return IMRedisRoutingConfiguration(
+            url: url,
+            mode: mode,
+            maximumConnectionCount: maximumConnectionCount,
+            presenceHeartbeatTimeoutSeconds: heartbeatTimeoutSeconds,
+            activeConversationRouteTTLSeconds: activeConversationRouteTTLSeconds,
+            activeConversationRouteCacheTTLSeconds: activeConversationRouteCacheTTLSeconds
+        )
     }
 
     func requireURL() throws -> String {

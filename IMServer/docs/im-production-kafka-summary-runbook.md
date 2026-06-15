@@ -237,3 +237,47 @@ Use the production env templates under:
 - `config/env/outbox-relay.production.env.example`
 - `config/env/stream-consumer.production.env.example`
 - `config/env/ops.production.env.example`
+
+Before deploying real env files, run:
+
+```bash
+scripts/production_release_gate.sh \
+  --command-api /etc/im/command-api.env \
+  --gateway /etc/im/gateway.env \
+  --query-api /etc/im/query-api.env \
+  --outbox-relay /etc/im/outbox-relay.env \
+  --ops /etc/im/ops.env \
+  --stream-consumer /etc/im/stream-summary.env \
+  --stream-consumer /etc/im/stream-domain.env \
+  --stream-consumer /etc/im/stream-realtime.env \
+  --stream-consumer /etc/im/stream-notification.env \
+  --strict-secrets \
+  --require-groups summary-projection-consumer,domain-delivery-consumer,realtime-delivery-consumer,notification-consumer
+```
+
+The release gate runs the preflight self-test, template preflight, real env
+preflight, release build, and full Swift test suite by default. Use
+`--skip-swift-tests` only for a local fast smoke gate that is not release
+acceptance evidence. The real env preflight checks
+every `IM_CONVERSATION_SHARD_IDS` and `IM_SUMMARY_SHARD_IDS` entry has explicit
+`HOST`, `PORT`, `USERNAME`, `PASSWORD`, and `NAME` values for the matching
+`DATABASE_CONVERSATION_<SHARD>_*` or `DATABASE_SUMMARY_<SHARD>_*` prefix before
+any role is deployed. Gateway must set `IM_COMMAND_API_INTERNAL_BASE_URL` and
+`IM_INTERNAL_SHARED_SECRET` for authenticated command ingress. Domain and realtime
+stream consumers must set `IM_GATEWAY_RELAY_MODE=http`,
+`IM_GATEWAY_INTERNAL_BASE_URL`, and the same `IM_INTERNAL_SHARED_SECRET` so
+large-group realtime relay reaches gateway over authenticated internal HTTP.
+It also requires Kafka `acks=all`, `sasl_tls`,
+`scram-sha-512`, SASL credentials, and `IM_KAFKA_TLS_CA_FILE` for command,
+relay, ops, and stream roles. Command API must use `MEDIA_STORAGE_PROVIDER=s3compatible`
+with explicit S3 endpoint, bucket, access key, secret key, region, and path-style
+setting. Command API must also keep hot-conversation throttling enabled, use
+block sequence allocation with `IM_COMMAND_NODE_ID` matching `IM_COMMAND_NODE_URLS`,
+provide the command/internal shared secret, and keep message write batching enabled.
+With `--strict-secrets`, it rejects template
+placeholders such as `replace-me`, `user:pass`, and `.example` hostnames in real
+production env files.
+
+Each run writes a timestamped markdown report plus per-step `.log` files under
+`reports/`; CI uploads that directory as the
+`imserver-production-release-gate-reports` artifact.

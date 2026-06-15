@@ -2,6 +2,11 @@ import Foundation
 import Vapor
 
 enum IMProductionRuntimeValidationSupport {
+    static let maximumActiveConversationFullFanoutLimit = 128
+    static let maximumActiveCompactHintCoalesceWindowMilliseconds = 100
+    static let maximumActiveCompactHintPreviewCharacters = 120
+    static let minimumActiveConversationFullFanoutPayloadByteBudget = 64 * 1024
+
     static func validatePrimaryDatabaseConfiguration() throws {
         let requiredKeys = [
             "DATABASE_PRIMARY_HOST",
@@ -24,6 +29,101 @@ enum IMProductionRuntimeValidationSupport {
     static func validateGatewayCommandIngressConfiguration(_ app: Application) throws {
         guard app.commandAPIIngressConfiguration.isEnabled else {
             throw Abort(.internalServerError, reason: "Production gateway requires IM_COMMAND_API_INTERNAL_BASE_URL to proxy IM command ingress.")
+        }
+    }
+
+    static func validateGatewayRealtimeFanoutProtection(_ app: Application) throws {
+        guard app.imTCPConfiguration.dropsRealtimeWhenNotWritable else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE=true so slow clients cannot retain unbounded best-effort realtime writes."
+            )
+        }
+
+        let fanoutConfiguration = app.gatewayLocalFanoutConfiguration
+        guard fanoutConfiguration.activeConversationFanoutEnabled else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED=true so large-group message fanout is split between active chat viewers and lightweight inactive conversation hints."
+            )
+        }
+
+        guard fanoutConfiguration.activeConversationFullFanoutRecipientLimit > 0 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT > 0 so one hot active conversation cannot force unbounded full message fanout."
+            )
+        }
+        guard fanoutConfiguration.activeConversationFullFanoutPayloadByteBudget >= minimumActiveConversationFullFanoutPayloadByteBudget else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET >= \(minimumActiveConversationFullFanoutPayloadByteBudget) so large or rich message payloads shrink full-message fanout instead of exceeding the per-message realtime budget."
+            )
+        }
+        try validateActiveConversationFullFanoutLimitBound(
+            fanoutConfiguration,
+            context: "Production gateway"
+        )
+
+        guard fanoutConfiguration.usesCompactOnlyActiveConversationFanout else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE=compact-only so hot large-group active viewers use lightweight realtime hints plus timeline/since catch-up instead of bounded full-message fanout."
+            )
+        }
+
+        try validateActiveCompactHintMessageLite(
+            app.streamConsumerConfiguration,
+            context: "Production gateway"
+        )
+
+        guard !fanoutConfiguration.relaysInactiveConversationHints else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=pull-only so large inactive online groups use conversation changes/timeline catch-up instead of one realtime hint fanout per online recipient."
+            )
+        }
+
+        guard fanoutConfiguration.batchSize <= 1024 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_GATEWAY_LOCAL_FANOUT_BATCH_SIZE <= 1024 so one local fanout chunk cannot monopolize a gateway EventLoop with too many TCP writes."
+            )
+        }
+
+        guard fanoutConfiguration.eventLoopYieldChunkCount <= 256 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_GATEWAY_LOCAL_FANOUT_EVENT_LOOP_YIELD_CHUNKS <= 256 so hot-room local fanout periodically yields gateway EventLoops for ACKs, heartbeats, and small realtime packets."
+            )
+        }
+
+        guard app.streamConsumerConfiguration.realtimeRemoteDispatchMaxInFlight > 1 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_REALTIME_REMOTE_DISPATCH_MAX_IN_FLIGHT > 1 so cross-node realtime fanout is not serialized under large-group bursts."
+            )
+        }
+
+        guard app.streamConsumerConfiguration.realtimeRemoteDispatchMaxInFlight <= 64 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_REALTIME_REMOTE_DISPATCH_MAX_IN_FLIGHT <= 64 so one process cannot retain too many concurrent cross-node realtime relay requests under large-group bursts."
+            )
+        }
+
+        guard app.streamConsumerConfiguration.realtimeRemoteDispatchUserBatchSize <= 2048 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_REALTIME_REMOTE_DISPATCH_USER_BATCH_SIZE <= 2048 so a single cross-node realtime relay packet cannot grow without a bounded recipient batch."
+            )
+        }
+
+        guard !app.streamConsumerConfiguration.realtimeActiveConversationUnsplitFallbackEnabled else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production gateway requires IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false so active-conversation route failures cannot fall back to full unsplit large-group realtime fanout."
+            )
         }
     }
 
@@ -63,6 +163,7 @@ enum IMProductionRuntimeValidationSupport {
     }
 
     static func validateGatewayRelayConfiguration(_ app: Application) throws {
+        try validateGatewayRelayBodyLimitConfiguration(app)
         guard app.gatewayRelayConfiguration.mode == .http else {
             throw GatewayRelayConfigurationError.productionCommandAPIRequiresHTTPMode
         }
@@ -74,6 +175,30 @@ enum IMProductionRuntimeValidationSupport {
         else {
             throw Abort(.internalServerError, reason: "Production gateway relay requires IM_INTERNAL_SHARED_SECRET.")
         }
+    }
+
+    static func validateGatewayRelayBodyLimitConfiguration(_ app: Application) throws {
+        let configuration = app.gatewayRelayConfiguration
+        let minimumBodyBytes = 64 * 1024
+        let maximumBodyBytes = 16 * 1024 * 1024
+        try validateRelayBodyLimit(
+            name: "IM_GATEWAY_RELAY_DOMAIN_EVENT_PACKET_MAX_BODY_BYTES",
+            value: configuration.domainEventPacketMaxBodyBytes,
+            minimum: minimumBodyBytes,
+            maximum: maximumBodyBytes
+        )
+        try validateRelayBodyLimit(
+            name: "IM_GATEWAY_RELAY_DOMAIN_EVENT_PACKET_BIN_MAX_BODY_BYTES",
+            value: configuration.domainEventPacketBinaryMaxBodyBytes,
+            minimum: minimumBodyBytes,
+            maximum: maximumBodyBytes
+        )
+        try validateRelayBodyLimit(
+            name: "IM_GATEWAY_RELAY_DOMAIN_EVENT_PACKETS_MAX_BODY_BYTES",
+            value: configuration.domainEventPacketsMaxBodyBytes,
+            minimum: minimumBodyBytes,
+            maximum: maximumBodyBytes
+        )
     }
 
     static func validateTCPTransportExposure(_ app: Application) throws {
@@ -95,6 +220,7 @@ enum IMProductionRuntimeValidationSupport {
         guard app.eventStreamConfiguration.driver == .kafka else {
             throw Abort(.internalServerError, reason: "\(app.imRuntimeRole.rawValue) requires IM_EVENT_STREAM_DRIVER=kafka in production.")
         }
+        try validateProductionKafkaStreamConfiguration(app)
         _ = try app.eventStreamConfiguration.makeProducerConfiguration(nodeID: app.imNodeID)
     }
 
@@ -102,11 +228,72 @@ enum IMProductionRuntimeValidationSupport {
         guard app.eventStreamConfiguration.driver == .kafka else {
             throw Abort(.internalServerError, reason: "\(app.imRuntimeRole.rawValue) requires IM_EVENT_STREAM_DRIVER=kafka in production.")
         }
+        try validateProductionKafkaStreamConfiguration(app)
         _ = try app.eventStreamConfiguration.makeConsumerConfiguration(
             consumerGroupID: "summary-projection-consumer",
             clientSuffix: "\(app.imRuntimeRole.rawValue)-validation",
             topics: [app.eventStreamConfiguration.topic]
         )
+    }
+
+    private static func validateProductionKafkaStreamConfiguration(_ app: Application) throws {
+        let configuration = app.eventStreamConfiguration
+        try requireExplicitKafkaEnvironmentKey("IM_KAFKA_TOPIC", role: app.imRuntimeRole)
+        try requireExplicitKafkaEnvironmentKey("IM_KAFKA_DEAD_LETTER_TOPIC", role: app.imRuntimeRole)
+        try requireExplicitKafkaEnvironmentKey("IM_KAFKA_CLIENT_ID", role: app.imRuntimeRole)
+        guard configuration.requiredAcknowledgements.lowercased() == "all"
+            || configuration.requiredAcknowledgements == "-1"
+        else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(app.imRuntimeRole.rawValue) requires IM_KAFKA_REQUIRED_ACKS=all in production so committed domain events are acknowledged by all in-sync replicas."
+            )
+        }
+        guard configuration.autoCreateTopics == false else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(app.imRuntimeRole.rawValue) requires IM_KAFKA_AUTO_CREATE_TOPICS=false in production so topic partitioning and retention are managed explicitly."
+            )
+        }
+        guard configuration.securityProtocol == .saslTLS else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(app.imRuntimeRole.rawValue) requires IM_KAFKA_SECURITY_PROTOCOL=sasl_tls in production."
+            )
+        }
+        guard configuration.saslMechanism == .scramSHA512 else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(app.imRuntimeRole.rawValue) requires IM_KAFKA_SASL_MECHANISM=scram-sha-512 in production."
+            )
+        }
+        guard configuration.saslUsername?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(app.imRuntimeRole.rawValue) requires IM_KAFKA_SASL_USERNAME in production."
+            )
+        }
+        guard configuration.saslPassword?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(app.imRuntimeRole.rawValue) requires IM_KAFKA_SASL_PASSWORD in production."
+            )
+        }
+        guard configuration.tlsCAFile?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(app.imRuntimeRole.rawValue) requires IM_KAFKA_TLS_CA_FILE in production."
+            )
+        }
+    }
+
+    private static func requireExplicitKafkaEnvironmentKey(_ key: String, role: IMRuntimeRole) throws {
+        guard Environment.get(key)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(role.rawValue) requires \(key) in production."
+            )
+        }
     }
 
     static func productionTransitionalReadModelsAllowed(_ app: Application) -> Bool {
@@ -120,11 +307,47 @@ enum IMProductionRuntimeValidationSupport {
     }
 
     static func validateSummaryReadModelReadConfiguration(_ app: Application) throws {
+        try requireSummaryReadModelEnvironmentKey(
+            "IM_SUMMARY_QUERY_READ_SOURCE",
+            expectedValue: "sharded",
+            role: app.imRuntimeRole
+        )
+        guard Environment.get("IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty == false,
+            app.summaryReadModelConfiguration.responseMemberUserIDsLimit > 0
+        else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT > 0 so large-group summary/list responses do not return full member_user_ids payloads."
+            )
+        }
         try validateSummaryShardDatabasesConfigured(app)
     }
 
     static func validateSummaryReadModelWriteConfiguration(_ app: Application) throws {
+        try requireSummaryReadModelEnvironmentKey(
+            "IM_SUMMARY_PROJECTION_WRITE_MODE",
+            expectedValue: "sharded",
+            role: app.imRuntimeRole
+        )
         try validateSummaryShardDatabasesConfigured(app)
+    }
+
+    private static func requireSummaryReadModelEnvironmentKey(
+        _ key: String,
+        expectedValue: String,
+        role: IMRuntimeRole
+    ) throws {
+        let value = Environment.get(key)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard value == expectedValue else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(role.rawValue) requires \(key)=\(expectedValue) in production."
+            )
+        }
     }
 
     static func validateSummaryShardDatabasesConfigured(_ app: Application) throws {
@@ -187,6 +410,172 @@ enum IMProductionRuntimeValidationSupport {
         guard app.messageWriteBatchConfiguration.isEnabled else {
             throw Abort(.internalServerError, reason: "Production command-api requires IM_MESSAGE_WRITE_BATCH_ENABLED=true for small-group write batching.")
         }
+        guard app.messageCreatedRecipientInlineConfiguration.threshold > 0 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production command-api requires IM_MESSAGE_CREATED_RECIPIENT_INLINE_THRESHOLD > 0 so large-group message_created outbox events do not inline every recipient UUID."
+            )
+        }
+        guard app.domainEventRecipientSnapshotConfiguration.deduplicationThreshold > 0 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production command-api requires IM_DOMAIN_EVENT_RECIPIENT_SNAPSHOT_DEDUP_THRESHOLD > 0 so large-group recipient snapshots reuse shared recipient sets."
+            )
+        }
+        guard app.domainEventRecipientSnapshotConfiguration.deduplicationThreshold <= app.messageCreatedRecipientInlineConfiguration.threshold else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production command-api requires IM_DOMAIN_EVENT_RECIPIENT_SNAPSHOT_DEDUP_THRESHOLD <= IM_MESSAGE_CREATED_RECIPIENT_INLINE_THRESHOLD so every omitted-recipient message_created event uses recipient-set deduplication."
+            )
+        }
+    }
+
+    static func validateGroupMemberLimitConfiguration(_ app: Application) throws {
+        guard Environment.get(IMGroupMemberLimitConfiguration.environmentKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty == false
+        else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production command-api requires IM_GROUP_MEMBER_LIMIT to be set explicitly so large-group capacity is an intentional product and infrastructure decision."
+            )
+        }
+
+        let groupMemberLimit = IMGroupMemberLimitConfiguration.load(from: app.environment).limit
+        let inlineThreshold = app.messageCreatedRecipientInlineConfiguration.threshold
+        guard groupMemberLimit >= inlineThreshold else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production command-api requires IM_GROUP_MEMBER_LIMIT >= IM_MESSAGE_CREATED_RECIPIENT_INLINE_THRESHOLD so large-group recipient snapshot protection can trigger before the business member limit rejects the group."
+            )
+        }
+    }
+
+    static func validateTimelineReadProtectionConfiguration(_ app: Application) throws {
+        let requiredKeys = [
+            "IM_TIMELINE_READ_VISIBILITY_SCAN_MAX_ROWS",
+            "IM_TIMELINE_READ_VISIBILITY_SCAN_MAX_PAGES"
+        ]
+        let missing = requiredKeys.filter {
+            Environment.get($0)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+        }
+        guard missing.isEmpty else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires timeline visibility scan protection to be explicit: \(missing.joined(separator: ", "))."
+            )
+        }
+
+        let timelineReadConfiguration = app.timelineReadConfiguration
+        guard timelineReadConfiguration.visibilityScanMaxRows >= 100 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_TIMELINE_READ_VISIBILITY_SCAN_MAX_ROWS >= 100 so normal timeline pages are not rejected."
+            )
+        }
+        guard timelineReadConfiguration.visibilityScanMaxPages >= 2 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_TIMELINE_READ_VISIBILITY_SCAN_MAX_PAGES >= 2 so filtered candidate pages can be scanned safely."
+            )
+        }
+    }
+
+    static func validateTimelineSinceCacheInvalidationConfiguration(_ app: Application) throws {
+        let timelineReadConfiguration = app.timelineReadConfiguration
+        let cacheConfigurationKeys = [
+            "IM_TIMELINE_SINCE_HOT_CACHE_TTL_MS",
+            "IM_TIMELINE_SINCE_HOT_CACHE_MAX_ENTRIES",
+            "IM_TIMELINE_SINCE_RECENT_CACHE_TTL_MS",
+            "IM_TIMELINE_SINCE_RECENT_CACHE_MAX_CONVERSATIONS",
+            "IM_TIMELINE_SINCE_RECENT_CACHE_MAX_ITEMS_PER_CONVERSATION",
+            "IM_TIMELINE_SINCE_TARGET_SEQUENCE_COALESCE_WINDOW_MS"
+        ]
+        let missingCacheConfiguration = cacheConfigurationKeys.filter {
+            Environment.get($0)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+        }
+        guard missingCacheConfiguration.isEmpty else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires timeline/since shared cache limits to be explicit: \(missingCacheConfiguration.joined(separator: ", "))."
+            )
+        }
+
+        guard timelineReadConfiguration.sinceHotCacheTTLMilliseconds >= 50 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_TIMELINE_SINCE_HOT_CACHE_TTL_MS >= 50 so hot large-group timeline/since catch-up cannot run with the exact-key cache disabled."
+            )
+        }
+        guard timelineReadConfiguration.sinceHotCacheTTLMilliseconds <= 5_000 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_TIMELINE_SINCE_HOT_CACHE_TTL_MS <= 5000 so shared timeline/since cache staleness stays bounded."
+            )
+        }
+        guard timelineReadConfiguration.sinceHotCacheMaxEntries >= 1_024 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_TIMELINE_SINCE_HOT_CACHE_MAX_ENTRIES >= 1024 so synchronized hot-group catch-up is not forced back to database reads."
+            )
+        }
+        guard timelineReadConfiguration.sinceRecentCacheTTLMilliseconds >= 1_000 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_TIMELINE_SINCE_RECENT_CACHE_TTL_MS >= 1000 so nearby hot-group timeline/since cursors can reuse recent safe pages."
+            )
+        }
+        guard timelineReadConfiguration.sinceRecentCacheTTLMilliseconds <= 30_000 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_TIMELINE_SINCE_RECENT_CACHE_TTL_MS <= 30000 so recent timeline/since cache staleness and memory retention stay bounded."
+            )
+        }
+        guard timelineReadConfiguration.sinceRecentCacheMaxConversations >= 512 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_TIMELINE_SINCE_RECENT_CACHE_MAX_CONVERSATIONS >= 512 so hot-group recent timeline/since cache capacity is not effectively disabled."
+            )
+        }
+        guard timelineReadConfiguration.sinceRecentCacheMaxItemsPerConversation >= 128 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_TIMELINE_SINCE_RECENT_CACHE_MAX_ITEMS_PER_CONVERSATION >= 128 so compact-hint catch-up has a useful reusable suffix."
+            )
+        }
+        guard timelineReadConfiguration.sinceTargetSequenceCoalesceWindowMilliseconds <= 50 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_TIMELINE_SINCE_TARGET_SEQUENCE_COALESCE_WINDOW_MS <= 50 so target-sequence catch-up coalescing does not hide query-api latency."
+            )
+        }
+
+        let requiredKeys = [
+            "IM_TIMELINE_SINCE_CACHE_INVALIDATION_MODE"
+        ]
+        let missing = requiredKeys.filter {
+            Environment.get($0)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+        }
+        guard missing.isEmpty else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires distributed timeline/since cache invalidation when any timeline/since shared cache is enabled: \(missing.joined(separator: ", "))."
+            )
+        }
+
+        let invalidationConfiguration = app.timelineSinceCacheInvalidationConfiguration
+        guard invalidationConfiguration.mode == .redis else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires IM_TIMELINE_SINCE_CACHE_INVALIDATION_MODE=redis when any timeline/since shared cache is enabled."
+            )
+        }
+        guard invalidationConfiguration.redisURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(app.imRuntimeRole.rawValue) requires REDIS_URL or IM_TIMELINE_SINCE_CACHE_INVALIDATION_REDIS_URL for distributed timeline/since cache invalidation."
+            )
+        }
     }
 
     static func validateStreamConsumerDeploymentIsolation(_ app: Application) throws {
@@ -199,6 +588,529 @@ enum IMProductionRuntimeValidationSupport {
                 reason: "Production stream-consumer deployments must run exactly one IM_STREAM_CONSUMER_GROUPS entry per process. Set IM_STREAM_CONSUMER_GROUPS to a single group or explicitly opt in with IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP=true for temporary transitions."
             )
         }
+    }
+
+    static func validateStreamConsumerBatchingConfiguration(_ app: Application) throws {
+        guard app.imRuntimeRole == .streamConsumer else {
+            return
+        }
+        let configuration = app.streamConsumerConfiguration
+        guard configuration.streamConsumerRunBatchSize > 1 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production stream-consumer requires IM_STREAM_CONSUMER_RUN_BATCH_SIZE > 1 so contiguous message_created events can be coalesced instead of processed one-by-one."
+            )
+        }
+        guard configuration.streamConsumerQueueCapacity >= configuration.streamConsumerRunBatchSize else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production stream-consumer requires IM_STREAM_CONSUMER_QUEUE_CAPACITY >= IM_STREAM_CONSUMER_RUN_BATCH_SIZE so Kafka polling can fill a full processing batch without immediate producer backpressure."
+            )
+        }
+        guard configuration.streamConsumerBatchFillWaitMilliseconds > 0 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production stream-consumer requires IM_STREAM_CONSUMER_BATCH_FILL_WAIT_MS > 0 so the processing queue can briefly fill contiguous message_created runs before dispatch."
+            )
+        }
+        guard configuration.streamConsumerBatchFillWaitMilliseconds <= 100 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production stream-consumer requires IM_STREAM_CONSUMER_BATCH_FILL_WAIT_MS <= 100 to prevent batch-fill tuning from becoming user-visible event lag."
+            )
+        }
+        if configuration.isEnabled("domain-delivery-consumer") {
+            let minOwnerRecordBatchRequests = OwnerDomainEventDeliveryService.minimumPostgresRecordBatchMaxRequests
+            let maxOwnerRecordBatchRequests = OwnerDomainEventDeliveryService.maximumPostgresRecordBatchMaxRequests
+            guard configuration.domainDeliveryOwnerRecordBatchMaxRequests >= minOwnerRecordBatchRequests else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer requires IM_DOMAIN_DELIVERY_OWNER_RECORD_BATCH_MAX_REQUESTS >= \(minOwnerRecordBatchRequests) so large-group owner-delivery writes do not degrade into per-owner single-row SQL."
+                )
+            }
+            guard configuration.domainDeliveryOwnerRecordBatchMaxRequests <= maxOwnerRecordBatchRequests else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer requires IM_DOMAIN_DELIVERY_OWNER_RECORD_BATCH_MAX_REQUESTS <= \(maxOwnerRecordBatchRequests) so owner-delivery SQL statements stay below database parameter and request-body limits."
+                )
+            }
+        }
+    }
+
+    static func validateStreamConsumerLargeGroupProtection(_ app: Application) throws {
+        guard app.imRuntimeRole == .streamConsumer else {
+            return
+        }
+
+        let configuration = app.streamConsumerConfiguration
+        guard configuration.streamConsumerRequiresMessageCreatedRecipientSnapshot else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production stream-consumer requires IM_STREAM_CONSUMER_REQUIRE_MESSAGE_CREATED_RECIPIENT_SNAPSHOT=true so omitted-recipient message_created events cannot fall back to repeated membership expansion."
+            )
+        }
+        let emitsRealtimeConversationSummaries = configuration.isEnabled("realtime-delivery-consumer")
+            || (
+                configuration.isEnabled("domain-delivery-consumer")
+                    && configuration.domainDeliveryRelayAfterRecord
+            )
+        if emitsRealtimeConversationSummaries {
+            guard Environment.get("IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT")?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty == false,
+                app.summaryReadModelConfiguration.responseMemberUserIDsLimit > 0
+            else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production stream-consumer realtime delivery requires IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT > 0 so membership/settings realtime summaries do not return full large-group member_user_ids payloads."
+                )
+            }
+        }
+        if configuration.isEnabled("summary-projection-consumer") {
+            guard configuration.summaryProjectionMessageCreatedActivityOnlyRecipientThreshold > 0 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production summary-projection-consumer requires IM_SUMMARY_PROJECTION_MESSAGE_CREATED_ACTIVITY_ONLY_RECIPIENT_THRESHOLD > 0 so large-group message_created events update conversation activity without per-owner summary/change-log writes."
+                )
+            }
+            guard configuration.summaryProjectionActivityCoalesceWindowMilliseconds >= 50 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production summary-projection-consumer requires IM_SUMMARY_PROJECTION_ACTIVITY_COALESCE_WINDOW_MS >= 50 so hot large-group conversation activity summary writes are meaningfully coalesced instead of updating the same row once per message."
+                )
+            }
+            guard configuration.summaryProjectionActivityCoalesceWindowMilliseconds <= 1_000 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production summary-projection-consumer requires IM_SUMMARY_PROJECTION_ACTIVITY_COALESCE_WINDOW_MS <= 1000 so conversation-list freshness remains bounded while hot large-group activity writes are coalesced."
+                )
+            }
+        }
+
+        if configuration.isEnabled("domain-delivery-consumer") {
+            let ownerDeliverySkipThreshold = configuration
+                .domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold
+            if ownerDeliverySkipThreshold > 0,
+               configuration.domainDeliveryMessageCreatedLargeGroupMode != .timelinePull
+            {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer requires IM_DOMAIN_DELIVERY_MESSAGE_CREATED_LARGE_GROUP_MODE=timeline-pull when IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD > 0; otherwise remove the threshold and keep owner-delivery mode explicitly."
+                )
+            }
+            let protectsOwnerDelivery = configuration.domainDeliverySkipsMessageCreatedOwnerDelivery
+                || (
+                    configuration.domainDeliveryMessageCreatedLargeGroupMode == .timelinePull
+                        && ownerDeliverySkipThreshold > 0
+                )
+            guard protectsOwnerDelivery else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer requires IM_DOMAIN_DELIVERY_MESSAGE_CREATED_LARGE_GROUP_MODE=timeline-pull with IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD > 0 for large groups, or IM_DOMAIN_DELIVERY_SKIP_MESSAGE_CREATED_OWNER_DELIVERY=true for a dedicated no-owner-copy deployment."
+                )
+            }
+        }
+
+        if configuration.isEnabled("notification-consumer") {
+            let protectsOwnerNotifications = configuration.notificationSkipsMessageCreatedOwnerNotifications
+                || configuration.notificationMessageCreatedOwnerNotificationSkipRecipientThreshold > 0
+            guard protectsOwnerNotifications else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production notification-consumer requires IM_NOTIFICATION_MESSAGE_CREATED_OWNER_NOTIFICATION_SKIP_RECIPIENT_THRESHOLD > 0 for large groups, or IM_NOTIFICATION_SKIP_MESSAGE_CREATED_OWNER_NOTIFICATIONS=true for a dedicated no-owner-notification deployment."
+                )
+            }
+        }
+
+        if configuration.isEnabled("realtime-delivery-consumer") {
+            let routingConfiguration = app.imRedisRoutingConfigurationOverride
+                ?? IMRedisRoutingConfiguration.load(from: app.environment)
+            guard routingConfiguration.mode == .redis,
+                  routingConfiguration.url?.isEmpty == false
+            else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production realtime-delivery-consumer requires REDIS_URL/IM_ROUTING_MODE=redis so it can read active conversation presence and split large-group realtime fanout before gateway relay."
+                )
+            }
+            guard configuration.realtimeMessageCreatedLightweightRecipientThreshold > 0 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD > 0 so large-group realtime payloads omit per-recipient conversation summaries before gateway active/inactive fanout."
+                )
+            }
+            guard !configuration.realtimeMessageCreatedPreviewLookupEnabled else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED=false so large-group lightweight realtime hints cannot reintroduce per-message database reads on the hot path."
+                )
+            }
+            guard !configuration.realtimeActiveConversationUnsplitFallbackEnabled else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false so route/split failures degrade to lightweight hints instead of full unsplit large-group realtime fanout."
+                )
+            }
+            guard configuration.realtimeDeliveryAsyncRelayEnabled else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED=true so Kafka event processing is not blocked by gateway relay latency."
+                )
+            }
+            guard configuration.realtimeDeliveryAsyncMaxInFlight > 1 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_DELIVERY_ASYNC_MAX_IN_FLIGHT > 1 so gateway relay work can progress concurrently under large-group bursts."
+                )
+            }
+            guard configuration.realtimeDeliveryAsyncMaxQueued > 0 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_DELIVERY_ASYNC_MAX_QUEUED > 0 so transient gateway relay bursts are buffered instead of dropped immediately."
+                )
+            }
+            guard configuration.realtimeMessageCreatedCoalesceWindowMilliseconds > 0 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS > 0 so hot large-group inactive hints are coalesced by conversation instead of relayed once per message."
+                )
+            }
+            guard configuration.realtimeActiveCompactHintCoalesceWindowMilliseconds > 0 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS > 0 so hot active-room compact hints are merged per recipient instead of relayed once per message."
+                )
+            }
+            guard configuration.realtimeActiveCompactHintCoalesceWindowMilliseconds <= maximumActiveCompactHintCoalesceWindowMilliseconds else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS <= \(maximumActiveCompactHintCoalesceWindowMilliseconds) so active chat viewers are not delayed by inactive-list hint debounce."
+                )
+            }
+            try validateActiveCompactHintMessageLite(
+                configuration,
+                context: "Production realtime-delivery-consumer"
+            )
+        }
+
+        try validateStreamConsumerLargeGroupThresholdsAgainstMemberLimit(app)
+    }
+
+    static func validateStreamConsumerLargeGroupThresholdsAgainstMemberLimit(_ app: Application) throws {
+        guard app.imRuntimeRole == .streamConsumer else {
+            return
+        }
+        guard Environment.get(IMGroupMemberLimitConfiguration.environmentKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty == false
+        else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production stream-consumer requires IM_GROUP_MEMBER_LIMIT to match command-api so large-group thresholds cannot drift above the business member limit."
+            )
+        }
+
+        let configuration = app.streamConsumerConfiguration
+        let groupMemberLimit = IMGroupMemberLimitConfiguration.load(from: app.environment).limit
+        if configuration.isEnabled("summary-projection-consumer") {
+            try validateLargeGroupThreshold(
+                "IM_SUMMARY_PROJECTION_MESSAGE_CREATED_ACTIVITY_ONLY_RECIPIENT_THRESHOLD",
+                configuration.summaryProjectionMessageCreatedActivityOnlyRecipientThreshold,
+                doesNotExceedGroupMemberLimit: groupMemberLimit
+            )
+        }
+        if configuration.isEnabled("domain-delivery-consumer"),
+           !configuration.domainDeliverySkipsMessageCreatedOwnerDelivery {
+            try validateLargeGroupThreshold(
+                "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD",
+                configuration.domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold,
+                doesNotExceedGroupMemberLimit: groupMemberLimit
+            )
+        }
+        if configuration.isEnabled("notification-consumer"),
+           !configuration.notificationSkipsMessageCreatedOwnerNotifications {
+            try validateLargeGroupThreshold(
+                "IM_NOTIFICATION_MESSAGE_CREATED_OWNER_NOTIFICATION_SKIP_RECIPIENT_THRESHOLD",
+                configuration.notificationMessageCreatedOwnerNotificationSkipRecipientThreshold,
+                doesNotExceedGroupMemberLimit: groupMemberLimit
+            )
+        }
+
+        let hasRealtimeDeliveryConsumer = configuration.isEnabled("realtime-delivery-consumer")
+        let usesDomainRelayAfterRecord = configuration.isEnabled("domain-delivery-consumer")
+            && configuration.domainDeliveryRelayAfterRecord
+        if hasRealtimeDeliveryConsumer || usesDomainRelayAfterRecord {
+            try validateLargeGroupThreshold(
+                "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD",
+                configuration.realtimeMessageCreatedLightweightRecipientThreshold,
+                doesNotExceedGroupMemberLimit: groupMemberLimit
+            )
+            try validateLargeGroupThreshold(
+                "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD",
+                app.gatewayLocalFanoutConfiguration.activeConversationFanoutRecipientThreshold,
+                doesNotExceedGroupMemberLimit: groupMemberLimit
+            )
+        }
+    }
+
+    static func validateLargeGroupRealtimeDeliveryPath(_ app: Application) throws {
+        let configuration = app.streamConsumerConfiguration
+        let hasDomainDeliveryConsumer = configuration.isEnabled("domain-delivery-consumer")
+        let hasRealtimeDeliveryConsumer = configuration.isEnabled("realtime-delivery-consumer")
+        let hasDomainRelayAfterRecord = hasDomainDeliveryConsumer
+            && configuration.domainDeliveryRelayAfterRecord
+
+        if hasDomainDeliveryConsumer,
+           hasRealtimeDeliveryConsumer,
+           configuration.domainDeliveryRelayAfterRecord
+        {
+            throw Abort(
+                .internalServerError,
+                reason: "Production stream-consumer must not enable IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true when realtime-delivery-consumer is also enabled; use the dedicated realtime-delivery-consumer path to avoid duplicate realtime delivery."
+            )
+        }
+
+        guard hasDomainDeliveryConsumer else {
+            return
+        }
+        let ownerDeliverySkipThreshold = configuration.domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold
+        let skipsMessageCreatedOwnerDelivery = configuration.domainDeliverySkipsMessageCreatedOwnerDelivery
+            || (
+                configuration.domainDeliveryMessageCreatedLargeGroupMode == .timelinePull
+                    && ownerDeliverySkipThreshold > 0
+            )
+        guard skipsMessageCreatedOwnerDelivery else {
+            return
+        }
+
+        guard hasRealtimeDeliveryConsumer || hasDomainRelayAfterRecord else {
+            throw Abort(
+                .internalServerError,
+                reason: "Large-group message_created owner delivery skip requires realtime delivery. Enable realtime-delivery-consumer or set IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true on domain-delivery-consumer."
+            )
+        }
+
+        if hasDomainRelayAfterRecord {
+            guard configuration.realtimeMessageCreatedLightweightRecipientThreshold > 0 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD > 0 so skip-owner-delivery large groups still use lightweight realtime payloads."
+                )
+            }
+            guard !configuration.realtimeMessageCreatedPreviewLookupEnabled else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED=false so relay-after-record large-group hints cannot reintroduce per-message database reads on the hot path."
+                )
+            }
+            guard !configuration.realtimeActiveConversationUnsplitFallbackEnabled else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false so route/split failures cannot fall back to full unsplit large-group realtime fanout."
+                )
+            }
+            guard configuration.realtimeDeliveryAsyncRelayEnabled else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED=true so relay-after-record does not block Kafka processing under large-group bursts."
+                )
+            }
+            guard configuration.realtimeDeliveryAsyncMaxInFlight > 1 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_DELIVERY_ASYNC_MAX_IN_FLIGHT > 1 so gateway relay work can progress concurrently under large-group bursts."
+                )
+            }
+            guard configuration.realtimeDeliveryAsyncMaxQueued > 0 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_DELIVERY_ASYNC_MAX_QUEUED > 0 so transient relay-after-record bursts are buffered instead of dropped immediately."
+                )
+            }
+            guard configuration.realtimeMessageCreatedCoalesceWindowMilliseconds > 0 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS > 0 so hot large-group inactive hints are coalesced by conversation instead of relayed once per message."
+                )
+            }
+            guard configuration.realtimeActiveCompactHintCoalesceWindowMilliseconds > 0 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS > 0 so hot active-room compact hints are merged per recipient instead of relayed once per message."
+                )
+            }
+            guard configuration.realtimeActiveCompactHintCoalesceWindowMilliseconds <= maximumActiveCompactHintCoalesceWindowMilliseconds else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS <= \(maximumActiveCompactHintCoalesceWindowMilliseconds) so active chat viewers are not delayed by inactive-list hint debounce."
+                )
+            }
+            try validateActiveCompactHintMessageLite(
+                configuration,
+                context: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true"
+            )
+        }
+
+        let fanoutConfiguration = app.gatewayLocalFanoutConfiguration
+        guard fanoutConfiguration.activeConversationFanoutEnabled else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED=true so realtime delivery is split between active chat viewers and coalesced inactive conversation hints."
+            )
+        }
+        guard fanoutConfiguration.activeConversationFullFanoutRecipientLimit > 0 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT > 0 so active chat full-message fanout is bounded."
+            )
+        }
+        guard fanoutConfiguration.activeConversationFullFanoutPayloadByteBudget >= minimumActiveConversationFullFanoutPayloadByteBudget else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET >= \(minimumActiveConversationFullFanoutPayloadByteBudget) so large or rich message payloads reduce active full-message fanout and overflow users use lightweight timeline catch-up."
+            )
+        }
+        try validateActiveConversationFullFanoutLimitBound(
+            fanoutConfiguration,
+            context: "Production large-group message_created owner delivery skip"
+        )
+        guard fanoutConfiguration.usesCompactOnlyActiveConversationFanout else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE=compact-only so skipped owner-delivery groups do not rely on full realtime fanout for active viewers."
+            )
+        }
+        guard !fanoutConfiguration.relaysInactiveConversationHints else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=pull-only so inactive online recipients rely on conversation changes/timeline catch-up instead of realtime hint fanout."
+            )
+        }
+        guard configuration.realtimeActiveConversationRouteCacheTTLMilliseconds > 0 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS > 0 so hot conversations do not re-query active room routes for every message."
+            )
+        }
+        guard configuration.realtimeActiveConversationRouteCacheMaxEntries > 0 else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_MAX_ENTRIES > 0 so hot conversation route caching is bounded instead of disabled."
+            )
+        }
+        if ownerDeliverySkipThreshold > 0,
+           fanoutConfiguration.activeConversationFanoutRecipientThreshold > ownerDeliverySkipThreshold
+        {
+            throw Abort(
+                .internalServerError,
+                reason: "Production large-group thresholds require IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD <= IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD so every skip-owner-delivery group is protected by active/inactive fanout."
+            )
+        }
+
+        let realtimeLightweightThreshold = configuration.realtimeMessageCreatedLightweightRecipientThreshold
+        if ownerDeliverySkipThreshold > 0,
+           realtimeLightweightThreshold > ownerDeliverySkipThreshold
+        {
+            throw Abort(
+                .internalServerError,
+                reason: "Production large-group thresholds require IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD <= IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD so every skip-owner-delivery group also uses lightweight realtime payloads."
+            )
+        }
+        let summaryActivityOnlyThreshold = configuration.summaryProjectionMessageCreatedActivityOnlyRecipientThreshold
+        if ownerDeliverySkipThreshold > 0,
+           configuration.isEnabled("summary-projection-consumer"),
+           summaryActivityOnlyThreshold > ownerDeliverySkipThreshold
+        {
+            throw Abort(
+                .internalServerError,
+                reason: "Production large-group thresholds require IM_SUMMARY_PROJECTION_MESSAGE_CREATED_ACTIVITY_ONLY_RECIPIENT_THRESHOLD <= IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD so every skip-owner-delivery group also avoids per-owner summary/change-log writes."
+            )
+        }
+        let notificationSkipThreshold = configuration.notificationMessageCreatedOwnerNotificationSkipRecipientThreshold
+        if ownerDeliverySkipThreshold > 0,
+           configuration.isEnabled("notification-consumer"),
+           !configuration.notificationSkipsMessageCreatedOwnerNotifications,
+           notificationSkipThreshold > ownerDeliverySkipThreshold
+        {
+            throw Abort(
+                .internalServerError,
+                reason: "Production large-group thresholds require IM_NOTIFICATION_MESSAGE_CREATED_OWNER_NOTIFICATION_SKIP_RECIPIENT_THRESHOLD <= IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD so every skip-owner-delivery group also avoids per-owner notification writes."
+            )
+        }
+    }
+
+    private static func validateActiveConversationFullFanoutLimitBound(
+        _ fanoutConfiguration: IMGatewayLocalFanoutConfiguration,
+        context: String
+    ) throws {
+        let threshold = fanoutConfiguration.activeConversationFanoutRecipientThreshold
+        let limit = fanoutConfiguration.activeConversationFullFanoutRecipientLimit
+        guard threshold > 0,
+              limit <= threshold,
+              limit <= maximumActiveConversationFullFanoutLimit
+        else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(context) requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT <= IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD and <= \(maximumActiveConversationFullFanoutLimit) so active full-message fanout remains bounded when large-group protection starts."
+            )
+        }
+    }
+
+    private static func validateActiveCompactHintMessageLite(
+        _ configuration: IMStreamConsumerConfiguration,
+        context: String
+    ) throws {
+        guard configuration.realtimeActiveCompactHintBody == .conversationActivity else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(context) requires IM_REALTIME_ACTIVE_COMPACT_HINT_BODY=conversation-activity so hot active-room viewers receive a lightweight message hint instead of a bare timeline gap signal."
+            )
+        }
+        guard configuration.realtimeActiveCompactHintPreviewMaxCharacters > 0 else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(context) requires IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS > 0 so hot active-room viewers can render the new message immediately while timeline/since remains the durable catch-up source."
+            )
+        }
+        guard configuration.realtimeActiveCompactHintPreviewMaxCharacters <= maximumActiveCompactHintPreviewCharacters else {
+            throw Abort(
+                .internalServerError,
+                reason: "\(context) requires IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS <= \(maximumActiveCompactHintPreviewCharacters) so hot-room realtime payloads stay bounded."
+            )
+        }
+    }
+}
+
+private func validateLargeGroupThreshold(
+    _ name: String,
+    _ value: Int,
+    doesNotExceedGroupMemberLimit groupMemberLimit: Int
+) throws {
+    guard value <= groupMemberLimit else {
+        throw Abort(
+            .internalServerError,
+            reason: "Production large-group thresholds require \(name) <= IM_GROUP_MEMBER_LIMIT so large-group protection can trigger before the business member limit rejects the group."
+        )
+    }
+}
+
+private func validateRelayBodyLimit(
+    name: String,
+    value: Int,
+    minimum: Int,
+    maximum: Int
+) throws {
+    guard value >= minimum else {
+        throw Abort(
+            .internalServerError,
+            reason: "Production gateway relay requires \(name) >= \(minimum) bytes so large-group relay batches do not fail with payload-too-large."
+        )
+    }
+    guard value <= maximum else {
+        throw Abort(
+            .internalServerError,
+            reason: "Production gateway relay requires \(name) <= \(maximum) bytes so oversized internal relay requests cannot retain unbounded request memory."
+        )
     }
 }
 

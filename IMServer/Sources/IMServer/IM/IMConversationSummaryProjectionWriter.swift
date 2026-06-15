@@ -6,6 +6,53 @@ import Vapor
 // Maintains per-user conversation summaries from canonical events. This is a
 // read-model projection layer; command behavior belongs in conversation services.
 extension IMConversationSummaryProjectionService {
+    func applyMessageCreatedActivityOnly(
+        conversationID: UUID,
+        messageID: UUID,
+        recipientCount: Int,
+        on database: (any Database)? = nil,
+        readModelKey: String = "default",
+        recordMetrics: Bool = true
+    ) async throws {
+        let database = database ?? sourceDB
+        guard recipientCount > 0 else {
+            return
+        }
+        guard let message = try await ConversationMessage.find(messageID, on: database),
+              message.$conversation.id == conversationID
+        else {
+            return
+        }
+
+        let messagePreview = try makePreview(from: message)
+        let updatedAt = Date()
+        if recordMetrics {
+            await domainEventMetrics?.recordMessageCreatedSummaryActivityOnly(recipientCount: recipientCount)
+        }
+        if let activitySummaryCoalescer,
+           streamConsumerConfiguration.summaryProjectionActivityCoalesceWindowMilliseconds > 0 {
+            await activitySummaryCoalescer.enqueue(
+                conversationID: conversationID,
+                messageServerSequence: message.serverSequence,
+                messagePreview: messagePreview,
+                messageCreatedAt: message.createdAt,
+                updatedAt: updatedAt,
+                readModelDB: readModelDB,
+                readModelKey: readModelKey,
+                windowMilliseconds: streamConsumerConfiguration.summaryProjectionActivityCoalesceWindowMilliseconds
+            )
+            return
+        }
+        try await upsertConversationActivity(
+            conversationID: conversationID,
+            messageServerSequence: message.serverSequence,
+            messagePreview: messagePreview,
+            messageCreatedAt: message.createdAt,
+            updatedAt: updatedAt,
+            on: readModelDB
+        )
+    }
+
     func applyMessageCreated(
         conversationID: UUID,
         messageID: UUID,
@@ -28,6 +75,15 @@ extension IMConversationSummaryProjectionService {
 
         let messagePreview = try makePreview(from: message)
         let updatedAt = Date()
+        if shouldProjectMessageCreatedToActivityOnly(recipientCount: uniqueUserIDs.count) {
+            try await applyMessageCreatedActivityOnly(
+                conversationID: conversationID,
+                messageID: messageID,
+                recipientCount: uniqueUserIDs.count,
+                on: database
+            )
+            return
+        }
         if let fastPathResult = try await applyMessageCreatedExistingSummariesSQL(
             conversationID: conversationID,
             messageServerSequence: message.serverSequence,
@@ -157,6 +213,11 @@ extension IMConversationSummaryProjectionService {
 
         try await updateMessageCreatedDynamicSummaries(summariesToUpdate, on: readModelDatabase)
         try await ConversationChangeLogBatchWriter(database: readModelDatabase).upsert(changeLogRows)
+    }
+
+    private func shouldProjectMessageCreatedToActivityOnly(recipientCount: Int) -> Bool {
+        let threshold = streamConsumerConfiguration.summaryProjectionMessageCreatedActivityOnlyRecipientThreshold
+        return threshold > 0 && recipientCount >= threshold
     }
 
     func refreshConversationSummaries(
@@ -328,8 +389,11 @@ extension IMConversationSummaryProjectionService {
         }
 
         let visibleLowerBound = max(0, membership.visibleFromSequence - 1)
+        let activity = try await ConversationActivitySummary.find(conversationID, on: readModelDatabase)
+        let activityLastSequence = activity.map { UInt64(max(0, $0.lastMessageServerSequence)) } ?? 0
         let latestVisibleSequence = max(
             summary.lastMessage?.serverSequence ?? 0,
+            activityLastSequence,
             UInt64(visibleLowerBound)
         )
         let effectiveLastReadSequence = max(

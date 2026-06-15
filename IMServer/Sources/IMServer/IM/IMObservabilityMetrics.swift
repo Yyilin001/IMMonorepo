@@ -84,33 +84,245 @@ actor IMStreamMetrics {
         var duplicateEvents: Int = 0
         var failedEvents: Int = 0
         var deadLetterPublishedEvents: Int = 0
+        var processedRuns: Int = 0
+        var messageCreatedRuns: Int = 0
+        var messageCreatedRunEventCount: Int = 0
+        var maxMessageCreatedRunEventCount: Int = 0
+        var runEventCount: Int = 0
+        var maxRunEventCount: Int = 0
+        var totalRunProcessingMillis: Int = 0
+        var maxRunProcessingMillis: Int = 0
+        var totalRunEventLagMillis: Int = 0
+        var maxRunEventLagMillis: Int = 0
+        var slowProcessingRuns: Int = 0
+        var laggedRuns: Int = 0
+        var processingBatches: Int = 0
+        var processingBatchEventCount: Int = 0
+        var maxProcessingBatchEventCount: Int = 0
+        var batchFillWaits: Int = 0
+        var batchFillWaitMillis: Int = 0
+        var batchFillEventCount: Int = 0
+        var batchFillSkippedBatches: Int = 0
+        var queueProducerWaits: Int = 0
+        var queueCurrentDepth: Int = 0
+        var queueMaxDepth: Int = 0
+        var queueDepthRevision: Int = 0
         var lastConsumerGroupID: String?
+
+        var averageRunProcessingMillis: Int {
+            guard processedRuns > 0 else {
+                return 0
+            }
+            return totalRunProcessingMillis / processedRuns
+        }
+
+        var averageRunEventLagMillis: Int {
+            guard processedRuns > 0 else {
+                return 0
+            }
+            return totalRunEventLagMillis / processedRuns
+        }
+
+        var averageMessageCreatedRunEventCount: Int {
+            guard messageCreatedRuns > 0 else {
+                return 0
+            }
+            return messageCreatedRunEventCount / messageCreatedRuns
+        }
+
+        var averageProcessingBatchEventCount: Int {
+            guard processingBatches > 0 else {
+                return 0
+            }
+            return processingBatchEventCount / processingBatches
+        }
+
+        var averageBatchFillWaitMillis: Int {
+            guard batchFillWaits > 0 else {
+                return 0
+            }
+            return batchFillWaitMillis / batchFillWaits
+        }
     }
 
     private var snapshot = Snapshot()
+    private var snapshotsByGroupID: [String: Snapshot] = [:]
 
     func recordConsumed(groupID: String) {
         snapshot.consumedEvents += 1
         snapshot.lastConsumerGroupID = groupID
+        updateGroup(groupID) { group in
+            group.consumedEvents += 1
+            group.lastConsumerGroupID = groupID
+        }
     }
 
     func recordDuplicate(groupID: String) {
         snapshot.duplicateEvents += 1
         snapshot.lastConsumerGroupID = groupID
+        updateGroup(groupID) { group in
+            group.duplicateEvents += 1
+            group.lastConsumerGroupID = groupID
+        }
     }
 
     func recordFailed(groupID: String) {
         snapshot.failedEvents += 1
         snapshot.lastConsumerGroupID = groupID
+        updateGroup(groupID) { group in
+            group.failedEvents += 1
+            group.lastConsumerGroupID = groupID
+        }
     }
 
     func recordDeadLetterPublished(groupID: String) {
         snapshot.deadLetterPublishedEvents += 1
         snapshot.lastConsumerGroupID = groupID
+        updateGroup(groupID) { group in
+            group.deadLetterPublishedEvents += 1
+            group.lastConsumerGroupID = groupID
+        }
+    }
+
+    func recordRun(
+        groupID: String,
+        eventCount: Int,
+        isMessageCreatedRun: Bool,
+        durationMillis: Int,
+        eventLagMillis: Int = 0,
+        slowThresholdMillis: Int = 0
+    ) {
+        snapshot.processedRuns += 1
+        let safeEventCount = max(0, eventCount)
+        let safeDurationMillis = max(0, durationMillis)
+        let safeEventLagMillis = max(0, eventLagMillis)
+        let safeSlowThresholdMillis = max(0, slowThresholdMillis)
+        if isMessageCreatedRun {
+            snapshot.messageCreatedRuns += 1
+            snapshot.messageCreatedRunEventCount += safeEventCount
+            snapshot.maxMessageCreatedRunEventCount = max(snapshot.maxMessageCreatedRunEventCount, safeEventCount)
+        }
+        snapshot.runEventCount += safeEventCount
+        snapshot.maxRunEventCount = max(snapshot.maxRunEventCount, safeEventCount)
+        snapshot.totalRunProcessingMillis += safeDurationMillis
+        snapshot.maxRunProcessingMillis = max(snapshot.maxRunProcessingMillis, safeDurationMillis)
+        snapshot.totalRunEventLagMillis += safeEventLagMillis
+        snapshot.maxRunEventLagMillis = max(snapshot.maxRunEventLagMillis, safeEventLagMillis)
+        if safeSlowThresholdMillis > 0, safeDurationMillis >= safeSlowThresholdMillis {
+            snapshot.slowProcessingRuns += 1
+        }
+        if safeSlowThresholdMillis > 0, safeEventLagMillis >= safeSlowThresholdMillis {
+            snapshot.laggedRuns += 1
+        }
+        snapshot.lastConsumerGroupID = groupID
+        updateGroup(groupID) { group in
+            group.processedRuns += 1
+            if isMessageCreatedRun {
+                group.messageCreatedRuns += 1
+                group.messageCreatedRunEventCount += safeEventCount
+                group.maxMessageCreatedRunEventCount = max(group.maxMessageCreatedRunEventCount, safeEventCount)
+            }
+            group.runEventCount += safeEventCount
+            group.maxRunEventCount = max(group.maxRunEventCount, safeEventCount)
+            group.totalRunProcessingMillis += safeDurationMillis
+            group.maxRunProcessingMillis = max(group.maxRunProcessingMillis, safeDurationMillis)
+            group.totalRunEventLagMillis += safeEventLagMillis
+            group.maxRunEventLagMillis = max(group.maxRunEventLagMillis, safeEventLagMillis)
+            if safeSlowThresholdMillis > 0, safeDurationMillis >= safeSlowThresholdMillis {
+                group.slowProcessingRuns += 1
+            }
+            if safeSlowThresholdMillis > 0, safeEventLagMillis >= safeSlowThresholdMillis {
+                group.laggedRuns += 1
+            }
+            group.lastConsumerGroupID = groupID
+        }
+    }
+
+    func recordQueueProducerWait(groupID: String) {
+        snapshot.queueProducerWaits += 1
+        snapshot.lastConsumerGroupID = groupID
+        updateGroup(groupID) { group in
+            group.queueProducerWaits += 1
+            group.lastConsumerGroupID = groupID
+        }
+    }
+
+    func recordProcessingBatch(
+        groupID: String,
+        eventCount: Int,
+        batchFillWaitMillis: Int = 0,
+        batchFillEventCount: Int = 0,
+        batchFillSkipped: Bool = false
+    ) {
+        let safeEventCount = max(0, eventCount)
+        let safeBatchFillWaitMillis = max(0, batchFillWaitMillis)
+        let safeBatchFillEventCount = max(0, batchFillEventCount)
+        snapshot.processingBatches += 1
+        snapshot.processingBatchEventCount += safeEventCount
+        snapshot.maxProcessingBatchEventCount = max(snapshot.maxProcessingBatchEventCount, safeEventCount)
+        if safeBatchFillWaitMillis > 0 {
+            snapshot.batchFillWaits += 1
+            snapshot.batchFillWaitMillis += safeBatchFillWaitMillis
+        }
+        snapshot.batchFillEventCount += safeBatchFillEventCount
+        if batchFillSkipped {
+            snapshot.batchFillSkippedBatches += 1
+        }
+        snapshot.lastConsumerGroupID = groupID
+        updateGroup(groupID) { group in
+            group.processingBatches += 1
+            group.processingBatchEventCount += safeEventCount
+            group.maxProcessingBatchEventCount = max(group.maxProcessingBatchEventCount, safeEventCount)
+            if safeBatchFillWaitMillis > 0 {
+                group.batchFillWaits += 1
+                group.batchFillWaitMillis += safeBatchFillWaitMillis
+            }
+            group.batchFillEventCount += safeBatchFillEventCount
+            if batchFillSkipped {
+                group.batchFillSkippedBatches += 1
+            }
+            group.lastConsumerGroupID = groupID
+        }
+    }
+
+    func recordQueueDepth(groupID: String, depth: Int, revision: Int? = nil) {
+        var didUpdateGroup = false
+        updateGroup(groupID) { group in
+            if let revision, revision < group.queueDepthRevision {
+                return
+            }
+            let safeDepth = max(0, depth)
+            group.queueCurrentDepth = safeDepth
+            group.queueMaxDepth = max(group.queueMaxDepth, safeDepth)
+            if let revision {
+                group.queueDepthRevision = revision
+            }
+            group.lastConsumerGroupID = groupID
+            didUpdateGroup = true
+        }
+        guard didUpdateGroup else {
+            return
+        }
+        snapshot.queueCurrentDepth = snapshotsByGroupID.values.reduce(0) { $0 + $1.queueCurrentDepth }
+        snapshot.queueMaxDepth = max(snapshot.queueMaxDepth, snapshot.queueCurrentDepth)
+        snapshot.queueDepthRevision = max(snapshot.queueDepthRevision, revision ?? snapshot.queueDepthRevision)
+        snapshot.lastConsumerGroupID = groupID
     }
 
     func currentSnapshot() -> Snapshot {
         snapshot
+    }
+
+    func currentGroupSnapshots() -> [(groupID: String, snapshot: Snapshot)] {
+        snapshotsByGroupID
+            .map { (groupID: $0.key, snapshot: $0.value) }
+            .sorted { $0.groupID < $1.groupID }
+    }
+
+    private func updateGroup(_ groupID: String, _ update: (inout Snapshot) -> Void) {
+        var group = snapshotsByGroupID[groupID] ?? Snapshot()
+        update(&group)
+        snapshotsByGroupID[groupID] = group
     }
 }
 
@@ -234,6 +446,26 @@ actor IMClientHealthMetrics {
         var invalidCanonicalMessageDTOs: Int = 0
         var cacheDroppedCanonicalMessages: Int = 0
         var cacheDroppedTimelineNotices: Int = 0
+        var timelineCatchUpHintQueued: Int = 0
+        var timelineCatchUpSkippedAlreadyLoaded: Int = 0
+        var timelineCatchUpDeferred: Int = 0
+        var timelineCatchUpSinceRequests: Int = 0
+        var timelineCatchUpSinceSuccesses: Int = 0
+        var timelineCatchUpSinceFailures: Int = 0
+        var timelineCatchUpAppliedPages: Int = 0
+        var timelineCatchUpAppliedItems: Int = 0
+        var maxTimelineCatchUpHintToRequestMillis: Int = 0
+        var maxTimelineCatchUpRequestMillis: Int = 0
+        var maxTimelineCatchUpHintToApplyMillis: Int = 0
+        var averageTimelineCatchUpHintToRequestMillis: Int = 0
+        var averageTimelineCatchUpRequestMillis: Int = 0
+        var averageTimelineCatchUpHintToApplyMillis: Int = 0
+        var maxTimelineCatchUpSelectedHintInitialJitterMillis: Int = 0
+        var maxTimelineCatchUpSelectedHintMinimumIntervalMillis: Int = 0
+        var maxTimelineCatchUpSelectedHintMicroBatchMillis: Int = 0
+        var averageTimelineCatchUpSelectedHintInitialJitterMillis: Int = 0
+        var averageTimelineCatchUpSelectedHintMinimumIntervalMillis: Int = 0
+        var averageTimelineCatchUpSelectedHintMicroBatchMillis: Int = 0
         var lastReason: String?
         var lastReportedAt: Date?
     }
@@ -288,6 +520,41 @@ actor IMClientHealthMetrics {
             previousMetrics?.cacheDroppedTimelineNotices
         )
 
+        let timelineDiagnostics = report.snapshot.timelineCatchUpDiagnostics
+        let previousTimelineDiagnostics = previous?.snapshot.timelineCatchUpDiagnostics
+        snapshot.timelineCatchUpHintQueued += positiveDelta(
+            timelineDiagnostics?.hintQueuedCount ?? 0,
+            previousTimelineDiagnostics?.hintQueuedCount
+        )
+        snapshot.timelineCatchUpSkippedAlreadyLoaded += positiveDelta(
+            timelineDiagnostics?.hintSkippedAlreadyLoadedCount ?? 0,
+            previousTimelineDiagnostics?.hintSkippedAlreadyLoadedCount
+        )
+        snapshot.timelineCatchUpDeferred += positiveDelta(
+            timelineDiagnostics?.deferredCount ?? 0,
+            previousTimelineDiagnostics?.deferredCount
+        )
+        snapshot.timelineCatchUpSinceRequests += positiveDelta(
+            timelineDiagnostics?.sinceRequestCount ?? 0,
+            previousTimelineDiagnostics?.sinceRequestCount
+        )
+        snapshot.timelineCatchUpSinceSuccesses += positiveDelta(
+            timelineDiagnostics?.sinceSuccessCount ?? 0,
+            previousTimelineDiagnostics?.sinceSuccessCount
+        )
+        snapshot.timelineCatchUpSinceFailures += positiveDelta(
+            timelineDiagnostics?.sinceFailureCount ?? 0,
+            previousTimelineDiagnostics?.sinceFailureCount
+        )
+        snapshot.timelineCatchUpAppliedPages += positiveDelta(
+            timelineDiagnostics?.appliedPageCount ?? 0,
+            previousTimelineDiagnostics?.appliedPageCount
+        )
+        snapshot.timelineCatchUpAppliedItems += positiveDelta(
+            timelineDiagnostics?.appliedItemCount ?? 0,
+            previousTimelineDiagnostics?.appliedItemCount
+        )
+
         recalculateCurrentGauges()
     }
 
@@ -312,6 +579,61 @@ actor IMClientHealthMetrics {
             max(0, $0.snapshot.fullRefreshConversationCount)
         }.max() ?? 0
         snapshot.maxDomainEventCursor = reports.map(\.snapshot.domainEventCursor).max() ?? 0
+        snapshot.maxTimelineCatchUpHintToRequestMillis = reports.compactMap {
+            $0.snapshot.timelineCatchUpDiagnostics?.lastHintToRequestMilliseconds.map { max(0, $0) }
+        }.max() ?? 0
+        snapshot.maxTimelineCatchUpRequestMillis = reports.compactMap {
+            $0.snapshot.timelineCatchUpDiagnostics?.lastRequestMilliseconds.map { max(0, $0) }
+        }.max() ?? 0
+        snapshot.maxTimelineCatchUpHintToApplyMillis = reports.compactMap {
+            $0.snapshot.timelineCatchUpDiagnostics?.lastHintToApplyMilliseconds.map { max(0, $0) }
+        }.max() ?? 0
+        snapshot.averageTimelineCatchUpHintToRequestMillis = average(
+            reports.compactMap {
+                $0.snapshot.timelineCatchUpDiagnostics?.lastHintToRequestMilliseconds.map { max(0, $0) }
+            }
+        )
+        snapshot.averageTimelineCatchUpRequestMillis = average(
+            reports.compactMap {
+                $0.snapshot.timelineCatchUpDiagnostics?.lastRequestMilliseconds.map { max(0, $0) }
+            }
+        )
+        snapshot.averageTimelineCatchUpHintToApplyMillis = average(
+            reports.compactMap {
+                $0.snapshot.timelineCatchUpDiagnostics?.lastHintToApplyMilliseconds.map { max(0, $0) }
+            }
+        )
+        snapshot.maxTimelineCatchUpSelectedHintInitialJitterMillis = reports.compactMap {
+            $0.snapshot.timelineCatchUpConfiguration?.selectedHintInitialJitterMilliseconds
+        }.map { max(0, $0) }.max() ?? 0
+        snapshot.maxTimelineCatchUpSelectedHintMinimumIntervalMillis = reports.compactMap {
+            $0.snapshot.timelineCatchUpConfiguration?.selectedHintMinimumIntervalMilliseconds
+        }.map { max(0, $0) }.max() ?? 0
+        snapshot.maxTimelineCatchUpSelectedHintMicroBatchMillis = reports.compactMap {
+            $0.snapshot.timelineCatchUpConfiguration?.selectedHintMicroBatchMilliseconds
+        }.map { max(0, $0) }.max() ?? 0
+        snapshot.averageTimelineCatchUpSelectedHintInitialJitterMillis = average(
+            reports.compactMap {
+                $0.snapshot.timelineCatchUpConfiguration?.selectedHintInitialJitterMilliseconds
+            }.map { max(0, $0) }
+        )
+        snapshot.averageTimelineCatchUpSelectedHintMinimumIntervalMillis = average(
+            reports.compactMap {
+                $0.snapshot.timelineCatchUpConfiguration?.selectedHintMinimumIntervalMilliseconds
+            }.map { max(0, $0) }
+        )
+        snapshot.averageTimelineCatchUpSelectedHintMicroBatchMillis = average(
+            reports.compactMap {
+                $0.snapshot.timelineCatchUpConfiguration?.selectedHintMicroBatchMilliseconds
+            }.map { max(0, $0) }
+        )
+    }
+
+    private func average(_ values: [Int]) -> Int {
+        guard !values.isEmpty else {
+            return 0
+        }
+        return values.reduce(0, +) / values.count
     }
 }
 

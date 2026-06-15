@@ -51,6 +51,7 @@ enum IMRuntimeConfigurator {
 
     private static func configureCommandAPIRuntime(_ app: Application) async throws {
         try await configureHTTPRuntimeBase(app)
+        try await app.configureTimelineSinceCacheInvalidationBusIfNeeded()
         if !app.imRuntimeRole.servesGateway {
             switch app.gatewayRelayConfiguration.mode {
             case .local:
@@ -69,6 +70,7 @@ enum IMRuntimeConfigurator {
 
     private static func configureQueryAPIRuntime(_ app: Application) async throws {
         try await configureHTTPRuntimeBase(app)
+        try await app.configureTimelineSinceCacheInvalidationBusIfNeeded()
     }
 
     private static func configureProjectionWorkerRuntime(_ app: Application) async throws {
@@ -87,6 +89,12 @@ enum IMRuntimeConfigurator {
     private static func configureStreamConsumerRuntime(_ app: Application) async throws {
         guard app.eventStreamConfiguration.driver == .kafka || app.environment != .production else {
             throw Abort(.internalServerError, reason: "stream-consumer requires IM_EVENT_STREAM_DRIVER=kafka in production.")
+        }
+        try await app.configureTimelineSinceCacheInvalidationBusIfNeeded()
+        if app.streamConsumerConfiguration.isEnabled("realtime-delivery-consumer"),
+           !app.hasConnectionRoutingServiceConfigured {
+            try await app.configureConnectionRoutingServiceIfNeeded()
+            app.lifecycle.use(ConnectionRoutingLifecycle())
         }
     }
 
