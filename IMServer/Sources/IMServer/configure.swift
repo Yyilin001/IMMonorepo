@@ -7,8 +7,26 @@ public func configure(_ app: Application) async throws {
     try await IMRuntimeConfigurator.configureRole(app)
 
     if app.imRuntimeRole.servesHTTP {
+        configureHTTPBodyLimits(app)
         try routes(app)
     }
+}
+
+private func configureHTTPBodyLimits(_ app: Application) {
+    guard let rawValue = Environment.get("IM_HTTP_MAX_BODY_SIZE_BYTES")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+          !rawValue.isEmpty
+    else {
+        return
+    }
+
+    guard let byteCount = Int(rawValue), byteCount > 0 else {
+        app.logger.warning("Ignoring invalid IM_HTTP_MAX_BODY_SIZE_BYTES=\(rawValue)")
+        return
+    }
+
+    app.routes.defaultMaxBodySize = ByteCount(value: byteCount)
+    app.logger.info("Configured HTTP default max body size bytes=\(byteCount)")
 }
 
 private func configureShared(_ app: Application) async throws {

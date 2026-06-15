@@ -213,6 +213,7 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
 enum ConversationProjectionCodingError: Error {
     case invalidJSON
     case missingRecipientSet
+    case recipientUserIDsNotFetched
 }
 
 final class ConversationActivitySummary: Model, @unchecked Sendable {

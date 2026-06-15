@@ -7,7 +7,10 @@ FROM swift:6.1-noble AS build
 RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
     && apt-get -q update \
     && apt-get -q dist-upgrade -y \
-    && apt-get install -y libjemalloc-dev
+    && apt-get install -y libjemalloc-dev libssl-dev libsasl2-dev
+
+RUN git config --global http.version HTTP/1.1 \
+    && git config --global url."https://gh-proxy.com/https://github.com/".insteadOf "https://github.com/"
 
 # 设置构建目录
 WORKDIR /build
@@ -17,7 +20,8 @@ WORKDIR /build
 # 只要 Package.swift/Package.resolved
 # 文件没有变化，就可以重复利用。
 COPY ./Package.* ./
-RUN swift package resolve \
+RUN --mount=type=cache,target=/root/.cache/org.swift.swiftpm \
+    swift package resolve \
         $([ -f ./Package.resolved ] && echo "--force-resolved-versions" || true)
 
 # 将整个仓库复制到容器中
@@ -62,6 +66,7 @@ RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
       libjemalloc2 \
       ca-certificates \
       tzdata \
+      libcurl4 \
 # 如果你的应用或其依赖导入了 FoundationNetworking，也需要安装 `libcurl4`。
       # libcurl4 \
 # 如果你的应用或其依赖导入了 FoundationXML，也需要安装 `libxml2`。

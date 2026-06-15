@@ -15,17 +15,26 @@ struct AuthSessionCacheConfiguration: Sendable {
     let mode: AuthSessionCacheMode
     let ttlSeconds: Int
     let maxEntries: Int
+    let redisMaxConnections: Int
     let redisURL: String?
 
     static func load(from environment: Environment) -> AuthSessionCacheConfiguration {
         let configuredMode = Environment.get("AUTH_SESSION_CACHE_MODE")
             .flatMap(AuthSessionCacheMode.init(rawValue:))
         let mode = configuredMode ?? (environment == .testing ? .disabled : .redis)
+        let maxTTLSeconds = max(
+            30,
+            Environment.get("AUTH_SESSION_CACHE_MAX_TTL_SECONDS").flatMap(Int.init(_:)) ?? 300
+        )
         let ttlSeconds = min(
             max(1, Environment.get("AUTH_SESSION_CACHE_TTL_SECONDS").flatMap(Int.init(_:)) ?? 5),
-            30
+            maxTTLSeconds
         )
         let maxEntries = max(1, Environment.get("AUTH_SESSION_CACHE_MAX_ENTRIES").flatMap(Int.init(_:)) ?? 100_000)
+        let redisMaxConnections = max(
+            2,
+            Environment.get("AUTH_SESSION_CACHE_REDIS_MAX_CONNECTIONS").flatMap(Int.init(_:)) ?? 2
+        )
         let redisURL = Environment.get("AUTH_SESSION_CACHE_REDIS_URL")?.nilIfBlank
             ?? Environment.get("REDIS_URL")?.nilIfBlank
 
@@ -33,6 +42,7 @@ struct AuthSessionCacheConfiguration: Sendable {
             mode: mode,
             ttlSeconds: ttlSeconds,
             maxEntries: maxEntries,
+            redisMaxConnections: redisMaxConnections,
             redisURL: redisURL
         )
     }
@@ -80,6 +90,7 @@ protocol AuthSessionValidationCaching: Sendable {
         userID: UUID,
         loadFromDatabase: @Sendable () async throws -> AuthenticatedPrincipal
     ) async throws -> AuthenticatedPrincipal
+    func store(_ principal: AuthenticatedPrincipal) async
     func invalidate(sessionID: UUID) async
     func invalidate(userID: UUID) async
     func invalidateAll() async
@@ -120,6 +131,8 @@ struct DisabledAuthSessionValidationCache: AuthSessionValidationCaching {
         return try await loadFromDatabase()
     }
 
+    func store(_: AuthenticatedPrincipal) async {}
+
     func invalidate(sessionID _: UUID) async {}
     func invalidate(userID _: UUID) async {}
     func invalidateAll() async {}
@@ -153,6 +166,11 @@ struct LocalAuthSessionValidationCache: AuthSessionValidationCaching {
         await store.store(principal, ttlSeconds: ttlSeconds)
         await metrics.recordStore()
         return principal
+    }
+
+    func store(_ principal: AuthenticatedPrincipal) async {
+        await store.store(principal, ttlSeconds: ttlSeconds)
+        await metrics.recordStore()
     }
 
     func invalidate(sessionID: UUID) async {
@@ -315,7 +333,7 @@ final class RedisAuthSessionValidationCache: AuthSessionValidationCaching, @unch
         self.pool = RedisConnectionPool(
             configuration: .init(
                 initialServerConnectionAddresses: [address],
-                maximumConnectionCount: .maximumActiveConnections(2),
+                maximumConnectionCount: .maximumActiveConnections(configuration.redisMaxConnections),
                 connectionFactoryConfiguration: factoryConfiguration,
                 minimumConnectionCount: 1,
                 poolDefaultLogger: logger
@@ -382,6 +400,12 @@ final class RedisAuthSessionValidationCache: AuthSessionValidationCaching, @unch
         await storeInRedis(principal)
         await recordStore()
         return principal
+    }
+
+    func store(_ principal: AuthenticatedPrincipal) async {
+        await localStore.store(principal, ttlSeconds: ttlSeconds)
+        await storeInRedis(principal)
+        await recordStore()
     }
 
     func invalidate(sessionID: UUID) async {

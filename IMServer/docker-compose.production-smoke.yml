@@ -8,8 +8,13 @@ x-imserver-env: &imserver_env
   JWT_SECRET: ${JWT_SECRET:-production-smoke-jwt-secret-change-me}
   IM_INTERNAL_SHARED_SECRET: ${IM_INTERNAL_SHARED_SECRET:-production-smoke-internal-secret}
   IM_COMMAND_INTERNAL_SHARED_SECRET: ${IM_COMMAND_INTERNAL_SHARED_SECRET:-production-smoke-internal-secret}
-  IM_GROUP_MEMBER_LIMIT: "500"
+  IM_HTTP_MAX_BODY_SIZE_BYTES: "1048576"
+  IM_GROUP_MEMBER_LIMIT: "5000"
   IM_METRICS_ENABLED: "true"
+  AUTH_SESSION_CACHE_TTL_SECONDS: "600"
+  AUTH_SESSION_CACHE_MAX_TTL_SECONDS: "600"
+  AUTH_SESSION_CACHE_REDIS_MAX_CONNECTIONS: "16"
+  AUTH_LOGIN_IP_MAX_ATTEMPTS: "2000"
   IM_AUTO_MIGRATE_ON_START: "false"
   IM_INLINE_OUTBOX_PROJECTION: "false"
   DATABASE_HOST: postgres
@@ -17,6 +22,11 @@ x-imserver-env: &imserver_env
   DATABASE_NAME: imserver_smoke
   DATABASE_USERNAME: imserver
   DATABASE_PASSWORD: imserver_password
+  DATABASE_PRIMARY_HOST: postgres
+  DATABASE_PRIMARY_PORT: "5432"
+  DATABASE_PRIMARY_NAME: imserver_smoke
+  DATABASE_PRIMARY_USERNAME: imserver
+  DATABASE_PRIMARY_PASSWORD: imserver_password
   DATABASE_CONVERSATION_SHARD_0_HOST: postgres
   DATABASE_CONVERSATION_SHARD_0_PORT: "5432"
   DATABASE_CONVERSATION_SHARD_0_NAME: imserver_smoke
@@ -24,7 +34,7 @@ x-imserver-env: &imserver_env
   DATABASE_CONVERSATION_SHARD_0_PASSWORD: imserver_password
   DATABASE_SUMMARY_SUMMARY_0_HOST: postgres
   DATABASE_SUMMARY_SUMMARY_0_PORT: "5432"
-  DATABASE_SUMMARY_SUMMARY_0_NAME: imserver_smoke
+  DATABASE_SUMMARY_SUMMARY_0_NAME: imserver_summary
   DATABASE_SUMMARY_SUMMARY_0_USERNAME: imserver
   DATABASE_SUMMARY_SUMMARY_0_PASSWORD: imserver_password
   IM_CONVERSATION_SHARD_IDS: shard-0
@@ -41,7 +51,9 @@ x-imserver-env: &imserver_env
   IM_KAFKA_AUTO_CREATE_TOPICS: "true"
   REDIS_URL: redis://redis:6379
   IM_ROUTING_MODE: redis
-  IM_REDIS_MAX_CONNECTIONS: "8"
+  IM_REDIS_MAX_CONNECTIONS: "32"
+  DATABASE_GATEWAY_MAX_CONNECTIONS_PER_EVENT_LOOP: "2"
+  DATABASE_GATEWAY_CONNECTION_POOL_TIMEOUT_SECONDS: "30"
   IM_COMMAND_API_INTERNAL_BASE_URL: http://command-api:8080
   IM_GATEWAY_RELAY_MODE: http
   IM_GATEWAY_INTERNAL_BASE_URL: http://gateway:8080
@@ -51,15 +63,50 @@ x-imserver-env: &imserver_env
   IM_MESSAGE_WRITE_BATCH_ENABLED: "true"
   IM_MESSAGE_WRITE_BATCH_MAX_SIZE: "32"
   IM_MESSAGE_WRITE_BATCH_MAX_DELAY_MS: "10"
+  IM_MESSAGE_CREATED_RECIPIENT_INLINE_THRESHOLD: "500"
+  IM_DOMAIN_EVENT_RECIPIENT_SNAPSHOT_DEDUP_THRESHOLD: "500"
+  IM_STREAM_CONSUMER_REQUIRE_MESSAGE_CREATED_RECIPIENT_SNAPSHOT: "true"
+  IM_DOMAIN_DELIVERY_MESSAGE_CREATED_LARGE_GROUP_MODE: timeline-pull
+  IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD: "500"
+  IM_DOMAIN_DELIVERY_OWNER_RECORD_BATCH_MAX_REQUESTS: "128"
+  IM_NOTIFICATION_MESSAGE_CREATED_OWNER_NOTIFICATION_SKIP_RECIPIENT_THRESHOLD: "500"
+  IM_SUMMARY_PROJECTION_MESSAGE_CREATED_ACTIVITY_ONLY_RECIPIENT_THRESHOLD: "500"
+  IM_SUMMARY_PROJECTION_ACTIVITY_COALESCE_WINDOW_MS: "100"
+  IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT: "100"
+  IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED: "true"
+  IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD: "500"
+  IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT: "128"
+  IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET: "65536"
+  IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE: compact-only
+  IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE: pull-only
+  IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD: "500"
+  IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED: "false"
+  IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED: "false"
+  IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED: "true"
+  IM_REALTIME_DELIVERY_ASYNC_MAX_IN_FLIGHT: "32"
+  IM_REALTIME_DELIVERY_ASYNC_MAX_QUEUED: "4096"
+  IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS: "100"
+  IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS: "50"
+  IM_REALTIME_ACTIVE_COMPACT_HINT_BODY: conversation-activity
+  IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS: "80"
+  IM_TIMELINE_SINCE_HOT_CACHE_TTL_MS: "500"
+  IM_TIMELINE_SINCE_HOT_CACHE_MAX_ENTRIES: "4096"
+  IM_TIMELINE_SINCE_RECENT_CACHE_TTL_MS: "5000"
+  IM_TIMELINE_SINCE_RECENT_CACHE_MAX_CONVERSATIONS: "1024"
+  IM_TIMELINE_SINCE_RECENT_CACHE_MAX_ITEMS_PER_CONVERSATION: "256"
+  IM_TIMELINE_SINCE_TARGET_SEQUENCE_COALESCE_WINDOW_MS: "25"
+  IM_TIMELINE_SINCE_CACHE_INVALIDATION_MODE: redis
   IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT: "1000"
   IM_SEARCH_DRIVER: database
   MEDIA_STORAGE_PROVIDER: s3compatible
+  MEDIA_STORAGE_DIRECTORY: /app/Storage/media
   MEDIA_STORAGE_S3_ENDPOINT: http://minio:9000
   MEDIA_STORAGE_S3_BUCKET: imserver-media
   MEDIA_STORAGE_S3_ACCESS_KEY_ID: minioadmin
   MEDIA_STORAGE_S3_SECRET_ACCESS_KEY: minioadmin
   MEDIA_STORAGE_S3_REGION: us-east-1
   MEDIA_STORAGE_S3_FORCE_PATH_STYLE: "true"
+  FILE_STORAGE_DIRECTORY: /app/Storage/files
 
 x-imserver-depends: &imserver_depends
   postgres:
@@ -170,7 +217,7 @@ services:
       IM_NODE_ID: ops-a
       IM_AUTO_MIGRATE_ON_START: "true"
     depends_on: *imserver_depends
-    command: ["ops", "--env", "production"]
+    command: ["ops", "--env", "production-smoke"]
 
   gateway:
     <<: *imserver_build
@@ -180,11 +227,18 @@ services:
       IM_TCP_ENABLED: "true"
       IM_TCP_HOST: "0.0.0.0"
       IM_TCP_PORT: "9001"
+      IM_TCP_AUTH_TIMEOUT: "30"
+      IM_TCP_IDLE_TIMEOUT: "300"
+      IM_TCP_LISTEN_BACKLOG: "8192"
     depends_on: *imserver_depends
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     ports:
       - "8080:8080"
       - "9001:9001"
-    command: ["serve", "--env", "production", "--hostname", "0.0.0.0", "--port", "8080", "--role", "gateway"]
+    command: ["serve", "--env", "production-smoke", "--hostname", "0.0.0.0", "--port", "8080", "--role", "gateway"]
 
   command-api:
     <<: *imserver_build
@@ -196,7 +250,7 @@ services:
     depends_on: *imserver_depends
     ports:
       - "8081:8080"
-    command: ["serve", "--env", "production", "--hostname", "0.0.0.0", "--port", "8080", "--role", "command-api"]
+    command: ["serve", "--env", "production-smoke", "--hostname", "0.0.0.0", "--port", "8080", "--role", "command-api"]
 
   query-api:
     <<: *imserver_build
@@ -208,7 +262,7 @@ services:
     depends_on: *imserver_depends
     ports:
       - "8082:8080"
-    command: ["serve", "--env", "production", "--hostname", "0.0.0.0", "--port", "8080"]
+    command: ["serve", "--env", "production-smoke", "--hostname", "0.0.0.0", "--port", "8080"]
 
   outbox-relay:
     <<: *imserver_build
@@ -217,7 +271,7 @@ services:
       IM_NODE_ID: outbox-relay-a
       IM_TCP_ENABLED: "false"
     depends_on: *imserver_depends
-    command: ["outbox-relay", "--env", "production"]
+    command: ["outbox-relay", "--env", "production-smoke"]
 
   stream-consumer-summary:
     <<: *imserver_build
@@ -227,7 +281,7 @@ services:
       IM_TCP_ENABLED: "false"
       IM_STREAM_CONSUMER_GROUPS: summary-projection-consumer
     depends_on: *imserver_depends
-    command: ["stream-consumer", "--env", "production"]
+    command: ["stream-consumer", "--env", "production-smoke"]
 
   stream-consumer-changes:
     <<: *imserver_build
@@ -237,7 +291,7 @@ services:
       IM_TCP_ENABLED: "false"
       IM_STREAM_CONSUMER_GROUPS: changes-log-consumer
     depends_on: *imserver_depends
-    command: ["stream-consumer", "--env", "production"]
+    command: ["stream-consumer", "--env", "production-smoke"]
 
   stream-consumer-search:
     <<: *imserver_build
@@ -247,7 +301,7 @@ services:
       IM_TCP_ENABLED: "false"
       IM_STREAM_CONSUMER_GROUPS: search-index-consumer
     depends_on: *imserver_depends
-    command: ["stream-consumer", "--env", "production"]
+    command: ["stream-consumer", "--env", "production-smoke"]
 
   stream-consumer-notification:
     <<: *imserver_build
@@ -257,7 +311,7 @@ services:
       IM_TCP_ENABLED: "false"
       IM_STREAM_CONSUMER_GROUPS: notification-consumer
     depends_on: *imserver_depends
-    command: ["stream-consumer", "--env", "production"]
+    command: ["stream-consumer", "--env", "production-smoke"]
 
   stream-consumer-repair:
     <<: *imserver_build
@@ -267,4 +321,26 @@ services:
       IM_TCP_ENABLED: "false"
       IM_STREAM_CONSUMER_GROUPS: repair-replay-consumer
     depends_on: *imserver_depends
-    command: ["stream-consumer", "--env", "production"]
+    command: ["stream-consumer", "--env", "production-smoke"]
+
+  stream-consumer-domain:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: stream-domain-a
+      IM_TCP_ENABLED: "false"
+      IM_STREAM_CONSUMER_GROUPS: domain-delivery-consumer
+      IM_GATEWAY_RELAY_MODE: http
+      IM_GATEWAY_INTERNAL_BASE_URL: http://gateway:8080
+    depends_on: *imserver_depends
+    command: ["stream-consumer", "--env", "production-smoke"]
+
+  stream-consumer-realtime:
+    <<: *imserver_build
+    environment:
+      <<: *imserver_env
+      IM_NODE_ID: stream-realtime-a
+      IM_TCP_ENABLED: "false"
+      IM_STREAM_CONSUMER_GROUPS: realtime-delivery-consumer
+    depends_on: *imserver_depends
+    command: ["stream-consumer", "--env", "production-smoke"]

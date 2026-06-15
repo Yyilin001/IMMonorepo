@@ -210,7 +210,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         Task {
             await self.application.routingMetrics.recordTCPChannelActive()
         }
-        application.logger.info(
+        application.logger.debug(
             "IM TCP channel active",
             metadata: logMetadata(channel: channel)
         )
@@ -249,7 +249,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                 state: self.stateName
             )
         }
-        application.logger.info(
+        application.logger.debug(
             "IM TCP channel inactive",
             metadata: logMetadata(channel: context.channel, extra: [
                 "close_reason": .string(closeReason ?? "peer_or_unknown"),
@@ -269,7 +269,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                 Task {
                     await self.application.routingMetrics.recordTCPAuthReceived()
                 }
-                application.logger.info(
+                application.logger.debug(
                     "IM TCP auth received",
                     metadata: logMetadata(channel: context.channel, extra: [
                         "requestID": .string(packet.requestID?.uuidString ?? "")
@@ -325,7 +325,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         if let closeReasonEvent = event as? IMTCPConnectionCloseReasonEvent {
             closeReason = closeReasonEvent.reason
-            application.logger.info(
+            application.logger.debug(
                 "IM TCP close reason event",
                 metadata: logMetadata(context: context, extra: [
                     "close_reason": .string(closeReasonEvent.reason)
@@ -341,7 +341,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                 if closeReason == nil {
                     closeReason = "peer_input_closed"
                 }
-                application.logger.info(
+                application.logger.debug(
                     "IM TCP input closed",
                     metadata: logMetadata(context: context, extra: [
                         "close_reason": .string(closeReason ?? "")
@@ -437,7 +437,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let remoteIPAddress = channel.remoteAddress?.ipAddress
         let authenticator = IMTCPAuthenticator(app: application, db: application.db)
-        application.logger.info(
+        application.logger.debug(
             "IM TCP auth started",
             metadata: logMetadata(channel: channel, extra: [
                 "requestID": .string(requestID?.uuidString ?? ""),
@@ -488,7 +488,7 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                         payload: response,
                         channel: channel
                     )
-                    self.application.logger.info(
+                    self.application.logger.debug(
                         "IM TCP auth OK sent",
                         metadata: self.logMetadata(channel: channel, extra: [
                             "requestID": .string(requestID?.uuidString ?? ""),

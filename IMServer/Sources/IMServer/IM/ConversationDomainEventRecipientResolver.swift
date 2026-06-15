@@ -207,26 +207,9 @@ struct ConversationDomainEventRecipientResolver {
             return nil
         }
         let startedAt = Date()
-        let inlineRecipients = try snapshot.recipientUserIDs()
-        if !inlineRecipients.isEmpty || snapshot.recipientCount == 0 {
-            await app?.conversationDomainEventMetrics.recordRecipientSnapshotResolved(
-                usedSharedSet: false,
-                recipientCount: inlineRecipients.count,
-                elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
-            )
-            return uniqueSorted(inlineRecipients)
-        }
-        guard let recipientHash = snapshot.recipientHash,
-              let recipientSet = try await ConversationDomainEventRecipientSet.find(recipientHash, on: db)
-        else {
-            await app?.conversationDomainEventMetrics.recordRecipientSnapshotSharedSetMissing(
-                elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
-            )
-            throw ConversationProjectionCodingError.missingRecipientSet
-        }
-        let sharedRecipients = try recipientSet.recipientUserIDs()
+        let sharedRecipients = try await snapshot.recipientUserIDs(on: db)
         await app?.conversationDomainEventMetrics.recordRecipientSnapshotResolved(
-            usedSharedSet: true,
+            usedSharedSet: snapshot.$recipientHash.value != nil,
             recipientCount: sharedRecipients.count,
             elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
         )
@@ -247,48 +230,10 @@ struct ConversationDomainEventRecipientResolver {
             return nil
         }
         let startedAt = Date()
-        let inlineRecipients = try snapshot.recipientUserIDs()
-        if !inlineRecipients.isEmpty || snapshot.recipientCount == 0 {
-            let inlineSet = Set(uniqueSorted(inlineRecipients))
-            let filtered = candidates.filter { inlineSet.contains($0) }
-            await app?.conversationDomainEventMetrics.recordRecipientSnapshotResolved(
-                usedSharedSet: false,
-                recipientCount: filtered.count,
-                elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
-            )
-            return filtered
-        }
-        guard let recipientHash = snapshot.recipientHash,
-              let recipientSet = try await ConversationDomainEventRecipientSet.find(recipientHash, on: db)
-        else {
-            await app?.conversationDomainEventMetrics.recordRecipientSnapshotSharedSetMissing(
-                elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
-            )
-            throw ConversationProjectionCodingError.missingRecipientSet
-        }
-
-        let indexedRecipients = try await ConversationDomainEventRecipientSetMember.matchingUserIDs(
-            recipientHash: recipientHash,
-            candidateUserIDs: candidates,
-            on: db
-        )
-        let hasMemberIndex = try await ConversationDomainEventRecipientSetMember.hasMemberIndex(
-                recipientHash: recipientHash,
-                on: db
-            )
-        if !indexedRecipients.isEmpty || hasMemberIndex {
-            await app?.conversationDomainEventMetrics.recordRecipientSnapshotResolved(
-                usedSharedSet: true,
-                recipientCount: indexedRecipients.count,
-                elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
-            )
-            return indexedRecipients
-        }
-
-        let sharedSet = Set(try recipientSet.recipientUserIDs())
+        let sharedSet = Set(try await snapshot.recipientUserIDs(on: db))
         let filtered = candidates.filter { sharedSet.contains($0) }
         await app?.conversationDomainEventMetrics.recordRecipientSnapshotResolved(
-            usedSharedSet: true,
+            usedSharedSet: snapshot.$recipientHash.value != nil,
             recipientCount: filtered.count,
             elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
         )

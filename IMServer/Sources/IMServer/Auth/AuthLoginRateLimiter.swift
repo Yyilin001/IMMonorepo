@@ -46,8 +46,8 @@ actor AuthLoginRateLimiter: AuthRateLimiting {
     }
 
     private let ipRule = Rule(
-        maxAttempts: 20,
-        window: 5 * 60,
+        maxAttempts: AuthLoginRateLimiter.envInt("AUTH_LOGIN_IP_MAX_ATTEMPTS", default: 20),
+        window: AuthLoginRateLimiter.envTimeInterval("AUTH_LOGIN_IP_WINDOW_SECONDS", default: 5 * 60),
         scopeDescription: "当前 IP 的"
     )
     private let accountRule = Rule(
@@ -89,6 +89,14 @@ actor AuthLoginRateLimiter: AuthRateLimiting {
     private var verificationResendAccountAttempts: [String: [Date]] = [:]
     private var verificationConfirmIPAttempts: [String: [Date]] = [:]
     private var verificationConfirmAccountAttempts: [String: [Date]] = [:]
+
+    private static func envInt(_ name: String, default defaultValue: Int) -> Int {
+        max(1, Environment.get(name).flatMap(Int.init(_:)) ?? defaultValue)
+    }
+
+    private static func envTimeInterval(_ name: String, default defaultValue: TimeInterval) -> TimeInterval {
+        max(1, Environment.get(name).flatMap(TimeInterval.init(_:)) ?? defaultValue)
+    }
 
     func beginLoginAttempt(ipAddress: String?, account: String, now: Date) async throws -> LoginAttemptReservation {
         try beginAttempt(kind: .login, ipAddress: ipAddress, account: account, now: now)
@@ -341,7 +349,11 @@ final class RedisAuthRateLimiter: AuthRateLimiting, @unchecked Sendable {
     private let pool: RedisConnectionPool
     private let logger: Logger
     private let keyPrefix = "im:auth:rate"
-    private let loginIPRule = Rule(maxAttempts: 20, window: 5 * 60, scopeDescription: "当前 IP 的")
+    private let loginIPRule = Rule(
+        maxAttempts: max(1, Environment.get("AUTH_LOGIN_IP_MAX_ATTEMPTS").flatMap(Int.init(_:)) ?? 20),
+        window: max(1, Int64(Environment.get("AUTH_LOGIN_IP_WINDOW_SECONDS").flatMap(Int.init(_:)) ?? 5 * 60)),
+        scopeDescription: "当前 IP 的"
+    )
     private let loginAccountRule = Rule(maxAttempts: 5, window: 15 * 60, scopeDescription: "当前账号的")
     private let registrationIPRule = Rule(maxAttempts: 10, window: 15 * 60, scopeDescription: "当前 IP 的注册")
     private let registrationAccountRule = Rule(maxAttempts: 3, window: 60 * 60, scopeDescription: "当前邮箱的注册")

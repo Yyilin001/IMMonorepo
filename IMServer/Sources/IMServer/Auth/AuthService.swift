@@ -602,6 +602,7 @@ struct AuthService {
             }
 
             let response = try await makeAuthResponse(for: user, session: session, now: issuedAt)
+            await app.authSessionValidationCache.store(try AuthenticatedPrincipal(user: user, session: session))
             for revokedSessionID in revokedSessionIDs {
                 await app.authSessionValidationCache.invalidate(sessionID: revokedSessionID)
                 await app.gatewaySessionService.kickConnections(
@@ -620,7 +621,9 @@ struct AuthService {
                 throw error
             }
 
-            return try await makeAuthResponse(for: user, session: existingSession, now: now)
+            let response = try await makeAuthResponse(for: user, session: existingSession, now: now)
+            await app.authSessionValidationCache.store(try AuthenticatedPrincipal(user: user, session: existingSession))
+            return response
         }
     }
 

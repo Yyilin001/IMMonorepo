@@ -33,7 +33,20 @@ final class ConversationDomainEventRecipientSet: Model, @unchecked Sendable {
     }
 
     func recipientUserIDs() throws -> [UUID] {
-        try Self.decode(recipientUserIDsJSON)
+        guard let json = $recipientUserIDsJSON.value else {
+            throw ConversationProjectionCodingError.recipientUserIDsNotFetched
+        }
+        return try Self.decode(json)
+    }
+
+    func recipientUserIDs(on database: any Database) async throws -> [UUID] {
+        if let json = $recipientUserIDsJSON.value {
+            return try Self.decode(json)
+        }
+        guard let recipientHash = id else {
+            throw ConversationProjectionCodingError.missingRecipientSet
+        }
+        return try await Self.recipientUserIDs(recipientHash: recipientHash, on: database)
     }
 
     static func recipientHash(for ids: [UUID]) -> String {
@@ -62,6 +75,34 @@ final class ConversationDomainEventRecipientSet: Model, @unchecked Sendable {
     fileprivate static func uniqueSorted(_ ids: [UUID]) -> [UUID] {
         Array(Set(ids)).sorted { $0.uuidString < $1.uuidString }
     }
+
+    static func recipientUserIDs(recipientHash: String, on database: any Database) async throws -> [UUID] {
+        if let sql = database as? any SQLDatabase,
+           sql.dialect.name == "postgresql"
+        {
+            let rows = try await sql.raw("""
+                SELECT \(ident: "recipient_user_ids_json")
+                FROM \(ident: schema)
+                WHERE \(ident: "recipient_hash") = \(bind: recipientHash)
+                LIMIT 1
+                """).all(decoding: RecipientSetJSONRow.self)
+            guard let row = rows.first else {
+                throw ConversationProjectionCodingError.missingRecipientSet
+            }
+            return try decode(row.recipient_user_ids_json)
+        }
+
+        guard let recipientSet = try await find(recipientHash, on: database),
+              let json = recipientSet.$recipientUserIDsJSON.value
+        else {
+            throw ConversationProjectionCodingError.missingRecipientSet
+        }
+        return try decode(json)
+    }
+}
+
+private struct RecipientSetJSONRow: Decodable {
+    let recipient_user_ids_json: String
 }
 
 final class ConversationDomainEventRecipientSetMember: Model, @unchecked Sendable {
@@ -240,20 +281,25 @@ final class ConversationDomainEventRecipientSnapshot: Model, @unchecked Sendable
     }
 
     func recipientUserIDs() throws -> [UUID] {
-        try Self.decode(recipientUserIDsJSON)
+        guard let json = $recipientUserIDsJSON.value else {
+            throw ConversationProjectionCodingError.recipientUserIDsNotFetched
+        }
+        return try Self.decode(json)
     }
 
     func recipientUserIDs(on database: any Database) async throws -> [UUID] {
-        let inlineRecipients = try recipientUserIDs()
-        if !inlineRecipients.isEmpty || recipientCount == 0 {
+        let snapshot = try await resolvedRecipientSnapshot(on: database)
+        let inlineRecipients = try Self.decode(snapshot.recipientUserIDsJSON)
+        if !inlineRecipients.isEmpty || snapshot.recipientCount == 0 {
             return inlineRecipients
         }
-        guard let recipientHash,
-              let recipientSet = try await ConversationDomainEventRecipientSet.find(recipientHash, on: database)
-        else {
+        guard let recipientHash = snapshot.recipientHash else {
             throw ConversationProjectionCodingError.missingRecipientSet
         }
-        return try recipientSet.recipientUserIDs()
+        return try await ConversationDomainEventRecipientSet.recipientUserIDs(
+            recipientHash: recipientHash,
+            on: database
+        )
     }
 
     static func recipientHash(for ids: [UUID]) -> String {
@@ -271,6 +317,68 @@ final class ConversationDomainEventRecipientSnapshot: Model, @unchecked Sendable
     private static func uniqueSorted(_ ids: [UUID]) -> [UUID] {
         ConversationDomainEventRecipientSet.uniqueSorted(ids)
     }
+
+    private func resolvedRecipientSnapshot(on database: any Database) async throws -> SnapshotRecipientRow {
+        if let json = $recipientUserIDsJSON.value,
+           let recipientCount = $recipientCount.value
+        {
+            let recipientHash = $recipientHash.value ?? nil
+            if !json.isEmpty, !json.elementsEqual("[]") || recipientCount == 0 || recipientHash != nil {
+                return SnapshotRecipientRow(
+                    recipient_user_ids_json: json,
+                    recipient_count: recipientCount,
+                    recipient_hash: recipientHash
+                )
+            }
+        }
+
+        guard let eventID = id else {
+            throw ConversationProjectionCodingError.missingRecipientSet
+        }
+        return try await Self.recipientSnapshot(eventID: eventID, on: database)
+    }
+
+    private static func recipientSnapshot(eventID: UUID, on database: any Database) async throws -> SnapshotRecipientRow {
+        if let sql = database as? any SQLDatabase,
+           sql.dialect.name == "postgresql"
+        {
+            let rows = try await sql.raw("""
+                SELECT
+                    \(ident: "recipient_user_ids_json"),
+                    \(ident: "recipient_count"),
+                    \(ident: "recipient_hash")
+                FROM \(ident: schema)
+                WHERE \(ident: "event_id") = \(bind: eventID)
+                LIMIT 1
+                """).all(decoding: SnapshotRecipientRow.self)
+            guard let row = rows.first else {
+                throw ConversationProjectionCodingError.missingRecipientSet
+            }
+            return row
+        }
+
+        guard let snapshot = try await find(eventID, on: database),
+              let json = snapshot.$recipientUserIDsJSON.value,
+              let recipientCount = snapshot.$recipientCount.value
+        else {
+            throw ConversationProjectionCodingError.missingRecipientSet
+        }
+        return SnapshotRecipientRow(
+            recipient_user_ids_json: json,
+            recipient_count: recipientCount,
+            recipient_hash: snapshot.$recipientHash.value ?? nil
+        )
+    }
+}
+
+private struct SnapshotRecipientRow: Decodable {
+    let recipient_user_ids_json: String
+    let recipient_count: Int
+    let recipient_hash: String?
+
+    var recipientUserIDsJSON: String { recipient_user_ids_json }
+    var recipientCount: Int { recipient_count }
+    var recipientHash: String? { recipient_hash }
 }
 
 final class ConversationNotificationEntry: Model, @unchecked Sendable {
