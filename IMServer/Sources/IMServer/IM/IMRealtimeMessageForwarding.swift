@@ -16,7 +16,9 @@ extension IMRealtimeMessageService {
 
         do {
             let target = URI(string: "\(owner.baseURL)/internal/im/messages/send")
-            let response = try await app.client.post(target, headers: internalHeaders(sharedSecret: configuration.sharedSecret)) { req in
+            var headers = internalHeaders(sharedSecret: configuration.sharedSecret)
+            headers.replaceOrAdd(name: "X-IM-Internal-Response", value: "full")
+            let response = try await app.client.post(target, headers: headers) { req in
                 try req.content.encode(
                     IMInternalMessageSendRequest(
                         payload: payload,

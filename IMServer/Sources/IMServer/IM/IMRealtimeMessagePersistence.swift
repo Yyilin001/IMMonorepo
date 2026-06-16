@@ -77,13 +77,14 @@ extension IMRealtimeMessageService {
         senderUserID: UUID,
         conversationID: UUID
     ) async throws -> IMPreparedIncomingMessage {
+        let startedAt = Date()
         try await reserveHotConversationCapacityIfNeeded(conversationID: conversationID)
         try await rejectBlockedDirectMessageIfNeeded(conversationID: conversationID, senderUserID: senderUserID)
         try await rejectMutedGroupMessageIfNeeded(conversationID: conversationID, senderUserID: senderUserID)
         let normalizedContent = try normalizedContent(from: payload.content)
         let trimmedClientMessageID = payload.clientMessageID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return IMPreparedIncomingMessage(
+        let prepared = IMPreparedIncomingMessage(
             payload: payload,
             senderUserID: senderUserID,
             conversationID: conversationID,
@@ -91,6 +92,10 @@ extension IMRealtimeMessageService {
             normalizedClientMessageID: trimmedClientMessageID?.isEmpty == false ? trimmedClientMessageID : nil,
             serverTimestamp: Date()
         )
+        await app?.messageWriteMetrics.recordPrepareMessage(
+            durationMillis: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
+        )
+        return prepared
     }
 
     func rejectMutedGroupMessageIfNeeded(conversationID: UUID, senderUserID: UUID) async throws {

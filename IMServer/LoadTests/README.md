@@ -421,6 +421,55 @@ CONNECTION_LOG_DIR=/tmp/imtcp-driver-logs \
 
 Load generator 2 uses the same command with `LOAD_GENERATOR_ID=2`.
 
+### Fast Offline Login Cache
+
+For a single 8 vCPU / 16 GiB load-test server, keep HTTP login outside the
+online-capacity run and prewarm the cache in parallel. This avoids repeating the
+old 10-minute connection ramp for every message test. On the 5000-account
+Shenzhen test server, `CONCURRENCY=96` generated a 5000-record login cache in
+about 3 minutes; adjust it down if the command API CPU saturates or login errors
+appear.
+
+Generate a 5000-account cache:
+
+```bash
+cd IMServer/LoadTests
+./prewarm_login_cache_parallel.py \
+  --base-url http://47.106.103.10:8080 \
+  --account-file /tmp/load-5000.csv \
+  --connections 5000 \
+  --login-cache-file /tmp/imtcp-login-cache-new-5000.json \
+  --concurrency 96 \
+  --request-timeout-seconds 30 \
+  --login-retries 2
+```
+
+Then run the online check in strict cache-only mode. This profile has been
+validated with 5000/5000 `authOK`, zero failures, and normal heartbeat ACKs
+using a 180-second ramp:
+
+```bash
+python3 /opt/imserver/IMMonorepo/IMServer/LoadTests/tcp_online_driver.py \
+  --tcp-host 127.0.0.1 \
+  --tcp-port 9000 \
+  --connections 5000 \
+  --connect-ramp-seconds 180 \
+  --hold-seconds 1200 \
+  --timeout-seconds 240 \
+  --heartbeat-interval-seconds 30 \
+  --barrier-keepalive-seconds 15 \
+  --barrier-batch-size 500 \
+  --login-cache-file /tmp/imtcp-login-cache-new-5000.json \
+  --login-cache-ttl-guard-seconds 30 \
+  --suppress-packet-received-log \
+  --progress-file /tmp/tcp-5000-msgtest-progress.json \
+  --progress-interval-seconds 1
+```
+
+Use a longer ramp only when the load generator itself is saturated or when
+auth/connect timeout counters increase. If the cache is still valid, do not
+prewarm again; reuse it for repeated message-rate tests.
+
 ### Slow Offline Login Cache
 
 On small servers, do not prewarm hundreds or thousands of HTTP logins inside the
@@ -607,6 +656,41 @@ Recommended ladder for the current single-node server:
 3000 online, 10 msg/s, hold 10m
 3000 online, 50 msg/s, hold 10m
 ```
+
+Latest verified single-node large-group result:
+
+```text
+2026-06-16, 8 vCPU / 16 GiB test node
+10000 online, 10000-member conversation, 200 msg/s, 60s send window
+connections=10000 successes=10000 authOK=10000
+messageSent=12000 messageAck=12000 messageSendError=0 failures={}
+messageReceived=13153557 heartbeatSent=165067 heartbeatAck=165067
+lagClearAfterSendSeconds=14.539
+Kafka consumer lag drained to 0 for domain, realtime, summary, notification
+```
+
+This result uses cached logins, `compact-only` active conversation fanout,
+`pull-only` inactive hints, `IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS=100`,
+`IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS=100`,
+`IM_GATEWAY_LOCAL_FANOUT_BATCH_SIZE=512`, and
+`IM_GATEWAY_LOCAL_FANOUT_EVENT_LOOP_YIELD_CHUNKS=32`. It validates the large-group
+compact/timeline-pull model, not full message-body fanout to every member.
+
+Recent 200 msg/s drain tuning history:
+
+```text
+activeCompactMs  gatewayBatch  yieldChunks  lagClearAfterSendSeconds
+50               64            64(default)  29.708
+100              64            64(default)  24.609
+100              128           64(default)  20.816
+100              256           32           16.949
+100              512           32           14.539
+```
+
+Use `monitor_tcp_drain.py` beside `tcp_online_driver.py` when validating drain
+SLOs. It writes one JSONL sample per interval with driver progress, Kafka lag,
+selected `/internal/metrics`, TCP established count, and container CPU/memory;
+the summary file reports `lagClearAfterSendSeconds`.
 
 Message send acceptance:
 
@@ -886,9 +970,9 @@ Realtime relay tuning:
   `message_created` inactive-list hints by conversation for rollback modes and
   non-`pull-only` deployments. Production active chat viewers should use a short
   active compact window, for example
-  `IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS=25`, so hot rooms collapse
+  `IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS=100`, so hot rooms collapse
   repeated compact hints by recipient while keeping visible-message catch-up
-  latency below one frame. Inactive online users are not realtime-fanout targets
+  freshness bounded well below one second. Inactive online users are not realtime-fanout targets
   in production `pull-only` mode; they use conversation changes and
   `timeline/since` catch-up. This is the production path for hot large groups,
   not a per-message delivery guarantee. Track `im_realtime_coalesced_*` metrics

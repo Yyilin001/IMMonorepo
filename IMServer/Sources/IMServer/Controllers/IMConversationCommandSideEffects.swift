@@ -15,6 +15,7 @@ struct IMConversationCommandSideEffects {
         await app.conversationMemberCache.invalidate(conversationID: conversationID)
         await app.directConversationPairCache.invalidate(conversationID: conversationID)
         await app.conversationMediaAccessCache.invalidate(conversationID: conversationID)
+        await ConversationRecipientSetExistenceCache.shared.invalidateConversation(conversationID)
 
         let configuration = app.commandOwnerRoutingConfiguration
         guard configuration.isEnabled,

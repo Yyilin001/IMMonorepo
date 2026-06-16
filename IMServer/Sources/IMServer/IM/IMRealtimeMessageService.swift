@@ -14,6 +14,22 @@ struct IMRealtimeMessagePersistenceResult: Content, Sendable {
     let didCreateMessage: Bool
 }
 
+struct IMInternalMessageSendResponse: Content, Sendable {
+    let conversationID: UUID
+    let acknowledgement: IMTCPAckPayload
+    let message: IMTCPMessagePayload
+    let recipientCount: Int
+    let didCreateMessage: Bool
+
+    init(result: IMRealtimeMessagePersistenceResult) {
+        self.conversationID = result.conversationID
+        self.acknowledgement = result.acknowledgement
+        self.message = result.message
+        self.recipientCount = result.recipientUserIDs.count
+        self.didCreateMessage = result.didCreateMessage
+    }
+}
+
 struct IMPreparedIncomingMessage: Sendable {
     let payload: IMTCPMessagePayload
     let senderUserID: UUID

@@ -402,6 +402,7 @@ struct IMStreamConsumerConfiguration: Sendable {
     let domainDeliveryOwnerRecordBatchMaxRequests: Int
     let domainDeliveryReplayRecordsEnabled: Bool
     let domainDeliveryRelayAfterRecord: Bool
+    let domainDeliveryExternalRealtimeDeliveryEnabled: Bool
     let domainDeliverySkipsMessageCreatedOwnerDelivery: Bool
     let domainDeliveryMessageCreatedLargeGroupMode: MessageCreatedLargeGroupDeliveryMode
     let domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold: Int
@@ -482,6 +483,10 @@ struct IMStreamConsumerConfiguration: Sendable {
             domainDeliveryRelayAfterRecord: parseBooleanEnvironment(
                 "IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD",
                 defaultValue: !Set(configured.isEmpty ? defaultGroups : configured).contains("realtime-delivery-consumer")
+            ),
+            domainDeliveryExternalRealtimeDeliveryEnabled: parseBooleanEnvironment(
+                "IM_DOMAIN_DELIVERY_EXTERNAL_REALTIME_DELIVERY_ENABLED",
+                defaultValue: false
             ),
             domainDeliverySkipsMessageCreatedOwnerDelivery: parseBooleanEnvironment(
                 "IM_DOMAIN_DELIVERY_SKIP_MESSAGE_CREATED_OWNER_DELIVERY",

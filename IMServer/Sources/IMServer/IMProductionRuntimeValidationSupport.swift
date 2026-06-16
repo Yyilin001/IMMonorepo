@@ -857,11 +857,12 @@ enum IMProductionRuntimeValidationSupport {
         let configuration = app.streamConsumerConfiguration
         let hasDomainDeliveryConsumer = configuration.isEnabled("domain-delivery-consumer")
         let hasRealtimeDeliveryConsumer = configuration.isEnabled("realtime-delivery-consumer")
+        let hasExternalRealtimeDeliveryConsumer = configuration.domainDeliveryExternalRealtimeDeliveryEnabled
         let hasDomainRelayAfterRecord = hasDomainDeliveryConsumer
             && configuration.domainDeliveryRelayAfterRecord
 
         if hasDomainDeliveryConsumer,
-           hasRealtimeDeliveryConsumer,
+           (hasRealtimeDeliveryConsumer || hasExternalRealtimeDeliveryConsumer),
            configuration.domainDeliveryRelayAfterRecord
         {
             throw Abort(
@@ -883,10 +884,10 @@ enum IMProductionRuntimeValidationSupport {
             return
         }
 
-        guard hasRealtimeDeliveryConsumer || hasDomainRelayAfterRecord else {
+        guard hasRealtimeDeliveryConsumer || hasExternalRealtimeDeliveryConsumer || hasDomainRelayAfterRecord else {
             throw Abort(
                 .internalServerError,
-                reason: "Large-group message_created owner delivery skip requires realtime delivery. Enable realtime-delivery-consumer or set IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true on domain-delivery-consumer."
+                reason: "Large-group message_created owner delivery skip requires realtime delivery. Enable realtime-delivery-consumer, set IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true on domain-delivery-consumer, or set IM_DOMAIN_DELIVERY_EXTERNAL_REALTIME_DELIVERY_ENABLED=true when a dedicated realtime-delivery-consumer runs in the same deployment."
             )
         }
 

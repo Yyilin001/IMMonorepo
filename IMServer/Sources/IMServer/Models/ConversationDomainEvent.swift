@@ -843,7 +843,7 @@ final class ConversationDomainEvent: Model, @unchecked Sendable {
         payloadJSON = try Self.encodePayload(payload)
     }
 
-    private static func encodePayload(_ payload: ConversationDomainEventPayload) throws -> String {
+    static func encodePayload(_ payload: ConversationDomainEventPayload) throws -> String {
         let data = try JSONEncoder().encode(payload)
         guard let json = String(data: data, encoding: .utf8) else {
             throw ConversationProjectionCodingError.invalidJSON

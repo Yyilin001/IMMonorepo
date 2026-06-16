@@ -1842,6 +1842,21 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
             let activeRecipientUserIDs = resolvedActiveRecipients.userIDs
             let activeRecipientSet = Set(activeRecipientUserIDs)
             let activeRoutes = routeLookup.routes.filter { activeRecipientSet.contains($0.key) }
+            if routeLookup.routes.isEmpty || activeRecipientUserIDs.isEmpty {
+                app.logger.info("Realtime delivery consumer active-only pre-split has no active recipients.", metadata: [
+                    "conversation_id": .string(first.conversationID.uuidString),
+                    "route_count": .stringConvertible(routeLookup.routes.count),
+                    "active_candidate_count": .stringConvertible(activeCandidateUserIDs.count),
+                    "filtered_active_recipient_count": .stringConvertible(activeRecipientUserIDs.count),
+                    "route_cache_hit": .stringConvertible(routeLookup.cacheHit),
+                    "route_cache_partial_hit": .stringConvertible(routeLookup.cachePartialHit),
+                    "route_cached_user_count": .stringConvertible(routeLookup.cachedUserCount),
+                    "route_missed_user_count": .stringConvertible(routeLookup.missedUserCount),
+                    "route_joined_in_flight": .stringConvertible(routeLookup.joinedInFlight),
+                    "resolved_source": .string(resolvedActiveRecipients.source.rawValue),
+                    "recipient_count_hint": .stringConvertible(recipientCount)
+                ])
+            }
             var split = ActiveConversationFanoutSplit()
             split.didSplit = true
             split.routeMilliseconds = routeLookup.cacheHit
@@ -2413,7 +2428,56 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
                 throw Abort(.internalServerError, reason: "messageCreated run owner delivery only accepts message_created events with messageID.")
             }
         }
+        if try await consumeMessageCreatedRunOwnerDeliverySkipIfPossible(envelopes) {
+            return
+        }
         _ = try await consume(envelopes)
+    }
+
+    private func consumeMessageCreatedRunOwnerDeliverySkipIfPossible(
+        _ envelopes: [ConversationEventEnvelope]
+    ) async throws -> Bool {
+        guard !relayRealtimeAfterRecord,
+              let first = envelopes.first,
+              let firstEventID = first.eventID,
+              envelopes.allSatisfy({
+                  $0.eventType == .messageCreated
+                      && $0.payload.messageID != nil
+                      && $0.conversationID == first.conversationID
+                      && $0.eventID != nil
+              })
+        else {
+            return false
+        }
+
+        let recipientCount = try await messageCreatedRecipientCountHint(for: first)
+        guard let skipReason = messageCreatedOwnerDeliverySkipReason(
+            for: first,
+            recipientCount: recipientCount
+        ) else {
+            return false
+        }
+
+        try validateMessageCreatedOwnerDeliverySkipRealtimePath(
+            eventID: firstEventID,
+            conversationID: first.conversationID,
+            skipReason: skipReason
+        )
+        for _ in envelopes {
+            await app.conversationDomainEventMetrics.recordMessageCreatedOwnerDeliverySkipped(
+                recipientCount: recipientCount
+            )
+            await app.conversationDomainEventMetrics.recordMessageCreatedTimelinePullDelivery(
+                recipientCount: recipientCount
+            )
+        }
+        app.logger.info("Domain delivery skipped messageCreated owner delivery run.", metadata: [
+            "conversation_id": .string(first.conversationID.uuidString),
+            "recipient_count": .stringConvertible(recipientCount),
+            "run_count": .stringConvertible(envelopes.count),
+            "skip_reason": .string(skipReason)
+        ])
+        return true
     }
 
     @discardableResult
@@ -2523,10 +2587,11 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
     ) throws {
         guard relayRealtimeAfterRecord
             || app.streamConsumerConfiguration.isEnabled("realtime-delivery-consumer")
+            || app.streamConsumerConfiguration.domainDeliveryExternalRealtimeDeliveryEnabled
         else {
             throw Abort(
                 .internalServerError,
-                reason: "Refusing to skip messageCreated owner delivery without realtime delivery path. Enable realtime-delivery-consumer or IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true. eventID=\(eventID.uuidString) conversationID=\(conversationID.uuidString) skipReason=\(skipReason)"
+                reason: "Refusing to skip messageCreated owner delivery without realtime delivery path. Enable realtime-delivery-consumer, set IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true, or set IM_DOMAIN_DELIVERY_EXTERNAL_REALTIME_DELIVERY_ENABLED=true when a dedicated realtime-delivery-consumer runs in the same deployment. eventID=\(eventID.uuidString) conversationID=\(conversationID.uuidString) skipReason=\(skipReason)"
             )
         }
     }
@@ -3123,6 +3188,28 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
         return "timeline_pull_recipient_threshold_\(threshold)"
     }
 
+    private func messageCreatedRecipientCountHint(for envelope: ConversationEventEnvelope) async throws -> Int {
+        let inlineCount = Set(envelope.payload.recipientUserIDs).count
+        if inlineCount > 0 {
+            return inlineCount
+        }
+        guard let eventID = envelope.eventID,
+              let snapshot = try await ConversationDomainEventRecipientSnapshot.find(eventID, on: sourceDB)
+        else {
+            if app.streamConsumerConfiguration.streamConsumerRequiresMessageCreatedRecipientSnapshot {
+                await app.conversationDomainEventMetrics.recordRecipientResolutionMissingSnapshot()
+                throw ConversationEventTransientProcessingError.messageCreatedRecipientSnapshotMissing(
+                    eventID: envelope.eventID,
+                    conversationID: envelope.conversationID
+                )
+            }
+            return try await ConversationMember.query(on: sourceDB)
+                .filter(\.$conversation.$id == envelope.conversationID)
+                .count()
+        }
+        return snapshot.recipientCount
+    }
+
     private func sharedMessageCreatedRunRecipients(
         for envelopes: [ConversationEventEnvelope]
     ) async throws -> ConversationDomainEventResolvedRecipients? {
@@ -3197,6 +3284,10 @@ struct ConversationNotificationConsumer: ConversationEventConsumer {
         Set(ConversationDomainEventType.allCases)
     }
 
+    func consumeMessageCreatedRun(_ envelopes: [ConversationEventEnvelope]) async throws {
+        try await ConversationNotificationRunWriter(app: app).consume(envelopes)
+    }
+
     func consume(_ envelope: ConversationEventEnvelope) async throws {
         guard let eventID = envelope.eventID else {
             return
@@ -3267,6 +3358,21 @@ struct ConversationNotificationRunWriter {
         let now = Date()
         var rowsByShard: [String: [ConversationNotificationBatchWriter.Row]] = [:]
 
+        if let skippedRun = try await messageCreatedRunSkipReason(envelopes) {
+            for _ in envelopes {
+                await app.conversationDomainEventMetrics.recordMessageCreatedOwnerNotificationSkipped(
+                    recipientCount: skippedRun.recipientCount
+                )
+            }
+            app.logger.info("Notification run writer skipped messageCreated owner notifications.", metadata: [
+                "conversation_id": .string(skippedRun.conversationID.uuidString),
+                "recipient_count": .stringConvertible(skippedRun.recipientCount),
+                "run_count": .stringConvertible(envelopes.count),
+                "skip_reason": .string(skippedRun.reason)
+            ])
+            return
+        }
+
         for envelope in envelopes {
             guard let eventID = envelope.eventID else {
                 continue
@@ -3317,6 +3423,69 @@ struct ConversationNotificationRunWriter {
         let db = try await app.conversationShardRouter.strongReadDatabase(forConversationID: envelope.conversationID)
         return try await ConversationDomainEventRecipientResolver(db: db, app: app)
             .recipientUserIDs(for: envelope)
+    }
+
+    private func messageCreatedRunSkipReason(
+        _ envelopes: [ConversationEventEnvelope]
+    ) async throws -> (conversationID: UUID, recipientCount: Int, reason: String)? {
+        guard let first = envelopes.first,
+              first.eventType == .messageCreated,
+              first.payload.messageID != nil,
+              envelopes.allSatisfy({
+                  $0.eventType == .messageCreated
+                      && $0.payload.messageID != nil
+                      && $0.conversationID == first.conversationID
+              })
+        else {
+            return nil
+        }
+
+        let configuration = app.streamConsumerConfiguration
+        if configuration.notificationSkipsMessageCreatedOwnerNotifications {
+            let recipientCount = try await notificationRecipientCountHint(for: first)
+            return (
+                first.conversationID,
+                recipientCount,
+                "message_created_owner_notifications_disabled"
+            )
+        }
+
+        let threshold = configuration.notificationMessageCreatedOwnerNotificationSkipRecipientThreshold
+        guard threshold > 0 else {
+            return nil
+        }
+        let recipientCount = try await notificationRecipientCountHint(for: first)
+        guard recipientCount >= threshold else {
+            return nil
+        }
+        return (
+            first.conversationID,
+            recipientCount,
+            "recipient_threshold_\(threshold)"
+        )
+    }
+
+    private func notificationRecipientCountHint(for envelope: ConversationEventEnvelope) async throws -> Int {
+        let inlineCount = Set(envelope.payload.recipientUserIDs).count
+        if inlineCount > 0 {
+            return inlineCount
+        }
+        let db = try await app.conversationShardRouter.strongReadDatabase(forConversationID: envelope.conversationID)
+        guard let eventID = envelope.eventID,
+              let snapshot = try await ConversationDomainEventRecipientSnapshot.find(eventID, on: db)
+        else {
+            if app.streamConsumerConfiguration.streamConsumerRequiresMessageCreatedRecipientSnapshot {
+                await app.conversationDomainEventMetrics.recordRecipientResolutionMissingSnapshot()
+                throw ConversationEventTransientProcessingError.messageCreatedRecipientSnapshotMissing(
+                    eventID: envelope.eventID,
+                    conversationID: envelope.conversationID
+                )
+            }
+            return try await ConversationMember.query(on: db)
+                .filter(\.$conversation.$id == envelope.conversationID)
+                .count()
+        }
+        return snapshot.recipientCount
     }
 }
 

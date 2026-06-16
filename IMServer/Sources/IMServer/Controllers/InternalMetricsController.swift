@@ -901,6 +901,30 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_message_write_batches_total", value: messageWrite.messageWriteBatches, to: &lines)
         appendCounter("im_message_write_batch_messages_total", value: messageWrite.messageWriteBatchMessages, to: &lines)
         appendCounter("im_message_write_queue_rejected_total", value: messageWrite.writeQueueRejected, to: &lines)
+        appendCounter("im_message_write_command_requests_total", value: messageWrite.commandSendRequests, to: &lines)
+        appendCounter("im_message_write_command_failures_total", value: messageWrite.commandSendFailures, to: &lines)
+        appendCounter("im_message_write_command_full_responses_total", value: messageWrite.commandSendFullResponses, to: &lines)
+        appendCounter("im_message_write_command_compact_responses_total", value: messageWrite.commandSendCompactResponses, to: &lines)
+        appendCounter("im_message_write_command_duration_millis_total", value: messageWrite.commandSendTotalMillis, to: &lines)
+        appendGauge("im_message_write_command_duration_millis_max", value: messageWrite.commandSendMaxMillis, to: &lines)
+        appendCounter("im_message_write_command_decode_millis_total", value: messageWrite.commandSendDecodeMillis, to: &lines)
+        appendGauge("im_message_write_command_decode_millis_max", value: messageWrite.commandSendDecodeMaxMillis, to: &lines)
+        appendCounter("im_message_write_command_persist_millis_total", value: messageWrite.commandSendPersistMillis, to: &lines)
+        appendGauge("im_message_write_command_persist_millis_max", value: messageWrite.commandSendPersistMaxMillis, to: &lines)
+        appendCounter("im_message_write_command_response_encode_millis_total", value: messageWrite.commandSendResponseEncodeMillis, to: &lines)
+        appendGauge("im_message_write_command_response_encode_millis_max", value: messageWrite.commandSendResponseEncodeMaxMillis, to: &lines)
+        appendCounter("im_message_write_prepare_messages_total", value: messageWrite.prepareMessages, to: &lines)
+        appendCounter("im_message_write_prepare_duration_millis_total", value: messageWrite.prepareTotalMillis, to: &lines)
+        appendGauge("im_message_write_prepare_duration_millis_max", value: messageWrite.prepareMaxMillis, to: &lines)
+        appendCounter("im_message_write_batch_queue_wait_messages_total", value: messageWrite.batchQueueWaitMessages, to: &lines)
+        appendCounter("im_message_write_batch_queue_wait_millis_total", value: messageWrite.batchQueueWaitTotalMillis, to: &lines)
+        appendGauge("im_message_write_batch_queue_wait_millis_max", value: messageWrite.batchQueueWaitMaxMillis, to: &lines)
+        appendCounter("im_message_write_pipeline_batches_total", value: messageWrite.persistencePipelineBatches, to: &lines)
+        appendCounter("im_message_write_pipeline_messages_total", value: messageWrite.persistencePipelineMessages, to: &lines)
+        appendCounter("im_message_write_pipeline_duration_millis_total", value: messageWrite.persistencePipelineTotalMillis, to: &lines)
+        appendGauge("im_message_write_pipeline_duration_millis_max", value: messageWrite.persistencePipelineMaxMillis, to: &lines)
+        appendGauge("im_message_write_pipeline_recipients_max", value: messageWrite.persistencePipelineMaxRecipients, to: &lines)
+        appendMessageWriteStageMetrics(messageWrite.persistenceStages, to: &lines)
         appendCounter(
             "im_domain_event_recipient_resolve_total",
             value: domainEvent.recipientResolveCount,
@@ -1652,6 +1676,46 @@ struct InternalMetricsController: RouteCollection {
         lines.append("\(name)_bucket\(labelString(infiniteBucketLabels)) \(histogram.count)")
         lines.append("\(name)_sum\(labelString(labels)) \(histogram.sumMilliseconds)")
         lines.append("\(name)_count\(labelString(labels)) \(histogram.count)")
+    }
+
+    private func appendMessageWriteStageMetrics(
+        _ stages: [String: IMMessageWriteMetrics.StageSnapshot],
+        to lines: inout [String]
+    ) {
+        guard !stages.isEmpty else {
+            return
+        }
+        lines.append("# TYPE im_message_write_pipeline_stage_count_total counter")
+        lines.append("# TYPE im_message_write_pipeline_stage_duration_millis_total counter")
+        lines.append("# TYPE im_message_write_pipeline_stage_duration_millis_max gauge")
+        lines.append("# TYPE im_message_write_pipeline_stage_duration_millis_avg gauge")
+        for (stageName, stage) in stages.sorted(by: { $0.key < $1.key }) {
+            let labels = ["stage": stageName]
+            appendCounterSample(
+                "im_message_write_pipeline_stage_count_total",
+                value: stage.count,
+                labels: labels,
+                to: &lines
+            )
+            appendCounterSample(
+                "im_message_write_pipeline_stage_duration_millis_total",
+                value: stage.totalMillis,
+                labels: labels,
+                to: &lines
+            )
+            appendGaugeSample(
+                "im_message_write_pipeline_stage_duration_millis_max",
+                value: stage.maxMillis,
+                labels: labels,
+                to: &lines
+            )
+            appendGaugeSample(
+                "im_message_write_pipeline_stage_duration_millis_avg",
+                value: stage.averageMillis,
+                labels: labels,
+                to: &lines
+            )
+        }
     }
 
     private func appendStreamGroupMetrics(

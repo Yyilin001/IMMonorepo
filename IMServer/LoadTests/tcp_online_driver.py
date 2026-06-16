@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import struct
 import time
 import uuid
@@ -64,6 +65,27 @@ def heartbeat_frame(sequence: int, protocol_version: int) -> bytes:
     return frame(packet)
 
 
+def conversation_activity_frame(conversation_id: str, is_active: bool, protocol_version: int) -> bytes:
+    activity = write_field_string(1, conversation_id) + write_field_varint(2, 1 if is_active else 0)
+    packet = make_packet_base(protocol_version, str(uuid.uuid4()))
+    packet += write_field_bytes(60, activity)
+    return frame(packet)
+
+
+def message_frame(conversation_id: str, client_message_id: str, text: str, protocol_version: int) -> bytes:
+    text_content = write_field_string(1, text)
+    content = write_field_bytes(1, text_content)
+    message = (
+        write_field_string(1, client_message_id)
+        + write_field_string(3, conversation_id)
+        + write_field_bytes(7, content)
+        + write_field_bytes(8, b"")
+    )
+    packet = make_packet_base(protocol_version, str(uuid.uuid4()))
+    packet += write_field_bytes(30, message)
+    return frame(packet)
+
+
 def read_varint(data: bytes, offset: int) -> tuple[int | None, int]:
     shift = 0
     value = 0
@@ -93,6 +115,12 @@ def packet_type(packet: bytes) -> str | None:
             return "auth_error"
         if field == 21:
             return "heartbeat_ack"
+        if field == 30:
+            return "message"
+        if field == 31:
+            return "ack"
+        if field == 40:
+            return "message"
         if field == 50:
             return "kick"
         if wire_type == 0:
@@ -135,8 +163,14 @@ class RunState:
     def __init__(self, target: int):
         self.target = target
         self.auth_ok = 0
+        self.packet_received = 0
+        self.packet_types = Counter()
         self.heartbeat_sent = 0
         self.heartbeat_ack = 0
+        self.message_sent = 0
+        self.message_send_error = 0
+        self.message_ack = 0
+        self.message_received = 0
         self.failures = Counter()
         self.auth_event = asyncio.Event()
         self.auth_condition = asyncio.Condition()
@@ -157,6 +191,11 @@ class RunState:
         async with self.lock:
             self.failures[reason] += 1
 
+    async def record_packet_received(self, packet_type: str):
+        async with self.lock:
+            self.packet_received += 1
+            self.packet_types[packet_type] += 1
+
     async def record_heartbeat_sent(self):
         async with self.lock:
             self.heartbeat_sent += 1
@@ -164,6 +203,38 @@ class RunState:
     async def record_heartbeat_ack(self):
         async with self.lock:
             self.heartbeat_ack += 1
+
+    async def record_message_sent(self):
+        async with self.lock:
+            self.message_sent += 1
+
+    async def record_message_send_error(self):
+        async with self.lock:
+            self.message_send_error += 1
+
+    async def record_message_ack(self):
+        async with self.lock:
+            self.message_ack += 1
+
+    async def record_message_received(self):
+        async with self.lock:
+            self.message_received += 1
+
+    async def snapshot(self) -> dict:
+        async with self.lock:
+            return {
+                "target": self.target,
+                "authOK": self.auth_ok,
+                "packetReceived": self.packet_received,
+                "packetTypes": dict(self.packet_types),
+                "heartbeatSent": self.heartbeat_sent,
+                "heartbeatAck": self.heartbeat_ack,
+                "messageSent": self.message_sent,
+                "messageSendError": self.message_send_error,
+                "messageAck": self.message_ack,
+                "messageReceived": self.message_received,
+                "failures": dict(self.failures),
+            }
 
 
 async def read_frames(
@@ -173,6 +244,7 @@ async def read_frames(
     logger: JsonlLogger,
     auth_ok_event: asyncio.Event,
     closed_event: asyncio.Event,
+    log_packet_received: bool,
 ):
     buffer = bytearray()
     try:
@@ -188,13 +260,19 @@ async def read_frames(
                 payload = bytes(buffer[4 : 4 + length])
                 del buffer[: 4 + length]
                 kind = packet_type(payload)
-                await logger.log("packet_received", connectionIndex=connection_index, packetType=kind or "")
+                await state.record_packet_received(kind or "")
+                if log_packet_received:
+                    await logger.log("packet_received", connectionIndex=connection_index, packetType=kind or "")
                 if kind == "auth_ok":
                     await state.record_auth_ok()
                     auth_ok_event.set()
                     await logger.log("auth_ok_received", connectionIndex=connection_index)
                 elif kind == "heartbeat_ack":
                     await state.record_heartbeat_ack()
+                elif kind == "ack":
+                    await state.record_message_ack()
+                elif kind == "message":
+                    await state.record_message_received()
                 elif kind in ("auth_error", "kick"):
                     await state.record_failure(kind)
                     return
@@ -226,6 +304,92 @@ async def heartbeat_loop(
             pass
 
 
+async def message_send_loop(
+    writer: asyncio.StreamWriter,
+    connection_index: int,
+    protocol_version: int,
+    conversation_id: str,
+    rate_per_second: float,
+    duration_seconds: float,
+    sender_every: int,
+    state: RunState,
+    logger: JsonlLogger,
+    stop_event: asyncio.Event,
+):
+    if rate_per_second <= 0 or duration_seconds <= 0 or not conversation_id:
+        return
+    if connection_index % max(1, sender_every) != 0:
+        return
+
+    sender_count = max(1, (state.target + max(1, sender_every) - 1) // max(1, sender_every))
+    sender_ordinal = connection_index // max(1, sender_every)
+    total_messages = max(1, int(rate_per_second * duration_seconds))
+    started = time.monotonic()
+    message_index = 0
+    global_index = sender_ordinal
+    while global_index < total_messages and not stop_event.is_set():
+        target_at = started + (global_index / rate_per_second)
+        delay = target_at - time.monotonic()
+        if delay > 0:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                return
+            except asyncio.TimeoutError:
+                pass
+        client_message_id = f"py-tcp-{connection_index}-{message_index}-{uuid.uuid4()}"
+        try:
+            writer.write(
+                message_frame(
+                    conversation_id,
+                    client_message_id,
+                    f"py tcp {connection_index}/{message_index}",
+                    protocol_version,
+                )
+            )
+            await writer.drain()
+            await state.record_message_sent()
+            await logger.log(
+                "message_send_ok",
+                connectionIndex=connection_index,
+                clientMessageID=client_message_id,
+                globalIndex=global_index,
+            )
+        except Exception as error:
+            await state.record_message_send_error()
+            await logger.log(
+                "message_send_error",
+                connectionIndex=connection_index,
+                clientMessageID=client_message_id,
+                error=str(error),
+                errorType=type(error).__name__,
+            )
+            return
+        message_index += 1
+        global_index += sender_count
+
+
+async def progress_loop(
+    path: str,
+    interval_seconds: float,
+    started: float,
+    state: RunState,
+    stop_event: asyncio.Event,
+):
+    while not stop_event.is_set():
+        snapshot = await state.snapshot()
+        snapshot["elapsedSeconds"] = round(time.monotonic() - started, 3)
+        snapshot["timestampMs"] = int(time.time() * 1000)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w") as file:
+            json.dump(snapshot, file, separators=(",", ":"))
+            file.write("\n")
+        os.replace(tmp_path, path)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=max(0.5, interval_seconds))
+        except asyncio.TimeoutError:
+            pass
+
+
 async def run_connection(index: int, record: dict, args, state: RunState, logger: JsonlLogger):
     if args.connect_ramp_seconds > 0 and args.connections > 1:
         await asyncio.sleep(args.connect_ramp_seconds * index / (args.connections - 1))
@@ -234,6 +398,7 @@ async def run_connection(index: int, record: dict, args, state: RunState, logger
     reader = writer = None
     read_task = None
     heartbeat_task = None
+    message_task = None
     barrier_keepalive_task = None
     stop_event = asyncio.Event()
     barrier_keepalive_stop_event = asyncio.Event()
@@ -250,8 +415,22 @@ async def run_connection(index: int, record: dict, args, state: RunState, logger
 
         auth_ok_event = asyncio.Event()
         closed_event = asyncio.Event()
-        read_task = asyncio.create_task(read_frames(reader, index, state, logger, auth_ok_event, closed_event))
+        read_task = asyncio.create_task(
+            read_frames(
+                reader,
+                index,
+                state,
+                logger,
+                auth_ok_event,
+                closed_event,
+                not args.suppress_packet_received_log,
+            )
+        )
         await asyncio.wait_for(auth_ok_event.wait(), timeout=args.timeout_seconds)
+        if args.conversation_id and index < args.active_conversation_users:
+            writer.write(conversation_activity_frame(args.conversation_id, True, args.protocol_version))
+            await writer.drain()
+            await logger.log("conversation_activity_send_ok", connectionIndex=index)
         if args.barrier_keepalive_seconds > 0:
             barrier_keepalive_task = asyncio.create_task(
                 heartbeat_loop(
@@ -306,6 +485,20 @@ async def run_connection(index: int, record: dict, args, state: RunState, logger
                 "hold"
             )
         )
+        message_task = asyncio.create_task(
+            message_send_loop(
+                writer,
+                index,
+                args.protocol_version,
+                args.conversation_id or "",
+                args.message_rate_per_second,
+                args.message_duration_seconds,
+                args.message_sender_every,
+                state,
+                logger,
+                stop_event,
+            )
+        )
         hold_task = asyncio.create_task(asyncio.sleep(args.hold_seconds))
         closed_task = asyncio.create_task(closed_event.wait())
         done, pending = await asyncio.wait({hold_task, closed_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -327,6 +520,8 @@ async def run_connection(index: int, record: dict, args, state: RunState, logger
             barrier_keepalive_task.cancel()
         if heartbeat_task is not None and not heartbeat_task.done():
             heartbeat_task.cancel()
+        if message_task is not None and not message_task.done():
+            message_task.cancel()
         if read_task is not None and not read_task.done():
             read_task.cancel()
         if writer is not None:
@@ -364,27 +559,56 @@ async def main():
     parser.add_argument("--login-cache-file", required=True)
     parser.add_argument("--login-cache-ttl-guard-seconds", type=int, default=60)
     parser.add_argument("--connection-log-file")
+    parser.add_argument("--suppress-packet-received-log", action="store_true")
+    parser.add_argument("--progress-file")
+    parser.add_argument("--progress-interval-seconds", type=float, default=5)
+    parser.add_argument("--conversation-id")
+    parser.add_argument("--active-conversation-users", type=int, default=0)
+    parser.add_argument("--message-rate-per-second", type=float, default=0)
+    parser.add_argument("--message-duration-seconds", type=float, default=0)
+    parser.add_argument("--message-sender-every", type=int, default=1)
     args = parser.parse_args()
+    args.active_conversation_users = min(args.connections, max(0, args.active_conversation_users))
+    args.message_sender_every = max(1, args.message_sender_every)
 
     records = load_cache(args.login_cache_file, args.connections, args.login_cache_ttl_guard_seconds)
     state = RunState(target=args.connections)
     logger = JsonlLogger(args.connection_log_file)
     started = time.monotonic()
+    progress_stop_event = asyncio.Event()
+    progress_task = None
+    if args.progress_file:
+        progress_task = asyncio.create_task(
+            progress_loop(
+                args.progress_file,
+                args.progress_interval_seconds,
+                started,
+                state,
+                progress_stop_event,
+            )
+        )
     try:
         await logger.log("run_start", connections=args.connections)
         tasks = [asyncio.create_task(run_connection(i, records[i], args, state, logger)) for i in range(args.connections)]
         await asyncio.gather(*tasks)
     finally:
+        progress_stop_event.set()
+        if progress_task is not None and not progress_task.done():
+            progress_task.cancel()
         logger.close()
 
     elapsed = time.monotonic() - started
     failures = dict(state.failures)
     successes = args.connections - sum(failures.values())
+    snapshot = await state.snapshot()
     print(
         "profile=linux-online "
         f"connections={args.connections} successes={successes} authOK={state.auth_ok} "
         f"elapsed={elapsed:.2f}s heartbeatSent={state.heartbeat_sent} "
-        f"heartbeatAck={state.heartbeat_ack} failures={failures}"
+        f"heartbeatAck={state.heartbeat_ack} packetReceived={snapshot['packetReceived']} "
+        f"packetTypes={snapshot['packetTypes']} messageSent={state.message_sent} "
+        f"messageAck={state.message_ack} messageReceived={state.message_received} "
+        f"messageSendError={state.message_send_error} failures={failures}"
     )
 
 

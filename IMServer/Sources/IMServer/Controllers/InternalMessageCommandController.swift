@@ -9,11 +9,52 @@ struct InternalMessageCommandController: RouteCollection {
             .post("invalidate", use: invalidateMemberCache)
     }
 
-    func sendMessage(req: Request) async throws -> IMRealtimeMessagePersistenceResult {
-        try requireInternalSecret(req)
-        let body = try req.content.decode(IMInternalMessageSendRequest.self)
-        return try await IMRealtimeMessageService(app: req.application)
-            .persistIncomingMessage(body.payload, senderUserID: body.senderUserID)
+    func sendMessage(req: Request) async throws -> Response {
+        let startedAt = Date()
+        var decodeMillis = 0
+        var persistMillis = 0
+        var responseEncodeMillis = 0
+        let fullResponse = req.headers.first(name: "X-IM-Internal-Response") == "full"
+
+        do {
+            try requireInternalSecret(req)
+            let decodeStartedAt = Date()
+            let body = try req.content.decode(IMInternalMessageSendRequest.self)
+            decodeMillis = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: decodeStartedAt)
+
+            let persistStartedAt = Date()
+            let result = try await IMRealtimeMessageService(app: req.application)
+                .persistIncomingMessage(body.payload, senderUserID: body.senderUserID)
+            persistMillis = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: persistStartedAt)
+
+            let response = Response(status: .ok)
+            let encodeStartedAt = Date()
+            if fullResponse {
+                try response.content.encode(result)
+            } else {
+                try response.content.encode(IMInternalMessageSendResponse(result: result))
+            }
+            responseEncodeMillis = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: encodeStartedAt)
+            await req.application.messageWriteMetrics.recordCommandSend(
+                durationMillis: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt),
+                decodeMillis: decodeMillis,
+                persistMillis: persistMillis,
+                responseEncodeMillis: responseEncodeMillis,
+                fullResponse: fullResponse,
+                didFail: false
+            )
+            return response
+        } catch {
+            await req.application.messageWriteMetrics.recordCommandSend(
+                durationMillis: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt),
+                decodeMillis: decodeMillis,
+                persistMillis: persistMillis,
+                responseEncodeMillis: responseEncodeMillis,
+                fullResponse: fullResponse,
+                didFail: true
+            )
+            throw error
+        }
     }
 
     func invalidateMemberCache(req: Request) async throws -> HTTPStatus {
@@ -28,6 +69,7 @@ struct InternalMessageCommandController: RouteCollection {
         await req.application.conversationMemberCache.invalidate(conversationID: conversationID)
         await req.application.directConversationPairCache.invalidate(conversationID: conversationID)
         await req.application.conversationMediaAccessCache.invalidate(conversationID: conversationID)
+        await ConversationRecipientSetExistenceCache.shared.invalidateConversation(conversationID)
         return .ok
     }
 

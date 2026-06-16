@@ -51,6 +51,8 @@ struct IMMessagePersistencePipeline {
             )
             var results: [IMRealtimeMessagePersistenceResult] = []
             results.reserveCapacity(preparedMessages.count)
+            var outboxItems: [ConversationMessageCreatedOutboxItem] = []
+            outboxItems.reserveCapacity(preparedMessages.count)
 
             for (index, prepared) in preparedMessages.enumerated() {
                 guard prepared.conversationID == conversationID,
@@ -99,7 +101,6 @@ struct IMMessagePersistencePipeline {
                     prepared: prepared,
                     serverSequence: serverSequence,
                     recipientUserIDs: recipientUserIDs,
-                    diagnostics: diagnostics,
                     on: database
                 )
                 directPolicyContext.recordCreated(senderUserID: prepared.senderUserID)
@@ -112,6 +113,36 @@ struct IMMessagePersistencePipeline {
                         fallbackTimestamp: prepared.serverTimestamp
                     )
                 )
+                outboxItems.append(
+                    ConversationMessageCreatedOutboxItem(
+                        actorUserID: prepared.senderUserID,
+                        messageID: try message.requireID(),
+                        aggregateSequence: message.timelineSequence,
+                        preview: try ConversationMessageCreatedPreview(
+                            senderUserID: message.$sender.id,
+                            serverSequence: imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence"),
+                            timelineSequence: imPositiveUInt64Sequence(message.timelineSequence, field: "timeline_sequence"),
+                            previewText: message.decodedContent().previewText,
+                            createdAt: message.createdAt
+                        )
+                    )
+                )
+            }
+            if !outboxItems.isEmpty {
+                _ = try await diagnostics.measure("outboxEnqueue", operation: {
+                    try await ConversationOutboxService(
+                        db: database,
+                        domainEventMetrics: service.app?.conversationDomainEventMetrics
+                    ).enqueueMessageCreatedBatch(
+                        conversationID: conversationID,
+                        recipientUserIDs: recipientUserIDs,
+                        items: outboxItems,
+                        recipientSnapshotDeduplicationThreshold: service.app?
+                            .domainEventRecipientSnapshotConfiguration
+                            .deduplicationThreshold ?? 0,
+                        on: database
+                    )
+                })
             }
             return results
             }
@@ -119,6 +150,12 @@ struct IMMessagePersistencePipeline {
         if results.contains(where: \.didCreateMessage) {
             service.app?.invalidateTimelineSinceHotCache(conversationID: conversationID)
         }
+        await service.app?.messageWriteMetrics.recordPersistencePipeline(
+            messageCount: preparedMessages.count,
+            recipientCount: diagnostics.capturedRecipientCount(),
+            totalMillis: diagnostics.totalMilliseconds(),
+            stageMillis: diagnostics.capturedMarks()
+        )
         return results
     }
 
@@ -148,23 +185,18 @@ struct IMMessagePersistencePipeline {
         prepared: IMPreparedIncomingMessage,
         serverSequence: Int,
         recipientUserIDs: [UUID],
-        diagnostics: IMMessagePersistenceDiagnostics,
         on database: any Database
     ) async throws -> ConversationMessage {
-        let canonicalContent = try await diagnostics.measure("canonicalize", operation: {
-            try await service.canonicalizeReplyReferenceIfNeeded(
-                prepared.normalizedContent,
-                conversationID: conversationID,
-                on: database
-            )
-        })
-        let aggregateSequence = try await diagnostics.measure("aggregateSequenceAllocate", operation: {
-            let sequence = try await ConversationDomainEventSequenceAllocator(db: database).allocate(
-                conversationID: conversationID,
-                on: database
-            )
-            return try imIntSequence(sequence.rawValue, field: "aggregate_sequence")
-        })
+        let canonicalContent = try await service.canonicalizeReplyReferenceIfNeeded(
+            prepared.normalizedContent,
+            conversationID: conversationID,
+            on: database
+        )
+        let sequence = try await ConversationDomainEventSequenceAllocator(db: database).allocate(
+            conversationID: conversationID,
+            on: database
+        )
+        let aggregateSequence = try imIntSequence(sequence.rawValue, field: "aggregate_sequence")
         let message = try ConversationMessage(
             conversationID: conversationID,
             senderUserID: prepared.senderUserID,
@@ -173,47 +205,13 @@ struct IMMessagePersistencePipeline {
             clientMessageID: prepared.normalizedClientMessageID,
             content: canonicalContent
         )
-        try await diagnostics.measure("messageCreate", operation: {
-            try await message.create(on: database)
-        })
-        try await diagnostics.measure("readAdvance", operation: {
-            try await service.advanceReadSequence(
-                conversationID: conversationID,
-                userID: prepared.senderUserID,
-                readSequence: serverSequence,
-                on: database
-            )
-        })
-        try await diagnostics.measure("outboxEnqueue", operation: {
-            let shouldInlineRecipients = service.app?
-                .messageCreatedRecipientInlineConfiguration
-                .shouldInlineRecipients(recipientCount: recipientUserIDs.count) ?? true
-            try await ConversationOutboxService(
-                db: database,
-                domainEventMetrics: service.app?.conversationDomainEventMetrics
-            ).enqueue(
-                type: .messageCreated,
-                conversationID: conversationID,
-                actorUserID: prepared.senderUserID,
-                payload: .messageCreated(
-                    messageID: try message.requireID(),
-                    recipientUserIDs: shouldInlineRecipients ? recipientUserIDs : [],
-                    preview: try ConversationMessageCreatedPreview(
-                        senderUserID: message.$sender.id,
-                        serverSequence: imPositiveUInt64Sequence(message.serverSequence, field: "server_sequence"),
-                        timelineSequence: imPositiveUInt64Sequence(message.timelineSequence, field: "timeline_sequence"),
-                        previewText: canonicalContent.previewText,
-                        createdAt: message.createdAt
-                    )
-                ),
-                recipientSnapshotUserIDs: shouldInlineRecipients ? nil : recipientUserIDs,
-                recipientSnapshotDeduplicationThreshold: service.app?
-                    .domainEventRecipientSnapshotConfiguration
-                    .deduplicationThreshold ?? 0,
-                preallocatedAggregateSequence: aggregateSequence,
-                updatesMessageTimelineSequence: false
-            )
-        })
+        try await message.create(on: database)
+        try await service.advanceReadSequence(
+            conversationID: conversationID,
+            userID: prepared.senderUserID,
+            readSequence: serverSequence,
+            on: database
+        )
         return message
     }
 }

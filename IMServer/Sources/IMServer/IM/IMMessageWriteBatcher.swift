@@ -8,6 +8,7 @@ actor IMMessageWriteBatcher {
     private struct QueuedItem {
         let item: Item
         let continuation: CheckedContinuation<IMRealtimeMessagePersistenceResult, any Error>
+        let enqueuedAt: Date
     }
 
     private var queues: [UUID: [QueuedItem]] = [:]
@@ -32,7 +33,7 @@ actor IMMessageWriteBatcher {
             }
 
             queues[conversationID, default: []].append(
-                QueuedItem(item: item, continuation: continuation)
+                QueuedItem(item: item, continuation: continuation, enqueuedAt: Date())
             )
             let depth = queues[conversationID]?.count ?? 0
             Task {
@@ -85,6 +86,12 @@ actor IMMessageWriteBatcher {
         queue.removeFirst(batch.count)
         queues[conversationID] = queue.isEmpty ? nil : queue
         await app.messageWriteMetrics.recordWriteQueueDepth(queue.count)
+        if let oldestEnqueuedAt = batch.map(\.enqueuedAt).min() {
+            await app.messageWriteMetrics.recordBatchQueueWait(
+                durationMillis: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: oldestEnqueuedAt),
+                messageCount: batch.count
+            )
+        }
 
         do {
             let results = try await IMRealtimeMessageService(app: app)

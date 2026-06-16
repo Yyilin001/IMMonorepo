@@ -50,14 +50,18 @@ final class ConversationDomainEventRecipientSet: Model, @unchecked Sendable {
     }
 
     static func recipientHash(for ids: [UUID]) -> String {
-        let normalized = uniqueSorted(ids)
+        recipientHash(forUniqueSorted: uniqueSorted(ids))
+    }
+
+    static func recipientHash(forUniqueSorted ids: [UUID]) -> String {
+        let normalized = ids
             .map { $0.uuidString.lowercased() }
             .joined(separator: ",")
         let digest = SHA256.hash(data: Data(normalized.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    fileprivate static func encode(_ ids: [UUID]) throws -> String {
+    static func encode(_ ids: [UUID]) throws -> String {
         let data = try JSONEncoder().encode(ids)
         guard let json = String(data: data, encoding: .utf8) else {
             throw ConversationProjectionCodingError.invalidJSON
@@ -72,7 +76,7 @@ final class ConversationDomainEventRecipientSet: Model, @unchecked Sendable {
         return try JSONDecoder().decode([UUID].self, from: data)
     }
 
-    fileprivate static func uniqueSorted(_ ids: [UUID]) -> [UUID] {
+    static func uniqueSorted(_ ids: [UUID]) -> [UUID] {
         Array(Set(ids)).sorted { $0.uuidString < $1.uuidString }
     }
 
@@ -277,6 +281,21 @@ final class ConversationDomainEventRecipientSnapshot: Model, @unchecked Sendable
         self.recipientUserIDsJSON = try storesRecipientIDsInline ? Self.encode(uniqueRecipients) : Self.encode([])
         self.recipientCount = uniqueRecipients.count
         self.recipientHash = Self.recipientHash(for: uniqueRecipients)
+        self.createdAt = createdAt
+    }
+
+    init(
+        eventID: UUID,
+        conversationID: UUID,
+        recipientCount: Int,
+        recipientHash: String,
+        createdAt: Date = Date()
+    ) {
+        self.id = eventID
+        self.conversationID = conversationID
+        self.recipientUserIDsJSON = "[]"
+        self.recipientCount = recipientCount
+        self.recipientHash = recipientHash
         self.createdAt = createdAt
     }
 

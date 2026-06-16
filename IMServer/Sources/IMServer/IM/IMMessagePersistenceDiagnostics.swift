@@ -28,6 +28,24 @@ final class IMMessagePersistenceDiagnostics: @unchecked Sendable {
         lock.unlock()
     }
 
+    func capturedMarks() -> [String: Int] {
+        lock.lock()
+        let captured = marks
+        lock.unlock()
+        return captured
+    }
+
+    func capturedRecipientCount() -> Int {
+        lock.lock()
+        let captured = recipientCount
+        lock.unlock()
+        return captured
+    }
+
+    func totalMilliseconds() -> Int {
+        max(0, Int(Date().timeIntervalSince(startedAt) * 1_000))
+    }
+
     func logIfSlow(
         app: Application?,
         conversationID: UUID,
@@ -36,7 +54,7 @@ final class IMMessagePersistenceDiagnostics: @unchecked Sendable {
         guard let app else {
             return
         }
-        let totalMillis = max(0, Int(Date().timeIntervalSince(startedAt) * 1_000))
+        let totalMillis = totalMilliseconds()
         let threshold = max(
             0,
             Environment.get("IM_MESSAGE_PERSISTENCE_SLOW_LOG_MS").flatMap(Int.init(_:)) ?? 1_000
