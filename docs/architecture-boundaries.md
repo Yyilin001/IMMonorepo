@@ -47,8 +47,7 @@ For a flow-oriented map of the core implementations, start with
   snapshots remain the convergence source after reconnect.
 - Cross-subsystem work must be split into reviewable commits: protocol/server,
   iOS core/app, Android core/app, release/monitoring, and docs.
-- The legacy `docs/service-size-budgets.tsv` file is only a compatibility
-  pointer. New governance work must update `docs/complexity-budgets.tsv`.
+- New governance work must update `docs/complexity-budgets.tsv`.
 
 ## Review Requirements
 

@@ -8,7 +8,6 @@ struct AddConversationDirectMessagingState: AsyncMigration {
                 ALTER TABLE \(unsafeRaw: Conversation.schema)
                 ADD COLUMN IF NOT EXISTS direct_messaging_state TEXT NOT NULL DEFAULT 'active'
                 """).run()
-            try await backfillDirectMessagingState(using: sql)
             return
         }
 
@@ -21,9 +20,6 @@ struct AddConversationDirectMessagingState: AsyncMigration {
             )
             .update()
 
-        if let sql = database as? any SQLDatabase {
-            try await backfillDirectMessagingState(using: sql)
-        }
     }
 
     func revert(on database: any Database) async throws {
@@ -32,12 +28,4 @@ struct AddConversationDirectMessagingState: AsyncMigration {
             .update()
     }
 
-    private func backfillDirectMessagingState(using sql: any SQLDatabase) async throws {
-        try await sql.raw("""
-            UPDATE \(unsafeRaw: Conversation.schema)
-            SET direct_messaging_state = 'active'
-            WHERE direct_messaging_state IS NULL
-               OR direct_messaging_state = ''
-            """).run()
-    }
 }

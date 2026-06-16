@@ -37,52 +37,6 @@ interface UserSessionCache {
     suspend fun clear()
 }
 
-class DataStoreTokenStore(
-    private val dataStore: DataStore<Preferences>,
-) : TokenStore {
-    constructor(context: Context) : this(
-        PreferenceDataStoreFactory.create(
-            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
-            produceFile = { context.preferencesDataStoreFile("imclientkit_tokens.preferences_pb") },
-        ),
-    )
-
-    override suspend fun load(): TokenSnapshot? =
-        dataStore.data
-            .catch { error ->
-                if (error is IOException) emit(emptyPreferences()) else throw error
-            }
-            .map { preferences ->
-                val accessToken = preferences[ACCESS_TOKEN]
-                val refreshToken = preferences[REFRESH_TOKEN]
-                if (accessToken.isNullOrBlank() || refreshToken.isNullOrBlank()) {
-                    null
-                } else {
-                    TokenSnapshot(accessToken, refreshToken)
-                }
-            }
-            .first()
-
-    override suspend fun save(snapshot: TokenSnapshot) {
-        dataStore.edit { preferences ->
-            preferences[ACCESS_TOKEN] = snapshot.accessToken
-            preferences[REFRESH_TOKEN] = snapshot.refreshToken
-        }
-    }
-
-    override suspend fun clear() {
-        dataStore.edit { preferences ->
-            preferences.remove(ACCESS_TOKEN)
-            preferences.remove(REFRESH_TOKEN)
-        }
-    }
-
-    private companion object {
-        val ACCESS_TOKEN = stringPreferencesKey("access_token")
-        val REFRESH_TOKEN = stringPreferencesKey("refresh_token")
-    }
-}
-
 class DataStoreUserSessionCache(
     private val dataStore: DataStore<Preferences>,
     private val json: Json = JsonConfiguration.default,

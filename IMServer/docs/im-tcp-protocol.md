@@ -83,8 +83,7 @@ Cross-node Redis dispatch and gateway HTTP relay keep a JSON envelope for observ
 
 Large active conversations use lightweight realtime events:
 
-- `conversation_activity_hint` carries message identity, sender, sequence targets, optional bounded preview text, and `updated_at_ms`. In production it is also used as the active-chat compact message-lite hint for hot rooms, so clients already viewing the conversation can render immediately and then reconcile through targeted `timeline/since`. Inactive or list-only clients may use the same event to update conversation-list ordering, preview, and unread state.
-- `timeline_gap_hint` is the compatibility active-chat hint for deployments using `IM_REALTIME_ACTIVE_COMPACT_HINT_BODY=timeline-gap`. It carries only message identity, sender, sequence targets, and `updated_at_ms`. Clients must not update list preview or unread state from this event; they use it only to trigger targeted `timeline/since` catch-up for the selected conversation.
+- `conversation_activity_hint` carries message identity, sender, sequence targets, optional bounded preview text, and `updated_at_ms`. It is the only active-chat compact message-lite hint for hot rooms. Clients already viewing the conversation can render immediately and then reconcile through targeted `timeline/since`; inactive or list-only clients use conversation changes plus `timeline/since` instead of realtime message fanout.
 
 ## Server Structure
 

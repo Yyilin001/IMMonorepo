@@ -181,6 +181,7 @@ extension IMServerTests {
                 mode: .local,
                 ttlSeconds: 5,
                 maxEntries: 1_000,
+                redisMaxConnections: 1,
                 redisURL: nil
             )
             app.authSessionValidationCache = LocalAuthSessionValidationCache(

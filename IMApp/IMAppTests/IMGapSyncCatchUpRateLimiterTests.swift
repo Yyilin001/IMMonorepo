@@ -3,7 +3,7 @@ import Testing
 @testable import IMApp
 
 struct IMGapSyncCatchUpRateLimiterTests {
-    @Test func timelineCatchUpProductionConfigurationMatchesLegacyDefaults() {
+    @Test func timelineCatchUpProductionConfigurationMatchesCurrentDefaults() {
         let configuration = ConversationRuntimeController.TimelineCatchUpConfiguration.production
 
         #expect(configuration.selectedHintInitialJitterNanoseconds == 750_000_000)

@@ -629,118 +629,6 @@ extension IMServerTests {
         }
     }
 
-    @Test("Production gateway requires active conversation full fanout limit")
-    func productionGatewayRequiresActiveConversationFullFanoutLimit() async throws {
-        try await withProductionRuntimeEnvironment {
-            unsetenv("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT")
-            let app = try await productionRuntimeValidationApp(role: .gateway)
-            do {
-                try IMGatewayProductionValidator.validate(app: app)
-                Issue.record("Expected gateway validation to require active conversation full fanout limit")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT > 0"))
-            } catch {
-                Issue.record("Unexpected gateway validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
-    @Test("Production gateway bounds active conversation full fanout limit")
-    func productionGatewayBoundsActiveConversationFullFanoutLimit() async throws {
-        try await withProductionRuntimeEnvironment {
-            setenv("IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD", "500", 1)
-            setenv("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT", "1000", 1)
-            let app = try await productionRuntimeValidationApp(role: .gateway)
-            do {
-                try IMGatewayProductionValidator.validate(app: app)
-                Issue.record("Expected gateway validation to reject oversized active conversation full fanout limit")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT <="))
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"))
-            } catch {
-                Issue.record("Unexpected gateway validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
-    @Test("Production gateway enforces active conversation full fanout hard cap")
-    func productionGatewayEnforcesActiveConversationFullFanoutHardCap() async throws {
-        try await withProductionRuntimeEnvironment {
-            setenv("IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD", "500", 1)
-            setenv("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT", "256", 1)
-            let app = try await productionRuntimeValidationApp(role: .gateway)
-            do {
-                try IMGatewayProductionValidator.validate(app: app)
-                Issue.record("Expected gateway validation to reject active full fanout above hard cap")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT <="))
-                #expect(abort.reason.contains("128"))
-            } catch {
-                Issue.record("Unexpected gateway validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
-    @Test("Production gateway requires active conversation full fanout payload byte budget")
-    func productionGatewayRequiresActiveConversationFullFanoutPayloadByteBudget() async throws {
-        try await withProductionRuntimeEnvironment {
-            unsetenv("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET")
-            let app = try await productionRuntimeValidationApp(role: .gateway)
-            do {
-                try IMGatewayProductionValidator.validate(app: app)
-                Issue.record("Expected gateway validation to require active conversation full fanout payload byte budget")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET >= 65536"))
-            } catch {
-                Issue.record("Unexpected gateway validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
-    @Test("Production gateway rejects too small active conversation full fanout payload byte budget")
-    func productionGatewayRejectsTooSmallActiveConversationFullFanoutPayloadByteBudget() async throws {
-        try await withProductionRuntimeEnvironment {
-            setenv("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET", "1024", 1)
-            let app = try await productionRuntimeValidationApp(role: .gateway)
-            do {
-                try IMGatewayProductionValidator.validate(app: app)
-                Issue.record("Expected gateway validation to reject undersized active conversation full fanout payload byte budget")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET >= 65536"))
-            } catch {
-                Issue.record("Unexpected gateway validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
-    @Test("Production gateway requires compact-only active conversation full fanout mode")
-    func productionGatewayRequiresCompactOnlyActiveConversationFullFanoutMode() async throws {
-        try await withProductionRuntimeEnvironment {
-            setenv("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE", "bounded", 1)
-            let app = try await productionRuntimeValidationApp(role: .gateway)
-            do {
-                try IMGatewayProductionValidator.validate(app: app)
-                Issue.record("Expected gateway validation to require compact-only active conversation full fanout mode")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE=compact-only"))
-            } catch {
-                Issue.record("Unexpected gateway validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
     @Test("Production gateway bounds local fanout event loop yield chunks")
     func productionGatewayBoundsLocalFanoutEventLoopYieldChunks() async throws {
         try await withProductionRuntimeEnvironment {
@@ -1245,31 +1133,6 @@ extension IMServerTests {
         }
     }
 
-    @Test("Production realtime delivery consumer requires activity active compact hint body")
-    func productionRealtimeDeliveryConsumerRequiresActivityActiveCompactHintBody() async throws {
-        try await withProductionRuntimeEnvironment {
-            let key = "IM_REALTIME_ACTIVE_COMPACT_HINT_BODY"
-            let originalValue = Environment.get(key)
-            defer {
-                restoreEnvironment(key, to: originalValue)
-            }
-
-            setenv("IM_STREAM_CONSUMER_GROUPS", "realtime-delivery-consumer", 1)
-            setenv(key, "timeline-gap", 1)
-            let app = try await productionRuntimeValidationApp(role: .streamConsumer)
-            do {
-                try IMStreamConsumerProductionValidator.validate(app: app)
-                Issue.record("Expected realtime-delivery-consumer validation to require active compact activity hints")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_COMPACT_HINT_BODY=conversation-activity"))
-            } catch {
-                Issue.record("Unexpected stream-consumer validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
     @Test("Production realtime delivery consumer bounds active compact hint preview")
     func productionRealtimeDeliveryConsumerBoundsActiveCompactHintPreview() async throws {
         try await withProductionRuntimeEnvironment {
@@ -1346,64 +1209,6 @@ extension IMServerTests {
             } catch let abort as any AbortError {
                 #expect(abort.status == .internalServerError)
                 #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_MAX_ENTRIES > 0"))
-            } catch {
-                Issue.record("Unexpected stream-consumer validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
-    @Test("Production large-group realtime path requires full fanout payload byte budget")
-    func productionLargeGroupRealtimePathRequiresFullFanoutPayloadByteBudget() async throws {
-        try await withProductionRuntimeEnvironment {
-            let key = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET"
-            let originalValue = Environment.get(key)
-            let relayAfterRecordKey = "IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD"
-            let originalRelayAfterRecord = Environment.get(relayAfterRecordKey)
-            defer {
-                restoreEnvironment(key, to: originalValue)
-                restoreEnvironment(relayAfterRecordKey, to: originalRelayAfterRecord)
-            }
-
-            setenv("IM_STREAM_CONSUMER_GROUPS", "domain-delivery-consumer", 1)
-            setenv(relayAfterRecordKey, "true", 1)
-            unsetenv(key)
-            let app = try await productionRuntimeValidationApp(role: .streamConsumer)
-            do {
-                try IMStreamConsumerProductionValidator.validate(app: app)
-                Issue.record("Expected large-group realtime validation to require full fanout payload byte budget")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET >= 65536"))
-            } catch {
-                Issue.record("Unexpected stream-consumer validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
-    @Test("Production large-group realtime path rejects too small full fanout payload byte budget")
-    func productionLargeGroupRealtimePathRejectsTooSmallFullFanoutPayloadByteBudget() async throws {
-        try await withProductionRuntimeEnvironment {
-            let key = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET"
-            let originalValue = Environment.get(key)
-            let relayAfterRecordKey = "IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD"
-            let originalRelayAfterRecord = Environment.get(relayAfterRecordKey)
-            defer {
-                restoreEnvironment(key, to: originalValue)
-                restoreEnvironment(relayAfterRecordKey, to: originalRelayAfterRecord)
-            }
-
-            setenv("IM_STREAM_CONSUMER_GROUPS", "domain-delivery-consumer", 1)
-            setenv(relayAfterRecordKey, "true", 1)
-            setenv(key, "1024", 1)
-            let app = try await productionRuntimeValidationApp(role: .streamConsumer)
-            do {
-                try IMStreamConsumerProductionValidator.validate(app: app)
-                Issue.record("Expected large-group realtime validation to reject undersized full fanout payload byte budget")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET >= 65536"))
             } catch {
                 Issue.record("Unexpected stream-consumer validation error: \(error)")
             }
@@ -1545,27 +1350,6 @@ extension IMServerTests {
         }
     }
 
-    @Test("Production gateway requires inactive conversation hint pull-only mode")
-    func productionGatewayRequiresInactiveConversationHintPullOnlyMode() async throws {
-        try await withProductionRuntimeEnvironment {
-            let modeKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE"
-            let originalMode = Environment.get(modeKey)
-            defer { restoreEnvironment(modeKey, to: originalMode) }
-            setenv(modeKey, "relay", 1)
-            let app = try await productionRuntimeValidationApp(role: .gateway)
-            do {
-                try IMGatewayProductionValidator.validate(app: app)
-                Issue.record("Expected gateway validation to require inactive conversation hint pull-only mode")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=pull-only"))
-            } catch {
-                Issue.record("Unexpected gateway validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
     @Test("Production gateway requires non-empty active compact hint preview")
     func productionGatewayRequiresNonEmptyActiveCompactHintPreview() async throws {
         try await withProductionRuntimeEnvironment {
@@ -1582,37 +1366,6 @@ extension IMServerTests {
                 #expect(abort.reason.contains("IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS > 0"))
             } catch {
                 Issue.record("Unexpected gateway validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
-    @Test("Production large-group realtime path requires inactive conversation hint pull-only mode")
-    func productionLargeGroupRealtimePathRequiresInactiveConversationHintPullOnlyMode() async throws {
-        try await withProductionRuntimeEnvironment {
-            let groupsKey = "IM_STREAM_CONSUMER_GROUPS"
-            let relayAfterRecordKey = "IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD"
-            let modeKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE"
-            let originalGroupsValue = Environment.get(groupsKey)
-            let originalRelayAfterRecordValue = Environment.get(relayAfterRecordKey)
-            let originalMode = Environment.get(modeKey)
-            defer {
-                restoreEnvironment(groupsKey, to: originalGroupsValue)
-                restoreEnvironment(relayAfterRecordKey, to: originalRelayAfterRecordValue)
-                restoreEnvironment(modeKey, to: originalMode)
-            }
-            setenv(groupsKey, "domain-delivery-consumer", 1)
-            setenv(relayAfterRecordKey, "true", 1)
-            setenv(modeKey, "relay", 1)
-            let app = try await productionRuntimeValidationApp(role: .streamConsumer)
-            do {
-                try IMStreamConsumerProductionValidator.validate(app: app)
-                Issue.record("Expected large-group validation to require inactive conversation hint pull-only mode")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=pull-only"))
-            } catch {
-                Issue.record("Unexpected stream-consumer validation error: \(error)")
             }
             try? await app.asyncShutdown()
         }
@@ -1849,58 +1602,6 @@ extension IMServerTests {
         }
     }
 
-    @Test("Production realtime delivery consumer disables active conversation unsplit fallback")
-    func productionRealtimeDeliveryConsumerDisablesActiveConversationUnsplitFallback() async throws {
-        try await withProductionRuntimeEnvironment {
-            let groupsKey = "IM_STREAM_CONSUMER_GROUPS"
-            let fallbackKey = "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED"
-            let originalGroupsValue = Environment.get(groupsKey)
-            let originalFallbackValue = Environment.get(fallbackKey)
-            defer {
-                restoreEnvironment(groupsKey, to: originalGroupsValue)
-                restoreEnvironment(fallbackKey, to: originalFallbackValue)
-            }
-
-            setenv(groupsKey, "realtime-delivery-consumer", 1)
-            setenv(fallbackKey, "true", 1)
-            let app = try await productionRuntimeValidationApp(role: .streamConsumer)
-            do {
-                try IMStreamConsumerProductionValidator.validate(app: app)
-                Issue.record("Expected realtime-delivery-consumer validation to disable active conversation unsplit fallback")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false"))
-            } catch {
-                Issue.record("Unexpected stream-consumer validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
-    @Test("Production gateway disables active conversation unsplit fallback")
-    func productionGatewayDisablesActiveConversationUnsplitFallback() async throws {
-        try await withProductionRuntimeEnvironment {
-            let fallbackKey = "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED"
-            let originalFallbackValue = Environment.get(fallbackKey)
-            defer {
-                restoreEnvironment(fallbackKey, to: originalFallbackValue)
-            }
-
-            setenv(fallbackKey, "true", 1)
-            let app = try await productionRuntimeValidationApp(role: .gateway)
-            do {
-                try IMGatewayProductionValidator.validate(app: app)
-                Issue.record("Expected gateway validation to disable active conversation unsplit fallback")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false"))
-            } catch {
-                Issue.record("Unexpected gateway validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
     @Test("Production domain relay after record requires async relay")
     func productionDomainRelayAfterRecordRequiresAsyncRelay() async throws {
         try await withProductionRuntimeEnvironment {
@@ -2000,39 +1701,6 @@ extension IMServerTests {
         }
     }
 
-    @Test("Production domain relay after record requires active compact activity hints")
-    func productionDomainRelayAfterRecordRequiresActiveCompactActivityHints() async throws {
-        try await withProductionRuntimeEnvironment {
-            let groupsKey = "IM_STREAM_CONSUMER_GROUPS"
-            let relayAfterRecordKey = "IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD"
-            let activeCompactBodyKey = "IM_REALTIME_ACTIVE_COMPACT_HINT_BODY"
-            let originalGroupsValue = Environment.get(groupsKey)
-            let originalRelayAfterRecordValue = Environment.get(relayAfterRecordKey)
-            let originalActiveCompactBodyValue = Environment.get(activeCompactBodyKey)
-            defer {
-                restoreEnvironment(groupsKey, to: originalGroupsValue)
-                restoreEnvironment(relayAfterRecordKey, to: originalRelayAfterRecordValue)
-                restoreEnvironment(activeCompactBodyKey, to: originalActiveCompactBodyValue)
-            }
-
-            setenv(groupsKey, "domain-delivery-consumer", 1)
-            setenv(relayAfterRecordKey, "true", 1)
-            setenv(activeCompactBodyKey, "timeline-gap", 1)
-            let app = try await productionRuntimeValidationApp(role: .streamConsumer)
-            do {
-                try IMStreamConsumerProductionValidator.validate(app: app)
-                Issue.record("Expected domain relay-after-record validation to require active compact activity hints")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true"))
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_COMPACT_HINT_BODY=conversation-activity"))
-            } catch {
-                Issue.record("Unexpected stream-consumer validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
     @Test("Production large-group owner delivery skip requires active conversation fanout")
     func productionLargeGroupOwnerDeliverySkipRequiresActiveConversationFanout() async throws {
         try await withProductionRuntimeEnvironment {
@@ -2096,43 +1764,6 @@ extension IMServerTests {
                 #expect(abort.status == .internalServerError)
                 #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD <="))
                 #expect(abort.reason.contains("IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD"))
-            } catch {
-                Issue.record("Unexpected stream-consumer validation error: \(error)")
-            }
-            try? await app.asyncShutdown()
-        }
-    }
-
-    @Test("Production large-group bounds active full fanout limit")
-    func productionLargeGroupBoundsActiveFullFanoutLimit() async throws {
-        try await withProductionRuntimeEnvironment {
-            let groupsKey = "IM_STREAM_CONSUMER_GROUPS"
-            let relayAfterRecordKey = "IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD"
-            let fanoutThresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-            let fullFanoutLimitKey = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT"
-            let originalGroupsValue = Environment.get(groupsKey)
-            let originalRelayAfterRecordValue = Environment.get(relayAfterRecordKey)
-            let originalFanoutThresholdValue = Environment.get(fanoutThresholdKey)
-            let originalFullFanoutLimitValue = Environment.get(fullFanoutLimitKey)
-            defer {
-                restoreEnvironment(groupsKey, to: originalGroupsValue)
-                restoreEnvironment(relayAfterRecordKey, to: originalRelayAfterRecordValue)
-                restoreEnvironment(fanoutThresholdKey, to: originalFanoutThresholdValue)
-                restoreEnvironment(fullFanoutLimitKey, to: originalFullFanoutLimitValue)
-            }
-
-            setenv(groupsKey, "domain-delivery-consumer", 1)
-            setenv(relayAfterRecordKey, "true", 1)
-            setenv(fanoutThresholdKey, "500", 1)
-            setenv(fullFanoutLimitKey, "1000", 1)
-            let app = try await productionRuntimeValidationApp(role: .streamConsumer)
-            do {
-                try IMStreamConsumerProductionValidator.validate(app: app)
-                Issue.record("Expected large-group validation to reject oversized active full fanout limit")
-            } catch let abort as any AbortError {
-                #expect(abort.status == .internalServerError)
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT <="))
-                #expect(abort.reason.contains("IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"))
             } catch {
                 Issue.record("Unexpected stream-consumer validation error: \(error)")
             }
@@ -3031,20 +2662,8 @@ extension IMServerTests {
         #expect(configuration.enabledGroups.contains("domain-delivery-consumer"))
     }
 
-    @Test("Stream consumer disables active conversation unsplit fallback by default")
-    func streamConsumerDisablesActiveConversationUnsplitFallbackByDefault() {
-        let key = "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED"
-        let originalValue = Environment.get(key)
-        defer { restoreEnvironment(key, to: originalValue) }
-
-        unsetenv(key)
-
-        let configuration = IMStreamConsumerConfiguration.load(from: .development)
-        #expect(configuration.realtimeActiveConversationUnsplitFallbackEnabled == false)
-    }
-
-    @Test("Stream consumer large-group messageCreated delivery mode is explicit and backward compatible")
-    func streamConsumerLargeGroupMessageCreatedDeliveryModeIsExplicitAndBackwardCompatible() {
+    @Test("Stream consumer large-group messageCreated delivery mode is explicit")
+    func streamConsumerLargeGroupMessageCreatedDeliveryModeIsExplicit() {
         let originalValues = [
             "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_LARGE_GROUP_MODE": Environment.get("IM_DOMAIN_DELIVERY_MESSAGE_CREATED_LARGE_GROUP_MODE"),
             "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD": Environment.get("IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD")
@@ -3151,15 +2770,12 @@ extension IMServerTests {
                 #expect(res.body.string.contains("im_realtime_active_conversation_fanout_splits_total"))
                 #expect(res.body.string.contains("im_realtime_active_conversation_fanout_downgraded_active_recipients_total"))
                 #expect(res.body.string.contains("im_realtime_active_conversation_fanout_backpressure_downgraded_active_recipients_total"))
-                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_unsplit_fallbacks_total"))
-                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_hint_fallback_recipients_total"))
-                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_dropped_fallbacks_total"))
-                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_dropped_fallback_recipients_total"))
+                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_route_split_drops_total"))
+                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_route_split_drop_recipients_total"))
                 #expect(res.body.string.contains("im_realtime_remote_active_conversation_fanout_splits_total"))
                 #expect(res.body.string.contains("im_realtime_remote_active_conversation_fanout_full_recipients_total"))
-                #expect(res.body.string.contains("im_realtime_remote_active_conversation_fanout_fallbacks_total"))
-                #expect(res.body.string.contains("im_realtime_remote_active_conversation_fanout_dropped_fallbacks_total"))
-                #expect(res.body.string.contains("im_realtime_remote_active_conversation_fanout_dropped_fallback_recipients_total"))
+                #expect(res.body.string.contains("im_realtime_remote_active_conversation_fanout_route_split_drops_total"))
+                #expect(res.body.string.contains("im_realtime_remote_active_conversation_fanout_route_split_drop_recipients_total"))
                 #expect(res.body.string.contains("im_cross_node_dispatch_latency_avg_millis"))
                 #expect(res.body.string.contains("im_cross_node_dispatch_latency_max_millis"))
                 #expect(res.body.string.contains("im_realtime_remote_dispatch_config_user_batch_size"))
@@ -3187,7 +2803,7 @@ extension IMServerTests {
                 #expect(res.body.string.contains("im_domain_relay_after_record_pre_split_total"))
                 #expect(res.body.string.contains("im_domain_relay_after_record_pre_split_active_recipients_total"))
                 #expect(res.body.string.contains("im_domain_relay_after_record_pre_split_compact_active_recipients_total"))
-                #expect(res.body.string.contains("im_domain_relay_after_record_pre_split_fallback_total"))
+                #expect(res.body.string.contains("im_domain_relay_after_record_pre_split_route_drops_total"))
                 #expect(res.body.string.contains("im_domain_relay_after_record_inactive_hint_suppressed_recipients_total"))
                 #expect(res.body.string.contains("im_domain_relay_after_record_active_route_cache_hits_total"))
                 #expect(res.body.string.contains("im_domain_relay_after_record_active_route_cache_partial_hits_total"))
@@ -3506,7 +3122,7 @@ extension IMServerTests {
                 inactiveHintRecipientCount: 3,
                 downgradedActiveRecipientCount: 1
             )
-            await app.routingMetrics.recordDomainRelayAfterRecordPreSplitFallback()
+            await app.routingMetrics.recordDomainRelayAfterRecordPreSplitRouteDrop()
             await app.routingMetrics.recordDomainRelayAfterRecordInactiveHintCoalescing(suppressedRecipientCount: 4)
             await app.routingMetrics.recordDomainRelayAfterRecordActiveRouteCache(hit: true, cachedUserCount: 2)
             await app.routingMetrics.recordDomainRelayAfterRecordActiveRouteCache(hit: false, partialHit: true, cachedUserCount: 3, missedUserCount: 1)
@@ -3670,7 +3286,7 @@ extension IMServerTests {
                 #expect(body.contains("im_domain_relay_after_record_pre_split_compact_active_recipients_total 1"))
                 #expect(body.contains("im_domain_relay_after_record_pre_split_inactive_hint_recipients_total 3"))
                 #expect(body.contains("im_domain_relay_after_record_pre_split_downgraded_active_recipients_total 1"))
-                #expect(body.contains("im_domain_relay_after_record_pre_split_fallback_total 1"))
+                #expect(body.contains("im_domain_relay_after_record_pre_split_route_drops_total 1"))
                 #expect(body.contains("im_domain_relay_after_record_inactive_hint_suppressed_recipients_total 4"))
                 #expect(body.contains("im_domain_relay_after_record_active_route_cache_hits_total 1"))
                 #expect(body.contains("im_domain_relay_after_record_active_route_cache_partial_hits_total 1"))
@@ -4125,10 +3741,6 @@ private func withProductionRuntimeEnvironment(_ body: () async throws -> Void) a
         "IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE": "true",
         "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
         "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "500",
-        "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "128",
-        "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE": "compact-only",
-        "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET": "262144",
-        "IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE": "pull-only",
         "IM_SUMMARY_PROJECTION_MESSAGE_CREATED_ACTIVITY_ONLY_RECIPIENT_THRESHOLD": "500",
         "IM_SUMMARY_PROJECTION_ACTIVITY_COALESCE_WINDOW_MS": "500",
         "IM_DOMAIN_DELIVERY_SKIP_MESSAGE_CREATED_OWNER_DELIVERY": "false",
@@ -4139,11 +3751,9 @@ private func withProductionRuntimeEnvironment(_ body: () async throws -> Void) a
             "IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED": "true",
             "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "500",
             "IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED": "false",
-            "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED": "false",
             "IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS": "1000",
             "IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS": "1000",
             "IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS": "25",
-            "IM_REALTIME_ACTIVE_COMPACT_HINT_BODY": "conversation-activity",
             "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS": "120",
         "IM_STREAM_CONSUMER_REQUIRE_MESSAGE_CREATED_RECIPIENT_SNAPSHOT": "true",
         "IM_EVENT_STREAM_DRIVER": "kafka",

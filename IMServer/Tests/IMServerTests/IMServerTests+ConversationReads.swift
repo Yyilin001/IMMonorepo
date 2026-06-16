@@ -220,7 +220,7 @@ extension IMServerTests {
             )
 
             let conversation = Conversation(
-                title: "Needs Backfill",
+                title: "Needs Projection",
                 updatedAt: Date(timeIntervalSince1970: 1_700_120_000)
             )
             try await conversation.create(on: app.db)

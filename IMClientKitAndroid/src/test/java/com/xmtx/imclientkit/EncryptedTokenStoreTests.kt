@@ -3,7 +3,6 @@ package com.xmtx.imclientkit
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.xmtx.imclientkit.persistence.EncryptedTokenStore
-import com.xmtx.imclientkit.persistence.InMemoryTokenStore
 import com.xmtx.imclientkit.persistence.TokenCipher
 import com.xmtx.imclientkit.persistence.TokenSnapshot
 import kotlinx.coroutines.test.runTest
@@ -38,20 +37,6 @@ class EncryptedTokenStoreTests {
         store.clear()
 
         assertNull(store.load())
-    }
-
-    @Test
-    fun migratesLegacyDataStoreTokenAndClearsLegacy() = runTest {
-        val legacy = InMemoryTokenStore(TokenSnapshot("legacy-access", "legacy-refresh"))
-        val store = EncryptedTokenStore(
-            preferences = context.getSharedPreferences("encrypted-token-test", Context.MODE_PRIVATE),
-            cipher = PrefixTokenCipher(),
-            legacyStore = legacy,
-        )
-
-        assertEquals(TokenSnapshot("legacy-access", "legacy-refresh"), store.load())
-        assertNull(legacy.load())
-        assertEquals(TokenSnapshot("legacy-access", "legacy-refresh"), store.load())
     }
 
     private class PrefixTokenCipher : TokenCipher {

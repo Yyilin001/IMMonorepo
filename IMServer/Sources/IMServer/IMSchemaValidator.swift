@@ -70,7 +70,7 @@ enum IMSchemaValidator {
                 let missing = missingColumns.sorted().joined(separator: ", ")
                 let reason: String
                 if resetAllowed {
-                    reason = "IM schema validation failed on \(role): table \(requirement.table) is missing columns [\(missing)]. This database is from an older incompatible IM schema. Restart with --reset-im-schema to rebuild the IM tables from current migrations."
+                    reason = "IM schema validation failed on \(role): table \(requirement.table) is missing columns [\(missing)]. Reset the IM schema with --reset-im-schema to rebuild the IM tables from current migrations."
                 } else {
                     reason = "IM schema validation failed on \(role): table \(requirement.table) is missing columns [\(missing)]. The database schema does not match the current IM server build."
                 }
@@ -90,7 +90,7 @@ enum IMSchemaValidator {
                 let missing = missingIndexes.sorted().joined(separator: ", ")
                 let reason: String
                 if resetAllowed {
-                    reason = "IM schema validation failed on \(role): table \(requirement.table) is missing indexes [\(missing)]. This database is from an older incompatible IM schema. Restart with --reset-im-schema to rebuild the IM tables from current migrations."
+                    reason = "IM schema validation failed on \(role): table \(requirement.table) is missing indexes [\(missing)]. Reset the IM schema with --reset-im-schema to rebuild the IM tables from current migrations."
                 } else {
                     reason = "IM schema validation failed on \(role): table \(requirement.table) is missing indexes [\(missing)]. Run the current IM migrations before starting this role."
                 }

@@ -101,7 +101,6 @@ struct EnforceV8SequenceInvariants: AsyncMigration {
 
         switch sql.dialect.name {
         case "postgresql":
-            try await ensureLegacyPostgresColumns(on: sql)
             try await alterPostgresColumns(on: sql)
             try await validateConstraints(on: sql)
             try await addPostgresConstraints(on: sql)
@@ -125,13 +124,6 @@ struct EnforceV8SequenceInvariants: AsyncMigration {
                 DROP CONSTRAINT IF EXISTS \(unsafeRaw: constraint.name)
                 """).run()
         }
-    }
-
-    private func ensureLegacyPostgresColumns(on sql: any SQLDatabase) async throws {
-        try await sql.raw("""
-            ALTER TABLE IF EXISTS \(unsafeRaw: ConversationReplayRecord.schema)
-            ADD COLUMN IF NOT EXISTS aggregate_sequence BIGINT NOT NULL DEFAULT 1
-            """).run()
     }
 
     private func alterPostgresColumns(on sql: any SQLDatabase) async throws {

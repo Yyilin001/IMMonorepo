@@ -98,14 +98,8 @@ actor RoutingMetrics {
         var realtimeActiveConversationFanoutInactiveHintRecipientCount: Int = 0
         var realtimeActiveConversationFanoutDowngradedActiveRecipientCount: Int = 0
         var realtimeActiveConversationFanoutBackpressureDowngradedRecipientCount: Int = 0
-        var realtimeActiveConversationFanoutPayloadBudgetAppliedCount: Int = 0
-        var realtimeActiveConversationFanoutPayloadBudgetDowngradedRecipientCount: Int = 0
-        var realtimeActiveConversationFanoutPayloadBudgetMaxPayloadBytes: Int = 0
-        var realtimeActiveConversationFanoutPayloadBudgetMaxEffectiveLimit: Int = 0
-        var realtimeActiveConversationFanoutUnsplitFallbackCount: Int = 0
-        var realtimeActiveConversationFanoutHintFallbackRecipientCount: Int = 0
-        var realtimeActiveConversationFanoutDroppedFallbackCount: Int = 0
-        var realtimeActiveConversationFanoutDroppedFallbackRecipientCount: Int = 0
+        var realtimeActiveConversationFanoutRouteSplitDropCount: Int = 0
+        var realtimeActiveConversationFanoutRouteSplitDropRecipientCount: Int = 0
         var realtimeActiveConversationFanoutMaxActiveRecipientsPerSplit: Int = 0
         var realtimeActiveConversationFanoutMaxCompactActiveRecipientsPerSplit: Int = 0
         var realtimeActiveConversationFanoutMaxInactiveHintRecipientsPerSplit: Int = 0
@@ -121,9 +115,8 @@ actor RoutingMetrics {
         var realtimeRemoteActiveConversationFanoutCompactRecipientCount: Int = 0
         var realtimeRemoteActiveConversationFanoutInactiveHintRecipientCount: Int = 0
         var realtimeRemoteActiveConversationFanoutDowngradedActiveRecipientCount: Int = 0
-        var realtimeRemoteActiveConversationFanoutFallbackCount: Int = 0
-        var realtimeRemoteActiveConversationFanoutDroppedFallbackCount: Int = 0
-        var realtimeRemoteActiveConversationFanoutDroppedFallbackRecipientCount: Int = 0
+        var realtimeRemoteActiveConversationFanoutRouteSplitDropCount: Int = 0
+        var realtimeRemoteActiveConversationFanoutRouteSplitDropRecipientCount: Int = 0
         var realtimeRemoteActiveConversationFanoutMaxFullRecipientsPerSplit: Int = 0
         var realtimeRemoteActiveConversationFanoutMaxCompactRecipientsPerSplit: Int = 0
         var realtimeRemoteActiveConversationFanoutMaxInactiveHintRecipientsPerSplit: Int = 0
@@ -140,7 +133,7 @@ actor RoutingMetrics {
         var domainRelayAfterRecordPreSplitCompactActiveRecipientCount: Int = 0
         var domainRelayAfterRecordPreSplitInactiveHintRecipientCount: Int = 0
         var domainRelayAfterRecordPreSplitDowngradedActiveRecipientCount: Int = 0
-        var domainRelayAfterRecordPreSplitFallbackCount: Int = 0
+        var domainRelayAfterRecordPreSplitRouteDropCount: Int = 0
         var domainRelayAfterRecordInactiveHintSuppressedRecipientCount: Int = 0
         var domainRelayAfterRecordActiveRouteCacheHitCount: Int = 0
         var domainRelayAfterRecordActiveRouteCachePartialHitCount: Int = 0
@@ -536,38 +529,9 @@ actor RoutingMetrics {
         )
     }
 
-    func recordActiveConversationFanoutUnsplitFallbackToHint(recipientCount: Int) {
-        recordActiveConversationFanoutUnsplitFallback()
-        snapshot.realtimeActiveConversationFanoutHintFallbackRecipientCount += max(0, recipientCount)
-    }
-
-    func recordActiveConversationFanoutUnsplitFallback() {
-        snapshot.realtimeActiveConversationFanoutUnsplitFallbackCount += 1
-    }
-
-    func recordActiveConversationFanoutDroppedFallback(recipientCount: Int) {
-        snapshot.realtimeActiveConversationFanoutDroppedFallbackCount += 1
-        snapshot.realtimeActiveConversationFanoutDroppedFallbackRecipientCount += max(0, recipientCount)
-    }
-
-    func recordActiveConversationFanoutPayloadBudgetApplied(
-        payloadByteCount: Int,
-        effectiveFullFanoutLimit: Int,
-        downgradedActiveRecipientCount: Int
-    ) {
-        snapshot.realtimeActiveConversationFanoutPayloadBudgetAppliedCount += 1
-        snapshot.realtimeActiveConversationFanoutPayloadBudgetDowngradedRecipientCount += max(
-            0,
-            downgradedActiveRecipientCount
-        )
-        snapshot.realtimeActiveConversationFanoutPayloadBudgetMaxPayloadBytes = max(
-            snapshot.realtimeActiveConversationFanoutPayloadBudgetMaxPayloadBytes,
-            max(0, payloadByteCount)
-        )
-        snapshot.realtimeActiveConversationFanoutPayloadBudgetMaxEffectiveLimit = max(
-            snapshot.realtimeActiveConversationFanoutPayloadBudgetMaxEffectiveLimit,
-            max(0, effectiveFullFanoutLimit)
-        )
+    func recordActiveConversationFanoutRouteSplitDrop(recipientCount: Int) {
+        snapshot.realtimeActiveConversationFanoutRouteSplitDropCount += 1
+        snapshot.realtimeActiveConversationFanoutRouteSplitDropRecipientCount += max(0, recipientCount)
     }
 
     func recordRemoteActiveConversationFanoutSplit(
@@ -603,13 +567,9 @@ actor RoutingMetrics {
         )
     }
 
-    func recordRemoteActiveConversationFanoutFallback() {
-        snapshot.realtimeRemoteActiveConversationFanoutFallbackCount += 1
-    }
-
-    func recordRemoteActiveConversationFanoutDroppedFallback(recipientCount: Int) {
-        snapshot.realtimeRemoteActiveConversationFanoutDroppedFallbackCount += 1
-        snapshot.realtimeRemoteActiveConversationFanoutDroppedFallbackRecipientCount += max(0, recipientCount)
+    func recordRemoteActiveConversationFanoutRouteSplitDrop(recipientCount: Int) {
+        snapshot.realtimeRemoteActiveConversationFanoutRouteSplitDropCount += 1
+        snapshot.realtimeRemoteActiveConversationFanoutRouteSplitDropRecipientCount += max(0, recipientCount)
     }
 
     func recordInactiveConversationHintFlush(
@@ -668,8 +628,8 @@ actor RoutingMetrics {
         )
     }
 
-    func recordDomainRelayAfterRecordPreSplitFallback() {
-        snapshot.domainRelayAfterRecordPreSplitFallbackCount += 1
+    func recordDomainRelayAfterRecordPreSplitRouteDrop() {
+        snapshot.domainRelayAfterRecordPreSplitRouteDropCount += 1
     }
 
     func recordDomainRelayAfterRecordInactiveHintCoalescing(suppressedRecipientCount: Int) {

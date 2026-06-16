@@ -25,7 +25,6 @@ require_file ".github/pull_request_template.md"
 require_file "docs/architecture-boundaries.md"
 require_file "docs/domain-boundaries.md"
 require_file "docs/complexity-budgets.tsv"
-require_file "docs/service-size-budgets.tsv"
 
 require_match "/IMServer/Sources/IMServer/IM/" ".github/CODEOWNERS"
 require_match "/IMApp/" ".github/CODEOWNERS"
@@ -39,7 +38,7 @@ require_match "App/UI layers must not directly parse TCP packets" "docs/architec
 require_match "real Redis staging and capacity data" "docs/architecture-boundaries.md"
 require_match "complexity-budgets.tsv" "docs/architecture-boundaries.md"
 require_match "AIStreamProviderPolicyService" "docs/domain-boundaries.md"
-require_match "only component allowed to dual-write" "docs/domain-boundaries.md"
+require_match "only component allowed to atomically update" "docs/domain-boundaries.md"
 
 check_ai_stream_state_write_boundaries() {
   local allowed='AIMessageStream(WriteStore|RepairStore|StateStore|MutationBuilder)\.swift$'

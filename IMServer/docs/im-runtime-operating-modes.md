@@ -37,7 +37,7 @@ This document is the operational source of truth for choosing an IMServer runtim
   - Prometheus metrics on private networking
 - Use staging to validate production startup behavior:
   - serving and worker roles should start with schema validation only.
-  - migrations, reset, backfill, verify, repair, requeue, and replay should be exercised through `ops`.
+  - migrations, reset, rebuild, verify, repair, requeue, and replay should be exercised through `ops`.
   - `IM_INLINE_OUTBOX_PROJECTION=true` should never be part of staging role manifests.
 
 ## Production
@@ -57,15 +57,15 @@ Required production posture:
 
 - `IM_NODE_ID` is explicitly configured for every process.
 - `IM_AUTO_MIGRATE_ON_START` is unset or `false` for `gateway`, `command-api`, `query-api`, `outbox-relay`, and `stream-consumer`.
-- `IM_AUTO_MIGRATE_ON_START=true` is allowed only for the `ops` role during an explicit migration window.
+- `IM_AUTO_MIGRATE_ON_START=true` is allowed only for the `ops` role during an explicit schema maintenance window.
 - `IM_INLINE_OUTBOX_PROJECTION` is unset or `false`; production event flow must use `outbox-relay` and `stream-consumer`.
 - Gateway sets `IM_COMMAND_API_INTERNAL_BASE_URL` and `IM_INTERNAL_SHARED_SECRET` so IM command ingress is proxied to command-api over authenticated internal traffic.
 - `domain-delivery-consumer` and `realtime-delivery-consumer` stream processes set `IM_GATEWAY_RELAY_MODE=http`, `IM_GATEWAY_INTERNAL_BASE_URL`, and the same `IM_INTERNAL_SHARED_SECRET` as gateway, so large-group realtime relay cannot silently fall back to local-only delivery.
 - `IM_EVENT_STREAM_DRIVER=kafka` for command, relay, and stream roles.
-- `IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE=compact-only` on gateway and realtime/domain delivery stream roles, so hot large groups use lightweight realtime hints plus `timeline/since` catch-up instead of bounded full-message realtime fanout.
+- Large-group realtime uses fixed active compact hints plus `timeline/since` catch-up; inactive online users are not fanned out realtime hints.
 - Kafka production env uses `IM_KAFKA_REQUIRED_ACKS=all`, `IM_KAFKA_SECURITY_PROTOCOL=sasl_tls`, `IM_KAFKA_SASL_MECHANISM=scram-sha-512`, and explicit SASL username/password plus `IM_KAFKA_TLS_CA_FILE`.
-- `IM_SUMMARY_PROJECTION_WRITE_MODE=sharded` outside temporary `ops` migration windows.
-- `IM_SUMMARY_QUERY_READ_SOURCE=sharded` outside temporary `ops` migration windows.
+- `IM_SUMMARY_PROJECTION_WRITE_MODE=sharded` outside explicit `ops` schema maintenance windows.
+- `IM_SUMMARY_QUERY_READ_SOURCE=sharded`.
 - `IM_CONVERSATION_SHARD_IDS` and every matching `DATABASE_CONVERSATION_<SHARD>_{HOST,PORT,USERNAME,PASSWORD,NAME}` value are present.
 - `IM_SUMMARY_SHARD_IDS` and every matching `DATABASE_SUMMARY_<SHARD>_{HOST,PORT,USERNAME,PASSWORD,NAME}` value are present.
 - `MEDIA_STORAGE_PROVIDER=s3compatible` for `command-api`, with explicit S3 endpoint, bucket, access key, secret key, region, and path-style setting.
@@ -130,4 +130,4 @@ Go only when all checks pass:
 - OpenSearch failure, when enabled, does not break primary message writes.
 - Hot conversation limiter rejects overload without changing the TCP packet shape.
 
-No-Go if any production process runs `combined`, runs `projection-worker`, auto-migrates outside `ops`, enables inline outbox projection, reads legacy summaries, writes legacy summaries outside an explicit `ops` transition, exposes public metrics, bypasses conversation shard routing, enables active-conversation unsplit fallback, uses non-`compact-only` active full fanout, or uses non-`pull-only` inactive conversation hints.
+No-Go if any production process runs `combined`, runs `projection-worker`, auto-migrates outside `ops`, enables inline outbox projection, uses non-sharded summary reads or writes, exposes public metrics, bypasses conversation shard routing, or serves active-conversation fanout without route splitting.

@@ -193,5 +193,4 @@ Known-good results from this deployment:
 - Remote release builds can overload the 2 GiB server and make SSH/HTTP appear dead. Build locally.
 - `swift-kafka-client` musl static build fails unless Kafka SSL/SASL code paths are disabled or a proper Linux OpenSSL/librdkafka setup is provided.
 - The server must have `FILE_STORAGE_DIRECTORY=/opt/imserver/files`; otherwise the binary may try to use the local compile path embedded by `#filePath`.
-- Existing historical outbox events may log `DecodingError.keyNotFound: Key 'kind' not found`. That is old payload data, not a deployment failure. It may need a separate data cleanup if outbox replay is required.
 - Keep `IM_AUTO_MIGRATE_ON_START=false` for normal service starts.

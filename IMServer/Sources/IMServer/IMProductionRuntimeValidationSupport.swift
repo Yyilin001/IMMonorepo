@@ -2,10 +2,8 @@ import Foundation
 import Vapor
 
 enum IMProductionRuntimeValidationSupport {
-    static let maximumActiveConversationFullFanoutLimit = 128
     static let maximumActiveCompactHintCoalesceWindowMilliseconds = 100
     static let maximumActiveCompactHintPreviewCharacters = 120
-    static let minimumActiveConversationFullFanoutPayloadByteBudget = 64 * 1024
 
     static func validatePrimaryDatabaseConfiguration() throws {
         let requiredKeys = [
@@ -44,31 +42,7 @@ enum IMProductionRuntimeValidationSupport {
         guard fanoutConfiguration.activeConversationFanoutEnabled else {
             throw Abort(
                 .internalServerError,
-                reason: "Production gateway requires IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED=true so large-group message fanout is split between active chat viewers and lightweight inactive conversation hints."
-            )
-        }
-
-        guard fanoutConfiguration.activeConversationFullFanoutRecipientLimit > 0 else {
-            throw Abort(
-                .internalServerError,
-                reason: "Production gateway requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT > 0 so one hot active conversation cannot force unbounded full message fanout."
-            )
-        }
-        guard fanoutConfiguration.activeConversationFullFanoutPayloadByteBudget >= minimumActiveConversationFullFanoutPayloadByteBudget else {
-            throw Abort(
-                .internalServerError,
-                reason: "Production gateway requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET >= \(minimumActiveConversationFullFanoutPayloadByteBudget) so large or rich message payloads shrink full-message fanout instead of exceeding the per-message realtime budget."
-            )
-        }
-        try validateActiveConversationFullFanoutLimitBound(
-            fanoutConfiguration,
-            context: "Production gateway"
-        )
-
-        guard fanoutConfiguration.usesCompactOnlyActiveConversationFanout else {
-            throw Abort(
-                .internalServerError,
-                reason: "Production gateway requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE=compact-only so hot large-group active viewers use lightweight realtime hints plus timeline/since catch-up instead of bounded full-message fanout."
+                reason: "Production gateway requires IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED=true so large-group message fanout sends compact realtime hints only to active chat viewers and lets inactive users pull timelines."
             )
         }
 
@@ -76,13 +50,6 @@ enum IMProductionRuntimeValidationSupport {
             app.streamConsumerConfiguration,
             context: "Production gateway"
         )
-
-        guard !fanoutConfiguration.relaysInactiveConversationHints else {
-            throw Abort(
-                .internalServerError,
-                reason: "Production gateway requires IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=pull-only so large inactive online groups use conversation changes/timeline catch-up instead of one realtime hint fanout per online recipient."
-            )
-        }
 
         guard fanoutConfiguration.batchSize <= 1024 else {
             throw Abort(
@@ -119,12 +86,6 @@ enum IMProductionRuntimeValidationSupport {
             )
         }
 
-        guard !app.streamConsumerConfiguration.realtimeActiveConversationUnsplitFallbackEnabled else {
-            throw Abort(
-                .internalServerError,
-                reason: "Production gateway requires IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false so active-conversation route failures cannot fall back to full unsplit large-group realtime fanout."
-            )
-        }
     }
 
     static func validateCommandOwnerRoutingConfiguration(_ app: Application, requiresLocalNodeID: Bool) throws {
@@ -294,16 +255,6 @@ enum IMProductionRuntimeValidationSupport {
                 reason: "\(role.rawValue) requires \(key) in production."
             )
         }
-    }
-
-    static func productionTransitionalReadModelsAllowed(_ app: Application) -> Bool {
-        guard app.environment == .production, app.imRuntimeRole == .ops else {
-            return false
-        }
-        let configuredValue = Environment.get("IM_ALLOW_TRANSITIONAL_READ_MODELS")?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return configuredValue == "1" || configuredValue == "true" || configuredValue == "yes"
     }
 
     static func validateSummaryReadModelReadConfiguration(_ app: Application) throws {
@@ -585,7 +536,7 @@ enum IMProductionRuntimeValidationSupport {
         guard app.streamConsumerConfiguration.enabledGroups.count == 1 || app.streamConsumerConfiguration.preservesGroupedDeploymentsInProduction else {
             throw Abort(
                 .internalServerError,
-                reason: "Production stream-consumer deployments must run exactly one IM_STREAM_CONSUMER_GROUPS entry per process. Set IM_STREAM_CONSUMER_GROUPS to a single group or explicitly opt in with IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP=true for temporary transitions."
+                reason: "Production stream-consumer deployments must run exactly one IM_STREAM_CONSUMER_GROUPS entry per process. Set IM_STREAM_CONSUMER_GROUPS to a single group or explicitly opt in with IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP=true for grouped test/runtime processes."
             )
         }
     }
@@ -745,12 +696,6 @@ enum IMProductionRuntimeValidationSupport {
                     reason: "Production realtime-delivery-consumer requires IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED=false so large-group lightweight realtime hints cannot reintroduce per-message database reads on the hot path."
                 )
             }
-            guard !configuration.realtimeActiveConversationUnsplitFallbackEnabled else {
-                throw Abort(
-                    .internalServerError,
-                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false so route/split failures degrade to lightweight hints instead of full unsplit large-group realtime fanout."
-                )
-            }
             guard configuration.realtimeDeliveryAsyncRelayEnabled else {
                 throw Abort(
                     .internalServerError,
@@ -772,7 +717,7 @@ enum IMProductionRuntimeValidationSupport {
             guard configuration.realtimeMessageCreatedCoalesceWindowMilliseconds > 0 else {
                 throw Abort(
                     .internalServerError,
-                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS > 0 so hot large-group inactive hints are coalesced by conversation instead of relayed once per message."
+                    reason: "Production realtime-delivery-consumer requires IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS > 0 so hot large-group active compact hints are coalesced by conversation instead of relayed once per message."
                 )
             }
             guard configuration.realtimeActiveCompactHintCoalesceWindowMilliseconds > 0 else {
@@ -904,12 +849,6 @@ enum IMProductionRuntimeValidationSupport {
                     reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED=false so relay-after-record large-group hints cannot reintroduce per-message database reads on the hot path."
                 )
             }
-            guard !configuration.realtimeActiveConversationUnsplitFallbackEnabled else {
-                throw Abort(
-                    .internalServerError,
-                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false so route/split failures cannot fall back to full unsplit large-group realtime fanout."
-                )
-            }
             guard configuration.realtimeDeliveryAsyncRelayEnabled else {
                 throw Abort(
                     .internalServerError,
@@ -931,7 +870,7 @@ enum IMProductionRuntimeValidationSupport {
             guard configuration.realtimeMessageCreatedCoalesceWindowMilliseconds > 0 else {
                 throw Abort(
                     .internalServerError,
-                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS > 0 so hot large-group inactive hints are coalesced by conversation instead of relayed once per message."
+                    reason: "Production domain-delivery-consumer with IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD=true requires IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS > 0 so hot large-group active compact hints are coalesced by conversation instead of relayed once per message."
                 )
             }
             guard configuration.realtimeActiveCompactHintCoalesceWindowMilliseconds > 0 else {
@@ -957,34 +896,6 @@ enum IMProductionRuntimeValidationSupport {
             throw Abort(
                 .internalServerError,
                 reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED=true so realtime delivery is split between active chat viewers and coalesced inactive conversation hints."
-            )
-        }
-        guard fanoutConfiguration.activeConversationFullFanoutRecipientLimit > 0 else {
-            throw Abort(
-                .internalServerError,
-                reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT > 0 so active chat full-message fanout is bounded."
-            )
-        }
-        guard fanoutConfiguration.activeConversationFullFanoutPayloadByteBudget >= minimumActiveConversationFullFanoutPayloadByteBudget else {
-            throw Abort(
-                .internalServerError,
-                reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET >= \(minimumActiveConversationFullFanoutPayloadByteBudget) so large or rich message payloads reduce active full-message fanout and overflow users use lightweight timeline catch-up."
-            )
-        }
-        try validateActiveConversationFullFanoutLimitBound(
-            fanoutConfiguration,
-            context: "Production large-group message_created owner delivery skip"
-        )
-        guard fanoutConfiguration.usesCompactOnlyActiveConversationFanout else {
-            throw Abort(
-                .internalServerError,
-                reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE=compact-only so skipped owner-delivery groups do not rely on full realtime fanout for active viewers."
-            )
-        }
-        guard !fanoutConfiguration.relaysInactiveConversationHints else {
-            throw Abort(
-                .internalServerError,
-                reason: "Production large-group message_created owner delivery skip requires IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=pull-only so inactive online recipients rely on conversation changes/timeline catch-up instead of realtime hint fanout."
             )
         }
         guard configuration.realtimeActiveConversationRouteCacheTTLMilliseconds > 0 else {
@@ -1040,33 +951,10 @@ enum IMProductionRuntimeValidationSupport {
         }
     }
 
-    private static func validateActiveConversationFullFanoutLimitBound(
-        _ fanoutConfiguration: IMGatewayLocalFanoutConfiguration,
-        context: String
-    ) throws {
-        let threshold = fanoutConfiguration.activeConversationFanoutRecipientThreshold
-        let limit = fanoutConfiguration.activeConversationFullFanoutRecipientLimit
-        guard threshold > 0,
-              limit <= threshold,
-              limit <= maximumActiveConversationFullFanoutLimit
-        else {
-            throw Abort(
-                .internalServerError,
-                reason: "\(context) requires IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT <= IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD and <= \(maximumActiveConversationFullFanoutLimit) so active full-message fanout remains bounded when large-group protection starts."
-            )
-        }
-    }
-
     private static func validateActiveCompactHintMessageLite(
         _ configuration: IMStreamConsumerConfiguration,
         context: String
     ) throws {
-        guard configuration.realtimeActiveCompactHintBody == .conversationActivity else {
-            throw Abort(
-                .internalServerError,
-                reason: "\(context) requires IM_REALTIME_ACTIVE_COMPACT_HINT_BODY=conversation-activity so hot active-room viewers receive a lightweight message hint instead of a bare timeline gap signal."
-            )
-        }
         guard configuration.realtimeActiveCompactHintPreviewMaxCharacters > 0 else {
             throw Abort(
                 .internalServerError,

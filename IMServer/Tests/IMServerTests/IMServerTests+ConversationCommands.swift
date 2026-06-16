@@ -302,8 +302,8 @@ extension IMServerTests {
         }
     }
 
-    @Test("AI stream startup repair does not backfill historical missing stream indexes")
-    func aiMessageStreamStartupRepairDoesNotBackfillHistoricalMissingStreamIndexes() async throws {
+    @Test("AI stream startup repair does not create missing stream indexes")
+    func aiMessageStreamStartupRepairDoesNotCreateMissingStreamIndexes() async throws {
         try await withApp(configure: configure) { app in
             let accessToken = try await loginAccessToken(using: app)
             let demoUser = try await user(email: "demo@example.com", on: app)
@@ -334,7 +334,7 @@ extension IMServerTests {
                 partialText: "partial missing-index",
                 updatedAt: Date()
             )
-            let historicalMessage = try ConversationMessage(
+            let messageWithoutIndex = try ConversationMessage(
                 id: messageID,
                 conversationID: conversationID,
                 senderUserID: userID,
@@ -343,7 +343,7 @@ extension IMServerTests {
                 content: .richText(.plain("partial missing-index")),
                 derivedState: MessageDerivedState(streamState: streamState)
             )
-            try await historicalMessage.create(on: app.db)
+            try await messageWithoutIndex.create(on: app.db)
             #expect(try await AIMessageStreamIndex.find(streamID, on: app.db) == nil)
 
             let repaired = try await IMAIStreamRepairService(app: app).repairStaleStreamingMessages()
@@ -352,8 +352,8 @@ extension IMServerTests {
         }
     }
 
-    @Test("AI stream state store audits missing historical index and repairs runtime index state")
-    func aiMessageStreamStateStoreAuditsMissingHistoricalIndexAndRepairsRuntimeIndexState() async throws {
+    @Test("AI stream state store audits missing index and repairs runtime index state")
+    func aiMessageStreamStateStoreAuditsMissingIndexAndRepairsRuntimeIndexState() async throws {
         try await withApp(configure: configure) { app in
             let demoUser = try await user(email: "demo@example.com", on: app)
             let peerUser = try await makeUser(email: "ai-stream-audit-peer@example.com", on: app)

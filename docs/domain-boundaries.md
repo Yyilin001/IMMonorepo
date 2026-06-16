@@ -38,11 +38,11 @@ domains in the PR checklist.
 
 ## AI Stream Boundary
 
-- `AIMessageStreamWriteStore` is the only component allowed to dual-write message
+- `AIMessageStreamWriteStore` is the only component allowed to atomically update message
   `derivedState`/content and `im_ai_message_streams` during start, snapshot
   update, terminal finalize, and repair transactions.
-- `AIMessageStreamRepairStore` may repair legacy or stale rows through the same
-  state-store boundary.
+- `AIMessageStreamRepairStore` may repair stale rows through the same state-store
+  boundary.
 - `IMMessageStreamingService`, providers, content safety, rate limiting, cost
   ledger, model routing, and fanout code must call the state facade. They must
   not hold database write dependencies for message/index state.

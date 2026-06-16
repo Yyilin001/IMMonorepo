@@ -623,7 +623,7 @@ MESSAGE_METRICS_GATE_MODE=fail \
 
 Message profile parameters:
 
-- `MESSAGE_PROFILE=per-connection` preserves the legacy behavior: each
+- `MESSAGE_PROFILE=per-connection` makes each
   connection sends `MESSAGES` messages and expects its own ack/canonical event.
 - `MESSAGE_PROFILE=pair-delivery` pairs sender `i` with receiver
   `(i + MESSAGE_RECEIVER_OFFSET) % connections` and records delivery latency when
@@ -637,7 +637,7 @@ Message profile parameters:
   the production defaults. A formal message-send run must not perform JIT HTTP
   login.
 - `MESSAGE_METRICS_GATE_MODE=fail` is the production default. It fails a step on
-  active fanout fallback, gateway relay failures, timeline/since misses,
+  active fanout route drops, gateway relay failures, timeline/since misses,
   visibility scan-limit hits, slow timeline reads, owner batch write stalls, or
   projection lag beyond the configured gate thresholds.
 - `MESSAGE_SEND_LADDER_DRY_RUN=true` prints the delegated
@@ -735,7 +735,7 @@ Message send acceptance:
   snapshot after each ladder step. Defaults are intentionally strict for
   correctness counters: client catch-up failures/deferred,
   timeline/since distributed invalidation errors, stream failed events, TCP
-  write backpressure/drops, active-conversation dropped fallback counters,
+  write backpressure/drops, active-conversation route-drop counters,
   realtime async relay dropped dispatch/recipient counters, gateway HTTP relay
   skipped recipients/request failures/binary fallbacks/inbound failures, and
   `im_timeline_since_target_sequence_strong_misses_total` /
@@ -769,11 +769,8 @@ Message send acceptance:
   `IM_GATE_TIMELINE_INVALIDATION_ERRORS_MAX`,
   `IM_GATE_STREAM_FAILED_EVENTS_MAX`,
   `IM_GATE_TCP_DROPPED_BACKPRESSURE_MAX`, `IM_GATE_TCP_BACKPRESSURE_MAX`,
-  `IM_GATE_ACTIVE_FANOUT_UNSPLIT_FALLBACKS_MAX`,
-  `IM_GATE_ACTIVE_FANOUT_HINT_FALLBACK_RECIPIENTS_MAX`,
-  `IM_GATE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX`,
-  `IM_GATE_REMOTE_ACTIVE_FANOUT_FALLBACKS_MAX`,
-  `IM_GATE_REMOTE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX`,
+  `IM_GATE_ACTIVE_FANOUT_ROUTE_SPLIT_DROPS_MAX`,
+  `IM_GATE_REMOTE_ACTIVE_FANOUT_ROUTE_SPLIT_DROPS_MAX`,
   `IM_GATE_REALTIME_ASYNC_RELAY_DROPPED_DISPATCHES_MAX`,
   `IM_GATE_REALTIME_ASYNC_RELAY_DROPPED_RECIPIENT_DELIVERIES_MAX`,
   `IM_GATE_GATEWAY_HTTP_RELAY_SKIPPED_RECIPIENTS_MAX`,
@@ -809,11 +806,10 @@ Message fanout interpretation:
   conversation changes and `timeline/since` catch-up instead of realtime fanout.
 - `im_realtime_active_conversation_fanout_downgraded_active_recipients_total`
   is the number of active conversation viewers downgraded from full live message
-  fanout by the full-fanout limit, payload budget, or gateway write
-  backpressure protection.
+  fanout to compact active realtime hints.
 - `im_realtime_active_conversation_fanout_compact_active_recipients_total`
   is the subset of downgraded active viewers that received a lightweight
-  `timeline_gap_hint` instead of the full `message_created` payload.
+  `conversation_activity_hint` instead of the full `message_created` payload.
   These viewers are actively in the conversation but must use `timeline/since`
   to fetch the message body.
 - `im_domain_relay_after_record_pre_split_compact_active_recipients_total`
@@ -833,7 +829,7 @@ Message fanout interpretation:
   freshness.
 - `im_realtime_inactive_conversation_hint_suppressed_recipients_total` shows
   how many pending inactive hints were replaced before flush when relay mode is
-  intentionally enabled for comparison or rollback.
+  explicitly enabled for a local experiment.
 - If active recipients dominate and TCP write latency/backpressure rises, the
   bottleneck is gateway live fanout or slow clients.
 - If downgraded active recipients grow while backpressure downgrades stay flat,
@@ -936,12 +932,9 @@ Realtime relay tuning:
 - `IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_PREVIEW_MAX_CHARS` caps the preview
   text used in inactive `conversation_activity_hint` payloads; the default is
   `120`.
-- `IM_REALTIME_ACTIVE_COMPACT_HINT_BODY=conversation-activity` is required in
-  production so active chat viewers can render a new hot-room message from the
-  realtime hint while still reconciling through `timeline/since`.
-  `IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS` must be `1...120`;
-  `timeline-gap` remains a rollback compatibility mode, not the production
-  posture.
+- `IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS` must be `1...120` so
+  active chat viewers can render a new hot-room message from the realtime hint
+  while still reconciling through `timeline/since`.
 - `IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED=false` is the production
   setting for hot large-group realtime. New `message_created` events must carry
   an embedded preview, so the realtime consumer can build inactive conversation
@@ -950,25 +943,18 @@ Realtime relay tuning:
   `im_domain_event_message_created_preview_message_lookup_total`, and
   `im_domain_event_message_created_preview_missing_total`; production hot-group
   tests should show embedded previews growing, message lookups staying flat, and
-  missing previews at zero except during legacy-event replay.
-- `IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false` is the
-  production setting for hot large-group realtime. When active-conversation
-  route lookup or pre-split fanout fails, the system drops the best-effort
-  realtime fanout instead of falling back to full unsplit group fanout or
-  converting active-chat delivery into inactive `conversation_activity_hint`
-  semantics. Track
-  `im_realtime_active_conversation_fanout_unsplit_fallbacks_total`,
-  `im_realtime_active_conversation_fanout_hint_fallback_recipients_total`,
-  `im_realtime_active_conversation_fanout_dropped_fallbacks_total`,
-  `im_realtime_active_conversation_fanout_dropped_fallback_recipients_total`, and
-  `im_realtime_remote_active_conversation_fanout_dropped_fallbacks_total` plus
-  `im_realtime_remote_active_conversation_fanout_dropped_fallback_recipients_total`.
-  In production, hint fallback recipients must stay at `0`; non-zero values mean
-  an old rollback path is running and large-group active-chat delivery semantics
-  are no longer clean.
+  missing previews at zero.
+- When active-conversation route lookup or pre-split fanout fails, the system
+  drops the best-effort realtime fanout. It does not fall back to full unsplit
+  group fanout and does not convert active-chat delivery into inactive
+  `conversation_activity_hint` semantics. Track
+  `im_realtime_active_conversation_fanout_route_split_drops_total`,
+  `im_realtime_active_conversation_fanout_route_split_drop_recipients_total`,
+  `im_realtime_remote_active_conversation_fanout_route_split_drops_total`, and
+  `im_realtime_remote_active_conversation_fanout_route_split_drop_recipients_total`.
 - `IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS` coalesces large
-  `message_created` inactive-list hints by conversation for rollback modes and
-  non-`pull-only` deployments. Production active chat viewers should use a short
+  `message_created` inactive-list hints by conversation when relay mode is
+  explicitly enabled. Production active chat viewers should use a short
   active compact window, for example
   `IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS=100`, so hot rooms collapse
   repeated compact hints by recipient while keeping visible-message catch-up
@@ -992,7 +978,7 @@ Realtime relay tuning:
   `500` for production gateway tests.
 - `IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT` caps how many active
   viewers of one conversation receive full live `message_created` fanout from a
-  gateway split. The default `0` is only for local compatibility checks.
+  gateway split. The default `0` is only for local smoke checks.
   Production validation requires a value above `0`, less than or equal to
   `IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD`, and no higher
   than the hard cap `128`. For production hot-room tests, start with `128`;
@@ -1027,7 +1013,7 @@ Realtime relay tuning:
 - `IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=pull-only` is the production
   setting. It disables realtime fanout to inactive online users for hot groups;
   clients use conversation changes and `timeline/since` catch-up for list and
-  message freshness. Keep `relay` only for local A/B comparison or rollback.
+  message freshness. Keep `relay` only for local A/B experiments.
 - `IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS` only matters when
   `IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE=relay`. Production `pull-only`
   deployments should not tune this to improve hot-group list freshness.
@@ -1230,11 +1216,11 @@ Realtime relay tuning:
   owner-delivery validation.
 - `IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD`
   is the recipient count where `timeline-pull` starts. The iOS client treats
-  active `timeline_gap_hint` events for the currently opened conversation as a
-  `timeline/since` catch-up trigger, so active viewers can recover the real
+  active `conversation_activity_hint` events for the currently opened conversation
+  as a `timeline/since` catch-up trigger, so active viewers can recover the real
   message body even when they receive a lightweight hint instead of an owner
-  cursor event. Inactive `conversation_activity_hint` remains a conversation-list
-  summary hint. The server timeline reader must scan past hidden or cleared
+  cursor event. Inactive users use conversation changes and `timeline/since`
+  instead of realtime message fanout. The server timeline reader must scan past hidden or cleared
   candidate rows before deciding there are no visible items; otherwise large-group
   hint catch-up can stop on an empty filtered page. Start with `500`.
 - `IM_TIMELINE_READ_VISIBILITY_SCAN_MAX_ROWS` and
@@ -1413,9 +1399,8 @@ On a single Mac load generator, observed signs of generator saturation are
 CPU and memory remain low. Treat that as a load-generator limit and split the run
 across multiple machines; do not treat it as the IM server's online-user limit.
 `PROTOCOL_VERSION` defaults to the value in
-`Protocol/im_realtime/v1/protocol_version.txt`; override it only for an explicit
-backward-compatibility test. Run it from a load generator, not from the IMServer
-host.
+`Protocol/im_realtime/v1/protocol_version.txt`. Override it only for a protocol
+development smoke test. Run it from a load generator, not from the IMServer host.
 
 ## Go/No-Go
 

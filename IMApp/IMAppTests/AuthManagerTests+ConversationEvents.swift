@@ -553,11 +553,11 @@ extension AuthManagerTests {
         let secondHarness = IMConnectionTestHarness()
         let requestCounter = IMRequestCounter()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
-        let historicalMessageID = UUID(uuidString: "11111111-1111-2222-3333-aaaaaaaaaaaa")!
+        let previousMessageID = UUID(uuidString: "11111111-1111-2222-3333-aaaaaaaaaaaa")!
         let recalledGapMessageID = UUID(uuidString: "22222222-1111-2222-3333-aaaaaaaaaaaa")!
         let initialMessages = [
             IMConversationMessageResponseBody(
-                id: historicalMessageID,
+                id: previousMessageID,
                 conversationID: conversationID,
                 senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                 clientMessageID: nil,
@@ -575,7 +575,7 @@ extension AuthManagerTests {
                 memberCount: 1,
                 memberUserIDs: [Self.user.id],
                 lastMessage: IMMessagePreviewResponseBody(
-                    id: historicalMessageID,
+                    id: previousMessageID,
                     senderUserID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
                     serverSequence: 1,
                     kind: "rich_text",

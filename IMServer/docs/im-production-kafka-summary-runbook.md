@@ -13,7 +13,7 @@ The rollout keeps the client protocol unchanged and uses:
 
 - Kafka with `SASL/TLS + SCRAM-SHA-512`
 - summary read models sharded by `ownerUserID`
-- `backfill + sharded query cutover`
+- sharded summary rebuild and verification
 
 ## 1. Role Responsibilities
 
@@ -170,15 +170,7 @@ IMServer serve --role ops --rebuild-conversation-summaries
 IMServer serve --role ops --verify-conversation-summaries
 ```
 
-6. only if you are finishing a pre-existing migration window, temporarily enable:
-
-```env
-IM_ALLOW_TRANSITIONAL_READ_MODELS=true
-IM_SUMMARY_PROJECTION_WRITE_MODE=dual-write
-IM_SUMMARY_QUERY_READ_SOURCE=legacy
-```
-
-7. once verification passes, remove the transitional override and return to sharded-only mode
+6. keep sharded-only mode enabled. This beta deployment uses only the current sharded read model.
 
 ### Stage D: Optional OpenSearch Cutover
 
@@ -201,15 +193,15 @@ Do this last.
 
 ## 5. Cutover Safety Rules
 
-- never hard-cut summary reads without backfill and verify
+- never enable summary reads before rebuilding and verifying the current sharded read model
 - never enable production `combined`
 - do not run `projection-worker` in production; it is a development/testing fallback only
 - do not let `command-api` use local gateway relay in production
 - do not let `gateway` proxy IM mutate traffic without `IM_COMMAND_API_INTERNAL_BASE_URL`
-- do not let production `query-api` use `legacy` summary reads
-- do not let production `stream-consumer` use `legacy` or `dual-write` summary projection modes unless `ops` is explicitly running a temporary migration override
+- do not let production `query-api` use non-sharded summary reads
+- do not let production `stream-consumer` use non-sharded summary projection writes
 - keep production `IM_EVENT_STREAM_DRIVER=kafka`; OpenSearch is optional
-- do not let production `stream-consumer` run multiple consumer groups in one process unless `IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP=true` is set for a temporary transition
+- do not let production `stream-consumer` run multiple consumer groups in one process unless `IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP=true` is set for an explicitly grouped runtime process
 - do not let any production role bypass `IM_CONVERSATION_SHARD_IDS` once conversation router topology is enabled
 
 ## 6. Production Verification Checklist

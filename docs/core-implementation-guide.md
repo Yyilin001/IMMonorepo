@@ -51,10 +51,9 @@ flowchart LR
   lease reservation, provider runner startup, and event publishing.
 - `AIMessageStreamStateStore` is the only facade for reading or mutating stream
   state.
-- `AIMessageStreamWriteStore` is the only component that dual-writes message
+- `AIMessageStreamWriteStore` is the only component that atomically updates message
   `derivedState`/content and `im_ai_message_streams`.
-- `AIMessageStreamRepairStore` handles legacy backfill, stale repair, and
-  consistency audit.
+- `AIMessageStreamRepairStore` handles stale repair and consistency audit.
 - Providers, content safety, rate limiting, model routing, and cost ledger code
   must never write message/index state directly.
 

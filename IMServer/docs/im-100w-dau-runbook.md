@@ -90,12 +90,12 @@ Go only when:
 No-Go if:
 
 - Any role runs outside its production boundary.
-- `query-api` uses legacy summary reads.
-- Any production stream consumer runs multiple groups without a temporary explicit override.
+- `query-api` uses non-sharded summary reads.
+- Any production stream consumer runs multiple groups without an explicit grouped-process override.
 - `messages/since` cannot repair realtime gaps.
 - Targeted `timeline/since` catch-up has non-zero strong misses/errors, or high
-  fallback without corresponding target-sequence singleflight joins during hot
-  large-group compact-hint validation.
+  source read amplification without corresponding target-sequence singleflight joins
+  during hot large-group compact-hint validation.
 - Large groups/channels or media traffic are included in the claim without separate capacity validation.
 
 ## Load Test Entrypoints

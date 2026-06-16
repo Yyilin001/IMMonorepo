@@ -7,11 +7,10 @@ actor RealtimeDeliveryAsyncDispatcher {
     enum CoalescingScope: Hashable, Sendable {
         case defaultScope
         case activeCompactHint
-        case inactiveHint
 
         var keepsLatestPayloadPerRecipient: Bool {
             switch self {
-            case .activeCompactHint, .inactiveHint:
+            case .activeCompactHint:
                 return true
             case .defaultScope:
                 return false

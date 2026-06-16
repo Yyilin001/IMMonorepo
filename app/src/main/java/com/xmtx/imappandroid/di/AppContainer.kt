@@ -12,7 +12,6 @@ import com.xmtx.imclientkit.features.im.IMRuntimeController
 import com.xmtx.imclientkit.networking.NetworkEnvironment
 import com.xmtx.imclientkit.networking.imtcp.IMTCPClientConfiguration
 import com.xmtx.imclientkit.persistence.DataStoreDeviceIdentityStore
-import com.xmtx.imclientkit.persistence.DataStoreTokenStore
 import com.xmtx.imclientkit.persistence.DataStoreUserSessionCache
 import com.xmtx.imclientkit.persistence.EncryptedTokenStore
 import com.xmtx.imclientkit.persistence.imcache.IMCacheDatabase
@@ -26,8 +25,7 @@ class AppContainer(context: Context) {
     private val deviceID = runBlocking { deviceIdentityStore.currentDeviceID() }
 
     val network = networkEnvironmentFromBuildConfig()
-    private val legacyTokenStore = DataStoreTokenStore(appContext)
-    private val tokenStore = EncryptedTokenStore(appContext, legacyStore = legacyTokenStore)
+    private val tokenStore = EncryptedTokenStore(appContext)
 
     private val sessionClient = SessionClient(
         network = network,

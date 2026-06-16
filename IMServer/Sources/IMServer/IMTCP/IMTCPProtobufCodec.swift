@@ -724,8 +724,6 @@ private extension IMTCPChatDomainEventPayload {
             }
         case .conversationActivityHint(let hint):
             value.conversationActivityHint = hint.protobuf
-        case .timelineGapHint(let hint):
-            value.timelineGapHint = hint.protobuf
         case .conversationRemovedForSelf:
             value.conversationRemovedForSelf = IMRTConversationRemovedForSelfEvent()
         case .conversationVisibilityChanged(let visibilityAction, let messageIDs):
@@ -879,8 +877,6 @@ private extension IMRTChatDomainEvent {
             return .conversationChanged
         case .conversationActivityHint(let event):
             return .conversationActivityHint(try event.domainValue())
-        case .timelineGapHint(let event):
-            return .timelineGapHint(try event.domainValue())
         case .conversationRemovedForSelf:
             return .conversationRemovedForSelf
         case .conversationVisibilityChanged(let event):
@@ -921,7 +917,6 @@ private extension IMTCPChatDomainEventBody {
              (.conversationChanged, .conversationUpdated),
              (.conversationChanged, .conversationSettingsChanged),
              (.conversationActivityHint, .conversationActivityHint),
-             (.timelineGapHint, .timelineGapHint),
              (.conversationRemovedForSelf, .conversationRemovedForSelf),
              (.conversationVisibilityChanged, .conversationVisibilityChanged),
              (.memberChanged, .memberAdded),
@@ -982,39 +977,6 @@ private extension IMRTConversationActivityHintEvent {
             timelineSequence: timelineSequence,
             previewText: previewText,
             messageCreatedAt: hasMessageCreatedAtMs ? Date(millisecondsSince1970: messageCreatedAtMs) : nil,
-            updatedAt: Date(millisecondsSince1970: updatedAtMs)
-        )
-    }
-}
-
-private extension IMTimelineGapHint {
-    var protobuf: IMRTTimelineGapHintEvent {
-        var value = IMRTTimelineGapHintEvent()
-        value.messageID = messageID.uuidString
-        value.senderUserID = senderUserID.uuidString
-        value.serverSequence = serverSequence
-        value.timelineSequence = timelineSequence
-        value.updatedAtMs = updatedAt.millisecondsSince1970
-        return value
-    }
-}
-
-private extension IMRTTimelineGapHintEvent {
-    func domainValue() throws -> IMTimelineGapHint {
-        guard let messageID = UUID(uuidString: messageID),
-              let senderUserID = UUID(uuidString: senderUserID),
-              hasServerSequence,
-              serverSequence > 0,
-              hasTimelineSequence,
-              timelineSequence > 0
-        else {
-            throw IMTCPProtocolError.invalidEnvelope
-        }
-        return IMTimelineGapHint(
-            messageID: messageID,
-            senderUserID: senderUserID,
-            serverSequence: serverSequence,
-            timelineSequence: timelineSequence,
             updatedAt: Date(millisecondsSince1970: updatedAtMs)
         )
     }

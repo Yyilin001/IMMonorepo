@@ -456,7 +456,6 @@ require_matching_value() {
 require_active_compact_hint_configuration() {
   local file="$1"
   local label="$2"
-  require_equals "${file}" "IM_REALTIME_ACTIVE_COMPACT_HINT_BODY" "conversation-activity" "${label}" || true
   require_int_at_least "${file}" "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS" 1 "${label}" || true
   require_int_at_most "${file}" "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS" "${MAX_ACTIVE_COMPACT_HINT_PREVIEW_CHARS}" "${label}" || true
 }
@@ -664,7 +663,6 @@ validate_gateway() {
   require_tcp_tls_termination_for_public_bind "${GATEWAY_ENV}" "${label}" || true
   require_true "${GATEWAY_ENV}" "IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE" "${label}" || true
   require_true "${GATEWAY_ENV}" "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED" "${label}" || true
-  require_equals "${GATEWAY_ENV}" "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED" "false" "${label}" || true
   require_int_at_least "${GATEWAY_ENV}" "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT" 1 "${label}" || true
   require_int_at_most "${GATEWAY_ENV}" "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT" "${MAX_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT}" "${label}" || true
   require_int_key_at_most "${GATEWAY_ENV}" "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT" "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD" "${label}" || true
@@ -766,7 +764,7 @@ validate_stream_consumer_file() {
   allow_multi_group="$(env_value "${file}" "IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP" || true)"
   group_count="$(csv_item_count "${groups}")"
   if (( group_count != 1 )) && ! is_true "${allow_multi_group}"; then
-    record_failure "${label} requires exactly one IM_STREAM_CONSUMER_GROUPS entry per env file, or IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP=true for a temporary transition"
+    record_failure "${label} requires exactly one IM_STREAM_CONSUMER_GROUPS entry per env file, or IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP=true for explicitly grouped test/runtime processes"
   fi
 
   require_true "${file}" "IM_STREAM_CONSUMER_REQUIRE_MESSAGE_CREATED_RECIPIENT_SNAPSHOT" "${label}" || true
@@ -826,7 +824,6 @@ validate_stream_consumer_file() {
       require_int_at_least "${file}" "IM_REALTIME_DELIVERY_ASYNC_MAX_IN_FLIGHT" 2 "${label}" || true
       require_int_at_least "${file}" "IM_REALTIME_DELIVERY_ASYNC_MAX_QUEUED" 1 "${label}" || true
       require_equals "${file}" "IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED" "false" "${label}" || true
-      require_equals "${file}" "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED" "false" "${label}" || true
       require_int_at_least "${file}" "IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS" 1 "${label}" || true
       require_int_at_least "${file}" "IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_MAX_ENTRIES" 1 "${label}" || true
       require_int_at_least "${file}" "IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS" 1 "${label}" || true

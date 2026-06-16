@@ -142,7 +142,6 @@ enum IMTCPChatDomainEventType: String, Codable, Sendable {
     case conversationSettingsChanged = "conversation_settings_changed"
     case conversationVisibilityChanged = "conversation_visibility_changed"
     case conversationActivityHint = "conversation_activity_hint"
-    case timelineGapHint = "timeline_gap_hint"
     case memberAdded = "member_added"
     case memberRemoved = "member_removed"
     case memberRoleUpdated = "member_role_updated"
@@ -161,14 +160,6 @@ struct IMConversationActivityHint: Codable, Equatable, Sendable {
     let updatedAt: Date
 }
 
-struct IMTimelineGapHint: Codable, Equatable, Sendable {
-    let messageID: UUID
-    let senderUserID: UUID
-    let serverSequence: UInt64
-    let timelineSequence: UInt64
-    let updatedAt: Date
-}
-
 enum IMTCPChatDomainEventBody: Sendable {
     case messageCreated(message: IMMessageResponse, clientMessageID: String?)
     case messageEdited(messageID: UUID, body: IMRichTextContent, editedAt: Date, message: IMMessageResponse?)
@@ -178,7 +169,6 @@ enum IMTCPChatDomainEventBody: Sendable {
     case messageStream(IMTCPMessageStreamPayload, message: IMMessageResponse?)
     case conversationChanged
     case conversationActivityHint(IMConversationActivityHint)
-    case timelineGapHint(IMTimelineGapHint)
     case conversationRemovedForSelf
     case conversationVisibilityChanged(visibilityAction: ConversationVisibilityAction, messageIDs: [UUID])
     case memberChanged(memberUserIDs: [UUID])

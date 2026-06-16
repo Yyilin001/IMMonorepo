@@ -449,89 +449,38 @@ run_should_fail "fail gate rejects timeline visibility scan limit hits" "im_time
   evaluate_im_metrics_gate \"\${before}\" \"\${after}\" 'step scan-limit'
 "
 
-run_should_fail "fail gate rejects active fanout dropped fallback" "im_realtime_active_conversation_fanout_dropped_fallbacks_total delta=1 exceeds max=0" bash -c "
+run_should_fail "fail gate rejects active fanout route split drop" "im_realtime_active_conversation_fanout_route_split_drops_total delta=1 exceeds max=0" bash -c "
   set -Eeuo pipefail
   TCP_CAPACITY_LADDER_TEST_SOURCE_ONLY=true source '${BASH_SOURCE[0]}'
   source_ladder_functions
-  before='${TMP_DIR}/active-dropped-before.prom'
-  after='${TMP_DIR}/active-dropped-after.prom'
-  printf '%s\n' 'im_realtime_active_conversation_fanout_dropped_fallbacks_total 0' >\"\${before}\"
-  printf '%s\n' 'im_realtime_active_conversation_fanout_dropped_fallbacks_total 1' >\"\${after}\"
+  before='${TMP_DIR}/active-route-drop-before.prom'
+  after='${TMP_DIR}/active-route-drop-after.prom'
+  printf '%s\n' 'im_realtime_active_conversation_fanout_route_split_drops_total 0' >\"\${before}\"
+  printf '%s\n' 'im_realtime_active_conversation_fanout_route_split_drops_total 1' >\"\${after}\"
   IM_METRICS_GATE_MODE=fail
   COLLECT_REMOTE_METRICS=true
   COLLECT_IM_METRICS=true
   COLLECT_IM_METRICS_DELTA=true
   SSH_HOST=metrics-host
-  IM_GATE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX=0
-  evaluate_im_metrics_gate \"\${before}\" \"\${after}\" 'step active-dropped'
+  IM_GATE_ACTIVE_FANOUT_ROUTE_SPLIT_DROPS_MAX=0
+  evaluate_im_metrics_gate \"\${before}\" \"\${after}\" 'step active-route-drop'
 "
 
-run_should_fail "fail gate rejects active fanout unsplit fallback" "im_realtime_active_conversation_fanout_unsplit_fallbacks_total delta=1 exceeds max=0" bash -c "
+run_should_fail "fail gate rejects remote active fanout route split drop" "im_realtime_remote_active_conversation_fanout_route_split_drops_total delta=1 exceeds max=0" bash -c "
   set -Eeuo pipefail
   TCP_CAPACITY_LADDER_TEST_SOURCE_ONLY=true source '${BASH_SOURCE[0]}'
   source_ladder_functions
-  before='${TMP_DIR}/active-unsplit-before.prom'
-  after='${TMP_DIR}/active-unsplit-after.prom'
-  printf '%s\n' 'im_realtime_active_conversation_fanout_unsplit_fallbacks_total 0' >\"\${before}\"
-  printf '%s\n' 'im_realtime_active_conversation_fanout_unsplit_fallbacks_total 1' >\"\${after}\"
+  before='${TMP_DIR}/remote-route-drop-before.prom'
+  after='${TMP_DIR}/remote-route-drop-after.prom'
+  printf '%s\n' 'im_realtime_remote_active_conversation_fanout_route_split_drops_total 0' >\"\${before}\"
+  printf '%s\n' 'im_realtime_remote_active_conversation_fanout_route_split_drops_total 1' >\"\${after}\"
   IM_METRICS_GATE_MODE=fail
   COLLECT_REMOTE_METRICS=true
   COLLECT_IM_METRICS=true
   COLLECT_IM_METRICS_DELTA=true
   SSH_HOST=metrics-host
-  IM_GATE_ACTIVE_FANOUT_UNSPLIT_FALLBACKS_MAX=0
-  evaluate_im_metrics_gate \"\${before}\" \"\${after}\" 'step active-unsplit'
-"
-
-run_should_fail "fail gate rejects active fanout hint fallback recipients" "im_realtime_active_conversation_fanout_hint_fallback_recipients_total delta=1 exceeds max=0" bash -c "
-  set -Eeuo pipefail
-  TCP_CAPACITY_LADDER_TEST_SOURCE_ONLY=true source '${BASH_SOURCE[0]}'
-  source_ladder_functions
-  before='${TMP_DIR}/active-hint-fallback-before.prom'
-  after='${TMP_DIR}/active-hint-fallback-after.prom'
-  printf '%s\n' 'im_realtime_active_conversation_fanout_hint_fallback_recipients_total 0' >\"\${before}\"
-  printf '%s\n' 'im_realtime_active_conversation_fanout_hint_fallback_recipients_total 1' >\"\${after}\"
-  IM_METRICS_GATE_MODE=fail
-  COLLECT_REMOTE_METRICS=true
-  COLLECT_IM_METRICS=true
-  COLLECT_IM_METRICS_DELTA=true
-  SSH_HOST=metrics-host
-  IM_GATE_ACTIVE_FANOUT_HINT_FALLBACK_RECIPIENTS_MAX=0
-  evaluate_im_metrics_gate \"\${before}\" \"\${after}\" 'step active-hint-fallback'
-"
-
-run_should_fail "fail gate rejects remote active fanout fallback" "im_realtime_remote_active_conversation_fanout_fallbacks_total delta=1 exceeds max=0" bash -c "
-  set -Eeuo pipefail
-  TCP_CAPACITY_LADDER_TEST_SOURCE_ONLY=true source '${BASH_SOURCE[0]}'
-  source_ladder_functions
-  before='${TMP_DIR}/remote-fallback-before.prom'
-  after='${TMP_DIR}/remote-fallback-after.prom'
-  printf '%s\n' 'im_realtime_remote_active_conversation_fanout_fallbacks_total 0' >\"\${before}\"
-  printf '%s\n' 'im_realtime_remote_active_conversation_fanout_fallbacks_total 1' >\"\${after}\"
-  IM_METRICS_GATE_MODE=fail
-  COLLECT_REMOTE_METRICS=true
-  COLLECT_IM_METRICS=true
-  COLLECT_IM_METRICS_DELTA=true
-  SSH_HOST=metrics-host
-  IM_GATE_REMOTE_ACTIVE_FANOUT_FALLBACKS_MAX=0
-  evaluate_im_metrics_gate \"\${before}\" \"\${after}\" 'step remote-fallback'
-"
-
-run_should_fail "fail gate rejects remote active fanout dropped fallback" "im_realtime_remote_active_conversation_fanout_dropped_fallbacks_total delta=1 exceeds max=0" bash -c "
-  set -Eeuo pipefail
-  TCP_CAPACITY_LADDER_TEST_SOURCE_ONLY=true source '${BASH_SOURCE[0]}'
-  source_ladder_functions
-  before='${TMP_DIR}/remote-dropped-before.prom'
-  after='${TMP_DIR}/remote-dropped-after.prom'
-  printf '%s\n' 'im_realtime_remote_active_conversation_fanout_dropped_fallbacks_total 0' >\"\${before}\"
-  printf '%s\n' 'im_realtime_remote_active_conversation_fanout_dropped_fallbacks_total 1' >\"\${after}\"
-  IM_METRICS_GATE_MODE=fail
-  COLLECT_REMOTE_METRICS=true
-  COLLECT_IM_METRICS=true
-  COLLECT_IM_METRICS_DELTA=true
-  SSH_HOST=metrics-host
-  IM_GATE_REMOTE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX=0
-  evaluate_im_metrics_gate \"\${before}\" \"\${after}\" 'step remote-dropped'
+  IM_GATE_REMOTE_ACTIVE_FANOUT_ROUTE_SPLIT_DROPS_MAX=0
+  evaluate_im_metrics_gate \"\${before}\" \"\${after}\" 'step remote-route-drop'
 "
 
 run_should_fail "fail gate rejects realtime async relay dropped dispatch" "im_realtime_async_relay_dropped_dispatches_total delta=1 exceeds max=0" bash -c "

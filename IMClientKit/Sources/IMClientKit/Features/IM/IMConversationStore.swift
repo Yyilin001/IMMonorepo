@@ -1204,8 +1204,7 @@ public final class IMConversationStore {
         }
 
         switch payload.body {
-        case .conversationActivityHint,
-             .timelineGapHint:
+        case .conversationActivityHint:
             return false
         case .messageCreated(let message, _):
             return message.conversationID.uuidString != selectedConversationID
@@ -1237,11 +1236,6 @@ public final class IMConversationStore {
             return true
         }
 
-        if payload.eventType == .timelineGapHint,
-           case .timelineGapHint = payload.body {
-            return true
-        }
-
         if payload.eventType == .conversationUpdated,
            let conversation = payload.conversation,
            Self.isActivityOnlySummaryContent(conversation),
@@ -1267,11 +1261,6 @@ public final class IMConversationStore {
                 conversationID: payload.aggregateID.uuidString,
                 targetTimelineSequence: UInt64(hint.timelineSequence)
             )
-        case .timelineGapHint(let hint):
-            return (
-                conversationID: payload.aggregateID.uuidString,
-                targetTimelineSequence: UInt64(hint.timelineSequence)
-            )
         case .conversationChanged:
             return (
                 conversationID: payload.aggregateID.uuidString,
@@ -1289,9 +1278,6 @@ public final class IMConversationStore {
         guard isActivityOnlySummaryHint else {
             return true
         }
-        guard payload.eventType != .timelineGapHint else {
-            return false
-        }
         return !isEmptyPreviewConversationActivityHint(payload)
     }
 
@@ -1301,7 +1287,6 @@ public final class IMConversationStore {
         isActivityOnlySummaryHint: Bool
     ) {
         guard isActivityOnlySummaryHint,
-              payload.eventType != .timelineGapHint,
               !isEmptyPreviewConversationActivityHint(payload),
               payload.actorUserID != currentUserID
         else {
@@ -1317,7 +1302,6 @@ public final class IMConversationStore {
         isActivityOnlySummaryHint: Bool
     ) async {
         guard isActivityOnlySummaryHint,
-              payload.eventType != .timelineGapHint,
               !isEmptyPreviewConversationActivityHint(payload),
               payload.actorUserID != currentUserID
         else {
@@ -1468,7 +1452,6 @@ public final class IMConversationStore {
             return .stream(conversationID: stream.conversationID, messageID: stream.messageID)
         case .conversationChanged,
              .conversationActivityHint,
-             .timelineGapHint,
              .conversationRemovedForSelf,
              .conversationVisibilityChanged,
              .memberChanged:
@@ -1653,7 +1636,6 @@ public final class IMConversationStore {
             return stream.conversationID
         case .conversationChanged,
              .conversationActivityHint,
-             .timelineGapHint,
              .conversationRemovedForSelf,
              .conversationVisibilityChanged,
              .memberChanged:

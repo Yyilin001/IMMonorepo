@@ -377,11 +377,6 @@ struct IMStreamConsumerConfiguration: Sendable {
         case timelinePull = "timeline-pull"
     }
 
-    enum ActiveCompactHintBody: String, Sendable {
-        case timelineGap = "timeline-gap"
-        case conversationActivity = "conversation-activity"
-    }
-
     static let defaultGroups = [
         "summary-projection-consumer",
         "realtime-delivery-consumer",
@@ -415,11 +410,9 @@ struct IMStreamConsumerConfiguration: Sendable {
     let realtimeRemoteDispatchUserBatchSize: Int
     let realtimeRemoteDispatchMaxInFlight: Int
     let realtimeMessageCreatedLightweightRecipientThreshold: Int
-    let realtimeActiveCompactHintBody: ActiveCompactHintBody
     let realtimeMessageCreatedLightweightPreviewMaxCharacters: Int
     let realtimeActiveCompactHintPreviewMaxCharacters: Int
     let realtimeMessageCreatedPreviewLookupEnabled: Bool
-    let realtimeActiveConversationUnsplitFallbackEnabled: Bool
     let realtimeActiveConversationRouteCacheTTLMilliseconds: Int
     let realtimeActiveConversationRouteCacheMaxEntries: Int
     let realtimeMessageCreatedCoalesceWindowMilliseconds: Int
@@ -531,11 +524,6 @@ struct IMStreamConsumerConfiguration: Sendable {
                 0,
                 Environment.get("IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD").flatMap(Int.init(_:)) ?? 0
             ),
-            realtimeActiveCompactHintBody: Environment.get("IM_REALTIME_ACTIVE_COMPACT_HINT_BODY")
-                .flatMap {
-                    ActiveCompactHintBody(rawValue: $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
-                }
-                ?? .timelineGap,
             realtimeMessageCreatedLightweightPreviewMaxCharacters: max(
                 0,
                 Environment.get("IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_PREVIEW_MAX_CHARS").flatMap(Int.init(_:)) ?? 120
@@ -547,10 +535,6 @@ struct IMStreamConsumerConfiguration: Sendable {
             realtimeMessageCreatedPreviewLookupEnabled: parseBooleanEnvironment(
                 "IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED",
                 defaultValue: true
-            ),
-            realtimeActiveConversationUnsplitFallbackEnabled: parseBooleanEnvironment(
-                "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED",
-                defaultValue: false
             ),
             realtimeActiveConversationRouteCacheTTLMilliseconds: max(
                 0,

@@ -390,21 +390,6 @@ struct InternalMetricsController: RouteCollection {
             value: fanoutConfiguration.activeConversationFanoutRecipientThreshold,
             to: &lines
         )
-        appendGauge(
-            "im_realtime_active_conversation_fanout_config_full_fanout_limit",
-            value: fanoutConfiguration.activeConversationFullFanoutRecipientLimit,
-            to: &lines
-        )
-        appendGauge(
-            "im_realtime_active_conversation_fanout_config_full_fanout_payload_byte_budget",
-            value: fanoutConfiguration.activeConversationFullFanoutPayloadByteBudget,
-            to: &lines
-        )
-        appendGauge(
-            "im_realtime_inactive_conversation_hint_config_debounce_seconds",
-            value: Int(fanoutConfiguration.inactiveConversationHintDebounceSeconds),
-            to: &lines
-        )
         appendCounter("im_local_fanout_event_loop_jobs_total", value: routing.localFanoutEventLoopJobCount, to: &lines)
         appendCounter("im_local_fanout_encode_failures_total", value: routing.localFanoutEncodeFailureCount, to: &lines)
         appendCounter(
@@ -438,43 +423,13 @@ struct InternalMetricsController: RouteCollection {
             to: &lines
         )
         appendCounter(
-            "im_realtime_active_conversation_fanout_payload_budget_applied_total",
-            value: routing.realtimeActiveConversationFanoutPayloadBudgetAppliedCount,
+            "im_realtime_active_conversation_fanout_route_split_drops_total",
+            value: routing.realtimeActiveConversationFanoutRouteSplitDropCount,
             to: &lines
         )
         appendCounter(
-            "im_realtime_active_conversation_fanout_payload_budget_downgraded_active_recipients_total",
-            value: routing.realtimeActiveConversationFanoutPayloadBudgetDowngradedRecipientCount,
-            to: &lines
-        )
-        appendGauge(
-            "im_realtime_active_conversation_fanout_payload_budget_max_payload_bytes",
-            value: routing.realtimeActiveConversationFanoutPayloadBudgetMaxPayloadBytes,
-            to: &lines
-        )
-        appendGauge(
-            "im_realtime_active_conversation_fanout_payload_budget_max_effective_limit",
-            value: routing.realtimeActiveConversationFanoutPayloadBudgetMaxEffectiveLimit,
-            to: &lines
-        )
-        appendCounter(
-            "im_realtime_active_conversation_fanout_unsplit_fallbacks_total",
-            value: routing.realtimeActiveConversationFanoutUnsplitFallbackCount,
-            to: &lines
-        )
-        appendCounter(
-            "im_realtime_active_conversation_fanout_hint_fallback_recipients_total",
-            value: routing.realtimeActiveConversationFanoutHintFallbackRecipientCount,
-            to: &lines
-        )
-        appendCounter(
-            "im_realtime_active_conversation_fanout_dropped_fallbacks_total",
-            value: routing.realtimeActiveConversationFanoutDroppedFallbackCount,
-            to: &lines
-        )
-        appendCounter(
-            "im_realtime_active_conversation_fanout_dropped_fallback_recipients_total",
-            value: routing.realtimeActiveConversationFanoutDroppedFallbackRecipientCount,
+            "im_realtime_active_conversation_fanout_route_split_drop_recipients_total",
+            value: routing.realtimeActiveConversationFanoutRouteSplitDropRecipientCount,
             to: &lines
         )
         appendGauge(
@@ -553,18 +508,13 @@ struct InternalMetricsController: RouteCollection {
             to: &lines
         )
         appendCounter(
-            "im_realtime_remote_active_conversation_fanout_fallbacks_total",
-            value: routing.realtimeRemoteActiveConversationFanoutFallbackCount,
+            "im_realtime_remote_active_conversation_fanout_route_split_drops_total",
+            value: routing.realtimeRemoteActiveConversationFanoutRouteSplitDropCount,
             to: &lines
         )
         appendCounter(
-            "im_realtime_remote_active_conversation_fanout_dropped_fallbacks_total",
-            value: routing.realtimeRemoteActiveConversationFanoutDroppedFallbackCount,
-            to: &lines
-        )
-        appendCounter(
-            "im_realtime_remote_active_conversation_fanout_dropped_fallback_recipients_total",
-            value: routing.realtimeRemoteActiveConversationFanoutDroppedFallbackRecipientCount,
+            "im_realtime_remote_active_conversation_fanout_route_split_drop_recipients_total",
+            value: routing.realtimeRemoteActiveConversationFanoutRouteSplitDropRecipientCount,
             to: &lines
         )
         appendGauge(
@@ -648,8 +598,8 @@ struct InternalMetricsController: RouteCollection {
             to: &lines
         )
         appendCounter(
-            "im_domain_relay_after_record_pre_split_fallback_total",
-            value: routing.domainRelayAfterRecordPreSplitFallbackCount,
+            "im_domain_relay_after_record_pre_split_route_drops_total",
+            value: routing.domainRelayAfterRecordPreSplitRouteDropCount,
             to: &lines
         )
         appendCounter(

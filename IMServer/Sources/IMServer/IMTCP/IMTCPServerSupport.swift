@@ -60,68 +60,24 @@ struct IMTCPConfiguration: Sendable {
 }
 
 struct IMGatewayLocalFanoutConfiguration: Sendable {
-    enum ActiveConversationFullFanoutMode: String, Sendable {
-        case bounded
-        case compactOnly = "compact-only"
-    }
-
-    enum InactiveConversationHintMode: String, Sendable {
-        case relay
-        case pullOnly = "pull-only"
-    }
-
     let batchSize: Int
     let eventLoopYieldChunkCount: Int
     let activeConversationFanoutEnabled: Bool
     let activeConversationFanoutRecipientThreshold: Int
-    let activeConversationFullFanoutRecipientLimit: Int
-    let activeConversationFullFanoutPayloadByteBudget: Int
-    let activeConversationFullFanoutMode: ActiveConversationFullFanoutMode
-    let inactiveConversationHintMode: InactiveConversationHintMode
-    let inactiveConversationHintDebounceSeconds: TimeInterval
-    let inactiveConversationHintMaxPendingRecipients: Int
-
-    var usesCompactOnlyActiveConversationFanout: Bool {
-        activeConversationFullFanoutMode == .compactOnly
-    }
-
-    var relaysInactiveConversationHints: Bool {
-        inactiveConversationHintMode == .relay
-    }
 
     init(
         batchSize: Int,
         eventLoopYieldChunkCount: Int,
         activeConversationFanoutEnabled: Bool,
-        activeConversationFanoutRecipientThreshold: Int,
-        activeConversationFullFanoutRecipientLimit: Int,
-        activeConversationFullFanoutPayloadByteBudget: Int,
-        activeConversationFullFanoutMode: ActiveConversationFullFanoutMode = .bounded,
-        inactiveConversationHintMode: InactiveConversationHintMode = .relay,
-        inactiveConversationHintDebounceSeconds: TimeInterval,
-        inactiveConversationHintMaxPendingRecipients: Int
+        activeConversationFanoutRecipientThreshold: Int
     ) {
         self.batchSize = batchSize
         self.eventLoopYieldChunkCount = eventLoopYieldChunkCount
         self.activeConversationFanoutEnabled = activeConversationFanoutEnabled
         self.activeConversationFanoutRecipientThreshold = activeConversationFanoutRecipientThreshold
-        self.activeConversationFullFanoutRecipientLimit = activeConversationFullFanoutRecipientLimit
-        self.activeConversationFullFanoutPayloadByteBudget = activeConversationFullFanoutPayloadByteBudget
-        self.activeConversationFullFanoutMode = activeConversationFullFanoutMode
-        self.inactiveConversationHintMode = inactiveConversationHintMode
-        self.inactiveConversationHintDebounceSeconds = inactiveConversationHintDebounceSeconds
-        self.inactiveConversationHintMaxPendingRecipients = inactiveConversationHintMaxPendingRecipients
     }
 
     static func load() -> IMGatewayLocalFanoutConfiguration {
-        let debounceSeconds: TimeInterval
-        if let milliseconds = Environment.get("IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_MS")
-            .flatMap(TimeInterval.init(_:)) {
-            debounceSeconds = milliseconds / 1000
-        } else {
-            debounceSeconds = Environment.get("IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS")
-                .flatMap(TimeInterval.init(_:)) ?? 1
-        }
         return IMGatewayLocalFanoutConfiguration(
             batchSize: max(1, Environment.get("IM_GATEWAY_LOCAL_FANOUT_BATCH_SIZE").flatMap(Int.init(_:)) ?? 64),
             eventLoopYieldChunkCount: max(
@@ -137,57 +93,8 @@ struct IMGatewayLocalFanoutConfiguration: Sendable {
                 1,
                 Environment.get("IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD")
                     .flatMap(Int.init(_:)) ?? 500
-            ),
-            activeConversationFullFanoutRecipientLimit: max(
-                0,
-                Environment.get("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT")
-                    .flatMap(Int.init(_:)) ?? 0
-            ),
-            activeConversationFullFanoutPayloadByteBudget: max(
-                0,
-                Environment.get("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET")
-                    .flatMap(Int.init(_:)) ?? 0
-            ),
-            activeConversationFullFanoutMode: activeConversationFullFanoutMode(),
-            inactiveConversationHintMode: inactiveConversationHintMode(),
-            inactiveConversationHintDebounceSeconds: max(
-                0,
-                debounceSeconds
-            ),
-            inactiveConversationHintMaxPendingRecipients: max(
-                0,
-                Environment.get("IM_REALTIME_INACTIVE_CONVERSATION_HINT_MAX_PENDING_RECIPIENTS")
-                    .flatMap(Int.init(_:)) ?? 5_000
             )
         )
-    }
-
-    private static func activeConversationFullFanoutMode() -> ActiveConversationFullFanoutMode {
-        let rawValue = Environment.get("IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE")?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        switch rawValue {
-        case "compact-only", "compact", "hint-only":
-            return .compactOnly
-        case "bounded", "limited", nil, "":
-            return .bounded
-        default:
-            return .bounded
-        }
-    }
-
-    private static func inactiveConversationHintMode() -> InactiveConversationHintMode {
-        let rawValue = Environment.get("IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE")?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        switch rawValue {
-        case "pull-only", "timeline-pull", "pull", "disabled", "off", "none":
-            return .pullOnly
-        case "relay", "realtime", nil, "":
-            return .relay
-        default:
-            return .relay
-        }
     }
 }
 
@@ -362,94 +269,6 @@ struct IMAuthenticatedConnection: Sendable {
     let appVersion: String?
 }
 
-struct IMActiveConversationFullFanoutSelector: Sendable {
-    let fullUserIDs: [UUID]
-    let downgradedUserIDs: [UUID]
-
-    static func select(
-        from activeUserIDs: [UUID],
-        limit: Int,
-        aggregateSequence: UInt64
-    ) -> IMActiveConversationFullFanoutSelector {
-        guard limit > 0, activeUserIDs.count > limit else {
-            return IMActiveConversationFullFanoutSelector(
-                fullUserIDs: activeUserIDs,
-                downgradedUserIDs: []
-            )
-        }
-
-        let rotatedUserIDs = rotated(activeUserIDs, aggregateSequence: aggregateSequence)
-        return IMActiveConversationFullFanoutSelector(
-            fullUserIDs: Array(rotatedUserIDs.prefix(limit)),
-            downgradedUserIDs: Array(rotatedUserIDs.dropFirst(limit))
-        )
-    }
-
-    private static func rotated(_ userIDs: [UUID], aggregateSequence: UInt64) -> [UUID] {
-        guard userIDs.count > 1 else {
-            return userIDs
-        }
-        let zeroBasedSequence = aggregateSequence > 0 ? aggregateSequence - 1 : 0
-        let offset = Int(zeroBasedSequence % UInt64(userIDs.count))
-        guard offset > 0 else {
-            return userIDs
-        }
-        return Array(userIDs[offset...]) + Array(userIDs[..<offset])
-    }
-}
-
-struct IMActiveConversationFullFanoutBudget: Sendable {
-    let baseLimit: Int
-    let limit: Int
-    let payloadByteCount: Int
-    let budgetApplied: Bool
-
-    static func effectiveLimit(
-        baseLimit: Int,
-        payloadByteBudget: Int,
-        payload: IMTCPChatDomainEventPayload
-    ) -> IMActiveConversationFullFanoutBudget {
-        guard baseLimit > 0, payloadByteBudget > 0 else {
-            return IMActiveConversationFullFanoutBudget(
-                baseLimit: baseLimit,
-                limit: baseLimit,
-                payloadByteCount: 0,
-                budgetApplied: false
-            )
-        }
-        guard let payloadByteCount = try? IMTCPProtobufCodec.encodeDomainEvent(
-            payload,
-            requireDeliveryMetadata: false
-        ).count,
-              payloadByteCount > 0
-        else {
-            return IMActiveConversationFullFanoutBudget(
-                baseLimit: baseLimit,
-                limit: baseLimit,
-                payloadByteCount: 0,
-                budgetApplied: false
-            )
-        }
-
-        let budgetLimit = max(1, payloadByteBudget / payloadByteCount)
-        return IMActiveConversationFullFanoutBudget(
-            baseLimit: baseLimit,
-            limit: min(baseLimit, budgetLimit),
-            payloadByteCount: payloadByteCount,
-            budgetApplied: budgetLimit < baseLimit
-        )
-    }
-
-    func budgetDowngradedRecipientCount(candidateCount: Int) -> Int {
-        guard budgetApplied else {
-            return 0
-        }
-        let baseFullCount = min(max(0, candidateCount), max(0, baseLimit))
-        let budgetFullCount = min(max(0, candidateCount), max(0, limit))
-        return max(0, baseFullCount - budgetFullCount)
-    }
-}
-
 struct IMConnectionRemoval: Sendable {
     let connection: IMAuthenticatedConnection
     let deactivatedConversationIDs: [UUID]
@@ -469,26 +288,20 @@ actor IMConnectionRegistry {
     private var activeConnectionIDsByConversationID: [UUID: Set<UUID>] = [:]
     private var activeUserConnectionCountsByConversationID: [UUID: [UUID: Int]] = [:]
     private var activeUserIDsByConversationID: [UUID: Set<UUID>] = [:]
-    private var pendingInactiveConversationHintPayloadKeysByRecipient: [InactiveConversationHintKey: InactiveConversationHintPayloadKey] = [:]
-    private var pendingInactiveConversationHintGroups: [InactiveConversationHintPayloadKey: PendingInactiveConversationHintGroup] = [:]
-    private var inactiveConversationHintFlushTask: Task<Void, Never>?
     private let metrics: RoutingMetrics?
     private let dropsRealtimeWhenNotWritable: Bool
     private let localFanoutConfiguration: IMGatewayLocalFanoutConfiguration
-    private let activeCompactHintBody: IMStreamConsumerConfiguration.ActiveCompactHintBody
     private let activeCompactHintPreviewMaxCharacters: Int
 
     init(
         metrics: RoutingMetrics? = nil,
         dropsRealtimeWhenNotWritable: Bool = true,
         localFanoutConfiguration: IMGatewayLocalFanoutConfiguration = .load(),
-        activeCompactHintBody: IMStreamConsumerConfiguration.ActiveCompactHintBody = .timelineGap,
         activeCompactHintPreviewMaxCharacters: Int = 0
     ) {
         self.metrics = metrics
         self.dropsRealtimeWhenNotWritable = dropsRealtimeWhenNotWritable
         self.localFanoutConfiguration = localFanoutConfiguration
-        self.activeCompactHintBody = activeCompactHintBody
         self.activeCompactHintPreviewMaxCharacters = max(0, activeCompactHintPreviewMaxCharacters)
     }
 
@@ -571,23 +384,6 @@ actor IMConnectionRegistry {
                 }
             }
         }
-    }
-
-    private struct InactiveConversationHintKey: Hashable, Sendable {
-        let conversationID: UUID
-        let userID: UUID
-    }
-
-    private struct InactiveConversationHintPayloadKey: Hashable, Sendable {
-        let eventID: UUID
-        let eventType: IMTCPChatDomainEventType
-        let aggregateID: UUID
-        let aggregateSequence: UInt64
-    }
-
-    private struct PendingInactiveConversationHintGroup: Sendable {
-        let payload: IMTCPChatDomainEventPayload
-        var userIDs: Set<UUID>
     }
 
     func bind(_ connection: IMAuthenticatedConnection, control: IMConnectionControl) {
@@ -712,9 +508,6 @@ actor IMConnectionRegistry {
             activeConnectionIDsByConversationID[conversationID, default: []].insert(connectionID)
             if let userID {
                 incrementActiveUserConnection(conversationID: conversationID, userID: userID)
-                removePendingInactiveConversationHint(
-                    for: InactiveConversationHintKey(conversationID: conversationID, userID: userID)
-                )
             }
         } else {
             let wasActive = activeConversationIDsByConnectionID[connectionID]?.remove(conversationID) != nil
@@ -1397,27 +1190,14 @@ actor IMConnectionRegistry {
     ) async -> [IMGatewayDomainEventPayloadBatch] {
         var result: [IMGatewayDomainEventPayloadBatch] = []
         result.reserveCapacity(batches.count)
-        var latestInactiveHints: [InactiveConversationHintKey: IMTCPChatDomainEventPayload] = [:]
-        var totalActiveRecipientCount = 0
+        let totalActiveRecipientCount = 0
         var totalCompactActiveRecipientCount = 0
-        var totalInactiveHintRecipientCount = 0
+        let totalInactiveHintRecipientCount = 0
         var totalDowngradedActiveRecipientCount = 0
-        var totalBackpressureDowngradedActiveRecipientCount = 0
-        let fullActiveRecipientLimit = activeConversationFullFanoutRecipientLimit
+        let totalBackpressureDowngradedActiveRecipientCount = 0
         for batch in batches {
             let localRecipientUserIDs = localRecipientUserIDs(from: batch.recipientUserIDs)
             guard !localRecipientUserIDs.isEmpty else {
-                continue
-            }
-            if shouldQueuePreSplitInactiveConversationHint(batch) {
-                for inactiveUserID in localRecipientUserIDs {
-                    latestInactiveHints[
-                        InactiveConversationHintKey(
-                            conversationID: batch.payload.aggregateID,
-                            userID: inactiveUserID
-                        )
-                    ] = batch.payload
-                }
                 continue
             }
             guard activeConversationFanoutEnabled else {
@@ -1445,64 +1225,9 @@ actor IMConnectionRegistry {
                 forConversationID: batch.payload.aggregateID,
                 among: localRecipientUserIDs
             )
-            let fullFanoutCandidateUserIDs = activeFullFanoutCandidateUserIDs(from: activeUserIDs)
-            let budget = IMActiveConversationFullFanoutBudget.effectiveLimit(
-                baseLimit: fullActiveRecipientLimit,
-                payloadByteBudget: localFanoutConfiguration.activeConversationFullFanoutPayloadByteBudget,
-                payload: batch.payload
-            )
-            let activeSelection: IMActiveConversationFullFanoutSelector
-            if localFanoutConfiguration.usesCompactOnlyActiveConversationFanout {
-                activeSelection = IMActiveConversationFullFanoutSelector(
-                    fullUserIDs: [],
-                    downgradedUserIDs: activeUserIDs
-                )
-            } else {
-                activeSelection = IMActiveConversationFullFanoutSelector.select(
-                    from: fullFanoutCandidateUserIDs,
-                    limit: budget.limit,
-                    aggregateSequence: batch.payload.aggregateSequence
-                )
-            }
-            let payloadBudgetDowngradedRecipientCount = budget.budgetDowngradedRecipientCount(
-                candidateCount: fullFanoutCandidateUserIDs.count
-            )
-            if payloadBudgetDowngradedRecipientCount > 0 {
-                await metrics?.recordActiveConversationFanoutPayloadBudgetApplied(
-                    payloadByteCount: budget.payloadByteCount,
-                    effectiveFullFanoutLimit: budget.limit,
-                    downgradedActiveRecipientCount: payloadBudgetDowngradedRecipientCount
-                )
-            }
-            let fullActiveUserIDs = activeSelection.fullUserIDs
-            let compactActiveUserIDs = activeSelection.downgradedUserIDs
-            let fullFanoutCandidateUserIDSet = Set(fullFanoutCandidateUserIDs)
-            let pressureDowngradedActiveUserIDs = localFanoutConfiguration.usesCompactOnlyActiveConversationFanout
-                ? []
-                : activeUserIDs.filter { activeUserID in
-                    !fullFanoutCandidateUserIDSet.contains(activeUserID)
-                }
-            let activeUserIDSet = Set(activeUserIDs)
-            let inactiveUserIDs = localRecipientUserIDs.filter { !activeUserIDSet.contains($0) }
-            let hintUserIDs = inactiveUserIDs
-
-            if !pressureDowngradedActiveUserIDs.isEmpty {
-                totalDowngradedActiveRecipientCount += pressureDowngradedActiveUserIDs.count
-                totalBackpressureDowngradedActiveRecipientCount += pressureDowngradedActiveUserIDs.count
-            }
-
-            if !fullActiveUserIDs.isEmpty {
-                totalActiveRecipientCount += fullActiveUserIDs.count
-                result.append(
-                    IMGatewayDomainEventPayloadBatch(
-                        payload: batch.payload,
-                        recipientUserIDs: fullActiveUserIDs
-                    )
-                )
-            }
+            let compactActiveUserIDs = activeUserIDs
             if !compactActiveUserIDs.isEmpty {
                 if let compactPayload = batch.payload.activeCompactHintForActiveRecipient(
-                    body: activeCompactHintBody,
                     maxPreviewCharacters: activeCompactHintPreviewMaxCharacters,
                     eventID: imLightweightMessageCreatedHintEventID(for: batch.payload.eventID)
                 ) {
@@ -1517,21 +1242,6 @@ actor IMConnectionRegistry {
                     )
                 }
             }
-            if localFanoutConfiguration.relaysInactiveConversationHints,
-               !hintUserIDs.isEmpty,
-               let inactivePayload = batch.payload.conversationActivityHintForInactiveRecipient(
-                   eventID: imLightweightMessageCreatedHintEventID(for: batch.payload.eventID)
-               ) {
-                totalInactiveHintRecipientCount += hintUserIDs.count
-                for inactiveUserID in hintUserIDs {
-                    latestInactiveHints[
-                        InactiveConversationHintKey(
-                            conversationID: batch.payload.aggregateID,
-                            userID: inactiveUserID
-                        )
-                    ] = inactivePayload
-                }
-            }
         }
 
         if totalActiveRecipientCount > 0 || totalCompactActiveRecipientCount > 0 || totalInactiveHintRecipientCount > 0 {
@@ -1543,106 +1253,7 @@ actor IMConnectionRegistry {
                 backpressureDowngradedActiveRecipientCount: totalBackpressureDowngradedActiveRecipientCount
             )
         }
-        if !latestInactiveHints.isEmpty {
-            await enqueueInactiveConversationHints(latestInactiveHints)
-        }
         return result
-    }
-
-    private func enqueueInactiveConversationHints(
-        _ hints: [InactiveConversationHintKey: IMTCPChatDomainEventPayload]
-    ) async {
-        guard inactiveConversationHintDebounceSeconds > 0 else {
-            await sendInactiveConversationHintsNow(hints)
-            return
-        }
-
-        var suppressedRecipientCount = 0
-        for (key, payload) in hints {
-            if enqueuePendingInactiveConversationHint(payload, for: key) {
-                suppressedRecipientCount += 1
-            }
-        }
-        if suppressedRecipientCount > 0 {
-            await metrics?.recordInactiveConversationHintSuppressed(recipientCount: suppressedRecipientCount)
-        }
-        if shouldFlushInactiveConversationHintsImmediately {
-            inactiveConversationHintFlushTask?.cancel()
-            inactiveConversationHintFlushTask = nil
-            await flushInactiveConversationHints()
-            return
-        }
-        guard inactiveConversationHintFlushTask == nil else {
-            return
-        }
-
-        let delayNanoseconds = UInt64(inactiveConversationHintDebounceSeconds * 1_000_000_000)
-        inactiveConversationHintFlushTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: delayNanoseconds)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled else {
-                return
-            }
-            await self?.flushInactiveConversationHints()
-        }
-    }
-
-    private func flushInactiveConversationHints() async {
-        let groups = pendingInactiveConversationHintGroups
-        pendingInactiveConversationHintGroups.removeAll(keepingCapacity: true)
-        pendingInactiveConversationHintPayloadKeysByRecipient.removeAll(keepingCapacity: true)
-        inactiveConversationHintFlushTask = nil
-        await sendInactiveConversationHintsNow(groups)
-    }
-
-    private func sendInactiveConversationHintsNow(
-        _ hints: [InactiveConversationHintKey: IMTCPChatDomainEventPayload]
-    ) async {
-        guard !hints.isEmpty else {
-            return
-        }
-
-        var groupedHints: [InactiveConversationHintPayloadKey: PendingInactiveConversationHintGroup] = [:]
-        for (key, payload) in hints {
-            let payloadKey = inactiveConversationHintPayloadKey(for: payload)
-            if groupedHints[payloadKey] == nil {
-                groupedHints[payloadKey] = PendingInactiveConversationHintGroup(payload: payload, userIDs: [])
-            }
-            groupedHints[payloadKey]?.userIDs.insert(key.userID)
-        }
-
-        await sendInactiveConversationHintsNow(groupedHints)
-    }
-
-    private func sendInactiveConversationHintsNow(
-        _ groups: [InactiveConversationHintPayloadKey: PendingInactiveConversationHintGroup]
-    ) async {
-        guard !groups.isEmpty else {
-            return
-        }
-
-        let batches = groups.values.sorted(by: { lhs, rhs in
-            if lhs.payload.aggregateID.uuidString == rhs.payload.aggregateID.uuidString {
-                if lhs.payload.aggregateSequence == rhs.payload.aggregateSequence {
-                    return lhs.payload.eventID.uuidString < rhs.payload.eventID.uuidString
-                }
-                return lhs.payload.aggregateSequence < rhs.payload.aggregateSequence
-            }
-            return lhs.payload.aggregateID.uuidString < rhs.payload.aggregateID.uuidString
-        }).map { group in
-            IMGatewayDomainEventPayloadBatch(
-                payload: group.payload,
-                recipientUserIDs: group.userIDs.sorted { $0.uuidString < $1.uuidString }
-            )
-        }
-        await metrics?.recordInactiveConversationHintFlush(
-            payloadBatchCount: batches.count,
-            recipientCount: batches.reduce(0) { $0 + $1.recipientUserIDs.count }
-        )
-        await sendDomainEventPayloadBatchesNow(batches, requestID: UUID())
     }
 
     private var activeConversationFanoutEnabled: Bool {
@@ -1651,25 +1262,6 @@ actor IMConnectionRegistry {
 
     private var activeConversationFanoutRecipientThreshold: Int {
         localFanoutConfiguration.activeConversationFanoutRecipientThreshold
-    }
-
-    private var activeConversationFullFanoutRecipientLimit: Int {
-        localFanoutConfiguration.activeConversationFullFanoutRecipientLimit
-    }
-
-    private var inactiveConversationHintDebounceSeconds: TimeInterval {
-        localFanoutConfiguration.inactiveConversationHintDebounceSeconds
-    }
-
-    private func shouldQueuePreSplitInactiveConversationHint(_ batch: IMGatewayDomainEventPayloadBatch) -> Bool {
-        guard batch.fanoutIntent == .preSplitInactiveHint,
-              batch.payload.eventType == .conversationActivityHint,
-              batch.payload.conversation == nil,
-              case .conversationActivityHint = batch.payload.body
-        else {
-            return false
-        }
-        return true
     }
 
     private func shouldSplitActiveConversationFanout(_ batch: IMGatewayDomainEventPayloadBatch) -> Bool {
@@ -1703,21 +1295,6 @@ actor IMConnectionRegistry {
         }
 
         return userIDs.filter { activeUserIDs.contains($0) }
-    }
-
-    private func activeFullFanoutCandidateUserIDs(from activeUserIDs: [UUID]) -> [UUID] {
-        guard dropsRealtimeWhenNotWritable else {
-            return activeUserIDs
-        }
-
-        return activeUserIDs.filter { userID in
-            guard let connectionIDs = connectionIDsByUserID[userID] else {
-                return false
-            }
-            return connectionIDs.contains { connectionID in
-                connectionsByID[connectionID]?.control.isWritable == true
-            }
-        }
     }
 
     private func localRecipientUserIDs(from userIDs: [UUID]) -> [UUID] {
@@ -1804,62 +1381,6 @@ actor IMConnectionRegistry {
         }
     }
 
-    private func enqueuePendingInactiveConversationHint(
-        _ payload: IMTCPChatDomainEventPayload,
-        for recipientKey: InactiveConversationHintKey
-    ) -> Bool {
-        let payloadKey = inactiveConversationHintPayloadKey(for: payload)
-        let hadPendingHint = pendingInactiveConversationHintPayloadKeysByRecipient[recipientKey] != nil
-        if let previousPayloadKey = pendingInactiveConversationHintPayloadKeysByRecipient[recipientKey],
-           previousPayloadKey != payloadKey {
-            pendingInactiveConversationHintGroups[previousPayloadKey]?.userIDs.remove(recipientKey.userID)
-            if pendingInactiveConversationHintGroups[previousPayloadKey]?.userIDs.isEmpty == true {
-                pendingInactiveConversationHintGroups.removeValue(forKey: previousPayloadKey)
-            }
-        }
-
-        pendingInactiveConversationHintPayloadKeysByRecipient[recipientKey] = payloadKey
-        if pendingInactiveConversationHintGroups[payloadKey] == nil {
-            pendingInactiveConversationHintGroups[payloadKey] = PendingInactiveConversationHintGroup(
-                payload: payload,
-                userIDs: []
-            )
-        }
-        pendingInactiveConversationHintGroups[payloadKey]?.userIDs.insert(recipientKey.userID)
-        return hadPendingHint
-    }
-
-    private func removePendingInactiveConversationHint(for recipientKey: InactiveConversationHintKey) {
-        guard let payloadKey = pendingInactiveConversationHintPayloadKeysByRecipient.removeValue(forKey: recipientKey) else {
-            return
-        }
-        pendingInactiveConversationHintGroups[payloadKey]?.userIDs.remove(recipientKey.userID)
-        if pendingInactiveConversationHintGroups[payloadKey]?.userIDs.isEmpty == true {
-            pendingInactiveConversationHintGroups.removeValue(forKey: payloadKey)
-        }
-        if pendingInactiveConversationHintPayloadKeysByRecipient.isEmpty {
-            inactiveConversationHintFlushTask?.cancel()
-            inactiveConversationHintFlushTask = nil
-        }
-    }
-
-    private func inactiveConversationHintPayloadKey(
-        for payload: IMTCPChatDomainEventPayload
-    ) -> InactiveConversationHintPayloadKey {
-        InactiveConversationHintPayloadKey(
-            eventID: payload.eventID,
-            eventType: payload.eventType,
-            aggregateID: payload.aggregateID,
-            aggregateSequence: payload.aggregateSequence
-        )
-    }
-
-    private var shouldFlushInactiveConversationHintsImmediately: Bool {
-        let maxPendingRecipients = localFanoutConfiguration.inactiveConversationHintMaxPendingRecipients
-        return maxPendingRecipients > 0
-            && pendingInactiveConversationHintPayloadKeysByRecipient.count >= maxPendingRecipients
-    }
-
     private func reusablePacketKey(for payload: IMTCPChatDomainEventPayload) -> ReusableDomainEventPacketKey? {
         guard payload.timelineNotice == nil,
               payload.requiresTimelineNotice == false,
@@ -1895,19 +1416,6 @@ actor IMConnectionRegistry {
                 "\(hint.timelineSequence)",
                 hint.previewText,
                 hint.messageCreatedAt.map { "\($0.timeIntervalSince1970)" } ?? "",
-                "\(hint.updatedAt.timeIntervalSince1970)"
-            ].joined(separator: "|")
-        case .timelineGapHint:
-            guard payload.conversation == nil,
-                  case .timelineGapHint(let hint) = payload.body
-            else {
-                return nil
-            }
-            bodyVariant = [
-                "timelineGapHint",
-                hint.messageID.uuidString,
-                "\(hint.serverSequence)",
-                "\(hint.timelineSequence)",
                 "\(hint.updatedAt.timeIntervalSince1970)"
             ].joined(separator: "|")
         case .conversationCreated,
@@ -2076,44 +1584,12 @@ private struct IMConnectionRegistryStorageKey: StorageKey {
 
 private extension IMTCPChatDomainEventPayload {
     func activeCompactHintForActiveRecipient(
-        body: IMStreamConsumerConfiguration.ActiveCompactHintBody,
         maxPreviewCharacters: Int,
         eventID hintEventID: UUID? = nil
     ) -> IMTCPChatDomainEventPayload? {
-        switch body {
-        case .conversationActivity:
-            return conversationActivityHintForActiveRecipient(
-                maxPreviewCharacters: maxPreviewCharacters,
-                eventID: hintEventID
-            )
-        case .timelineGap:
-            return timelineGapHintForActiveRecipient(eventID: hintEventID)
-        }
-    }
-
-    func timelineGapHintForActiveRecipient(
-        eventID hintEventID: UUID? = nil
-    ) -> IMTCPChatDomainEventPayload? {
-        guard eventType == .messageCreated else {
-            return nil
-        }
-        guard let timelineGapHint = activeConversationTimelineGapHint() else {
-            return nil
-        }
-        return IMTCPChatDomainEventPayload(
-            eventID: hintEventID ?? eventID,
-            eventType: .timelineGapHint,
-            aggregateType: aggregateType,
-            aggregateID: aggregateID,
-            aggregateSequence: aggregateSequence,
-            occurredAt: occurredAt,
-            actorUserID: actorUserID,
-            conversation: nil,
-            timelineNotice: nil,
-            requiresTimelineNotice: false,
-            ownerCursor: nil,
-            ownerAggregateSequence: nil,
-            body: .timelineGapHint(timelineGapHint)
+        return conversationActivityHintForActiveRecipient(
+            maxPreviewCharacters: maxPreviewCharacters,
+            eventID: hintEventID
         )
     }
 
@@ -2168,19 +1644,6 @@ private extension IMTCPChatDomainEventPayload {
             ownerCursor: nil,
             ownerAggregateSequence: nil,
             body: .conversationActivityHint(activityHint)
-        )
-    }
-
-    private func activeConversationTimelineGapHint() -> IMTimelineGapHint? {
-        guard case .messageCreated(let message, _) = body else {
-            return nil
-        }
-        return IMTimelineGapHint(
-            messageID: message.id,
-            senderUserID: message.senderUserID,
-            serverSequence: message.serverSequence,
-            timelineSequence: message.timelineSequence,
-            updatedAt: message.createdAt ?? occurredAt
         )
     }
 
@@ -2251,7 +1714,6 @@ extension Application {
                 metrics: routingMetrics,
                 dropsRealtimeWhenNotWritable: imTCPConfiguration.dropsRealtimeWhenNotWritable,
                 localFanoutConfiguration: gatewayLocalFanoutConfiguration,
-                activeCompactHintBody: streamConsumerConfiguration.realtimeActiveCompactHintBody,
                 activeCompactHintPreviewMaxCharacters: streamConsumerConfiguration.realtimeActiveCompactHintPreviewMaxCharacters
             )
             storage[IMConnectionRegistryStorageKey.self] = registry

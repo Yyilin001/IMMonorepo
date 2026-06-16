@@ -8,7 +8,6 @@ struct AddConversationKind: AsyncMigration {
                 ALTER TABLE \(unsafeRaw: Conversation.schema)
                 ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'group'
                 """).run()
-            try await backfillConversationKinds(using: sql)
             return
         }
 
@@ -21,9 +20,6 @@ struct AddConversationKind: AsyncMigration {
             )
             .update()
 
-        if let sql = database as? any SQLDatabase {
-            try await backfillConversationKinds(using: sql)
-        }
     }
 
     func revert(on database: any Database) async throws {
@@ -32,19 +28,4 @@ struct AddConversationKind: AsyncMigration {
             .update()
     }
 
-    private func backfillConversationKinds(using sql: any SQLDatabase) async throws {
-        try await sql.raw("""
-            UPDATE \(unsafeRaw: Conversation.schema)
-            SET kind = CASE
-                WHEN title IS NULL
-                 AND (
-                    SELECT COUNT(*)
-                    FROM \(unsafeRaw: ConversationMember.schema)
-                    WHERE \(unsafeRaw: ConversationMember.schema).conversation_id = \(unsafeRaw: Conversation.schema).id
-                 ) = 2
-                THEN 'direct'
-                ELSE 'group'
-            END
-            """).run()
-    }
 }

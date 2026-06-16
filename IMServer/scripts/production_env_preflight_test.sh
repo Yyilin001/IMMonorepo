@@ -268,10 +268,10 @@ replace_env_value "${stream_relay_body_override_dir}/stream-realtime.env" "IM_GA
 run_should_fail "stream relay body override below minimum fails" "stream-consumer:${stream_relay_body_override_dir}/stream-realtime.env requires IM_GATEWAY_RELAY_DOMAIN_EVENT_PACKET_BIN_MAX_BODY_BYTES between 65536 and 16777216 when set" \
   run_preflight "${stream_relay_body_override_dir}"
 
-query_legacy_dir="$(copy_templates query-legacy)"
-replace_env_value "${query_legacy_dir}/query-api.env" "IM_SUMMARY_QUERY_READ_SOURCE" "legacy"
-run_should_fail "query-api legacy summary read fails" "query-api requires IM_SUMMARY_QUERY_READ_SOURCE=sharded" \
-  run_preflight "${query_legacy_dir}"
+query_non_sharded_dir="$(copy_templates query-non-sharded)"
+replace_env_value "${query_non_sharded_dir}/query-api.env" "IM_SUMMARY_QUERY_READ_SOURCE" "local"
+run_should_fail "query-api non-sharded summary read fails" "query-api requires IM_SUMMARY_QUERY_READ_SOURCE=sharded" \
+  run_preflight "${query_non_sharded_dir}"
 
 query_summary_member_limit_dir="$(copy_templates query-summary-member-limit)"
 replace_env_value "${query_summary_member_limit_dir}/query-api.env" "IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT" "0"
@@ -491,11 +491,6 @@ replace_env_value "${realtime_active_compact_coalesce_dir}/stream-realtime.env" 
 run_should_fail "realtime active compact coalescing above cap fails" "stream-consumer:${realtime_active_compact_coalesce_dir}/stream-realtime.env requires IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS <= 100" \
   run_preflight "${realtime_active_compact_coalesce_dir}"
 
-realtime_active_compact_body_dir="$(copy_templates realtime-active-compact-body)"
-replace_env_value "${realtime_active_compact_body_dir}/stream-realtime.env" "IM_REALTIME_ACTIVE_COMPACT_HINT_BODY" "timeline-gap"
-run_should_fail "realtime active compact body timeline-gap fails" "stream-consumer:${realtime_active_compact_body_dir}/stream-realtime.env requires IM_REALTIME_ACTIVE_COMPACT_HINT_BODY=conversation-activity" \
-  run_preflight "${realtime_active_compact_body_dir}"
-
 realtime_active_compact_preview_dir="$(copy_templates realtime-active-compact-preview)"
 replace_env_value "${realtime_active_compact_preview_dir}/stream-realtime.env" "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS" "0"
 run_should_fail "realtime active compact preview empty fails" "stream-consumer:${realtime_active_compact_preview_dir}/stream-realtime.env requires IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS >= 1" \
@@ -520,16 +515,6 @@ replace_env_value "${relay_after_record_route_cache_bound_dir}/stream-domain.env
 run_should_fail "relay-after-record unbounded active route cache fails" "stream-consumer:${relay_after_record_route_cache_bound_dir}/stream-domain.env requires IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_MAX_ENTRIES >= 1" \
   run_preflight "${relay_after_record_route_cache_bound_dir}"
 
-gateway_unsplit_fallback_dir="$(copy_templates gateway-unsplit-fallback)"
-replace_env_value "${gateway_unsplit_fallback_dir}/gateway.env" "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED" "true"
-run_should_fail "gateway unsplit fallback enabled fails" "gateway requires IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false" \
-  run_preflight "${gateway_unsplit_fallback_dir}"
-
-gateway_active_compact_body_dir="$(copy_templates gateway-active-compact-body)"
-replace_env_value "${gateway_active_compact_body_dir}/gateway.env" "IM_REALTIME_ACTIVE_COMPACT_HINT_BODY" "timeline-gap"
-run_should_fail "gateway active compact body timeline-gap fails" "gateway requires IM_REALTIME_ACTIVE_COMPACT_HINT_BODY=conversation-activity" \
-  run_preflight "${gateway_active_compact_body_dir}"
-
 gateway_active_compact_preview_dir="$(copy_templates gateway-active-compact-preview)"
 replace_env_value "${gateway_active_compact_preview_dir}/gateway.env" "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS" "0"
 run_should_fail "gateway active compact preview empty fails" "gateway requires IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS >= 1" \
@@ -549,18 +534,6 @@ realtime_summary_member_limit_dir="$(copy_templates realtime-summary-member-limi
 replace_env_value "${realtime_summary_member_limit_dir}/stream-realtime.env" "IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT" "0"
 run_should_fail "realtime stream summary member ids limit disabled fails" "stream-consumer:${realtime_summary_member_limit_dir}/stream-realtime.env requires IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT >= 1" \
   run_preflight "${realtime_summary_member_limit_dir}"
-
-realtime_unsplit_fallback_dir="$(copy_templates realtime-unsplit-fallback)"
-replace_env_value "${realtime_unsplit_fallback_dir}/stream-realtime.env" "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED" "true"
-run_should_fail "realtime stream unsplit fallback enabled fails" "stream-consumer:${realtime_unsplit_fallback_dir}/stream-realtime.env requires IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false" \
-  run_preflight "${realtime_unsplit_fallback_dir}"
-
-relay_after_record_unsplit_fallback_dir="$(copy_templates relay-after-record-unsplit-fallback)"
-replace_env_value "${relay_after_record_unsplit_fallback_dir}/stream-realtime.env" "IM_STREAM_CONSUMER_GROUPS" "search-index-consumer"
-replace_env_value "${relay_after_record_unsplit_fallback_dir}/stream-domain.env" "IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD" "true"
-replace_env_value "${relay_after_record_unsplit_fallback_dir}/stream-domain.env" "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED" "true"
-run_should_fail "relay-after-record unsplit fallback enabled fails" "stream-consumer:${relay_after_record_unsplit_fallback_dir}/stream-domain.env requires IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED=false" \
-  run_preflight "${relay_after_record_unsplit_fallback_dir}"
 
 relay_after_record_inactive_hint_mode_dir="$(copy_templates relay-after-record-inactive-hint-mode)"
 replace_env_value "${relay_after_record_inactive_hint_mode_dir}/stream-realtime.env" "IM_STREAM_CONSUMER_GROUPS" "search-index-consumer"

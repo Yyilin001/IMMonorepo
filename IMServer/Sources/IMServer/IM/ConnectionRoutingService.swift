@@ -80,16 +80,8 @@ struct ConnectionRoutingService {
     }
 
     private struct RemoteActiveConversationFanoutPlan: Sendable {
-        let activeFullUserIDs: [UUID]
         let activeCompactUserIDs: [UUID]
-        let inactiveHintUserIDs: [UUID]
         let downgradedActiveUserCount: Int
-        let payloadBudget: IMActiveConversationFullFanoutBudget
-        let activeCandidateCount: Int
-
-        var payloadBudgetDowngradedRecipientCount: Int {
-            payloadBudget.budgetDowngradedRecipientCount(candidateCount: activeCandidateCount)
-        }
     }
 
     let app: Application
@@ -973,40 +965,15 @@ struct ConnectionRoutingService {
                 activeRoutes: activeRoutes
             )
             await app.routingMetrics.recordRemoteActiveConversationFanoutSplit(
-                fullRecipientCount: plan.activeFullUserIDs.count,
+                fullRecipientCount: 0,
                 compactRecipientCount: plan.activeCompactUserIDs.count,
-                inactiveHintRecipientCount: plan.inactiveHintUserIDs.count,
+                inactiveHintRecipientCount: 0,
                 downgradedActiveRecipientCount: plan.downgradedActiveUserCount
             )
-            if plan.payloadBudgetDowngradedRecipientCount > 0 {
-                await app.routingMetrics.recordActiveConversationFanoutPayloadBudgetApplied(
-                    payloadByteCount: plan.payloadBudget.payloadByteCount,
-                    effectiveFullFanoutLimit: plan.payloadBudget.limit,
-                    downgradedActiveRecipientCount: plan.payloadBudgetDowngradedRecipientCount
-                )
-            }
-
             var workItems: [RemoteDispatchWorkItem] = []
             var encodedPayloadCount = 0
-            if !plan.activeFullUserIDs.isEmpty {
-                let envelope = try await encodeActiveConversationDomainEventPacketEnvelope(
-                    requestID: requestID,
-                    payload: batch.payload,
-                    conversationID: batch.payload.aggregateID,
-                    allowedUserIDs: plan.activeFullUserIDs,
-                    fanoutIntent: .preSplitActiveFull,
-                    encodeCache: encodeCache
-                )
-                let fullRoutes = filteredRoutes(activeRoutes, forUserIDs: plan.activeFullUserIDs)
-                workItems += remoteDispatchWorkItems(
-                    envelope: envelope,
-                    targetUserIDsByNodeID: targetUserIDsByNodeID(from: fullRoutes)
-                )
-                encodedPayloadCount += 1
-            }
             if !plan.activeCompactUserIDs.isEmpty {
                 let compactPayload = batch.payload.activeCompactHintForRemoteActiveRecipient(
-                    body: app.streamConsumerConfiguration.realtimeActiveCompactHintBody,
                     maxPreviewCharacters: app.streamConsumerConfiguration.realtimeActiveCompactHintPreviewMaxCharacters,
                     eventID: imLightweightMessageCreatedHintEventID(for: batch.payload.eventID)
                 ) ?? batch.payload
@@ -1026,29 +993,6 @@ struct ConnectionRoutingService {
                 encodedPayloadCount += 1
             }
 
-            var hintRouteMilliseconds = 0
-            if !plan.inactiveHintUserIDs.isEmpty,
-               let hintPayload = batch.payload.conversationActivityHintForRemoteInactiveRecipient(
-                   maxPreviewCharacters: app.streamConsumerConfiguration.realtimeMessageCreatedLightweightPreviewMaxCharacters,
-                   eventID: imLightweightMessageCreatedHintEventID(for: batch.payload.eventID)
-               ) {
-                let hintRouteStartedAt = Date()
-                let hintRoutes = try await backend.presenceStore.routeNodeIDs(forUserIDs: plan.inactiveHintUserIDs)
-                hintRouteMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: hintRouteStartedAt)
-                let envelope = try await encodeDomainEventPacketEnvelope(
-                    requestID: requestID,
-                    payload: hintPayload,
-                    targetUserIDs: plan.inactiveHintUserIDs,
-                    fanoutIntent: .preSplitInactiveHint,
-                    encodeCache: encodeCache
-                )
-                workItems += remoteDispatchWorkItems(
-                    envelope: envelope,
-                    targetUserIDsByNodeID: targetUserIDsByNodeID(from: hintRoutes)
-                )
-                encodedPayloadCount += 1
-            }
-
             let dispatchStartedAt = Date()
             await dispatchRemoteWorkItems(
                 workItems,
@@ -1056,10 +1000,10 @@ struct ConnectionRoutingService {
                 targetMetadataKey: "target_user_count"
             )
             let dispatchMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: dispatchStartedAt)
-            let totalMilliseconds = activeRouteMilliseconds + hintRouteMilliseconds + dispatchMilliseconds
+            let totalMilliseconds = activeRouteMilliseconds + dispatchMilliseconds
             let slowLogMilliseconds = app.streamConsumerConfiguration.realtimeDeliverySlowLogMilliseconds
             if IMRealtimeDeliveryDiagnostics.shouldLogAny(
-                [activeRouteMilliseconds, hintRouteMilliseconds, dispatchMilliseconds, totalMilliseconds],
+                [activeRouteMilliseconds, dispatchMilliseconds, totalMilliseconds],
                 thresholdMilliseconds: slowLogMilliseconds
             ) {
                 app.logger.info("Cross-node active conversation fanout slow.", metadata: [
@@ -1069,12 +1013,10 @@ struct ConnectionRoutingService {
                     "event_id": .string(batch.payload.eventID.uuidString),
                     "conversation_id": .string(batch.payload.aggregateID.uuidString),
                     "recipient_count": .stringConvertible(Set(batch.recipientUserIDs).count),
-                    "active_full_user_count": .stringConvertible(plan.activeFullUserIDs.count),
-                    "inactive_hint_user_count": .stringConvertible(plan.inactiveHintUserIDs.count),
+                    "active_full_user_count": .stringConvertible(0),
                     "work_item_count": .stringConvertible(workItems.count),
                     "encoded_payload_count": .stringConvertible(encodedPayloadCount),
                     "active_route_ms": .stringConvertible(activeRouteMilliseconds),
-                    "hint_route_ms": .stringConvertible(hintRouteMilliseconds),
                     "dispatch_ms": .stringConvertible(dispatchMilliseconds),
                     "total_ms": .stringConvertible(totalMilliseconds)
                 ])
@@ -1082,29 +1024,18 @@ struct ConnectionRoutingService {
             return true
         } catch {
             await app.routingMetrics.recordCrossNodeDispatchFailed()
-            if !app.streamConsumerConfiguration.realtimeActiveConversationUnsplitFallbackEnabled {
-                let targetUserCount = Set(batch.recipientUserIDs).count
-                await app.routingMetrics.recordRemoteActiveConversationFanoutDroppedFallback(
-                    recipientCount: targetUserCount
-                )
-                app.logger.warning("Cross-node active conversation fanout failed; dropping unsplit fallback.", metadata: [
-                    "requestID": .string(requestID?.uuidString ?? ""),
-                    "event_id": .string(batch.payload.eventID.uuidString),
-                    "conversation_id": .string(batch.payload.aggregateID.uuidString),
-                    "target_user_count": .stringConvertible(targetUserCount),
-                    "error": .string(String(describing: error))
-                ])
-                return true
-            }
-            await app.routingMetrics.recordRemoteActiveConversationFanoutFallback()
-            app.logger.warning("Cross-node active conversation fanout failed; falling back to full remote dispatch.", metadata: [
+            let targetUserCount = Set(batch.recipientUserIDs).count
+            await app.routingMetrics.recordRemoteActiveConversationFanoutRouteSplitDrop(
+                recipientCount: targetUserCount
+            )
+            app.logger.warning("Cross-node active conversation fanout failed; dropping realtime fanout.", metadata: [
                 "requestID": .string(requestID?.uuidString ?? ""),
                 "event_id": .string(batch.payload.eventID.uuidString),
                 "conversation_id": .string(batch.payload.aggregateID.uuidString),
-                "target_user_count": .stringConvertible(Set(batch.recipientUserIDs).count),
+                "target_user_count": .stringConvertible(targetUserCount),
                 "error": .string(String(describing: error))
             ])
-            return false
+            return true
         }
     }
 
@@ -1139,36 +1070,9 @@ struct ConnectionRoutingService {
             }
             return nodeIDs.contains(where: { $0 != nodeID })
         }
-        let fanoutConfiguration = app.gatewayLocalFanoutConfiguration
-        let budget = IMActiveConversationFullFanoutBudget.effectiveLimit(
-            baseLimit: fanoutConfiguration.activeConversationFullFanoutRecipientLimit,
-            payloadByteBudget: fanoutConfiguration.activeConversationFullFanoutPayloadByteBudget,
-            payload: batch.payload
-        )
-        let activeSelection: IMActiveConversationFullFanoutSelector
-        if fanoutConfiguration.usesCompactOnlyActiveConversationFanout {
-            activeSelection = IMActiveConversationFullFanoutSelector(
-                fullUserIDs: [],
-                downgradedUserIDs: activeUserIDs
-            )
-        } else {
-            activeSelection = IMActiveConversationFullFanoutSelector.select(
-                from: activeUserIDs,
-                limit: budget.limit,
-                aggregateSequence: batch.payload.aggregateSequence
-            )
-        }
-        let fullActiveUserIDSet = Set(activeSelection.fullUserIDs)
-        let activeUserIDSet = Set(activeUserIDs)
         return RemoteActiveConversationFanoutPlan(
-            activeFullUserIDs: activeSelection.fullUserIDs,
-            activeCompactUserIDs: activeSelection.downgradedUserIDs,
-            inactiveHintUserIDs: fanoutConfiguration.relaysInactiveConversationHints ? orderedUserIDs.filter {
-                !fullActiveUserIDSet.contains($0) && !activeUserIDSet.contains($0)
-            } : [],
-            downgradedActiveUserCount: activeSelection.downgradedUserIDs.count,
-            payloadBudget: budget,
-            activeCandidateCount: activeUserIDs.count
+            activeCompactUserIDs: activeUserIDs,
+            downgradedActiveUserCount: activeUserIDs.count
         )
     }
 
@@ -1466,19 +1370,6 @@ struct ConnectionRoutingService {
                 hint.messageCreatedAt.map { "\($0.timeIntervalSince1970)" } ?? "",
                 "\(hint.updatedAt.timeIntervalSince1970)"
             ].joined(separator: "|")
-        case .timelineGapHint:
-            guard payload.conversation == nil,
-                  case .timelineGapHint(let hint) = payload.body
-            else {
-                return nil
-            }
-            bodyVariant = [
-                "timelineGapHint",
-                hint.messageID.uuidString,
-                "\(hint.serverSequence)",
-                "\(hint.timelineSequence)",
-                "\(hint.updatedAt.timeIntervalSince1970)"
-            ].joined(separator: "|")
         case .conversationCreated,
              .conversationSettingsChanged,
              .conversationRemovedForSelf,
@@ -1544,44 +1435,12 @@ struct ConnectionRoutingService {
 
 private extension IMTCPChatDomainEventPayload {
     func activeCompactHintForRemoteActiveRecipient(
-        body: IMStreamConsumerConfiguration.ActiveCompactHintBody,
         maxPreviewCharacters: Int,
         eventID hintEventID: UUID? = nil
     ) -> IMTCPChatDomainEventPayload? {
-        switch body {
-        case .conversationActivity:
-            return conversationActivityHintForRemoteActiveRecipient(
-                maxPreviewCharacters: maxPreviewCharacters,
-                eventID: hintEventID
-            )
-        case .timelineGap:
-            return timelineGapHintForRemoteActiveRecipient(eventID: hintEventID)
-        }
-    }
-
-    func timelineGapHintForRemoteActiveRecipient(
-        eventID hintEventID: UUID? = nil
-    ) -> IMTCPChatDomainEventPayload? {
-        guard eventType == .messageCreated else {
-            return nil
-        }
-        guard let timelineGapHint = remoteActiveConversationTimelineGapHint() else {
-            return nil
-        }
-        return IMTCPChatDomainEventPayload(
-            eventID: hintEventID ?? eventID,
-            eventType: .timelineGapHint,
-            aggregateType: aggregateType,
-            aggregateID: aggregateID,
-            aggregateSequence: aggregateSequence,
-            occurredAt: occurredAt,
-            actorUserID: actorUserID,
-            conversation: nil,
-            timelineNotice: nil,
-            requiresTimelineNotice: false,
-            ownerCursor: nil,
-            ownerAggregateSequence: nil,
-            body: .timelineGapHint(timelineGapHint)
+        return conversationActivityHintForRemoteActiveRecipient(
+            maxPreviewCharacters: maxPreviewCharacters,
+            eventID: hintEventID
         )
     }
 
@@ -1636,19 +1495,6 @@ private extension IMTCPChatDomainEventPayload {
             ownerCursor: nil,
             ownerAggregateSequence: nil,
             body: .conversationActivityHint(activityHint)
-        )
-    }
-
-    private func remoteActiveConversationTimelineGapHint() -> IMTimelineGapHint? {
-        guard case .messageCreated(let message, _) = body else {
-            return nil
-        }
-        return IMTimelineGapHint(
-            messageID: message.id,
-            senderUserID: message.senderUserID,
-            serverSequence: message.serverSequence,
-            timelineSequence: message.timelineSequence,
-            updatedAt: message.createdAt ?? occurredAt
         )
     }
 

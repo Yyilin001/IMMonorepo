@@ -173,7 +173,6 @@ public enum IMTCPChatDomainEventType: String, Codable, Equatable, Sendable {
     case conversationSettingsChanged = "conversation_settings_changed"
     case conversationVisibilityChanged = "conversation_visibility_changed"
     case conversationActivityHint = "conversation_activity_hint"
-    case timelineGapHint = "timeline_gap_hint"
     case memberAdded = "member_added"
     case memberRemoved = "member_removed"
     case memberRoleUpdated = "member_role_updated"
@@ -210,28 +209,6 @@ public struct IMConversationActivityHintResponseBody: Codable, Equatable, Sendab
     }
 }
 
-public struct IMTimelineGapHintResponseBody: Codable, Equatable, Sendable {
-    public let messageID: UUID
-    public let senderUserID: UUID
-    public let serverSequence: UInt64
-    public let timelineSequence: UInt64
-    public let updatedAt: Date
-
-    public init(
-        messageID: UUID,
-        senderUserID: UUID,
-        serverSequence: UInt64,
-        timelineSequence: UInt64,
-        updatedAt: Date
-    ) {
-        self.messageID = messageID
-        self.senderUserID = senderUserID
-        self.serverSequence = serverSequence
-        self.timelineSequence = timelineSequence
-        self.updatedAt = updatedAt
-    }
-}
-
 public enum IMTCPChatDomainEventBody: Equatable, Sendable {
     case messageCreated(message: IMConversationMessageResponseBody, clientMessageID: String?)
     case messageEdited(messageID: UUID, body: IMRichTextContent, editedAt: Date, message: IMConversationMessageResponseBody?)
@@ -241,7 +218,6 @@ public enum IMTCPChatDomainEventBody: Equatable, Sendable {
     case messageStream(IMTCPMessageStreamPayload, message: IMConversationMessageResponseBody?)
     case conversationChanged
     case conversationActivityHint(IMConversationActivityHintResponseBody)
-    case timelineGapHint(IMTimelineGapHintResponseBody)
     case conversationRemovedForSelf
     case conversationVisibilityChanged(visibilityAction: IMTCPConversationVisibilityAction, messageIDs: [UUID])
     case memberChanged(memberUserIDs: [UUID])

@@ -216,8 +216,6 @@ struct DomainEventProjectionReducer: Sendable {
                 notice: notice,
                 summary: Self.activityOnlySummary(from: hint, event: event)
             )
-        case .timelineGapHint:
-            return .applyConversationChange(notice: notice, summary: nil)
         case .conversationRemovedForSelf:
             return .removeConversation(conversationID: event.aggregateID.uuidString, notice: notice)
         case .conversationVisibilityChanged(let visibilityAction, let messageIDs):
@@ -333,7 +331,6 @@ struct DomainEventProjectionReducer: Sendable {
             return .stream(conversationID: stream.conversationID, messageID: stream.messageID)
         case .conversationChanged,
              .conversationActivityHint,
-             .timelineGapHint,
              .conversationRemovedForSelf,
              .conversationVisibilityChanged,
              .memberChanged:
@@ -359,7 +356,6 @@ struct DomainEventProjectionReducer: Sendable {
             return stream.conversationID
         case .conversationChanged,
              .conversationActivityHint,
-             .timelineGapHint,
              .conversationRemovedForSelf,
              .conversationVisibilityChanged,
              .memberChanged:

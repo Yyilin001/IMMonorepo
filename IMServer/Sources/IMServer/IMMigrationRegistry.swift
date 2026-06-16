@@ -9,7 +9,6 @@ enum IMMigrationRegistry {
         app.migrations.add(AddUserProfileFields())
         app.migrations.add(CreateUserContact())
         app.migrations.add(AddUserContactRemark())
-        app.migrations.add(BackfillReciprocalUserContacts())
         app.migrations.add(CreateFriendRequest())
         app.migrations.add(CreateContactChangesLog())
         app.migrations.add(CreateAuthSession())
@@ -31,7 +30,6 @@ enum IMMigrationRegistry {
         app.migrations.add(AddConversationMessageClientMessageID())
         app.migrations.add(AddConversationMessageClientMessageIDUniqueIndex())
         app.migrations.add(AddConversationMessageTimelineIndexes())
-        app.migrations.add(ReconcileConversationLastMessageSequence())
         app.migrations.add(CreateConversationDomainEvent())
         app.migrations.add(AddConversationDomainEventRetryCount())
         app.migrations.add(AddConversationDomainEventStreamPublicationFields())
@@ -68,7 +66,6 @@ enum IMMigrationRegistry {
         app.migrations.add(AddReportSnapshotFields())
         app.migrations.add(CreateAIMessageStreamIndex())
         app.migrations.add(EnforceV8SequenceInvariants())
-        app.migrations.add(RepairLegacyUserProfileColumns())
         app.migrations.add(CreateConversationActivitySummaryReadModel())
         app.migrations.add(AddLargeGroupSummaryReadPathIndexes())
         app.migrations.add(AddTimelineReadPathIndexes())
@@ -216,7 +213,6 @@ private let imMigrationNames: [String] = [
     "AddConversationMessageClientMessageID",
     "AddConversationMessageClientMessageIDUniqueIndex",
     "AddConversationMessageTimelineIndexes",
-    "ReconcileConversationLastMessageSequence",
     "CreateConversationDomainEvent",
     "AddConversationDomainEventRetryCount",
     "AddConversationDomainEventStreamPublicationFields",

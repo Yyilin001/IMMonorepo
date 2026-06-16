@@ -699,29 +699,21 @@ extension IMServerTests {
         }
     }
 
-    @Test("Active conversation fanout records active and inactive hint metrics")
-    func activeConversationFanoutRecordsActiveAndInactiveHintMetrics() async throws {
+    @Test("Active conversation fanout records active compact hint metrics")
+    func activeConversationFanoutRecordsActiveCompactHintMetrics() async throws {
         let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
         let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let limitKey = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT"
-        let budgetKey = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
+        let previewKey = "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS"
         let previousFanout = Environment.get(fanoutKey)
         let previousThreshold = Environment.get(thresholdKey)
-        let previousLimit = Environment.get(limitKey)
-        let previousBudget = Environment.get(budgetKey)
-        let previousDebounce = Environment.get(debounceKey)
+        let previousPreview = Environment.get(previewKey)
         setenv(fanoutKey, "true", 1)
         setenv(thresholdKey, "2", 1)
-        setenv(limitKey, "10", 1)
-        setenv(budgetKey, "0", 1)
-        setenv(debounceKey, "0", 1)
+        setenv(previewKey, "120", 1)
         defer {
             restoreEnvironment(fanoutKey, to: previousFanout)
             restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(limitKey, to: previousLimit)
-            restoreEnvironment(budgetKey, to: previousBudget)
-            restoreEnvironment(debounceKey, to: previousDebounce)
+            restoreEnvironment(previewKey, to: previousPreview)
         }
 
         try await withApp(configure: configure) { app in
@@ -778,25 +770,25 @@ extension IMServerTests {
             )
             channels.forEach { $0.embeddedEventLoop.run() }
 
-            let fullPayload = try readDomainEventPayload(from: channels[0])
-            let hintPayloads = try channels[1...].map { try readDomainEventPayload(from: $0) }
-            let hintPayload = try #require(hintPayloads.first)
-            #expect(fullPayload.eventID == eventID)
-            #expect(fullPayload.eventType == .messageCreated)
-            #expect(hintPayload.eventID == imLightweightMessageCreatedHintEventID(for: eventID))
-            #expect(hintPayload.eventID != eventID)
-            #expect(hintPayload.eventType == .conversationActivityHint)
-            #expect(hintPayloads.allSatisfy { $0.eventType == .conversationActivityHint })
+            let activeHintPayload = try readDomainEventPayload(from: channels[0])
+            #expect(activeHintPayload.eventID == imLightweightMessageCreatedHintEventID(for: eventID))
+            #expect(activeHintPayload.eventID != eventID)
+            #expect(activeHintPayload.eventType == .conversationActivityHint)
+            for channel in channels[1...] {
+                #expect(try readOptionalDomainEventPayload(from: channel) == nil)
+            }
 
             let metrics = await app.routingMetrics.currentSnapshot()
             #expect(metrics.realtimeActiveConversationFanoutSplitCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutMaxActiveRecipientsPerSplit == 1)
-            #expect(metrics.realtimeActiveConversationFanoutMaxInactiveHintRecipientsPerSplit == 2)
-            #expect(metrics.realtimeInactiveConversationHintFlushCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintPayloadBatchCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintRecipientCount == 2)
+            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 0)
+            #expect(metrics.realtimeActiveConversationFanoutCompactActiveRecipientCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 0)
+            #expect(metrics.realtimeActiveConversationFanoutMaxActiveRecipientsPerSplit == 0)
+            #expect(metrics.realtimeActiveConversationFanoutMaxCompactActiveRecipientsPerSplit == 1)
+            #expect(metrics.realtimeActiveConversationFanoutMaxInactiveHintRecipientsPerSplit == 0)
+            #expect(metrics.realtimeInactiveConversationHintFlushCount == 0)
+            #expect(metrics.realtimeInactiveConversationHintPayloadBatchCount == 0)
+            #expect(metrics.realtimeInactiveConversationHintRecipientCount == 0)
 
             for connectionID in connectionIDs {
                 await app.gatewaySessionService.remove(connectionID: connectionID)
@@ -804,21 +796,21 @@ extension IMServerTests {
         }
     }
 
-    @Test("Active conversation fanout keeps full message for active viewers and hints inactive viewers")
-    func activeConversationFanoutKeepsFullMessageForActiveViewersAndHintsInactiveViewers() async throws {
+    @Test("Active conversation fanout hints active viewers and skips inactive viewers")
+    func activeConversationFanoutHintsActiveViewersAndSkipsInactiveViewers() async throws {
         let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
         let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
+        let previewKey = "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS"
         let previousFanout = Environment.get(fanoutKey)
         let previousThreshold = Environment.get(thresholdKey)
-        let previousDebounce = Environment.get(debounceKey)
+        let previousPreview = Environment.get(previewKey)
         setenv(fanoutKey, "true", 1)
         setenv(thresholdKey, "2", 1)
-        setenv(debounceKey, "0", 1)
+        setenv(previewKey, "120", 1)
         defer {
             restoreEnvironment(fanoutKey, to: previousFanout)
             restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(debounceKey, to: previousDebounce)
+            restoreEnvironment(previewKey, to: previousPreview)
         }
 
         try await withApp(configure: configure) { app in
@@ -887,50 +879,38 @@ extension IMServerTests {
             inactiveChannel.embeddedEventLoop.run()
 
             let activePayload = try readDomainEventPayload(from: activeChannel)
-            let inactivePayload = try readDomainEventPayload(from: inactiveChannel)
 
-            #expect(activePayload.eventID == payload.eventID)
-            #expect(activePayload.eventType == .messageCreated)
-            guard case .messageCreated(let activeMessage, _) = activePayload.body else {
-                Issue.record("Expected active viewer to receive full messageCreated payload.")
+            #expect(activePayload.eventID == imLightweightMessageCreatedHintEventID(for: payload.eventID))
+            #expect(activePayload.eventID != payload.eventID)
+            #expect(activePayload.eventType == .conversationActivityHint)
+            guard case .conversationActivityHint(let hint) = activePayload.body else {
+                Issue.record("Expected active viewer to receive conversationActivityHint.")
                 return
             }
-            #expect(activeMessage.content.previewText == "active full message")
-
-            #expect(inactivePayload.eventID == imLightweightMessageCreatedHintEventID(for: payload.eventID))
-            #expect(inactivePayload.eventID != payload.eventID)
-            #expect(inactivePayload.eventType == .conversationActivityHint)
-            guard case .conversationActivityHint(let hint) = inactivePayload.body else {
-                Issue.record("Expected inactive viewer to receive conversationActivityHint.")
-                return
-            }
-            #expect(inactivePayload.conversation == nil)
+            #expect(activePayload.conversation == nil)
             #expect(hint.previewText == "active full message")
-            #expect(inactivePayload.timelineNotice == nil)
-            #expect(inactivePayload.requiresTimelineNotice == false)
-            #expect(inactivePayload.ownerCursor == nil)
-            #expect(inactivePayload.ownerAggregateSequence == nil)
+            #expect(activePayload.timelineNotice == nil)
+            #expect(activePayload.requiresTimelineNotice == false)
+            #expect(activePayload.ownerCursor == nil)
+            #expect(activePayload.ownerAggregateSequence == nil)
+            #expect(try readOptionalDomainEventPayload(from: inactiveChannel) == nil)
 
             await app.gatewaySessionService.remove(connectionID: activeConnectionID)
             await app.gatewaySessionService.remove(connectionID: inactiveConnectionID)
         }
     }
 
-    @Test("Active conversation fanout pull-only mode skips inactive realtime hints")
-    func activeConversationFanoutPullOnlyModeSkipsInactiveRealtimeHints() async throws {
+    @Test("Active conversation fanout skips inactive realtime hints")
+    func activeConversationFanoutSkipsInactiveRealtimeHints() async throws {
         let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
         let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let modeKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE"
         let previousFanout = Environment.get(fanoutKey)
         let previousThreshold = Environment.get(thresholdKey)
-        let previousMode = Environment.get(modeKey)
         setenv(fanoutKey, "true", 1)
         setenv(thresholdKey, "2", 1)
-        setenv(modeKey, "pull-only", 1)
         defer {
             restoreEnvironment(fanoutKey, to: previousFanout)
             restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(modeKey, to: previousMode)
         }
 
         try await withApp(configure: configure) { app in
@@ -999,7 +979,7 @@ extension IMServerTests {
             inactiveChannel.embeddedEventLoop.run()
 
             let activePayload = try readDomainEventPayload(from: activeChannel)
-            #expect(activePayload.eventType == .messageCreated)
+            #expect(activePayload.eventType == .conversationActivityHint)
             let inactiveOutbound = try inactiveChannel.readOutbound(as: ByteBuffer.self)
             #expect(inactiveOutbound == nil)
 
@@ -1012,24 +992,16 @@ extension IMServerTests {
     func activeConversationFanoutDowngradesNonWritableActiveViewers() async throws {
         let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
         let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let limitKey = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
         let dropKey = "IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE"
         let previousFanout = Environment.get(fanoutKey)
         let previousThreshold = Environment.get(thresholdKey)
-        let previousLimit = Environment.get(limitKey)
-        let previousDebounce = Environment.get(debounceKey)
         let previousDrop = Environment.get(dropKey)
         setenv(fanoutKey, "true", 1)
         setenv(thresholdKey, "2", 1)
-        setenv(limitKey, "10", 1)
-        setenv(debounceKey, "0", 1)
         setenv(dropKey, "true", 1)
         defer {
             restoreEnvironment(fanoutKey, to: previousFanout)
             restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(limitKey, to: previousLimit)
-            restoreEnvironment(debounceKey, to: previousDebounce)
             restoreEnvironment(dropKey, to: previousDrop)
         }
 
@@ -1113,16 +1085,17 @@ extension IMServerTests {
             blockedChannel.embeddedEventLoop.run()
 
             let writablePayload = try readDomainEventPayload(from: writableChannel)
-            #expect(writablePayload.eventType == .messageCreated)
-            #expect(writablePayload.eventID == payload.eventID)
+            #expect(writablePayload.eventType == .conversationActivityHint)
+            #expect(writablePayload.eventID == imLightweightMessageCreatedHintEventID(for: payload.eventID))
             #expect(try readOptionalDomainEventPayload(from: blockedChannel) == nil)
 
             let metrics = await app.routingMetrics.currentSnapshot()
             #expect(metrics.realtimeActiveConversationFanoutSplitCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 0)
+            #expect(metrics.realtimeActiveConversationFanoutCompactActiveRecipientCount == 2)
             #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 0)
-            #expect(metrics.realtimeActiveConversationFanoutDowngradedActiveRecipientCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutBackpressureDowngradedRecipientCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutDowngradedActiveRecipientCount == 2)
+            #expect(metrics.realtimeActiveConversationFanoutBackpressureDowngradedRecipientCount == 0)
             #expect(metrics.realtimeInactiveConversationHintRecipientCount == 0)
 
             await app.gatewaySessionService.remove(connectionID: writableConnectionID)
@@ -1130,134 +1103,17 @@ extension IMServerTests {
         }
     }
 
-    @Test("Active conversation full fanout limit downgrades overflow active viewers")
-    func activeConversationFullFanoutLimitDowngradesOverflowActiveViewers() async throws {
-        let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
-        let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let limitKey = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
-        let previousFanout = Environment.get(fanoutKey)
-        let previousThreshold = Environment.get(thresholdKey)
-        let previousLimit = Environment.get(limitKey)
-        let previousDebounce = Environment.get(debounceKey)
-        setenv(fanoutKey, "true", 1)
-        setenv(thresholdKey, "2", 1)
-        setenv(limitKey, "1", 1)
-        setenv(debounceKey, "0", 1)
-        defer {
-            restoreEnvironment(fanoutKey, to: previousFanout)
-            restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(limitKey, to: previousLimit)
-            restoreEnvironment(debounceKey, to: previousDebounce)
-        }
-
-        try await withApp(configure: configure) { app in
-            let userIDs = [UUID(), UUID(), UUID()]
-            let connectionIDs = [UUID(), UUID(), UUID()]
-            let channels = userIDs.map { _ in EmbeddedChannel() }
-            let address = try SocketAddress(ipAddress: "127.0.0.1", port: 12345)
-            for channel in channels {
-                try await channel.connect(to: address).get()
-            }
-            let conversationID = UUID()
-            for index in userIDs.indices {
-                let connection = IMAuthenticatedConnection(
-                    connectionID: connectionIDs[index],
-                    userID: userIDs[index],
-                    sessionID: UUID(),
-                    authenticatedAt: Date(),
-                    remoteIPAddress: "127.0.0.1",
-                    deviceID: "active-limit-device-\(index)",
-                    deviceName: "Active Limit Device \(index)",
-                    platform: "ios",
-                    appVersion: "1.0"
-                )
-                try await app.gatewaySessionService.bind(
-                    connection,
-                    control: IMConnectionControl(connectionID: connectionIDs[index], channel: channels[index])
-                )
-                let didMarkActive = await app.connectionRoutingService.updateConversationActivity(
-                    connectionID: connectionIDs[index],
-                    conversationID: conversationID,
-                    isActive: true
-                )
-                #expect(didMarkActive)
-            }
-
-            let eventID = UUID()
-            let payload = imTestDomainEventPayload(
-                eventID: eventID,
-                conversationID: conversationID,
-                senderUserID: userIDs[0],
-                sequence: 1,
-                text: "active fanout limit"
-            )
-
-            await app.gatewaySessionService.sendDomainEventPayloadBatches(
-                [
-                    IMGatewayDomainEventPayloadBatch(
-                        payload: payload,
-                        recipientUserIDs: userIDs
-                    )
-                ],
-                requestID: eventID
-            )
-            channels.forEach { $0.embeddedEventLoop.run() }
-
-            let payloads = try channels.map { try readDomainEventPayload(from: $0) }
-            let fullPayloads = payloads.filter { $0.eventType == .messageCreated }
-            let compactPayloads = payloads.filter { $0.eventType == .timelineGapHint }
-            #expect(fullPayloads.count == 1)
-            #expect(compactPayloads.count == 2)
-            #expect(fullPayloads.first?.eventID == eventID)
-            #expect(compactPayloads.allSatisfy {
-                $0.eventID == imLightweightMessageCreatedHintEventID(for: eventID)
-            })
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutCompactActiveRecipientCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 0)
-            #expect(metrics.realtimeActiveConversationFanoutDowngradedActiveRecipientCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutBackpressureDowngradedRecipientCount == 0)
-            #expect(metrics.realtimeActiveConversationFanoutMaxActiveRecipientsPerSplit == 1)
-            #expect(metrics.realtimeActiveConversationFanoutMaxCompactActiveRecipientsPerSplit == 2)
-            #expect(metrics.realtimeActiveConversationFanoutMaxInactiveHintRecipientsPerSplit == 0)
-            #expect(metrics.realtimeActiveConversationFanoutMaxDowngradedActiveRecipientsPerSplit == 2)
-            #expect(metrics.realtimeInactiveConversationHintFlushCount == 0)
-            #expect(metrics.realtimeInactiveConversationHintPayloadBatchCount == 0)
-            #expect(metrics.realtimeInactiveConversationHintRecipientCount == 0)
-
-            for connectionID in connectionIDs {
-                await app.gatewaySessionService.remove(connectionID: connectionID)
-            }
-        }
-    }
-
     @Test("Active conversation compact-only mode downgrades all active viewers")
     func activeConversationCompactOnlyModeDowngradesAllActiveViewers() async throws {
         let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
         let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let limitKey = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT"
-        let modeKey = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
         let previousFanout = Environment.get(fanoutKey)
         let previousThreshold = Environment.get(thresholdKey)
-        let previousLimit = Environment.get(limitKey)
-        let previousMode = Environment.get(modeKey)
-        let previousDebounce = Environment.get(debounceKey)
         setenv(fanoutKey, "true", 1)
         setenv(thresholdKey, "2", 1)
-        setenv(limitKey, "10", 1)
-        setenv(modeKey, "compact-only", 1)
-        setenv(debounceKey, "0", 1)
         defer {
             restoreEnvironment(fanoutKey, to: previousFanout)
             restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(limitKey, to: previousLimit)
-            restoreEnvironment(modeKey, to: previousMode)
-            restoreEnvironment(debounceKey, to: previousDebounce)
         }
 
         try await withApp(configure: configure) { app in
@@ -1314,7 +1170,7 @@ extension IMServerTests {
             channels.forEach { $0.embeddedEventLoop.run() }
 
             let payloads = try channels.map { try readDomainEventPayload(from: $0) }
-            #expect(payloads.allSatisfy { $0.eventType == .timelineGapHint })
+            #expect(payloads.allSatisfy { $0.eventType == .conversationActivityHint })
             #expect(payloads.allSatisfy {
                 $0.eventID == imLightweightMessageCreatedHintEventID(for: eventID)
             })
@@ -1332,117 +1188,17 @@ extension IMServerTests {
         }
     }
 
-    @Test("Active conversation full fanout payload budget downgrades large payload overflow viewers")
-    func activeConversationFullFanoutPayloadBudgetDowngradesLargePayloadOverflowViewers() async throws {
+    @Test("Pre-split active packet only targets active conversation connections")
+    func preSplitActivePacketOnlyTargetsActiveConversationConnections() async throws {
         let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
         let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let limitKey = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT"
-        let budgetKey = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
         let previousFanout = Environment.get(fanoutKey)
         let previousThreshold = Environment.get(thresholdKey)
-        let previousLimit = Environment.get(limitKey)
-        let previousBudget = Environment.get(budgetKey)
-        let previousDebounce = Environment.get(debounceKey)
         setenv(fanoutKey, "true", 1)
         setenv(thresholdKey, "2", 1)
-        setenv(limitKey, "10", 1)
-        setenv(budgetKey, "1024", 1)
-        setenv(debounceKey, "0", 1)
         defer {
             restoreEnvironment(fanoutKey, to: previousFanout)
             restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(limitKey, to: previousLimit)
-            restoreEnvironment(budgetKey, to: previousBudget)
-            restoreEnvironment(debounceKey, to: previousDebounce)
-        }
-
-        try await withApp(configure: configure) { app in
-            let channel = EmbeddedChannel()
-            let userIDs = [UUID(), UUID(), UUID()]
-            let connectionIDs = [UUID(), UUID(), UUID()]
-            let conversationID = UUID()
-            for index in userIDs.indices {
-                let connection = IMAuthenticatedConnection(
-                    connectionID: connectionIDs[index],
-                    userID: userIDs[index],
-                    sessionID: UUID(),
-                    authenticatedAt: Date(),
-                    remoteIPAddress: "127.0.0.1",
-                    deviceID: "active-budget-device-\(index)",
-                    deviceName: "Active Budget Device \(index)",
-                    platform: "ios",
-                    appVersion: "1.0"
-                )
-                try await app.gatewaySessionService.bind(
-                    connection,
-                    control: IMConnectionControl(connectionID: connectionIDs[index], channel: channel)
-                )
-                let didMarkActive = await app.imConnectionRegistry.updateConversationActivity(
-                    connectionID: connectionIDs[index],
-                    conversationID: conversationID,
-                    isActive: true
-                )
-                #expect(didMarkActive)
-            }
-
-            let eventID = UUID()
-            let payload = imTestDomainEventPayload(
-                eventID: eventID,
-                conversationID: conversationID,
-                senderUserID: userIDs[0],
-                sequence: 1,
-                text: String(repeating: "large-payload", count: 400)
-            )
-            let budget = IMActiveConversationFullFanoutBudget.effectiveLimit(
-                baseLimit: 10,
-                payloadByteBudget: 1024,
-                payload: payload
-            )
-            #expect(budget.limit == 1)
-
-            await app.gatewaySessionService.sendDomainEventPayloadBatches(
-                [
-                    IMGatewayDomainEventPayloadBatch(
-                        payload: payload,
-                        recipientUserIDs: userIDs
-                    )
-                ],
-                requestID: eventID
-            )
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutCompactActiveRecipientCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 0)
-            #expect(metrics.realtimeActiveConversationFanoutDowngradedActiveRecipientCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutPayloadBudgetAppliedCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutPayloadBudgetDowngradedRecipientCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutPayloadBudgetMaxPayloadBytes == budget.payloadByteCount)
-            #expect(metrics.realtimeActiveConversationFanoutPayloadBudgetMaxEffectiveLimit == 1)
-
-            for connectionID in connectionIDs {
-                await app.gatewaySessionService.remove(connectionID: connectionID)
-            }
-        }
-    }
-
-    @Test("Pre-split active full fanout only targets active conversation connections")
-    func preSplitActiveFullFanoutOnlyTargetsActiveConversationConnections() async throws {
-        let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
-        let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let limitKey = "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT"
-        let previousFanout = Environment.get(fanoutKey)
-        let previousThreshold = Environment.get(thresholdKey)
-        let previousLimit = Environment.get(limitKey)
-        setenv(fanoutKey, "true", 1)
-        setenv(thresholdKey, "2", 1)
-        setenv(limitKey, "1", 1)
-        defer {
-            restoreEnvironment(fanoutKey, to: previousFanout)
-            restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(limitKey, to: previousLimit)
         }
 
         try await withApp(configure: configure) { app in
@@ -1645,17 +1401,13 @@ extension IMServerTests {
     func activeConversationFanoutKeepsUserActiveUntilAllActiveDevicesLeave() async throws {
         let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
         let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
         let previousFanout = Environment.get(fanoutKey)
         let previousThreshold = Environment.get(thresholdKey)
-        let previousDebounce = Environment.get(debounceKey)
         setenv(fanoutKey, "true", 1)
         setenv(thresholdKey, "2", 1)
-        setenv(debounceKey, "0", 1)
         defer {
             restoreEnvironment(fanoutKey, to: previousFanout)
             restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(debounceKey, to: previousDebounce)
         }
 
         try await withApp(configure: configure) { app in
@@ -1732,336 +1484,11 @@ extension IMServerTests {
 
             let metrics = await app.routingMetrics.currentSnapshot()
             #expect(metrics.realtimeActiveConversationFanoutSplitCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 0)
+            #expect(metrics.realtimeActiveConversationFanoutCompactActiveRecipientCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 0)
 
             for connectionID in activeConnectionIDs + [inactiveConnectionID] {
-                await app.gatewaySessionService.remove(connectionID: connectionID)
-            }
-        }
-    }
-
-    @Test("Active conversation full fanout limit rotates selected active viewers")
-    func activeConversationFullFanoutLimitRotatesSelectedActiveViewers() async throws {
-        let userIDs = [UUID(), UUID(), UUID()]
-
-        let first = IMActiveConversationFullFanoutSelector.select(
-            from: userIDs,
-            limit: 1,
-            aggregateSequence: 1
-        )
-        #expect(first.fullUserIDs == [userIDs[0]])
-        #expect(first.downgradedUserIDs == [userIDs[1], userIDs[2]])
-
-        let second = IMActiveConversationFullFanoutSelector.select(
-            from: userIDs,
-            limit: 1,
-            aggregateSequence: 2
-        )
-        #expect(second.fullUserIDs == [userIDs[1]])
-        #expect(second.downgradedUserIDs == [userIDs[2], userIDs[0]])
-
-        let third = IMActiveConversationFullFanoutSelector.select(
-            from: userIDs,
-            limit: 1,
-            aggregateSequence: 3
-        )
-        #expect(third.fullUserIDs == [userIDs[2]])
-        #expect(third.downgradedUserIDs == [userIDs[0], userIDs[1]])
-
-        let wrapped = IMActiveConversationFullFanoutSelector.select(
-            from: userIDs,
-            limit: 1,
-            aggregateSequence: 4
-        )
-        #expect(wrapped.fullUserIDs == [userIDs[0]])
-        #expect(wrapped.downgradedUserIDs == [userIDs[1], userIDs[2]])
-    }
-
-    @Test("Active conversation full fanout byte budget reduces effective limit")
-    func activeConversationFullFanoutByteBudgetReducesEffectiveLimit() throws {
-        let payload = imTestDomainEventPayload(
-            eventID: UUID(),
-            conversationID: UUID(),
-            senderUserID: UUID(),
-            sequence: 1,
-            text: String(repeating: "large-payload", count: 200)
-        )
-        let encodedByteCount = try IMTCPProtobufCodec.encodeDomainEvent(
-            payload,
-            requireDeliveryMetadata: false
-        ).count
-
-        let disabled = IMActiveConversationFullFanoutBudget.effectiveLimit(
-            baseLimit: 10,
-            payloadByteBudget: 0,
-            payload: payload
-        )
-        #expect(disabled.limit == 10)
-        #expect(disabled.payloadByteCount == 0)
-        #expect(disabled.budgetApplied == false)
-
-        let budgeted = IMActiveConversationFullFanoutBudget.effectiveLimit(
-            baseLimit: 10,
-            payloadByteBudget: encodedByteCount * 2 + max(1, encodedByteCount / 2),
-            payload: payload
-        )
-        #expect(budgeted.limit == 2)
-        #expect(budgeted.payloadByteCount == encodedByteCount)
-        #expect(budgeted.budgetApplied)
-
-        let minimum = IMActiveConversationFullFanoutBudget.effectiveLimit(
-            baseLimit: 10,
-            payloadByteBudget: max(1, encodedByteCount - 1),
-            payload: payload
-        )
-        #expect(minimum.limit == 1)
-        #expect(minimum.budgetApplied)
-    }
-
-    @Test("Inactive conversation hints coalesce to latest payload per recipient")
-    func inactiveConversationHintsCoalesceToLatestPayloadPerRecipient() async throws {
-        let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
-        let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
-        let previousFanout = Environment.get(fanoutKey)
-        let previousThreshold = Environment.get(thresholdKey)
-        let previousDebounce = Environment.get(debounceKey)
-        setenv(fanoutKey, "true", 1)
-        setenv(thresholdKey, "2", 1)
-        setenv(debounceKey, "1", 1)
-        defer {
-            restoreEnvironment(fanoutKey, to: previousFanout)
-            restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(debounceKey, to: previousDebounce)
-        }
-
-        try await withApp(configure: configure) { app in
-            let channel = EmbeddedChannel()
-            let userIDs = [UUID(), UUID()]
-            let connectionIDs = [UUID(), UUID()]
-            for index in userIDs.indices {
-                let connection = IMAuthenticatedConnection(
-                    connectionID: connectionIDs[index],
-                    userID: userIDs[index],
-                    sessionID: UUID(),
-                    authenticatedAt: Date(),
-                    remoteIPAddress: "127.0.0.1",
-                    deviceID: "inactive-coalesce-device-\(index)",
-                    deviceName: "Inactive Coalesce Device \(index)",
-                    platform: "ios",
-                    appVersion: "1.0"
-                )
-                try await app.gatewaySessionService.bind(
-                    connection,
-                    control: IMConnectionControl(connectionID: connectionIDs[index], channel: channel)
-                )
-            }
-            let conversationID = UUID()
-            let firstPayload = imTestDomainEventPayload(
-                eventID: UUID(),
-                conversationID: conversationID,
-                senderUserID: userIDs[0],
-                sequence: 1,
-                text: "first inactive hint"
-            )
-            let secondPayload = imTestDomainEventPayload(
-                eventID: UUID(),
-                conversationID: conversationID,
-                senderUserID: userIDs[0],
-                sequence: 2,
-                text: "second inactive hint"
-            )
-
-            await app.gatewaySessionService.sendDomainEventPayloadBatches(
-                [
-                    IMGatewayDomainEventPayloadBatch(
-                        payload: firstPayload,
-                        recipientUserIDs: userIDs
-                    )
-                ],
-                requestID: firstPayload.eventID
-            )
-            await app.gatewaySessionService.sendDomainEventPayloadBatches(
-                [
-                    IMGatewayDomainEventPayloadBatch(
-                        payload: secondPayload,
-                        recipientUserIDs: userIDs
-                    )
-                ],
-                requestID: secondPayload.eventID
-            )
-
-            try await Task.sleep(nanoseconds: 1_200_000_000)
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 4)
-            #expect(metrics.realtimeInactiveConversationHintFlushCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintPayloadBatchCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintRecipientCount == 2)
-
-            for connectionID in connectionIDs {
-                await app.gatewaySessionService.remove(connectionID: connectionID)
-            }
-        }
-    }
-
-    @Test("Inactive conversation hints flush immediately at max pending recipient threshold")
-    func inactiveConversationHintsFlushImmediatelyAtMaxPendingRecipientThreshold() async throws {
-        let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
-        let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
-        let maxPendingKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_MAX_PENDING_RECIPIENTS"
-        let previousFanout = Environment.get(fanoutKey)
-        let previousThreshold = Environment.get(thresholdKey)
-        let previousDebounce = Environment.get(debounceKey)
-        let previousMaxPending = Environment.get(maxPendingKey)
-        setenv(fanoutKey, "true", 1)
-        setenv(thresholdKey, "2", 1)
-        setenv(debounceKey, "60", 1)
-        setenv(maxPendingKey, "2", 1)
-        defer {
-            restoreEnvironment(fanoutKey, to: previousFanout)
-            restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(debounceKey, to: previousDebounce)
-            restoreEnvironment(maxPendingKey, to: previousMaxPending)
-        }
-
-        try await withApp(configure: configure) { app in
-            let channel = EmbeddedChannel()
-            let userIDs = [UUID(), UUID()]
-            let connectionIDs = [UUID(), UUID()]
-            for index in userIDs.indices {
-                let connection = IMAuthenticatedConnection(
-                    connectionID: connectionIDs[index],
-                    userID: userIDs[index],
-                    sessionID: UUID(),
-                    authenticatedAt: Date(),
-                    remoteIPAddress: "127.0.0.1",
-                    deviceID: "inactive-threshold-device-\(index)",
-                    deviceName: "Inactive Threshold Device \(index)",
-                    platform: "ios",
-                    appVersion: "1.0"
-                )
-                try await app.gatewaySessionService.bind(
-                    connection,
-                    control: IMConnectionControl(connectionID: connectionIDs[index], channel: channel)
-                )
-            }
-
-            let payload = imTestDomainEventPayload(
-                eventID: UUID(),
-                conversationID: UUID(),
-                senderUserID: userIDs[0],
-                sequence: 1,
-                text: "flush at threshold"
-            )
-            await app.gatewaySessionService.sendDomainEventPayloadBatches(
-                [
-                    IMGatewayDomainEventPayloadBatch(
-                        payload: payload,
-                        recipientUserIDs: userIDs
-                    )
-                ],
-                requestID: payload.eventID
-            )
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 2)
-            #expect(metrics.realtimeInactiveConversationHintFlushCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintPayloadBatchCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintRecipientCount == 2)
-
-            for connectionID in connectionIDs {
-                await app.gatewaySessionService.remove(connectionID: connectionID)
-            }
-        }
-    }
-
-    @Test("Pre-split inactive conversation hints use gateway debounce")
-    func preSplitInactiveConversationHintsUseGatewayDebounce() async throws {
-        let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
-        let previousFanout = Environment.get(fanoutKey)
-        let previousDebounce = Environment.get(debounceKey)
-        setenv(fanoutKey, "false", 1)
-        setenv(debounceKey, "1", 1)
-        defer {
-            restoreEnvironment(fanoutKey, to: previousFanout)
-            restoreEnvironment(debounceKey, to: previousDebounce)
-        }
-
-        try await withApp(configure: configure) { app in
-            let channel = EmbeddedChannel()
-            let userIDs = [UUID(), UUID()]
-            let connectionIDs = [UUID(), UUID()]
-            for index in userIDs.indices {
-                let connection = IMAuthenticatedConnection(
-                    connectionID: connectionIDs[index],
-                    userID: userIDs[index],
-                    sessionID: UUID(),
-                    authenticatedAt: Date(),
-                    remoteIPAddress: "127.0.0.1",
-                    deviceID: "pre-split-hint-device-\(index)",
-                    deviceName: "Pre Split Hint Device \(index)",
-                    platform: "ios",
-                    appVersion: "1.0"
-                )
-                try await app.gatewaySessionService.bind(
-                    connection,
-                    control: IMConnectionControl(connectionID: connectionIDs[index], channel: channel)
-                )
-            }
-
-            let conversationID = UUID()
-            let firstPayload = imTestConversationActivityHintPayload(
-                eventID: UUID(),
-                conversationID: conversationID,
-                senderUserID: userIDs[0],
-                sequence: 1,
-                previewText: "first pre-split hint"
-            )
-            let secondPayload = imTestConversationActivityHintPayload(
-                eventID: UUID(),
-                conversationID: conversationID,
-                senderUserID: userIDs[0],
-                sequence: 2,
-                previewText: "second pre-split hint"
-            )
-
-            await app.gatewaySessionService.sendDomainEventPayloadBatches(
-                [
-                    IMGatewayDomainEventPayloadBatch(
-                        payload: firstPayload,
-                        recipientUserIDs: userIDs,
-                        fanoutIntent: .preSplitInactiveHint
-                    )
-                ],
-                requestID: firstPayload.eventID
-            )
-            await app.gatewaySessionService.sendDomainEventPayloadBatches(
-                [
-                    IMGatewayDomainEventPayloadBatch(
-                        payload: secondPayload,
-                        recipientUserIDs: userIDs,
-                        fanoutIntent: .preSplitInactiveHint
-                    )
-                ],
-                requestID: secondPayload.eventID
-            )
-
-            try await Task.sleep(nanoseconds: 1_200_000_000)
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 0)
-            #expect(metrics.realtimeInactiveConversationHintFlushCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintPayloadBatchCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintRecipientCount == 2)
-            #expect(metrics.realtimeInactiveConversationHintSuppressedRecipientCount == 2)
-
-            for connectionID in connectionIDs {
                 await app.gatewaySessionService.remove(connectionID: connectionID)
             }
         }
@@ -2071,17 +1498,13 @@ extension IMServerTests {
     func activeConversationFanoutIgnoresRecipientsWithoutLocalConnections() async throws {
         let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
         let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
         let previousFanout = Environment.get(fanoutKey)
         let previousThreshold = Environment.get(thresholdKey)
-        let previousDebounce = Environment.get(debounceKey)
         setenv(fanoutKey, "true", 1)
         setenv(thresholdKey, "2", 1)
-        setenv(debounceKey, "0", 1)
         defer {
             restoreEnvironment(fanoutKey, to: previousFanout)
             restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(debounceKey, to: previousDebounce)
         }
 
         try await withApp(configure: configure) { app in
@@ -2124,106 +1547,13 @@ extension IMServerTests {
             )
 
             let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintFlushCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintRecipientCount == 1)
-            #expect(metrics.localFanoutTargetConnectionCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 0)
+            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 0)
+            #expect(metrics.realtimeInactiveConversationHintFlushCount == 0)
+            #expect(metrics.realtimeInactiveConversationHintRecipientCount == 0)
+            #expect(metrics.localFanoutTargetConnectionCount == 0)
 
             await app.gatewaySessionService.remove(connectionID: connectionID)
-        }
-    }
-
-    @Test("Activating conversation removes pending inactive hint for that user")
-    func activatingConversationRemovesPendingInactiveHintForThatUser() async throws {
-        let fanoutKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED"
-        let thresholdKey = "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD"
-        let debounceKey = "IM_REALTIME_INACTIVE_CONVERSATION_HINT_DEBOUNCE_SECONDS"
-        let previousFanout = Environment.get(fanoutKey)
-        let previousThreshold = Environment.get(thresholdKey)
-        let previousDebounce = Environment.get(debounceKey)
-        setenv(fanoutKey, "true", 1)
-        setenv(thresholdKey, "2", 1)
-        setenv(debounceKey, "1", 1)
-        defer {
-            restoreEnvironment(fanoutKey, to: previousFanout)
-            restoreEnvironment(thresholdKey, to: previousThreshold)
-            restoreEnvironment(debounceKey, to: previousDebounce)
-        }
-
-        try await withApp(configure: configure) { app in
-            let activeLaterUserID = UUID()
-            let inactiveUserID = UUID()
-            let activeLaterConnectionID = UUID()
-            let inactiveConnectionID = UUID()
-            let channel = EmbeddedChannel()
-            let conversationID = UUID()
-            let activeLaterConnection = IMAuthenticatedConnection(
-                connectionID: activeLaterConnectionID,
-                userID: activeLaterUserID,
-                sessionID: UUID(),
-                authenticatedAt: Date(),
-                remoteIPAddress: "127.0.0.1",
-                deviceID: "active-later-device",
-                deviceName: "Active Later Device",
-                platform: "ios",
-                appVersion: "1.0"
-            )
-            try await app.gatewaySessionService.bind(
-                activeLaterConnection,
-                control: IMConnectionControl(connectionID: activeLaterConnectionID, channel: channel)
-            )
-            let inactiveConnection = IMAuthenticatedConnection(
-                connectionID: inactiveConnectionID,
-                userID: inactiveUserID,
-                sessionID: UUID(),
-                authenticatedAt: Date(),
-                remoteIPAddress: "127.0.0.1",
-                deviceID: "inactive-still-device",
-                deviceName: "Inactive Still Device",
-                platform: "ios",
-                appVersion: "1.0"
-            )
-            try await app.gatewaySessionService.bind(
-                inactiveConnection,
-                control: IMConnectionControl(connectionID: inactiveConnectionID, channel: channel)
-            )
-
-            let payload = imTestDomainEventPayload(
-                eventID: UUID(),
-                conversationID: conversationID,
-                senderUserID: activeLaterUserID,
-                sequence: 1,
-                text: "pending inactive hint"
-            )
-            await app.gatewaySessionService.sendDomainEventPayloadBatches(
-                [
-                    IMGatewayDomainEventPayloadBatch(
-                        payload: payload,
-                        recipientUserIDs: [activeLaterUserID, inactiveUserID]
-                    )
-                ],
-                requestID: payload.eventID
-            )
-
-            let didMarkActive = await app.imConnectionRegistry.updateConversationActivity(
-                connectionID: activeLaterConnectionID,
-                conversationID: conversationID,
-                isActive: true
-            )
-            #expect(didMarkActive)
-
-            try await Task.sleep(nanoseconds: 1_200_000_000)
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 2)
-            #expect(metrics.realtimeInactiveConversationHintFlushCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintPayloadBatchCount == 1)
-            #expect(metrics.realtimeInactiveConversationHintRecipientCount == 1)
-
-            await app.gatewaySessionService.remove(connectionID: activeLaterConnectionID)
-            await app.gatewaySessionService.remove(connectionID: inactiveConnectionID)
         }
     }
 
@@ -2668,7 +1998,7 @@ extension IMServerTests {
         }
     }
 
-    @Test("Realtime coalescing keeps active compact and inactive hint scopes independent")
+    @Test("Realtime coalescing keeps active compact and default scopes independent")
     func realtimeCoalescingScopesAreIndependent() async throws {
         try await withApp(configure: configure) { app in
             let probe = RecordingRealtimeRelayProbe()
@@ -2682,7 +2012,7 @@ extension IMServerTests {
             let conversationID = UUID()
             let senderUserID = UUID()
             let activeEventID = UUID()
-            let inactiveEventID = UUID()
+            let defaultEventID = UUID()
             let activePayload = imTestConversationActivityHintPayload(
                 eventID: activeEventID,
                 conversationID: conversationID,
@@ -2690,12 +2020,12 @@ extension IMServerTests {
                 sequence: 1,
                 previewText: "active"
             )
-            let inactivePayload = imTestConversationActivityHintPayload(
-                eventID: inactiveEventID,
+            let defaultPayload = imTestConversationActivityHintPayload(
+                eventID: defaultEventID,
                 conversationID: conversationID,
                 senderUserID: senderUserID,
                 sequence: 2,
-                previewText: "inactive"
+                previewText: "default"
             )
 
             await dispatcher.dispatchPayloadBatches(
@@ -2714,14 +2044,14 @@ extension IMServerTests {
             await dispatcher.dispatchPayloadBatches(
                 [
                     ConversationRealtimeConsumer.DomainEventPayloadBatch(
-                        payload: inactivePayload,
+                        payload: defaultPayload,
                         recipientUserIDs: [UUID()],
-                        fanoutIntent: .preSplitInactiveHint
+                        fanoutIntent: .unspecified
                     )
                 ],
-                requestID: inactiveEventID,
+                requestID: defaultEventID,
                 coalescingKey: conversationID,
-                coalescingScope: .inactiveHint,
+                coalescingScope: .defaultScope,
                 coalescingWindowMilliseconds: 50
             )
 
@@ -2732,7 +2062,7 @@ extension IMServerTests {
             #expect(await probe.callCount() == 2)
             let fanoutIntents = await probe.fanoutIntents()
             #expect(fanoutIntents.contains(.preSplitActiveCompact))
-            #expect(fanoutIntents.contains(.preSplitInactiveHint))
+            #expect(fanoutIntents.contains(.unspecified))
         }
     }
 
@@ -2754,17 +2084,19 @@ extension IMServerTests {
             let recipientC = UUID()
             let firstEventID = UUID()
             let secondEventID = UUID()
-            let firstPayload = imTestTimelineGapHintPayload(
+            let firstPayload = imTestConversationActivityHintPayload(
                 eventID: firstEventID,
                 conversationID: conversationID,
                 senderUserID: senderUserID,
-                sequence: 1
+                sequence: 1,
+                previewText: "first"
             )
-            let secondPayload = imTestTimelineGapHintPayload(
+            let secondPayload = imTestConversationActivityHintPayload(
                 eventID: secondEventID,
                 conversationID: conversationID,
                 senderUserID: senderUserID,
-                sequence: 2
+                sequence: 2,
+                previewText: "second"
             )
 
             await dispatcher.dispatchPayloadBatches(
@@ -2801,7 +2133,7 @@ extension IMServerTests {
             #expect(metrics.realtimeCoalescedDroppedPayloadBatchCount == 0)
             #expect(metrics.realtimeCoalescedDroppedRecipientDeliveryCount == 1)
 
-            let sequenceByRecipient = await probe.timelineGapHintSequenceByRecipient()
+            let sequenceByRecipient = await probe.activityHintSequenceByRecipient()
             #expect(sequenceByRecipient[recipientA] == 1)
             #expect(sequenceByRecipient[recipientB] == 2)
             #expect(sequenceByRecipient[recipientC] == 2)
@@ -3636,11 +2968,7 @@ extension IMServerTests {
             batchSize: 64,
             eventLoopYieldChunkCount: 64,
             activeConversationFanoutEnabled: true,
-            activeConversationFanoutRecipientThreshold: 2,
-            activeConversationFullFanoutRecipientLimit: 10,
-            activeConversationFullFanoutPayloadByteBudget: 0,
-            inactiveConversationHintDebounceSeconds: 1,
-            inactiveConversationHintMaxPendingRecipients: 5_000
+            activeConversationFanoutRecipientThreshold: 2
         )
 
         let conversationID = UUID()
@@ -3689,67 +3017,47 @@ extension IMServerTests {
         )
 
         let dispatches = await dispatchService.dispatches()
-        #expect(dispatches.count == 2)
+        #expect(dispatches.count == 1)
         let decodedDispatches = try dispatches.map { dispatch in
             (dispatch: dispatch, payload: try readDomainEventPayload(from: dispatch.envelope))
         }
-        let fullDispatch = try #require(decodedDispatches.first { $0.payload.eventType == .messageCreated })
-        let hintDispatch = try #require(decodedDispatches.first { $0.payload.eventType == .conversationActivityHint })
+        let compactDispatch = try #require(decodedDispatches.first { $0.payload.eventType == .conversationActivityHint })
 
-        #expect(fullDispatch.dispatch.nodeID == "node-b")
-        #expect(Set(fullDispatch.dispatch.envelope.targetUserIDs) == Set(activeUserIDs))
-        guard case .activeConversationDomainEventPacket(_, let activeConversationID, let allowedUserIDs, let fanoutIntent) = fullDispatch.dispatch.envelope.payload else {
-            Issue.record("Expected active full dispatch to use an active-conversation packet envelope.")
+        #expect(compactDispatch.dispatch.nodeID == "node-b")
+        #expect(Set(compactDispatch.dispatch.envelope.targetUserIDs) == Set(activeUserIDs))
+        guard case .activeConversationDomainEventPacket(_, let activeConversationID, let allowedUserIDs, let fanoutIntent) = compactDispatch.dispatch.envelope.payload else {
+            Issue.record("Expected active compact dispatch to use an active-conversation packet envelope.")
             return
         }
         #expect(activeConversationID == conversationID)
         #expect(Set(allowedUserIDs) == Set(activeUserIDs))
-        #expect(fanoutIntent == .preSplitActiveFull)
-        guard case .messageCreated = fullDispatch.payload.body else {
-            Issue.record("Expected active remote users to receive full message_created payload.")
+        #expect(fanoutIntent == .preSplitActiveCompact)
+        #expect(compactDispatch.payload.conversation == nil)
+        #expect(compactDispatch.payload.timelineNotice == nil)
+        #expect(compactDispatch.payload.requiresTimelineNotice == false)
+        #expect(compactDispatch.payload.ownerCursor == nil)
+        #expect(compactDispatch.payload.ownerAggregateSequence == nil)
+        #expect(compactDispatch.payload.eventID == imLightweightMessageCreatedHintEventID(for: payload.eventID))
+        #expect(compactDispatch.payload.eventID != payload.eventID)
+        guard case .conversationActivityHint(let hint) = compactDispatch.payload.body else {
+            Issue.record("Expected active remote users to receive conversation activity hint.")
             return
         }
-
-        #expect(hintDispatch.dispatch.nodeID == "node-b")
-        #expect(Set(hintDispatch.dispatch.envelope.targetUserIDs) == [inactiveUserID])
-        guard case .domainEventPacket(_, _, let hintFanoutIntent) = hintDispatch.dispatch.envelope.payload else {
-            Issue.record("Expected inactive hint dispatch to use a domain-event packet envelope.")
-            return
-        }
-        #expect(hintFanoutIntent == .preSplitInactiveHint)
-        #expect(hintDispatch.payload.conversation == nil)
-        #expect(hintDispatch.payload.timelineNotice == nil)
-        #expect(hintDispatch.payload.requiresTimelineNotice == false)
-        #expect(hintDispatch.payload.ownerCursor == nil)
-        #expect(hintDispatch.payload.ownerAggregateSequence == nil)
-        #expect(hintDispatch.payload.eventID == imLightweightMessageCreatedHintEventID(for: payload.eventID))
-        #expect(hintDispatch.payload.eventID != payload.eventID)
-        guard case .conversationActivityHint(let hint) = hintDispatch.payload.body else {
-            Issue.record("Expected inactive remote users to receive conversation activity hint.")
-            return
-        }
-        #expect(hint.previewText == "large remote")
+        #expect(hint.previewText == "")
         let metrics = await app.routingMetrics.currentSnapshot()
         #expect(metrics.realtimeRemoteActiveConversationFanoutSplitCount == 1)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutFullRecipientCount == 2)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutInactiveHintRecipientCount == 1)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutDowngradedActiveRecipientCount == 0)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutFallbackCount == 0)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutMaxFullRecipientsPerSplit == 2)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutMaxInactiveHintRecipientsPerSplit == 1)
+        #expect(metrics.realtimeRemoteActiveConversationFanoutFullRecipientCount == 0)
+        #expect(metrics.realtimeRemoteActiveConversationFanoutCompactRecipientCount == 2)
+        #expect(metrics.realtimeRemoteActiveConversationFanoutInactiveHintRecipientCount == 0)
+        #expect(metrics.realtimeRemoteActiveConversationFanoutDowngradedActiveRecipientCount == 2)
+        #expect(metrics.realtimeRemoteActiveConversationFanoutMaxFullRecipientsPerSplit == 0)
+        #expect(metrics.realtimeRemoteActiveConversationFanoutMaxInactiveHintRecipientsPerSplit == 0)
 
         try await app.asyncShutdown()
     }
 
-    @Test("Connection routing drops remote unsplit fallback when active route lookup fails closed")
-    func connectionRoutingDropsRemoteUnsplitFallbackWhenActiveRouteLookupFailsClosed() async throws {
-        let fallbackKey = "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED"
-        let previousFallback = Environment.get(fallbackKey)
-        setenv(fallbackKey, "false", 1)
-        defer {
-            restoreEnvironment(fallbackKey, to: previousFallback)
-        }
-
+    @Test("Connection routing drops remote realtime fanout when active route lookup fails closed")
+    func connectionRoutingDropsRemoteRealtimeFanoutWhenActiveRouteLookupFailsClosed() async throws {
         let app = try await Application.make(.testing)
         try await configure(app)
         app.imNodeID = "node-a"
@@ -3758,11 +3066,7 @@ extension IMServerTests {
             batchSize: 64,
             eventLoopYieldChunkCount: 64,
             activeConversationFanoutEnabled: true,
-            activeConversationFanoutRecipientThreshold: 2,
-            activeConversationFullFanoutRecipientLimit: 1,
-            activeConversationFullFanoutPayloadByteBudget: 0,
-            inactiveConversationHintDebounceSeconds: 1,
-            inactiveConversationHintMaxPendingRecipients: 5_000
+            activeConversationFanoutRecipientThreshold: 2
         )
 
         let conversationID = UUID()
@@ -3786,7 +3090,7 @@ extension IMServerTests {
             conversationID: conversationID,
             senderUserID: userIDs[0],
             sequence: 1,
-            text: "route failure must not full fanout"
+            text: "route failure must drop realtime"
         )
         await routingService.sendDomainEventPayloadBatches(
             [
@@ -3802,229 +3106,8 @@ extension IMServerTests {
         #expect(dispatches.isEmpty)
         #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
         let metrics = await app.routingMetrics.currentSnapshot()
-        #expect(metrics.realtimeRemoteActiveConversationFanoutFallbackCount == 0)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutDroppedFallbackCount == 1)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutDroppedFallbackRecipientCount == userIDs.count)
-
-        try await app.asyncShutdown()
-    }
-
-    @Test("Connection routing applies remote active conversation full fanout limit")
-    func connectionRoutingAppliesRemoteActiveConversationFullFanoutLimit() async throws {
-        let previewValues = [
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_PREVIEW_MAX_CHARS": "120",
-            "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS": "0"
-        ]
-        let originalPreviewValues = Dictionary(uniqueKeysWithValues: previewValues.keys.map { ($0, Environment.get($0)) })
-        defer {
-            for (key, value) in originalPreviewValues {
-                restoreEnvironment(key, to: value)
-            }
-        }
-        for (key, value) in previewValues {
-            setenv(key, value, 1)
-        }
-
-        let app = try await Application.make(.testing)
-        try await configure(app)
-        app.imNodeID = "node-a"
-        app.gatewayLocalFanoutConfiguration = IMGatewayLocalFanoutConfiguration(
-            batchSize: 64,
-            eventLoopYieldChunkCount: 64,
-            activeConversationFanoutEnabled: true,
-            activeConversationFanoutRecipientThreshold: 2,
-            activeConversationFullFanoutRecipientLimit: 2,
-            activeConversationFullFanoutPayloadByteBudget: 0,
-            inactiveConversationHintDebounceSeconds: 1,
-            inactiveConversationHintMaxPendingRecipients: 5_000
-        )
-
-        let conversationID = UUID()
-        let activeUserIDs = [UUID(), UUID(), UUID()]
-        let inactiveUserID = UUID()
-        let userIDs = activeUserIDs + [inactiveUserID]
-        let presenceStore = FakePresenceStore()
-        await presenceStore.setUserRoutes(
-            Dictionary(uniqueKeysWithValues: userIDs.map { ($0, Set(["node-b"])) })
-        )
-        await presenceStore.setActiveConversationRoutes([
-            conversationID: Dictionary(uniqueKeysWithValues: activeUserIDs.map { ($0, Set(["node-b"])) })
-        ])
-        let dispatchService = FakeNodeMessageDispatchService()
-        let routingService = ConnectionRoutingService(
-            app: app,
-            backend: FakeConnectionRoutingBackend(
-                presenceStore: presenceStore,
-                dispatchService: dispatchService
-            )
-        )
-
-        let payload = imTestDomainEventPayload(
-            eventID: UUID(),
-            conversationID: conversationID,
-            senderUserID: activeUserIDs[0],
-            sequence: 1,
-            text: "limited remote group"
-        )
-        await routingService.sendDomainEventPayloadBatches(
-            [
-                IMGatewayDomainEventPayloadBatch(
-                    payload: payload,
-                    recipientUserIDs: userIDs
-                )
-            ],
-            requestID: payload.eventID
-        )
-
-        let dispatches = await dispatchService.dispatches()
-        #expect(dispatches.count == 3)
-        let decodedDispatches = try dispatches.map { dispatch in
-            (dispatch: dispatch, payload: try readDomainEventPayload(from: dispatch.envelope))
-        }
-        let messageDispatches = decodedDispatches.filter { $0.payload.eventType == .messageCreated }
-        let hintDispatches = decodedDispatches.filter { $0.payload.eventType == .conversationActivityHint }
-        let timelineGapDispatches = decodedDispatches.filter { $0.payload.eventType == .timelineGapHint }
-        let fullDispatch = try #require(messageDispatches.first {
-            guard case .activeConversationDomainEventPacket(_, _, _, .preSplitActiveFull) = $0.dispatch.envelope.payload else {
-                return false
-            }
-            return true
-        })
-        let compactDispatch = try #require(timelineGapDispatches.first {
-            guard case .activeConversationDomainEventPacket(_, _, _, .preSplitActiveCompact) = $0.dispatch.envelope.payload else {
-                return false
-            }
-            return true
-        })
-        let inactiveHintDispatch = try #require(hintDispatches.first {
-            guard case .domainEventPacket = $0.dispatch.envelope.payload else {
-                return false
-            }
-            return true
-        })
-
-        #expect(Set(fullDispatch.dispatch.envelope.targetUserIDs) == Set(activeUserIDs.prefix(2)))
-        #expect(Set(compactDispatch.dispatch.envelope.targetUserIDs) == Set(activeUserIDs.suffix(1)))
-        #expect(Set(inactiveHintDispatch.dispatch.envelope.targetUserIDs) == Set([inactiveUserID]))
-        #expect(compactDispatch.payload.timelineNotice == nil)
-        #expect(compactDispatch.payload.requiresTimelineNotice == false)
-        #expect(compactDispatch.payload.ownerCursor == nil)
-        #expect(compactDispatch.payload.ownerAggregateSequence == nil)
-        if case .timelineGapHint(let compactHint) = compactDispatch.payload.body {
-            #expect(compactHint.timelineSequence == payload.aggregateSequence)
-        } else {
-            Issue.record("Expected compact active remote users to receive timelineGapHint.")
-        }
-        #expect(inactiveHintDispatch.payload.timelineNotice == nil)
-        #expect(inactiveHintDispatch.payload.requiresTimelineNotice == false)
-        #expect(inactiveHintDispatch.payload.ownerCursor == nil)
-        #expect(inactiveHintDispatch.payload.ownerAggregateSequence == nil)
-        if case .conversationActivityHint(let inactiveHint) = inactiveHintDispatch.payload.body {
-            #expect(inactiveHint.previewText == "limited remote group")
-        } else {
-            Issue.record("Expected inactive remote users to receive conversationActivityHint.")
-        }
-        let metrics = await app.routingMetrics.currentSnapshot()
-        #expect(metrics.realtimeRemoteActiveConversationFanoutSplitCount == 1)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutFullRecipientCount == 2)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutCompactRecipientCount == 1)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutInactiveHintRecipientCount == 1)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutDowngradedActiveRecipientCount == 1)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutMaxCompactRecipientsPerSplit == 1)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutMaxDowngradedActiveRecipientsPerSplit == 1)
-
-        try await app.asyncShutdown()
-    }
-
-    @Test("Connection routing applies remote active conversation full fanout payload budget")
-    func connectionRoutingAppliesRemoteActiveConversationFullFanoutPayloadBudget() async throws {
-        let app = try await Application.make(.testing)
-        try await configure(app)
-        app.imNodeID = "node-a"
-        app.gatewayLocalFanoutConfiguration = IMGatewayLocalFanoutConfiguration(
-            batchSize: 64,
-            eventLoopYieldChunkCount: 64,
-            activeConversationFanoutEnabled: true,
-            activeConversationFanoutRecipientThreshold: 2,
-            activeConversationFullFanoutRecipientLimit: 10,
-            activeConversationFullFanoutPayloadByteBudget: 1024,
-            inactiveConversationHintDebounceSeconds: 1,
-            inactiveConversationHintMaxPendingRecipients: 5_000
-        )
-
-        let conversationID = UUID()
-        let activeUserIDs = [UUID(), UUID(), UUID()]
-        let inactiveUserID = UUID()
-        let userIDs = activeUserIDs + [inactiveUserID]
-        let presenceStore = FakePresenceStore()
-        await presenceStore.setUserRoutes(
-            Dictionary(uniqueKeysWithValues: userIDs.map { ($0, Set(["node-b"])) })
-        )
-        await presenceStore.setActiveConversationRoutes([
-            conversationID: Dictionary(uniqueKeysWithValues: activeUserIDs.map { ($0, Set(["node-b"])) })
-        ])
-        let dispatchService = FakeNodeMessageDispatchService()
-        let routingService = ConnectionRoutingService(
-            app: app,
-            backend: FakeConnectionRoutingBackend(
-                presenceStore: presenceStore,
-                dispatchService: dispatchService
-            )
-        )
-
-        let payload = imTestDomainEventPayload(
-            eventID: UUID(),
-            conversationID: conversationID,
-            senderUserID: activeUserIDs[0],
-            sequence: 1,
-            text: String(repeating: "large-remote-payload", count: 400)
-        )
-        let budget = IMActiveConversationFullFanoutBudget.effectiveLimit(
-            baseLimit: 10,
-            payloadByteBudget: 1024,
-            payload: payload
-        )
-        #expect(budget.limit == 1)
-
-        await routingService.sendDomainEventPayloadBatches(
-            [
-                IMGatewayDomainEventPayloadBatch(
-                    payload: payload,
-                    recipientUserIDs: userIDs
-                )
-            ],
-            requestID: payload.eventID
-        )
-
-        let dispatches = await dispatchService.dispatches()
-        #expect(dispatches.count == 3)
-        let decodedDispatches = try dispatches.map { dispatch in
-            (dispatch: dispatch, payload: try readDomainEventPayload(from: dispatch.envelope))
-        }
-        let messageDispatches = decodedDispatches.filter { $0.payload.eventType == .messageCreated }
-        let hintDispatches = decodedDispatches.filter { $0.payload.eventType == .conversationActivityHint }
-        let timelineGapDispatches = decodedDispatches.filter { $0.payload.eventType == .timelineGapHint }
-        let compactHintDispatch = try #require(timelineGapDispatches.first {
-            Set($0.dispatch.envelope.targetUserIDs) == Set(activeUserIDs.suffix(2))
-        })
-        let inactiveHintDispatch = try #require(hintDispatches.first {
-            Set($0.dispatch.envelope.targetUserIDs) == Set([inactiveUserID])
-        })
-
-        #expect(Set(messageDispatches.flatMap { $0.dispatch.envelope.targetUserIDs }) == Set(activeUserIDs.prefix(1)))
-        #expect(messageDispatches.contains { Set($0.dispatch.envelope.targetUserIDs) == Set(activeUserIDs.prefix(1)) })
-        #expect(Set(compactHintDispatch.dispatch.envelope.targetUserIDs) == Set(activeUserIDs.suffix(2)))
-        #expect(Set(inactiveHintDispatch.dispatch.envelope.targetUserIDs) == Set([inactiveUserID]))
-        let metrics = await app.routingMetrics.currentSnapshot()
-        #expect(metrics.realtimeRemoteActiveConversationFanoutSplitCount == 1)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutFullRecipientCount == 1)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutCompactRecipientCount == 2)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutInactiveHintRecipientCount == 1)
-        #expect(metrics.realtimeRemoteActiveConversationFanoutDowngradedActiveRecipientCount == 2)
-        #expect(metrics.realtimeActiveConversationFanoutPayloadBudgetAppliedCount == 1)
-        #expect(metrics.realtimeActiveConversationFanoutPayloadBudgetDowngradedRecipientCount == 2)
-        #expect(metrics.realtimeActiveConversationFanoutPayloadBudgetMaxPayloadBytes == budget.payloadByteCount)
-        #expect(metrics.realtimeActiveConversationFanoutPayloadBudgetMaxEffectiveLimit == 1)
+        #expect(metrics.realtimeRemoteActiveConversationFanoutRouteSplitDropCount == 1)
+        #expect(metrics.realtimeRemoteActiveConversationFanoutRouteSplitDropRecipientCount == userIDs.count)
 
         try await app.asyncShutdown()
     }
@@ -4349,299 +3432,11 @@ extension IMServerTests {
         try await app.asyncShutdown()
     }
 
-    @Test("Realtime delivery consumer splits active full messages and coalesces inactive hints")
-    func realtimeDeliveryConsumerSplitsActiveFullMessagesAndCoalescesInactiveHints() async throws {
-        let values = [
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "1",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS": "0"
-        ]
-        let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
-        defer {
-            for (key, value) in originalValues {
-                restoreEnvironment(key, to: value)
-            }
-        }
-        for (key, value) in values {
-            setenv(key, value, 1)
-        }
-
-        try await withApp(configure: configure) { app in
-            let presenceStore = FakePresenceStore()
-            let dispatchService = FakeNodeMessageDispatchService()
-            app.connectionRoutingService = ConnectionRoutingService(
-                app: app,
-                backend: FakeConnectionRoutingBackend(
-                    presenceStore: presenceStore,
-                    dispatchService: dispatchService
-                )
-            )
-
-            let sender = try await user(email: "demo@example.com", on: app)
-            let senderID = try sender.requireID()
-            let activeUserID = senderID
-            let inactiveUserID = UUID()
-            let downgradedUserID = UUID()
-            let recipientUserIDs = [activeUserID, inactiveUserID, downgradedUserID]
-            let conversation = Conversation(
-                title: "Consumer Split",
-                kind: .group,
-                updatedAt: Date(timeIntervalSince1970: 1_710_500_000),
-                lastMessageSequence: 2
-            )
-            try await conversation.create(on: app.db)
-            let conversationID = try conversation.requireID()
-
-            await presenceStore.setActiveConversationRoutes([
-                conversationID: [
-                    activeUserID: ["gateway-a"],
-                    downgradedUserID: ["gateway-a"]
-                ]
-            ])
-            await presenceStore.setUserRoutes([
-                activeUserID: ["gateway-a"],
-                inactiveUserID: ["gateway-a"],
-                downgradedUserID: ["gateway-a"]
-            ])
-
-            var envelopes: [ConversationEventEnvelope] = []
-            var messageIDs: [UUID] = []
-            for sequence in 1...2 {
-                let message = try ConversationMessage(
-                    conversationID: conversationID,
-                    senderUserID: senderID,
-                    serverSequence: sequence,
-                    timelineSequence: sequence,
-                    clientMessageID: "consumer-split-\(sequence)",
-                    content: .richText(.plain("consumer split \(sequence)"))
-                )
-                try await message.create(on: app.db)
-                let messageID = try message.requireID()
-                messageIDs.append(messageID)
-                let event = try ConversationDomainEvent(
-                    id: UUID(),
-                    conversationID: conversationID,
-                    eventType: .messageCreated,
-                    aggregateSequence: sequence,
-                    payload: .messageCreated(
-                        messageID: messageID,
-                        recipientUserIDs: recipientUserIDs,
-                        preview: ConversationMessageCreatedPreview(
-                            senderUserID: senderID,
-                            serverSequence: UInt64(sequence),
-                            timelineSequence: UInt64(sequence),
-                            previewText: "consumer split \(sequence)",
-                            createdAt: message.createdAt
-                        )
-                    ),
-                    createdAt: Date(timeIntervalSince1970: 1_710_500_000 + TimeInterval(sequence))
-                )
-                envelopes.append(
-                    try ConversationEventEnvelope(
-                        event: event,
-                        payload: try event.decodedPayload(),
-                        deliveryContext: nil
-                    )
-                )
-            }
-
-            try await ConversationRealtimeDeliveryConsumer(app: app, sourceDB: app.db)
-                .consumeMessageCreatedRun(envelopes)
-
-            let decodedPayloads = await dispatchService.dispatches().compactMap { dispatch in
-                decodedDomainEventPayload(from: dispatch.envelope).map { payload in
-                    (payload: payload, targetUserIDs: dispatch.envelope.targetUserIDs)
-                }
-            }
-            let fullMessages = decodedPayloads.filter { $0.payload.eventType == .messageCreated }
-            let inactiveHints = decodedPayloads.filter { $0.payload.eventType == .conversationActivityHint }
-            #expect(fullMessages.count == 2)
-            let messageTargetsBySequence = Dictionary(grouping: fullMessages, by: \.payload.aggregateSequence)
-                .mapValues { payloads in
-                    Set(payloads.flatMap { $0.targetUserIDs })
-                }
-            let activeRecipientSet = Set([activeUserID, downgradedUserID])
-            for sequence in UInt64(1)...UInt64(2) {
-                let fullTargets = try #require(messageTargetsBySequence[sequence])
-                #expect(fullTargets.count == 1)
-                #expect(fullTargets.isSubset(of: activeRecipientSet))
-            }
-            #expect(Set(fullMessages.map(\.payload.eventID)) == Set(envelopes.compactMap(\.eventID)))
-            #expect(inactiveHints.count == 3)
-            for sequence in UInt64(1)...UInt64(2) {
-                let fullTargets = try #require(messageTargetsBySequence[sequence])
-                let compactHints = inactiveHints.filter {
-                    $0.payload.aggregateSequence == sequence
-                        && Set($0.targetUserIDs).isSubset(of: activeRecipientSet)
-                }
-                #expect(compactHints.count == 1)
-                #expect(Set(compactHints.flatMap(\.targetUserIDs)) == activeRecipientSet.subtracting(fullTargets))
-            }
-            let inactiveRecipientHints = inactiveHints.filter { Set($0.targetUserIDs) == [inactiveUserID] }
-            #expect(inactiveRecipientHints.count == 1)
-            let inactiveHint = try #require(inactiveRecipientHints.first)
-            #expect(inactiveHint.payload.eventID != envelopes[1].eventID)
-            if case .conversationActivityHint(let hint) = inactiveHint.payload.body {
-                #expect(hint.messageID == messageIDs[1])
-            } else {
-                Issue.record("Expected inactive hint to use conversationActivityHint body.")
-            }
-            #expect(inactiveHint.payload.timelineNotice == nil)
-            #expect(inactiveHint.payload.requiresTimelineNotice == false)
-            #expect(inactiveHint.payload.ownerCursor == nil)
-            #expect(inactiveHint.payload.ownerAggregateSequence == nil)
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutCompactActiveRecipientCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutDowngradedActiveRecipientCount == 2)
-            #expect(metrics.realtimeDeliveryConsumerInactiveHintRelayPayloadBatchCount == 1)
-            #expect(metrics.realtimeDeliveryConsumerInactiveHintRelayRecipientCount == 1)
-            #expect(metrics.realtimeDeliveryConsumerInactiveHintSuppressedRecipientCount == 1)
-            #expect(metrics.realtimeActiveConversationRouteCacheHitCount == 0)
-            #expect(metrics.realtimeActiveConversationRouteCacheMissCount == 1)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
-        }
-    }
-
-    @Test("Realtime delivery consumer compact-only mode sends active compact hints")
-    func realtimeDeliveryConsumerCompactOnlyModeSendsActiveCompactHints() async throws {
-        let values = [
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "10",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE": "compact-only",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_COMPACT_HINT_BODY": "conversation-activity",
-            "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS": "8",
-            "IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS": "0"
-        ]
-        let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
-        defer {
-            for (key, value) in originalValues {
-                restoreEnvironment(key, to: value)
-            }
-        }
-        for (key, value) in values {
-            setenv(key, value, 1)
-        }
-
-        try await withApp(configure: configure) { app in
-            let presenceStore = FakePresenceStore()
-            let dispatchService = FakeNodeMessageDispatchService()
-            app.connectionRoutingService = ConnectionRoutingService(
-                app: app,
-                backend: FakeConnectionRoutingBackend(
-                    presenceStore: presenceStore,
-                    dispatchService: dispatchService
-                )
-            )
-
-            let sender = try await user(email: "demo@example.com", on: app)
-            let senderID = try sender.requireID()
-            let secondActiveUserID = UUID()
-            let inactiveUserID = UUID()
-            let recipientUserIDs = [senderID, secondActiveUserID, inactiveUserID]
-            let conversation = Conversation(
-                title: "Consumer Compact Only",
-                kind: .group,
-                updatedAt: Date(timeIntervalSince1970: 1_710_500_500),
-                lastMessageSequence: 1
-            )
-            try await conversation.create(on: app.db)
-            let conversationID = try conversation.requireID()
-
-            await presenceStore.setActiveConversationRoutes([
-                conversationID: [
-                    senderID: ["gateway-a"],
-                    secondActiveUserID: ["gateway-a"]
-                ]
-            ])
-            await presenceStore.setUserRoutes(
-                Dictionary(uniqueKeysWithValues: recipientUserIDs.map { ($0, Set(["gateway-a"])) })
-            )
-
-            let message = try ConversationMessage(
-                conversationID: conversationID,
-                senderUserID: senderID,
-                serverSequence: 1,
-                timelineSequence: 1,
-                clientMessageID: "consumer-compact-only-1",
-                content: .richText(.plain("consumer compact only"))
-            )
-            try await message.create(on: app.db)
-            let messageID = try message.requireID()
-            let event = try ConversationDomainEvent(
-                id: UUID(),
-                conversationID: conversationID,
-                eventType: .messageCreated,
-                aggregateSequence: 1,
-                payload: .messageCreated(
-                    messageID: messageID,
-                    recipientUserIDs: recipientUserIDs,
-                    preview: ConversationMessageCreatedPreview(
-                        senderUserID: senderID,
-                        serverSequence: 1,
-                        timelineSequence: 1,
-                        previewText: "consumer compact only",
-                        createdAt: message.createdAt
-                    )
-                ),
-                createdAt: Date(timeIntervalSince1970: 1_710_500_501)
-            )
-            let envelope = try ConversationEventEnvelope(
-                event: event,
-                payload: try event.decodedPayload(),
-                deliveryContext: nil
-            )
-
-            try await ConversationRealtimeDeliveryConsumer(app: app, sourceDB: app.db)
-                .consumeMessageCreatedRun([envelope])
-
-            let decodedPayloads = await dispatchService.dispatches().compactMap { dispatch in
-                decodedDomainEventPayload(from: dispatch.envelope).map { payload in
-                    (payload: payload, targetUserIDs: dispatch.envelope.targetUserIDs)
-                }
-            }
-            let fullMessages = decodedPayloads.filter { $0.payload.eventType == .messageCreated }
-            let timelineGapHints = decodedPayloads.filter { $0.payload.eventType == .timelineGapHint }
-            let activityHints = decodedPayloads.filter { $0.payload.eventType == .conversationActivityHint }
-            let expectedHintEventID = imLightweightMessageCreatedHintEventID(for: try event.requireID())
-            #expect(fullMessages.isEmpty)
-            #expect(timelineGapHints.isEmpty)
-            #expect(activityHints.count == 2)
-            #expect((timelineGapHints + activityHints).allSatisfy {
-                $0.payload.eventID == expectedHintEventID
-            })
-            let activeActivityHint = try #require(activityHints.first { Set($0.targetUserIDs) == [senderID, secondActiveUserID] })
-            guard case .conversationActivityHint(let activeHint) = activeActivityHint.payload.body else {
-                Issue.record("Expected active compact payload to use conversationActivityHint body.")
-                return
-            }
-            #expect(activeHint.messageID == messageID)
-            #expect(activeHint.previewText == "consumer")
-            #expect(activityHints.contains { Set($0.targetUserIDs) == [inactiveUserID] })
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 0)
-            #expect(metrics.realtimeActiveConversationFanoutCompactActiveRecipientCount == 2)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutDowngradedActiveRecipientCount == 2)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
-        }
-    }
-
     @Test("Realtime delivery active conversation route cache reuses hot conversation routes across consumes")
     func realtimeDeliveryActiveConversationRouteCacheReusesHotConversationRoutesAcrossConsumes() async throws {
         let values = [
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "10",
             "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
             "IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS": "1000"
         ]
@@ -4739,10 +3534,8 @@ extension IMServerTests {
         let values = [
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "10",
             "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS": "1000",
-            "IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE": "pull-only"
+            "IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS": "1000"
         ]
         let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
         defer {
@@ -4848,10 +3641,8 @@ extension IMServerTests {
         let values = [
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "10",
             "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
             "IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS": "1000",
-            "IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE": "pull-only",
             "IM_STREAM_CONSUMER_REQUIRE_MESSAGE_CREATED_RECIPIENT_SNAPSHOT": "true"
         ]
         let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
@@ -4977,7 +3768,6 @@ extension IMServerTests {
         let values = [
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "10",
             "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
             "IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS": "1000"
         ]
@@ -5082,7 +3872,6 @@ extension IMServerTests {
         let values = [
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "10",
             "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
             "IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS": "0"
         ]
@@ -5175,15 +3964,12 @@ extension IMServerTests {
         }
     }
 
-    @Test("Realtime delivery drops unsplit fallback when route split fails closed")
-    func realtimeDeliveryDropsUnsplitFallbackWhenRouteSplitFailsClosed() async throws {
+    @Test("Realtime delivery drops fanout when route split fails closed")
+    func realtimeDeliveryDropsFanoutWhenRouteSplitFailsClosed() async throws {
         let values = [
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "10",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "0",
-            "IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE": "relay",
-            "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED": "false"
+            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "0"
         ]
         let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
         defer {
@@ -5209,12 +3995,7 @@ extension IMServerTests {
                 batchSize: 64,
                 eventLoopYieldChunkCount: 64,
                 activeConversationFanoutEnabled: true,
-                activeConversationFanoutRecipientThreshold: 3,
-                activeConversationFullFanoutRecipientLimit: 10,
-                activeConversationFullFanoutPayloadByteBudget: 0,
-                inactiveConversationHintMode: .relay,
-                inactiveConversationHintDebounceSeconds: 1,
-                inactiveConversationHintMaxPendingRecipients: 5_000
+                activeConversationFanoutRecipientThreshold: 3
             )
 
             let sender = try await user(email: "demo@example.com", on: app)
@@ -5268,29 +4049,23 @@ extension IMServerTests {
                         payload: try event.decodedPayload(),
                         deliveryContext: nil
                     )
-                )
+            )
 
             #expect(await dispatchService.dispatches().isEmpty)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
             let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutDroppedFallbackCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutDroppedFallbackRecipientCount == recipientUserIDs.count)
-            #expect(metrics.realtimeActiveConversationFanoutUnsplitFallbackCount == 0)
-            #expect(metrics.realtimeActiveConversationFanoutHintFallbackRecipientCount == 0)
+            #expect(metrics.realtimeActiveConversationFanoutRouteSplitDropCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutRouteSplitDropRecipientCount == recipientUserIDs.count)
             #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 0)
         }
     }
 
-    @Test("Domain relay-after-record drops unsplit fallback when route split fails closed")
-    func domainRelayAfterRecordDropsUnsplitFallbackWhenRouteSplitFailsClosed() async throws {
+    @Test("Domain relay-after-record drops realtime fanout when route split fails closed")
+    func domainRelayAfterRecordDropsRealtimeFanoutWhenRouteSplitFailsClosed() async throws {
         let values = [
             "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD": "3",
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "10",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_INACTIVE_CONVERSATION_HINT_MODE": "relay",
-            "IM_REALTIME_ACTIVE_CONVERSATION_UNSPLIT_FALLBACK_ENABLED": "false"
+            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3"
         ]
         let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
         defer {
@@ -5371,781 +4146,15 @@ extension IMServerTests {
 
             #expect(try await OwnerDomainEventDelivery.query(on: app.imSummaryDB).count() == 0)
             #expect(await dispatchService.dispatches().isEmpty)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
 
             let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.domainRelayAfterRecordPreSplitFallbackCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutDroppedFallbackCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutDroppedFallbackRecipientCount == recipientUserIDs.count)
-            #expect(metrics.realtimeActiveConversationFanoutUnsplitFallbackCount == 0)
-            #expect(metrics.realtimeActiveConversationFanoutHintFallbackRecipientCount == 0)
+            #expect(metrics.domainRelayAfterRecordPreSplitRouteDropCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutRouteSplitDropCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutRouteSplitDropRecipientCount == recipientUserIDs.count)
             #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 0)
         }
     }
 
-    @Test("Domain relay-after-record pre-splits active messages and inactive hints")
-    func domainRelayAfterRecordPreSplitsActiveMessagesAndInactiveHints() async throws {
-        let values = [
-            "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "1",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3"
-        ]
-        let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
-        defer {
-            for (key, value) in originalValues {
-                restoreEnvironment(key, to: value)
-            }
-        }
-        for (key, value) in values {
-            setenv(key, value, 1)
-        }
-
-        try await withApp(configure: configure) { app in
-            let presenceStore = FakePresenceStore()
-            let dispatchService = FakeNodeMessageDispatchService()
-            app.connectionRoutingService = ConnectionRoutingService(
-                app: app,
-                backend: FakeConnectionRoutingBackend(
-                    presenceStore: presenceStore,
-                    dispatchService: dispatchService
-                )
-            )
-
-            let sender = try await user(email: "demo@example.com", on: app)
-            let senderID = try sender.requireID()
-            let compactActiveUserID = UUID()
-            let inactiveUserID = UUID()
-            let secondInactiveUserID = UUID()
-            let recipientUserIDs = [senderID, compactActiveUserID, inactiveUserID, secondInactiveUserID]
-            let conversation = Conversation(
-                title: "Relay Pre Split",
-                kind: .group,
-                updatedAt: Date(timeIntervalSince1970: 1_710_500_200),
-                lastMessageSequence: 1
-            )
-            try await conversation.create(on: app.db)
-            let conversationID = try conversation.requireID()
-            await presenceStore.setActiveConversationRoutes([
-                conversationID: [
-                    senderID: ["gateway-a"],
-                    compactActiveUserID: ["gateway-a"]
-                ]
-            ])
-            await presenceStore.setUserRoutes(
-                Dictionary(uniqueKeysWithValues: recipientUserIDs.map { ($0, Set(["gateway-a"])) })
-            )
-
-            let message = try ConversationMessage(
-                conversationID: conversationID,
-                senderUserID: senderID,
-                serverSequence: 1,
-                timelineSequence: 1,
-                clientMessageID: "relay-pre-split-message",
-                content: .richText(.plain("relay pre split payload"))
-            )
-            try await message.create(on: app.db)
-            let messageID = try message.requireID()
-            let event = try ConversationDomainEvent(
-                id: UUID(),
-                conversationID: conversationID,
-                eventType: .messageCreated,
-                aggregateSequence: 1,
-                payload: .messageCreated(
-                    messageID: messageID,
-                    recipientUserIDs: recipientUserIDs,
-                    preview: ConversationMessageCreatedPreview(
-                        senderUserID: senderID,
-                        serverSequence: 1,
-                        timelineSequence: 1,
-                        previewText: "relay pre split payload",
-                        createdAt: message.createdAt
-                    )
-                ),
-                createdAt: Date(timeIntervalSince1970: 1_710_500_201)
-            )
-            let envelope = try ConversationEventEnvelope(
-                event: event,
-                payload: try event.decodedPayload(),
-                deliveryContext: nil
-            )
-
-            try await OwnerDomainEventDeliveryConsumer(
-                app: app,
-                sourceDB: app.db,
-                relayRealtimeAfterRecord: true
-            ).consume(envelope)
-
-            #expect(try await OwnerDomainEventDelivery.query(on: app.imSummaryDB).count() == 0)
-
-            let decodedPayloads = await dispatchService.dispatches().compactMap { dispatch in
-                decodedDomainEventPayload(from: dispatch.envelope).map { payload in
-                    (payload: payload, targetUserIDs: dispatch.envelope.targetUserIDs)
-                }
-            }
-            let fullMessages = decodedPayloads.filter { $0.payload.eventType == .messageCreated }
-            let inactiveHints = decodedPayloads.filter { $0.payload.eventType == .conversationActivityHint }
-            #expect(fullMessages.count == 1)
-            let activeRecipientSet = Set([senderID, compactActiveUserID])
-            let fullActiveTargets = Set(fullMessages.flatMap(\.targetUserIDs))
-            #expect(fullActiveTargets.count == 1)
-            #expect(fullActiveTargets.isSubset(of: activeRecipientSet))
-            #expect(inactiveHints.count == 2)
-            #expect(inactiveHints.contains { Set($0.targetUserIDs) == activeRecipientSet.subtracting(fullActiveTargets) })
-            #expect(inactiveHints.contains { Set($0.targetUserIDs) == [inactiveUserID, secondInactiveUserID] })
-
-            let fullPayload = try #require(fullMessages.first?.payload)
-            guard case .messageCreated(let activeMessage, _) = fullPayload.body else {
-                Issue.record("Expected active relay to keep messageCreated payload.")
-                return
-            }
-            #expect(activeMessage.id == messageID)
-            #expect(activeMessage.content.previewText == "relay pre split payload")
-
-            let hintPayload = try #require(inactiveHints.first { Set($0.targetUserIDs) == [inactiveUserID, secondInactiveUserID] }?.payload)
-            guard case .conversationActivityHint(let hint) = hintPayload.body else {
-                Issue.record("Expected inactive relay to use conversationActivityHint.")
-                return
-            }
-            #expect(fullPayload.eventID == (try event.requireID()))
-            #expect(hintPayload.eventID != (try event.requireID()))
-            #expect(hintPayload.conversation == nil)
-            #expect(hint.messageID == messageID)
-            #expect(hint.previewText == "relay pre split payload")
-            #expect(hintPayload.timelineNotice == nil)
-            #expect(hintPayload.requiresTimelineNotice == false)
-            #expect(hintPayload.ownerCursor == nil)
-            #expect(hintPayload.ownerAggregateSequence == nil)
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutCompactActiveRecipientCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 2)
-            #expect(metrics.domainRelayAfterRecordPreSplitCount == 1)
-            #expect(metrics.domainRelayAfterRecordPreSplitActiveRecipientCount == 1)
-            #expect(metrics.domainRelayAfterRecordPreSplitCompactActiveRecipientCount == 1)
-            #expect(metrics.domainRelayAfterRecordPreSplitInactiveHintRecipientCount == 2)
-            #expect(metrics.domainRelayAfterRecordPreSplitDowngradedActiveRecipientCount == 1)
-            #expect(metrics.domainRelayAfterRecordPreSplitFallbackCount == 0)
-            #expect(metrics.domainRelayAfterRecordInactiveHintSuppressedRecipientCount == 0)
-            #expect(metrics.domainRelayAfterRecordActiveRouteCacheHitCount == 0)
-            #expect(metrics.domainRelayAfterRecordActiveRouteCacheMissCount == 1)
-            #expect(metrics.domainRelayAfterRecordPreSplitMaxActiveRecipients == 1)
-            #expect(metrics.domainRelayAfterRecordPreSplitMaxCompactActiveRecipients == 1)
-            #expect(metrics.domainRelayAfterRecordPreSplitMaxInactiveHintRecipients == 2)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
-        }
-    }
-
-    @Test("Domain relay-after-record coalesces inactive hints across messageCreated runs")
-    func domainRelayAfterRecordCoalescesInactiveHintsAcrossMessageCreatedRuns() async throws {
-        let values = [
-            "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "10",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3"
-        ]
-        let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
-        defer {
-            for (key, value) in originalValues {
-                restoreEnvironment(key, to: value)
-            }
-        }
-        for (key, value) in values {
-            setenv(key, value, 1)
-        }
-
-        try await withApp(configure: configure) { app in
-            let presenceStore = FakePresenceStore()
-            let dispatchService = FakeNodeMessageDispatchService()
-            app.connectionRoutingService = ConnectionRoutingService(
-                app: app,
-                backend: FakeConnectionRoutingBackend(
-                    presenceStore: presenceStore,
-                    dispatchService: dispatchService
-                )
-            )
-
-            let sender = try await user(email: "demo@example.com", on: app)
-            let senderID = try sender.requireID()
-            let inactiveUserID = UUID()
-            let secondInactiveUserID = UUID()
-            let recipientUserIDs = [senderID, inactiveUserID, secondInactiveUserID]
-            let conversation = Conversation(
-                title: "Relay Run Coalesce",
-                kind: .group,
-                updatedAt: Date(timeIntervalSince1970: 1_710_500_300),
-                lastMessageSequence: 2
-            )
-            try await conversation.create(on: app.db)
-            let conversationID = try conversation.requireID()
-            await presenceStore.setActiveConversationRoutes([
-                conversationID: [
-                    senderID: ["gateway-a"]
-                ]
-            ])
-            await presenceStore.setUserRoutes(
-                Dictionary(uniqueKeysWithValues: recipientUserIDs.map { ($0, Set(["gateway-a"])) })
-            )
-
-            var envelopes: [ConversationEventEnvelope] = []
-            var messageIDs: [UUID] = []
-            for sequence in 1...2 {
-                let message = try ConversationMessage(
-                    conversationID: conversationID,
-                    senderUserID: senderID,
-                    serverSequence: sequence,
-                    timelineSequence: sequence,
-                    clientMessageID: "relay-run-coalesce-\(sequence)",
-                    content: .richText(.plain("relay run coalesce \(sequence)"))
-                )
-                try await message.create(on: app.db)
-                let messageID = try message.requireID()
-                messageIDs.append(messageID)
-                let event = try ConversationDomainEvent(
-                    id: UUID(),
-                    conversationID: conversationID,
-                    eventType: .messageCreated,
-                    aggregateSequence: sequence,
-                    payload: .messageCreated(
-                        messageID: messageID,
-                        recipientUserIDs: recipientUserIDs,
-                        preview: ConversationMessageCreatedPreview(
-                            senderUserID: senderID,
-                            serverSequence: UInt64(sequence),
-                            timelineSequence: UInt64(sequence),
-                            previewText: "relay run coalesce \(sequence)",
-                            createdAt: message.createdAt
-                        )
-                    ),
-                    createdAt: Date(timeIntervalSince1970: 1_710_500_300 + TimeInterval(sequence))
-                )
-                envelopes.append(
-                    try ConversationEventEnvelope(
-                        event: event,
-                        payload: try event.decodedPayload(),
-                        deliveryContext: nil
-                    )
-                )
-            }
-
-            try await OwnerDomainEventDeliveryConsumer(
-                app: app,
-                sourceDB: app.db,
-                relayRealtimeAfterRecord: true
-            ).consumeMessageCreatedRun(envelopes)
-
-            #expect(try await OwnerDomainEventDelivery.query(on: app.imSummaryDB).count() == 0)
-
-            let decodedPayloads = await dispatchService.dispatches().compactMap { dispatch in
-                decodedDomainEventPayload(from: dispatch.envelope).map { payload in
-                    (payload: payload, targetUserIDs: dispatch.envelope.targetUserIDs)
-                }
-            }
-            let fullMessages = decodedPayloads.filter { $0.payload.eventType == .messageCreated }
-            let inactiveHints = decodedPayloads.filter { $0.payload.eventType == .conversationActivityHint }
-            #expect(fullMessages.count == 2)
-            #expect(Set(fullMessages.flatMap(\.targetUserIDs)) == [senderID])
-            #expect(Set(fullMessages.map(\.payload.aggregateSequence)) == [1, 2])
-            #expect(inactiveHints.count == 1)
-            #expect(Set(inactiveHints.first?.targetUserIDs ?? []) == [inactiveUserID, secondInactiveUserID])
-            let hintPayload = try #require(inactiveHints.first?.payload)
-            #expect(hintPayload.aggregateSequence == 2)
-            #expect(hintPayload.eventID != envelopes[1].eventID)
-            if case .conversationActivityHint(let hint) = hintPayload.body {
-                #expect(hint.messageID == messageIDs[1])
-                #expect(hint.previewText == "relay run coalesce 2")
-            } else {
-                Issue.record("Expected inactive relay to use conversationActivityHint.")
-            }
-            #expect(hintPayload.ownerCursor == nil)
-            #expect(hintPayload.ownerAggregateSequence == nil)
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.domainRelayAfterRecordPreSplitCount == 2)
-            #expect(metrics.domainRelayAfterRecordPreSplitActiveRecipientCount == 2)
-            #expect(metrics.domainRelayAfterRecordPreSplitInactiveHintRecipientCount == 4)
-            #expect(metrics.domainRelayAfterRecordInactiveHintSuppressedRecipientCount == 2)
-            #expect(metrics.domainRelayAfterRecordActiveRouteCacheHitCount == 1)
-            #expect(metrics.domainRelayAfterRecordActiveRouteCacheMissCount == 1)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
-        }
-    }
-
-    @Test("Domain relay-after-record coalesces single-message inactive hints by conversation window")
-    func domainRelayAfterRecordCoalescesSingleMessageInactiveHintsByConversationWindow() async throws {
-        let values = [
-            "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "1",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_PREVIEW_MAX_CHARS": "120",
-            "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS": "0",
-            "IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS": "100",
-            "IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED": "true"
-        ]
-        let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
-        defer {
-            for (key, value) in originalValues {
-                restoreEnvironment(key, to: value)
-            }
-        }
-        for (key, value) in values {
-            setenv(key, value, 1)
-        }
-
-        try await withApp(configure: configure) { app in
-            let presenceStore = FakePresenceStore()
-            let dispatchService = FakeNodeMessageDispatchService()
-            app.connectionRoutingService = ConnectionRoutingService(
-                app: app,
-                backend: FakeConnectionRoutingBackend(
-                    presenceStore: presenceStore,
-                    dispatchService: dispatchService
-                )
-            )
-
-            let sender = try await user(email: "demo@example.com", on: app)
-            let senderID = try sender.requireID()
-            let recipientUserIDs = [senderID, UUID(), UUID()]
-            let conversation = Conversation(
-                title: "Relay Single Coalesce",
-                kind: .group,
-                updatedAt: Date(timeIntervalSince1970: 1_710_500_450),
-                lastMessageSequence: 2
-            )
-            try await conversation.create(on: app.db)
-            let conversationID = try conversation.requireID()
-            await presenceStore.setUserRoutes(
-                Dictionary(uniqueKeysWithValues: recipientUserIDs.map { ($0, Set(["gateway-a"])) })
-            )
-
-            var envelopes: [ConversationEventEnvelope] = []
-            var messageIDs: [UUID] = []
-            for sequence in 1...2 {
-                let message = try ConversationMessage(
-                    conversationID: conversationID,
-                    senderUserID: senderID,
-                    serverSequence: sequence,
-                    timelineSequence: sequence,
-                    clientMessageID: "relay-single-coalesce-\(sequence)",
-                    content: .richText(.plain("relay single coalesce \(sequence)"))
-                )
-                try await message.create(on: app.db)
-                let messageID = try message.requireID()
-                messageIDs.append(messageID)
-                let event = try ConversationDomainEvent(
-                    id: UUID(),
-                    conversationID: conversationID,
-                    eventType: .messageCreated,
-                    aggregateSequence: sequence,
-                    payload: .messageCreated(
-                        messageID: messageID,
-                        recipientUserIDs: recipientUserIDs,
-                        preview: ConversationMessageCreatedPreview(
-                            senderUserID: senderID,
-                            serverSequence: UInt64(sequence),
-                            timelineSequence: UInt64(sequence),
-                            previewText: "relay single coalesce \(sequence)",
-                            createdAt: message.createdAt
-                        )
-                    ),
-                    createdAt: Date(timeIntervalSince1970: 1_710_500_450 + TimeInterval(sequence))
-                )
-                envelopes.append(
-                    try ConversationEventEnvelope(
-                        event: event,
-                        payload: try event.decodedPayload(),
-                        deliveryContext: nil
-                    )
-                )
-            }
-
-            let consumer = OwnerDomainEventDeliveryConsumer(
-                app: app,
-                sourceDB: app.db,
-                relayRealtimeAfterRecord: true
-            )
-            try await consumer.consume(envelopes[0])
-            try await consumer.consume(envelopes[1])
-            try await Task.sleep(nanoseconds: 200_000_000)
-
-            #expect(try await OwnerDomainEventDelivery.query(on: app.imSummaryDB).count() == 0)
-
-            let decodedPayloads = await dispatchService.dispatches().compactMap { dispatch in
-                decodedDomainEventPayload(from: dispatch.envelope).map { payload in
-                    (payload: payload, targetUserIDs: dispatch.envelope.targetUserIDs)
-                }
-            }
-            #expect(decodedPayloads.filter { $0.payload.eventType == .messageCreated }.isEmpty)
-            let inactiveHints = decodedPayloads.filter { $0.payload.eventType == .conversationActivityHint }
-            #expect(inactiveHints.count == 1)
-            let hintPayload = try #require(inactiveHints.first?.payload)
-            #expect(Set(inactiveHints.first?.targetUserIDs ?? []) == Set(recipientUserIDs))
-            #expect(hintPayload.aggregateSequence == 2)
-            #expect(hintPayload.eventID != envelopes[1].eventID)
-            if case .conversationActivityHint(let hint) = hintPayload.body {
-                #expect(hint.messageID == messageIDs[1])
-                #expect(hint.previewText == "relay single coalesce 2")
-            } else {
-                Issue.record("Expected domain relay-after-record coalescing to relay conversationActivityHint.")
-            }
-            #expect(hintPayload.ownerCursor == nil)
-            #expect(hintPayload.ownerAggregateSequence == nil)
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.domainRelayAfterRecordPreSplitCount == 2)
-            #expect(metrics.domainRelayAfterRecordPreSplitActiveRecipientCount == 0)
-            #expect(metrics.domainRelayAfterRecordPreSplitInactiveHintRecipientCount == recipientUserIDs.count * 2)
-            #expect(metrics.domainRelayAfterRecordInactiveHintSuppressedRecipientCount == 0)
-            #expect(metrics.realtimeCoalescedDispatchReplacementCount == 1)
-            #expect(metrics.realtimeCoalescedDroppedPayloadBatchCount == 1)
-            #expect(metrics.realtimeCoalescedDroppedRecipientDeliveryCount == recipientUserIDs.count)
-            #expect(metrics.realtimeActiveConversationRouteCacheHitCount == 1)
-            #expect(metrics.realtimeActiveConversationRouteCacheMissCount == 1)
-            #expect(metrics.domainRelayAfterRecordActiveRouteCacheHitCount == 1)
-            #expect(metrics.domainRelayAfterRecordActiveRouteCacheMissCount == 1)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
-        }
-    }
-
-    @Test("Realtime delivery consumer coalesces single-message inactive hints by conversation window")
-    func realtimeDeliveryConsumerCoalescesSingleMessageInactiveHintsByConversationWindow() async throws {
-        let values = [
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "1",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS": "100",
-            "IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED": "true"
-        ]
-        let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
-        defer {
-            for (key, value) in originalValues {
-                restoreEnvironment(key, to: value)
-            }
-        }
-        for (key, value) in values {
-            setenv(key, value, 1)
-        }
-
-        try await withApp(configure: configure) { app in
-            let presenceStore = FakePresenceStore()
-            let dispatchService = FakeNodeMessageDispatchService()
-            app.connectionRoutingService = ConnectionRoutingService(
-                app: app,
-                backend: FakeConnectionRoutingBackend(
-                    presenceStore: presenceStore,
-                    dispatchService: dispatchService
-                )
-            )
-
-            let sender = try await user(email: "demo@example.com", on: app)
-            let senderID = try sender.requireID()
-            let recipientUserIDs = [senderID, UUID(), UUID()]
-            let conversation = Conversation(
-                title: "Consumer Single Coalesce",
-                kind: .group,
-                updatedAt: Date(timeIntervalSince1970: 1_710_500_400),
-                lastMessageSequence: 2
-            )
-            try await conversation.create(on: app.db)
-            let conversationID = try conversation.requireID()
-            await presenceStore.setUserRoutes(
-                Dictionary(uniqueKeysWithValues: recipientUserIDs.map { ($0, Set(["gateway-a"])) })
-            )
-
-            var envelopes: [ConversationEventEnvelope] = []
-            var messageIDs: [UUID] = []
-            for sequence in 1...2 {
-                let messageID = UUID()
-                messageIDs.append(messageID)
-                let event = try ConversationDomainEvent(
-                    id: UUID(),
-                    conversationID: conversationID,
-                    eventType: .messageCreated,
-                    aggregateSequence: sequence,
-                    payload: .messageCreated(
-                        messageID: messageID,
-                        recipientUserIDs: recipientUserIDs,
-                        preview: ConversationMessageCreatedPreview(
-                            senderUserID: senderID,
-                            serverSequence: UInt64(sequence),
-                            timelineSequence: UInt64(sequence),
-                            previewText: "single coalesce \(sequence)",
-                            createdAt: Date(timeIntervalSince1970: 1_710_500_400 + TimeInterval(sequence))
-                        )
-                    ),
-                    createdAt: Date(timeIntervalSince1970: 1_710_500_400 + TimeInterval(sequence))
-                )
-                envelopes.append(
-                    try ConversationEventEnvelope(
-                        event: event,
-                        payload: try event.decodedPayload(),
-                        deliveryContext: nil
-                    )
-                )
-            }
-
-            let consumer = ConversationRealtimeDeliveryConsumer(app: app, sourceDB: app.db)
-            try await consumer.consumeMessageCreatedRun([envelopes[0]])
-            try await consumer.consumeMessageCreatedRun([envelopes[1]])
-            try await Task.sleep(nanoseconds: 200_000_000)
-
-            let decodedPayloads = await dispatchService.dispatches().compactMap { dispatch in
-                decodedDomainEventPayload(from: dispatch.envelope).map { payload in
-                    (payload: payload, targetUserIDs: dispatch.envelope.targetUserIDs)
-                }
-            }
-            #expect(decodedPayloads.filter { $0.payload.eventType == .messageCreated }.isEmpty)
-            let hints = decodedPayloads.filter { $0.payload.eventType == .conversationActivityHint }
-            #expect(hints.count == 1)
-            let hintPayload = try #require(hints.first?.payload)
-            #expect(Set(hints.first?.targetUserIDs ?? []) == Set(recipientUserIDs))
-            #expect(hintPayload.aggregateSequence == 2)
-            #expect(hintPayload.eventID != envelopes[1].eventID)
-            if case .conversationActivityHint(let hint) = hintPayload.body {
-                #expect(hint.messageID == messageIDs[1])
-                #expect(hint.previewText == "single coalesce 2")
-            } else {
-                Issue.record("Expected coalesced single-message fanout to relay conversationActivityHint.")
-            }
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeCoalescedDispatchReplacementCount == 1)
-            #expect(metrics.realtimeCoalescedDroppedPayloadBatchCount == 1)
-            #expect(metrics.realtimeCoalescedDroppedRecipientDeliveryCount == recipientUserIDs.count)
-            #expect(metrics.realtimeDeliveryConsumerInactiveHintRelayPayloadBatchCount == 2)
-            #expect(metrics.realtimeDeliveryConsumerInactiveHintRelayRecipientCount == recipientUserIDs.count * 2)
-            #expect(metrics.realtimeActiveConversationRouteCacheHitCount == 1)
-            #expect(metrics.realtimeActiveConversationRouteCacheMissCount == 1)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
-        }
-    }
-
-    @Test("Realtime delivery active compact hints bypass inactive coalescing window")
-    func realtimeDeliveryActiveCompactHintsBypassInactiveCoalescingWindow() async throws {
-        let values = [
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "10",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_MODE": "compact-only",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS": "100",
-            "IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS": "0",
-            "IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED": "true"
-        ]
-        let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
-        defer {
-            for (key, value) in originalValues {
-                restoreEnvironment(key, to: value)
-            }
-        }
-        for (key, value) in values {
-            setenv(key, value, 1)
-        }
-
-        try await withApp(configure: configure) { app in
-            let presenceStore = FakePresenceStore()
-            let dispatchService = FakeNodeMessageDispatchService()
-            app.connectionRoutingService = ConnectionRoutingService(
-                app: app,
-                backend: FakeConnectionRoutingBackend(
-                    presenceStore: presenceStore,
-                    dispatchService: dispatchService
-                )
-            )
-
-            let sender = try await user(email: "demo@example.com", on: app)
-            let senderID = try sender.requireID()
-            let activeUserIDs = [senderID, UUID(), UUID()]
-            let conversation = Conversation(
-                title: "Active Compact Immediate",
-                kind: .group,
-                updatedAt: Date(timeIntervalSince1970: 1_710_500_600),
-                lastMessageSequence: 2
-            )
-            try await conversation.create(on: app.db)
-            let conversationID = try conversation.requireID()
-            await presenceStore.setActiveConversationRoutes([
-                conversationID: Dictionary(uniqueKeysWithValues: activeUserIDs.map { ($0, Set(["gateway-a"])) })
-            ])
-            await presenceStore.setUserRoutes(
-                Dictionary(uniqueKeysWithValues: activeUserIDs.map { ($0, Set(["gateway-a"])) })
-            )
-
-            var envelopes: [ConversationEventEnvelope] = []
-            var messageIDs: [UUID] = []
-            for sequence in 1...2 {
-                let messageID = UUID()
-                messageIDs.append(messageID)
-                let event = try ConversationDomainEvent(
-                    id: UUID(),
-                    conversationID: conversationID,
-                    eventType: .messageCreated,
-                    aggregateSequence: sequence,
-                    payload: .messageCreated(
-                        messageID: messageID,
-                        recipientUserIDs: activeUserIDs,
-                        preview: ConversationMessageCreatedPreview(
-                            senderUserID: senderID,
-                            serverSequence: UInt64(sequence),
-                            timelineSequence: UInt64(sequence),
-                            previewText: "active compact immediate \(sequence)",
-                            createdAt: Date(timeIntervalSince1970: 1_710_500_600 + TimeInterval(sequence))
-                        )
-                    ),
-                    createdAt: Date(timeIntervalSince1970: 1_710_500_600 + TimeInterval(sequence))
-                )
-                envelopes.append(
-                    try ConversationEventEnvelope(
-                        event: event,
-                        payload: try event.decodedPayload(),
-                        deliveryContext: nil
-                    )
-                )
-            }
-
-            let consumer = ConversationRealtimeDeliveryConsumer(app: app, sourceDB: app.db)
-            try await consumer.consumeMessageCreatedRun([envelopes[0]])
-            try await consumer.consumeMessageCreatedRun([envelopes[1]])
-            try await Task.sleep(nanoseconds: 50_000_000)
-
-            let decodedPayloads = await dispatchService.dispatches().compactMap { dispatch in
-                decodedDomainEventPayload(from: dispatch.envelope).map { payload in
-                    (payload: payload, targetUserIDs: dispatch.envelope.targetUserIDs)
-                }
-            }
-            let hints = decodedPayloads.filter { $0.payload.eventType == .timelineGapHint }
-            #expect(hints.count == 2)
-            #expect(hints.allSatisfy { Set($0.targetUserIDs) == Set(activeUserIDs) })
-            #expect(Set(hints.map(\.payload.aggregateSequence)) == [1, 2])
-            #expect(Set(hints.map(\.payload.eventID)) == Set(envelopes.compactMap(\.eventID).map(imLightweightMessageCreatedHintEventID)))
-            let hintMessageIDs = hints.compactMap { entry -> UUID? in
-                guard case .timelineGapHint(let hint) = entry.payload.body else {
-                    return nil
-                }
-                return hint.messageID
-            }
-            #expect(Set(hintMessageIDs) == Set(messageIDs))
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeCoalescedDispatchReplacementCount == 0)
-            #expect(metrics.realtimeActiveConversationFanoutCompactActiveRecipientCount == activeUserIDs.count * 2)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 0)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
-        }
-    }
-
-    @Test("Realtime delivery consumer sends only lightweight hints when no large-group recipients are active")
-    func realtimeDeliveryConsumerSendsOnlyLightweightHintsWhenNoLargeGroupRecipientsAreActive() async throws {
-        let values = [
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT": "1",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS": "0"
-        ]
-        let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
-        defer {
-            for (key, value) in originalValues {
-                restoreEnvironment(key, to: value)
-            }
-        }
-        for (key, value) in values {
-            setenv(key, value, 1)
-        }
-
-        try await withApp(configure: configure) { app in
-            let presenceStore = FakePresenceStore()
-            let dispatchService = FakeNodeMessageDispatchService()
-            app.connectionRoutingService = ConnectionRoutingService(
-                app: app,
-                backend: FakeConnectionRoutingBackend(
-                    presenceStore: presenceStore,
-                    dispatchService: dispatchService
-                )
-            )
-
-            let sender = try await user(email: "demo@example.com", on: app)
-            let senderID = try sender.requireID()
-            let recipientUserIDs = [senderID, UUID(), UUID()]
-            let conversation = Conversation(
-                title: "Consumer Hint Only",
-                kind: .group,
-                updatedAt: Date(timeIntervalSince1970: 1_710_500_100),
-                lastMessageSequence: 1
-            )
-            try await conversation.create(on: app.db)
-            let conversationID = try conversation.requireID()
-            await presenceStore.setUserRoutes(
-                Dictionary(uniqueKeysWithValues: recipientUserIDs.map { ($0, Set(["gateway-a"])) })
-            )
-
-            let messageID = UUID()
-            let event = try ConversationDomainEvent(
-                id: UUID(),
-                conversationID: conversationID,
-                eventType: .messageCreated,
-                aggregateSequence: 1,
-                payload: .messageCreated(
-                    messageID: messageID,
-                    recipientUserIDs: recipientUserIDs,
-                    preview: ConversationMessageCreatedPreview(
-                        senderUserID: senderID,
-                        serverSequence: 1,
-                        timelineSequence: 1,
-                        previewText: "hint only payload",
-                        createdAt: Date(timeIntervalSince1970: 1_710_500_101)
-                    )
-                ),
-                createdAt: Date(timeIntervalSince1970: 1_710_500_101)
-            )
-            let envelope = try ConversationEventEnvelope(
-                event: event,
-                payload: try event.decodedPayload(),
-                deliveryContext: nil
-            )
-
-            try await ConversationRealtimeDeliveryConsumer(app: app, sourceDB: app.db)
-                .consumeMessageCreatedRun([envelope])
-
-            let decodedPayloads = await dispatchService.dispatches().compactMap { dispatch in
-                decodedDomainEventPayload(from: dispatch.envelope).map { payload in
-                    (payload: payload, targetUserIDs: dispatch.envelope.targetUserIDs)
-                }
-            }
-            #expect(decodedPayloads.filter { $0.payload.eventType == .messageCreated }.isEmpty)
-            let hints = decodedPayloads.filter { $0.payload.eventType == .conversationActivityHint }
-            #expect(hints.count == 1)
-            #expect(Set(hints.first?.targetUserIDs ?? []) == Set(recipientUserIDs))
-            let hintPayload = try #require(hints.first?.payload)
-            guard case .conversationActivityHint(let hint) = hintPayload.body else {
-                Issue.record("Expected hint-only fanout to relay conversationActivityHint.")
-                return
-            }
-            #expect(hintPayload.eventID != event.id)
-            #expect(hintPayload.conversation == nil)
-            #expect(hint.messageID == messageID)
-            #expect(hint.previewText == "hint only payload")
-            #expect(hintPayload.timelineNotice == nil)
-            #expect(hintPayload.requiresTimelineNotice == false)
-            #expect(hintPayload.ownerCursor == nil)
-            #expect(hintPayload.ownerAggregateSequence == nil)
-
-            let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutSplitCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutActiveRecipientCount == 0)
-            #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == recipientUserIDs.count)
-            #expect(metrics.realtimeDeliveryConsumerInactiveHintRelayPayloadBatchCount == 1)
-            #expect(metrics.realtimeDeliveryConsumerInactiveHintRelayRecipientCount == recipientUserIDs.count)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
-        }
-    }
 }
 
 private func decodedDomainEventPayload(from envelope: NodeMessageDispatchEnvelope) -> IMTCPChatDomainEventPayload? {
@@ -6542,38 +4551,6 @@ private func imTestConversationActivityHintPayload(
     )
 }
 
-private func imTestTimelineGapHintPayload(
-    eventID: UUID,
-    conversationID: UUID,
-    senderUserID: UUID,
-    sequence: UInt64
-) -> IMTCPChatDomainEventPayload {
-    let occurredAt = Date()
-    return IMTCPChatDomainEventPayload(
-        eventID: eventID,
-        eventType: .timelineGapHint,
-        aggregateType: "conversation",
-        aggregateID: conversationID,
-        aggregateSequence: sequence,
-        occurredAt: occurredAt,
-        actorUserID: senderUserID,
-        conversation: nil,
-        timelineNotice: nil,
-        requiresTimelineNotice: false,
-        ownerCursor: nil,
-        ownerAggregateSequence: nil,
-        body: .timelineGapHint(
-            IMTimelineGapHint(
-                messageID: UUID(),
-                senderUserID: senderUserID,
-                serverSequence: sequence,
-                timelineSequence: sequence,
-                updatedAt: occurredAt
-            )
-        )
-    )
-}
-
 private actor BlockingRealtimeRelayProbe {
     private var relayCallCount = 0
     private var startedContinuations: [CheckedContinuation<Void, Never>] = []
@@ -6640,10 +4617,10 @@ private actor RecordingRealtimeRelayProbe {
         Set(relayedBatches.map(\.fanoutIntent))
     }
 
-    func timelineGapHintSequenceByRecipient() -> [UUID: UInt64] {
+    func activityHintSequenceByRecipient() -> [UUID: UInt64] {
         var result: [UUID: UInt64] = [:]
         for batch in relayedBatches {
-            guard case .timelineGapHint(let hint) = batch.payload.body else {
+            guard case .conversationActivityHint(let hint) = batch.payload.body else {
                 continue
             }
             for recipientUserID in batch.recipientUserIDs {

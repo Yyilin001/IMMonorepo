@@ -316,7 +316,7 @@ struct IMConversationView: View {
                     .listRowBackground(Color.clear)
             } else {
                 conversationRows
-                historicalConversationLoader
+                olderConversationLoader
             }
         } header: {
             AppSectionHeader(
@@ -342,7 +342,7 @@ struct IMConversationView: View {
     }
 
     @ViewBuilder
-    var historicalConversationLoader: some View {
+    var olderConversationLoader: some View {
         if conversationListSnapshot.isLoadingMoreConversationSummaries {
             HStack {
                 Spacer()
@@ -353,7 +353,7 @@ struct IMConversationView: View {
             .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
         } else if conversationListSnapshot.hasMoreConversationSummaries {
             Button {
-                loadMoreHistoricalConversations()
+                loadMoreOlderConversations()
             } label: {
                 Label("加载更多历史会话", systemImage: "clock.arrow.circlepath")
                     .frame(maxWidth: .infinity)
@@ -362,12 +362,12 @@ struct IMConversationView: View {
             .disabled(conversationListSnapshot.isLoadingMoreConversationSummaries)
             .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
             .onAppear {
-                loadMoreHistoricalConversations()
+                loadMoreOlderConversations()
             }
         }
     }
 
-    func loadMoreHistoricalConversations() {
+    func loadMoreOlderConversations() {
         let anchorConversationID = conversationStore.conversationSummaryPaginationAnchorID
         Task {
             await runtimeStore.loadMoreConversationSummariesIfNeeded(

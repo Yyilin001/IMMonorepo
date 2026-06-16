@@ -866,8 +866,8 @@ extension IMServerTests {
         }
     }
 
-    @Test("Explicit owner-delivery mode keeps durable messageCreated owner delivery despite legacy threshold")
-    func explicitOwnerDeliveryModeKeepsDurableMessageCreatedOwnerDeliveryDespiteLegacyThreshold() async throws {
+    @Test("Explicit owner-delivery mode keeps durable messageCreated owner delivery despite skip threshold")
+    func explicitOwnerDeliveryModeKeepsDurableMessageCreatedOwnerDeliveryDespiteSkipThreshold() async throws {
         let modeKey = "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_LARGE_GROUP_MODE"
         let thresholdKey = "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD"
         let originalModeValue = Environment.get(modeKey)
@@ -2704,7 +2704,6 @@ extension IMServerTests {
     func largeGroupActiveCompactPayloadCanUseBoundedActivityHintPreview() async throws {
         let values = [
             "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "3",
-            "IM_REALTIME_ACTIVE_COMPACT_HINT_BODY": "conversation-activity",
             "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS": "12"
         ]
         let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })

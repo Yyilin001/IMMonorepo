@@ -74,11 +74,8 @@ IM_GATE_TIMELINE_INVALIDATION_ERRORS_MAX="${IM_GATE_TIMELINE_INVALIDATION_ERRORS
 IM_GATE_STREAM_FAILED_EVENTS_MAX="${IM_GATE_STREAM_FAILED_EVENTS_MAX:-0}"
 IM_GATE_TCP_DROPPED_BACKPRESSURE_MAX="${IM_GATE_TCP_DROPPED_BACKPRESSURE_MAX:-0}"
 IM_GATE_TCP_BACKPRESSURE_MAX="${IM_GATE_TCP_BACKPRESSURE_MAX:-0}"
-IM_GATE_ACTIVE_FANOUT_UNSPLIT_FALLBACKS_MAX="${IM_GATE_ACTIVE_FANOUT_UNSPLIT_FALLBACKS_MAX:-0}"
-IM_GATE_ACTIVE_FANOUT_HINT_FALLBACK_RECIPIENTS_MAX="${IM_GATE_ACTIVE_FANOUT_HINT_FALLBACK_RECIPIENTS_MAX:-0}"
-IM_GATE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX="${IM_GATE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX:-0}"
-IM_GATE_REMOTE_ACTIVE_FANOUT_FALLBACKS_MAX="${IM_GATE_REMOTE_ACTIVE_FANOUT_FALLBACKS_MAX:-0}"
-IM_GATE_REMOTE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX="${IM_GATE_REMOTE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX:-0}"
+IM_GATE_ACTIVE_FANOUT_ROUTE_SPLIT_DROPS_MAX="${IM_GATE_ACTIVE_FANOUT_ROUTE_SPLIT_DROPS_MAX:-0}"
+IM_GATE_REMOTE_ACTIVE_FANOUT_ROUTE_SPLIT_DROPS_MAX="${IM_GATE_REMOTE_ACTIVE_FANOUT_ROUTE_SPLIT_DROPS_MAX:-0}"
 IM_GATE_REALTIME_ASYNC_RELAY_DROPPED_DISPATCHES_MAX="${IM_GATE_REALTIME_ASYNC_RELAY_DROPPED_DISPATCHES_MAX:-0}"
 IM_GATE_REALTIME_ASYNC_RELAY_DROPPED_RECIPIENT_DELIVERIES_MAX="${IM_GATE_REALTIME_ASYNC_RELAY_DROPPED_RECIPIENT_DELIVERIES_MAX:-0}"
 IM_GATE_GATEWAY_HTTP_RELAY_SKIPPED_RECIPIENTS_MAX="${IM_GATE_GATEWAY_HTTP_RELAY_SKIPPED_RECIPIENTS_MAX:-0}"
@@ -127,19 +124,16 @@ DEFAULT_IM_METRICS_NAMES=(
   im_realtime_active_conversation_fanout_inactive_hint_recipients_total
   im_realtime_active_conversation_fanout_downgraded_active_recipients_total
   im_realtime_active_conversation_fanout_backpressure_downgraded_active_recipients_total
-  im_realtime_active_conversation_fanout_unsplit_fallbacks_total
-  im_realtime_active_conversation_fanout_hint_fallback_recipients_total
-  im_realtime_active_conversation_fanout_dropped_fallbacks_total
-  im_realtime_active_conversation_fanout_dropped_fallback_recipients_total
+  im_realtime_active_conversation_fanout_route_split_drops_total
+  im_realtime_active_conversation_fanout_route_split_drop_recipients_total
   im_realtime_active_conversation_route_cache_hits_total
   im_realtime_active_conversation_route_cache_partial_hits_total
   im_realtime_active_conversation_route_cache_misses_total
   im_realtime_active_conversation_route_cache_cached_users_total
   im_realtime_active_conversation_route_cache_missed_users_total
   im_realtime_active_conversation_route_cache_joined_in_flight_total
-  im_realtime_remote_active_conversation_fanout_fallbacks_total
-  im_realtime_remote_active_conversation_fanout_dropped_fallbacks_total
-  im_realtime_remote_active_conversation_fanout_dropped_fallback_recipients_total
+  im_realtime_remote_active_conversation_fanout_route_split_drops_total
+  im_realtime_remote_active_conversation_fanout_route_split_drop_recipients_total
   im_realtime_inactive_conversation_hint_flushes_total
   im_realtime_inactive_conversation_hint_payload_batches_total
   im_realtime_inactive_conversation_hint_recipients_total
@@ -863,11 +857,8 @@ evaluate_im_metrics_gate() {
   check_counter_delta_max "${before_file}" "${after_file}" "im_stream_failed_events_total" "${IM_GATE_STREAM_FAILED_EVENTS_MAX}"
   check_counter_delta_max "${before_file}" "${after_file}" "im_tcp_write_dropped_backpressure_total" "${IM_GATE_TCP_DROPPED_BACKPRESSURE_MAX}"
   check_counter_delta_max "${before_file}" "${after_file}" "im_tcp_write_backpressure_total" "${IM_GATE_TCP_BACKPRESSURE_MAX}"
-  check_counter_delta_max "${before_file}" "${after_file}" "im_realtime_active_conversation_fanout_unsplit_fallbacks_total" "${IM_GATE_ACTIVE_FANOUT_UNSPLIT_FALLBACKS_MAX}"
-  check_counter_delta_max "${before_file}" "${after_file}" "im_realtime_active_conversation_fanout_hint_fallback_recipients_total" "${IM_GATE_ACTIVE_FANOUT_HINT_FALLBACK_RECIPIENTS_MAX}"
-  check_counter_delta_max "${before_file}" "${after_file}" "im_realtime_active_conversation_fanout_dropped_fallbacks_total" "${IM_GATE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX}"
-  check_counter_delta_max "${before_file}" "${after_file}" "im_realtime_remote_active_conversation_fanout_fallbacks_total" "${IM_GATE_REMOTE_ACTIVE_FANOUT_FALLBACKS_MAX}"
-  check_counter_delta_max "${before_file}" "${after_file}" "im_realtime_remote_active_conversation_fanout_dropped_fallbacks_total" "${IM_GATE_REMOTE_ACTIVE_FANOUT_DROPPED_FALLBACKS_MAX}"
+  check_counter_delta_max "${before_file}" "${after_file}" "im_realtime_active_conversation_fanout_route_split_drops_total" "${IM_GATE_ACTIVE_FANOUT_ROUTE_SPLIT_DROPS_MAX}"
+  check_counter_delta_max "${before_file}" "${after_file}" "im_realtime_remote_active_conversation_fanout_route_split_drops_total" "${IM_GATE_REMOTE_ACTIVE_FANOUT_ROUTE_SPLIT_DROPS_MAX}"
   check_counter_delta_max "${before_file}" "${after_file}" "im_realtime_async_relay_dropped_dispatches_total" "${IM_GATE_REALTIME_ASYNC_RELAY_DROPPED_DISPATCHES_MAX}"
   check_counter_delta_max "${before_file}" "${after_file}" "im_realtime_async_relay_dropped_recipient_deliveries_total" "${IM_GATE_REALTIME_ASYNC_RELAY_DROPPED_RECIPIENT_DELIVERIES_MAX}"
   check_counter_delta_max "${before_file}" "${after_file}" "im_gateway_http_relay_skipped_recipients_total" "${IM_GATE_GATEWAY_HTTP_RELAY_SKIPPED_RECIPIENTS_MAX}"

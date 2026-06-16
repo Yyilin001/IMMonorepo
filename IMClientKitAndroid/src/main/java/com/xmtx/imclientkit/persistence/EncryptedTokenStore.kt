@@ -15,12 +15,10 @@ import javax.crypto.spec.GCMParameterSpec
 class EncryptedTokenStore internal constructor(
     private val preferences: SharedPreferences,
     private val cipher: TokenCipher,
-    private val legacyStore: TokenStore? = null,
 ) : TokenStore {
-    constructor(context: Context, legacyStore: TokenStore? = null) : this(
+    constructor(context: Context) : this(
         preferences = context.applicationContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE),
         cipher = AndroidKeystoreTokenCipher(),
-        legacyStore = legacyStore,
     )
 
     override suspend fun load(): TokenSnapshot? {
@@ -41,11 +39,7 @@ class EncryptedTokenStore internal constructor(
             clear()
             return null
         }
-
-        val legacySnapshot = legacyStore?.load() ?: return null
-        save(legacySnapshot)
-        legacyStore.clear()
-        return legacySnapshot
+        return null
     }
 
     override suspend fun save(snapshot: TokenSnapshot) {

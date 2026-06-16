@@ -135,6 +135,10 @@ def main() -> int:
     parser.add_argument("--sample-interval-seconds", type=positive_float, default=1)
     parser.add_argument("--heavy-sample-interval-seconds", type=positive_float, default=5)
     parser.add_argument("--post-send-timeout-seconds", type=non_negative_int, default=180)
+    parser.add_argument("--max-lag-clear-after-send-seconds", type=float)
+    parser.add_argument("--require-acks", action="store_true")
+    parser.add_argument("--require-no-failures", action="store_true")
+    parser.add_argument("--require-final-lag-zero", action="store_true")
     parser.add_argument("--tcp-port", type=int, default=9000)
     parser.add_argument("--redpanda-container", default="imserver-redpanda-1")
     parser.add_argument(
@@ -257,6 +261,31 @@ def main() -> int:
     if summary_path:
         summary_path.write_text(summary_text + "\n")
     print(summary_text)
+    gate_failures: list[str] = []
+    lag_clear_after_send = summary["lagClearAfterSendSeconds"]
+    if args.max_lag_clear_after_send_seconds is not None:
+        if lag_clear_after_send is None:
+            gate_failures.append("lagClearAfterSendSeconds was not observed")
+        elif lag_clear_after_send > args.max_lag_clear_after_send_seconds:
+            gate_failures.append(
+                f"lagClearAfterSendSeconds={lag_clear_after_send} exceeds max={args.max_lag_clear_after_send_seconds}"
+            )
+    if args.require_acks:
+        progress = summary["finalProgress"]
+        message_sent = int(progress.get("messageSent") or 0)
+        message_ack = int(progress.get("messageAck") or 0)
+        if message_ack != message_sent:
+            gate_failures.append(f"messageAck={message_ack} does not match messageSent={message_sent}")
+    if args.require_no_failures:
+        failures = summary["finalProgress"].get("failures") or {}
+        if failures:
+            gate_failures.append(f"driver failures were recorded: {failures}")
+    if args.require_final_lag_zero and not all_lags_zero(summary["finalKafkaLag"]):
+        gate_failures.append(f"final Kafka lag is not zero: {summary['finalKafkaLag']}")
+    if gate_failures:
+        for failure in gate_failures:
+            print(f"gate failed: {failure}")
+        return 1
     return 0
 
 
