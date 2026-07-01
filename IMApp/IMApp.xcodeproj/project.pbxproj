@@ -109,6 +109,7 @@
 				1BADBC0A2F73859D00E89B24 /* Sources */,
 				1BADBC0B2F73859D00E89B24 /* Frameworks */,
 				1BADBC0C2F73859D00E89B24 /* Resources */,
+				1BADBC3D2F73859E00E89B24 /* Validate Release Network Configuration */,
 			);
 			buildRules = (
 			);
@@ -243,6 +244,30 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		1BADBC3D2F73859E00E89B24 /* Validate Release Network Configuration */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+				"$(SRCROOT)/Scripts/validate_network_configuration.sh",
+			);
+			name = "Validate Release Network Configuration";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ \"${CONFIGURATION}\" != \"Release\" ]; then\n  exit 0\nfi\nINFO_PLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\" \\\nIMAPP_NETWORK_CONFIG_MODE=production \\\nIMAPP_NETWORK_CONFIG_USE_ENV_OVERRIDES=false \\\n\"${SRCROOT}/Scripts/validate_network_configuration.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		1BADBC0A2F73859D00E89B24 /* Sources */ = {
@@ -420,6 +445,9 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IM_API_BASE_URL = "http://127.0.0.1:8080";
+				IM_TCP_HOST = "127.0.0.1";
+				IM_TCP_PORT = 9000;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -454,6 +482,9 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IM_API_BASE_URL = "https://im.example.com";
+				IM_TCP_HOST = im.example.com;
+				IM_TCP_PORT = 9000;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

@@ -72,21 +72,11 @@ class AppContainer(context: Context) {
             imTcpPort = BuildConfig.IM_TCP_PORT,
         )
         if (!BuildConfig.DEBUG) {
-            require(environment.apiBaseUrl.startsWith("https://")) {
-                "Release builds require an HTTPS IM_API_BASE_URL."
-            }
-            require(BuildConfig.IM_TCP_REQUIRES_TLS_TERMINATION || isPrivateOrLoopbackTCPHost(environment.imTcpHost)) {
-                "Release builds require IM_TCP_REQUIRES_TLS_TERMINATION=true for public TCP hosts."
-            }
+            AndroidNetworkConfigurationPolicy.validateRelease(
+                environment = environment,
+                tcpRequiresTlsTermination = BuildConfig.IM_TCP_REQUIRES_TLS_TERMINATION,
+            )
         }
         return environment
-    }
-
-    private fun isPrivateOrLoopbackTCPHost(host: String): Boolean {
-        val normalized = host.trim().lowercase()
-        if (normalized == "localhost" || normalized == "::1" || normalized.startsWith("127.")) return true
-        if (normalized.startsWith("10.") || normalized.startsWith("192.168.")) return true
-        val parts = normalized.split(".").mapNotNull { it.toIntOrNull() }
-        return parts.size == 4 && parts[0] == 172 && parts[1] in 16..31
     }
 }

@@ -24,6 +24,12 @@
 	<false/>
 	<key>IMDemoLoginEnabled</key>
 	<true/>
+	<key>IMAPIBaseURL</key>
+	<string>$(IM_API_BASE_URL)</string>
+	<key>IMTCPHost</key>
+	<string>$(IM_TCP_HOST)</string>
+	<key>IMTCPPort</key>
+	<string>$(IM_TCP_PORT)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -38,13 +44,6 @@
 				<true/>
 			</dict>
 			<key>localhost</key>
-			<dict>
-				<key>NSExceptionAllowsInsecureHTTPLoads</key>
-				<true/>
-				<key>NSIncludesSubdomains</key>
-				<true/>
-			</dict>
-			<key>120.25.106.200</key>
 			<dict>
 				<key>NSExceptionAllowsInsecureHTTPLoads</key>
 				<true/>

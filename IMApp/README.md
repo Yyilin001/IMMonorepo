@@ -68,7 +68,7 @@ IMAppUITests             UI 测试入口
 
 ## 环境配置
 
-客户端不再从 `IMClientKit` 读取默认地址，服务端地址统一由 `IMApp` 在组合根注入。当前本地开发配置定义在 [AppNetworkConfiguration.swift](/Users/yy/Desktop/vaporTest/IMApp/IMApp/App/AppNetworkConfiguration.swift:1)：
+客户端不再从 `IMClientKit` 读取默认地址，服务端地址统一由 `IMApp` 在组合根注入。默认本地开发配置定义在 [AppNetworkConfiguration.swift](/Users/yyl/Desktop/Code/IMMonorepo/IMApp/IMApp/App/AppNetworkConfiguration.swift:1)：
 
 ```swift
 static let local = AppNetworkConfiguration(
@@ -78,11 +78,56 @@ static let local = AppNetworkConfiguration(
 )
 ```
 
-应用入口会在 [IMAppApp.swift](/Users/yy/Desktop/vaporTest/IMApp/IMApp/IMAppApp.swift:12) 里显式构造 `NetworkEnvironment` 和 `IMTCPClientConfiguration` 后注入 `AuthManager`。如果你不是本机联调，只需要改这里的配置源。
+生产网络入口由 `Config/IMAppInfo.plist` 提供，值来自 Xcode build settings；调试、CI 和发布脚本也可以用环境变量覆盖：
+
+- `IMAPIBaseURL` / `IM_API_BASE_URL`
+- `IMTCPHost` / `IM_TCP_HOST`
+- `IMTCPPort` / `IM_TCP_PORT`
+
+长期生产包必须使用 HTTPS 真实域名和公网 TCP 真实域名，不允许裸 IP、占位域名、旧临时服务器 IP、localhost、明文公网 HTTP、非默认 HTTPS 端口或非 `9000` 的 TCP 端口。发布前运行：
+
+```bash
+IM_API_BASE_URL=https://<your-domain> \
+IM_TCP_HOST=<your-domain> \
+IM_TCP_PORT=9000 \
+IMAPP_NETWORK_CONFIG_MODE=production \
+  ./Scripts/validate_network_configuration.sh
+```
+
+或使用仓库统一入口：
+
+```bash
+IM_API_BASE_URL=https://<your-domain> \
+IM_TCP_HOST=<your-domain> \
+IM_TCP_PORT=9000 \
+make validate-ios-production-config
+```
+
+网络配置校验自身也有负例自测，覆盖公网 IP、占位域名、非默认 HTTPS 端口和非生产 TCP 端口：
+
+```bash
+make validate-ios-network-config
+```
+
+Debug 构建的实际 Xcode build settings 也有独立校验，防止本地开发默认地址被误改成公网、占位域名或未解析的 `$(IM_API_BASE_URL)`：
+
+```bash
+make validate-ios-debug-network-defaults
+```
+
+GitHub Actions 的 `IMApp Production Config Gate` 会在 PR/push 时验证开发配置和模拟器构建；手动触发 `workflow_dispatch` 时必须输入真实生产 `api_base_url`、`tcp_host`、`tcp_port`，并执行同一个 production config gate 和 Release 构建。Xcode 的 IMApp target 也有 Release-only build phase，会校验最终打进 App 包的 processed Info.plist；没有真实生产域名时 Release/Archive 会失败。
+
+本地开发可以继续使用 `127.0.0.1:8080`，但 production/release 校验会拒绝它。应用入口会在 [IMAppApp.swift](/Users/yyl/Desktop/Code/IMMonorepo/IMApp/IMApp/IMAppApp.swift:12) 里显式构造 `NetworkEnvironment` 和 `IMTCPClientConfiguration` 后注入 `AuthManager`。
 
 ## 快速开始
 
 ### 1. 启动服务端
+
+从仓库根目录启动本地服务端：
+
+```bash
+IMServer/scripts/run_local.sh
+```
 
 先启动 `IMServer`，确保：
 
@@ -96,6 +141,15 @@ static let local = AppNetworkConfiguration(
 ### 3. 运行客户端
 
 选择 iPhone 模拟器，直接运行 `IMApp` scheme。
+
+如果云服务器已经关闭、需要真机连 Mac 本地服务，先确认手机和 Mac 在同一个 Wi-Fi，然后从仓库根目录运行：
+
+```bash
+make print-local-client-config
+make build-app-local-device
+```
+
+脚本会自动探测 Mac 局域网 IP，并用 `IM_API_BASE_URL=http://<Mac-LAN-IP>:8080`、`IM_TCP_HOST=<Mac-LAN-IP>`、`IM_TCP_PORT=9000` 覆盖 Debug 构建。不要把临时局域网 IP 写进 Release 配置。
 
 ## 交互模型
 

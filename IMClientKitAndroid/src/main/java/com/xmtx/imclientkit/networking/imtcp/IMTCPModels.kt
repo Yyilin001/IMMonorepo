@@ -108,7 +108,6 @@ internal object IMTCPPacketCodec {
                     .also { if (payload.deviceName != null) it.deviceName = payload.deviceName }
                     .also { if (payload.platform != null) it.platform = payload.platform }
                     .also { if (payload.appVersion != null) it.appVersion = payload.appVersion }
-                    .setProtocolVersion(payload.protocolVersion)
                     .build(),
             )
             .build()
@@ -239,13 +238,11 @@ private val ChatDomainEvent.domainBody: IMTCPChatDomainEventBody
             isFavorited = messageFavoriteChanged.isFavorited,
         )
         ChatDomainEvent.BodyCase.MESSAGE_STREAM_STARTED,
-        ChatDomainEvent.BodyCase.MESSAGE_STREAM_CHUNK,
         ChatDomainEvent.BodyCase.MESSAGE_STREAM_COMPLETED,
         ChatDomainEvent.BodyCase.MESSAGE_STREAM_FAILED,
         ChatDomainEvent.BodyCase.MESSAGE_STREAM_CANCELLED -> {
             val event = when (bodyCase) {
                 ChatDomainEvent.BodyCase.MESSAGE_STREAM_STARTED -> messageStreamStarted
-                ChatDomainEvent.BodyCase.MESSAGE_STREAM_CHUNK -> messageStreamChunk
                 ChatDomainEvent.BodyCase.MESSAGE_STREAM_COMPLETED -> messageStreamCompleted
                 ChatDomainEvent.BodyCase.MESSAGE_STREAM_FAILED -> messageStreamFailed
                 else -> messageStreamCancelled
@@ -268,6 +265,7 @@ private val ChatDomainEvent.domainBody: IMTCPChatDomainEventBody
         ChatDomainEvent.BodyCase.CONTACT_REQUEST_UPDATED -> IMTCPChatDomainEventBody.ContactChanged(contactUserID = if (contactRequestUpdated.hasContactUserId()) contactRequestUpdated.contactUserId else null)
         ChatDomainEvent.BodyCase.CONVERSATION_CREATED,
         ChatDomainEvent.BodyCase.CONVERSATION_UPDATED,
+        ChatDomainEvent.BodyCase.CONVERSATION_ACTIVITY_HINT,
         ChatDomainEvent.BodyCase.CONVERSATION_SETTINGS_CHANGED -> IMTCPChatDomainEventBody.ConversationChanged()
         ChatDomainEvent.BodyCase.BODY_NOT_SET -> throw IMTCPClientError.InvalidPayload("domain_event")
     }
@@ -297,7 +295,7 @@ private val ConversationSummary.domainValue: IMConversationSummaryResponseBody
             com.xmtx.imclientkit.features.im.IMMessagePreviewResponseBody(
                 id = lastMessage.id,
                 senderUserID = lastMessage.senderUserId,
-                serverSequence = lastMessage.serverSequence,
+                serverSequence = lastMessage.serverSequence.toIntSequence("last_message.server_sequence"),
                 content = lastMessage.content.domainValue,
                 derivedState = lastMessage.derivedState.jsonValue,
                 createdAt = if (lastMessage.hasCreatedAtMs()) lastMessage.createdAtMs.isoMillis else null,
@@ -305,7 +303,7 @@ private val ConversationSummary.domainValue: IMConversationSummaryResponseBody
         } else {
             null
         },
-        lastReadSequence = lastReadSequence,
+        lastReadSequence = lastReadSequence.toIntSequence("last_read_sequence"),
         unreadCount = unreadCount,
         isPinned = isPinned,
         pinnedAt = if (hasPinnedAtMs()) pinnedAtMs.isoMillis else null,
@@ -320,7 +318,7 @@ private val ConversationMessage.domainValue: IMConversationMessageResponseBody
         conversationID = conversationId,
         senderUserID = senderUserId,
         clientMessageID = if (hasClientMessageId()) clientMessageId else null,
-        serverSequence = serverSequence,
+        serverSequence = serverSequence.toIntSequence("message.server_sequence"),
         content = content.domainValue,
         derivedState = derivedState.jsonValue,
         createdAt = if (hasCreatedAtMs()) createdAtMs.isoMillis else null,
@@ -467,3 +465,10 @@ private val com.xmtx.imclientkit.generated.im.realtime.v1.MessageStreamPayload.d
 
 private val Long.isoMillis: String
     get() = Instant.ofEpochMilli(this).toString()
+
+private fun Long.toIntSequence(fieldName: String): Int {
+    if (this < Int.MIN_VALUE || this > Int.MAX_VALUE) {
+        throw IMTCPClientError.InvalidPayload(fieldName)
+    }
+    return toInt()
+}
