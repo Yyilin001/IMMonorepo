@@ -32,7 +32,7 @@ Runs the local production release gate:
   - production env preflight self-test
   - default production env template preflight
   - protobuf generated-file drift check
-  - TCP load-driver release build
+  - TCP load-driver release build on Darwin hosts
   - optional real production env preflight with --strict-secrets
   - Swift release build
   - full Swift tests by default with swift test --no-parallel
@@ -201,6 +201,22 @@ run_step() {
     printf '%s\t%s\t%s\tfailed\t%s\n' "${STEP_INDEX}" "${name}" "${log_name}" "${rc}" >> "${STEP_RESULTS_FILE}"
     return "${rc}"
   fi
+}
+
+record_skipped_step() {
+  local name="$1"
+  local reason="$2"
+  STEP_INDEX=$((STEP_INDEX + 1))
+
+  echo "==> ${name} skipped: ${reason}"
+  {
+    echo
+    echo "## ${name}"
+    echo
+    echo "- status: skipped"
+    echo "- reason: ${reason}"
+  } >> "${REPORT_FILE}"
+  printf '%s\t%s\t%s\tskipped\t0\n' "${STEP_INDEX}" "${name}" "" >> "${STEP_RESULTS_FILE}"
 }
 
 append_real_preflight_arg() {
@@ -487,20 +503,17 @@ run_step "Protobuf generated drift check" "${MONOREPO_DIR}/scripts/check_protobu
 if [[ "${RUN_REAL_PREFLIGHT}" == true ]]; then
   run_step "Production real env preflight" "${ROOT_DIR}/scripts/production_env_preflight.sh" "${REAL_PREFLIGHT_ARGS[@]}"
 fi
-run_step "TCPDriver release build" swift build -c release --package-path "${ROOT_DIR}/LoadTests/TCPDriver"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  run_step "TCPDriver release build" swift build -c release --package-path "${ROOT_DIR}/LoadTests/TCPDriver"
+else
+  record_skipped_step "TCPDriver release build" "TCPDriver uses Apple's Network framework and is built on Darwin load-generator hosts."
+fi
 run_step "IMServer release build" swift build -c release --package-path "${ROOT_DIR}"
 
 if is_true "${RUN_SWIFT_TESTS}"; then
   run_step "IMServer full Swift tests" swift test --no-parallel --package-path "${ROOT_DIR}"
 else
-  {
-    echo
-    echo "## IMServer full Swift tests"
-    echo
-    echo "- status: skipped"
-    echo "- reason: explicitly skipped with --skip-swift-tests or RUN_SWIFT_TESTS=false"
-  } >> "${REPORT_FILE}"
-  printf '%s\t%s\t%s\tskipped\t0\n' "$((STEP_INDEX + 1))" "IMServer full Swift tests" "" >> "${STEP_RESULTS_FILE}"
+  record_skipped_step "IMServer full Swift tests" "explicitly skipped with --skip-swift-tests or RUN_SWIFT_TESTS=false"
   echo "==> swift test skipped by explicit request."
 fi
 
