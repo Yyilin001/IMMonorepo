@@ -296,7 +296,7 @@ REQUIRED = {
     ".github/workflows/imserver-production-release-gate.yml": {
         "commands": [
             "uses: swift-actions/setup-swift@v2",
-            "swift-version: \"6.2\"",
+            "swift-version: \"6.1\"",
             "sudo apt-get install -y librdkafka-dev libsasl2-dev libssl-dev protobuf-compiler",
             "working-directory: IMServer",
             "./scripts/production_release_gate.sh",

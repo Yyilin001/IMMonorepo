@@ -3688,6 +3688,10 @@ if bool_enabled "${VALIDATE_DRY_RUN}"; then
   log "runner dry-run artifacts"
   requirement_preflight_dir="${RESULT_DIR}/requirement-preflight"
   mkdir -p "${requirement_preflight_dir}"
+  validate_account_file="${requirement_preflight_dir}/dry-run-accounts-1000.csv"
+  for index in $(seq 1 1000); do
+    printf 'dry-run-%04d@example.com,password1234\n' "${index}"
+  done >"${validate_account_file}"
 
   set +e
   PERF_DRY_RUN=true \
@@ -3882,7 +3886,8 @@ PY
   RESULT_ROOT="${RESULT_DIR}" \
   BASE_URL="http://127.0.0.1:8080" \
   TCP_HOST="127.0.0.1" \
-  ACCOUNT_FILE="${SCRIPT_DIR}/accounts/load-1000.csv" \
+  ACCOUNT_FILE="${validate_account_file}" \
+  PERF_PLAN_ACCOUNT_FILE="${SCRIPT_DIR}/accounts/load-1000.csv" \
   IM_INTERNAL_SECRET="validate" \
   IM_CONVERSATION_ID="00000000-0000-0000-0000-000000000000" \
   SCENARIOS="timeline-pagination-smoke" \
@@ -3924,7 +3929,8 @@ PY
     RESULT_ROOT="${negative_gate_dir}" \
     BASE_URL="http://127.0.0.1:8080" \
     TCP_HOST="127.0.0.1" \
-    ACCOUNT_FILE="${SCRIPT_DIR}/accounts/load-1000.csv" \
+    ACCOUNT_FILE="${validate_account_file}" \
+    PERF_PLAN_ACCOUNT_FILE="${SCRIPT_DIR}/accounts/load-1000.csv" \
     IM_INTERNAL_SECRET="validate" \
     IM_CONVERSATION_ID="00000000-0000-0000-0000-000000000000" \
     SCENARIOS="timeline-pagination-smoke" \
@@ -4149,7 +4155,7 @@ PY
     --base-url "http://127.0.0.1:8080" \
     --tcp-host "127.0.0.1" \
     --tcp-port "9000" \
-    --account-file "${SCRIPT_DIR}/accounts/load-1000.csv" \
+    --account-file "${validate_account_file}" \
     --conversation-id "00000000-0000-0000-0000-000000000000" \
     --internal-secret "validate" \
     --output "${RESULT_DIR}/domain-run-plan.md" \
@@ -4220,13 +4226,13 @@ PY
   python3 "${SCRIPT_DIR}/perf_domain_run_plan.py" \
     --domain-backlog "${stale_blocker_dir}/domain-backlog.json" \
     --base-url "http://127.0.0.1:8080" \
-    --account-file "${SCRIPT_DIR}/accounts/load-1000.csv" \
+    --account-file "${validate_account_file}" \
     --output "${stale_blocker_dir}/default-domain-run-plan.md" \
     --json-output "${stale_blocker_dir}/default-domain-run-plan.json" >/dev/null || true
   python3 "${SCRIPT_DIR}/perf_domain_run_plan.py" \
     --domain-backlog "${stale_blocker_dir}/domain-backlog.json" \
     --base-url "http://127.0.0.1:8080" \
-    --account-file "${SCRIPT_DIR}/accounts/load-1000.csv" \
+    --account-file "${validate_account_file}" \
     --blocker-max-age-seconds 60 \
     --output "${stale_blocker_dir}/fresh-domain-run-plan.md" \
     --json-output "${stale_blocker_dir}/fresh-domain-run-plan.json" >/dev/null || true
@@ -4235,7 +4241,7 @@ PY
     --base-url "http://new-target.example:8080" \
     --tcp-host "new-target.example" \
     --tcp-port "9000" \
-    --account-file "${SCRIPT_DIR}/accounts/load-1000.csv" \
+    --account-file "${validate_account_file}" \
     --ignore-blockers-for-different-target \
     --output "${stale_blocker_dir}/target-domain-run-plan.md" \
     --json-output "${stale_blocker_dir}/target-domain-run-plan.json" >/dev/null || true
@@ -4291,7 +4297,7 @@ PY
     --base-url "http://127.0.0.1:8080" \
     --tcp-host "127.0.0.1" \
     --tcp-port "9000" \
-    --account-file "${SCRIPT_DIR}/accounts/load-1000.csv" \
+    --account-file "${validate_account_file}" \
     --conversation-id "00000000-0000-0000-0000-000000000000" \
     --internal-secret "validate" \
     --output "${RESULT_DIR}/prereq-audit.md" \
@@ -4729,7 +4735,7 @@ PY
     --base-url "http://127.0.0.1:8080" \
     --tcp-host "127.0.0.1" \
     --tcp-port "9000" \
-    --account-file "${SCRIPT_DIR}/accounts/load-1000.csv" \
+    --account-file "${validate_account_file}" \
     --conversation-id "00000000-0000-0000-0000-000000000000" \
     --internal-secret "validate" \
     --output "${RESULT_DIR}/slo-domain-run-plan.md" \
