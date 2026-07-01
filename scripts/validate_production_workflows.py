@@ -297,7 +297,7 @@ REQUIRED = {
         "commands": [
             "uses: swift-actions/setup-swift@v2",
             "swift-version: \"6.2\"",
-            "sudo apt-get install -y librdkafka-dev libssl-dev protobuf-compiler",
+            "sudo apt-get install -y librdkafka-dev libsasl2-dev libssl-dev protobuf-compiler",
             "working-directory: IMServer",
             "./scripts/production_release_gate.sh",
             "./scripts/production_release_gate.sh --skip-swift-tests",
