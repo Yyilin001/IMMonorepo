@@ -52,6 +52,37 @@ bool_enabled() {
   esac
 }
 
+tree_contains_regex() {
+  local root="$1"
+  local pattern="$2"
+  local exclude_name="${3:-}"
+  if command -v rg >/dev/null 2>&1; then
+    if [[ -n "${exclude_name}" ]]; then
+      rg -n --glob "!${exclude_name}" -- "${pattern}" "${root}" >/dev/null
+    else
+      rg -n -- "${pattern}" "${root}" >/dev/null
+    fi
+    return $?
+  fi
+
+  if [[ -n "${exclude_name}" ]]; then
+    grep -R -n -E --exclude="${exclude_name}" -- "${pattern}" "${root}" >/dev/null
+  else
+    grep -R -n -E -- "${pattern}" "${root}" >/dev/null
+  fi
+}
+
+tree_contains_fixed() {
+  local root="$1"
+  local value="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -n -F -- "${value}" "${root}" >/dev/null
+    return $?
+  fi
+
+  grep -R -n -F -- "${value}" "${root}" >/dev/null
+}
+
 resolve_path() {
   python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).expanduser().resolve())' "$1"
 }
@@ -986,6 +1017,26 @@ require_file() {
   fi
 }
 
+tree_contains_regex() {
+  local root="$1"
+  local pattern="$2"
+  local exclude_name="${3:-}"
+  if command -v rg >/dev/null 2>&1; then
+    if [[ -n "${exclude_name}" ]]; then
+      rg -n --glob "!${exclude_name}" -- "${pattern}" "${root}" >/dev/null
+    else
+      rg -n -- "${pattern}" "${root}" >/dev/null
+    fi
+    return $?
+  fi
+
+  if [[ -n "${exclude_name}" ]]; then
+    grep -R -n -E --exclude="${exclude_name}" -- "${pattern}" "${root}" >/dev/null
+  else
+    grep -R -n -E -- "${pattern}" "${root}" >/dev/null
+  fi
+}
+
 require_file SHA256SUMS
 require_file cloud-console-node-access-rescue.sh
 require_file post-rescue-verify.sh
@@ -1118,16 +1169,9 @@ bash -n "${SCRIPT_DIR}/cloud-console-node-access-rescue.sh"
 bash -n "${SCRIPT_DIR}/post-rescue-verify.sh"
 bash -n "${SCRIPT_DIR}/resume-product-validation.sh"
 
-if command -v rg >/dev/null 2>&1; then
-  if rg -n --glob '!verify-artifact.sh' 'BEGIN (OPENSSH|RSA|EC|DSA) PRIVATE KEY|PRIVATE KEY-----|Proc-Type: 4,ENCRYPTED' "${SCRIPT_DIR}" >/dev/null; then
-    printf 'node_access_rescue_artifact_verify result=fail reason=private_key_marker_detected dir=%s\n' "${SCRIPT_DIR}" >&2
-    exit 1
-  fi
-else
-  if grep -R -n -E --exclude=verify-artifact.sh 'BEGIN (OPENSSH|RSA|EC|DSA) PRIVATE KEY|PRIVATE KEY-----|Proc-Type: 4,ENCRYPTED' "${SCRIPT_DIR}" >/dev/null; then
-    printf 'node_access_rescue_artifact_verify result=fail reason=private_key_marker_detected dir=%s\n' "${SCRIPT_DIR}" >&2
-    exit 1
-  fi
+if tree_contains_regex "${SCRIPT_DIR}" 'BEGIN (OPENSSH|RSA|EC|DSA) PRIVATE KEY|PRIVATE KEY-----|Proc-Type: 4,ENCRYPTED' "verify-artifact.sh"; then
+  printf 'node_access_rescue_artifact_verify result=fail reason=private_key_marker_detected dir=%s\n' "${SCRIPT_DIR}" >&2
+  exit 1
 fi
 
 fallback_secret_scan() {
@@ -1898,7 +1942,7 @@ write_artifact_archive() {
 
 verify_no_private_key() {
   local artifact_dir="$1"
-  if rg -n --glob '!verify-artifact.sh' 'BEGIN (OPENSSH|RSA|EC|DSA) PRIVATE KEY|PRIVATE KEY-----|Proc-Type: 4,ENCRYPTED' "${artifact_dir}" >/dev/null; then
+  if tree_contains_regex "${artifact_dir}" 'BEGIN (OPENSSH|RSA|EC|DSA) PRIVATE KEY|PRIVATE KEY-----|Proc-Type: 4,ENCRYPTED' "verify-artifact.sh"; then
     printf 'node_access_rescue_artifact result=fail reason=private_key_marker_detected dir=%s\n' "${artifact_dir}" >&2
     return 1
   fi
@@ -1912,7 +1956,7 @@ verify_no_sensitive_values() {
     if [[ ${#value} -lt 8 ]]; then
       continue
     fi
-    if rg -n -F "${value}" "${artifact_dir}" >/dev/null; then
+    if tree_contains_fixed "${artifact_dir}" "${value}"; then
       printf 'node_access_rescue_artifact result=fail reason=sensitive_value_leaked name=%s dir=%s\n' "${name}" "${artifact_dir}" >&2
       return 1
     fi
@@ -2496,15 +2540,15 @@ PY
     printf 'node_access_rescue_artifact_self_test result=fail reason=readme_real_world_default_missing\n' >&2
     return 1
   }
-  if rg -n -- '-----BEGIN ' "${tmpdir}/artifact" >/dev/null; then
+  if tree_contains_regex "${tmpdir}/artifact" '-----BEGIN '; then
     printf 'node_access_rescue_artifact_self_test result=fail reason=private_key_marker_detected\n' >&2
     return 1
   fi
-  if rg -n -F 'node-access-self-test-secret-should-not-leak' "${tmpdir}/artifact" >/dev/null; then
+  if tree_contains_fixed "${tmpdir}/artifact" 'node-access-self-test-secret-should-not-leak'; then
     printf 'node_access_rescue_artifact_self_test result=fail reason=internal_secret_leaked\n' >&2
     return 1
   fi
-  if rg -n -F "${tmpdir}/should-not-leak/test01.pem" "${tmpdir}/artifact" >/dev/null; then
+  if tree_contains_fixed "${tmpdir}/artifact" "${tmpdir}/should-not-leak/test01.pem"; then
     printf 'node_access_rescue_artifact_self_test result=fail reason=ssh_private_key_path_leaked\n' >&2
     return 1
   fi

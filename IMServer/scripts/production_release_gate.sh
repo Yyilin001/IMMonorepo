@@ -62,7 +62,7 @@ USAGE
 configure_swiftpm_job_args() {
   local jobs="${SWIFTPM_BUILD_JOBS}"
   if [[ -z "${jobs}" && "$(uname -s)" != "Darwin" ]]; then
-    jobs=2
+    jobs=1
   fi
   if [[ -n "${jobs}" ]]; then
     SWIFTPM_JOB_ARGS=(--jobs "${jobs}")
