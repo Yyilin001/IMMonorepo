@@ -1,0 +1,425 @@
+{
+  "schemaVersion": 1,
+  "campaigns": {
+    "non-large-group-release": {
+      "description": "Release gate for the normal IM product surface while explicitly excluding large-group fanout stress.",
+      "stages": [
+        {
+          "id": "entrypoint",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint"
+          ],
+          "required": true,
+          "evidence": "public entrypoint probe"
+        },
+        {
+          "id": "real-world-smoke",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "real-world-smoke"
+          ],
+          "required": true,
+          "evidence": "fast cross-product smoke"
+        },
+        {
+          "id": "daily-core",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "daily-core",
+            "daily-traffic"
+          ],
+          "required": true,
+          "evidence": "normal foreground chat and daily traffic"
+        },
+        {
+          "id": "workflow-domains",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "account-security",
+            "sync-read",
+            "direct-chat",
+            "group-workflow",
+            "contacts-social",
+            "media-ai-admin"
+          ],
+          "required": true,
+          "evidence": "auth, sync, direct chat, ordinary groups, contacts, media, AI, and admin flows"
+        },
+        {
+          "id": "recovery-governance",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "reliability-recovery",
+            "lifecycle-governance"
+          ],
+          "required": true,
+          "evidence": "reconnect, cold-start, offline catch-up, lifecycle, visibility, safety, and moderation"
+        },
+        {
+          "id": "realtime-direct",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "message-spike",
+            "realtime-direct",
+            "group-delivery"
+          ],
+          "required": true,
+          "evidence": "direct send spikes, multi-device delivery, pair delivery, and ordinary group realtime"
+        },
+        {
+          "id": "normal-product-baseline",
+          "runner": "production-profile",
+          "profile": "normal-product-baseline",
+          "required": true,
+          "evidence": "resumable full non-large-group production profile"
+        }
+      ]
+    },
+    "product-scenario-regression": {
+      "description": "Domain-by-domain product regression campaign for testing normal IM scenarios beyond large-group fanout.",
+      "stopOnFailure": false,
+      "stages": [
+        {
+          "id": "entrypoint",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint"
+          ],
+          "required": true,
+          "evidence": "public HTTP and TCP entrypoint status"
+        },
+        {
+          "id": "account-security",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "account-security-baseline"
+          ],
+          "required": true,
+          "evidence": "login, session management, token rotation, auth recovery, push token, and account lifecycle"
+        },
+        {
+          "id": "sync-read",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "sync-read-baseline"
+          ],
+          "required": true,
+          "evidence": "client sync, inbox fanout, offline catch-up, cold start, timeline paging/history, domain events, and client health"
+        },
+        {
+          "id": "direct-message-workflow",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "direct-chat-baseline",
+            "message-spike-baseline"
+          ],
+          "required": true,
+          "evidence": "direct convergence, message lifecycle, read state, preferences, visibility, forwarding, burst writes, and pair delivery"
+        },
+        {
+          "id": "group-workflow",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "group-workflow-baseline",
+            "group-delivery-baseline"
+          ],
+          "required": true,
+          "evidence": "small groups, group convergence, group admin, membership, invites, governance, access control, and ordinary group realtime"
+        },
+        {
+          "id": "social-governance",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "contacts-social-baseline",
+            "lifecycle-governance-baseline"
+          ],
+          "required": true,
+          "evidence": "contacts, profile propagation, safety block, moderation, visibility, lifecycle, and governance"
+        },
+        {
+          "id": "media-ai-admin",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "media-ai-admin-baseline"
+          ],
+          "required": true,
+          "evidence": "media upload/download, media recovery, AI stream, admin report moderation, and search"
+        },
+        {
+          "id": "reliability-realtime",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "reliability-recovery-baseline",
+            "realtime-direct-baseline"
+          ],
+          "required": true,
+          "evidence": "reconnect, recovery, TCP online, multi-device online/delivery, online chat mix, and pair delivery"
+        },
+        {
+          "id": "normal-product-baseline",
+          "runner": "production-profile",
+          "profile": "normal-product-baseline",
+          "required": false,
+          "evidence": "optional full non-large-group profile after domain regressions identify no weak area"
+        }
+      ]
+    },
+    "product-scenario-acceptance": {
+      "description": "Full normal-product acceptance campaign across daily IM usage, workflow domains, recovery, and realtime delivery, explicitly excluding isolated large-group fanout stress.",
+      "stopOnFailure": false,
+      "stages": [
+        {
+          "id": "entrypoint",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint"
+          ],
+          "required": true,
+          "evidence": "public HTTP and TCP entrypoint status"
+        },
+        {
+          "id": "real-world-baseline",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "real-world-baseline"
+          ],
+          "required": true,
+          "evidence": "representative normal IM baseline including auth, sync, direct chat, media, online, multi-device, group delivery, and pair delivery"
+        },
+        {
+          "id": "daily-usage",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "daily-core",
+            "daily-traffic"
+          ],
+          "required": true,
+          "evidence": "foreground chat, conversation sync, offline catch-up, read state, small group, online, pair, and multi-device daily traffic"
+        },
+        {
+          "id": "account-and-sync",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "account-security-baseline",
+            "sync-read-baseline"
+          ],
+          "required": true,
+          "evidence": "login/session/token/push/account lifecycle plus client sync, inbox, offline catch-up, cold start, timeline, domain events, and client health"
+        },
+        {
+          "id": "message-workflows",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "direct-chat-baseline",
+            "message-spike-baseline"
+          ],
+          "required": true,
+          "evidence": "direct convergence, lifecycle, read state, preferences, visibility, forwarding, hot writes, burst writes, and pair delivery"
+        },
+        {
+          "id": "ordinary-groups",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "group-workflow-baseline",
+            "group-delivery-baseline"
+          ],
+          "required": true,
+          "evidence": "small group create/read, admin, membership, invite, governance, access control, and ordinary group realtime below large-group scale"
+        },
+        {
+          "id": "social-media-governance",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "contacts-social-baseline",
+            "media-ai-admin-baseline",
+            "lifecycle-governance-baseline"
+          ],
+          "required": true,
+          "evidence": "contacts, profile, safety block, media, AI stream, admin reports, moderation, visibility, lifecycle, and governance"
+        },
+        {
+          "id": "recovery-and-realtime",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "reliability-recovery-baseline",
+            "realtime-direct-baseline"
+          ],
+          "required": true,
+          "evidence": "token failure recovery, reconnect, cold start, offline catch-up, timeline recovery, TCP online, multi-device delivery, online chat mix, and pair delivery"
+        },
+        {
+          "id": "normal-product-baseline",
+          "runner": "production-profile",
+          "profile": "normal-product-baseline",
+          "required": true,
+          "evidence": "single resumable aggregate profile for the same non-large-group product surface"
+        }
+      ]
+    },
+    "production-acceptance": {
+      "description": "Full production acceptance flow. Normal product breadth must pass before isolated large-group stress is considered.",
+      "stages": [
+        {
+          "id": "non-large-group-release",
+          "runner": "campaign",
+          "campaign": "non-large-group-release",
+          "required": true,
+          "evidence": "normal product release gate"
+        },
+        {
+          "id": "large-group-baseline",
+          "runner": "scenario-group",
+          "scenarioGroups": [
+            "large-group"
+          ],
+          "required": true,
+          "isolated": true,
+          "evidence": "large-group fanout stress kept separate from normal product capacity"
+        },
+        {
+          "id": "full-baseline-profile",
+          "runner": "production-profile",
+          "profile": "full-baseline",
+          "required": false,
+          "evidence": "legacy combined baseline for historical comparison"
+        }
+      ]
+    },
+    "production-full-acceptance": {
+      "description": "Long-term full production acceptance ladder. It separates normal product smoke, baseline, capacity, realtime delivery, and large-group stress so one path cannot hide another.",
+      "stages": [
+        {
+          "id": "normal-product-smoke",
+          "runner": "scenario-group",
+          "scenarioGroups": [
+            "normal-product-smoke"
+          ],
+          "required": true,
+          "evidence": "fast cross-domain smoke before expensive baseline or capacity work"
+        },
+        {
+          "id": "normal-product-plan",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "normal-product-baseline"
+          ],
+          "required": true,
+          "packageEvidenceProductPlan": true,
+          "evidence": "packageable product-plan artifacts for the normal non-large-group product surface"
+        },
+        {
+          "id": "normal-product-baseline",
+          "runner": "production-profile",
+          "profile": "normal-product-baseline",
+          "required": true,
+          "packageEvidenceProfile": true,
+          "evidence": "full non-large-group baseline across auth, sync, message, small group, social, media, AI, TCP, and pair delivery"
+        },
+        {
+          "id": "normal-product-capacity",
+          "runner": "production-profile",
+          "profile": "normal-product-capacity",
+          "required": true,
+          "evidence": "capacity breadth for the same non-large-group product surface"
+        },
+        {
+          "id": "message-realtime-capacity",
+          "runner": "scenario-group",
+          "scenarioGroups": [
+            "message-workflow-baseline",
+            "realtime-direct-baseline",
+            "group-delivery-capacity"
+          ],
+          "required": true,
+          "evidence": "message workflow, TCP realtime, multi-device, pair delivery, and ordinary group delivery under sustained pressure"
+        },
+        {
+          "id": "large-group-isolated",
+          "runner": "scenario-group",
+          "scenarioGroups": [
+            "large-group"
+          ],
+          "required": true,
+          "isolated": true,
+          "evidence": "large-group fanout stress after normal product acceptance has already passed"
+        }
+      ]
+    },
+    "incident-triage": {
+      "description": "Focused campaign for routing regressions after production acceptance identifies a weak domain.",
+      "stages": [
+        {
+          "id": "entrypoint",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint"
+          ],
+          "required": true,
+          "evidence": "public HTTP and protocol-port entrypoint status"
+        },
+        {
+          "id": "sync-message",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "sync-message"
+          ],
+          "required": false,
+          "evidence": "sync recovery and message workflow"
+        },
+        {
+          "id": "social-governance",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "social-governance"
+          ],
+          "required": false,
+          "evidence": "contacts, profile, lifecycle, governance, and safety"
+        },
+        {
+          "id": "realtime-direct",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "realtime-direct"
+          ],
+          "required": false,
+          "evidence": "TCP online, reconnect, pair delivery, and multi-device delivery"
+        },
+        {
+          "id": "group-delivery",
+          "runner": "product-plan",
+          "phases": [
+            "entrypoint",
+            "group-delivery",
+            "group-delivery-baseline"
+          ],
+          "required": false,
+          "evidence": "ordinary group realtime delivery below large-group fanout scale"
+        }
+      ]
+    }
+  }
+}

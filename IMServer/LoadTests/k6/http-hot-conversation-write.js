@@ -69,9 +69,12 @@ function login() {
     JSON.stringify({
       email,
       password,
-      deviceID: 'k6-hot-conversation-owner',
-      deviceName: 'k6-hot-conversation',
-      platform: 'load-test',
+      device: {
+        deviceID: 'k6-hot-conversation-owner',
+        deviceName: 'k6-hot-conversation',
+        platform: 'load-test',
+        appVersion: 'k6',
+      },
     }),
     jsonHeaders()
   );

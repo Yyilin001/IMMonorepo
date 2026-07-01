@@ -9,6 +9,7 @@ struct Options: Sendable {
     var email = ProcessInfo.processInfo.environment["IM_EMAIL"] ?? "demo@example.com"
     var password = ProcessInfo.processInfo.environment["IM_PASSWORD"] ?? "password1234"
     var accountFile: String?
+    var accountDevicesPerUser = ProcessInfo.processInfo.environment["IM_TCP_ACCOUNT_DEVICES_PER_USER"].flatMap(Int.init(_:)) ?? 1
     var conversationID = ProcessInfo.processInfo.environment["IM_CONVERSATION_ID"] ?? ""
     var connections = 100
     var devicesPerUser = 1
@@ -41,6 +42,7 @@ struct Options: Sendable {
     var connectionQueuePoolSize = ProcessInfo.processInfo.environment["IM_TCP_CONNECTION_QUEUE_POOL_SIZE"]
         .flatMap(Int.init(_:)) ?? max(8, min(64, ProcessInfo.processInfo.activeProcessorCount * 4))
     var maxReconnects = ProcessInfo.processInfo.environment["IM_TCP_MAX_RECONNECTS"].flatMap(Int.init(_:)) ?? 0
+    var minReconnects = ProcessInfo.processInfo.environment["IM_TCP_MIN_RECONNECTS"].flatMap(Int.init(_:)) ?? 0
     var reconnectDelayMillis = ProcessInfo.processInfo.environment["IM_TCP_RECONNECT_DELAY_MS"].flatMap(Int.init(_:)) ?? 1_000
     var loginRetries = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_RETRIES"].flatMap(Int.init(_:)) ?? 2
     var loginRetryDelayMillis = ProcessInfo.processInfo.environment["IM_TCP_LOGIN_RETRY_DELAY_MS"].flatMap(Int.init(_:)) ?? 1_000
@@ -435,6 +437,8 @@ func parseOptions() -> Options {
             options.password = value
         case "--account-file":
             options.accountFile = value
+        case "--account-devices-per-user":
+            options.accountDevicesPerUser = max(1, Int(value) ?? options.accountDevicesPerUser)
         case "--conversation-id":
             options.conversationID = value
         case "--connections":
@@ -491,6 +495,8 @@ func parseOptions() -> Options {
             options.connectionQueuePoolSize = max(1, Int(value) ?? options.connectionQueuePoolSize)
         case "--max-reconnects":
             options.maxReconnects = max(0, Int(value) ?? options.maxReconnects)
+        case "--min-reconnects":
+            options.minReconnects = max(0, Int(value) ?? options.minReconnects)
         case "--reconnect-delay-ms":
             options.reconnectDelayMillis = max(0, Int(value) ?? options.reconnectDelayMillis)
         case "--login-retries":
@@ -504,6 +510,7 @@ func parseOptions() -> Options {
         }
     }
     options.globalHoldBarrierMinRatio = min(1.0, max(0.0, options.globalHoldBarrierMinRatio))
+    options.accountDevicesPerUser = max(1, options.accountDevicesPerUser)
     options.activeConversationUsers = min(options.connections, max(0, options.activeConversationUsers))
     options.messageProfile = options.messageProfile.lowercased()
     if !["per-connection", "pair-delivery"].contains(options.messageProfile) {
@@ -2331,9 +2338,11 @@ connectionLogger.log(
         "heartbeatLogSampleRate": String(options.heartbeatLogSampleRate),
         "connectionQueuePoolSize": String(options.connectionQueuePoolSize),
         "maxReconnects": String(options.maxReconnects),
+        "minReconnects": String(options.minReconnects),
         "reconnectDelayMillis": String(options.reconnectDelayMillis),
         "loginRetries": String(options.loginRetries),
         "loginRetryDelayMillis": String(options.loginRetryDelayMillis),
+        "accountDevicesPerUser": String(options.accountDevicesPerUser),
         "loginCacheFile": options.loginCacheFile ?? "",
         "requireLoginCache": String(options.requireLoginCache),
         "loginCacheTTLGuardSeconds": String(options.loginCacheTTLGuardSeconds),
@@ -2367,7 +2376,10 @@ if justInTimeLogin {
         exit(4)
     }
     connectionLogins = try await concurrentMap(Array(0..<loginCount), concurrency: options.loginConcurrency) { loginIndex in
-        let credential = accountCredentials[loginIndex % accountCredentials.count]
+        let credentialIndex = options.accountFile == nil
+            ? loginIndex % accountCredentials.count
+            : (loginIndex / options.accountDevicesPerUser) % accountCredentials.count
+        let credential = accountCredentials[credentialIndex]
         return try await loginForConnection(
             options: options,
             credential: credential,
@@ -2545,7 +2557,7 @@ let canonicalSuccessRate = expectedCanonicalMessages == 0 ? 1.0 : Double(canonic
 let expectedDeliveries = expectedDeliveriesByConnection.reduce(0, +)
 let deliverySuccessRate = expectedDeliveries == 0 ? 0 : Double(deliveredMessages) / Double(expectedDeliveries)
 
-print("profile=\(options.profile) connections=\(options.connections) accounts=\(accountCredentials.count) devicesPerUser=\(options.devicesPerUser) queuePoolSize=\(connectionQueuePool.size) maxReconnects=\(options.maxReconnects) successes=\(successes) elapsed=\(String(format: "%.2f", elapsed))s")
+print("profile=\(options.profile) connections=\(options.connections) accounts=\(accountCredentials.count) devicesPerUser=\(options.devicesPerUser) accountDevicesPerUser=\(options.accountDevicesPerUser) queuePoolSize=\(connectionQueuePool.size) maxReconnects=\(options.maxReconnects) successes=\(successes) elapsed=\(String(format: "%.2f", elapsed))s")
 print("loginCacheHit=\(loginCacheHit) loginCacheRecords=\(loginCacheRecords) loginCacheValidForSeconds=\(loginCacheValidForSeconds) requireLoginCache=\(options.requireLoginCache)")
 print("globalHoldBarrier=\(globalHoldBarrier != nil) globalHoldBarrierTarget=\(globalHoldBarrierTarget) globalHoldBarrierMinRatio=\(options.globalHoldBarrierMinRatio) messageProfile=\(options.messageProfile) messageCompletionMode=\(options.messageCompletionMode) messageRatePerSecond=\(options.messageRatePerSecond) activeConversationUsers=\(options.activeConversationUsers) expectedCanonical=\(expectedCanonicalMessages) expectedDeliveries=\(expectedDeliveries)")
 print("sent=\(sent) ack=\(acknowledgements) canonical=\(canonicalMessages) duplicateCanonical=\(duplicateCanonicalMessages) delivered=\(deliveredMessages) duplicateDelivered=\(duplicateDeliveredMessages) fanout=\(fanoutMessages) reconnects=\(reconnects) serverErrors=\(serverErrors)")
@@ -2583,6 +2595,7 @@ connectionLogger.log(
         "expectedDeliveries": String(expectedDeliveries),
         "deliverySuccessRate": String(deliverySuccessRate),
         "serverErrors": String(serverErrors),
+        "reconnects": String(reconnects),
         "heartbeatSends": String(heartbeatSends),
         "heartbeatAcks": String(heartbeatAcks),
         "heartbeatSendCompletionP95Ms": String(Int(percentile(heartbeatSendCompletionMillis, 0.95))),
@@ -2593,6 +2606,7 @@ connectionLogger.log(
         "messageCompletionMode": options.messageCompletionMode,
         "messageRatePerSecond": String(options.messageRatePerSecond),
         "activeConversationUsers": String(options.activeConversationUsers),
+        "accountDevicesPerUser": String(options.accountDevicesPerUser),
         "loginCacheHit": String(loginCacheHit),
         "loginCacheRecords": String(loginCacheRecords),
         "loginCacheValidForSeconds": String(loginCacheValidForSeconds),
@@ -2601,6 +2615,14 @@ connectionLogger.log(
         "elapsedMs": String(Int(elapsed * 1_000))
     ]
 )
+
+if reconnects < options.minReconnects {
+    fputs(
+        "minimum reconnects not reached: reconnects=\(reconnects) minReconnects=\(options.minReconnects)\n",
+        stderr
+    )
+    exit(5)
+}
 
 extension Sequence {
     func asyncMap<T>(_ transform: (Element) async throws -> T) async throws -> [T] {

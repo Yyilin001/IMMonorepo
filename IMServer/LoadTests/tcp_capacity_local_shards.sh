@@ -14,8 +14,18 @@ default_protocol_version() {
   fi
 }
 
-BASE_URL="${BASE_URL:-http://120.25.106.200:8080}"
-TCP_HOST="${TCP_HOST:-120.25.106.200}"
+default_tcp_host_from_base_url() {
+  local url="$1"
+  python3 - "${url}" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+print(urlsplit(sys.argv[1]).hostname or "127.0.0.1")
+PY
+}
+
+BASE_URL="${BASE_URL:-http://127.0.0.1:8080}"
+TCP_HOST="${TCP_HOST:-$(default_tcp_host_from_base_url "${BASE_URL}")}"
 TCP_PORT="${TCP_PORT:-9000}"
 IM_EMAIL="${IM_EMAIL:-demo@example.com}"
 IM_PASSWORD="${IM_PASSWORD:-password1234}"

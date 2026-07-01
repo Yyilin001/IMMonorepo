@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_URL="${BASE_URL:-${IM_HTTP_BASE_URL:-http://120.25.106.200:8080}}"
+BASE_URL="${BASE_URL:-${IM_HTTP_BASE_URL:-http://127.0.0.1:8080}}"
 ACCOUNT_FILE="${ACCOUNT_FILE:-}"
 CONNECTIONS="${CONNECTIONS:-}"
 LOGIN_CACHE_DIR="${LOGIN_CACHE_DIR:-/tmp/imtcp-login-cache-slow}"

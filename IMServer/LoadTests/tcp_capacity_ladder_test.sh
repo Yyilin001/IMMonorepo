@@ -99,6 +99,7 @@ bash -n "${SCRIPT_DIR}/tcp_message_send_ladder.sh"
 bash -n "${SCRIPT_DIR}/tcp_capacity_local_shards.sh"
 bash -n "${SCRIPT_DIR}/prewarm_login_cache_slow.sh"
 bash -n "${SCRIPT_DIR}/provision_load_accounts.sh"
+PROVISION_LOAD_ACCOUNTS_SELF_TEST=true bash "${SCRIPT_DIR}/provision_load_accounts.sh" >/dev/null
 
 expected_protocol_version="$(tr -d '[:space:]' <"${SCRIPT_DIR}/../../Protocol/im_realtime/v1/protocol_version.txt")"
 driver_default_protocol_version="$(sed -nE 's/.*protocolVersion = .* \?\? ([0-9]+).*/\1/p' "${SCRIPT_DIR}/TCPDriver/Sources/IMTCPLoadDriver/main.swift" | head -n 1)"

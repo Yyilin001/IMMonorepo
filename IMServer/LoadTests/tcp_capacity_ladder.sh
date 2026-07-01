@@ -14,12 +14,23 @@ default_protocol_version() {
   fi
 }
 
-BASE_URL="${BASE_URL:-http://120.25.106.200:8080}"
-TCP_HOST="${TCP_HOST:-120.25.106.200}"
+default_tcp_host_from_base_url() {
+  local url="$1"
+  python3 - "${url}" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+print(urlsplit(sys.argv[1]).hostname or "127.0.0.1")
+PY
+}
+
+BASE_URL="${BASE_URL:-http://127.0.0.1:8080}"
+TCP_HOST="${TCP_HOST:-$(default_tcp_host_from_base_url "${BASE_URL}")}"
 TCP_PORT="${TCP_PORT:-9000}"
 IM_EMAIL="${IM_EMAIL:-demo@example.com}"
 IM_PASSWORD="${IM_PASSWORD:-password1234}"
 ACCOUNT_FILE="${ACCOUNT_FILE:-}"
+ACCOUNT_DEVICES_PER_USER="${ACCOUNT_DEVICES_PER_USER:-1}"
 IM_CONVERSATION_ID="${IM_CONVERSATION_ID:-}"
 LADDER="${LADDER:-100 500 1000 2000 5000 10000}"
 DEVICES_PER_USER="${DEVICES_PER_USER:-}"
@@ -41,6 +52,7 @@ HEARTBEAT_LOG_MODE="${HEARTBEAT_LOG_MODE:-errors}"
 HEARTBEAT_LOG_SAMPLE_RATE="${HEARTBEAT_LOG_SAMPLE_RATE:-100}"
 CONNECTION_QUEUE_POOL_SIZE="${CONNECTION_QUEUE_POOL_SIZE:-256}"
 MAX_RECONNECTS="${MAX_RECONNECTS:-0}"
+MIN_RECONNECTS="${MIN_RECONNECTS:-0}"
 RECONNECT_DELAY_MS="${RECONNECT_DELAY_MS:-1000}"
 LOGIN_RETRIES="${LOGIN_RETRIES:-2}"
 LOGIN_RETRY_DELAY_MS="${LOGIN_RETRY_DELAY_MS:-1000}"
@@ -1046,6 +1058,7 @@ for connections in ${LADDER}; do
     --tcp-port "${TCP_PORT}"
     --email "${IM_EMAIL}"
     --password "${IM_PASSWORD}"
+    --account-devices-per-user "${ACCOUNT_DEVICES_PER_USER}"
     --conversation-id "${IM_CONVERSATION_ID}"
     --connections "${connections}"
     --devices-per-user "${devices_per_user}"
@@ -1068,6 +1081,7 @@ for connections in ${LADDER}; do
     --heartbeat-log-sample-rate "${HEARTBEAT_LOG_SAMPLE_RATE}"
     --connection-queue-pool-size "${CONNECTION_QUEUE_POOL_SIZE}"
     --max-reconnects "${MAX_RECONNECTS}"
+    --min-reconnects "${MIN_RECONNECTS}"
     --reconnect-delay-ms "${RECONNECT_DELAY_MS}"
     --login-retries "${LOGIN_RETRIES}"
     --login-retry-delay-ms "${LOGIN_RETRY_DELAY_MS}"
@@ -1095,6 +1109,7 @@ for connections in ${LADDER}; do
       --tcp-port "${TCP_PORT}"
       --email "${IM_EMAIL}"
       --password "${IM_PASSWORD}"
+      --account-devices-per-user "${ACCOUNT_DEVICES_PER_USER}"
       --conversation-id "${IM_CONVERSATION_ID}"
       --connections "${connections}"
       --devices-per-user "${devices_per_user}"

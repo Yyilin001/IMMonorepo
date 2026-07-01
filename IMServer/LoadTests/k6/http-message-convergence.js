@@ -26,6 +26,17 @@ const profiles = {
       im_message_summary_latency: ['p(95)<5000', 'p(99)<10000'],
     },
   },
+  'staging-convergence-capacity': {
+    vus: 500,
+    duration: '20m',
+    thresholds: {
+      http_req_failed: ['rate<0.005'],
+      im_message_convergence_errors: ['rate<0.001'],
+      im_message_accept_latency: ['p(95)<300', 'p(99)<800'],
+      im_message_timeline_latency: ['p(95)<2000', 'p(99)<5000'],
+      im_message_summary_latency: ['p(95)<5000', 'p(99)<10000'],
+    },
+  },
 };
 
 export const options = profiles[profile] || profiles['local-convergence-smoke'];
@@ -37,6 +48,7 @@ const memberEmails = (__ENV.IM_MEMBER_EMAILS || 'alice@example.com')
   .split(',')
   .map((value) => value.trim())
   .filter((value) => value.length > 0);
+const conversationKind = __ENV.IM_CONVERSATION_KIND || 'group';
 const internalSecret = __ENV.IM_INTERNAL_SECRET || __ENV.IM_INTERNAL_SHARED_SECRET || '';
 const pollTimeoutMillis = Number.parseInt(__ENV.IM_CONVERGENCE_TIMEOUT_MS || '10000', 10);
 const pollIntervalMillis = Number.parseInt(__ENV.IM_CONVERGENCE_POLL_INTERVAL_MS || '250', 10);
@@ -60,9 +72,12 @@ function login() {
     JSON.stringify({
       email,
       password,
-      deviceID: 'k6-message-convergence',
-      deviceName: 'k6-message-convergence',
-      platform: 'load-test',
+      device: {
+        deviceID: 'k6-message-convergence',
+        deviceName: 'k6-message-convergence',
+        platform: 'load-test',
+        appVersion: 'k6',
+      },
     }),
     jsonHeaders()
   );
@@ -81,8 +96,8 @@ function createConversation(token) {
   const res = http.post(
     `${baseURL}/api/im/conversations`,
     JSON.stringify({
-      kind: 'group',
-      title: `k6-message-convergence-${Date.now()}`,
+      kind: conversationKind,
+      title: conversationKind === 'direct' ? null : `k6-message-convergence-${Date.now()}`,
       memberEmails,
     }),
     jsonHeaders(token)

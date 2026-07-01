@@ -58,9 +58,12 @@ function login() {
     JSON.stringify({
       email,
       password,
-      deviceID: `k6-${__VU}`,
-      deviceName: 'k6',
-      platform: 'load-test',
+      device: {
+        deviceID: `k6-${__VU}`,
+        deviceName: 'k6',
+        platform: 'load-test',
+        appVersion: 'k6',
+      },
     }),
     jsonHeaders()
   );

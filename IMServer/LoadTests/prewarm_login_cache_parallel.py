@@ -92,7 +92,7 @@ def login_one(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prewarm IM TCP login cache with bounded parallel HTTP logins.")
-    parser.add_argument("--base-url", default="http://120.25.106.200:8080")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8080")
     parser.add_argument("--account-file", required=True)
     parser.add_argument("--connections", type=positive_int, required=True)
     parser.add_argument("--login-cache-file", required=True)
