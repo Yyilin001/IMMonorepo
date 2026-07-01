@@ -95,6 +95,7 @@ check_no_unbudgeted_large_files() {
     rg '^(IMServer/Sources|IMApp/IMApp/|IMClientKit/Sources|app/src|imclientkit/src|IMClientKitAndroid).*\.(swift|kt)$' | \
     while IFS= read -r path; do
       [[ -z "${path}" ]] && continue
+      [[ "${path}" == *"/Generated/"* ]] && continue
       local file="${ROOT_DIR}/${path}"
       [[ -f "${file}" ]] || continue
       local line_count
