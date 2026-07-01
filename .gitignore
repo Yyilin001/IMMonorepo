@@ -17,7 +17,9 @@ DerivedData/
 # Vapor / local environment
 .env
 .env.*
+*.env
 !*.env.example
+!*.example.env
 
 # Logs and temporary files
 *.log
@@ -29,6 +31,17 @@ build/
 .idea/
 local.properties
 
+# Local secrets, certificates, and provisioning files
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+
 # Archives and local backups
 *.xcarchive
 *.ipa
@@ -39,3 +52,9 @@ dist/
 # IMServer generated smoke/load-test reports
 IMServer/reports/
 IMServer/LoadTests/accounts/
+IMServer/LoadTests/**/*login-cache*
+IMServer/LoadTests/**/login_cache/*
+IMServer/LoadTests/**/*token-cache*
+IMServer/LoadTests/**/*token_cache*
+IMServer/LoadTests/**/*tcp_login_cache*
+IMServer/LoadTests/results/
