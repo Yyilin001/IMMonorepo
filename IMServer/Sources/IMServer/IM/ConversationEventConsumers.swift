@@ -389,8 +389,9 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
         guard threshold > 0 else {
             return nil
         }
-        let recipientCount = try await messageCreatedRecipientCountHint(for: first)
-        guard recipientCount >= threshold else {
+        guard let recipientCount = try await consistentMessageCreatedRunRecipientCount(envelopes),
+              recipientCount >= threshold
+        else {
             return nil
         }
 
@@ -401,6 +402,58 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
             return nil
         }
         return (latestEnvelope, latestMessageID, recipientCount)
+    }
+
+    private func consistentMessageCreatedRunRecipientCount(
+        _ envelopes: [ConversationEventEnvelope]
+    ) async throws -> Int? {
+        let inlineRecipientSets = envelopes.map { Set($0.payload.recipientUserIDs) }
+        if inlineRecipientSets.allSatisfy({ !$0.isEmpty }) {
+            guard let firstRecipientSet = inlineRecipientSets.first,
+                  inlineRecipientSets.allSatisfy({ $0 == firstRecipientSet })
+            else {
+                return nil
+            }
+            return firstRecipientSet.count
+        }
+
+        let eventIDs = envelopes.compactMap(\.eventID)
+        if eventIDs.count == envelopes.count {
+            let snapshots = try await ConversationDomainEventRecipientSnapshot.query(on: sourceDB)
+                .filter(\.$id ~~ eventIDs)
+                .all()
+            let snapshotsByEventID = Dictionary(
+                uniqueKeysWithValues: snapshots.compactMap { snapshot in
+                    snapshot.id.map { ($0, snapshot) }
+                }
+            )
+            let orderedSnapshots = eventIDs.compactMap { snapshotsByEventID[$0] }
+            if orderedSnapshots.count == envelopes.count {
+                let snapshotHashes = orderedSnapshots.map(\.recipientHash)
+                if snapshotHashes.allSatisfy({ $0 != nil }) {
+                    guard let firstHash = snapshotHashes.first.flatMap({ $0 }),
+                          snapshotHashes.allSatisfy({ $0 == firstHash })
+                    else {
+                        return nil
+                    }
+                    return orderedSnapshots[0].recipientCount
+                }
+
+                var snapshotRecipientSets: [Set<UUID>] = []
+                snapshotRecipientSets.reserveCapacity(orderedSnapshots.count)
+                for snapshot in orderedSnapshots {
+                    snapshotRecipientSets.append(Set(try await snapshot.recipientUserIDs(on: sourceDB)))
+                }
+                guard let firstRecipientSet = snapshotRecipientSets.first,
+                      snapshotRecipientSets.allSatisfy({ $0 == firstRecipientSet })
+                else {
+                    return nil
+                }
+                return firstRecipientSet.count
+            }
+        }
+
+        return try await messageCreatedRecipientCountHint(for: envelopes[0])
     }
 
     private func activityOnlyRecipientCountIfNeeded(

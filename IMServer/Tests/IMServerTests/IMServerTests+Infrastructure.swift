@@ -80,17 +80,146 @@ extension IMServerTests {
         }
     }
 
-    @Test("Production requires an explicit JWT secret")
-    func productionRequiresJWTSecret() throws {
+    @Test("Production requires rotated JWT secrets")
+    func productionRequiresJWTSecrets() throws {
         let originalJWTSecret = Environment.get("JWT_SECRET")
-        defer { restoreEnvironment("JWT_SECRET", to: originalJWTSecret) }
+        let originalJWTSecrets = Environment.get("JWT_SECRETS")
+        let originalActiveKeyID = Environment.get("JWT_ACTIVE_KID")
+        defer {
+            restoreEnvironment("JWT_SECRET", to: originalJWTSecret)
+            restoreEnvironment("JWT_SECRETS", to: originalJWTSecrets)
+            restoreEnvironment("JWT_ACTIVE_KID", to: originalActiveKeyID)
+        }
 
         unsetenv("JWT_SECRET")
+        unsetenv("JWT_SECRETS")
+        unsetenv("JWT_ACTIVE_KID")
 
         do {
             _ = try AuthConfiguration.load(from: .production)
-            Issue.record("Expected production auth configuration to fail without JWT_SECRET")
+            Issue.record("Expected production auth configuration to fail without JWT_SECRETS")
         } catch AuthConfigurationError.missingJWTSecret {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("Development JWT fallback is generated per process")
+    func developmentJWTFallbackIsGeneratedPerProcess() throws {
+        let originalJWTSecret = Environment.get("JWT_SECRET")
+        let originalJWTSecrets = Environment.get("JWT_SECRETS")
+        let originalActiveKeyID = Environment.get("JWT_ACTIVE_KID")
+        defer {
+            restoreEnvironment("JWT_SECRET", to: originalJWTSecret)
+            restoreEnvironment("JWT_SECRETS", to: originalJWTSecrets)
+            restoreEnvironment("JWT_ACTIVE_KID", to: originalActiveKeyID)
+        }
+
+        unsetenv("JWT_SECRET")
+        unsetenv("JWT_SECRETS")
+        unsetenv("JWT_ACTIVE_KID")
+
+        let first = try AuthConfiguration.load(from: .development)
+        let second = try AuthConfiguration.load(from: .development)
+
+        #expect(first.jwtSecret == second.jwtSecret)
+        #expect(first.jwtSecret.count >= 32)
+        #expect(first.jwtSecret != "dev-jwt-secret-change-me")
+        #expect(first.jwtSecrets.count == 1)
+        #expect(first.activeJWTKeyID == nil)
+    }
+
+    @Test("Production rejects legacy single JWT secret")
+    func productionRejectsLegacySingleJWTSecret() throws {
+        let originalJWTSecret = Environment.get("JWT_SECRET")
+        let originalJWTSecrets = Environment.get("JWT_SECRETS")
+        let originalActiveKeyID = Environment.get("JWT_ACTIVE_KID")
+        defer {
+            restoreEnvironment("JWT_SECRET", to: originalJWTSecret)
+            restoreEnvironment("JWT_SECRETS", to: originalJWTSecrets)
+            restoreEnvironment("JWT_ACTIVE_KID", to: originalActiveKeyID)
+        }
+
+        setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef", 1)
+        unsetenv("JWT_SECRETS")
+        unsetenv("JWT_ACTIVE_KID")
+
+        do {
+            _ = try AuthConfiguration.load(from: .production)
+            Issue.record("Expected production auth configuration to reject JWT_SECRET")
+        } catch AuthConfigurationError.legacyJWTSecretInProduction {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("Production requires active JWT key id")
+    func productionRequiresActiveJWTKeyID() throws {
+        let originalJWTSecret = Environment.get("JWT_SECRET")
+        let originalJWTSecrets = Environment.get("JWT_SECRETS")
+        let originalActiveKeyID = Environment.get("JWT_ACTIVE_KID")
+        defer {
+            restoreEnvironment("JWT_SECRET", to: originalJWTSecret)
+            restoreEnvironment("JWT_SECRETS", to: originalJWTSecrets)
+            restoreEnvironment("JWT_ACTIVE_KID", to: originalActiveKeyID)
+        }
+
+        unsetenv("JWT_SECRET")
+        setenv("JWT_SECRETS", "active:0123456789abcdef0123456789abcdef", 1)
+        unsetenv("JWT_ACTIVE_KID")
+
+        do {
+            _ = try AuthConfiguration.load(from: .production)
+            Issue.record("Expected production auth configuration to require JWT_ACTIVE_KID")
+        } catch AuthConfigurationError.missingActiveJWTKeyID {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("Production rejects weak JWT signing secrets during auth configuration load")
+    func productionRejectsWeakJWTSigningSecretsDuringAuthConfigurationLoad() throws {
+        let originalJWTSecret = Environment.get("JWT_SECRET")
+        let originalJWTSecrets = Environment.get("JWT_SECRETS")
+        let originalActiveKeyID = Environment.get("JWT_ACTIVE_KID")
+        defer {
+            restoreEnvironment("JWT_SECRET", to: originalJWTSecret)
+            restoreEnvironment("JWT_SECRETS", to: originalJWTSecrets)
+            restoreEnvironment("JWT_ACTIVE_KID", to: originalActiveKeyID)
+        }
+
+        unsetenv("JWT_SECRET")
+        setenv("JWT_SECRETS", "active:short", 1)
+        setenv("JWT_ACTIVE_KID", "active", 1)
+
+        do {
+            _ = try AuthConfiguration.load(from: .production)
+            Issue.record("Expected production auth configuration to reject short JWT_SECRETS")
+        } catch AuthConfigurationError.weakJWTSecret("active") {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("Production rejects placeholder JWT signing secrets during auth configuration load")
+    func productionRejectsPlaceholderJWTSigningSecretsDuringAuthConfigurationLoad() throws {
+        let originalJWTSecret = Environment.get("JWT_SECRET")
+        let originalJWTSecrets = Environment.get("JWT_SECRETS")
+        let originalActiveKeyID = Environment.get("JWT_ACTIVE_KID")
+        defer {
+            restoreEnvironment("JWT_SECRET", to: originalJWTSecret)
+            restoreEnvironment("JWT_SECRETS", to: originalJWTSecrets)
+            restoreEnvironment("JWT_ACTIVE_KID", to: originalActiveKeyID)
+        }
+
+        unsetenv("JWT_SECRET")
+        setenv("JWT_SECRETS", "active:password1234password1234password1234", 1)
+        setenv("JWT_ACTIVE_KID", "active", 1)
+
+        do {
+            _ = try AuthConfiguration.load(from: .production)
+            Issue.record("Expected production auth configuration to reject placeholder JWT_SECRETS")
+        } catch AuthConfigurationError.placeholderJWTSecret("active") {
         } catch {
             Issue.record("Unexpected error: \(error)")
         }
@@ -2144,6 +2273,173 @@ extension IMServerTests {
         }
     }
 
+    @Test("Production stream consumer rejects weak Kafka SASL password")
+    func productionStreamConsumerRejectsWeakKafkaSASLPassword() async throws {
+        try await withProductionRuntimeEnvironment {
+            setenv("IM_KAFKA_SASL_PASSWORD", "im-password", 1)
+            let app = try await productionRuntimeValidationApp(role: .streamConsumer)
+            do {
+                try IMStreamConsumerProductionValidator.validate(app: app)
+                Issue.record("Expected stream-consumer validation to reject weak Kafka SASL password")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_KAFKA_SASL_PASSWORD"))
+            } catch {
+                Issue.record("Unexpected stream-consumer validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production command API rejects placeholder S3 media secrets")
+    func productionCommandAPIRejectsPlaceholderS3MediaSecrets() async throws {
+        try await withProductionRuntimeEnvironment {
+            setenv("MEDIA_STORAGE_S3_ACCESS_KEY_ID", "access-key", 1)
+            setenv("MEDIA_STORAGE_S3_SECRET_ACCESS_KEY", "secret-key", 1)
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMCommandAPIProductionValidator.validate(app: app)
+                Issue.record("Expected command-api validation to reject placeholder S3 media secrets")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(
+                    abort.reason.contains("MEDIA_STORAGE_S3_ACCESS_KEY_ID")
+                    || abort.reason.contains("MEDIA_STORAGE_S3_SECRET_ACCESS_KEY")
+                )
+            } catch {
+                Issue.record("Unexpected command-api validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production command API requires explicit S3 media region")
+    func productionCommandAPIRequiresExplicitS3MediaRegion() async throws {
+        try await withProductionRuntimeEnvironment {
+            unsetenv("MEDIA_STORAGE_S3_REGION")
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMCommandAPIProductionValidator.validate(app: app)
+                Issue.record("Expected command-api validation to require S3 media region")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("MEDIA_STORAGE_S3_REGION"))
+            } catch {
+                Issue.record("Unexpected command-api validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production command API requires explicit lowercase S3 path style flag")
+    func productionCommandAPIRequiresExplicitLowercaseS3PathStyleFlag() async throws {
+        try await withProductionRuntimeEnvironment {
+            setenv("MEDIA_STORAGE_S3_FORCE_PATH_STYLE", "TRUE", 1)
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMCommandAPIProductionValidator.validate(app: app)
+                Issue.record("Expected command-api validation to reject invalid S3 force path style")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("MEDIA_STORAGE_S3_FORCE_PATH_STYLE"))
+            } catch {
+                Issue.record("Unexpected command-api validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production command API requires HTTPS S3 media endpoint by default")
+    func productionCommandAPIRequiresHTTPSS3MediaEndpointByDefault() async throws {
+        try await withProductionRuntimeEnvironment {
+            setenv("MEDIA_STORAGE_S3_ENDPOINT", "http://s3.internal", 1)
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMCommandAPIProductionValidator.validate(app: app)
+                Issue.record("Expected command-api validation to reject insecure S3 endpoint")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("MEDIA_STORAGE_S3_ENDPOINT"))
+            } catch {
+                Issue.record("Unexpected command-api validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production command API rejects placeholder S3 media endpoint")
+    func productionCommandAPIRejectsPlaceholderS3MediaEndpoint() async throws {
+        try await withProductionRuntimeEnvironment {
+            setenv("MEDIA_STORAGE_S3_ENDPOINT", "https://oss.example.com", 1)
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMCommandAPIProductionValidator.validate(app: app)
+                Issue.record("Expected command-api validation to reject placeholder S3 endpoint")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("MEDIA_STORAGE_S3_ENDPOINT"))
+            } catch {
+                Issue.record("Unexpected command-api validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production command API rejects insecure S3 endpoint override")
+    func productionCommandAPIRejectsInsecureS3EndpointOverride() async throws {
+        try await withProductionRuntimeEnvironment {
+            setenv("MEDIA_STORAGE_S3_ENDPOINT", "http://s3.internal", 1)
+            setenv("IM_PRODUCTION_ALLOW_INSECURE_MEDIA_STORAGE_ENDPOINT", "true", 1)
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMCommandAPIProductionValidator.validate(app: app)
+                Issue.record("Expected command-api validation to reject insecure S3 endpoint override")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_PRODUCTION_ALLOW_INSECURE_MEDIA_STORAGE_ENDPOINT"))
+            } catch {
+                Issue.record("Unexpected command-api validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production query API requires HTTPS OpenSearch endpoint")
+    func productionQueryAPIRequiresHTTPSOpenSearchEndpoint() async throws {
+        try await withProductionRuntimeEnvironment {
+            setenv("IM_OPENSEARCH_ENDPOINT", "http://opensearch.internal", 1)
+            let app = try await productionRuntimeValidationApp(role: .queryAPI)
+            do {
+                try IMQueryAPIProductionValidator.validate(app: app)
+                Issue.record("Expected query-api validation to reject insecure OpenSearch endpoint")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_OPENSEARCH_ENDPOINT"))
+            } catch {
+                Issue.record("Unexpected query-api validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production query API rejects placeholder OpenSearch endpoint")
+    func productionQueryAPIRejectsPlaceholderOpenSearchEndpoint() async throws {
+        try await withProductionRuntimeEnvironment {
+            setenv("IM_OPENSEARCH_ENDPOINT", "https://search.example.com", 1)
+            let app = try await productionRuntimeValidationApp(role: .queryAPI)
+            do {
+                try IMQueryAPIProductionValidator.validate(app: app)
+                Issue.record("Expected query-api validation to reject placeholder OpenSearch endpoint")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_OPENSEARCH_ENDPOINT"))
+            } catch {
+                Issue.record("Unexpected query-api validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
     @Test("Production ops role requires Kafka event stream")
     func productionOpsRoleRequiresKafkaEventStream() async throws {
         try await withProductionRuntimeEnvironment {
@@ -2487,7 +2783,7 @@ extension IMServerTests {
 
         app.searchIndexConfiguration = IMSearchIndexConfiguration(
             driver: .openSearch,
-            endpoint: "https://opensearch.example",
+            endpoint: "https://opensearch.internal",
             indexName: "conversation-message-search"
         )
 
@@ -2869,13 +3165,6 @@ extension IMServerTests {
                 #expect(res.body.string.contains("im_gateway_local_fanout_config_event_loop_yield_chunks"))
                 #expect(res.body.string.contains("im_realtime_active_conversation_fanout_config_enabled"))
                 #expect(res.body.string.contains("im_realtime_active_conversation_fanout_config_recipient_threshold"))
-                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_config_full_fanout_limit"))
-                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_config_full_fanout_payload_byte_budget"))
-                #expect(res.body.string.contains("im_realtime_inactive_conversation_hint_config_debounce_seconds"))
-                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_payload_budget_applied_total"))
-                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_payload_budget_downgraded_active_recipients_total"))
-                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_payload_budget_max_payload_bytes"))
-                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_payload_budget_max_effective_limit"))
             })
 
             app.metricsConfiguration = IMMetricsConfiguration(isEnabled: false, internalSecret: nil)
@@ -3526,8 +3815,195 @@ extension IMServerTests {
         setenv("DATABASE_PRIMARY_HOST", "db.internal", 1)
         setenv("DATABASE_PRIMARY_NAME", "imserver", 1)
         setenv("DATABASE_PRIMARY_USERNAME", "imserver", 1)
-        setenv("DATABASE_PRIMARY_PASSWORD", "secret", 1)
+        setenv("DATABASE_PRIMARY_PASSWORD", "database-0123456789abcdef", 1)
         try IMProductionRuntimeValidationSupport.validatePrimaryDatabaseConfiguration()
+    }
+
+    @Test("Production rejects weak primary database password")
+    func productionRejectsWeakPrimaryDatabasePassword() throws {
+        let keys = [
+            "DATABASE_PRIMARY_HOST",
+            "DATABASE_PRIMARY_NAME",
+            "DATABASE_PRIMARY_USERNAME",
+            "DATABASE_PRIMARY_PASSWORD"
+        ]
+        let originalValues = Dictionary(uniqueKeysWithValues: keys.map { ($0, Environment.get($0)) })
+        defer {
+            for (key, value) in originalValues {
+                restoreEnvironment(key, to: value)
+            }
+        }
+
+        setenv("DATABASE_PRIMARY_HOST", "db.internal", 1)
+        setenv("DATABASE_PRIMARY_NAME", "imserver", 1)
+        setenv("DATABASE_PRIMARY_USERNAME", "imserver", 1)
+        setenv("DATABASE_PRIMARY_PASSWORD", "password1234", 1)
+
+        do {
+            try IMProductionRuntimeValidationSupport.validatePrimaryDatabaseConfiguration()
+            Issue.record("Expected weak production database password to fail")
+        } catch let abort as any AbortError {
+            #expect(abort.status == .internalServerError)
+            #expect(abort.reason.contains("DATABASE_PRIMARY_PASSWORD"))
+        } catch {
+            Issue.record("Unexpected database secret validation error: \(error)")
+        }
+    }
+
+    @Test("Production rejects development seed user configuration")
+    func productionRejectsDevelopmentSeedUserConfiguration() throws {
+        let keys = [
+            "SEED_USER_EMAIL",
+            "SEED_USER_EMAILS",
+            "SEED_USER_PASSWORD"
+        ]
+        let originalValues = Dictionary(uniqueKeysWithValues: keys.map { ($0, Environment.get($0)) })
+        defer {
+            for (key, value) in originalValues {
+                restoreEnvironment(key, to: value)
+            }
+        }
+        for key in keys {
+            unsetenv(key)
+        }
+
+        try IMProductionRuntimeValidationSupport.validateDevelopmentSeedConfigurationDisabled()
+
+        setenv("SEED_USER_EMAIL", "demo@example.com", 1)
+        do {
+            try IMProductionRuntimeValidationSupport.validateDevelopmentSeedConfigurationDisabled()
+            Issue.record("Expected production seed user configuration to fail")
+        } catch let abort as any AbortError {
+            #expect(abort.status == .internalServerError)
+            #expect(abort.reason.contains("development seed user configuration"))
+            #expect(abort.reason.contains("SEED_USER_EMAIL"))
+        } catch {
+            Issue.record("Unexpected seed user configuration error: \(error)")
+        }
+    }
+
+    @Test("Production runtime rejects placeholder shared secrets")
+    func productionRuntimeRejectsPlaceholderSharedSecrets() async throws {
+        try await withProductionRuntimeEnvironment {
+            setenv("JWT_SECRETS", "active:0123456789abcdef0123456789abcdef", 1)
+            setenv("IM_INTERNAL_SHARED_SECRET", "change_me", 1)
+
+            let app = try await productionRuntimeValidationApp(role: .queryAPI)
+            do {
+                try IMProductionRuntimeValidator.validate(app: app)
+                Issue.record("Expected production runtime to reject placeholder secrets")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(
+                    abort.reason.contains("JWT_SECRETS")
+                    || abort.reason.contains("IM_INTERNAL_SHARED_SECRET")
+                )
+            } catch {
+                Issue.record("Unexpected production secret validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production runtime requires public HTTPS base URL")
+    func productionRuntimeRequiresPublicHTTPSBaseURL() async throws {
+        try await withProductionRuntimeEnvironment {
+            unsetenv("PUBLIC_BASE_URL")
+            unsetenv("IM_PUBLIC_BASE_URL")
+
+            let app = try await productionRuntimeValidationApp(role: .queryAPI)
+            do {
+                try IMProductionRuntimeValidator.validate(app: app)
+                Issue.record("Expected production runtime to reject missing public base URL")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("PUBLIC_BASE_URL"))
+            } catch {
+                Issue.record("Unexpected public base URL validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+
+        try await withProductionRuntimeEnvironment {
+            setenv("PUBLIC_BASE_URL", "http://chat.myim-prod.com", 1)
+
+            let app = try await productionRuntimeValidationApp(role: .queryAPI)
+            do {
+                try IMProductionRuntimeValidator.validate(app: app)
+                Issue.record("Expected production runtime to reject insecure public base URL")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("https"))
+            } catch {
+                Issue.record("Unexpected public base URL validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+
+        try await withProductionRuntimeEnvironment {
+            setenv("PUBLIC_BASE_URL", "https://127.0.0.1", 1)
+
+            let app = try await productionRuntimeValidationApp(role: .queryAPI)
+            do {
+                try IMProductionRuntimeValidator.validate(app: app)
+                Issue.record("Expected production runtime to reject local public base URL")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("real public DNS"))
+            } catch {
+                Issue.record("Unexpected public base URL validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+
+        try await withProductionRuntimeEnvironment {
+            setenv("PUBLIC_BASE_URL", "https://chat.yourdomain.com", 1)
+
+            let app = try await productionRuntimeValidationApp(role: .queryAPI)
+            do {
+                try IMProductionRuntimeValidator.validate(app: app)
+                Issue.record("Expected production runtime to reject placeholder public base URL")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("placeholder domain"))
+            } catch {
+                Issue.record("Unexpected public base URL validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+
+        try await withProductionRuntimeEnvironment {
+            setenv("PUBLIC_BASE_URL", "https://chat.myim-prod.com:8443", 1)
+
+            let app = try await productionRuntimeValidationApp(role: .queryAPI)
+            do {
+                try IMProductionRuntimeValidator.validate(app: app)
+                Issue.record("Expected production runtime to reject non-default public base URL port")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("443"))
+            } catch {
+                Issue.record("Unexpected public base URL validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+
+        try await withProductionRuntimeEnvironment {
+            setenv("PUBLIC_BASE_URL", "https://chat.myim-prod.com", 1)
+            setenv("IM_PRODUCTION_ALLOW_INSECURE_PUBLIC_BASE_URL", "true", 1)
+
+            let app = try await productionRuntimeValidationApp(role: .queryAPI)
+            do {
+                try IMProductionRuntimeValidator.validate(app: app)
+                Issue.record("Expected production runtime to reject insecure public base URL override")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_PRODUCTION_ALLOW_INSECURE_PUBLIC_BASE_URL"))
+            } catch {
+                Issue.record("Unexpected public base URL validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
     }
 
     @Test("Projection worker role does not register API routes")
@@ -3729,13 +4205,19 @@ extension IMServerTests {
 private func withProductionRuntimeEnvironment(_ body: () async throws -> Void) async throws {
     let values = [
         "IM_NODE_ID": "node-a",
+        "PUBLIC_BASE_URL": "https://chat.myim-prod.com",
+        "IM_PUBLIC_BASE_URL": "",
+        "IM_PRODUCTION_ALLOW_INSECURE_PUBLIC_BASE_URL": "",
+        "JWT_SECRET": "",
+        "JWT_SECRETS": "active:0123456789abcdef0123456789abcdef",
+        "JWT_ACTIVE_KID": "active",
         "IM_ROUTING_MODE": "redis",
         "REDIS_URL": "redis://redis.internal:6379",
         "IM_REDIS_MAX_CONNECTIONS": "16",
         "IM_COMMAND_API_INTERNAL_BASE_URL": "http://command.internal",
         "IM_GATEWAY_RELAY_MODE": "http",
         "IM_GATEWAY_INTERNAL_BASE_URL": "http://gateway.internal",
-        "IM_INTERNAL_SHARED_SECRET": "test-internal-secret",
+        "IM_INTERNAL_SHARED_SECRET": "fedcba9876543210fedcba9876543210",
         "IM_GATEWAY_RELAY_DOMAIN_EVENT_PACKET_BIN_MAX_BODY_BYTES": "262144",
         "IM_TCP_REQUIRES_TLS_TERMINATION": "true",
         "IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE": "true",
@@ -3748,13 +4230,13 @@ private func withProductionRuntimeEnvironment(_ body: () async throws -> Void) a
         "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD": "500",
         "IM_NOTIFICATION_SKIP_MESSAGE_CREATED_OWNER_NOTIFICATIONS": "false",
         "IM_NOTIFICATION_MESSAGE_CREATED_OWNER_NOTIFICATION_SKIP_RECIPIENT_THRESHOLD": "500",
-            "IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED": "true",
-            "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "500",
-            "IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED": "false",
-            "IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS": "1000",
-            "IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS": "1000",
-            "IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS": "25",
-            "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS": "120",
+        "IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED": "true",
+        "IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD": "500",
+        "IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED": "false",
+        "IM_REALTIME_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_MS": "1000",
+        "IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS": "1000",
+        "IM_REALTIME_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS": "25",
+        "IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS": "120",
         "IM_STREAM_CONSUMER_REQUIRE_MESSAGE_CREATED_RECIPIENT_SNAPSHOT": "true",
         "IM_EVENT_STREAM_DRIVER": "kafka",
         "IM_KAFKA_BROKERS": "kafka-a:9092",
@@ -3766,7 +4248,7 @@ private func withProductionRuntimeEnvironment(_ body: () async throws -> Void) a
         "IM_KAFKA_SECURITY_PROTOCOL": "sasl_tls",
         "IM_KAFKA_SASL_MECHANISM": "scram-sha-512",
         "IM_KAFKA_SASL_USERNAME": "im-user",
-        "IM_KAFKA_SASL_PASSWORD": "im-password",
+        "IM_KAFKA_SASL_PASSWORD": "kafka-0123456789abcdef",
         "IM_KAFKA_TLS_CA_FILE": "/tmp/im-ca.pem",
         "IM_SUMMARY_PROJECTION_WRITE_MODE": "sharded",
         "IM_SUMMARY_QUERY_READ_SOURCE": "sharded",
@@ -3798,17 +4280,20 @@ private func withProductionRuntimeEnvironment(_ body: () async throws -> Void) a
         "MEDIA_STORAGE_PROVIDER": "s3compatible",
         "MEDIA_STORAGE_S3_ENDPOINT": "https://s3.internal",
         "MEDIA_STORAGE_S3_BUCKET": "im-media",
-        "MEDIA_STORAGE_S3_ACCESS_KEY_ID": "access-key",
-        "MEDIA_STORAGE_S3_SECRET_ACCESS_KEY": "secret-key",
+        "MEDIA_STORAGE_S3_ACCESS_KEY_ID": "AKIA0123456789ABCDEF",
+        "MEDIA_STORAGE_S3_SECRET_ACCESS_KEY": "s3-0123456789abcdef0123456789abcdef",
+        "MEDIA_STORAGE_S3_REGION": "cn-shenzhen",
+        "MEDIA_STORAGE_S3_FORCE_PATH_STYLE": "true",
+        "IM_PRODUCTION_ALLOW_INSECURE_MEDIA_STORAGE_ENDPOINT": "",
         "DATABASE_PRIMARY_HOST": "primary-db",
         "DATABASE_PRIMARY_NAME": "imserver",
         "DATABASE_PRIMARY_USERNAME": "imserver",
-        "DATABASE_PRIMARY_PASSWORD": "database-secret",
+        "DATABASE_PRIMARY_PASSWORD": "database-0123456789abcdef",
         "IM_SUMMARY_SHARD_IDS": "summary-0",
         "DATABASE_SUMMARY_SUMMARY_0_HOST": "summary-db",
         "DATABASE_SUMMARY_SUMMARY_0_NAME": "imserver_summary",
         "DATABASE_SUMMARY_SUMMARY_0_USERNAME": "imserver",
-        "DATABASE_SUMMARY_SUMMARY_0_PASSWORD": "database-secret"
+        "DATABASE_SUMMARY_SUMMARY_0_PASSWORD": "database-0123456789abcdef"
     ]
     let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
     defer {

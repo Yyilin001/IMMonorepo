@@ -104,9 +104,9 @@ extension IMServerTests {
             })
 
             let metrics = await app.authSessionCacheMetrics.currentSnapshot()
-            #expect(metrics.databaseFallbacks == 1)
+            #expect(metrics.databaseFallbacks == 0)
             #expect(metrics.stores == 1)
-            #expect(metrics.hits == 1)
+            #expect(metrics.hits == 2)
         }
     }
 

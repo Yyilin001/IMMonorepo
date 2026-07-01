@@ -8,6 +8,8 @@ enum Entrypoint {
     static func main() async throws {
         var env = try Environment.detect()
         let runtimeRole = normalizeRuntimeRole(in: &env)
+        let shouldResetIMSchema = env.arguments.contains("--reset-im-schema")
+        env.commandInput.arguments.removeAll { $0 == "--reset-im-schema" }
         try LoggingSystem.bootstrap(from: &env)
 
         let app = try await Application.make(env)
@@ -21,7 +23,7 @@ enum Entrypoint {
         // app.logger.debug("已尝试将 SwiftNIO 的 EventLoopGroup 安装为 Swift 的全局并发执行器", metadata: ["success": .stringConvertible(executorTakeoverSuccess)])
         
         do {
-            app.shouldResetIMSchema = env.arguments.contains("--reset-im-schema")
+            app.shouldResetIMSchema = shouldResetIMSchema
             try await configure(app)
             let summaryRepairService = IMSummaryReadModelRepairService(app: app)
             let shouldRebuildConversationSummaries = env.arguments.contains("--rebuild-conversation-summaries")

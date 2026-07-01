@@ -7,6 +7,7 @@ enum IMMigrationRegistry {
         // 认证链路依赖 users + auth_sessions 两张表，以及后续的索引/约束迁移。
         app.migrations.add(CreateUser())
         app.migrations.add(AddUserProfileFields())
+        app.migrations.add(EnsureUserProfileRevision())
         app.migrations.add(CreateUserContact())
         app.migrations.add(AddUserContactRemark())
         app.migrations.add(CreateFriendRequest())
@@ -217,11 +218,13 @@ private let imMigrationNames: [String] = [
     "AddConversationDomainEventRetryCount",
     "AddConversationDomainEventStreamPublicationFields",
     "AddConversationDomainEventStreamClaimFields",
-            "AddConversationDomainEventIndexes",
-            "AddConversationDomainEventActor",
-            "AddConversationDomainEventSideEffectKey",
-            "CreateContactDomainEvent",
+    "AddConversationDomainEventIndexes",
+    "AddConversationDomainEventActor",
+    "AddConversationDomainEventSideEffectKey",
+    "CreateContactDomainEvent",
     "CreateOwnerDomainEventDelivery",
+    "CreateDomainEventSequencesAndTimelineNotices",
+    "CreateConversationRoutingDirectories",
     "CreateDirectConversationPairDirectory",
     "CreateConversationMessageSearchIndex",
     "AddConversationMessageSearchResultFields",
@@ -246,6 +249,7 @@ private let imMigrationNames: [String] = [
     "AddIMCommonFeatureVisibilityIndexes",
     "AddReportSnapshotFields",
     "CreateAIMessageStreamIndex",
+    "EnforceV8SequenceInvariants",
     "CreateContactChangesLog",
     "CreateConversationActivitySummaryReadModel",
     "AddLargeGroupSummaryReadPathIndexes",

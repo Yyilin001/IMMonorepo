@@ -5,6 +5,56 @@ enum IMProductionRuntimeValidationSupport {
     static let maximumActiveCompactHintCoalesceWindowMilliseconds = 100
     static let maximumActiveCompactHintPreviewCharacters = 120
 
+    static func validatePublicBaseURLConfiguration() throws {
+        let publicBaseURL = Environment.get("PUBLIC_BASE_URL")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let imPublicBaseURL = Environment.get("IM_PUBLIC_BASE_URL")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = publicBaseURL?.isEmpty == false ? "PUBLIC_BASE_URL" : "IM_PUBLIC_BASE_URL"
+        let value = publicBaseURL?.isEmpty == false ? publicBaseURL : imPublicBaseURL
+
+        guard let rawURL = value, !rawURL.isEmpty else {
+            throw Abort(.internalServerError, reason: "Production requires PUBLIC_BASE_URL or IM_PUBLIC_BASE_URL to be configured.")
+        }
+        guard let components = URLComponents(string: rawURL),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = components.host,
+              !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw Abort(.internalServerError, reason: "Production \(key) must be an HTTP URL with a host.")
+        }
+
+        guard !parseBooleanEnvironment("IM_PRODUCTION_ALLOW_INSECURE_PUBLIC_BASE_URL", defaultValue: false) else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production IM_PRODUCTION_ALLOW_INSECURE_PUBLIC_BASE_URL is forbidden for long-term production."
+            )
+        }
+        guard scheme == "https" else {
+            throw Abort(.internalServerError, reason: "Production \(key) must use https.")
+        }
+
+        let port = components.port ?? 443
+        guard port == 443 else {
+            throw Abort(.internalServerError, reason: "Production \(key) must use default HTTPS port 443.")
+        }
+
+        guard isPublicBaseURLHost(host) else {
+            throw Abort(.internalServerError, reason: "Production \(key) host must be a real public DNS name and must not be localhost, an IP literal, private, link-local, carrier-grade NAT, benchmarking address space, or placeholder domain.")
+        }
+    }
+
+    static func validateProductionSecretConfiguration(_ app: Application) throws {
+        let authConfiguration = try AuthConfiguration.load(from: app.environment)
+        for jwtSecret in authConfiguration.jwtSecrets {
+            let key = jwtSecret.keyID.map { "JWT_SECRETS[\($0)]" } ?? "JWT_SECRET"
+            try requireProductionSecret(key, value: jwtSecret.secret, minimumLength: 32)
+        }
+
+        try requireProductionSecret("IM_INTERNAL_SHARED_SECRET", minimumLength: 32)
+    }
+
     static func validatePrimaryDatabaseConfiguration() throws {
         let requiredKeys = [
             "DATABASE_PRIMARY_HOST",
@@ -20,6 +70,25 @@ enum IMProductionRuntimeValidationSupport {
             throw Abort(
                 .internalServerError,
                 reason: "Production requires explicit primary database configuration: \(missing.joined(separator: ", "))."
+            )
+        }
+        try requireProductionSecret("DATABASE_PRIMARY_PASSWORD", minimumLength: 16)
+    }
+
+    static func validateDevelopmentSeedConfigurationDisabled() throws {
+        let forbiddenKeys = [
+            "SEED_USER_EMAIL",
+            "SEED_USER_EMAILS",
+            "SEED_USER_PASSWORD"
+        ]
+        let presentKeys = forbiddenKeys.filter { key in
+            Environment.get(key)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+
+        guard presentKeys.isEmpty else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production must not include development seed user configuration: \(presentKeys.joined(separator: ", "))."
             )
         }
     }
@@ -240,6 +309,11 @@ enum IMProductionRuntimeValidationSupport {
                 reason: "\(app.imRuntimeRole.rawValue) requires IM_KAFKA_SASL_PASSWORD in production."
             )
         }
+        try requireProductionSecret(
+            "IM_KAFKA_SASL_PASSWORD",
+            value: configuration.saslPassword,
+            minimumLength: 16
+        )
         guard configuration.tlsCAFile?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
             throw Abort(
                 .internalServerError,
@@ -322,6 +396,10 @@ enum IMProductionRuntimeValidationSupport {
         else {
             throw Abort(.internalServerError, reason: "IM_SEARCH_DRIVER=opensearch requires IM_OPENSEARCH_ENDPOINT in production.")
         }
+        try validateProductionHTTPSDependencyEndpoint(
+            key: "IM_OPENSEARCH_ENDPOINT",
+            rawValue: endpoint
+        )
     }
 
     static func validateProductionMediaStorageConfiguration(_ app: Application) throws {
@@ -335,7 +413,9 @@ enum IMProductionRuntimeValidationSupport {
             "MEDIA_STORAGE_S3_ENDPOINT",
             "MEDIA_STORAGE_S3_BUCKET",
             "MEDIA_STORAGE_S3_ACCESS_KEY_ID",
-            "MEDIA_STORAGE_S3_SECRET_ACCESS_KEY"
+            "MEDIA_STORAGE_S3_SECRET_ACCESS_KEY",
+            "MEDIA_STORAGE_S3_REGION",
+            "MEDIA_STORAGE_S3_FORCE_PATH_STYLE"
         ]
         let missing = requiredKeys.filter {
             Environment.get($0)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
@@ -343,6 +423,27 @@ enum IMProductionRuntimeValidationSupport {
         guard missing.isEmpty else {
             throw Abort(.internalServerError, reason: "Production S3 media storage is missing: \(missing.joined(separator: ", ")).")
         }
+        guard !parseBooleanEnvironment("IM_PRODUCTION_ALLOW_INSECURE_MEDIA_STORAGE_ENDPOINT", defaultValue: false) else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production IM_PRODUCTION_ALLOW_INSECURE_MEDIA_STORAGE_ENDPOINT is forbidden for long-term production."
+            )
+        }
+        try validateProductionHTTPSDependencyEndpoint(
+            key: "MEDIA_STORAGE_S3_ENDPOINT",
+            rawValue: Environment.get("MEDIA_STORAGE_S3_ENDPOINT") ?? ""
+        )
+        guard ["true", "false"].contains(
+            Environment.get("MEDIA_STORAGE_S3_FORCE_PATH_STYLE")?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        ) else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production S3 media storage requires MEDIA_STORAGE_S3_FORCE_PATH_STYLE to be exactly true or false."
+            )
+        }
+        try requireProductionSecret("MEDIA_STORAGE_S3_ACCESS_KEY_ID", minimumLength: 1)
+        try requireProductionSecret("MEDIA_STORAGE_S3_SECRET_ACCESS_KEY", minimumLength: 16)
     }
 
     static func validateHotConversationProtectionConfiguration(_ app: Application) throws {
@@ -967,6 +1068,153 @@ enum IMProductionRuntimeValidationSupport {
                 reason: "\(context) requires IM_REALTIME_ACTIVE_COMPACT_HINT_PREVIEW_MAX_CHARS <= \(maximumActiveCompactHintPreviewCharacters) so hot-room realtime payloads stay bounded."
             )
         }
+    }
+
+    private static func requireProductionSecret(
+        _ key: String,
+        minimumLength: Int
+    ) throws {
+        try requireProductionSecret(
+            key,
+            value: Environment.get(key),
+            minimumLength: minimumLength
+        )
+    }
+
+    private static func requireProductionSecret(
+        _ key: String,
+        value rawValue: String?,
+        minimumLength: Int
+    ) throws {
+        let value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !value.isEmpty else {
+            throw Abort(.internalServerError, reason: "Production requires \(key) to be configured.")
+        }
+        guard value.count >= minimumLength else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production requires \(key) to be at least \(minimumLength) characters."
+            )
+        }
+        guard !isPlaceholderProductionSecret(value) else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(key) must not use a placeholder or default test value."
+            )
+        }
+    }
+
+    private static func isPlaceholderProductionSecret(_ value: String) -> Bool {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return [
+            "change_me",
+            "changeme",
+            "replace-me",
+            "replace_me",
+            "password",
+            "password1234",
+            "test",
+            "demo",
+            "example",
+            "secret",
+            "prod-secret",
+            "prod-secret-key",
+            "prod-db-password",
+            "prod-kafka-password",
+            "prod-jwt-secret",
+            "prod-internal-secret",
+            "dev-jwt-secret-change-me",
+            "test-internal-secret",
+            "database-secret",
+            "im-password",
+            "secret-key",
+            "access-key"
+        ].contains(normalized)
+    }
+
+    private static func validateProductionHTTPSDependencyEndpoint(
+        key: String,
+        rawValue: String
+    ) throws {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let components = URLComponents(string: value),
+              components.scheme?.lowercased() == "https",
+              let host = components.host,
+              isProductionDependencyEndpointHost(host)
+        else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production \(key) must be an https URL with a real non-placeholder DNS host."
+            )
+        }
+    }
+
+    private static func isProductionDependencyEndpointHost(_ host: String) -> Bool {
+        let normalized = host
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .lowercased()
+        guard !normalized.isEmpty else {
+            return false
+        }
+        if normalized == "localhost" || normalized == "ip6-localhost" || normalized.hasSuffix(".local") {
+            return false
+        }
+        if normalized.contains(":") {
+            return false
+        }
+        let octets = normalized.split(separator: ".").compactMap { Int($0) }
+        if octets.count == 4 {
+            return false
+        }
+        return !isPlaceholderDomainHost(normalized)
+    }
+
+    private static func isPublicBaseURLHost(_ host: String) -> Bool {
+        let normalized = host
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .lowercased()
+        guard !normalized.isEmpty else {
+            return false
+        }
+        if normalized == "localhost" || normalized == "ip6-localhost" || normalized.hasSuffix(".local") {
+            return false
+        }
+        if normalized.contains(":") {
+            return false
+        }
+        let octets = normalized.split(separator: ".").compactMap { Int($0) }
+        if octets.count == 4 {
+            return false
+        }
+        if isPlaceholderDomainHost(normalized) {
+            return false
+        }
+        return normalized.contains(".")
+    }
+
+    private static func isPlaceholderDomainHost(_ normalizedHost: String) -> Bool {
+        let placeholderHosts: Set<String> = [
+            "example",
+            "example.com",
+            "example.net",
+            "example.org",
+            "yourdomain.com"
+        ]
+        let placeholderSuffixes = [
+            ".example",
+            ".example.com",
+            ".example.net",
+            ".example.org",
+            ".yourdomain.com",
+            ".test",
+            ".invalid"
+        ]
+        return placeholderHosts.contains(normalizedHost)
+            || placeholderSuffixes.contains(where: { normalizedHost.hasSuffix($0) })
     }
 }
 

@@ -950,7 +950,10 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
             bodyBytes: bodyBytes
         )
         if Response.self == EmptyGatewayRelayResponse.self {
-            return EmptyGatewayRelayResponse() as! Response
+            guard let emptyResponse = EmptyGatewayRelayResponse() as? Response else {
+                throw GatewayRelayTransportError.responseTypeMismatch(String(describing: Response.self))
+            }
+            return emptyResponse
         }
 
         return try response.content.decode(Response.self)
@@ -1139,6 +1142,7 @@ struct GatewayRelayDomainEventPayloadBatchWorkPlan: Sendable {
 private enum GatewayRelayTransportError: Error {
     case missingBaseURL
     case unexpectedStatus(HTTPResponseStatus)
+    case responseTypeMismatch(String)
 }
 
 struct LoggingUnavailableGatewaySessionTransport: GatewaySessionTransport {

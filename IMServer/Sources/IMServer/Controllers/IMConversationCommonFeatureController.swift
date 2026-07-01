@@ -25,9 +25,12 @@ extension IMConversationController {
     func favorites(req: Request) async throws -> IMFavoritePageResponse {
         let userID = try req.auth.require(User.self).requireID()
         let query = try req.query.decode(IMFavoritePageQuery.self)
-        let db = query.conversationID == nil
-            ? req.application.imWriteDB
-            : try await req.application.conversationShardRouter.strongReadDatabase(forConversationID: query.conversationID!)
+        let db: any Database
+        if let conversationID = query.conversationID {
+            db = try await req.application.conversationShardRouter.strongReadDatabase(forConversationID: conversationID)
+        } else {
+            db = req.application.imWriteDB
+        }
         return try await IMCommonFeatureService(db: db).listFavorites(
             userID: userID,
             conversationID: query.conversationID,

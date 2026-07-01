@@ -9,7 +9,9 @@ struct AuthService {
     let app: Application
     let db: any Database
 
-    private static let credentialMaskingHash = try! Bcrypt.hash("credential-mask-placeholder")
+    private static let credentialMaskingHashResult: Result<String, any Error> = Result {
+        try Bcrypt.hash("credential-mask-placeholder")
+    }
 
     private var config: AuthConfiguration {
         app.authConfiguration
@@ -121,7 +123,7 @@ struct AuthService {
                 .first()
             else {
                 // 使用固定 bcrypt 校验掩盖“账号不存在”的更快失败路径。
-                _ = try? Bcrypt.verify(request.password, created: Self.credentialMaskingHash)
+                Self.performCredentialMaskingCheck(password: request.password, logger: app.logger)
                 throw AuthError.invalidCredentials
             }
 
@@ -163,6 +165,20 @@ struct AuthService {
             )
             await app.authLoginRateLimiter.completeLoginAttempt(attempt, succeeded: false, now: now)
             throw error
+        }
+    }
+
+    private static func performCredentialMaskingCheck(password: String, logger: Logger) {
+        switch credentialMaskingHashResult {
+        case .success(let hash):
+            do {
+                _ = try Bcrypt.verify(password, created: hash)
+            } catch {
+                logger.warning("auth credential masking bcrypt verify failed", metadata: ["error": "\(error)"])
+            }
+        case .failure(let error):
+            logger.error("auth credential masking hash unavailable", metadata: ["error": "\(error)"])
+            _ = try? Bcrypt.hash(password)
         }
     }
 

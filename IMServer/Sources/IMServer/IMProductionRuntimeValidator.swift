@@ -31,7 +31,10 @@ enum IMProductionRuntimeValidator {
             throw Abort(.internalServerError, reason: "Production requires IM_NODE_ID to be explicitly configured.")
         }
 
+        try IMProductionRuntimeValidationSupport.validatePublicBaseURLConfiguration()
         try IMProductionRuntimeValidationSupport.validatePrimaryDatabaseConfiguration()
+        try IMProductionRuntimeValidationSupport.validateProductionSecretConfiguration(app)
+        try IMProductionRuntimeValidationSupport.validateDevelopmentSeedConfigurationDisabled()
         try app.metricsConfiguration.validateStartup(environment: app.environment)
 
         switch app.imRuntimeRole {

@@ -1,3 +1,5 @@
+import Crypto
+import Foundation
 import JWTKit
 import Vapor
 
@@ -5,18 +7,30 @@ enum AuthConfigurationError: Error, LocalizedError {
     case missingJWTSecret
     case missingRedisURL
     case invalidJWTSecrets
+    case legacyJWTSecretInProduction
+    case missingActiveJWTKeyID
     case missingActiveJWTKey(String)
+    case weakJWTSecret(String)
+    case placeholderJWTSecret(String)
 
     var errorDescription: String? {
         switch self {
         case .missingJWTSecret:
-            return "生产环境必须显式配置 JWT_SECRET。"
+            return "生产环境必须配置 JWT_SECRETS=kid:secret,...。"
         case .missingRedisURL:
             return "生产环境认证限流必须配置 REDIS_URL。"
         case .invalidJWTSecrets:
             return "JWT_SECRETS 格式无效，必须使用 kid:secret 并用逗号分隔。"
+        case .legacyJWTSecretInProduction:
+            return "生产环境禁止使用单个 JWT_SECRET，必须使用 JWT_SECRETS 和 JWT_ACTIVE_KID。"
+        case .missingActiveJWTKeyID:
+            return "生产环境必须显式配置 JWT_ACTIVE_KID。"
         case .missingActiveJWTKey(let kid):
             return "JWT_ACTIVE_KID=\(kid) 未在 JWT_SECRETS 中配置。"
+        case .weakJWTSecret(let kid):
+            return "生产环境 JWT_SECRETS[\(kid)] 长度不足，至少需要 32 个字符。"
+        case .placeholderJWTSecret(let kid):
+            return "生产环境 JWT_SECRETS[\(kid)] 不能使用占位或默认测试值。"
         }
     }
 }
@@ -27,6 +41,11 @@ struct AuthJWTSigningSecret: Sendable {
 }
 
 struct AuthConfiguration: Sendable {
+    private static let developmentFallbackJWTSecret: String = {
+        let key = SymmetricKey(size: .bits256)
+        return key.withUnsafeBytes { Data($0).base64EncodedString() }
+    }()
+
     let issuer: String
     let jwtSecret: String
     let jwtSecrets: [AuthJWTSigningSecret]
@@ -37,7 +56,7 @@ struct AuthConfiguration: Sendable {
 
     static func load(from environment: Environment) throws -> AuthConfiguration {
         let secrets = try jwtSecrets(for: environment)
-        let activeKeyID = try activeJWTKeyID(in: secrets)
+        let activeKeyID = try activeJWTKeyID(in: secrets, environment: environment)
         let activeSecret = secrets.first(where: { $0.keyID == activeKeyID })?.secret ?? secrets[0].secret
 
         return AuthConfiguration(
@@ -53,6 +72,12 @@ struct AuthConfiguration: Sendable {
     }
 
     private static func jwtSecrets(for environment: Environment) throws -> [AuthJWTSigningSecret] {
+        if environment == .production,
+           Environment.get("JWT_SECRET")?.trimmed.isEmpty == false
+        {
+            throw AuthConfigurationError.legacyJWTSecretInProduction
+        }
+
         if let rawSecrets = Environment.get("JWT_SECRETS")?.trimmed,
            !rawSecrets.isEmpty
         {
@@ -77,7 +102,12 @@ struct AuthConfiguration: Sendable {
                 throw AuthConfigurationError.invalidJWTSecrets
             }
 
-            return secrets.compactMap { $0 }
+            let signingSecrets = secrets.compactMap { $0 }
+            if environment == .production {
+                try validateProductionJWTSecrets(signingSecrets)
+            }
+
+            return signingSecrets
         }
 
         if let configuredSecret = Environment.get("JWT_SECRET")?.trimmed,
@@ -90,13 +120,51 @@ struct AuthConfiguration: Sendable {
             throw AuthConfigurationError.missingJWTSecret
         }
 
-        return [AuthJWTSigningSecret(keyID: nil, secret: "dev-jwt-secret-change-me")]
+        return [AuthJWTSigningSecret(keyID: nil, secret: developmentFallbackJWTSecret)]
     }
 
-    private static func activeJWTKeyID(in secrets: [AuthJWTSigningSecret]) throws -> String? {
+    private static func validateProductionJWTSecrets(_ secrets: [AuthJWTSigningSecret]) throws {
+        for signingSecret in secrets {
+            let key = signingSecret.keyID ?? "active"
+            guard signingSecret.secret.count >= 32 else {
+                throw AuthConfigurationError.weakJWTSecret(key)
+            }
+            guard !isPlaceholderProductionJWTSecret(signingSecret.secret) else {
+                throw AuthConfigurationError.placeholderJWTSecret(key)
+            }
+        }
+    }
+
+    private static func isPlaceholderProductionJWTSecret(_ secret: String) -> Bool {
+        let normalized = secret
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return [
+            "change_me",
+            "changeme",
+            "replace-me",
+            "replace_me",
+            "password",
+            "password1234",
+            "password1234password1234password1234",
+            "test",
+            "demo",
+            "example",
+            "secret",
+            "prod-secret",
+            "prod-jwt-secret",
+            "dev-jwt-secret-change-me",
+            "secret-key"
+        ].contains(normalized)
+    }
+
+    private static func activeJWTKeyID(in secrets: [AuthJWTSigningSecret], environment: Environment) throws -> String? {
         guard let configuredActiveKeyID = Environment.get("JWT_ACTIVE_KID")?.trimmed,
               !configuredActiveKeyID.isEmpty
         else {
+            if environment == .production {
+                throw AuthConfigurationError.missingActiveJWTKeyID
+            }
             return secrets.first?.keyID
         }
 

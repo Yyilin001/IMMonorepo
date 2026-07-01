@@ -3525,7 +3525,8 @@ extension IMServerTests {
             let metrics = await app.routingMetrics.currentSnapshot()
             #expect(metrics.realtimeActiveConversationRouteCacheHitCount == 1)
             #expect(metrics.realtimeActiveConversationRouteCacheMissCount == 1)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 1)
+            #expect(await presenceStore.activeConversationSnapshotRouteLookupTotal() == 1)
+            #expect(await presenceStore.activeConversationRouteLookupTotal() == 0)
         }
     }
 
@@ -3857,13 +3858,14 @@ extension IMServerTests {
             }
 
             let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationRouteCacheHitCount == 0)
-            #expect(metrics.realtimeActiveConversationRouteCachePartialHitCount == 1)
+            #expect(metrics.realtimeActiveConversationRouteCacheHitCount == 1)
+            #expect(metrics.realtimeActiveConversationRouteCachePartialHitCount == 0)
             #expect(metrics.realtimeActiveConversationRouteCacheMissCount == 1)
-            #expect(metrics.realtimeActiveConversationRouteCacheCachedUserCount == 3)
-            #expect(metrics.realtimeActiveConversationRouteCacheMissedUserCount == 4)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 2)
-            #expect(await presenceStore.activeConversationRouteLookupRequestedCounts() == [3, 1])
+            #expect(metrics.realtimeActiveConversationRouteCacheCachedUserCount == 2)
+            #expect(metrics.realtimeActiveConversationRouteCacheMissedUserCount == 2)
+            #expect(await presenceStore.activeConversationSnapshotRouteLookupTotal() == 1)
+            #expect(await presenceStore.activeConversationRouteLookupTotal() == 0)
+            #expect(await presenceStore.activeConversationRouteLookupRequestedCounts().isEmpty)
         }
     }
 
@@ -3960,7 +3962,8 @@ extension IMServerTests {
             let metrics = await app.routingMetrics.currentSnapshot()
             #expect(metrics.realtimeActiveConversationRouteCacheHitCount == 0)
             #expect(metrics.realtimeActiveConversationRouteCacheMissCount == 2)
-            #expect(await presenceStore.activeConversationRouteLookupTotal() == 2)
+            #expect(await presenceStore.activeConversationSnapshotRouteLookupTotal() == 2)
+            #expect(await presenceStore.activeConversationRouteLookupTotal() == 0)
         }
     }
 

@@ -2138,8 +2138,8 @@ extension IMServerTests {
         }
     }
 
-    @Test("Message-created owner delivery run reuses recipient expansion")
-    func messageCreatedOwnerDeliveryRunReusesRecipientExpansion() async throws {
+    @Test("Message-created owner delivery run skip uses recipient count hint without expansion")
+    func messageCreatedOwnerDeliveryRunSkipUsesRecipientCountHintWithoutExpansion() async throws {
         let key = "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD"
         let originalValue = Environment.get(key)
         defer { restoreEnvironment(key, to: originalValue) }
@@ -2205,10 +2205,14 @@ extension IMServerTests {
             #expect(deliveryCount == 0)
 
             let metrics = await app.conversationDomainEventMetrics.currentSnapshot()
-            #expect(metrics.recipientResolveCount == 1)
-            #expect(metrics.recipientResolveMembershipExpansionCount == 1)
-            #expect(metrics.recipientResolveUserCount == memberUserIDs.count)
-            #expect(metrics.recipientResolveMaxUserCount == memberUserIDs.count)
+            #expect(metrics.recipientResolveCount == 0)
+            #expect(metrics.recipientResolveMembershipExpansionCount == 0)
+            #expect(metrics.recipientResolveUserCount == 0)
+            #expect(metrics.recipientResolveMaxUserCount == 0)
+            #expect(metrics.messageCreatedOwnerDeliverySkippedCount == 2)
+            #expect(metrics.messageCreatedTimelinePullDeliveryCount == 2)
+            #expect(metrics.messageCreatedOwnerDeliverySkippedRecipientCount == memberUserIDs.count * 2)
+            #expect(metrics.messageCreatedTimelinePullDeliveryRecipientCount == memberUserIDs.count * 2)
         }
     }
 
