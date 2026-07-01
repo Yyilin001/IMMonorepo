@@ -16,13 +16,8 @@ jobs:
           docker --version
           docker compose version
 
-      - name: Build IMServer smoke image
-        working-directory: IMServer
-        run: docker compose -f docker-compose.production-smoke.yml build gateway
-
       - name: Run production topology smoke
-        working-directory: IMServer
-        run: ./scripts/production_smoke.sh run
+        run: make run-imserver-production-smoke
 
       - name: Upload smoke reports
         if: always()
@@ -30,5 +25,6 @@ jobs:
         with:
           name: imserver-production-smoke-reports
           path: |
+            IMServer/reports/latest-production-smoke.json
             IMServer/reports/
           if-no-files-found: warn

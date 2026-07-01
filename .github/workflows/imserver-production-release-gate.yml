@@ -63,8 +63,17 @@ jobs:
         run: |
           if [ "${RUN_SWIFT_TESTS_INPUT}" = "false" ]; then
             ./scripts/production_release_gate.sh --skip-swift-tests
+            python3 scripts/verify_production_release_gate.py \
+              --receipt-json reports/latest-production-release-gate.json \
+              --require-pass \
+              --require-release-run
           else
             ./scripts/production_release_gate.sh
+            python3 scripts/verify_production_release_gate.py \
+              --receipt-json reports/latest-production-release-gate.json \
+              --require-pass \
+              --require-release-run \
+              --require-swift-tests
           fi
 
       - name: Upload production release gate reports

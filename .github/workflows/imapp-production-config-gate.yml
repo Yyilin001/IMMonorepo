@@ -1,0 +1,100 @@
+name: IMApp Production Config Gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/imapp-production-config-gate.yml"
+      - "IMApp/**"
+      - "IMClientKit/**"
+      - "Protocol/im_realtime/**"
+      - "Makefile"
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/imapp-production-config-gate.yml"
+      - "IMApp/**"
+      - "IMClientKit/**"
+      - "Protocol/im_realtime/**"
+      - "Makefile"
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: "Production HTTPS API base URL, for example https://chat.example.com"
+        required: true
+        type: string
+      tcp_host:
+        description: "Production public TCP host"
+        required: true
+        type: string
+      tcp_port:
+        description: "Production public TCP port"
+        required: false
+        default: "9000"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: imapp-production-config-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  imapp-config:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Validate network config gate behavior
+        run: make validate-ios-network-config
+
+      - name: Validate development config
+        env:
+          IM_API_BASE_URL: http://127.0.0.1:8080
+          IM_TCP_HOST: 127.0.0.1
+          IM_TCP_PORT: "9000"
+        run: IMAPP_NETWORK_CONFIG_MODE=development IMApp/Scripts/validate_network_configuration.sh
+
+      - name: Validate Debug network defaults
+        run: make validate-ios-debug-network-defaults
+
+      - name: Build IMApp for simulator
+        run: |
+          xcodebuild build \
+            -project IMApp/IMApp.xcodeproj \
+            -scheme IMApp \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Validate production config
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          IM_API_BASE_URL: ${{ inputs.api_base_url }}
+          IM_TCP_HOST: ${{ inputs.tcp_host }}
+          IM_TCP_PORT: ${{ inputs.tcp_port }}
+        run: make validate-ios-production-config
+
+      - name: Build Release with production config
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          IM_API_BASE_URL: ${{ inputs.api_base_url }}
+          IM_TCP_HOST: ${{ inputs.tcp_host }}
+          IM_TCP_PORT: ${{ inputs.tcp_port }}
+        run: |
+          xcodebuild build \
+            -project IMApp/IMApp.xcodeproj \
+            -scheme IMApp \
+            -configuration Release \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            IM_API_BASE_URL="${IM_API_BASE_URL}" \
+            IM_TCP_HOST="${IM_TCP_HOST}" \
+            IM_TCP_PORT="${IM_TCP_PORT}"

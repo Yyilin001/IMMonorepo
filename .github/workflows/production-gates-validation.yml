@@ -1,0 +1,84 @@
+name: Production Gates Validation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/production-gates-validation.yml"
+      - ".github/workflows/production-static-gate.yml"
+      - ".gitignore"
+      - "IMServer/.dockerignore"
+      - ".github/pull_request_template.md"
+      - "Makefile"
+      - "README.md"
+      - "scripts/validate_android_network_configuration.py"
+      - "scripts/validate_production_workflows.py"
+      - "docs/architecture-boundaries.md"
+      - "app/build.gradle.kts"
+      - "app/src/main/java/com/xmtx/imappandroid/di/**"
+      - "app/src/test/java/com/xmtx/imappandroid/di/**"
+      - "IMApp/Scripts/**"
+      - "IMServer/LoadTests/**"
+      - "IMServer/config/env/**"
+      - "IMServer/scripts/production_env_preflight.sh"
+      - "IMServer/scripts/production_env_preflight_test.sh"
+      - "deploy/ubuntu/**"
+      - "docs/imserver-aliyun-local-binary-deploy.md"
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/production-gates-validation.yml"
+      - ".github/workflows/production-static-gate.yml"
+      - ".gitignore"
+      - "IMServer/.dockerignore"
+      - ".github/pull_request_template.md"
+      - "Makefile"
+      - "README.md"
+      - "scripts/validate_android_network_configuration.py"
+      - "scripts/validate_production_workflows.py"
+      - "docs/architecture-boundaries.md"
+      - "app/build.gradle.kts"
+      - "app/src/main/java/com/xmtx/imappandroid/di/**"
+      - "app/src/test/java/com/xmtx/imappandroid/di/**"
+      - "IMApp/Scripts/**"
+      - "IMServer/LoadTests/**"
+      - "IMServer/config/env/**"
+      - "IMServer/scripts/production_env_preflight.sh"
+      - "IMServer/scripts/production_env_preflight_test.sh"
+      - "deploy/ubuntu/**"
+      - "docs/imserver-aliyun-local-binary-deploy.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-gates-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  production-gates-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show tool versions
+        run: |
+          bash --version
+          python3 --version
+          make --version
+
+      - name: Run production gates validation
+        run: make validate-production-gates
+
+      - name: Upload production gate validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-gates-validation-results
+          path: |
+            IMServer/LoadTests/results/validate-load-tests/
+          if-no-files-found: warn

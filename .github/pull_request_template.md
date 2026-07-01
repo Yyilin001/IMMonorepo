@@ -60,6 +60,18 @@ If more than two domains are checked:
 ## Validation
 
 - [ ] Governance: `./scripts/check_governance_boundaries.sh`
+- [ ] Production static gate for production-facing config/deploy/runbook changes:
+  `make validate-production-static`
+- [ ] iOS Debug network defaults, when touching IMApp network config or Xcode settings:
+  `make validate-ios-debug-network-defaults`
+- [ ] Android network config, when touching Android app network config:
+  `make validate-android-network-config`
+- [ ] Production gates validation for LoadTests/evidence/deploy gate changes:
+  `make validate-production-gates`
+- [ ] Production acceptance env preflight, before claiming production-ready:
+  `make validate-production-acceptance-env`
+- [ ] Final production acceptance evidence, when claiming production-ready:
+  `make verify-production-acceptance`
 - [ ] IMServer production gate: `cd IMServer && ./scripts/production_release_gate.sh`
   - Local fast smoke only: `cd IMServer && ./scripts/production_release_gate.sh --skip-swift-tests`
 - [ ] IMServer: `swift test --no-parallel`
