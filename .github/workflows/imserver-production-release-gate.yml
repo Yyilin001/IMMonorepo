@@ -39,7 +39,7 @@ concurrency:
 jobs:
   production-release-gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
 
     steps:
       - uses: actions/checkout@v4
@@ -60,6 +60,7 @@ jobs:
         working-directory: IMServer
         env:
           RUN_SWIFT_TESTS_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.run_swift_tests || 'true' }}
+          SWIFTPM_BUILD_JOBS: "2"
         run: |
           if [ "${RUN_SWIFT_TESTS_INPUT}" = "false" ]; then
             ./scripts/production_release_gate.sh --skip-swift-tests

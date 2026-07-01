@@ -295,10 +295,12 @@ REQUIRED = {
     },
     ".github/workflows/imserver-production-release-gate.yml": {
         "commands": [
+            "timeout-minutes: 75",
             "uses: swift-actions/setup-swift@v2",
             "swift-version: \"6.1\"",
             "sudo apt-get install -y librdkafka-dev libsasl2-dev libssl-dev protobuf-compiler",
             "working-directory: IMServer",
+            "SWIFTPM_BUILD_JOBS: \"2\"",
             "./scripts/production_release_gate.sh",
             "./scripts/production_release_gate.sh --skip-swift-tests",
             "python3 scripts/verify_production_release_gate.py",
