@@ -145,17 +145,31 @@ run_self_test() {
     mkdir -p "${gpg_home}"
     chmod 700 "${gpg_home}"
     cat >"${tmpdir}/gpg-batch" <<'EOF'
-Key-Type: default
-Subkey-Type: default
+Key-Type: RSA
+Key-Length: 2048
+Subkey-Type: RSA
+Subkey-Length: 2048
 Name-Real: Swiftly Install Self Test
 Name-Email: swiftly-install-self-test@example.invalid
 Expire-Date: 0
 %no-protection
 %commit
 EOF
-    GNUPGHOME="${gpg_home}" gpg --batch --generate-key "${tmpdir}/gpg-batch" >/dev/null 2>&1
-    GNUPGHOME="${gpg_home}" gpg --armor --export >"${keys}"
-    GNUPGHOME="${gpg_home}" gpg --batch --yes --armor --detach-sign --output "${signature}" "${archive}" >/dev/null 2>&1
+    if ! GNUPGHOME="${gpg_home}" gpg --batch --pinentry-mode loopback --generate-key "${tmpdir}/gpg-batch" >"${tmpdir}/gpg-generate.log" 2>&1; then
+      sed 's/^/install_dependencies_self_test gpg_generate: /' "${tmpdir}/gpg-generate.log" >&2 || true
+      printf 'install_dependencies_self_test result=fail reason=swiftly_signature_test_key_generation_failed\n' >&2
+      return 1
+    fi
+    if ! GNUPGHOME="${gpg_home}" gpg --armor --export >"${keys}" 2>"${tmpdir}/gpg-export.log"; then
+      sed 's/^/install_dependencies_self_test gpg_export: /' "${tmpdir}/gpg-export.log" >&2 || true
+      printf 'install_dependencies_self_test result=fail reason=swiftly_signature_test_key_export_failed\n' >&2
+      return 1
+    fi
+    if ! GNUPGHOME="${gpg_home}" gpg --batch --yes --pinentry-mode loopback --armor --detach-sign --output "${signature}" "${archive}" >"${tmpdir}/gpg-sign.log" 2>&1; then
+      sed 's/^/install_dependencies_self_test gpg_sign: /' "${tmpdir}/gpg-sign.log" >&2 || true
+      printf 'install_dependencies_self_test result=fail reason=swiftly_signature_test_sign_failed\n' >&2
+      return 1
+    fi
     verify_swiftly_archive_signature "${archive}" "${signature}" "${keys}" >/dev/null
     printf 'invalid-signature\n' >"${tmpdir}/bad.sig"
     if verify_swiftly_archive_signature "${archive}" "${tmpdir}/bad.sig" "${keys}" >"${tmpdir}/bad-signature.log" 2>&1; then
