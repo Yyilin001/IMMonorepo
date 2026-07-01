@@ -1,11 +1,21 @@
 # IMServer Aliyun Local Binary Deploy Runbook
 
-This server is small: Aliyun ECS `120.25.106.200`, Ubuntu 24.04 x86_64, 2 vCPU, 2 GiB RAM. Do not run a full Swift release build on the server. Build a Linux x86_64 binary locally, upload it, then run migrations as a single ops process.
+This is a legacy/bootstrap runbook for a small Aliyun ECS host. Do not use it as
+the long-term production deployment path. For production, use the
+`deploy/ubuntu/90_deploy_single_node.sh` flow with a real DNS name, HTTPS on
+default port `443`, public TCP `9000`, and cloud security group evidence that
+keeps `8080` and internal ports closed to the Internet.
+
+The original bootstrap server shape was Aliyun ECS `<server-public-ip>`, Ubuntu
+24.04 x86_64, 2 vCPU, 2 GiB RAM. Do not run a full Swift release build on that
+class of server. Build a Linux x86_64 binary locally, upload it, then run
+migrations as a single ops process.
 
 ## Current Server Shape
 
-- Public HTTP: `http://120.25.106.200:8080`
-- TCP gateway: `120.25.106.200:9000`
+- Temporary bootstrap HTTP: `http://<server-public-ip>`
+- Long-term production HTTP: `https://chat.yourdomain.com`
+- TCP gateway: `<server-public-ip>:9000`
 - Runtime services:
   - `postgresql`
   - `redis-server`
@@ -94,7 +104,7 @@ ELF 64-bit LSB executable, x86-64, statically linked
 ```bash
 rsync -avP --compress \
   IMServer/.build/x86_64-swift-linux-musl/release/IMServer \
-  root@120.25.106.200:/tmp/IMServer.new
+  root@<server-public-ip>:/tmp/IMServer.new
 ```
 
 On the server:
@@ -169,17 +179,49 @@ systemctl is-active \
   imserver-outbox-relay imserver-stream-consumer imserver-domain-delivery-consumer
 ```
 
-Smoke tests:
+Bootstrap smoke tests before DNS/HTTPS:
 
 ```bash
-curl -i --max-time 10 http://120.25.106.200:8080/health
+curl -i --max-time 10 http://<server-public-ip>/health
 
 curl -sS --max-time 10 \
-  -X POST http://120.25.106.200:8080/api/auth/login \
+  -X POST http://<server-public-ip>/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"email":"demo@example.com","password":"password1234","device":{"deviceID":"codex-smoke","deviceName":"Codex","platform":"curl","appVersion":"1"}}'
 
-nc -vz -w 5 120.25.106.200 9000
+nc -vz -w 5 <server-public-ip> 9000
+```
+
+During this bootstrap phase, Aliyun security group `8080/tcp` may be open only
+if the temporary public entrypoint still depends on it. Before treating the
+server as production, change the inbound rules to the long-term posture:
+
+| Port | Source | Production posture |
+| --- | --- | --- |
+| `80/tcp` | `0.0.0.0/0` | Allowed for ACME HTTP challenge or redirect only. |
+| `443/tcp` | `0.0.0.0/0` | Allowed for public HTTPS API traffic. |
+| `9000/tcp` | `0.0.0.0/0` | Allowed for direct IM TCP gateway clients. |
+| `22/tcp` | `<your-admin-public-ip>/32` | Allowed only from the operator IP or VPN egress. |
+| `3389/tcp` | any | Deleted; Ubuntu does not use RDP. |
+| `8080/tcp` | any public CIDR | Deleted after HTTPS is installed. |
+| `5432`, `6379`, `9092`, `8081`, `8082`, `18080` | any public CIDR | Deleted; internal services are local/private only. |
+
+Use `deploy/ubuntu/29_fetch_aliyun_security_group_snapshot.sh` plus
+`deploy/ubuntu/26_audit_cloud_security_group.sh`, or the all-in-one deploy's
+Aliyun security group repair path, to produce machine-readable evidence. A
+console screenshot alone is not enough for the production gate.
+
+Long-term production smoke tests:
+
+```bash
+curl -i --max-time 10 https://chat.yourdomain.com/health
+
+curl -sS --max-time 10 \
+  -X POST https://chat.yourdomain.com/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"demo@example.com","password":"password1234","device":{"deviceID":"codex-smoke","deviceName":"Codex","platform":"curl","appVersion":"1"}}'
+
+nc -vz -w 5 chat.yourdomain.com 9000
 ```
 
 Known-good results from this deployment:

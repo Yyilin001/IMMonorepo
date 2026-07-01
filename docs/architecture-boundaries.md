@@ -53,7 +53,15 @@ For a flow-oriented map of the core implementations, start with
 
 - Changes touching TCP, multi-device routing, read sync, cache restore, AI stream,
   media transfer, or DB migrations require targeted regression tests.
+- Changes touching production config, deploy scripts, or runbooks must run or
+  justify skipping `make validate-production-static`.
+- Changes touching release/load gates, LoadTests, or production evidence
+  packaging must run or justify skipping `make validate-production-gates`.
 - Changes touching release gate or capacity docs must state whether the evidence
-  is real staging data or local smoke only.
+  is real production/staging data or local gate/smoke only.
+- Production-ready claims must preflight the acceptance env with
+  `make validate-production-acceptance-env`, then verify the final acceptance
+  receipt and evidence package with `make verify-production-acceptance` against
+  the exact public `BASE_URL`, `TCP_HOST`, and `TCP_PORT`.
 - Production safety assumptions, including TCP TLS termination, internal secrets,
   Redis ACLs, and metrics secrets, must remain explicit in runbooks.
