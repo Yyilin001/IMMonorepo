@@ -807,7 +807,7 @@ def commit_runbook(payload: dict[str, Any]) -> str:
             str(commands["stageCommand"]),
             "make verify-production-worktree-staging",
             "make verify-production-worktree-staged-group",
-            str(commands["verifyCommand"]),
+            f"( {commands['verifyCommand']} )",
             str(commands["commitCommand"]),
             "",
         ])
@@ -1454,6 +1454,7 @@ def self_test() -> None:
             "make production-worktree-inventory PRODUCTION_WORKTREE_INVENTORY_ARGS='--group misc'",
             "make verify-production-worktree-stage-dry-run PRODUCTION_WORKTREE_INVENTORY_ARGS='--group misc'",
             "make verify-production-worktree-staged-group",
+            "( python3 scripts/validate_production_workflows.py )",
             "git commit -m \"chore: align production readiness support\"",
             "make validate-production-static",
         ):
