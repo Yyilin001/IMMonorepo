@@ -11,6 +11,8 @@ STREAM_CONSUMER_ENVS=("${ROOT_DIR}/config/env/stream-consumer.production.env.exa
 REQUIRED_GROUPS=()
 STRICT_SECRETS=false
 failures=()
+ENV_FILE_CACHE_FILES=()
+ENV_CACHE_FILE_INDEX=""
 MAX_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT=128
 MAX_ACTIVE_COMPACT_HINT_COALESCE_WINDOW_MS=100
 MAX_ACTIVE_COMPACT_HINT_PREVIEW_CHARS=120
@@ -119,26 +121,87 @@ record_failure() {
   echo "PREFLIGHT FAILURE: $1" >&2
 }
 
+env_cache_find_file_index() {
+  local file="$1"
+  local index
+  ENV_CACHE_FILE_INDEX=""
+  if (( ${#ENV_FILE_CACHE_FILES[@]} > 0 )); then
+    for index in "${!ENV_FILE_CACHE_FILES[@]}"; do
+      if [[ "${ENV_FILE_CACHE_FILES[${index}]}" == "${file}" ]]; then
+        ENV_CACHE_FILE_INDEX="${index}"
+        return 0
+      fi
+    done
+  fi
+  return 1
+}
+
+env_cache_get() {
+  local file="$1"
+  local key="$2"
+  local variable_name
+  env_cache_find_file_index "${file}" || return 1
+  [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
+  variable_name="__IM_ENV_CACHE_${ENV_CACHE_FILE_INDEX}_${key}"
+  eval '[[ -n "${'"${variable_name}"'+set}" ]]' || return 1
+  eval 'printf "%s" "${'"${variable_name}"'}"'
+}
+
+env_cache_set_if_absent() {
+  local file_index="$1"
+  local key="$2"
+  local value="$3"
+  local variable_name
+  [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 0
+  variable_name="__IM_ENV_CACHE_${file_index}_${key}"
+  printf -v "${variable_name}" '%s' "${value}"
+}
+
+load_env_file_cache() {
+  local file="$1"
+  local key value file_index
+  if env_cache_find_file_index "${file}"; then
+    return 0
+  fi
+  ENV_FILE_CACHE_FILES+=("${file}")
+  file_index="$((${#ENV_FILE_CACHE_FILES[@]} - 1))"
+  [[ -f "${file}" ]] || return 0
+  while IFS=$'\034' read -r key value || [[ -n "${key}" ]]; do
+    [[ -n "${key}" ]] || continue
+    env_cache_set_if_absent "${file_index}" "${key}" "${value}"
+  done < <(
+    awk '
+      function trim(value) {
+        sub(/^[[:space:]]+/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        return value
+      }
+      {
+        line = trim($0)
+        if (line == "" || line ~ /^#/) next
+        sub(/^export[[:space:]]+/, "", line)
+        pos = index(line, "=")
+        if (pos == 0) next
+        key = trim(substr(line, 1, pos - 1))
+        if (key == "") next
+        value = trim(substr(line, pos + 1))
+        if ((value ~ /^".*"$/) || (value ~ /^'\''.*'\''$/)) {
+          value = substr(value, 2, length(value) - 2)
+        }
+        printf "%s\034%s\n", key, value
+      }
+    ' "${file}"
+  )
+}
+
 env_value() {
   local file="$1"
   local key="$2"
-  local line value
   [[ -f "${file}" ]] || return 1
-  while IFS= read -r line || [[ -n "${line}" ]]; do
-    line="$(trim "${line}")"
-    [[ -z "${line}" || "${line}" == \#* ]] && continue
-    [[ "${line}" == export\ * ]] && line="$(trim "${line#export }")"
-    [[ "${line}" == "${key}="* ]] || continue
-    value="${line#*=}"
-    value="$(trim "${value}")"
-    if [[ "${value}" == \"*\" && "${value}" == *\" ]]; then
-      value="${value:1:${#value}-2}"
-    elif [[ "${value}" == \'*\' && "${value}" == *\' ]]; then
-      value="${value:1:${#value}-2}"
-    fi
-    printf '%s' "${value}"
+  load_env_file_cache "${file}"
+  if env_cache_get "${file}" "${key}"; then
     return 0
-  done < "${file}"
+  fi
   return 1
 }
 
@@ -431,6 +494,140 @@ require_equals() {
   return 0
 }
 
+require_one_of() {
+  local file="$1"
+  local key="$2"
+  local label="$3"
+  shift 3
+  local value expected
+  if ! value="$(env_value "${file}" "${key}")"; then
+    record_failure "${label} requires ${key}"
+    return 1
+  fi
+  for expected in "$@"; do
+    if [[ "${value}" == "${expected}" ]]; then
+      return 0
+    fi
+  done
+  record_failure "${label} requires ${key} to be one of: $*"
+  return 1
+}
+
+require_jwt_rotation_configuration() {
+  local file="$1"
+  local label="$2"
+  local jwt_secret jwt_secrets active_kid entry kid secret found_active=false valid_entries=0
+
+  jwt_secret="$(env_value "${file}" "JWT_SECRET" || true)"
+  jwt_secrets="$(env_value "${file}" "JWT_SECRETS" || true)"
+  active_kid="$(env_value "${file}" "JWT_ACTIVE_KID" || true)"
+
+  if [[ -n "${jwt_secret}" ]]; then
+    record_failure "${label} must not set legacy JWT_SECRET in production; use JWT_SECRETS and JWT_ACTIVE_KID"
+  fi
+  if [[ -z "${jwt_secrets}" ]]; then
+    record_failure "${label} requires JWT_SECRETS=kid:secret,..."
+    return 1
+  fi
+  if [[ -z "${active_kid}" ]]; then
+    record_failure "${label} requires JWT_ACTIVE_KID"
+  fi
+
+  IFS=',' read -ra entries <<< "${jwt_secrets}"
+  for entry in "${entries[@]}"; do
+    entry="$(trim "${entry}")"
+    if [[ -z "${entry}" || "${entry}" != *:* ]]; then
+      record_failure "${label} requires JWT_SECRETS entries to use kid:secret"
+      continue
+    fi
+    kid="$(trim "${entry%%:*}")"
+    secret="$(trim "${entry#*:}")"
+    if [[ -z "${kid}" || -z "${secret}" ]]; then
+      record_failure "${label} requires JWT_SECRETS entries to include non-empty kid and secret"
+      continue
+    fi
+    ((valid_entries += 1))
+    [[ "${kid}" == "${active_kid}" ]] && found_active=true
+  done
+
+  if (( valid_entries == 0 )); then
+    record_failure "${label} requires at least one valid JWT_SECRETS entry"
+  fi
+  if [[ -n "${active_kid}" && "${found_active}" != true ]]; then
+    record_failure "${label} requires JWT_ACTIVE_KID to match a JWT_SECRETS kid"
+  fi
+}
+
+require_https_url_unless_allowed() {
+  local file="$1"
+  local key="$2"
+  local allow_key="$3"
+  local label="$4"
+  local value allow_value
+  if ! value="$(env_value "${file}" "${key}")" || [[ -z "${value}" ]]; then
+    record_failure "${label} requires ${key}"
+    return 1
+  fi
+  if allow_value="$(env_value "${file}" "${allow_key}")" && is_true "${allow_value}"; then
+    record_failure "${label} must not set ${allow_key} in production"
+    return 1
+  fi
+  if [[ "${value}" == https://* ]]; then
+    require_https_dependency_url_value "${key}" "${value}" "${label}"
+    return $?
+  fi
+  record_failure "${label} requires ${key} to use https"
+  return 1
+}
+
+require_https_dependency_url() {
+  local file="$1"
+  local key="$2"
+  local label="$3"
+  local value
+  if ! value="$(env_value "${file}" "${key}")" || [[ -z "${value}" ]]; then
+    record_failure "${label} requires ${key}"
+    return 1
+  fi
+  if [[ "${value}" != https://* ]]; then
+    record_failure "${label} requires ${key} to use https"
+    return 1
+  fi
+  require_https_dependency_url_value "${key}" "${value}" "${label}"
+}
+
+require_https_dependency_url_value() {
+  local key="$1"
+  local value="$2"
+  local label="$3"
+  local authority host lower
+  authority="${value#https://}"
+  authority="${authority%%/*}"
+  authority="${authority%%\?*}"
+  authority="${authority%%#*}"
+  if [[ -z "${authority}" || "${authority}" == \[* ]]; then
+    record_failure "${label} requires ${key} to use a real non-placeholder DNS host"
+    return 1
+  fi
+  host="${authority%%:*}"
+  lower="$(to_lower "${host}")"
+  if [[ -z "${lower}" || "${lower}" == "localhost" || "${lower}" == "ip6-localhost" || "${lower}" == *.local ]]; then
+    record_failure "${label} requires ${key} to use a real non-placeholder DNS host"
+    return 1
+  fi
+  if [[ "${lower}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    record_failure "${label} requires ${key} to use a real non-placeholder DNS host"
+    return 1
+  fi
+  case "${lower}" in
+    example|example.com|example.net|example.org|yourdomain.com|*.example|*.example.com|*.example.net|*.example.org|*.yourdomain.com|*.test|*.invalid)
+      record_failure "${label} requires ${key} to use a real non-placeholder DNS host"
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 require_matching_value() {
   local left_file="$1"
   local left_key="$2"
@@ -526,12 +723,12 @@ require_command_api_media_storage() {
   local file="$1"
   local label="$2"
   require_equals "${file}" "MEDIA_STORAGE_PROVIDER" "s3compatible" "${label}" || true
-  require_non_empty "${file}" "MEDIA_STORAGE_S3_ENDPOINT" "${label}" || true
+  require_https_url_unless_allowed "${file}" "MEDIA_STORAGE_S3_ENDPOINT" "IM_PRODUCTION_ALLOW_INSECURE_MEDIA_STORAGE_ENDPOINT" "${label}" || true
   require_non_empty "${file}" "MEDIA_STORAGE_S3_BUCKET" "${label}" || true
   require_non_empty "${file}" "MEDIA_STORAGE_S3_ACCESS_KEY_ID" "${label}" || true
   require_non_empty "${file}" "MEDIA_STORAGE_S3_SECRET_ACCESS_KEY" "${label}" || true
   require_non_empty "${file}" "MEDIA_STORAGE_S3_REGION" "${label}" || true
-  require_non_empty "${file}" "MEDIA_STORAGE_S3_FORCE_PATH_STYLE" "${label}" || true
+  require_one_of "${file}" "MEDIA_STORAGE_S3_FORCE_PATH_STYLE" "${label}" "true" "false" || true
 }
 
 require_command_api_write_path() {
@@ -591,7 +788,7 @@ require_search_configuration() {
   require_non_empty "${file}" "IM_SEARCH_DRIVER" "${label}" || true
   driver="$(env_value "${file}" "IM_SEARCH_DRIVER" || true)"
   if [[ "${driver}" == "opensearch" ]]; then
-    require_non_empty "${file}" "IM_OPENSEARCH_ENDPOINT" "${label}" || true
+    require_https_dependency_url "${file}" "IM_OPENSEARCH_ENDPOINT" "${label}" || true
   fi
 }
 
@@ -627,6 +824,7 @@ validate_command_api() {
   local label="command-api"
   require_file "${label}" "${COMMAND_API_ENV}"
   require_non_empty "${COMMAND_API_ENV}" "IM_NODE_ID" "${label}" || true
+  require_jwt_rotation_configuration "${COMMAND_API_ENV}" "${label}" || true
   require_primary_database "${COMMAND_API_ENV}" "${label}"
   require_conversation_shards "${COMMAND_API_ENV}" "${label}"
   require_kafka_stream "${COMMAND_API_ENV}" "${label}"
@@ -658,6 +856,7 @@ validate_gateway() {
   local group_limit
   require_file "${label}" "${GATEWAY_ENV}"
   require_non_empty "${GATEWAY_ENV}" "IM_NODE_ID" "${label}" || true
+  require_jwt_rotation_configuration "${GATEWAY_ENV}" "${label}" || true
   require_primary_database "${GATEWAY_ENV}" "${label}"
   require_gateway_command_ingress "${GATEWAY_ENV}" "${label}"
   require_tcp_tls_termination_for_public_bind "${GATEWAY_ENV}" "${label}" || true
@@ -700,6 +899,7 @@ validate_query_api() {
   local label="query-api"
   require_file "${label}" "${QUERY_API_ENV}"
   require_non_empty "${QUERY_API_ENV}" "IM_NODE_ID" "${label}" || true
+  require_jwt_rotation_configuration "${QUERY_API_ENV}" "${label}" || true
   require_primary_database "${QUERY_API_ENV}" "${label}"
   require_conversation_shards "${QUERY_API_ENV}" "${label}"
   require_summary_shards "${QUERY_API_ENV}" "${label}"

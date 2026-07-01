@@ -4,6 +4,8 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MONOREPO_DIR="$(cd "${ROOT_DIR}/.." && pwd)"
 RUN_SWIFT_TESTS="${RUN_SWIFT_TESTS:-true}"
+PRODUCTION_RELEASE_GATE_SELF_TEST="${PRODUCTION_RELEASE_GATE_SELF_TEST:-false}"
+VALIDATE_ARGS_ONLY=false
 RUN_REAL_PREFLIGHT=false
 REAL_STRICT_SECRETS=false
 COMMAND_API_SET=false
@@ -15,7 +17,9 @@ STREAM_CONSUMER_COUNT=0
 REAL_PREFLIGHT_ARGS=()
 REPORT_DIR="${ROOT_DIR}/reports"
 REPORT_FILE=""
+REPORT_JSON=""
 STEP_LOG_DIR=""
+STEP_RESULTS_FILE=""
 STEP_INDEX=0
 GATE_STATUS="running"
 
@@ -34,6 +38,8 @@ Runs the local production release gate:
   - full Swift tests by default with swift test --no-parallel
 
 Use --skip-swift-tests or RUN_SWIFT_TESTS=false only for a local fast smoke gate.
+Use --validate-args-only only from CI/static checks; it validates the gate CLI
+contract and exits before builds, protobuf checks, or Swift tests.
 
 Real env preflight args mirror production_env_preflight.sh:
   --command-api file
@@ -47,6 +53,7 @@ Real env preflight args mirror production_env_preflight.sh:
 
 Report options:
   --report-file file
+  --report-json file
 USAGE
 }
 
@@ -56,6 +63,103 @@ is_true() {
     *) return 1 ;;
   esac
 }
+
+run_self_test() {
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "${tmpdir}"' RETURN
+
+  if ! PRODUCTION_RELEASE_GATE_SELF_TEST=false bash "${BASH_SOURCE[0]}" \
+    --validate-args-only \
+    --command-api "${tmpdir}/command-api.env" \
+    --gateway "${tmpdir}/gateway.env" \
+    --query-api "${tmpdir}/query-api.env" \
+    --outbox-relay "${tmpdir}/outbox-relay.env" \
+    --ops "${tmpdir}/ops.env" \
+    --stream-consumer "${tmpdir}/stream-domain.env" \
+    --require-groups domain-delivery-consumer \
+    --strict-secrets >"${tmpdir}/valid.log" 2>&1; then
+    printf 'production_release_gate_self_test result=fail reason=valid_args_failed\n' >&2
+    cat "${tmpdir}/valid.log" >&2
+    exit 1
+  fi
+  grep -q 'production_release_gate validate_args=pass' "${tmpdir}/valid.log" || {
+    printf 'production_release_gate_self_test result=fail reason=valid_args_message_missing\n' >&2
+    exit 1
+  }
+
+  if PRODUCTION_RELEASE_GATE_SELF_TEST=false bash "${BASH_SOURCE[0]}" \
+    --validate-args-only \
+    --command-api "${tmpdir}/command-api.env" \
+    --strict-secrets >"${tmpdir}/missing-roles.log" 2>&1; then
+    printf 'production_release_gate_self_test result=fail reason=missing_roles_passed\n' >&2
+    exit 1
+  fi
+  grep -q 'Real env preflight requires --command-api, --gateway, --query-api, --outbox-relay, --ops, and at least one --stream-consumer' "${tmpdir}/missing-roles.log" || {
+    printf 'production_release_gate_self_test result=fail reason=missing_roles_message_missing\n' >&2
+    exit 1
+  }
+
+  if PRODUCTION_RELEASE_GATE_SELF_TEST=false bash "${BASH_SOURCE[0]}" \
+    --validate-args-only \
+    --command-api "${tmpdir}/command-api.env" \
+    --gateway "${tmpdir}/gateway.env" \
+    --query-api "${tmpdir}/query-api.env" \
+    --outbox-relay "${tmpdir}/outbox-relay.env" \
+    --ops "${tmpdir}/ops.env" \
+    --stream-consumer "${tmpdir}/stream-domain.env" >"${tmpdir}/missing-strict.log" 2>&1; then
+    printf 'production_release_gate_self_test result=fail reason=missing_strict_passed\n' >&2
+    exit 1
+  fi
+  grep -q 'Real env preflight requires --strict-secrets' "${tmpdir}/missing-strict.log" || {
+    printf 'production_release_gate_self_test result=fail reason=missing_strict_message_missing\n' >&2
+    exit 1
+  }
+
+  if PRODUCTION_RELEASE_GATE_SELF_TEST=false bash "${BASH_SOURCE[0]}" --definitely-invalid >"${tmpdir}/unknown.log" 2>&1; then
+    printf 'production_release_gate_self_test result=fail reason=unknown_arg_passed\n' >&2
+    exit 1
+  fi
+  grep -q 'Unknown argument: --definitely-invalid' "${tmpdir}/unknown.log" || {
+    printf 'production_release_gate_self_test result=fail reason=unknown_arg_message_missing\n' >&2
+    exit 1
+  }
+
+  PRODUCTION_RELEASE_GATE_SELF_TEST=false bash "${BASH_SOURCE[0]}" --help >"${tmpdir}/help.log"
+  grep -q 'Usage: production_release_gate.sh' "${tmpdir}/help.log" || {
+    printf 'production_release_gate_self_test result=fail reason=help_missing\n' >&2
+    exit 1
+  }
+
+  PRODUCTION_RELEASE_GATE_SELF_TEST=false bash "${BASH_SOURCE[0]}" \
+    --validate-args-only \
+    --skip-swift-tests \
+    --report-file "${tmpdir}/release-gate.md" \
+    --report-json "${tmpdir}/release-gate.json" >"${tmpdir}/receipt.log" 2>&1
+  python3 - "${tmpdir}/release-gate.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+if payload.get("status") != "passed":
+    raise SystemExit("production_release_gate_self_test result=fail reason=receipt_status_missing")
+if payload.get("validateArgsOnly") is not True:
+    raise SystemExit("production_release_gate_self_test result=fail reason=receipt_validate_args_only_missing")
+if payload.get("swiftTests") is not False:
+    raise SystemExit("production_release_gate_self_test result=fail reason=receipt_swift_tests_flag_wrong")
+if payload.get("steps") != []:
+    raise SystemExit("production_release_gate_self_test result=fail reason=receipt_steps_not_empty")
+PY
+
+  printf 'production_release_gate_self_test result=pass\n'
+}
+
+if is_true "${PRODUCTION_RELEASE_GATE_SELF_TEST}"; then
+  run_self_test
+  exit 0
+fi
 
 run_step() {
   local name="$1"
@@ -88,11 +192,13 @@ run_step() {
 
   if (( rc == 0 )); then
     echo "- status: passed" >> "${REPORT_FILE}"
+    printf '%s\t%s\t%s\tpassed\t0\n' "${STEP_INDEX}" "${name}" "${log_name}" >> "${STEP_RESULTS_FILE}"
   else
     {
       echo "- status: failed"
       echo "- exit_code: ${rc}"
     } >> "${REPORT_FILE}"
+    printf '%s\t%s\t%s\tfailed\t%s\n' "${STEP_INDEX}" "${name}" "${log_name}" "${rc}" >> "${STEP_RESULTS_FILE}"
     return "${rc}"
   fi
 }
@@ -112,8 +218,121 @@ write_failure_report() {
       echo "- status: failed"
       echo "- exit_code: ${rc}"
     } >> "${REPORT_FILE}"
+    write_json_receipt "failed" "${rc}" || true
     echo "Production release gate failed. Report: ${REPORT_FILE}" >&2
   fi
+}
+
+write_json_receipt() {
+  local status="${1:?missing status}"
+  local exit_code="${2:?missing exit code}"
+  if [[ -z "${REPORT_JSON}" ]]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "${REPORT_JSON}")"
+  python3 - \
+    "${REPORT_JSON}" \
+    "${status}" \
+    "${exit_code}" \
+    "${REPORT_FILE}" \
+    "${STEP_RESULTS_FILE}" \
+    "${RUN_SWIFT_TESTS}" \
+    "${RUN_REAL_PREFLIGHT}" \
+    "${REAL_STRICT_SECRETS}" \
+    "${STREAM_CONSUMER_COUNT}" \
+    "${VALIDATE_ARGS_ONLY}" \
+    "${MONOREPO_DIR}" <<'PY'
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+(
+    output_path,
+    status,
+    exit_code,
+    report_file,
+    step_results_file,
+    swift_tests,
+    real_env_preflight,
+    real_env_strict_secrets,
+    stream_consumer_count,
+    validate_args_only,
+    repo_root,
+) = sys.argv[1:12]
+
+def as_bool(value: str) -> bool:
+    return value.lower() in {"1", "true", "yes", "on"}
+
+def git_value(*args: str) -> str:
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).stdout.strip()
+    except OSError:
+        return ""
+
+steps = []
+step_path = Path(step_results_file) if step_results_file else None
+if step_path and step_path.is_file():
+    for line in step_path.read_text(encoding="utf-8").splitlines():
+        parts = line.split("\t")
+        if len(parts) != 5:
+            continue
+        index, name, log, step_status, step_exit = parts
+        try:
+            index_value = int(index)
+        except ValueError:
+            index_value = 0
+        try:
+            exit_value = int(step_exit)
+        except ValueError:
+            exit_value = 0
+        steps.append(
+            {
+                "index": index_value,
+                "name": name,
+                "log": log,
+                "status": step_status,
+                "exitCode": exit_value,
+            }
+        )
+
+payload = {
+    "schemaVersion": 1,
+    "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "status": status,
+    "exitCode": int(exit_code),
+    "validateArgsOnly": as_bool(validate_args_only),
+    "swiftTests": as_bool(swift_tests),
+    "realEnvPreflight": as_bool(real_env_preflight),
+    "realEnvStrictSecrets": as_bool(real_env_strict_secrets),
+    "streamConsumerEnvs": int(stream_consumer_count or 0),
+    "reportFile": report_file,
+    "source": {
+        "gitCommit": git_value("rev-parse", "--verify", "HEAD"),
+        "gitBranch": git_value("branch", "--show-current"),
+        "gitDirty": bool(git_value("status", "--porcelain")),
+    },
+    "summary": {
+        "stepCount": len(steps),
+        "passed": sum(1 for step in steps if step.get("status") == "passed"),
+        "failed": sum(1 for step in steps if step.get("status") == "failed"),
+        "skipped": sum(1 for step in steps if step.get("status") == "skipped"),
+    },
+    "steps": steps,
+}
+Path(output_path).write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+latest_path = Path(output_path).with_name("latest-production-release-gate.json")
+if latest_path != Path(output_path):
+    latest_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+PY
 }
 
 trap write_failure_report EXIT
@@ -131,6 +350,14 @@ while [[ $# -gt 0 ]]; do
     --report-file)
       REPORT_FILE="${2:?missing --report-file value}"
       shift 2
+      ;;
+    --report-json)
+      REPORT_JSON="${2:?missing --report-json value}"
+      shift 2
+      ;;
+    --validate-args-only)
+      VALIDATE_ARGS_ONLY=true
+      shift
       ;;
     --command-api)
       COMMAND_API_SET=true
@@ -199,12 +426,31 @@ if [[ "${RUN_REAL_PREFLIGHT}" == true ]]; then
   fi
 fi
 
+if [[ "${VALIDATE_ARGS_ONLY}" == true ]]; then
+  if [[ -n "${REPORT_FILE}" && -z "${REPORT_JSON}" ]]; then
+    REPORT_JSON="${REPORT_FILE%.*}.json"
+  fi
+  STEP_RESULTS_FILE="$(mktemp)"
+  write_json_receipt "passed" 0
+  printf 'production_release_gate validate_args=pass real_env_preflight=%s strictSecrets=%s streamConsumers=%s swiftTests=%s\n' \
+    "${RUN_REAL_PREFLIGHT}" \
+    "${REAL_STRICT_SECRETS}" \
+    "${STREAM_CONSUMER_COUNT}" \
+    "${RUN_SWIFT_TESTS}"
+  exit 0
+fi
+
 mkdir -p "${REPORT_DIR}"
 if [[ -z "${REPORT_FILE}" ]]; then
   REPORT_FILE="${REPORT_DIR}/$(date -u +%Y%m%dT%H%M%SZ)-production-release-gate.md"
 fi
+if [[ -z "${REPORT_JSON}" ]]; then
+  REPORT_JSON="${REPORT_FILE%.*}.json"
+fi
 mkdir -p "$(dirname "${REPORT_FILE}")"
 STEP_LOG_DIR="$(dirname "${REPORT_FILE}")"
+STEP_RESULTS_FILE="${STEP_LOG_DIR}/$(basename "${REPORT_FILE%.*}").steps.tsv"
+: > "${STEP_RESULTS_FILE}"
 
 {
   echo "# Production release gate report"
@@ -254,6 +500,7 @@ else
     echo "- status: skipped"
     echo "- reason: explicitly skipped with --skip-swift-tests or RUN_SWIFT_TESTS=false"
   } >> "${REPORT_FILE}"
+  printf '%s\t%s\t%s\tskipped\t0\n' "$((STEP_INDEX + 1))" "IMServer full Swift tests" "" >> "${STEP_RESULTS_FILE}"
   echo "==> swift test skipped by explicit request."
 fi
 
@@ -265,5 +512,7 @@ fi
 } >> "${REPORT_FILE}"
 
 GATE_STATUS="passed"
+write_json_receipt "passed" 0
 echo "production_release_gate passed."
 echo "Production release gate report: ${REPORT_FILE}"
+echo "Production release gate receipt: ${REPORT_JSON}"

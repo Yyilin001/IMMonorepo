@@ -6,7 +6,10 @@ COMPOSE_FILE="${ROOT_DIR}/docker-compose.production-smoke.yml"
 PROJECT_NAME="${COMPOSE_PROJECT_NAME:-imserver-production-smoke}"
 REPORT_DIR="${ROOT_DIR}/reports"
 STATE_FILE="${REPORT_DIR}/production-smoke-state.env"
-REPORT_FILE="${REPORT_DIR}/$(date -u +%Y%m%dT%H%M%SZ)-production-smoke.md"
+REPORT_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+REPORT_FILE="${REPORT_DIR}/${REPORT_STAMP}-production-smoke.md"
+RECEIPT_FILE="${REPORT_DIR}/${REPORT_STAMP}-production-smoke.json"
+LATEST_RECEIPT_FILE="${REPORT_DIR}/latest-production-smoke.json"
 
 GATEWAY_URL="${IM_SMOKE_GATEWAY_URL:-http://127.0.0.1:8080}"
 COMMAND_URL="${IM_SMOKE_COMMAND_URL:-http://127.0.0.1:8081}"
@@ -30,13 +33,15 @@ require_command() {
 
 usage() {
   cat <<'USAGE'
-Usage: production_smoke.sh <up|run|down|logs>
+Usage: production_smoke.sh <up|run|down|logs|self-test>
 
 Commands:
   up     Build image, start infra, run ops migrations, and start all production roles.
   run    Reset the smoke stack, start it, execute HTTP/Kafka/summary checks, and write a report.
   down   Stop the stack and remove smoke volumes.
   logs   Print role and infra logs.
+  self-test
+         Validate static production-smoke config that does not require Docker.
 USAGE
 }
 
@@ -127,13 +132,66 @@ wait_for_http() {
   local url="$2"
   echo "Waiting for ${name} at ${url}"
   for _ in $(seq 1 90); do
-    if curl -fsS "${url}/hello" >/dev/null 2>&1; then
+    if curl -fsS "${url}/health" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
   done
   echo "Timed out waiting for ${name}" >&2
   return 1
+}
+
+compose_container_health_status() {
+  local service="$1"
+  local container_id
+  container_id="$(compose ps -q "${service}" 2>/dev/null | head -n 1)"
+  if [[ -z "${container_id}" ]]; then
+    echo "missing missing"
+    return 0
+  fi
+  docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "${container_id}" 2>/dev/null || echo "missing missing"
+}
+
+wait_for_compose_service_health() {
+  local service="$1"
+  echo "Waiting for ${service} container health"
+  for _ in $(seq 1 90); do
+    local state health
+    read -r state health < <(compose_container_health_status "${service}")
+    if [[ "${state}" == "running" && ( "${health}" == "healthy" || "${health}" == "none" ) ]]; then
+      return 0
+    fi
+    if [[ "${state}" == "exited" || "${state}" == "dead" ]]; then
+      echo "Service ${service} stopped while waiting for health: state=${state} health=${health}" >&2
+      compose logs --no-color --tail=80 "${service}" >&2 || true
+      return 1
+    fi
+    sleep 2
+  done
+  echo "Timed out waiting for ${service} container health" >&2
+  compose ps "${service}" >&2 || true
+  compose logs --no-color --tail=80 "${service}" >&2 || true
+  return 1
+}
+
+wait_for_runtime_services_health() {
+  local services=(
+    gateway
+    command-api
+    query-api
+    outbox-relay
+    stream-consumer-summary
+    stream-consumer-changes
+    stream-consumer-search
+    stream-consumer-notification
+    stream-consumer-repair
+    stream-consumer-domain
+    stream-consumer-realtime
+  )
+  local service
+  for service in "${services[@]}"; do
+    wait_for_compose_service_health "${service}"
+  done
 }
 
 register_user() {
@@ -308,7 +366,7 @@ metric_value() {
 wait_for_outbox_recovery() {
   for _ in $(seq 1 60); do
     local inspect pending claimed failed
-    inspect="$(compose run --rm ops ops --env production --inspect-conversation-outbox 2>/dev/null || true)"
+    inspect="$(compose run --rm ops ops --env production-smoke --inspect-conversation-outbox 2>/dev/null || true)"
     pending="$(printf '%s\n' "${inspect}" | awk -F'[ =]' '/^shard=/{for(i=1;i<=NF;i++) if($i=="pending") print $(i+1)}' | awk '{s+=$1} END{print s+0}')"
     claimed="$(printf '%s\n' "${inspect}" | awk -F'[ =]' '/^shard=/{for(i=1;i<=NF;i++) if($i=="claimed") print $(i+1)}' | awk '{s+=$1} END{print s+0}')"
     failed="$(printf '%s\n' "${inspect}" | awk -F'[ =]' '/^shard=/{for(i=1;i<=NF;i++) if($i=="failed") print $(i+1)}' | awk '{s+=$1} END{print s+0}')"
@@ -320,7 +378,7 @@ wait_for_outbox_recovery() {
     sleep 2
   done
   echo "Outbox backlog did not recover" >&2
-  compose run --rm ops ops --env production --inspect-conversation-outbox >&2 || true
+  compose run --rm ops ops --env production-smoke --inspect-conversation-outbox >&2 || true
   return 1
 }
 
@@ -335,7 +393,7 @@ assert_metrics_protected() {
 }
 
 write_state() {
-  local owner_token="$1"
+  local _access_token="$1"
   local owner_user_id="$2"
   local direct_conversation_id="$3"
   local group_conversation_id="$4"
@@ -344,12 +402,108 @@ write_state() {
     printf 'GATEWAY_URL=%q\n' "${GATEWAY_URL}"
     printf 'COMMAND_URL=%q\n' "${COMMAND_URL}"
     printf 'QUERY_URL=%q\n' "${QUERY_URL}"
-    printf 'INTERNAL_SECRET=%q\n' "${INTERNAL_SECRET}"
-    printf 'OWNER_TOKEN=%q\n' "${owner_token}"
     printf 'OWNER_USER_ID=%q\n' "${owner_user_id}"
     printf 'DIRECT_CONVERSATION_ID=%q\n' "${direct_conversation_id}"
     printf 'GROUP_CONVERSATION_ID=%q\n' "${group_conversation_id}"
   } > "${STATE_FILE}"
+}
+
+write_smoke_receipt() {
+  local generated_at="$1"
+  local direct_conversation_id="$2"
+  local group_conversation_id="$3"
+  python3 - \
+    "${generated_at}" \
+    "${PROJECT_NAME}" \
+    "${COMPOSE_FILE}" \
+    "${REPORT_FILE}" \
+    "${STATE_FILE}" \
+    "${REPORT_DIR}/production-smoke-compose-ps.txt" \
+    "${REPORT_DIR}/production-smoke-compose.log" \
+    "${REPORT_DIR}/production-smoke-outbox-inspect.txt" \
+    "${direct_conversation_id}" \
+    "${group_conversation_id}" \
+    "${GATEWAY_URL}" \
+    "${COMMAND_URL}" \
+    "${QUERY_URL}" \
+    "${RECEIPT_FILE}" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+(
+    generated_at,
+    project,
+    compose_file,
+    report_file,
+    state_file,
+    compose_ps_file,
+    compose_log_file,
+    outbox_inspect_file,
+    direct_conversation_id,
+    group_conversation_id,
+    gateway_url,
+    command_url,
+    query_url,
+    receipt_file,
+) = sys.argv[1:]
+
+def git_value(*args: str) -> str:
+    try:
+        return subprocess.check_output(["git", *args], text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return ""
+
+dirty = bool(git_value("status", "--porcelain"))
+payload = {
+    "schemaVersion": 1,
+    "generatedAt": generated_at,
+    "status": "passed",
+    "exitCode": 0,
+    "environment": "production-smoke",
+    "project": project,
+    "runtimeEvidence": True,
+    "composeFile": compose_file,
+    "endpoints": {
+        "gateway": gateway_url,
+        "command": command_url,
+        "query": query_url,
+    },
+    "conversations": {
+        "directConversationID": direct_conversation_id,
+        "groupConversationID": group_conversation_id,
+    },
+    "source": {
+        "gitCommit": git_value("rev-parse", "HEAD"),
+        "gitBranch": git_value("rev-parse", "--abbrev-ref", "HEAD"),
+        "gitDirty": dirty,
+    },
+    "artifacts": {
+        "markdownReport": report_file,
+        "stateFile": state_file,
+        "composePs": compose_ps_file,
+        "composeLog": compose_log_file,
+        "outboxInspect": outbox_inspect_file,
+    },
+    "checks": [
+        {"name": "docker_compose_runtime_roles", "status": "passed"},
+        {"name": "runtime_services_health", "status": "passed"},
+        {"name": "http_health", "status": "passed"},
+        {"name": "auth_register_or_login", "status": "passed"},
+        {"name": "conversation_create", "status": "passed"},
+        {"name": "message_write", "status": "passed"},
+        {"name": "summary_projection", "status": "passed"},
+        {"name": "changes_projection", "status": "passed"},
+        {"name": "messages_since", "status": "passed"},
+        {"name": "metrics_secret", "status": "passed"},
+        {"name": "outbox_recovery", "status": "passed"},
+    ],
+}
+path = Path(receipt_file)
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  cp "${RECEIPT_FILE}" "${LATEST_RECEIPT_FILE}"
 }
 
 collect_logs() {
@@ -361,7 +515,7 @@ collect_logs() {
 print_diagnostics() {
   echo "Collecting production smoke diagnostics" >&2
   collect_logs
-  compose run --rm ops ops --env production --inspect-conversation-outbox >&2 || true
+  compose run --rm ops ops --env production-smoke --inspect-conversation-outbox >&2 || true
   curl -fsS -H "X-IM-Internal-Secret: ${INTERNAL_SECRET}" "${COMMAND_URL}/internal/metrics" >&2 || true
 }
 
@@ -383,8 +537,11 @@ up_stack() {
     stream-consumer-changes \
     stream-consumer-search \
     stream-consumer-notification \
-    stream-consumer-repair
+    stream-consumer-repair \
+    stream-consumer-domain \
+    stream-consumer-realtime
 
+  wait_for_runtime_services_health
   wait_for_http gateway "${GATEWAY_URL}"
   wait_for_http command-api "${COMMAND_URL}"
   wait_for_http query-api "${QUERY_URL}"
@@ -392,6 +549,179 @@ up_stack() {
 
 down_stack() {
   compose down --volumes --remove-orphans
+}
+
+production_smoke_config_self_test() {
+  require_command python3
+  python3 - "${COMPOSE_FILE}" "${BASH_SOURCE[0]}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+compose_path = Path(sys.argv[1])
+script_path = Path(sys.argv[2])
+text = compose_path.read_text(encoding="utf-8")
+script_text = script_path.read_text(encoding="utf-8")
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise SystemExit(f"production-smoke-config-self-test result=fail reason={message}")
+
+def value_for(key: str) -> str:
+    match = re.search(rf"^\s*{re.escape(key)}:\s*\"?([^\"\n]+)\"?\s*$", text, re.MULTILINE)
+    require(match is not None, f"missing_{key}")
+    return match.group(1).strip()
+
+def compose_service_names() -> set[str]:
+    services = set()
+    in_services = False
+    for line in text.splitlines():
+        if line == "services:":
+            in_services = True
+            continue
+        if not in_services:
+            continue
+        if line and not line.startswith(" ") and not line.startswith("#"):
+            break
+        match = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if match:
+            services.add(match.group(1))
+    return services
+
+def service_block(service_name: str) -> str:
+    pattern = rf"^  {re.escape(service_name)}:\n(?P<body>(?:    .*\n|      .*\n|        .*\n|          .*\n)*)"
+    match = re.search(pattern, text, re.MULTILINE)
+    require(match is not None, f"missing_service_block:{service_name}")
+    return match.group("body")
+
+def up_stack_services() -> set[str]:
+    match = re.search(
+        r"compose up -d \\\n(?P<body>.*?)(?:\n\n|\n\s*wait_for_http)",
+        script_text,
+        re.DOTALL,
+    )
+    require(match is not None, "missing_runtime_compose_up_block")
+    services = set()
+    for line in match.group("body").splitlines():
+        stripped = line.strip().rstrip("\\").strip()
+        if stripped:
+            services.add(stripped)
+    return services
+
+def wait_for_http_body() -> str:
+    match = re.search(
+        r"wait_for_http\(\) \{\n(?P<body>.*?)\n\}",
+        script_text,
+        re.DOTALL,
+    )
+    require(match is not None, "missing_wait_for_http_function")
+    return match.group("body")
+
+def write_state_body() -> str:
+    match = re.search(
+        r"write_state\(\) \{\n(?P<body>.*?)\n\}",
+        script_text,
+        re.DOTALL,
+    )
+    require(match is not None, "missing_write_state_function")
+    return match.group("body")
+
+def runtime_health_wait_services() -> set[str]:
+    match = re.search(
+        r"wait_for_runtime_services_health\(\) \{\n(?P<body>.*?)\n\}",
+        script_text,
+        re.DOTALL,
+    )
+    require(match is not None, "missing_wait_for_runtime_services_health_function")
+    array_match = re.search(r"local services=\(\n(?P<array>.*?)\n\s*\)", match.group("body"), re.DOTALL)
+    require(array_match is not None, "missing_runtime_health_services_array")
+    services = set()
+    for line in array_match.group("array").splitlines():
+        stripped = line.strip().strip('"').strip("'")
+        if stripped:
+            services.add(stripped)
+    return services
+
+access_key = value_for("MEDIA_STORAGE_S3_ACCESS_KEY_ID")
+secret_key = value_for("MEDIA_STORAGE_S3_SECRET_ACCESS_KEY")
+root_user = value_for("MINIO_ROOT_USER")
+root_password = value_for("MINIO_ROOT_PASSWORD")
+endpoint = value_for("MEDIA_STORAGE_S3_ENDPOINT")
+allow_insecure = value_for("IM_PRODUCTION_ALLOW_INSECURE_MEDIA_STORAGE_ENDPOINT")
+compose_services = compose_service_names()
+started_services = up_stack_services()
+health_wait_services = runtime_health_wait_services()
+runtime_services = {
+    "gateway",
+    "command-api",
+    "query-api",
+    "outbox-relay",
+} | {name for name in compose_services if name.startswith("stream-consumer-")}
+
+placeholder_values = {
+    "minioadmin",
+    "access-key",
+    "secret-key",
+    "password",
+    "password1234",
+    "replace-me",
+    "change_me",
+    "changeme",
+}
+require(access_key == root_user, "minio_root_user_must_match_media_access_key")
+require(secret_key == root_password, "minio_root_password_must_match_media_secret")
+require(secret_key.lower() not in placeholder_values, "media_secret_must_not_be_placeholder")
+require(len(secret_key) >= 16, "media_secret_min_length_16")
+require(endpoint.startswith("http://minio:"), "smoke_endpoint_must_target_local_minio")
+require(allow_insecure == "true", "local_minio_requires_explicit_insecure_endpoint_override")
+require("minioadmin" not in text, "default_minioadmin_credentials_forbidden")
+require(
+    f"mc alias set smoke http://minio:9000 {access_key} {secret_key}" in text,
+    "minio_init_alias_must_use_same_credentials",
+)
+require("compose run --rm ops" in script_text, "ops_migration_runner_must_start_before_runtime_roles")
+outbox_inspect_commands = [
+    line.strip()
+    for line in script_text.splitlines()
+    if "--inspect-conversation-outbox" in line
+    and (line.strip().startswith('inspect="$(compose run --rm ops ops') or line.strip().startswith("compose run --rm ops ops"))
+]
+require(outbox_inspect_commands, "missing_outbox_inspect_commands")
+for command in outbox_inspect_commands:
+    require("--env production-smoke" in command, "outbox_inspect_must_use_smoke_env:" + command)
+    require(
+        re.search(r"--env\s+production(\s|$)", command) is None,
+        "outbox_inspect_must_not_use_real_production_env:" + command,
+    )
+missing_runtime_services = sorted(runtime_services - started_services)
+require(not missing_runtime_services, "runtime_services_not_started:" + ",".join(missing_runtime_services))
+missing_health_wait_services = sorted(runtime_services - health_wait_services)
+require(not missing_health_wait_services, "runtime_services_not_health_waited:" + ",".join(missing_health_wait_services))
+http_wait_body = wait_for_http_body()
+state_body = write_state_body()
+require('curl -fsS "${url}/health"' in http_wait_body, "http_readiness_must_use_health_endpoint")
+require('curl -fsS "${url}/hello"' not in http_wait_body, "http_readiness_must_not_use_hello_endpoint")
+require("INTERNAL_SECRET" not in state_body, "state_file_must_not_persist_internal_secret")
+require("OWNER_TOKEN" not in state_body, "state_file_must_not_persist_owner_token")
+require("\n  wait_for_runtime_services_health\n" in script_text, "missing_runtime_services_health_wait_call")
+require("wait_for_compose_service_health" in script_text, "missing_compose_service_health_wait")
+require("docker inspect --format" in script_text, "compose_health_wait_must_inspect_container_state")
+require("write_smoke_receipt()" in script_text, "missing_write_smoke_receipt_function")
+require("latest-production-smoke.json" in script_text, "missing_latest_production_smoke_receipt")
+require('"runtimeEvidence": True' in script_text, "smoke_receipt_must_mark_runtime_evidence")
+require('"checks": [' in script_text, "smoke_receipt_must_include_checks")
+require('"runtime_services_health"' in script_text, "smoke_receipt_must_include_runtime_health_check")
+require("write_smoke_receipt \"${generated_at}\"" in script_text, "missing_write_smoke_receipt_call")
+require("x-imserver-worker-healthcheck: &imserver_worker_healthcheck" in text, "missing_worker_healthcheck_anchor")
+require('test: ["CMD-SHELL", "kill -0 1"]' in text, "worker_healthcheck_must_probe_pid1")
+for service_name in sorted({"outbox-relay"} | {name for name in compose_services if name.startswith("stream-consumer-")}):
+    require(
+        "healthcheck: *imserver_worker_healthcheck" in service_block(service_name),
+        f"worker_service_missing_worker_healthcheck:{service_name}",
+    )
+
+print("production-smoke-config-self-test result=pass")
+PY
 }
 
 run_smoke() {
@@ -433,15 +763,17 @@ run_smoke() {
   request_json GET "${QUERY_URL}/api/im/conversations/${direct_id}/messages/since?afterSequence=0&limit=10" "" "${owner_token}" >/dev/null
   assert_metrics_protected
   wait_for_outbox_recovery >/tmp/imserver-production-smoke-outbox.txt
-  compose run --rm ops ops --env production --inspect-conversation-outbox > "${REPORT_DIR}/production-smoke-outbox-inspect.txt"
+  compose run --rm ops ops --env production-smoke --inspect-conversation-outbox > "${REPORT_DIR}/production-smoke-outbox-inspect.txt"
 
   write_state "${owner_token}" "${owner_user_id}" "${direct_id}" "${group_id}"
   collect_logs
 
+  local generated_at
+  generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   {
     echo "# IMServer production smoke report"
     echo
-    echo "- generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "- generated_at: ${generated_at}"
     echo "- project: ${PROJECT_NAME}"
     echo "- direct_conversation_id: ${direct_id}"
     echo "- group_conversation_id: ${group_id}"
@@ -457,9 +789,11 @@ run_smoke() {
     echo '```'
     cat "${REPORT_DIR}/production-smoke-outbox-inspect.txt"
     echo '```'
-  } > "${REPORT_FILE}"
+	  } > "${REPORT_FILE}"
+  write_smoke_receipt "${generated_at}" "${direct_id}" "${group_id}"
 
   echo "Production smoke passed: ${REPORT_FILE}"
+  echo "Production smoke receipt: ${LATEST_RECEIPT_FILE}"
 }
 
 case "${1:-}" in
@@ -474,6 +808,9 @@ case "${1:-}" in
     ;;
   logs)
     compose logs --no-color --tail="${LOG_TAIL:-300}"
+    ;;
+  self-test)
+    production_smoke_config_self_test
     ;;
   *)
     usage

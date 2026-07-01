@@ -23,7 +23,7 @@ replace_env_value() {
   local key="$2"
   local value="$3"
   if grep -qE "^${key}=" "${file}"; then
-    perl -0pi -e "s/^${key}=.*$/${key}=${value}/m" "${file}"
+    perl -0pi -e "s#^${key}=.*\$#${key}=${value}#m" "${file}"
   else
     printf '\n%s=%s\n' "${key}" "${value}" >> "${file}"
   fi
@@ -138,7 +138,7 @@ bash -n "${RELEASE_GATE}"
 
 run_should_pass "default templates pass" "${PREFLIGHT}"
 
-run_should_fail "strict secrets rejects template placeholders" "strict secrets requires JWT_SECRET to not use placeholder value" \
+run_should_fail "strict secrets rejects template placeholders" "strict secrets requires JWT_SECRETS to not use placeholder value" \
   "${PREFLIGHT}" --strict-secrets
 
 run_should_fail "release gate real env requires complete role args" "Real env preflight requires --command-api, --gateway, --query-api, --outbox-relay, --ops, and at least one --stream-consumer." \
@@ -156,6 +156,16 @@ run_should_fail "release gate real env requires strict secrets" "Real env prefli
 full_dir="$(copy_templates full)"
 run_should_pass "four stream-consumer topology passes" run_preflight "${full_dir}" \
   --require-groups summary-projection-consumer,domain-delivery-consumer,realtime-delivery-consumer,notification-consumer
+
+jwt_legacy_dir="$(copy_templates jwt-legacy)"
+replace_env_value "${jwt_legacy_dir}/command-api.env" "JWT_SECRET" "0123456789abcdef0123456789abcdef"
+run_should_fail "legacy JWT_SECRET fails production preflight" "command-api must not set legacy JWT_SECRET in production" \
+  run_preflight "${jwt_legacy_dir}"
+
+jwt_active_missing_dir="$(copy_templates jwt-active-missing)"
+delete_env_key "${jwt_active_missing_dir}/gateway.env" "JWT_ACTIVE_KID"
+run_should_fail "missing active JWT kid fails production preflight" "gateway requires JWT_ACTIVE_KID" \
+  run_preflight "${jwt_active_missing_dir}"
 
 private_tcp_dir="$(copy_templates private-tcp)"
 replace_env_value "${private_tcp_dir}/gateway.env" "IM_TCP_HOST" "10.0.0.10"
@@ -327,6 +337,34 @@ media_missing_secret_dir="$(copy_templates media-missing-secret)"
 delete_env_key "${media_missing_secret_dir}/command-api.env" "MEDIA_STORAGE_S3_SECRET_ACCESS_KEY"
 run_should_fail "command-api missing S3 media secret fails" "command-api requires MEDIA_STORAGE_S3_SECRET_ACCESS_KEY" \
   run_preflight "${media_missing_secret_dir}"
+
+media_http_endpoint_dir="$(copy_templates media-http-endpoint)"
+replace_env_value "${media_http_endpoint_dir}/command-api.env" "MEDIA_STORAGE_S3_ENDPOINT" "http://s3.internal"
+run_should_fail "command-api insecure S3 media endpoint fails" "command-api requires MEDIA_STORAGE_S3_ENDPOINT to use https" \
+  run_preflight "${media_http_endpoint_dir}"
+
+media_http_endpoint_allowed_dir="$(copy_templates media-http-endpoint-allowed)"
+replace_env_value "${media_http_endpoint_allowed_dir}/command-api.env" "MEDIA_STORAGE_S3_ENDPOINT" "http://s3.internal"
+replace_env_value "${media_http_endpoint_allowed_dir}/command-api.env" "IM_PRODUCTION_ALLOW_INSECURE_MEDIA_STORAGE_ENDPOINT" "true"
+run_should_fail "command-api insecure S3 media endpoint smoke override fails" "command-api must not set IM_PRODUCTION_ALLOW_INSECURE_MEDIA_STORAGE_ENDPOINT in production" \
+  run_preflight "${media_http_endpoint_allowed_dir}"
+
+media_placeholder_endpoint_dir="$(copy_templates media-placeholder-endpoint)"
+replace_env_value "${media_placeholder_endpoint_dir}/command-api.env" "MEDIA_STORAGE_S3_ENDPOINT" "https://s3.example"
+run_should_fail "command-api placeholder S3 media endpoint fails" "command-api requires MEDIA_STORAGE_S3_ENDPOINT to use a real non-placeholder DNS host" \
+  run_preflight "${media_placeholder_endpoint_dir}"
+
+search_http_endpoint_dir="$(copy_templates search-http-endpoint)"
+replace_env_value "${search_http_endpoint_dir}/query-api.env" "IM_SEARCH_DRIVER" "opensearch"
+replace_env_value "${search_http_endpoint_dir}/query-api.env" "IM_OPENSEARCH_ENDPOINT" "http://opensearch.internal"
+run_should_fail "query-api insecure OpenSearch endpoint fails" "query-api requires IM_OPENSEARCH_ENDPOINT to use https" \
+  run_preflight "${search_http_endpoint_dir}"
+
+search_placeholder_endpoint_dir="$(copy_templates search-placeholder-endpoint)"
+replace_env_value "${search_placeholder_endpoint_dir}/query-api.env" "IM_SEARCH_DRIVER" "opensearch"
+replace_env_value "${search_placeholder_endpoint_dir}/query-api.env" "IM_OPENSEARCH_ENDPOINT" "https://opensearch.example"
+run_should_fail "query-api placeholder OpenSearch endpoint fails" "query-api requires IM_OPENSEARCH_ENDPOINT to use a real non-placeholder DNS host" \
+  run_preflight "${search_placeholder_endpoint_dir}"
 
 hot_limit_dir="$(copy_templates hot-limit)"
 delete_env_key "${hot_limit_dir}/command-api.env" "IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT"
