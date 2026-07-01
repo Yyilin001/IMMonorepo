@@ -2908,8 +2908,11 @@ GOVERNANCE_REQUIRED = {
         '"steps": steps',
         "Real env preflight requires --command-api, --gateway, --query-api, --outbox-relay, --ops, and at least one --stream-consumer",
         "Real env preflight requires --strict-secrets",
-        "swift build -c release --package-path",
-        "swift test --no-parallel --package-path",
+        "SWIFTPM_BUILD_JOBS",
+        "configure_swiftpm_job_args",
+        "swift build -c release",
+        "swift test --no-parallel",
+        "--package-path",
     ],
     "IMServer/scripts/verify_production_release_gate.py": [
         "production_release_gate_verify result=pass",

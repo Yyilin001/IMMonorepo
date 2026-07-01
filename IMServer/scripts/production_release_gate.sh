@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MONOREPO_DIR="$(cd "${ROOT_DIR}/.." && pwd)"
 RUN_SWIFT_TESTS="${RUN_SWIFT_TESTS:-true}"
+SWIFTPM_BUILD_JOBS="${SWIFTPM_BUILD_JOBS:-}"
 PRODUCTION_RELEASE_GATE_SELF_TEST="${PRODUCTION_RELEASE_GATE_SELF_TEST:-false}"
 VALIDATE_ARGS_ONLY=false
 RUN_REAL_PREFLIGHT=false
@@ -22,6 +23,7 @@ STEP_LOG_DIR=""
 STEP_RESULTS_FILE=""
 STEP_INDEX=0
 GATE_STATUS="running"
+SWIFTPM_JOB_ARGS=()
 
 usage() {
   cat <<'USAGE'
@@ -55,6 +57,18 @@ Report options:
   --report-file file
   --report-json file
 USAGE
+}
+
+configure_swiftpm_job_args() {
+  local jobs="${SWIFTPM_BUILD_JOBS}"
+  if [[ -z "${jobs}" && "$(uname -s)" != "Darwin" ]]; then
+    jobs=2
+  fi
+  if [[ -n "${jobs}" ]]; then
+    SWIFTPM_JOB_ARGS=(--jobs "${jobs}")
+  else
+    SWIFTPM_JOB_ARGS=()
+  fi
 }
 
 is_true() {
@@ -457,6 +471,7 @@ if [[ "${VALIDATE_ARGS_ONLY}" == true ]]; then
 fi
 
 mkdir -p "${REPORT_DIR}"
+configure_swiftpm_job_args
 if [[ -z "${REPORT_FILE}" ]]; then
   REPORT_FILE="${REPORT_DIR}/$(date -u +%Y%m%dT%H%M%SZ)-production-release-gate.md"
 fi
@@ -474,6 +489,7 @@ STEP_RESULTS_FILE="${STEP_LOG_DIR}/$(basename "${REPORT_FILE%.*}").steps.tsv"
   echo "- generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "- git_sha: $(git -C "${MONOREPO_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   echo "- swift_tests: ${RUN_SWIFT_TESTS}"
+  echo "- swiftpm_build_jobs: ${SWIFTPM_BUILD_JOBS:-auto}"
   echo "- real_env_preflight: ${RUN_REAL_PREFLIGHT}"
   echo "- real_env_strict_secrets: ${REAL_STRICT_SECRETS}"
   echo "- stream_consumer_envs: ${STREAM_CONSUMER_COUNT}"
@@ -504,14 +520,14 @@ if [[ "${RUN_REAL_PREFLIGHT}" == true ]]; then
   run_step "Production real env preflight" "${ROOT_DIR}/scripts/production_env_preflight.sh" "${REAL_PREFLIGHT_ARGS[@]}"
 fi
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  run_step "TCPDriver release build" swift build -c release --package-path "${ROOT_DIR}/LoadTests/TCPDriver"
+  run_step "TCPDriver release build" swift build -c release "${SWIFTPM_JOB_ARGS[@]}" --package-path "${ROOT_DIR}/LoadTests/TCPDriver"
 else
   record_skipped_step "TCPDriver release build" "TCPDriver uses Apple's Network framework and is built on Darwin load-generator hosts."
 fi
-run_step "IMServer release build" swift build -c release --package-path "${ROOT_DIR}"
+run_step "IMServer release build" swift build -c release "${SWIFTPM_JOB_ARGS[@]}" --package-path "${ROOT_DIR}"
 
 if is_true "${RUN_SWIFT_TESTS}"; then
-  run_step "IMServer full Swift tests" swift test --no-parallel --package-path "${ROOT_DIR}"
+  run_step "IMServer full Swift tests" swift test --no-parallel "${SWIFTPM_JOB_ARGS[@]}" --package-path "${ROOT_DIR}"
 else
   record_skipped_step "IMServer full Swift tests" "explicitly skipped with --skip-swift-tests or RUN_SWIFT_TESTS=false"
   echo "==> swift test skipped by explicit request."

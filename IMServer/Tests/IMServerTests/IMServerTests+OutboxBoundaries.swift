@@ -3477,6 +3477,87 @@ extension IMServerTests {
         }
     }
 
+    @Test("Batch media reference sync returns recall tombstones for directory cleanup")
+    func batchMediaReferenceSyncReturnsRecallTombstonesForDirectoryCleanup() async throws {
+        try await withApp(configure: configure) { app in
+            let sender = try await makeUser(email: "batch-media-reference-sender@example.com", on: app)
+            let senderID = try sender.requireID()
+            let conversation = Conversation(
+                title: "Batch Media Reference",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_710_610_000)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+            try await ConversationMember(conversationID: conversationID, userID: senderID, role: .owner)
+                .create(on: app.db)
+
+            let asset = IMMediaAsset(
+                assetID: "batch-media-reference-asset",
+                kind: .file,
+                mimeType: "application/pdf",
+                byteSize: 256,
+                filename: "batch.pdf",
+                width: nil,
+                height: nil,
+                durationMillis: nil,
+                previewAssetID: nil
+            )
+            let message = try ConversationMessage(
+                conversationID: conversationID,
+                senderUserID: senderID,
+                serverSequence: 1,
+                timelineSequence: 1,
+                clientMessageID: "batch-media-reference-message",
+                content: .file(asset)
+            )
+            try await message.create(on: app.db)
+            let messageID = try message.requireID()
+
+            let referenceService = ConversationMediaAssetReferenceService(db: app.db)
+            let directoryService = ConversationMediaAssetReferenceDirectoryService(db: app.db)
+            let createdReferences = try await referenceService.syncMessageReferences(
+                conversationID: conversationID,
+                messageIDs: [messageID],
+                on: app.db
+            )
+            try await directoryService.sync(
+                referencesByMessageID: createdReferences,
+                shardID: SingleShardConversationShardRouter.defaultShardID,
+                on: app.db
+            )
+            #expect(try await ConversationMediaAssetReferenceDirectory.find(
+                ConversationMediaAssetReferenceDirectory.recordID(messageID: messageID),
+                on: app.db
+            ) != nil)
+
+            try message.replaceDerivedState(.init(recallState: .recalled))
+            try await message.update(on: app.db)
+            let removedReferences = try await referenceService.syncMessageReferences(
+                conversationID: conversationID,
+                messageIDs: [messageID],
+                on: app.db
+            )
+            let tombstoneWasReturned: Bool
+            if case .some(.none) = removedReferences[messageID] {
+                tombstoneWasReturned = true
+            } else {
+                tombstoneWasReturned = false
+            }
+            #expect(tombstoneWasReturned)
+
+            try await directoryService.sync(
+                referencesByMessageID: removedReferences,
+                shardID: SingleShardConversationShardRouter.defaultShardID,
+                on: app.db
+            )
+            #expect(try await ConversationMediaAssetReferenceDirectory.find(
+                ConversationMediaAssetReferenceDirectory.recordID(messageID: messageID),
+                on: app.db
+            ) == nil)
+        }
+    }
+
     @Test("Directory backed shard router caches conversation shard lookups")
     func directoryBackedShardRouterCachesConversationLookups() async throws {
         try await withApp(configure: configure) { app in

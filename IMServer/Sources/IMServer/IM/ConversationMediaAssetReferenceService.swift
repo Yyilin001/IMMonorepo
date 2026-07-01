@@ -44,7 +44,7 @@ struct ConversationMediaAssetReferenceService {
                 if existingReferencesByID[recordID] != nil {
                     recordIDsToDelete.append(recordID)
                 }
-                results[messageID] = nil
+                results.updateValue(nil, forKey: messageID)
                 continue
             }
 
