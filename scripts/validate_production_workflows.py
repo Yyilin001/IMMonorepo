@@ -319,7 +319,7 @@ REQUIRED = {
     },
     ".github/workflows/imapp-production-config-gate.yml": {
         "commands": [
-            "runs-on: macos-latest",
+            "runs-on: macos-26",
             "xcodebuild -version",
             "run: make validate-ios-network-config",
             "IMAPP_NETWORK_CONFIG_MODE=development",
