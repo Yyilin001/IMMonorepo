@@ -126,7 +126,8 @@ SEED_USER_PASSWORD=password1234
 ### 3. 启动服务
 
 ```bash
-./scripts/run_local.sh
+./scripts/local_service.sh start
+./scripts/local_service.sh health
 ```
 
 默认 HTTP 地址：
@@ -146,6 +147,19 @@ http://127.0.0.1:8080
 ```bash
 docker compose up --build
 ```
+
+本地 Docker stack 使用 development 环境和 combined 角色，默认暴露：
+
+```text
+HTTP: http://127.0.0.1:8080
+TCP:  127.0.0.1:9000
+```
+
+客户端本地地址规则：
+
+- iOS Simulator：`http://127.0.0.1:8080` / `127.0.0.1:9000`
+- Android Emulator：`http://10.0.2.2:8080` / `10.0.2.2:9000`
+- 真机同 Wi-Fi：使用 Mac 局域网 IP 覆盖 Debug 配置，例如 `http://192.168.x.x:8080` / `192.168.x.x:9000`
 
 ## 开发命令
 
@@ -176,8 +190,18 @@ IM_POSTGRES_SMOKE_DATABASE_URL=postgres://user:password@127.0.0.1:5432/imserver_
 生产拓扑 smoke：
 
 ```bash
-./scripts/production_smoke.sh run
+make check-imserver-production-smoke
+make run-imserver-production-smoke
+make verify-imserver-production-smoke
 ```
+
+`check-imserver-production-smoke` 只做静态拓扑和脚本自检，不需要 Docker；
+`run-imserver-production-smoke` 需要本机或 CI 提供 Docker，会启动
+`gateway`、`command-api`、`query-api`、`outbox-relay` 和所有
+`stream-consumer-*` 角色，等待容器健康和 HTTP `/health` 后再执行端到端
+写入、投影、指标鉴权和 outbox recovery 检查，并生成
+`reports/latest-production-smoke.json`。`verify-imserver-production-smoke`
+用于校验这份机器可读 receipt。
 
 多端同步上线门禁：
 

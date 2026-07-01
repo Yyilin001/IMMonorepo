@@ -7,10 +7,17 @@ FROM swift:6.1-noble AS build
 RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
     && apt-get -q update \
     && apt-get -q dist-upgrade -y \
-    && apt-get install -y libjemalloc-dev libssl-dev libsasl2-dev
+    && apt-get install -y --no-install-recommends \
+      libjemalloc-dev \
+      libssl-dev \
+      libsasl2-dev \
+    && rm -rf /var/lib/apt/lists/*
 
+ARG GIT_HTTPS_PROXY_PREFIX=""
 RUN git config --global http.version HTTP/1.1 \
-    && git config --global url."https://gh-proxy.com/https://github.com/".insteadOf "https://github.com/"
+    && if [ -n "${GIT_HTTPS_PROXY_PREFIX}" ]; then \
+        git config --global url."${GIT_HTTPS_PROXY_PREFIX}".insteadOf "https://github.com/"; \
+    fi
 
 # 设置构建目录
 WORKDIR /build
@@ -62,16 +69,13 @@ FROM ubuntu:noble
 RUN export DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true \
     && apt-get -q update \
     && apt-get -q dist-upgrade -y \
-    && apt-get -q install -y \
+    && apt-get -q install -y --no-install-recommends \
       libjemalloc2 \
       ca-certificates \
       tzdata \
       libcurl4 \
-# 如果你的应用或其依赖导入了 FoundationNetworking，也需要安装 `libcurl4`。
-      # libcurl4 \
-# 如果你的应用或其依赖导入了 FoundationXML，也需要安装 `libxml2`。
-      # libxml2 \
-    && rm -r /var/lib/apt/lists/*
+      curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # 创建一个以 /app 为主目录的 vapor 用户和用户组
 RUN useradd --user-group --create-home --system --skel /dev/null --home-dir /app vapor
@@ -88,8 +92,11 @@ ENV SWIFT_BACKTRACE=enable=yes,sanitize=yes,threads=all,images=all,interactive=n
 # 确保后续所有命令都以 vapor 用户身份运行
 USER vapor:vapor
 
-# 让 Docker 绑定到 8080 端口
+# 让 Docker 绑定到 HTTP 8080 和 IM TCP 9000 端口
 EXPOSE 8080
+EXPOSE 9000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -fsS "http://127.0.0.1:${PORT:-8080}/health" >/dev/null || exit 1
 
 # 镜像运行时启动 Vapor 服务，默认在生产环境监听 8080 端口
 ENTRYPOINT ["./IMServer"]

@@ -21,6 +21,14 @@ x-shared_environment: &shared_environment
   DATABASE_USERNAME: ${DATABASE_USERNAME:-vapor}
   DATABASE_PASSWORD: ${DATABASE_PASSWORD:-vapor_password}
   JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me}
+  IM_RUNTIME_ROLE: ${IM_RUNTIME_ROLE:-combined}
+  IM_TCP_HOST: ${IM_TCP_HOST:-0.0.0.0}
+  IM_TCP_PORT: ${IM_TCP_PORT:-9000}
+  IM_ROUTING_MODE: ${IM_ROUTING_MODE:-local}
+  IM_NODE_ID: ${IM_NODE_ID:-local-docker-node}
+  MEDIA_STORAGE_PROVIDER: ${MEDIA_STORAGE_PROVIDER:-local}
+  SEED_USER_EMAIL: ${SEED_USER_EMAIL:-demo@example.com}
+  SEED_USER_PASSWORD: ${SEED_USER_PASSWORD:-password1234}
   
 services:
   app:
@@ -31,10 +39,11 @@ services:
       <<: *shared_environment
     ports:
       - '8080:8080'
+      - '9000:9000'
     depends_on:
       - db
     # user: '0' # 如需为测试目的以 root 身份运行，可取消注释；尽管 Dockerfile 中定义的是 'vapor' 用户。
-    command: ["serve", "--env", "production", "--hostname", "0.0.0.0", "--port", "8080"]
+    command: ["serve", "--env", "development", "--hostname", "0.0.0.0", "--port", "8080"]
 
   db:
     image: postgres:16-alpine
