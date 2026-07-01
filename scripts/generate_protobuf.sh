@@ -22,11 +22,6 @@ resolve_protoc_gen_swift() {
     return 0
   fi
 
-  if command -v protoc-gen-swift >/dev/null 2>&1; then
-    command -v protoc-gen-swift
-    return 0
-  fi
-
   if [[ ! -d "${SWIFT_PROTOBUF_CHECKOUT}" ]]; then
     swift package --package-path "${ROOT_DIR}/IMServer" resolve >/dev/null
   fi

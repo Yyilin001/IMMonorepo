@@ -15,22 +15,22 @@ import SwiftProtobuf
 // incompatible with the version of SwiftProtobuf to which you are linking.
 // Please ensure that you are building against the same version of the API
 // that was used to generate this file.
-fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
+fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
   struct _2: SwiftProtobuf.ProtobufAPIVersion_2 {}
   typealias Version = _2
 }
 
-struct IMRTPacket: Sendable {
+nonisolated struct IMRTPacket: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var requestID: String {
-    get {return _requestID ?? String()}
+    get {_requestID ?? String()}
     set {_requestID = newValue}
   }
   /// Returns true if `requestID` has been explicitly set.
-  var hasRequestID: Bool {return self._requestID != nil}
+  var hasRequestID: Bool {self._requestID != nil}
   /// Clears the value of `requestID`. Subsequent reads from it will return its default value.
   mutating func clearRequestID() {self._requestID = nil}
 
@@ -130,7 +130,7 @@ struct IMRTPacket: Sendable {
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  enum OneOf_Body: Equatable, Sendable {
+  nonisolated enum OneOf_Body: Equatable, Sendable {
     case auth(IMRTAuthRequest)
     case authOk(IMRTAuthAccepted)
     case authError(IMRTAuthError)
@@ -150,7 +150,7 @@ struct IMRTPacket: Sendable {
   fileprivate var _requestID: String? = nil
 }
 
-struct IMRTAuthRequest: Sendable {
+nonisolated struct IMRTAuthRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -158,38 +158,38 @@ struct IMRTAuthRequest: Sendable {
   var accessToken: String = String()
 
   var deviceID: String {
-    get {return _deviceID ?? String()}
+    get {_deviceID ?? String()}
     set {_deviceID = newValue}
   }
   /// Returns true if `deviceID` has been explicitly set.
-  var hasDeviceID: Bool {return self._deviceID != nil}
+  var hasDeviceID: Bool {self._deviceID != nil}
   /// Clears the value of `deviceID`. Subsequent reads from it will return its default value.
   mutating func clearDeviceID() {self._deviceID = nil}
 
   var deviceName: String {
-    get {return _deviceName ?? String()}
+    get {_deviceName ?? String()}
     set {_deviceName = newValue}
   }
   /// Returns true if `deviceName` has been explicitly set.
-  var hasDeviceName: Bool {return self._deviceName != nil}
+  var hasDeviceName: Bool {self._deviceName != nil}
   /// Clears the value of `deviceName`. Subsequent reads from it will return its default value.
   mutating func clearDeviceName() {self._deviceName = nil}
 
   var platform: String {
-    get {return _platform ?? String()}
+    get {_platform ?? String()}
     set {_platform = newValue}
   }
   /// Returns true if `platform` has been explicitly set.
-  var hasPlatform: Bool {return self._platform != nil}
+  var hasPlatform: Bool {self._platform != nil}
   /// Clears the value of `platform`. Subsequent reads from it will return its default value.
   mutating func clearPlatform() {self._platform = nil}
 
   var appVersion: String {
-    get {return _appVersion ?? String()}
+    get {_appVersion ?? String()}
     set {_appVersion = newValue}
   }
   /// Returns true if `appVersion` has been explicitly set.
-  var hasAppVersion: Bool {return self._appVersion != nil}
+  var hasAppVersion: Bool {self._appVersion != nil}
   /// Clears the value of `appVersion`. Subsequent reads from it will return its default value.
   mutating func clearAppVersion() {self._appVersion = nil}
 
@@ -203,7 +203,7 @@ struct IMRTAuthRequest: Sendable {
   fileprivate var _appVersion: String? = nil
 }
 
-struct IMRTAuthAccepted: Sendable {
+nonisolated struct IMRTAuthAccepted: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -223,7 +223,7 @@ struct IMRTAuthAccepted: Sendable {
   init() {}
 }
 
-struct IMRTAuthError: Sendable {
+nonisolated struct IMRTAuthError: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -237,7 +237,7 @@ struct IMRTAuthError: Sendable {
   init() {}
 }
 
-struct IMRTHeartbeat: Sendable {
+nonisolated struct IMRTHeartbeat: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -249,7 +249,7 @@ struct IMRTHeartbeat: Sendable {
   init() {}
 }
 
-struct IMRTAck: Sendable {
+nonisolated struct IMRTAck: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -257,11 +257,11 @@ struct IMRTAck: Sendable {
   var messageID: String = String()
 
   var conversationID: String {
-    get {return _conversationID ?? String()}
+    get {_conversationID ?? String()}
     set {_conversationID = newValue}
   }
   /// Returns true if `conversationID` has been explicitly set.
-  var hasConversationID: Bool {return self._conversationID != nil}
+  var hasConversationID: Bool {self._conversationID != nil}
   /// Clears the value of `conversationID`. Subsequent reads from it will return its default value.
   mutating func clearConversationID() {self._conversationID = nil}
 
@@ -274,28 +274,28 @@ struct IMRTAck: Sendable {
   fileprivate var _conversationID: String? = nil
 }
 
-struct IMRTSendMessageCommand: Sendable {
+nonisolated struct IMRTSendMessageCommand: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var clientMessageID: String {
-    get {return _clientMessageID ?? String()}
+    get {_clientMessageID ?? String()}
     set {_clientMessageID = newValue}
   }
   /// Returns true if `clientMessageID` has been explicitly set.
-  var hasClientMessageID: Bool {return self._clientMessageID != nil}
+  var hasClientMessageID: Bool {self._clientMessageID != nil}
   /// Clears the value of `clientMessageID`. Subsequent reads from it will return its default value.
   mutating func clearClientMessageID() {self._clientMessageID = nil}
 
   var conversationID: String = String()
 
   var content: IMRTMessageContent {
-    get {return _content ?? IMRTMessageContent()}
+    get {_content ?? IMRTMessageContent()}
     set {_content = newValue}
   }
   /// Returns true if `content` has been explicitly set.
-  var hasContent: Bool {return self._content != nil}
+  var hasContent: Bool {self._content != nil}
   /// Clears the value of `content`. Subsequent reads from it will return its default value.
   mutating func clearContent() {self._content = nil}
 
@@ -307,7 +307,7 @@ struct IMRTSendMessageCommand: Sendable {
   fileprivate var _content: IMRTMessageContent? = nil
 }
 
-struct IMRTConversationActivityCommand: Sendable {
+nonisolated struct IMRTConversationActivityCommand: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -321,92 +321,92 @@ struct IMRTConversationActivityCommand: Sendable {
   init() {}
 }
 
-struct IMRTChatDomainEvent: @unchecked Sendable {
+nonisolated struct IMRTChatDomainEvent: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var eventID: String {
-    get {return _storage._eventID}
+    get {_storage._eventID}
     set {_uniqueStorage()._eventID = newValue}
   }
 
   var eventType: String {
-    get {return _storage._eventType}
+    get {_storage._eventType}
     set {_uniqueStorage()._eventType = newValue}
   }
 
   var aggregateType: String {
-    get {return _storage._aggregateType}
+    get {_storage._aggregateType}
     set {_uniqueStorage()._aggregateType = newValue}
   }
 
   var aggregateID: String {
-    get {return _storage._aggregateID}
+    get {_storage._aggregateID}
     set {_uniqueStorage()._aggregateID = newValue}
   }
 
   var aggregateSequence: UInt64 {
-    get {return _storage._aggregateSequence ?? 0}
+    get {_storage._aggregateSequence ?? 0}
     set {_uniqueStorage()._aggregateSequence = newValue}
   }
   /// Returns true if `aggregateSequence` has been explicitly set.
-  var hasAggregateSequence: Bool {return _storage._aggregateSequence != nil}
+  var hasAggregateSequence: Bool {_storage._aggregateSequence != nil}
   /// Clears the value of `aggregateSequence`. Subsequent reads from it will return its default value.
   mutating func clearAggregateSequence() {_uniqueStorage()._aggregateSequence = nil}
 
   var occurredAtMs: Int64 {
-    get {return _storage._occurredAtMs}
+    get {_storage._occurredAtMs}
     set {_uniqueStorage()._occurredAtMs = newValue}
   }
 
   var actorUserID: String {
-    get {return _storage._actorUserID ?? String()}
+    get {_storage._actorUserID ?? String()}
     set {_uniqueStorage()._actorUserID = newValue}
   }
   /// Returns true if `actorUserID` has been explicitly set.
-  var hasActorUserID: Bool {return _storage._actorUserID != nil}
+  var hasActorUserID: Bool {_storage._actorUserID != nil}
   /// Clears the value of `actorUserID`. Subsequent reads from it will return its default value.
   mutating func clearActorUserID() {_uniqueStorage()._actorUserID = nil}
 
   var conversation: IMRTConversationSummary {
-    get {return _storage._conversation ?? IMRTConversationSummary()}
+    get {_storage._conversation ?? IMRTConversationSummary()}
     set {_uniqueStorage()._conversation = newValue}
   }
   /// Returns true if `conversation` has been explicitly set.
-  var hasConversation: Bool {return _storage._conversation != nil}
+  var hasConversation: Bool {_storage._conversation != nil}
   /// Clears the value of `conversation`. Subsequent reads from it will return its default value.
   mutating func clearConversation() {_uniqueStorage()._conversation = nil}
 
   var timelineNotice: IMRTTimelineNotice {
-    get {return _storage._timelineNotice ?? IMRTTimelineNotice()}
+    get {_storage._timelineNotice ?? IMRTTimelineNotice()}
     set {_uniqueStorage()._timelineNotice = newValue}
   }
   /// Returns true if `timelineNotice` has been explicitly set.
-  var hasTimelineNotice: Bool {return _storage._timelineNotice != nil}
+  var hasTimelineNotice: Bool {_storage._timelineNotice != nil}
   /// Clears the value of `timelineNotice`. Subsequent reads from it will return its default value.
   mutating func clearTimelineNotice() {_uniqueStorage()._timelineNotice = nil}
 
   var ownerCursor: UInt64 {
-    get {return _storage._ownerCursor ?? 0}
+    get {_storage._ownerCursor ?? 0}
     set {_uniqueStorage()._ownerCursor = newValue}
   }
   /// Returns true if `ownerCursor` has been explicitly set.
-  var hasOwnerCursor: Bool {return _storage._ownerCursor != nil}
+  var hasOwnerCursor: Bool {_storage._ownerCursor != nil}
   /// Clears the value of `ownerCursor`. Subsequent reads from it will return its default value.
   mutating func clearOwnerCursor() {_uniqueStorage()._ownerCursor = nil}
 
   var ownerAggregateSequence: UInt64 {
-    get {return _storage._ownerAggregateSequence ?? 0}
+    get {_storage._ownerAggregateSequence ?? 0}
     set {_uniqueStorage()._ownerAggregateSequence = newValue}
   }
   /// Returns true if `ownerAggregateSequence` has been explicitly set.
-  var hasOwnerAggregateSequence: Bool {return _storage._ownerAggregateSequence != nil}
+  var hasOwnerAggregateSequence: Bool {_storage._ownerAggregateSequence != nil}
   /// Clears the value of `ownerAggregateSequence`. Subsequent reads from it will return its default value.
   mutating func clearOwnerAggregateSequence() {_uniqueStorage()._ownerAggregateSequence = nil}
 
   var requiresTimelineNotice: Bool {
-    get {return _storage._requiresTimelineNotice}
+    get {_storage._requiresTimelineNotice}
     set {_uniqueStorage()._requiresTimelineNotice = newValue}
   }
 
@@ -585,7 +585,7 @@ struct IMRTChatDomainEvent: @unchecked Sendable {
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  enum OneOf_Body: Equatable, Sendable {
+  nonisolated enum OneOf_Body: Equatable, Sendable {
     case messageCreated(IMRTMessageCreatedEvent)
     case messageEdited(IMRTMessageEditedEvent)
     case messageRevoked(IMRTMessageRevokedEvent)
@@ -615,26 +615,26 @@ struct IMRTChatDomainEvent: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-struct IMRTMessageCreatedEvent: Sendable {
+nonisolated struct IMRTMessageCreatedEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var message: IMRTConversationMessage {
-    get {return _message ?? IMRTConversationMessage()}
+    get {_message ?? IMRTConversationMessage()}
     set {_message = newValue}
   }
   /// Returns true if `message` has been explicitly set.
-  var hasMessage: Bool {return self._message != nil}
+  var hasMessage: Bool {self._message != nil}
   /// Clears the value of `message`. Subsequent reads from it will return its default value.
   mutating func clearMessage() {self._message = nil}
 
   var clientMessageID: String {
-    get {return _clientMessageID ?? String()}
+    get {_clientMessageID ?? String()}
     set {_clientMessageID = newValue}
   }
   /// Returns true if `clientMessageID` has been explicitly set.
-  var hasClientMessageID: Bool {return self._clientMessageID != nil}
+  var hasClientMessageID: Bool {self._clientMessageID != nil}
   /// Clears the value of `clientMessageID`. Subsequent reads from it will return its default value.
   mutating func clearClientMessageID() {self._clientMessageID = nil}
 
@@ -646,7 +646,7 @@ struct IMRTMessageCreatedEvent: Sendable {
   fileprivate var _clientMessageID: String? = nil
 }
 
-struct IMRTMessageEditedEvent: Sendable {
+nonisolated struct IMRTMessageEditedEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -654,22 +654,22 @@ struct IMRTMessageEditedEvent: Sendable {
   var messageID: String = String()
 
   var body: IMRTRichTextContent {
-    get {return _body ?? IMRTRichTextContent()}
+    get {_body ?? IMRTRichTextContent()}
     set {_body = newValue}
   }
   /// Returns true if `body` has been explicitly set.
-  var hasBody: Bool {return self._body != nil}
+  var hasBody: Bool {self._body != nil}
   /// Clears the value of `body`. Subsequent reads from it will return its default value.
   mutating func clearBody() {self._body = nil}
 
   var editedAtMs: Int64 = 0
 
   var message: IMRTConversationMessage {
-    get {return _message ?? IMRTConversationMessage()}
+    get {_message ?? IMRTConversationMessage()}
     set {_message = newValue}
   }
   /// Returns true if `message` has been explicitly set.
-  var hasMessage: Bool {return self._message != nil}
+  var hasMessage: Bool {self._message != nil}
   /// Clears the value of `message`. Subsequent reads from it will return its default value.
   mutating func clearMessage() {self._message = nil}
 
@@ -681,7 +681,7 @@ struct IMRTMessageEditedEvent: Sendable {
   fileprivate var _message: IMRTConversationMessage? = nil
 }
 
-struct IMRTMessageRevokedEvent: Sendable {
+nonisolated struct IMRTMessageRevokedEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -691,20 +691,20 @@ struct IMRTMessageRevokedEvent: Sendable {
   var revokedAtMs: Int64 = 0
 
   var revokedByUserID: String {
-    get {return _revokedByUserID ?? String()}
+    get {_revokedByUserID ?? String()}
     set {_revokedByUserID = newValue}
   }
   /// Returns true if `revokedByUserID` has been explicitly set.
-  var hasRevokedByUserID: Bool {return self._revokedByUserID != nil}
+  var hasRevokedByUserID: Bool {self._revokedByUserID != nil}
   /// Clears the value of `revokedByUserID`. Subsequent reads from it will return its default value.
   mutating func clearRevokedByUserID() {self._revokedByUserID = nil}
 
   var message: IMRTConversationMessage {
-    get {return _message ?? IMRTConversationMessage()}
+    get {_message ?? IMRTConversationMessage()}
     set {_message = newValue}
   }
   /// Returns true if `message` has been explicitly set.
-  var hasMessage: Bool {return self._message != nil}
+  var hasMessage: Bool {self._message != nil}
   /// Clears the value of `message`. Subsequent reads from it will return its default value.
   mutating func clearMessage() {self._message = nil}
 
@@ -716,7 +716,7 @@ struct IMRTMessageRevokedEvent: Sendable {
   fileprivate var _message: IMRTConversationMessage? = nil
 }
 
-struct IMRTMessageVisibilityChangedEvent: Sendable {
+nonisolated struct IMRTMessageVisibilityChangedEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -724,20 +724,20 @@ struct IMRTMessageVisibilityChangedEvent: Sendable {
   var messageIds: [String] = []
 
   var message: IMRTConversationMessage {
-    get {return _message ?? IMRTConversationMessage()}
+    get {_message ?? IMRTConversationMessage()}
     set {_message = newValue}
   }
   /// Returns true if `message` has been explicitly set.
-  var hasMessage: Bool {return self._message != nil}
+  var hasMessage: Bool {self._message != nil}
   /// Clears the value of `message`. Subsequent reads from it will return its default value.
   mutating func clearMessage() {self._message = nil}
 
   var visibilityAction: String {
-    get {return _visibilityAction ?? String()}
+    get {_visibilityAction ?? String()}
     set {_visibilityAction = newValue}
   }
   /// Returns true if `visibilityAction` has been explicitly set.
-  var hasVisibilityAction: Bool {return self._visibilityAction != nil}
+  var hasVisibilityAction: Bool {self._visibilityAction != nil}
   /// Clears the value of `visibilityAction`. Subsequent reads from it will return its default value.
   mutating func clearVisibilityAction() {self._visibilityAction = nil}
 
@@ -749,7 +749,7 @@ struct IMRTMessageVisibilityChangedEvent: Sendable {
   fileprivate var _visibilityAction: String? = nil
 }
 
-struct IMRTMessageFavoriteChangedEvent: Sendable {
+nonisolated struct IMRTMessageFavoriteChangedEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -763,26 +763,26 @@ struct IMRTMessageFavoriteChangedEvent: Sendable {
   init() {}
 }
 
-struct IMRTMessageStreamEvent: Sendable {
+nonisolated struct IMRTMessageStreamEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var stream: IMRTMessageStreamPayload {
-    get {return _stream ?? IMRTMessageStreamPayload()}
+    get {_stream ?? IMRTMessageStreamPayload()}
     set {_stream = newValue}
   }
   /// Returns true if `stream` has been explicitly set.
-  var hasStream: Bool {return self._stream != nil}
+  var hasStream: Bool {self._stream != nil}
   /// Clears the value of `stream`. Subsequent reads from it will return its default value.
   mutating func clearStream() {self._stream = nil}
 
   var message: IMRTConversationMessage {
-    get {return _message ?? IMRTConversationMessage()}
+    get {_message ?? IMRTConversationMessage()}
     set {_message = newValue}
   }
   /// Returns true if `message` has been explicitly set.
-  var hasMessage: Bool {return self._message != nil}
+  var hasMessage: Bool {self._message != nil}
   /// Clears the value of `message`. Subsequent reads from it will return its default value.
   mutating func clearMessage() {self._message = nil}
 
@@ -794,26 +794,26 @@ struct IMRTMessageStreamEvent: Sendable {
   fileprivate var _message: IMRTConversationMessage? = nil
 }
 
-struct IMRTMessageStreamSignal: Sendable {
+nonisolated struct IMRTMessageStreamSignal: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var stream: IMRTMessageStreamPayload {
-    get {return _stream ?? IMRTMessageStreamPayload()}
+    get {_stream ?? IMRTMessageStreamPayload()}
     set {_stream = newValue}
   }
   /// Returns true if `stream` has been explicitly set.
-  var hasStream: Bool {return self._stream != nil}
+  var hasStream: Bool {self._stream != nil}
   /// Clears the value of `stream`. Subsequent reads from it will return its default value.
   mutating func clearStream() {self._stream = nil}
 
   var message: IMRTConversationMessage {
-    get {return _message ?? IMRTConversationMessage()}
+    get {_message ?? IMRTConversationMessage()}
     set {_message = newValue}
   }
   /// Returns true if `message` has been explicitly set.
-  var hasMessage: Bool {return self._message != nil}
+  var hasMessage: Bool {self._message != nil}
   /// Clears the value of `message`. Subsequent reads from it will return its default value.
   mutating func clearMessage() {self._message = nil}
 
@@ -825,7 +825,7 @@ struct IMRTMessageStreamSignal: Sendable {
   fileprivate var _message: IMRTConversationMessage? = nil
 }
 
-struct IMRTConversationChangedEvent: Sendable {
+nonisolated struct IMRTConversationChangedEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -835,7 +835,7 @@ struct IMRTConversationChangedEvent: Sendable {
   init() {}
 }
 
-struct IMRTConversationActivityHintEvent: Sendable {
+nonisolated struct IMRTConversationActivityHintEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -845,31 +845,31 @@ struct IMRTConversationActivityHintEvent: Sendable {
   var senderUserID: String = String()
 
   var serverSequence: UInt64 {
-    get {return _serverSequence ?? 0}
+    get {_serverSequence ?? 0}
     set {_serverSequence = newValue}
   }
   /// Returns true if `serverSequence` has been explicitly set.
-  var hasServerSequence: Bool {return self._serverSequence != nil}
+  var hasServerSequence: Bool {self._serverSequence != nil}
   /// Clears the value of `serverSequence`. Subsequent reads from it will return its default value.
   mutating func clearServerSequence() {self._serverSequence = nil}
 
   var timelineSequence: UInt64 {
-    get {return _timelineSequence ?? 0}
+    get {_timelineSequence ?? 0}
     set {_timelineSequence = newValue}
   }
   /// Returns true if `timelineSequence` has been explicitly set.
-  var hasTimelineSequence: Bool {return self._timelineSequence != nil}
+  var hasTimelineSequence: Bool {self._timelineSequence != nil}
   /// Clears the value of `timelineSequence`. Subsequent reads from it will return its default value.
   mutating func clearTimelineSequence() {self._timelineSequence = nil}
 
   var previewText: String = String()
 
   var messageCreatedAtMs: Int64 {
-    get {return _messageCreatedAtMs ?? 0}
+    get {_messageCreatedAtMs ?? 0}
     set {_messageCreatedAtMs = newValue}
   }
   /// Returns true if `messageCreatedAtMs` has been explicitly set.
-  var hasMessageCreatedAtMs: Bool {return self._messageCreatedAtMs != nil}
+  var hasMessageCreatedAtMs: Bool {self._messageCreatedAtMs != nil}
   /// Clears the value of `messageCreatedAtMs`. Subsequent reads from it will return its default value.
   mutating func clearMessageCreatedAtMs() {self._messageCreatedAtMs = nil}
 
@@ -884,7 +884,7 @@ struct IMRTConversationActivityHintEvent: Sendable {
   fileprivate var _messageCreatedAtMs: Int64? = nil
 }
 
-struct IMRTConversationRemovedForSelfEvent: Sendable {
+nonisolated struct IMRTConversationRemovedForSelfEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -894,7 +894,7 @@ struct IMRTConversationRemovedForSelfEvent: Sendable {
   init() {}
 }
 
-struct IMRTConversationVisibilityChangedEvent: Sendable {
+nonisolated struct IMRTConversationVisibilityChangedEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -908,7 +908,7 @@ struct IMRTConversationVisibilityChangedEvent: Sendable {
   init() {}
 }
 
-struct IMRTMemberChangedEvent: Sendable {
+nonisolated struct IMRTMemberChangedEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -920,35 +920,35 @@ struct IMRTMemberChangedEvent: Sendable {
   init() {}
 }
 
-struct IMRTContactChangedEvent: @unchecked Sendable {
+nonisolated struct IMRTContactChangedEvent: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var request: IMRTContactRequest {
-    get {return _storage._request ?? IMRTContactRequest()}
+    get {_storage._request ?? IMRTContactRequest()}
     set {_uniqueStorage()._request = newValue}
   }
   /// Returns true if `request` has been explicitly set.
-  var hasRequest: Bool {return _storage._request != nil}
+  var hasRequest: Bool {_storage._request != nil}
   /// Clears the value of `request`. Subsequent reads from it will return its default value.
   mutating func clearRequest() {_uniqueStorage()._request = nil}
 
   var contact: IMRTContact {
-    get {return _storage._contact ?? IMRTContact()}
+    get {_storage._contact ?? IMRTContact()}
     set {_uniqueStorage()._contact = newValue}
   }
   /// Returns true if `contact` has been explicitly set.
-  var hasContact: Bool {return _storage._contact != nil}
+  var hasContact: Bool {_storage._contact != nil}
   /// Clears the value of `contact`. Subsequent reads from it will return its default value.
   mutating func clearContact() {_uniqueStorage()._contact = nil}
 
   var contactUserID: String {
-    get {return _storage._contactUserID ?? String()}
+    get {_storage._contactUserID ?? String()}
     set {_uniqueStorage()._contactUserID = newValue}
   }
   /// Returns true if `contactUserID` has been explicitly set.
-  var hasContactUserID: Bool {return _storage._contactUserID != nil}
+  var hasContactUserID: Bool {_storage._contactUserID != nil}
   /// Clears the value of `contactUserID`. Subsequent reads from it will return its default value.
   mutating func clearContactUserID() {_uniqueStorage()._contactUserID = nil}
 
@@ -959,7 +959,7 @@ struct IMRTContactChangedEvent: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-struct IMRTTimelineNotice: Sendable {
+nonisolated struct IMRTTimelineNotice: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -969,22 +969,22 @@ struct IMRTTimelineNotice: Sendable {
   var conversationID: String = String()
 
   var timelineSequence: UInt64 {
-    get {return _timelineSequence ?? 0}
+    get {_timelineSequence ?? 0}
     set {_timelineSequence = newValue}
   }
   /// Returns true if `timelineSequence` has been explicitly set.
-  var hasTimelineSequence: Bool {return self._timelineSequence != nil}
+  var hasTimelineSequence: Bool {self._timelineSequence != nil}
   /// Clears the value of `timelineSequence`. Subsequent reads from it will return its default value.
   mutating func clearTimelineSequence() {self._timelineSequence = nil}
 
   var eventType: String = String()
 
   var actorUserID: String {
-    get {return _actorUserID ?? String()}
+    get {_actorUserID ?? String()}
     set {_actorUserID = newValue}
   }
   /// Returns true if `actorUserID` has been explicitly set.
-  var hasActorUserID: Bool {return self._actorUserID != nil}
+  var hasActorUserID: Bool {self._actorUserID != nil}
   /// Clears the value of `actorUserID`. Subsequent reads from it will return its default value.
   mutating func clearActorUserID() {self._actorUserID = nil}
 
@@ -1006,7 +1006,7 @@ struct IMRTTimelineNotice: Sendable {
   fileprivate var _actorUserID: String? = nil
 }
 
-struct IMRTKick: Sendable {
+nonisolated struct IMRTKick: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1020,7 +1020,7 @@ struct IMRTKick: Sendable {
   init() {}
 }
 
-struct IMRTMessageStreamPayload: Sendable {
+nonisolated struct IMRTMessageStreamPayload: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1034,11 +1034,11 @@ struct IMRTMessageStreamPayload: Sendable {
   var chunkIndex: Int32 = 0
 
   var deltaText: String {
-    get {return _deltaText ?? String()}
+    get {_deltaText ?? String()}
     set {_deltaText = newValue}
   }
   /// Returns true if `deltaText` has been explicitly set.
-  var hasDeltaText: Bool {return self._deltaText != nil}
+  var hasDeltaText: Bool {self._deltaText != nil}
   /// Clears the value of `deltaText`. Subsequent reads from it will return its default value.
   mutating func clearDeltaText() {self._deltaText = nil}
 
@@ -1055,134 +1055,134 @@ struct IMRTMessageStreamPayload: Sendable {
   fileprivate var _deltaText: String? = nil
 }
 
-struct IMRTConversationSummary: @unchecked Sendable {
+nonisolated struct IMRTConversationSummary: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var id: String {
-    get {return _storage._id}
+    get {_storage._id}
     set {_uniqueStorage()._id = newValue}
   }
 
   var title: String {
-    get {return _storage._title ?? String()}
+    get {_storage._title ?? String()}
     set {_uniqueStorage()._title = newValue}
   }
   /// Returns true if `title` has been explicitly set.
-  var hasTitle: Bool {return _storage._title != nil}
+  var hasTitle: Bool {_storage._title != nil}
   /// Clears the value of `title`. Subsequent reads from it will return its default value.
   mutating func clearTitle() {_uniqueStorage()._title = nil}
 
   var kind: String {
-    get {return _storage._kind}
+    get {_storage._kind}
     set {_uniqueStorage()._kind = newValue}
   }
 
   var directMessagingState: String {
-    get {return _storage._directMessagingState ?? String()}
+    get {_storage._directMessagingState ?? String()}
     set {_uniqueStorage()._directMessagingState = newValue}
   }
   /// Returns true if `directMessagingState` has been explicitly set.
-  var hasDirectMessagingState: Bool {return _storage._directMessagingState != nil}
+  var hasDirectMessagingState: Bool {_storage._directMessagingState != nil}
   /// Clears the value of `directMessagingState`. Subsequent reads from it will return its default value.
   mutating func clearDirectMessagingState() {_uniqueStorage()._directMessagingState = nil}
 
   var directPeer: IMRTDirectPeer {
-    get {return _storage._directPeer ?? IMRTDirectPeer()}
+    get {_storage._directPeer ?? IMRTDirectPeer()}
     set {_uniqueStorage()._directPeer = newValue}
   }
   /// Returns true if `directPeer` has been explicitly set.
-  var hasDirectPeer: Bool {return _storage._directPeer != nil}
+  var hasDirectPeer: Bool {_storage._directPeer != nil}
   /// Clears the value of `directPeer`. Subsequent reads from it will return its default value.
   mutating func clearDirectPeer() {_uniqueStorage()._directPeer = nil}
 
   var notice: String {
-    get {return _storage._notice ?? String()}
+    get {_storage._notice ?? String()}
     set {_uniqueStorage()._notice = newValue}
   }
   /// Returns true if `notice` has been explicitly set.
-  var hasNotice: Bool {return _storage._notice != nil}
+  var hasNotice: Bool {_storage._notice != nil}
   /// Clears the value of `notice`. Subsequent reads from it will return its default value.
   mutating func clearNotice() {_uniqueStorage()._notice = nil}
 
   var avatarPreset: String {
-    get {return _storage._avatarPreset ?? String()}
+    get {_storage._avatarPreset ?? String()}
     set {_uniqueStorage()._avatarPreset = newValue}
   }
   /// Returns true if `avatarPreset` has been explicitly set.
-  var hasAvatarPreset: Bool {return _storage._avatarPreset != nil}
+  var hasAvatarPreset: Bool {_storage._avatarPreset != nil}
   /// Clears the value of `avatarPreset`. Subsequent reads from it will return its default value.
   mutating func clearAvatarPreset() {_uniqueStorage()._avatarPreset = nil}
 
   var muteAll: Bool {
-    get {return _storage._muteAll}
+    get {_storage._muteAll}
     set {_uniqueStorage()._muteAll = newValue}
   }
 
   var memberCount: Int32 {
-    get {return _storage._memberCount}
+    get {_storage._memberCount}
     set {_uniqueStorage()._memberCount = newValue}
   }
 
   var memberUserIds: [String] {
-    get {return _storage._memberUserIds}
+    get {_storage._memberUserIds}
     set {_uniqueStorage()._memberUserIds = newValue}
   }
 
   var lastMessage: IMRTMessagePreview {
-    get {return _storage._lastMessage ?? IMRTMessagePreview()}
+    get {_storage._lastMessage ?? IMRTMessagePreview()}
     set {_uniqueStorage()._lastMessage = newValue}
   }
   /// Returns true if `lastMessage` has been explicitly set.
-  var hasLastMessage: Bool {return _storage._lastMessage != nil}
+  var hasLastMessage: Bool {_storage._lastMessage != nil}
   /// Clears the value of `lastMessage`. Subsequent reads from it will return its default value.
   mutating func clearLastMessage() {_uniqueStorage()._lastMessage = nil}
 
   var lastReadSequence: UInt64 {
-    get {return _storage._lastReadSequence ?? 0}
+    get {_storage._lastReadSequence ?? 0}
     set {_uniqueStorage()._lastReadSequence = newValue}
   }
   /// Returns true if `lastReadSequence` has been explicitly set.
-  var hasLastReadSequence: Bool {return _storage._lastReadSequence != nil}
+  var hasLastReadSequence: Bool {_storage._lastReadSequence != nil}
   /// Clears the value of `lastReadSequence`. Subsequent reads from it will return its default value.
   mutating func clearLastReadSequence() {_uniqueStorage()._lastReadSequence = nil}
 
   var unreadCount: Int32 {
-    get {return _storage._unreadCount}
+    get {_storage._unreadCount}
     set {_uniqueStorage()._unreadCount = newValue}
   }
 
   var isPinned: Bool {
-    get {return _storage._isPinned}
+    get {_storage._isPinned}
     set {_uniqueStorage()._isPinned = newValue}
   }
 
   var pinnedAtMs: Int64 {
-    get {return _storage._pinnedAtMs ?? 0}
+    get {_storage._pinnedAtMs ?? 0}
     set {_uniqueStorage()._pinnedAtMs = newValue}
   }
   /// Returns true if `pinnedAtMs` has been explicitly set.
-  var hasPinnedAtMs: Bool {return _storage._pinnedAtMs != nil}
+  var hasPinnedAtMs: Bool {_storage._pinnedAtMs != nil}
   /// Clears the value of `pinnedAtMs`. Subsequent reads from it will return its default value.
   mutating func clearPinnedAtMs() {_uniqueStorage()._pinnedAtMs = nil}
 
   var isMuted: Bool {
-    get {return _storage._isMuted}
+    get {_storage._isMuted}
     set {_uniqueStorage()._isMuted = newValue}
   }
 
   var createdAtMs: Int64 {
-    get {return _storage._createdAtMs ?? 0}
+    get {_storage._createdAtMs ?? 0}
     set {_uniqueStorage()._createdAtMs = newValue}
   }
   /// Returns true if `createdAtMs` has been explicitly set.
-  var hasCreatedAtMs: Bool {return _storage._createdAtMs != nil}
+  var hasCreatedAtMs: Bool {_storage._createdAtMs != nil}
   /// Clears the value of `createdAtMs`. Subsequent reads from it will return its default value.
   mutating func clearCreatedAtMs() {_uniqueStorage()._createdAtMs = nil}
 
   var updatedAtMs: Int64 {
-    get {return _storage._updatedAtMs}
+    get {_storage._updatedAtMs}
     set {_uniqueStorage()._updatedAtMs = newValue}
   }
 
@@ -1193,7 +1193,7 @@ struct IMRTConversationSummary: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-struct IMRTDirectPeer: Sendable {
+nonisolated struct IMRTDirectPeer: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1203,20 +1203,20 @@ struct IMRTDirectPeer: Sendable {
   var email: String = String()
 
   var displayName: String {
-    get {return _displayName ?? String()}
+    get {_displayName ?? String()}
     set {_displayName = newValue}
   }
   /// Returns true if `displayName` has been explicitly set.
-  var hasDisplayName: Bool {return self._displayName != nil}
+  var hasDisplayName: Bool {self._displayName != nil}
   /// Clears the value of `displayName`. Subsequent reads from it will return its default value.
   mutating func clearDisplayName() {self._displayName = nil}
 
   var avatarPreset: String {
-    get {return _avatarPreset ?? String()}
+    get {_avatarPreset ?? String()}
     set {_avatarPreset = newValue}
   }
   /// Returns true if `avatarPreset` has been explicitly set.
-  var hasAvatarPreset: Bool {return self._avatarPreset != nil}
+  var hasAvatarPreset: Bool {self._avatarPreset != nil}
   /// Clears the value of `avatarPreset`. Subsequent reads from it will return its default value.
   mutating func clearAvatarPreset() {self._avatarPreset = nil}
 
@@ -1228,63 +1228,63 @@ struct IMRTDirectPeer: Sendable {
   fileprivate var _avatarPreset: String? = nil
 }
 
-struct IMRTMessagePreview: @unchecked Sendable {
+nonisolated struct IMRTMessagePreview: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var id: String {
-    get {return _storage._id}
+    get {_storage._id}
     set {_uniqueStorage()._id = newValue}
   }
 
   var senderUserID: String {
-    get {return _storage._senderUserID}
+    get {_storage._senderUserID}
     set {_uniqueStorage()._senderUserID = newValue}
   }
 
   var serverSequence: UInt64 {
-    get {return _storage._serverSequence ?? 0}
+    get {_storage._serverSequence ?? 0}
     set {_uniqueStorage()._serverSequence = newValue}
   }
   /// Returns true if `serverSequence` has been explicitly set.
-  var hasServerSequence: Bool {return _storage._serverSequence != nil}
+  var hasServerSequence: Bool {_storage._serverSequence != nil}
   /// Clears the value of `serverSequence`. Subsequent reads from it will return its default value.
   mutating func clearServerSequence() {_uniqueStorage()._serverSequence = nil}
 
   var content: IMRTMessageContent {
-    get {return _storage._content ?? IMRTMessageContent()}
+    get {_storage._content ?? IMRTMessageContent()}
     set {_uniqueStorage()._content = newValue}
   }
   /// Returns true if `content` has been explicitly set.
-  var hasContent: Bool {return _storage._content != nil}
+  var hasContent: Bool {_storage._content != nil}
   /// Clears the value of `content`. Subsequent reads from it will return its default value.
   mutating func clearContent() {_uniqueStorage()._content = nil}
 
   var derivedState: IMRTMessageDerivedState {
-    get {return _storage._derivedState ?? IMRTMessageDerivedState()}
+    get {_storage._derivedState ?? IMRTMessageDerivedState()}
     set {_uniqueStorage()._derivedState = newValue}
   }
   /// Returns true if `derivedState` has been explicitly set.
-  var hasDerivedState: Bool {return _storage._derivedState != nil}
+  var hasDerivedState: Bool {_storage._derivedState != nil}
   /// Clears the value of `derivedState`. Subsequent reads from it will return its default value.
   mutating func clearDerivedState() {_uniqueStorage()._derivedState = nil}
 
   var createdAtMs: Int64 {
-    get {return _storage._createdAtMs ?? 0}
+    get {_storage._createdAtMs ?? 0}
     set {_uniqueStorage()._createdAtMs = newValue}
   }
   /// Returns true if `createdAtMs` has been explicitly set.
-  var hasCreatedAtMs: Bool {return _storage._createdAtMs != nil}
+  var hasCreatedAtMs: Bool {_storage._createdAtMs != nil}
   /// Clears the value of `createdAtMs`. Subsequent reads from it will return its default value.
   mutating func clearCreatedAtMs() {_uniqueStorage()._createdAtMs = nil}
 
   var timelineSequence: UInt64 {
-    get {return _storage._timelineSequence ?? 0}
+    get {_storage._timelineSequence ?? 0}
     set {_uniqueStorage()._timelineSequence = newValue}
   }
   /// Returns true if `timelineSequence` has been explicitly set.
-  var hasTimelineSequence: Bool {return _storage._timelineSequence != nil}
+  var hasTimelineSequence: Bool {_storage._timelineSequence != nil}
   /// Clears the value of `timelineSequence`. Subsequent reads from it will return its default value.
   mutating func clearTimelineSequence() {_uniqueStorage()._timelineSequence = nil}
 
@@ -1295,77 +1295,77 @@ struct IMRTMessagePreview: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-struct IMRTConversationMessage: @unchecked Sendable {
+nonisolated struct IMRTConversationMessage: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var id: String {
-    get {return _storage._id}
+    get {_storage._id}
     set {_uniqueStorage()._id = newValue}
   }
 
   var conversationID: String {
-    get {return _storage._conversationID}
+    get {_storage._conversationID}
     set {_uniqueStorage()._conversationID = newValue}
   }
 
   var senderUserID: String {
-    get {return _storage._senderUserID}
+    get {_storage._senderUserID}
     set {_uniqueStorage()._senderUserID = newValue}
   }
 
   var clientMessageID: String {
-    get {return _storage._clientMessageID ?? String()}
+    get {_storage._clientMessageID ?? String()}
     set {_uniqueStorage()._clientMessageID = newValue}
   }
   /// Returns true if `clientMessageID` has been explicitly set.
-  var hasClientMessageID: Bool {return _storage._clientMessageID != nil}
+  var hasClientMessageID: Bool {_storage._clientMessageID != nil}
   /// Clears the value of `clientMessageID`. Subsequent reads from it will return its default value.
   mutating func clearClientMessageID() {_uniqueStorage()._clientMessageID = nil}
 
   var serverSequence: UInt64 {
-    get {return _storage._serverSequence ?? 0}
+    get {_storage._serverSequence ?? 0}
     set {_uniqueStorage()._serverSequence = newValue}
   }
   /// Returns true if `serverSequence` has been explicitly set.
-  var hasServerSequence: Bool {return _storage._serverSequence != nil}
+  var hasServerSequence: Bool {_storage._serverSequence != nil}
   /// Clears the value of `serverSequence`. Subsequent reads from it will return its default value.
   mutating func clearServerSequence() {_uniqueStorage()._serverSequence = nil}
 
   var content: IMRTMessageContent {
-    get {return _storage._content ?? IMRTMessageContent()}
+    get {_storage._content ?? IMRTMessageContent()}
     set {_uniqueStorage()._content = newValue}
   }
   /// Returns true if `content` has been explicitly set.
-  var hasContent: Bool {return _storage._content != nil}
+  var hasContent: Bool {_storage._content != nil}
   /// Clears the value of `content`. Subsequent reads from it will return its default value.
   mutating func clearContent() {_uniqueStorage()._content = nil}
 
   var derivedState: IMRTMessageDerivedState {
-    get {return _storage._derivedState ?? IMRTMessageDerivedState()}
+    get {_storage._derivedState ?? IMRTMessageDerivedState()}
     set {_uniqueStorage()._derivedState = newValue}
   }
   /// Returns true if `derivedState` has been explicitly set.
-  var hasDerivedState: Bool {return _storage._derivedState != nil}
+  var hasDerivedState: Bool {_storage._derivedState != nil}
   /// Clears the value of `derivedState`. Subsequent reads from it will return its default value.
   mutating func clearDerivedState() {_uniqueStorage()._derivedState = nil}
 
   var createdAtMs: Int64 {
-    get {return _storage._createdAtMs ?? 0}
+    get {_storage._createdAtMs ?? 0}
     set {_uniqueStorage()._createdAtMs = newValue}
   }
   /// Returns true if `createdAtMs` has been explicitly set.
-  var hasCreatedAtMs: Bool {return _storage._createdAtMs != nil}
+  var hasCreatedAtMs: Bool {_storage._createdAtMs != nil}
   /// Clears the value of `createdAtMs`. Subsequent reads from it will return its default value.
   mutating func clearCreatedAtMs() {_uniqueStorage()._createdAtMs = nil}
 
   var timelineSequence: UInt64 {
-    get {return _storage._timelineSequence ?? 0}
+    get {_storage._timelineSequence ?? 0}
     set {_uniqueStorage()._timelineSequence = newValue}
   }
   /// Returns true if `timelineSequence` has been explicitly set.
-  var hasTimelineSequence: Bool {return _storage._timelineSequence != nil}
+  var hasTimelineSequence: Bool {_storage._timelineSequence != nil}
   /// Clears the value of `timelineSequence`. Subsequent reads from it will return its default value.
   mutating func clearTimelineSequence() {_uniqueStorage()._timelineSequence = nil}
 
@@ -1376,7 +1376,7 @@ struct IMRTConversationMessage: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-struct IMRTMessageContent: Sendable {
+nonisolated struct IMRTMessageContent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1425,7 +1425,7 @@ struct IMRTMessageContent: Sendable {
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  enum OneOf_Body: Equatable, Sendable {
+  nonisolated enum OneOf_Body: Equatable, Sendable {
     case richText(IMRTRichTextContent)
     case reply(IMRTReplyContent)
     case image(IMRTMediaAsset)
@@ -1437,7 +1437,7 @@ struct IMRTMessageContent: Sendable {
   init() {}
 }
 
-struct IMRTRichTextContent: Sendable {
+nonisolated struct IMRTRichTextContent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1451,26 +1451,26 @@ struct IMRTRichTextContent: Sendable {
   init() {}
 }
 
-struct IMRTReplyContent: Sendable {
+nonisolated struct IMRTReplyContent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var reference: IMRTReplyReference {
-    get {return _reference ?? IMRTReplyReference()}
+    get {_reference ?? IMRTReplyReference()}
     set {_reference = newValue}
   }
   /// Returns true if `reference` has been explicitly set.
-  var hasReference: Bool {return self._reference != nil}
+  var hasReference: Bool {self._reference != nil}
   /// Clears the value of `reference`. Subsequent reads from it will return its default value.
   mutating func clearReference() {self._reference = nil}
 
   var body: IMRTRichTextContent {
-    get {return _body ?? IMRTRichTextContent()}
+    get {_body ?? IMRTRichTextContent()}
     set {_body = newValue}
   }
   /// Returns true if `body` has been explicitly set.
-  var hasBody: Bool {return self._body != nil}
+  var hasBody: Bool {self._body != nil}
   /// Clears the value of `body`. Subsequent reads from it will return its default value.
   mutating func clearBody() {self._body = nil}
 
@@ -1482,7 +1482,7 @@ struct IMRTReplyContent: Sendable {
   fileprivate var _body: IMRTRichTextContent? = nil
 }
 
-struct IMRTTextRange: Sendable {
+nonisolated struct IMRTTextRange: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1496,17 +1496,17 @@ struct IMRTTextRange: Sendable {
   init() {}
 }
 
-struct IMRTTextEntity: Sendable {
+nonisolated struct IMRTTextEntity: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var range: IMRTTextRange {
-    get {return _range ?? IMRTTextRange()}
+    get {_range ?? IMRTTextRange()}
     set {_range = newValue}
   }
   /// Returns true if `range` has been explicitly set.
-  var hasRange: Bool {return self._range != nil}
+  var hasRange: Bool {self._range != nil}
   /// Clears the value of `range`. Subsequent reads from it will return its default value.
   mutating func clearRange() {self._range = nil}
 
@@ -1546,7 +1546,7 @@ struct IMRTTextEntity: Sendable {
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  enum OneOf_Body: Equatable, Sendable {
+  nonisolated enum OneOf_Body: Equatable, Sendable {
     case link(IMRTLinkEntity)
     case mention(IMRTMentionEntity)
     case hashtag(IMRTHashtagEntity)
@@ -1559,7 +1559,7 @@ struct IMRTTextEntity: Sendable {
   fileprivate var _range: IMRTTextRange? = nil
 }
 
-struct IMRTLinkEntity: Sendable {
+nonisolated struct IMRTLinkEntity: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1571,7 +1571,7 @@ struct IMRTLinkEntity: Sendable {
   init() {}
 }
 
-struct IMRTMentionEntity: Sendable {
+nonisolated struct IMRTMentionEntity: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1583,7 +1583,7 @@ struct IMRTMentionEntity: Sendable {
   init() {}
 }
 
-struct IMRTHashtagEntity: Sendable {
+nonisolated struct IMRTHashtagEntity: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1595,7 +1595,7 @@ struct IMRTHashtagEntity: Sendable {
   init() {}
 }
 
-struct IMRTInlineCodeEntity: Sendable {
+nonisolated struct IMRTInlineCodeEntity: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1605,7 +1605,7 @@ struct IMRTInlineCodeEntity: Sendable {
   init() {}
 }
 
-struct IMRTReplyReference: Sendable {
+nonisolated struct IMRTReplyReference: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1613,11 +1613,11 @@ struct IMRTReplyReference: Sendable {
   var messageID: String = String()
 
   var senderUserID: String {
-    get {return _senderUserID ?? String()}
+    get {_senderUserID ?? String()}
     set {_senderUserID = newValue}
   }
   /// Returns true if `senderUserID` has been explicitly set.
-  var hasSenderUserID: Bool {return self._senderUserID != nil}
+  var hasSenderUserID: Bool {self._senderUserID != nil}
   /// Clears the value of `senderUserID`. Subsequent reads from it will return its default value.
   mutating func clearSenderUserID() {self._senderUserID = nil}
 
@@ -1630,7 +1630,7 @@ struct IMRTReplyReference: Sendable {
   fileprivate var _senderUserID: String? = nil
 }
 
-struct IMRTMediaAsset: Sendable {
+nonisolated struct IMRTMediaAsset: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1646,38 +1646,38 @@ struct IMRTMediaAsset: Sendable {
   var filename: String = String()
 
   var width: Int32 {
-    get {return _width ?? 0}
+    get {_width ?? 0}
     set {_width = newValue}
   }
   /// Returns true if `width` has been explicitly set.
-  var hasWidth: Bool {return self._width != nil}
+  var hasWidth: Bool {self._width != nil}
   /// Clears the value of `width`. Subsequent reads from it will return its default value.
   mutating func clearWidth() {self._width = nil}
 
   var height: Int32 {
-    get {return _height ?? 0}
+    get {_height ?? 0}
     set {_height = newValue}
   }
   /// Returns true if `height` has been explicitly set.
-  var hasHeight: Bool {return self._height != nil}
+  var hasHeight: Bool {self._height != nil}
   /// Clears the value of `height`. Subsequent reads from it will return its default value.
   mutating func clearHeight() {self._height = nil}
 
   var durationMillis: Int32 {
-    get {return _durationMillis ?? 0}
+    get {_durationMillis ?? 0}
     set {_durationMillis = newValue}
   }
   /// Returns true if `durationMillis` has been explicitly set.
-  var hasDurationMillis: Bool {return self._durationMillis != nil}
+  var hasDurationMillis: Bool {self._durationMillis != nil}
   /// Clears the value of `durationMillis`. Subsequent reads from it will return its default value.
   mutating func clearDurationMillis() {self._durationMillis = nil}
 
   var previewAssetID: String {
-    get {return _previewAssetID ?? String()}
+    get {_previewAssetID ?? String()}
     set {_previewAssetID = newValue}
   }
   /// Returns true if `previewAssetID` has been explicitly set.
-  var hasPreviewAssetID: Bool {return self._previewAssetID != nil}
+  var hasPreviewAssetID: Bool {self._previewAssetID != nil}
   /// Clears the value of `previewAssetID`. Subsequent reads from it will return its default value.
   mutating func clearPreviewAssetID() {self._previewAssetID = nil}
 
@@ -1691,7 +1691,7 @@ struct IMRTMediaAsset: Sendable {
   fileprivate var _previewAssetID: String? = nil
 }
 
-struct IMRTMessageDerivedState: Sendable {
+nonisolated struct IMRTMessageDerivedState: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1703,11 +1703,11 @@ struct IMRTMessageDerivedState: Sendable {
   var reactions: [IMRTMessageReaction] = []
 
   var streamState: IMRTMessageStreamState {
-    get {return _streamState ?? IMRTMessageStreamState()}
+    get {_streamState ?? IMRTMessageStreamState()}
     set {_streamState = newValue}
   }
   /// Returns true if `streamState` has been explicitly set.
-  var hasStreamState: Bool {return self._streamState != nil}
+  var hasStreamState: Bool {self._streamState != nil}
   /// Clears the value of `streamState`. Subsequent reads from it will return its default value.
   mutating func clearStreamState() {self._streamState = nil}
 
@@ -1718,26 +1718,26 @@ struct IMRTMessageDerivedState: Sendable {
   fileprivate var _streamState: IMRTMessageStreamState? = nil
 }
 
-struct IMRTMessageEdit: Sendable {
+nonisolated struct IMRTMessageEdit: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   var editedAtMs: Int64 {
-    get {return _editedAtMs ?? 0}
+    get {_editedAtMs ?? 0}
     set {_editedAtMs = newValue}
   }
   /// Returns true if `editedAtMs` has been explicitly set.
-  var hasEditedAtMs: Bool {return self._editedAtMs != nil}
+  var hasEditedAtMs: Bool {self._editedAtMs != nil}
   /// Clears the value of `editedAtMs`. Subsequent reads from it will return its default value.
   mutating func clearEditedAtMs() {self._editedAtMs = nil}
 
   var body: IMRTRichTextContent {
-    get {return _body ?? IMRTRichTextContent()}
+    get {_body ?? IMRTRichTextContent()}
     set {_body = newValue}
   }
   /// Returns true if `body` has been explicitly set.
-  var hasBody: Bool {return self._body != nil}
+  var hasBody: Bool {self._body != nil}
   /// Clears the value of `body`. Subsequent reads from it will return its default value.
   mutating func clearBody() {self._body = nil}
 
@@ -1749,7 +1749,7 @@ struct IMRTMessageEdit: Sendable {
   fileprivate var _body: IMRTRichTextContent? = nil
 }
 
-struct IMRTMessageReaction: Sendable {
+nonisolated struct IMRTMessageReaction: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1763,7 +1763,7 @@ struct IMRTMessageReaction: Sendable {
   init() {}
 }
 
-struct IMRTMessageStreamState: Sendable {
+nonisolated struct IMRTMessageStreamState: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1777,20 +1777,20 @@ struct IMRTMessageStreamState: Sendable {
   var partialText: String = String()
 
   var errorCode: String {
-    get {return _errorCode ?? String()}
+    get {_errorCode ?? String()}
     set {_errorCode = newValue}
   }
   /// Returns true if `errorCode` has been explicitly set.
-  var hasErrorCode: Bool {return self._errorCode != nil}
+  var hasErrorCode: Bool {self._errorCode != nil}
   /// Clears the value of `errorCode`. Subsequent reads from it will return its default value.
   mutating func clearErrorCode() {self._errorCode = nil}
 
   var errorMessage: String {
-    get {return _errorMessage ?? String()}
+    get {_errorMessage ?? String()}
     set {_errorMessage = newValue}
   }
   /// Returns true if `errorMessage` has been explicitly set.
-  var hasErrorMessage: Bool {return self._errorMessage != nil}
+  var hasErrorMessage: Bool {self._errorMessage != nil}
   /// Clears the value of `errorMessage`. Subsequent reads from it will return its default value.
   mutating func clearErrorMessage() {self._errorMessage = nil}
 
@@ -1806,7 +1806,7 @@ struct IMRTMessageStreamState: Sendable {
   fileprivate var _errorMessage: String? = nil
 }
 
-struct IMRTContact: Sendable {
+nonisolated struct IMRTContact: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1816,38 +1816,38 @@ struct IMRTContact: Sendable {
   var email: String = String()
 
   var displayName: String {
-    get {return _displayName ?? String()}
+    get {_displayName ?? String()}
     set {_displayName = newValue}
   }
   /// Returns true if `displayName` has been explicitly set.
-  var hasDisplayName: Bool {return self._displayName != nil}
+  var hasDisplayName: Bool {self._displayName != nil}
   /// Clears the value of `displayName`. Subsequent reads from it will return its default value.
   mutating func clearDisplayName() {self._displayName = nil}
 
   var avatarPreset: String {
-    get {return _avatarPreset ?? String()}
+    get {_avatarPreset ?? String()}
     set {_avatarPreset = newValue}
   }
   /// Returns true if `avatarPreset` has been explicitly set.
-  var hasAvatarPreset: Bool {return self._avatarPreset != nil}
+  var hasAvatarPreset: Bool {self._avatarPreset != nil}
   /// Clears the value of `avatarPreset`. Subsequent reads from it will return its default value.
   mutating func clearAvatarPreset() {self._avatarPreset = nil}
 
   var remark: String {
-    get {return _remark ?? String()}
+    get {_remark ?? String()}
     set {_remark = newValue}
   }
   /// Returns true if `remark` has been explicitly set.
-  var hasRemark: Bool {return self._remark != nil}
+  var hasRemark: Bool {self._remark != nil}
   /// Clears the value of `remark`. Subsequent reads from it will return its default value.
   mutating func clearRemark() {self._remark = nil}
 
   var createdAtMs: Int64 {
-    get {return _createdAtMs ?? 0}
+    get {_createdAtMs ?? 0}
     set {_createdAtMs = newValue}
   }
   /// Returns true if `createdAtMs` has been explicitly set.
-  var hasCreatedAtMs: Bool {return self._createdAtMs != nil}
+  var hasCreatedAtMs: Bool {self._createdAtMs != nil}
   /// Clears the value of `createdAtMs`. Subsequent reads from it will return its default value.
   mutating func clearCreatedAtMs() {self._createdAtMs = nil}
 
@@ -1861,7 +1861,7 @@ struct IMRTContact: Sendable {
   fileprivate var _createdAtMs: Int64? = nil
 }
 
-struct IMRTContactRequest: Sendable {
+nonisolated struct IMRTContactRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1869,76 +1869,76 @@ struct IMRTContactRequest: Sendable {
   var id: String = String()
 
   var requester: IMRTUser {
-    get {return _requester ?? IMRTUser()}
+    get {_requester ?? IMRTUser()}
     set {_requester = newValue}
   }
   /// Returns true if `requester` has been explicitly set.
-  var hasRequester: Bool {return self._requester != nil}
+  var hasRequester: Bool {self._requester != nil}
   /// Clears the value of `requester`. Subsequent reads from it will return its default value.
   mutating func clearRequester() {self._requester = nil}
 
   var addressee: IMRTUser {
-    get {return _addressee ?? IMRTUser()}
+    get {_addressee ?? IMRTUser()}
     set {_addressee = newValue}
   }
   /// Returns true if `addressee` has been explicitly set.
-  var hasAddressee: Bool {return self._addressee != nil}
+  var hasAddressee: Bool {self._addressee != nil}
   /// Clears the value of `addressee`. Subsequent reads from it will return its default value.
   mutating func clearAddressee() {self._addressee = nil}
 
   var status: String = String()
 
   var message: String {
-    get {return _message ?? String()}
+    get {_message ?? String()}
     set {_message = newValue}
   }
   /// Returns true if `message` has been explicitly set.
-  var hasMessage: Bool {return self._message != nil}
+  var hasMessage: Bool {self._message != nil}
   /// Clears the value of `message`. Subsequent reads from it will return its default value.
   mutating func clearMessage() {self._message = nil}
 
   var requesterRemark: String {
-    get {return _requesterRemark ?? String()}
+    get {_requesterRemark ?? String()}
     set {_requesterRemark = newValue}
   }
   /// Returns true if `requesterRemark` has been explicitly set.
-  var hasRequesterRemark: Bool {return self._requesterRemark != nil}
+  var hasRequesterRemark: Bool {self._requesterRemark != nil}
   /// Clears the value of `requesterRemark`. Subsequent reads from it will return its default value.
   mutating func clearRequesterRemark() {self._requesterRemark = nil}
 
   var addresseeRemark: String {
-    get {return _addresseeRemark ?? String()}
+    get {_addresseeRemark ?? String()}
     set {_addresseeRemark = newValue}
   }
   /// Returns true if `addresseeRemark` has been explicitly set.
-  var hasAddresseeRemark: Bool {return self._addresseeRemark != nil}
+  var hasAddresseeRemark: Bool {self._addresseeRemark != nil}
   /// Clears the value of `addresseeRemark`. Subsequent reads from it will return its default value.
   mutating func clearAddresseeRemark() {self._addresseeRemark = nil}
 
   var createdAtMs: Int64 {
-    get {return _createdAtMs ?? 0}
+    get {_createdAtMs ?? 0}
     set {_createdAtMs = newValue}
   }
   /// Returns true if `createdAtMs` has been explicitly set.
-  var hasCreatedAtMs: Bool {return self._createdAtMs != nil}
+  var hasCreatedAtMs: Bool {self._createdAtMs != nil}
   /// Clears the value of `createdAtMs`. Subsequent reads from it will return its default value.
   mutating func clearCreatedAtMs() {self._createdAtMs = nil}
 
   var updatedAtMs: Int64 {
-    get {return _updatedAtMs ?? 0}
+    get {_updatedAtMs ?? 0}
     set {_updatedAtMs = newValue}
   }
   /// Returns true if `updatedAtMs` has been explicitly set.
-  var hasUpdatedAtMs: Bool {return self._updatedAtMs != nil}
+  var hasUpdatedAtMs: Bool {self._updatedAtMs != nil}
   /// Clears the value of `updatedAtMs`. Subsequent reads from it will return its default value.
   mutating func clearUpdatedAtMs() {self._updatedAtMs = nil}
 
   var respondedAtMs: Int64 {
-    get {return _respondedAtMs ?? 0}
+    get {_respondedAtMs ?? 0}
     set {_respondedAtMs = newValue}
   }
   /// Returns true if `respondedAtMs` has been explicitly set.
-  var hasRespondedAtMs: Bool {return self._respondedAtMs != nil}
+  var hasRespondedAtMs: Bool {self._respondedAtMs != nil}
   /// Clears the value of `respondedAtMs`. Subsequent reads from it will return its default value.
   mutating func clearRespondedAtMs() {self._respondedAtMs = nil}
 
@@ -1956,7 +1956,7 @@ struct IMRTContactRequest: Sendable {
   fileprivate var _respondedAtMs: Int64? = nil
 }
 
-struct IMRTUser: Sendable {
+nonisolated struct IMRTUser: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1966,20 +1966,20 @@ struct IMRTUser: Sendable {
   var email: String = String()
 
   var displayName: String {
-    get {return _displayName ?? String()}
+    get {_displayName ?? String()}
     set {_displayName = newValue}
   }
   /// Returns true if `displayName` has been explicitly set.
-  var hasDisplayName: Bool {return self._displayName != nil}
+  var hasDisplayName: Bool {self._displayName != nil}
   /// Clears the value of `displayName`. Subsequent reads from it will return its default value.
   mutating func clearDisplayName() {self._displayName = nil}
 
   var avatarPreset: String {
-    get {return _avatarPreset ?? String()}
+    get {_avatarPreset ?? String()}
     set {_avatarPreset = newValue}
   }
   /// Returns true if `avatarPreset` has been explicitly set.
-  var hasAvatarPreset: Bool {return self._avatarPreset != nil}
+  var hasAvatarPreset: Bool {self._avatarPreset != nil}
   /// Clears the value of `avatarPreset`. Subsequent reads from it will return its default value.
   mutating func clearAvatarPreset() {self._avatarPreset = nil}
 
@@ -1993,9 +1993,9 @@ struct IMRTUser: Sendable {
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
-fileprivate let _protobuf_package = "im.realtime.v1"
+fileprivate nonisolated let _protobuf_package = "im.realtime.v1"
 
-extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Packet"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}timestamp_ms\0\u{3}protocol_version\0\u{2}\u{7}auth\0\u{3}auth_ok\0\u{3}auth_error\0\u{2}\u{8}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{9}send_message\0\u{1}ack\0\u{4}\u{9}domain_event\0\u{3}stream_signal\0\u{2}\u{9}kick\0\u{4}\u{a}conversation_activity\0")
 
@@ -2230,7 +2230,7 @@ extension IMRTPacket: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementatio
   }
 }
 
-extension IMRTAuthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTAuthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AuthRequest"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}access_token\0\u{3}device_id\0\u{3}device_name\0\u{1}platform\0\u{3}app_version\0")
 
@@ -2284,7 +2284,7 @@ extension IMRTAuthRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplemen
   }
 }
 
-extension IMRTAuthAccepted: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTAuthAccepted: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AuthAccepted"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}connection_id\0\u{3}user_id\0\u{3}session_id\0\u{3}heartbeat_interval_seconds\0\u{3}server_time_ms\0")
 
@@ -2334,7 +2334,7 @@ extension IMRTAuthAccepted: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
   }
 }
 
-extension IMRTAuthError: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTAuthError: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AuthError"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}code\0\u{1}message\0")
 
@@ -2369,7 +2369,7 @@ extension IMRTAuthError: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementa
   }
 }
 
-extension IMRTHeartbeat: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTHeartbeat: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Heartbeat"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}sequence\0")
 
@@ -2399,7 +2399,7 @@ extension IMRTHeartbeat: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementa
   }
 }
 
-extension IMRTAck: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTAck: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Ack"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}conversation_id\0\u{1}status\0")
 
@@ -2443,7 +2443,7 @@ extension IMRTAck: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBa
   }
 }
 
-extension IMRTSendMessageCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTSendMessageCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".SendMessageCommand"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_message_id\0\u{4}\u{2}conversation_id\0\u{2}\u{4}content\0")
 
@@ -2487,7 +2487,7 @@ extension IMRTSendMessageCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension IMRTConversationActivityCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTConversationActivityCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ConversationActivityCommand"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}conversation_id\0\u{3}is_active\0")
 
@@ -2522,9 +2522,9 @@ extension IMRTConversationActivityCommand: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
-extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ChatDomainEvent"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_id\0\u{3}event_type\0\u{3}aggregate_type\0\u{3}aggregate_id\0\u{3}aggregate_sequence\0\u{3}occurred_at_ms\0\u{3}actor_user_id\0\u{1}conversation\0\u{3}timeline_notice\0\u{3}message_created\0\u{3}message_edited\0\u{3}message_revoked\0\u{3}message_visibility_changed\0\u{3}message_favorite_changed\0\u{4}\u{6}message_stream_started\0\u{4}\u{2}message_stream_completed\0\u{3}message_stream_failed\0\u{3}message_stream_cancelled\0\u{4}\u{6}conversation_created\0\u{3}conversation_updated\0\u{3}conversation_removed_for_self\0\u{3}conversation_settings_changed\0\u{3}conversation_visibility_changed\0\u{3}conversation_activity_hint\0\u{4}\u{4}member_added\0\u{3}member_removed\0\u{3}member_role_updated\0\u{4}\u{8}contact_request_created\0\u{3}contact_request_accepted\0\u{3}contact_request_updated\0\u{4}\u{8}owner_cursor\0\u{3}owner_aggregate_sequence\0\u{3}requires_timeline_notice\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_id\0\u{3}event_type\0\u{3}aggregate_type\0\u{3}aggregate_id\0\u{3}aggregate_sequence\0\u{3}occurred_at_ms\0\u{3}actor_user_id\0\u{1}conversation\0\u{3}timeline_notice\0\u{3}message_created\0\u{3}message_edited\0\u{3}message_revoked\0\u{3}message_visibility_changed\0\u{3}message_favorite_changed\0\u{4}\u{6}message_stream_started\0\u{4}\u{2}message_stream_completed\0\u{3}message_stream_failed\0\u{3}message_stream_cancelled\0\u{4}\u{6}conversation_created\0\u{3}conversation_updated\0\u{3}conversation_removed_for_self\0\u{3}conversation_settings_changed\0\u{3}conversation_visibility_changed\0\u{3}conversation_activity_hint\0\u{4}\u{5}member_added\0\u{3}member_removed\0\u{3}member_role_updated\0\u{4}\u{8}contact_request_created\0\u{3}contact_request_accepted\0\u{3}contact_request_updated\0\u{4}\u{8}owner_cursor\0\u{3}owner_aggregate_sequence\0\u{3}requires_timeline_notice\0")
 
   fileprivate class _StorageClass {
     var _eventID: String = String()
@@ -3032,7 +3032,7 @@ extension IMRTChatDomainEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
   }
 }
 
-extension IMRTMessageCreatedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageCreatedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageCreatedEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}message\0\u{3}client_message_id\0")
 
@@ -3071,7 +3071,7 @@ extension IMRTMessageCreatedEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension IMRTMessageEditedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageEditedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageEditedEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{1}body\0\u{3}edited_at_ms\0\u{1}message\0")
 
@@ -3120,7 +3120,7 @@ extension IMRTMessageEditedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension IMRTMessageRevokedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageRevokedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageRevokedEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}revoked_at_ms\0\u{3}revoked_by_user_id\0\u{1}message\0")
 
@@ -3169,7 +3169,7 @@ extension IMRTMessageRevokedEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension IMRTMessageVisibilityChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageVisibilityChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageVisibilityChangedEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_ids\0\u{1}message\0\u{3}visibility_action\0")
 
@@ -3213,7 +3213,7 @@ extension IMRTMessageVisibilityChangedEvent: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
-extension IMRTMessageFavoriteChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageFavoriteChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageFavoriteChangedEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}is_favorited\0")
 
@@ -3248,7 +3248,7 @@ extension IMRTMessageFavoriteChangedEvent: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
-extension IMRTMessageStreamEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageStreamEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageStreamEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}stream\0\u{1}message\0")
 
@@ -3287,7 +3287,7 @@ extension IMRTMessageStreamEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension IMRTMessageStreamSignal: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageStreamSignal: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageStreamSignal"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}stream\0\u{1}message\0")
 
@@ -3326,7 +3326,7 @@ extension IMRTMessageStreamSignal: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension IMRTConversationChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTConversationChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ConversationChangedEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap()
 
@@ -3345,7 +3345,7 @@ extension IMRTConversationChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._Me
   }
 }
 
-extension IMRTConversationActivityHintEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTConversationActivityHintEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ConversationActivityHintEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}sender_user_id\0\u{3}server_sequence\0\u{3}timeline_sequence\0\u{3}preview_text\0\u{3}message_created_at_ms\0\u{3}updated_at_ms\0")
 
@@ -3409,7 +3409,7 @@ extension IMRTConversationActivityHintEvent: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
-extension IMRTConversationRemovedForSelfEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTConversationRemovedForSelfEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ConversationRemovedForSelfEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap()
 
@@ -3428,7 +3428,7 @@ extension IMRTConversationRemovedForSelfEvent: SwiftProtobuf.Message, SwiftProto
   }
 }
 
-extension IMRTConversationVisibilityChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTConversationVisibilityChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ConversationVisibilityChangedEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}visibility_action\0\u{3}message_ids\0")
 
@@ -3463,7 +3463,7 @@ extension IMRTConversationVisibilityChangedEvent: SwiftProtobuf.Message, SwiftPr
   }
 }
 
-extension IMRTMemberChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMemberChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MemberChangedEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}member_user_ids\0")
 
@@ -3493,7 +3493,7 @@ extension IMRTMemberChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension IMRTContactChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTContactChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ContactChangedEvent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}request\0\u{1}contact\0\u{3}contact_user_id\0")
 
@@ -3577,7 +3577,7 @@ extension IMRTContactChangedEvent: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension IMRTTimelineNotice: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTTimelineNotice: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".TimelineNotice"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}conversation_id\0\u{3}timeline_sequence\0\u{3}event_type\0\u{3}actor_user_id\0\u{3}target_user_ids\0\u{3}notice_kind\0\u{1}params\0\u{3}fallback_text\0\u{3}created_at_ms\0")
 
@@ -3656,7 +3656,7 @@ extension IMRTTimelineNotice: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension IMRTKick: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTKick: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Kick"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}reason\0\u{1}message\0")
 
@@ -3691,7 +3691,7 @@ extension IMRTKick: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationB
   }
 }
 
-extension IMRTMessageStreamPayload: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageStreamPayload: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageStreamPayload"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}stream_id\0\u{3}message_id\0\u{3}conversation_id\0\u{3}chunk_index\0\u{3}delta_text\0\u{3}partial_text_length\0\u{1}state\0\u{3}server_timestamp_ms\0")
 
@@ -3760,7 +3760,7 @@ extension IMRTMessageStreamPayload: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
-extension IMRTConversationSummary: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTConversationSummary: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ConversationSummary"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}title\0\u{1}kind\0\u{3}direct_messaging_state\0\u{3}direct_peer\0\u{1}notice\0\u{3}avatar_preset\0\u{3}mute_all\0\u{3}member_count\0\u{3}member_user_ids\0\u{3}last_message\0\u{3}last_read_sequence\0\u{3}unread_count\0\u{3}is_pinned\0\u{3}pinned_at_ms\0\u{3}is_muted\0\u{3}created_at_ms\0\u{3}updated_at_ms\0")
 
@@ -3949,7 +3949,7 @@ extension IMRTConversationSummary: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension IMRTDirectPeer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTDirectPeer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".DirectPeer"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}email\0\u{3}display_name\0\u{3}avatar_preset\0")
 
@@ -3998,7 +3998,7 @@ extension IMRTDirectPeer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplement
   }
 }
 
-extension IMRTMessagePreview: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessagePreview: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessagePreview"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}sender_user_id\0\u{3}server_sequence\0\u{1}content\0\u{3}derived_state\0\u{3}created_at_ms\0\u{3}timeline_sequence\0")
 
@@ -4110,7 +4110,7 @@ extension IMRTMessagePreview: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension IMRTConversationMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTConversationMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ConversationMessage"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}conversation_id\0\u{3}sender_user_id\0\u{3}client_message_id\0\u{3}server_sequence\0\u{1}content\0\u{3}derived_state\0\u{3}created_at_ms\0\u{3}timeline_sequence\0")
 
@@ -4236,7 +4236,7 @@ extension IMRTConversationMessage: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension IMRTMessageContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageContent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}rich_text\0\u{1}reply\0\u{2}\u{3}image\0\u{1}audio\0\u{1}file\0")
 
@@ -4354,7 +4354,7 @@ extension IMRTMessageContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension IMRTRichTextContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTRichTextContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".RichTextContent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{1}entities\0")
 
@@ -4389,7 +4389,7 @@ extension IMRTRichTextContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
   }
 }
 
-extension IMRTReplyContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTReplyContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ReplyContent"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}reference\0\u{1}body\0")
 
@@ -4428,7 +4428,7 @@ extension IMRTReplyContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
   }
 }
 
-extension IMRTTextRange: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTTextRange: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".TextRange"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}location\0\u{1}length\0")
 
@@ -4463,7 +4463,7 @@ extension IMRTTextRange: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementa
   }
 }
 
-extension IMRTTextEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTTextEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".TextEntity"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}range\0\u{2}\u{9}link\0\u{1}mention\0\u{1}hashtag\0\u{3}inline_code\0")
 
@@ -4569,7 +4569,7 @@ extension IMRTTextEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplement
   }
 }
 
-extension IMRTLinkEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTLinkEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".LinkEntity"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}url\0")
 
@@ -4599,7 +4599,7 @@ extension IMRTLinkEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplement
   }
 }
 
-extension IMRTMentionEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMentionEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MentionEntity"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0")
 
@@ -4629,7 +4629,7 @@ extension IMRTMentionEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
   }
 }
 
-extension IMRTHashtagEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTHashtagEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".HashtagEntity"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}value\0")
 
@@ -4659,7 +4659,7 @@ extension IMRTHashtagEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
   }
 }
 
-extension IMRTInlineCodeEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTInlineCodeEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".InlineCodeEntity"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap()
 
@@ -4678,7 +4678,7 @@ extension IMRTInlineCodeEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
   }
 }
 
-extension IMRTReplyReference: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTReplyReference: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ReplyReference"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}sender_user_id\0\u{3}preview_text\0")
 
@@ -4722,7 +4722,7 @@ extension IMRTReplyReference: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension IMRTMediaAsset: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMediaAsset: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MediaAsset"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}asset_id\0\u{1}kind\0\u{3}mime_type\0\u{3}byte_size\0\u{1}filename\0\u{1}width\0\u{1}height\0\u{3}duration_millis\0\u{3}preview_asset_id\0")
 
@@ -4796,7 +4796,7 @@ extension IMRTMediaAsset: SwiftProtobuf.Message, SwiftProtobuf._MessageImplement
   }
 }
 
-extension IMRTMessageDerivedState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageDerivedState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageDerivedState"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}recall_state\0\u{1}edits\0\u{1}reactions\0\u{3}stream_state\0")
 
@@ -4845,7 +4845,7 @@ extension IMRTMessageDerivedState: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension IMRTMessageEdit: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageEdit: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageEdit"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}edited_at_ms\0\u{1}body\0")
 
@@ -4884,7 +4884,7 @@ extension IMRTMessageEdit: SwiftProtobuf.Message, SwiftProtobuf._MessageImplemen
   }
 }
 
-extension IMRTMessageReaction: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageReaction: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageReaction"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}emoji\0\u{3}actor_user_ids\0")
 
@@ -4919,7 +4919,7 @@ extension IMRTMessageReaction: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
   }
 }
 
-extension IMRTMessageStreamState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTMessageStreamState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".MessageStreamState"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}stream_id\0\u{1}state\0\u{3}last_chunk_index\0\u{3}partial_text\0\u{3}error_code\0\u{3}error_message\0\u{3}updated_at_ms\0\u{3}is_ai_generated\0")
 
@@ -4988,7 +4988,7 @@ extension IMRTMessageStreamState: SwiftProtobuf.Message, SwiftProtobuf._MessageI
   }
 }
 
-extension IMRTContact: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTContact: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Contact"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}email\0\u{3}display_name\0\u{3}avatar_preset\0\u{1}remark\0\u{3}created_at_ms\0")
 
@@ -5047,7 +5047,7 @@ extension IMRTContact: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementati
   }
 }
 
-extension IMRTContactRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTContactRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ContactRequest"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}requester\0\u{1}addressee\0\u{1}status\0\u{1}message\0\u{3}requester_remark\0\u{3}addressee_remark\0\u{3}created_at_ms\0\u{3}updated_at_ms\0\u{3}responded_at_ms\0")
 
@@ -5126,7 +5126,7 @@ extension IMRTContactRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
   }
 }
 
-extension IMRTUser: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension IMRTUser: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".User"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}email\0\u{3}display_name\0\u{3}avatar_preset\0")
 

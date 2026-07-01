@@ -23,6 +23,8 @@ DerivedData/
 
 # Logs and temporary files
 *.log
+*.py[cod]
+__pycache__/
 tmp/
 temp/
 build/
