@@ -2913,7 +2913,7 @@ GOVERNANCE_REQUIRED = {
         "SWIFTPM_BUILD_JOBS",
         "configure_swiftpm_job_args",
         "swift build -c release",
-        "swift test --no-parallel",
+        "swift test -c release --no-parallel",
         "--package-path",
     ],
     "IMServer/scripts/verify_production_release_gate.py": [

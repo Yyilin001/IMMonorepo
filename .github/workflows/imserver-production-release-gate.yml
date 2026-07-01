@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       run_swift_tests:
-        description: "Run swift test --no-parallel as part of the production gate"
+        description: "Run swift test -c release --no-parallel as part of the production gate"
         required: false
         default: "true"
         type: choice

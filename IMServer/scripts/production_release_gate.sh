@@ -37,7 +37,7 @@ Runs the local production release gate:
   - TCP load-driver release build on Darwin hosts
   - optional real production env preflight with --strict-secrets
   - Swift release build
-  - full Swift tests by default with swift test --no-parallel
+  - full Swift release tests by default with swift test -c release --no-parallel
 
 Use --skip-swift-tests or RUN_SWIFT_TESTS=false only for a local fast smoke gate.
 Use --validate-args-only only from CI/static checks; it validates the gate CLI
@@ -489,6 +489,7 @@ STEP_RESULTS_FILE="${STEP_LOG_DIR}/$(basename "${REPORT_FILE%.*}").steps.tsv"
   echo "- generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "- git_sha: $(git -C "${MONOREPO_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   echo "- swift_tests: ${RUN_SWIFT_TESTS}"
+  echo "- swift_test_configuration: release"
   echo "- swiftpm_build_jobs: ${SWIFTPM_BUILD_JOBS:-auto}"
   echo "- real_env_preflight: ${RUN_REAL_PREFLIGHT}"
   echo "- real_env_strict_secrets: ${REAL_STRICT_SECRETS}"
@@ -527,9 +528,9 @@ fi
 run_step "IMServer release build" swift build -c release "${SWIFTPM_JOB_ARGS[@]}" --package-path "${ROOT_DIR}"
 
 if is_true "${RUN_SWIFT_TESTS}"; then
-  run_step "IMServer full Swift tests" swift test --no-parallel "${SWIFTPM_JOB_ARGS[@]}" --package-path "${ROOT_DIR}"
+  run_step "IMServer full Swift release tests" swift test -c release --no-parallel "${SWIFTPM_JOB_ARGS[@]}" --package-path "${ROOT_DIR}"
 else
-  record_skipped_step "IMServer full Swift tests" "explicitly skipped with --skip-swift-tests or RUN_SWIFT_TESTS=false"
+  record_skipped_step "IMServer full Swift release tests" "explicitly skipped with --skip-swift-tests or RUN_SWIFT_TESTS=false"
   echo "==> swift test skipped by explicit request."
 fi
 

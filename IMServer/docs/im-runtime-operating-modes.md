@@ -113,8 +113,8 @@ preflight, CI artifacts, and failure handling.
 `production_release_gate.sh` writes a timestamped markdown report plus per-step
 `.log` files under `reports/`; CI uploads them as the
 `imserver-production-release-gate-reports` artifact. The release gate runs
-`swift test --no-parallel` by default; use `--skip-swift-tests` only for a local
-fast smoke gate that is not release acceptance evidence.
+`swift test -c release --no-parallel` by default; use `--skip-swift-tests` only
+for a local fast smoke gate that is not release acceptance evidence.
 
 ## Production Go / No-Go Checklist
 

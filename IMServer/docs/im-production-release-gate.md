@@ -18,7 +18,7 @@ protocol files, production env shape, and role guardrails are deployable.
 - optional real production env preflight when real env files are passed
 - `swift build -c release --package-path IMServer/LoadTests/TCPDriver`
 - `swift build -c release --package-path IMServer`
-- `swift test --no-parallel --package-path IMServer` by default
+- `swift test -c release --no-parallel --package-path IMServer` by default
 
 The protobuf drift check regenerates expected Swift protobuf outputs in a temp
 directory and compares them with the committed generated files. If it fails, run
