@@ -337,6 +337,12 @@ require_file() {
   fi
 }
 
+archive_contains_member() {
+  local archive="$1"
+  local member="$2"
+  tar -tzf "${archive}" | awk -v expected="${member}" '$0 == expected { found = 1 } END { exit(found ? 0 : 1) }'
+}
+
 stage_cloud_security_group_snapshot() {
   local stage_dir="$1"
   local source_file="${PRODUCTION_EVIDENCE_CLOUD_SECURITY_GROUP_RULES_FILE}"
@@ -2332,7 +2338,7 @@ PY
 	    './cloud-security-group-repair-plan.json' \
 	    './cloud-security-group-repair-snapshot.json' \
 	    './cloud-security-group-repair-post-apply-snapshot.json'; do
-	    tar -tzf "${tmp_dir}/production-target-cloud-sg-out/evidence.tar.gz" | grep -q "${cloud_sg_artifact}" || {
+	    archive_contains_member "${tmp_dir}/production-target-cloud-sg-out/evidence.tar.gz" "${cloud_sg_artifact}" || {
 	      printf 'production_evidence_package_self_test result=fail reason=cloud_security_group_artifact_missing artifact=%s\n' "${cloud_sg_artifact}" >&2
 	      exit 1
 	    }
@@ -2369,143 +2375,143 @@ PY
 	  PRODUCTION_EVIDENCE_CLOUD_SECURITY_GROUP_REPAIR_RECEIPT_EXPECT_REGION_ID=
 	  PRODUCTION_EVIDENCE_CLOUD_SECURITY_GROUP_REPAIR_RECEIPT_EXPECT_ADMIN_CIDR=
 	  PRODUCTION_EVIDENCE_REQUIRE_CLOUD_SECURITY_GROUP_EFFECTIVE="$(resolve_package_require_cloud_security_group)"
-	  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './production-profile-plan.json' || {
+	  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './production-profile-plan.json' || {
 	    printf 'production_evidence_package_self_test result=fail reason=profile_plan_missing\n' >&2
 	    exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './production-profile-run.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './production-profile-run.json' || {
     printf 'production_evidence_package_self_test result=fail reason=profile_run_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './production-profile-operator-network.log' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './production-profile-operator-network.log' || {
     printf 'production_evidence_package_self_test result=fail reason=profile_operator_network_log_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './production-profile-operator-network.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './production-profile-operator-network.json' || {
     printf 'production_evidence_package_self_test result=fail reason=profile_operator_network_json_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './production-profile-entrypoint-probe.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './production-profile-entrypoint-probe.json' || {
     printf 'production_evidence_package_self_test result=fail reason=profile_entrypoint_probe_json_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './production-profile-entrypoint-probe.log' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './production-profile-entrypoint-probe.log' || {
     printf 'production_evidence_package_self_test result=fail reason=profile_entrypoint_probe_log_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './production-profile-runbook.md' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './production-profile-runbook.md' || {
     printf 'production_evidence_package_self_test result=fail reason=profile_runbook_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './production-profile-prereq-audit.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './production-profile-prereq-audit.json' || {
     printf 'production_evidence_package_self_test result=fail reason=profile_prereq_audit_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-test-plan-run.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-test-plan-run.json' || {
     printf 'production_evidence_package_self_test result=fail reason=product_plan_run_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-test-plan-preview.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-test-plan-preview.json' || {
     printf 'production_evidence_package_self_test result=fail reason=product_plan_preview_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-test-runbook.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-test-runbook.json' || {
     printf 'production_evidence_package_self_test result=fail reason=product_plan_runbook_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-test-prereq-audit.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-test-prereq-audit.json' || {
     printf 'production_evidence_package_self_test result=fail reason=product_plan_prereq_audit_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-campaign-run.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-campaign-run.json' || {
     printf 'production_evidence_package_self_test result=fail reason=product_campaign_run_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-campaign-runbook.md' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-campaign-runbook.md' || {
     printf 'production_evidence_package_self_test result=fail reason=product_campaign_runbook_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-campaign-stage-01-entrypoint.log' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-campaign-stage-01-entrypoint.log' || {
     printf 'production_evidence_package_self_test result=fail reason=product_campaign_stage_log_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-campaign-stage-07-normal-product-baseline.log' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-campaign-stage-07-normal-product-baseline.log' || {
     printf 'production_evidence_package_self_test result=fail reason=product_campaign_last_stage_log_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-scenario-suite-run.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-scenario-suite-run.json' || {
     printf 'production_evidence_package_self_test result=fail reason=product_scenario_suite_run_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-scenario-suite-run.md' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-scenario-suite-run.md' || {
     printf 'production_evidence_package_self_test result=fail reason=product_scenario_suite_md_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-scenario-suite-stages.tsv' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-scenario-suite-stages.tsv' || {
     printf 'production_evidence_package_self_test result=fail reason=product_scenario_suite_stages_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './validation-inventory.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './validation-inventory.json' || {
     printf 'production_evidence_package_self_test result=fail reason=validation_inventory_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './docs-audit.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './docs-audit.json' || {
     printf 'production_evidence_package_self_test result=fail reason=docs_audit_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-profile-gate.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-profile-gate.json' || {
     printf 'production_evidence_package_self_test result=fail reason=product_profile_gate_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-profile-gate.md' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-profile-gate.md' || {
     printf 'production_evidence_package_self_test result=fail reason=product_profile_gate_md_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-campaign-audit.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-campaign-audit.json' || {
     printf 'production_evidence_package_self_test result=fail reason=product_campaign_audit_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './product-campaign-audit.md' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './product-campaign-audit.md' || {
     printf 'production_evidence_package_self_test result=fail reason=product_campaign_audit_md_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './current-production-readiness.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './current-production-readiness.json' || {
     printf 'production_evidence_package_self_test result=fail reason=current_readiness_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './current-production-dashboard.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './current-production-dashboard.json' || {
     printf 'production_evidence_package_self_test result=fail reason=current_readiness_dashboard_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './current-readiness-operator-network.log' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './current-readiness-operator-network.log' || {
     printf 'production_evidence_package_self_test result=fail reason=current_readiness_operator_network_log_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './current-readiness-operator-network.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './current-readiness-operator-network.json' || {
     printf 'production_evidence_package_self_test result=fail reason=current_readiness_operator_network_json_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './current-readiness-production-full-acceptance.log' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './current-readiness-production-full-acceptance.log' || {
     printf 'production_evidence_package_self_test result=fail reason=current_readiness_full_acceptance_log_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './current-readiness-full-acceptance-run.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './current-readiness-full-acceptance-run.json' || {
     printf 'production_evidence_package_self_test result=fail reason=current_readiness_full_acceptance_run_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './current-readiness-full-acceptance-runbook.md' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './current-readiness-full-acceptance-runbook.md' || {
     printf 'production_evidence_package_self_test result=fail reason=current_readiness_full_acceptance_runbook_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './perf_production_profiles.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './perf_production_profiles.json' || {
     printf 'production_evidence_package_self_test result=fail reason=profile_catalog_snapshot_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './perf_product_campaigns.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './perf_product_campaigns.json' || {
     printf 'production_evidence_package_self_test result=fail reason=product_campaign_catalog_snapshot_missing\n' >&2
     exit 1
   }
-  tar -tzf "${tmp_dir}/out/evidence.tar.gz" | grep -q './production-evidence-manifest.json' || {
+  archive_contains_member "${tmp_dir}/out/evidence.tar.gz" './production-evidence-manifest.json' || {
     printf 'production_evidence_package_self_test result=fail reason=evidence_manifest_missing\n' >&2
     exit 1
   }

@@ -68,7 +68,7 @@ run_self_test() {
 
   [[ -f "${tmpdir}/loadtest-3.csv" ]] || fail "self_test_output_missing"
   [[ "$(wc -l <"${tmpdir}/loadtest-3.csv" | tr -d ' ')" == "3" ]] || fail "self_test_row_count_invalid"
-  [[ "$(stat -f '%Lp' "${tmpdir}/loadtest-3.csv" 2>/dev/null || stat -c '%a' "${tmpdir}/loadtest-3.csv")" == "600" ]] || fail "self_test_mode_invalid"
+  [[ "$(python3 -c 'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])' "${tmpdir}/loadtest-3.csv")" == "600" ]] || fail "self_test_mode_invalid"
   grep -q 'provision_load_accounts result=pass' "${tmpdir}/local.out" || fail "self_test_local_result_missing"
 
   if COUNT=1 \
