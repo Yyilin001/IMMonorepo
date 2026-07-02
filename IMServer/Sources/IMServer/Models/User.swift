@@ -34,6 +34,9 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
     @OptionalField(key: "email_verified_at")
     var emailVerifiedAt: Date?
 
+    @OptionalField(key: "admin_role")
+    var adminRole: String?
+
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
 
@@ -52,7 +55,8 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
         status: UserStatus,
         displayName: String? = nil,
         avatarPreset: UserAvatarPreset? = nil,
-        emailVerifiedAt: Date? = nil
+        emailVerifiedAt: Date? = nil,
+        adminRole: String? = nil
     ) {
         self.id = id
         self.email = email
@@ -62,6 +66,7 @@ final class User: Model, Content, Authenticatable, @unchecked Sendable {
         self.avatarPreset = avatarPreset?.rawValue
         self.profileRevision = 0
         self.emailVerifiedAt = emailVerifiedAt
+        self.adminRole = adminRole
     }
 
     var statusEnum: UserStatus {

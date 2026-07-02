@@ -184,6 +184,36 @@ private struct IMTableIndexRequirement {
 
 private let imSchemaRequirements: [IMTableSchemaRequirement] = [
     IMTableSchemaRequirement(
+        table: User.schema,
+        requiredColumns: [
+            "id",
+            "email",
+            "password_hash",
+            "status",
+            "display_name",
+            "avatar_preset",
+            "profile_revision",
+            "email_verified_at",
+            "admin_role",
+            "created_at",
+            "updated_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
+        table: AdminAuditEvent.schema,
+        requiredColumns: [
+            "id",
+            "actor",
+            "action",
+            "target_type",
+            "target_id",
+            "request_id",
+            "ip_address",
+            "metadata_json",
+            "created_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
         table: Conversation.schema,
         requiredColumns: [
             "id",
@@ -419,6 +449,13 @@ private let imIndexRequirements: [IMTableIndexRequirement] = [
         requiredIndexes: [
             "conversation_domain_event_recipient_set_members_hash_user_idx",
             "conversation_domain_event_recipient_set_members_user_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: AdminAuditEvent.schema,
+        requiredIndexes: [
+            "admin_audit_events_created_idx",
+            "admin_audit_events_action_created_idx"
         ]
     )
 ]

@@ -25,6 +25,7 @@ enum IMCommandAPIProductionValidator {
         try IMProductionRuntimeValidationSupport.validateGroupMemberLimitConfiguration(app)
         try IMProductionRuntimeValidationSupport.validateTimelineReadProtectionConfiguration(app)
         try IMProductionRuntimeValidationSupport.validateTimelineSinceCacheInvalidationConfiguration(app)
+        try IMProductionRuntimeValidationSupport.validateAdminAPIConfiguration(app)
         try IMProductionRuntimeValidationSupport.validateCommandOwnerRoutingConfiguration(
             app,
             requiresLocalNodeID: true

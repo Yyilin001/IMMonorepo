@@ -49,6 +49,7 @@ private func configureShared(_ app: Application) async throws {
     app.summaryReadModelConfiguration = IMSummaryReadModelConfiguration.load(from: app.environment)
     app.streamConsumerConfiguration = IMStreamConsumerConfiguration.load(from: app.environment)
     app.metricsConfiguration = IMMetricsConfiguration.load(from: app.environment)
+    app.adminConfiguration = AdminConfiguration.load(from: app.environment)
     app.hotConversationConfiguration = IMHotConversationConfiguration.load(from: app.environment)
     app.sequenceAllocationConfiguration = IMSequenceAllocationConfiguration.load(from: app.environment)
     app.commandOwnerRoutingConfiguration = IMCommandOwnerRoutingConfiguration.load(from: app.environment)

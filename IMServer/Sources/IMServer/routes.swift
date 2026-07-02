@@ -23,6 +23,9 @@ func routes(_ app: Application) throws {
         try app.register(collection: UserController())
         try app.register(collection: MediaController())
         try app.register(collection: FileController())
+        if app.adminConfiguration.isEnabled {
+            try app.register(collection: AdminController())
+        }
     }
 
     if app.imRuntimeRole.servesQueryAPI {

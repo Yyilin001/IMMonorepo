@@ -688,6 +688,41 @@ extension IMServerTests {
         }
     }
 
+    @Test("Production command API requires separate admin secret when admin is enabled")
+    func productionCommandAPIRequiresSeparateAdminSecretWhenAdminIsEnabled() async throws {
+        try await withProductionRuntimeEnvironment {
+            setenv("IM_ADMIN_API_ENABLED", "true", 1)
+            unsetenv("IM_ADMIN_SHARED_SECRET")
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMCommandAPIProductionValidator.validate(app: app)
+                Issue.record("Expected command-api validation to require admin secret when admin is enabled")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_ADMIN_SHARED_SECRET"))
+            } catch {
+                Issue.record("Unexpected command-api admin validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+
+        try await withProductionRuntimeEnvironment {
+            setenv("IM_ADMIN_API_ENABLED", "true", 1)
+            setenv("IM_ADMIN_SHARED_SECRET", "fedcba9876543210fedcba9876543210", 1)
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMCommandAPIProductionValidator.validate(app: app)
+                Issue.record("Expected command-api validation to reject reused internal secret")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("different from IM_INTERNAL_SHARED_SECRET"))
+            } catch {
+                Issue.record("Unexpected command-api admin validation error: \(error)")
+            }
+            try? await app.asyncShutdown()
+        }
+    }
+
     @Test("Production domain delivery consumer requires gateway relay configuration")
     func productionDomainDeliveryConsumerRequiresGatewayRelayConfiguration() async throws {
         try await withProductionRuntimeEnvironment {

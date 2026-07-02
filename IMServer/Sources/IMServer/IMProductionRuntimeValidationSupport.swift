@@ -93,6 +93,28 @@ enum IMProductionRuntimeValidationSupport {
         }
     }
 
+    static func validateAdminAPIConfiguration(_ app: Application) throws {
+        guard app.adminConfiguration.isEnabled else {
+            return
+        }
+
+        try requireProductionSecret("IM_ADMIN_SHARED_SECRET", minimumLength: 32)
+
+        let adminSecret = Environment.get("IM_ADMIN_SHARED_SECRET")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let internalSecret = Environment.get("IM_INTERNAL_SHARED_SECRET")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let adminSecret,
+           let internalSecret,
+           !adminSecret.isEmpty,
+           adminSecret == internalSecret {
+            throw Abort(
+                .internalServerError,
+                reason: "Production IM_ADMIN_SHARED_SECRET must be different from IM_INTERNAL_SHARED_SECRET."
+            )
+        }
+    }
+
     static func validateGatewayCommandIngressConfiguration(_ app: Application) throws {
         guard app.commandAPIIngressConfiguration.isEnabled else {
             throw Abort(.internalServerError, reason: "Production gateway requires IM_COMMAND_API_INTERNAL_BASE_URL to proxy IM command ingress.")

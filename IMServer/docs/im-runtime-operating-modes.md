@@ -70,6 +70,7 @@ Required production posture:
 - `IM_SUMMARY_SHARD_IDS` and every matching `DATABASE_SUMMARY_<SHARD>_{HOST,PORT,USERNAME,PASSWORD,NAME}` value are present.
 - `MEDIA_STORAGE_PROVIDER=s3compatible` for `command-api`, with explicit S3 endpoint, bucket, access key, secret key, region, and path-style setting.
 - `IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT`, `IM_SEQUENCE_ALLOCATION_MODE=block`, matching `IM_COMMAND_NODE_ID` / `IM_COMMAND_NODE_URLS`, `IM_COMMAND_INTERNAL_SHARED_SECRET` or `IM_INTERNAL_SHARED_SECRET`, `IM_MESSAGE_WRITE_BATCH_ENABLED=true`, and an explicit `IM_GROUP_MEMBER_LIMIT` for production capacity. The current large-group template uses `1000`; keep the same value on `command-api` and `stream-consumer`, and keep it at or above `IM_MESSAGE_CREATED_RECIPIENT_INLINE_THRESHOLD`.
+- Admin management is a `command-api` responsibility only. Keep `IM_ADMIN_API_ENABLED=false` by default; when enabling it, set a separate strong `IM_ADMIN_SHARED_SECRET` and expose `/admin` only behind private networking or an authenticated reverse proxy.
 - `/internal/metrics` is enabled only on private networking.
 
 ## Production Startup Guards
@@ -86,6 +87,7 @@ Required production posture:
 | `command-api` without hot conversation limit | `Production command-api requires IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT` |
 | `command-api` without block sequence allocation | `Production command-api requires IM_SEQUENCE_ALLOCATION_MODE=block` |
 | `command-api` without message write batching | `Production command-api requires IM_MESSAGE_WRITE_BATCH_ENABLED=true` |
+| `command-api` with admin enabled and no admin secret | `Production requires IM_ADMIN_SHARED_SECRET` |
 | `query-api` without sharded summary reads | `Production summary query reads must use IM_SUMMARY_QUERY_READ_SOURCE=sharded` |
 | `stream-consumer` without Kafka | `stream-consumer requires IM_EVENT_STREAM_DRIVER=kafka` |
 | `stream-consumer` with multiple groups and no override | `Production stream-consumer deployments must run exactly one IM_STREAM_CONSUMER_GROUPS entry per process` |

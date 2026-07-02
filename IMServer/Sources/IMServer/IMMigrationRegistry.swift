@@ -16,6 +16,7 @@ enum IMMigrationRegistry {
         app.migrations.add(AddAuthSecuritySchema())
         app.migrations.add(AddAuthIndexes())
         app.migrations.add(EnforceSingleActiveDeviceSession())
+        app.migrations.add(AddAdminManagementSchema())
         app.migrations.add(CreateConversation())
         app.migrations.add(AddConversationMembershipRevision())
         app.migrations.add(AddConversationLastMessageSequence())
@@ -114,6 +115,7 @@ enum IMMigrationRegistry {
 
         let tablesToDrop = [
             DirectConversationIndexEntry.schema,
+            AdminAuditEvent.schema,
             DirectConversationPairDirectory.schema,
             ConversationDirectoryEntry.schema,
             ConversationReadModelToken.schema,
@@ -253,7 +255,8 @@ private let imMigrationNames: [String] = [
     "CreateContactChangesLog",
     "CreateConversationActivitySummaryReadModel",
     "AddLargeGroupSummaryReadPathIndexes",
-    "AddTimelineReadPathIndexes"
+    "AddTimelineReadPathIndexes",
+    "AddAdminManagementSchema"
 ]
 
 private struct ResetIMSchemaStorageKey: StorageKey {
