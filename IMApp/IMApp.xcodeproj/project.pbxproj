@@ -248,7 +248,6 @@
 /* Begin PBXShellScriptBuildPhase section */
 		1BADBC3D2F73859E00E89B24 /* Validate Release Network Configuration */ = {
 			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
@@ -262,10 +261,11 @@
 			outputFileListPaths = (
 			);
 			outputPaths = (
+				"$(DERIVED_FILE_DIR)/validate_network_configuration-$(CONFIGURATION).stamp",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "if [ \"${CONFIGURATION}\" != \"Release\" ]; then\n  exit 0\nfi\nINFO_PLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\" \\\nIMAPP_NETWORK_CONFIG_MODE=production \\\nIMAPP_NETWORK_CONFIG_USE_ENV_OVERRIDES=false \\\n\"${SRCROOT}/Scripts/validate_network_configuration.sh\"\n";
+			shellScript = "if [ \"${CONFIGURATION}\" != \"Release\" ]; then\n  mkdir -p \"$(dirname \"${SCRIPT_OUTPUT_FILE_0}\")\"\n  touch \"${SCRIPT_OUTPUT_FILE_0}\"\n  exit 0\nfi\nINFO_PLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\" \\\nIMAPP_NETWORK_CONFIG_MODE=production \\\nIMAPP_NETWORK_CONFIG_USE_ENV_OVERRIDES=false \\\n\"${SRCROOT}/Scripts/validate_network_configuration.sh\"\nmkdir -p \"$(dirname \"${SCRIPT_OUTPUT_FILE_0}\")\"\ntouch \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -517,7 +517,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/IMApp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/IMApp";
 			};
@@ -538,7 +538,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/IMApp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/IMApp";
 			};
@@ -557,7 +557,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = IMApp;
 			};
@@ -576,7 +576,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = IMApp;
 			};

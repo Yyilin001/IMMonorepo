@@ -108,9 +108,33 @@ struct IMConversationSnapshotBuildState: Equatable, Sendable {
 
     @MainActor
     init(conversationStore: IMConversationStore) {
-        let conversations = conversationStore.conversations
-        self.filteredConversations = conversationStore.filteredConversations
-        self.conversations = conversations
+        self.init(
+            conversationStore: conversationStore,
+            capturesList: true,
+            chatPageConversationIDs: nil
+        )
+    }
+
+    @MainActor
+    init(
+        conversationStore: IMConversationStore,
+        capturesList: Bool,
+        chatPageConversationIDs: Set<String>?
+    ) {
+        let allConversations = conversationStore.conversations
+        let filteredConversations = capturesList ? conversationStore.filteredConversations : []
+        let chatConversations: [IMConversation]
+        if let chatPageConversationIDs {
+            chatConversations = allConversations.filter { chatPageConversationIDs.contains($0.id) }
+        } else {
+            chatConversations = allConversations
+        }
+        let queueSummaryConversations = Self.uniqueConversations(
+            filteredConversations + chatConversations
+        )
+
+        self.filteredConversations = filteredConversations
+        self.conversations = chatConversations
         self.selectedConversationID = conversationStore.selectedConversationID
         self.conversationMutationGeneration = conversationStore.conversationMutationGeneration
         self.statusMessage = conversationStore.statusMessage
@@ -119,20 +143,34 @@ struct IMConversationSnapshotBuildState: Equatable, Sendable {
         self.hasMoreConversationSummaries = conversationStore.hasMoreConversationSummaries
         self.searchText = conversationStore.searchText
         self.queueSummariesByConversationID = Dictionary(
-            uniqueKeysWithValues: conversations.map { conversation in
-                (conversation.id, conversationStore.queueSummary(for: conversation.id))
+            uniqueKeysWithValues: queueSummaryConversations.map { conversation in
+                (
+                    conversation.id,
+                    Self.queueSummary(
+                        for: conversation.pendingMessages,
+                        isRetryableFailure: { conversationStore.isRetryableFailure($0) }
+                    )
+                )
             }
         )
-        self.receiptSummariesByConversationID = conversationStore.receiptSummaries
+        if let chatPageConversationIDs {
+            self.receiptSummariesByConversationID = Dictionary(
+                uniqueKeysWithValues: chatPageConversationIDs.compactMap { conversationID in
+                    conversationStore.receiptSummary(for: conversationID).map { (conversationID, $0) }
+                }
+            )
+        } else {
+            self.receiptSummariesByConversationID = conversationStore.receiptSummaries
+        }
         self.isLoadingMessages = conversationStore.isLoadingMessages
         self.isLoadingMembers = conversationStore.isLoadingMembers
         self.retryableMessageIDs = Set(
-            conversations.flatMap(\.messages)
+            chatConversations.flatMap(\.messages)
                 .filter { conversationStore.isRetryableFailure($0) }
                 .map(\.id)
         )
         self.retryablePendingMessageIDs = Set(
-            conversations.flatMap(\.pendingMessages)
+            chatConversations.flatMap(\.pendingMessages)
                 .filter { conversationStore.isRetryableFailure($0) }
                 .map(\.id)
         )
@@ -143,6 +181,47 @@ struct IMConversationSnapshotBuildState: Equatable, Sendable {
             queuedCount: 0,
             sendingCount: 0,
             retryableIssueCount: 0
+        )
+    }
+
+    private static func uniqueConversations(_ conversations: [IMConversation]) -> [IMConversation] {
+        var seenIDs: Set<String> = []
+        var uniqueConversations: [IMConversation] = []
+        for conversation in conversations where seenIDs.insert(conversation.id).inserted {
+            uniqueConversations.append(conversation)
+        }
+        return uniqueConversations
+    }
+
+    private static func queueSummary(
+        for messages: [IMPendingConversationMessage],
+        isRetryableFailure: (IMPendingConversationMessage) -> Bool
+    ) -> IMConversationQueueSummary {
+        var queuedCount = 0
+        var sendingCount = 0
+        var retryableIssueCount = 0
+
+        for message in messages where message.direction == .outgoing {
+            switch message.deliveryState {
+            case .preparing, .uploading, .uploaded, .sending:
+                sendingCount += 1
+            case .queued:
+                queuedCount += 1
+            case .unknown:
+                retryableIssueCount += 1
+            case .failed:
+                if isRetryableFailure(message) {
+                    retryableIssueCount += 1
+                }
+            case .sent, .received:
+                break
+            }
+        }
+
+        return IMConversationQueueSummary(
+            queuedCount: queuedCount,
+            sendingCount: sendingCount,
+            retryableIssueCount: retryableIssueCount
         )
     }
 }
@@ -169,6 +248,8 @@ enum IMConversationSnapshotInvalidation: Equatable, Sendable, CustomStringConver
     case appear
     case task(String)
     case opened(String)
+    case conversationDetailChanged(String)
+    case conversationDetailAuxiliaryChanged(String)
     case conversationGenerationChanged(UInt64)
     case selectedConversationChanged(String?)
     case searchChanged(String)
@@ -188,6 +269,10 @@ enum IMConversationSnapshotInvalidation: Equatable, Sendable, CustomStringConver
             return "task:\(id)"
         case .opened(let id):
             return "opened:\(id)"
+        case .conversationDetailChanged(let id):
+            return "conversationDetailChanged:\(id)"
+        case .conversationDetailAuxiliaryChanged(let id):
+            return "conversationDetailAuxiliaryChanged:\(id)"
         case .conversationGenerationChanged(let generation):
             return "generationChanged:\(generation)"
         case .selectedConversationChanged(let id):
@@ -903,7 +988,15 @@ final class IMConversationSnapshotStore {
         filter: IMConversationListFilter,
         identityForConversation: (IMConversation) -> IMConversationIdentityPresentation
     ) async -> IMConversationSnapshotCommitResult {
-        let state = IMConversationSnapshotBuildState(conversationStore: conversationStore)
+        let signpost = IMPerformanceSignpost.begin("IMConversationListSnapshotCommit")
+        defer {
+            IMPerformanceSignpost.end("IMConversationListSnapshotCommit", signpost)
+        }
+        let state = IMConversationSnapshotBuildState(
+            conversationStore: conversationStore,
+            capturesList: true,
+            chatPageConversationIDs: []
+        )
         let request = listSnapshotBuildRequest(
             filter: filter,
             state: state,
@@ -922,7 +1015,15 @@ final class IMConversationSnapshotStore {
         currentUserID: UUID?,
         blockedUserIDs: Set<UUID>
     ) async -> IMConversationSnapshotCommitResult {
-        let state = IMConversationSnapshotBuildState(conversationStore: conversationStore)
+        let signpost = IMPerformanceSignpost.begin("IMChatPageSnapshotCommit")
+        defer {
+            IMPerformanceSignpost.end("IMChatPageSnapshotCommit", signpost)
+        }
+        let state = IMConversationSnapshotBuildState(
+            conversationStore: conversationStore,
+            capturesList: false,
+            chatPageConversationIDs: [conversationID]
+        )
         let request = IMChatPageSnapshotCommitRequest(
             conversationID: conversationID,
             currentUserID: currentUserID,
@@ -953,7 +1054,15 @@ final class IMConversationSnapshotStore {
         list: IMConversationListSnapshotCommitRequest? = nil,
         chatPages: [IMChatPageSnapshotCommitRequest] = []
     ) async -> IMConversationSnapshotBatchBuildCommitResult {
-        let state = IMConversationSnapshotBuildState(conversationStore: conversationStore)
+        let signpost = IMPerformanceSignpost.begin("IMConversationSnapshotBatchCommit")
+        defer {
+            IMPerformanceSignpost.end("IMConversationSnapshotBatchCommit", signpost)
+        }
+        let state = IMConversationSnapshotBuildState(
+            conversationStore: conversationStore,
+            capturesList: list != nil,
+            chatPageConversationIDs: Set(chatPages.map(\.conversationID))
+        )
         let listRequest = list.map {
             listSnapshotBuildRequest(
                 filter: $0.filter,

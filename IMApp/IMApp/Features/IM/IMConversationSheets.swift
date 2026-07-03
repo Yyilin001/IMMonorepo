@@ -13,14 +13,50 @@ struct IMFavoriteMessageSnapshot: Identifiable, Equatable, Sendable {
 
     init(message: IMConversationMessageResponseBody, title: String) {
         let messageID = message.id.uuidString
-        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.id = messageID
-        self.conversationID = message.conversationID.uuidString
+        self.init(
+            id: messageID,
+            conversationID: message.conversationID.uuidString,
+            messageID: messageID,
+            title: Self.normalizedTitle(title),
+            iconName: Self.iconName(for: message.content),
+            previewText: message.previewText,
+            createdAtText: message.createdAt?.formatted(date: .abbreviated, time: .shortened) ?? "时间未知"
+        )
+    }
+
+    private init(
+        id: String,
+        conversationID: String,
+        messageID: String,
+        title: String,
+        iconName: String,
+        previewText: String,
+        createdAtText: String
+    ) {
+        self.id = id
+        self.conversationID = conversationID
         self.messageID = messageID
-        self.title = trimmedTitle.isEmpty ? "会话" : trimmedTitle
-        self.iconName = Self.iconName(for: message.content)
-        self.previewText = message.previewText
-        self.createdAtText = message.createdAt?.formatted(date: .abbreviated, time: .shortened) ?? "时间未知"
+        self.title = title
+        self.iconName = iconName
+        self.previewText = previewText
+        self.createdAtText = createdAtText
+    }
+
+    func replacingTitle(_ title: String) -> IMFavoriteMessageSnapshot {
+        IMFavoriteMessageSnapshot(
+            id: id,
+            conversationID: conversationID,
+            messageID: messageID,
+            title: Self.normalizedTitle(title),
+            iconName: iconName,
+            previewText: previewText,
+            createdAtText: createdAtText
+        )
+    }
+
+    private static func normalizedTitle(_ title: String) -> String {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedTitle.isEmpty ? "会话" : trimmedTitle
     }
 
     private static func iconName(for content: IMMessageContent) -> String {
@@ -46,20 +82,62 @@ struct IMConversationTitleSnapshot: Identifiable, Equatable, Sendable {
 
     init(conversation: IMConversation) {
         id = conversation.id
+        title = Self.projectedTitle(for: conversation)
+    }
+
+    static func projectedTitle(for conversation: IMConversation) -> String {
         let trimmedTitle = conversation.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        title = trimmedTitle.isEmpty ? "会话" : trimmedTitle
+        return trimmedTitle.isEmpty ? "会话" : trimmedTitle
     }
 }
 
 /// Builds a title lookup so sheets do not repeatedly read raw conversations in body.
 struct IMConversationTitleSnapshotBuilder {
-    func build(conversations: [IMConversation]) -> [String: String] {
-        Dictionary(
-            uniqueKeysWithValues: conversations.map { conversation in
+    func build(
+        conversations: [IMConversation],
+        including conversationIDs: Set<String>? = nil
+    ) -> [String: String] {
+        if conversationIDs?.isEmpty == true {
+            return [:]
+        }
+
+        return Dictionary<String, String>(
+            uniqueKeysWithValues: conversations.compactMap { conversation in
+                if let conversationIDs,
+                   !conversationIDs.contains(conversation.id) {
+                    return nil
+                }
                 let snapshot = IMConversationTitleSnapshot(conversation: conversation)
                 return (snapshot.id, snapshot.title)
             }
         )
+    }
+}
+
+/// Lightweight dependency signature for title lookups in message-only sheets.
+struct IMConversationTitleObservedState: Equatable, Sendable {
+    let requestedConversationIDs: [String]
+    let titleSignatures: [IMConversationTitleSignature]
+
+    init(
+        conversations: [IMConversation],
+        including conversationIDs: Set<String>
+    ) {
+        self.requestedConversationIDs = conversationIDs.sorted()
+        self.titleSignatures = conversations
+            .filter { conversationIDs.contains($0.id) }
+            .map(IMConversationTitleSignature.init)
+            .sorted { $0.id < $1.id }
+    }
+}
+
+struct IMConversationTitleSignature: Equatable, Sendable {
+    let id: String
+    let title: String
+
+    init(conversation: IMConversation) {
+        self.id = conversation.id
+        self.title = IMConversationTitleSnapshot.projectedTitle(for: conversation)
     }
 }
 
@@ -72,11 +150,49 @@ struct IMForwardConversationCandidateSnapshot: Identifiable, Equatable, Sendable
     init(conversation: IMConversation) {
         id = conversation.id
 
-        let trimmedTitle = conversation.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        title = trimmedTitle.isEmpty ? "会话" : trimmedTitle
+        title = Self.projectedTitle(for: conversation)
+        previewText = Self.projectedPreviewText(for: conversation)
+    }
 
+    static func projectedTitle(for conversation: IMConversation) -> String {
+        let trimmedTitle = conversation.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedTitle.isEmpty ? "会话" : trimmedTitle
+    }
+
+    static func projectedPreviewText(for conversation: IMConversation) -> String {
         let trimmedPreview = conversation.lastMessagePreviewText.trimmingCharacters(in: .whitespacesAndNewlines)
-        previewText = trimmedPreview.isEmpty ? "\(conversation.memberCount) 位成员" : trimmedPreview
+        return trimmedPreview.isEmpty ? "\(conversation.memberCount) 位成员" : trimmedPreview
+    }
+}
+
+/// Lightweight dependency signature for the forward picker candidate list.
+struct IMForwardConversationCandidateObservedState: Equatable, Sendable {
+    let sourceConversationID: String
+    let candidateSignatures: [IMForwardConversationCandidateSignature]
+
+    init(
+        conversations: [IMConversation],
+        excluding sourceConversationID: String
+    ) {
+        self.sourceConversationID = sourceConversationID
+        self.candidateSignatures = conversations
+            .filter { $0.id != sourceConversationID }
+            .map(IMForwardConversationCandidateSignature.init)
+            .sorted { $0.id < $1.id }
+    }
+}
+
+struct IMForwardConversationCandidateSignature: Equatable, Sendable {
+    let id: String
+    let title: String
+    let previewText: String
+    let updatedAt: Date
+
+    init(conversation: IMConversation) {
+        self.id = conversation.id
+        self.title = IMForwardConversationCandidateSnapshot.projectedTitle(for: conversation)
+        self.previewText = IMForwardConversationCandidateSnapshot.projectedPreviewText(for: conversation)
+        self.updatedAt = conversation.updatedAt
     }
 }
 
@@ -198,12 +314,19 @@ struct IMFavoritesSheet: View {
                 await reload()
             }
         }
-        .onChange(of: conversationStore.conversationMutationGeneration) { _, _ in
+        .onChange(of: favoriteTitleObservedState) { _, _ in
             refreshTitleSnapshots()
         }
         .refreshable {
             await reload()
         }
+    }
+
+    var favoriteTitleObservedState: IMConversationTitleObservedState {
+        IMConversationTitleObservedState(
+            conversations: conversationStore.conversations,
+            including: Set(messages.map(\.conversationID))
+        )
     }
 
     func reload() async {
@@ -218,7 +341,6 @@ struct IMFavoritesSheet: View {
             return
         }
 
-        refreshTitleSnapshots()
         isLoading = true
         defer { isLoading = false }
 
@@ -228,6 +350,9 @@ struct IMFavoritesSheet: View {
         }
 
         statusMessage = nil
+        let loadedConversationIDs = Set(messages.map(\.conversationID))
+            .union(page.items.map { $0.conversationID.uuidString })
+        refreshTitleSnapshots(conversationIDs: loadedConversationIDs)
         messages.append(
             contentsOf: page.items.map { message in
                 IMFavoriteMessageSnapshot(
@@ -240,10 +365,20 @@ struct IMFavoritesSheet: View {
         hasMore = page.hasMore
     }
 
-    func refreshTitleSnapshots() {
+    func refreshTitleSnapshots(conversationIDs: Set<String>? = nil) {
+        let ids = conversationIDs ?? Set(messages.map(\.conversationID))
+        guard !ids.isEmpty else {
+            titleSnapshotByConversationID = [:]
+            return
+        }
+
         titleSnapshotByConversationID = IMConversationTitleSnapshotBuilder().build(
-            conversations: conversationStore.conversations
+            conversations: conversationStore.conversations,
+            including: ids
         )
+        messages = messages.map { message in
+            message.replacingTitle(title(forConversationID: message.conversationID))
+        }
     }
 
     func title(forConversationID conversationID: String) -> String {
@@ -331,9 +466,16 @@ struct IMForwardMessagePickerSheet: View {
         .onAppear {
             refreshCandidates()
         }
-        .onChange(of: conversationStore.conversationMutationGeneration) { _, _ in
+        .onChange(of: forwardCandidateObservedState) { _, _ in
             refreshCandidates()
         }
+    }
+
+    var forwardCandidateObservedState: IMForwardConversationCandidateObservedState {
+        IMForwardConversationCandidateObservedState(
+            conversations: conversationStore.conversations,
+            excluding: sourceConversationID
+        )
     }
 
     func refreshCandidates() {

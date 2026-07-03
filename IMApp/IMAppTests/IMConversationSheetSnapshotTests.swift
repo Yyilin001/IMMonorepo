@@ -10,6 +10,23 @@ struct IMConversationSheetSnapshotTests {
         #expect(IMConversationStatusSnapshot(message: " 同步失败 ").message == "同步失败")
     }
 
+    @Test func conversationMemberEmailDraftNormalizesDelimitedInput() {
+        let draft = IMConversationMemberEmailDraft(
+            " Alice@Example.COM, \n bob@example.com\n\n,carol@example.com "
+        )
+
+        #expect(draft.rawValue.hasPrefix(" Alice"))
+        #expect(draft.emails == [
+            "alice@example.com",
+            "bob@example.com",
+            "carol@example.com"
+        ])
+        #expect(!draft.isEmpty)
+        #expect(!draft.hasSingleEmail)
+        #expect(IMConversationMemberEmailDraft("   \n,").isEmpty)
+        #expect(IMConversationMemberEmailDraft(" single@example.com ").hasSingleEmail)
+    }
+
     @Test func manageMembersSnapshotProjectsOwnerActionsFromVisiblePageState() throws {
         let ownerID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
         let adminID = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
@@ -135,6 +152,92 @@ struct IMConversationSheetSnapshotTests {
         #expect(snapshot.isLoading)
     }
 
+    @Test func manageMembersObservedStateTracksOnlyMemberSnapshotInputs() {
+        let memberID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let currentUserID = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+        let conversation = makeConversation(
+            id: "conversation",
+            title: "Original Title",
+            memberCount: 1,
+            members: [
+                makeMember(id: memberID, email: "member@example.com", role: .member, displayTitle: "Member")
+            ],
+            lastMessagePreviewText: "preview",
+            updatedAt: Date(timeIntervalSince1970: 10)
+        )
+        let renamedConversation = makeConversation(
+            id: "conversation",
+            title: "Renamed Title",
+            memberCount: 1,
+            members: [
+                makeMember(id: memberID, email: "member@example.com", role: .member, displayTitle: "Member")
+            ],
+            lastMessagePreviewText: "changed preview",
+            updatedAt: Date(timeIntervalSince1970: 20)
+        )
+        let pageState = IMConversationMemberPageState(
+            items: [
+                makeMember(id: memberID, email: "member@example.com", role: .member, displayTitle: "Member")
+            ],
+            query: "mem",
+            total: 1,
+            isLoading: false
+        )
+        let baseline = IMManageMembersObservedState(
+            conversationID: "conversation",
+            conversation: IMManageMembersConversationSignature(conversation: conversation),
+            pageState: pageState,
+            currentUserID: currentUserID,
+            visibleQuery: " mem "
+        )
+
+        #expect(
+            baseline == IMManageMembersObservedState(
+                conversationID: "conversation",
+                conversation: IMManageMembersConversationSignature(conversation: renamedConversation),
+                pageState: pageState,
+                currentUserID: currentUserID,
+                visibleQuery: "mem"
+            )
+        )
+
+        let changedPageState = IMConversationMemberPageState(
+            items: [
+                makeMember(id: memberID, email: "member@example.com", role: .admin, displayTitle: "Member")
+            ],
+            query: "mem",
+            total: 1,
+            isLoading: false
+        )
+        #expect(
+            baseline != IMManageMembersObservedState(
+                conversationID: "conversation",
+                conversation: IMManageMembersConversationSignature(conversation: conversation),
+                pageState: changedPageState,
+                currentUserID: currentUserID,
+                visibleQuery: "mem"
+            )
+        )
+        #expect(
+            baseline != IMManageMembersObservedState(
+                conversationID: "conversation",
+                conversation: IMManageMembersConversationSignature(conversation: conversation),
+                pageState: pageState,
+                currentUserID: memberID,
+                visibleQuery: "mem"
+            )
+        )
+        #expect(
+            baseline != IMManageMembersObservedState(
+                conversationID: "conversation",
+                conversation: IMManageMembersConversationSignature(conversation: conversation),
+                pageState: pageState,
+                currentUserID: currentUserID,
+                visibleQuery: "admin"
+            )
+        )
+    }
+
     @Test func groupInviteRowSnapshotProjectsInviteForRendering() {
         let activeInvite = IMGroupInviteResponseBody(
             token: "active-token",
@@ -193,6 +296,32 @@ struct IMConversationSheetSnapshotTests {
         #expect(snapshot.createdAtText == "时间未知")
     }
 
+    @Test func favoriteMessageSnapshotCanReplaceTitleWithoutChangingMessageProjection() {
+        let messageID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let conversationID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        let message = IMConversationMessageResponseBody(
+            id: messageID,
+            conversationID: conversationID,
+            senderUserID: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
+            serverSequence: 9,
+            timelineSequence: 11,
+            content: .richText(.plain("favorite text")),
+            createdAt: nil
+        )
+
+        let snapshot = IMFavoriteMessageSnapshot(message: message, title: "Old Chat")
+        let retitled = snapshot.replacingTitle(" New Chat ")
+
+        #expect(retitled.id == snapshot.id)
+        #expect(retitled.conversationID == snapshot.conversationID)
+        #expect(retitled.messageID == snapshot.messageID)
+        #expect(retitled.title == "New Chat")
+        #expect(retitled.iconName == snapshot.iconName)
+        #expect(retitled.previewText == snapshot.previewText)
+        #expect(retitled.createdAtText == snapshot.createdAtText)
+        #expect(snapshot.replacingTitle(" ").title == "会话")
+    }
+
     @Test func conversationTitleSnapshotBuilderProjectsStableTitleMap() {
         let firstID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         let secondID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
@@ -218,6 +347,114 @@ struct IMConversationSheetSnapshotTests {
 
         #expect(titles[firstID] == "Projected Title")
         #expect(titles[secondID] == "会话")
+    }
+
+    @Test func conversationTitleSnapshotBuilderCanProjectOnlyRequestedTitles() {
+        let includedID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        let excludedID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+        let titles = IMConversationTitleSnapshotBuilder().build(
+            conversations: [
+                makeConversation(
+                    id: includedID,
+                    title: " Included ",
+                    memberCount: 2,
+                    lastMessagePreviewText: "",
+                    updatedAt: Date(timeIntervalSince1970: 10)
+                ),
+                makeConversation(
+                    id: excludedID,
+                    title: "Excluded",
+                    memberCount: 3,
+                    lastMessagePreviewText: "",
+                    updatedAt: Date(timeIntervalSince1970: 20)
+                )
+            ],
+            including: [includedID]
+        )
+
+        #expect(titles == [includedID: "Included"])
+    }
+
+    @Test func conversationTitleSnapshotBuilderSkipsEmptyRequestedTitleSet() {
+        let titles = IMConversationTitleSnapshotBuilder().build(
+            conversations: [
+                makeConversation(
+                    id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    title: "Excluded",
+                    memberCount: 2,
+                    lastMessagePreviewText: "",
+                    updatedAt: Date(timeIntervalSince1970: 10)
+                )
+            ],
+            including: []
+        )
+
+        #expect(titles.isEmpty)
+    }
+
+    @Test func conversationTitleObservedStateTracksOnlyRequestedProjectedTitles() {
+        let requestedID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        let unrelatedID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        let memberID = UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!
+        let requested = makeConversation(
+            id: requestedID,
+            title: " Requested ",
+            memberCount: 2,
+            lastMessagePreviewText: "requested preview",
+            updatedAt: Date(timeIntervalSince1970: 10)
+        )
+        let unrelated = makeConversation(
+            id: unrelatedID,
+            title: "Unrelated",
+            memberCount: 3,
+            lastMessagePreviewText: "unrelated preview",
+            updatedAt: Date(timeIntervalSince1970: 20)
+        )
+
+        let baseline = IMConversationTitleObservedState(
+            conversations: [requested, unrelated],
+            including: [requestedID]
+        )
+
+        var changedUnrelated = unrelated
+        changedUnrelated.title = "Changed Unrelated"
+        changedUnrelated.updatedAt = Date(timeIntervalSince1970: 900)
+
+        var changedRequestedUnrenderedFields = requested
+        changedRequestedUnrenderedFields.members = [
+            makeMember(
+                id: memberID,
+                email: "member@example.com",
+                role: .member,
+                displayTitle: "Member"
+            )
+        ]
+        changedRequestedUnrenderedFields.lastMessagePreviewText = "changed preview"
+        changedRequestedUnrenderedFields.updatedAt = Date(timeIntervalSince1970: 800)
+
+        #expect(
+            baseline == IMConversationTitleObservedState(
+                conversations: [changedRequestedUnrenderedFields, changedUnrelated],
+                including: [requestedID]
+            )
+        )
+
+        var changedRequestedTitle = requested
+        changedRequestedTitle.title = "Changed Requested"
+        #expect(
+            baseline != IMConversationTitleObservedState(
+                conversations: [changedRequestedTitle, unrelated],
+                including: [requestedID]
+            )
+        )
+
+        #expect(
+            baseline != IMConversationTitleObservedState(
+                conversations: [requested, unrelated],
+                including: [requestedID, unrelatedID]
+            )
+        )
     }
 
     @Test func forwardCandidateBuilderProjectsAndSortsConversations() {
@@ -277,6 +514,73 @@ struct IMConversationSheetSnapshotTests {
         #expect(snapshots[2].previewText == "5 位成员")
         #expect(snapshots[3].title == "Older")
         #expect(snapshots[3].previewText == "old preview")
+    }
+
+    @Test func forwardCandidateObservedStateIgnoresNonCandidateDisplayChanges() {
+        let sourceID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        let candidateID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        let memberID = UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!
+        let source = makeConversation(
+            id: sourceID,
+            title: "Source",
+            memberCount: 2,
+            lastMessagePreviewText: "source preview",
+            updatedAt: Date(timeIntervalSince1970: 100)
+        )
+        let candidate = makeConversation(
+            id: candidateID,
+            title: " Candidate ",
+            memberCount: 3,
+            lastMessagePreviewText: " preview ",
+            updatedAt: Date(timeIntervalSince1970: 200)
+        )
+
+        let baseline = IMForwardConversationCandidateObservedState(
+            conversations: [source, candidate],
+            excluding: sourceID
+        )
+
+        var changedSource = source
+        changedSource.title = "Changed Source"
+        changedSource.lastMessagePreviewText = "changed source preview"
+        changedSource.updatedAt = Date(timeIntervalSince1970: 900)
+
+        var changedUnrenderedCandidateFields = candidate
+        changedUnrenderedCandidateFields.members = [
+            makeMember(
+                id: memberID,
+                email: "member@example.com",
+                role: .member,
+                displayTitle: "Member"
+            )
+        ]
+        changedUnrenderedCandidateFields.serverUnreadCount = 12
+        changedUnrenderedCandidateFields.draftText = "draft"
+
+        #expect(
+            baseline == IMForwardConversationCandidateObservedState(
+                conversations: [changedSource, changedUnrenderedCandidateFields],
+                excluding: sourceID
+            )
+        )
+
+        var changedPreview = candidate
+        changedPreview.lastMessagePreviewText = "changed preview"
+        #expect(
+            baseline != IMForwardConversationCandidateObservedState(
+                conversations: [source, changedPreview],
+                excluding: sourceID
+            )
+        )
+
+        var changedSortDate = candidate
+        changedSortDate.updatedAt = Date(timeIntervalSince1970: 300)
+        #expect(
+            baseline != IMForwardConversationCandidateObservedState(
+                conversations: [source, changedSortDate],
+                excluding: sourceID
+            )
+        )
     }
 
     private func makeConversation(

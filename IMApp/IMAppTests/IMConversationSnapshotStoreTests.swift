@@ -273,6 +273,244 @@ struct IMConversationSnapshotStoreTests {
         #expect(result.snapshot.generation == state.conversationMutationGeneration)
     }
 
+    @Test func scopedChatCaptureSkipsUnrelatedConversationDerivedState() throws {
+        let activeConversationID = UUID(uuidString: "c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1")!
+        let inactiveConversationID = UUID(uuidString: "c2c2c2c2-c2c2-c2c2-c2c2-c2c2c2c2c2c2")!
+        let conversationStore = IMConversationStore()
+        conversationStore.replaceConversationSummaries([
+            makeSummary(
+                id: activeConversationID,
+                title: "Active Chat",
+                kind: .direct,
+                unreadCount: 0
+            ),
+            makeSummary(
+                id: inactiveConversationID,
+                title: "Inactive Chat",
+                kind: .direct,
+                unreadCount: 0
+            )
+        ])
+
+        let inactiveRequest = try #require(
+            conversationStore.prepareOutgoingText(
+                "inactive failed",
+                conversationID: inactiveConversationID.uuidString,
+                senderUserID: currentUserID
+            )
+        )
+        conversationStore.markOutgoingFailure(
+            requestID: inactiveRequest.requestID,
+            message: "IM 长连接未建立，消息没有发送出去。"
+        )
+        let inactivePendingMessageID = try #require(
+            conversationStore.conversations
+                .first { $0.id == inactiveConversationID.uuidString }?
+                .pendingMessages
+                .first?
+                .id
+        )
+
+        let scopedState = IMConversationSnapshotBuildState(
+            conversationStore: conversationStore,
+            capturesList: false,
+            chatPageConversationIDs: [activeConversationID.uuidString]
+        )
+
+        #expect(scopedState.filteredConversations.isEmpty)
+        #expect(scopedState.conversations.map(\.id) == [activeConversationID.uuidString])
+        #expect(scopedState.queueSummary(for: inactiveConversationID.uuidString).retryableIssueCount == 0)
+        #expect(!scopedState.retryablePendingMessageIDs.contains(inactivePendingMessageID))
+    }
+
+    @Test func conversationDetailObservedStateIgnoresUnrelatedConversationChanges() throws {
+        let activeConversationID = UUID(uuidString: "c3c3c3c3-c3c3-c3c3-c3c3-c3c3c3c3c3c3")!
+        let inactiveConversationID = UUID(uuidString: "c4c4c4c4-c4c4-c4c4-c4c4-c4c4c4c4c4c4")!
+        let conversationStore = IMConversationStore()
+        conversationStore.replaceConversationSummaries([
+            makeSummary(
+                id: activeConversationID,
+                title: "Active Detail",
+                kind: .direct,
+                unreadCount: 0
+            ),
+            makeSummary(
+                id: inactiveConversationID,
+                title: "Inactive Detail",
+                kind: .direct,
+                unreadCount: 0
+            )
+        ])
+
+        let initialState = IMConversationDetailObservedState(
+            conversationStore: conversationStore,
+            conversationID: activeConversationID.uuidString
+        )
+
+        conversationStore.replaceConversationSummaries([
+            makeSummary(
+                id: activeConversationID,
+                title: "Active Detail",
+                kind: .direct,
+                unreadCount: 0
+            ),
+            makeSummary(
+                id: inactiveConversationID,
+                title: "Inactive Detail Updated",
+                kind: .direct,
+                unreadCount: 4
+            )
+        ])
+        let unrelatedChangeState = IMConversationDetailObservedState(
+            conversationStore: conversationStore,
+            conversationID: activeConversationID.uuidString
+        )
+        #expect(unrelatedChangeState == initialState)
+
+        _ = try #require(
+            conversationStore.prepareOutgoingText(
+                "inactive pending",
+                conversationID: inactiveConversationID.uuidString,
+                senderUserID: currentUserID
+            )
+        )
+        let inactivePendingState = IMConversationDetailObservedState(
+            conversationStore: conversationStore,
+            conversationID: activeConversationID.uuidString
+        )
+        #expect(inactivePendingState == initialState)
+
+        _ = try #require(
+            conversationStore.prepareOutgoingText(
+                "active pending",
+                conversationID: activeConversationID.uuidString,
+                senderUserID: currentUserID
+            )
+        )
+        let activePendingState = IMConversationDetailObservedState(
+            conversationStore: conversationStore,
+            conversationID: activeConversationID.uuidString
+        )
+        #expect(activePendingState != initialState)
+
+        conversationStore.replaceConversationSummaries([
+            makeSummary(
+                id: activeConversationID,
+                title: "Active Detail Updated",
+                kind: .direct,
+                unreadCount: 0
+            ),
+            makeSummary(
+                id: inactiveConversationID,
+                title: "Inactive Detail Updated",
+                kind: .direct,
+                unreadCount: 4
+            )
+        ])
+        let activeChangeState = IMConversationDetailObservedState(
+            conversationStore: conversationStore,
+            conversationID: activeConversationID.uuidString
+        )
+        #expect(activeChangeState != activePendingState)
+
+        conversationStore.setStatusMessage("同步中")
+        let statusChangeState = IMConversationDetailObservedState(
+            conversationStore: conversationStore,
+            conversationID: activeConversationID.uuidString
+        )
+        #expect(statusChangeState != activeChangeState)
+    }
+
+    @Test func conversationDetailAuxiliaryObservedStateCombinesSnapshotInputs() {
+        let conversationID = "c5c5c5c5-c5c5-c5c5-c5c5-c5c5c5c5c5c5"
+        let peerUserID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        let receipt = IMConversationReceiptSummaryResponseBody(
+            conversationID: UUID(uuidString: conversationID)!,
+            deliveredThroughSequence: 7,
+            readThroughSequence: 5,
+            readableMemberCount: 3
+        )
+        let baseline = IMConversationDetailAuxiliaryObservedState(
+            conversationID: conversationID,
+            isLoadingMessages: false,
+            isLoadingMembers: false,
+            receiptSummary: receipt,
+            currentUserID: currentUserID,
+            blockedUserIDs: []
+        )
+
+        #expect(
+            baseline == IMConversationDetailAuxiliaryObservedState(
+                conversationID: conversationID,
+                isLoadingMessages: false,
+                isLoadingMembers: false,
+                receiptSummary: receipt,
+                currentUserID: currentUserID,
+                blockedUserIDs: []
+            )
+        )
+        #expect(
+            baseline != IMConversationDetailAuxiliaryObservedState(
+                conversationID: conversationID,
+                isLoadingMessages: true,
+                isLoadingMembers: false,
+                receiptSummary: receipt,
+                currentUserID: currentUserID,
+                blockedUserIDs: []
+            )
+        )
+        #expect(
+            baseline != IMConversationDetailAuxiliaryObservedState(
+                conversationID: conversationID,
+                isLoadingMessages: false,
+                isLoadingMembers: true,
+                receiptSummary: receipt,
+                currentUserID: currentUserID,
+                blockedUserIDs: []
+            )
+        )
+        #expect(
+            baseline != IMConversationDetailAuxiliaryObservedState(
+                conversationID: conversationID,
+                isLoadingMessages: false,
+                isLoadingMembers: false,
+                receiptSummary: IMConversationReceiptSummaryResponseBody(
+                    conversationID: UUID(uuidString: conversationID)!,
+                    deliveredThroughSequence: 8,
+                    readThroughSequence: 5,
+                    readableMemberCount: 3
+                ),
+                currentUserID: currentUserID,
+                blockedUserIDs: []
+            )
+        )
+        #expect(
+            baseline != IMConversationDetailAuxiliaryObservedState(
+                conversationID: conversationID,
+                isLoadingMessages: false,
+                isLoadingMembers: false,
+                receiptSummary: receipt,
+                currentUserID: peerUserID,
+                blockedUserIDs: []
+            )
+        )
+        #expect(
+            baseline != IMConversationDetailAuxiliaryObservedState(
+                conversationID: conversationID,
+                isLoadingMessages: false,
+                isLoadingMembers: false,
+                receiptSummary: receipt,
+                currentUserID: currentUserID,
+                blockedUserIDs: [peerUserID]
+            )
+        )
+
+        #expect(
+            IMConversationSnapshotInvalidation.conversationDetailAuxiliaryChanged(conversationID)
+                .description == "conversationDetailAuxiliaryChanged:\(conversationID)"
+        )
+    }
+
     @Test func snapshotEngineBuildsAndCommitsSnapshotBatchFromCapturedState() async throws {
         let firstConversationID = UUID(uuidString: "d1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1")!
         let secondConversationID = UUID(uuidString: "d2d2d2d2-d2d2-d2d2-d2d2-d2d2d2d2d2d2")!
@@ -1181,6 +1419,57 @@ struct IMConversationSnapshotStoreTests {
         #expect(await snapshotStore.currentListSnapshotEvent().snapshot.rows.map(\.title) == ["Projected First Pipeline Room"])
         #expect(await snapshotStore.currentChatPageSnapshotEvent(for: firstConversationID.uuidString).snapshot.metadata.title == "First Pipeline Room")
         #expect(await snapshotStore.currentChatPageSnapshotEvent(for: secondConversationID.uuidString).snapshot.metadata.title == "Second Pipeline Room")
+    }
+
+    @Test func snapshotCommitPipelineListOnlyCommitDoesNotBuildSelectedChatSnapshot() async throws {
+        let conversationID = UUID(uuidString: "61616161-6161-6161-6161-616161616161")!
+        let conversationStore = IMConversationStore()
+        let snapshotStore = IMConversationSnapshotStore()
+        let pipeline = IMConversationSnapshotCommitPipeline(
+            coordinator: IMConversationSnapshotCommitCoordinator(flushDelayNanoseconds: 10_000_000)
+        )
+        let recorder = IMConversationSnapshotExecutionRecorder()
+
+        conversationStore.replaceConversationSummaries([
+            makeSummary(
+                id: conversationID,
+                title: "List Only Room",
+                kind: .direct,
+                unreadCount: 1
+            )
+        ])
+        conversationStore.openConversation(id: conversationID.uuidString)
+
+        await pipeline.scheduleListAndChatCommit(
+            IMConversationSnapshotCommitEvent(
+                .searchChanged("room"),
+                list: IMConversationListSnapshotCommitPlan(filter: .all),
+                chatPages: []
+            ),
+            from: conversationStore,
+            to: snapshotStore,
+            identityForConversation: { conversation in
+                IMConversationIdentityPresentation(
+                    title: "Projected \(conversation.title)",
+                    detailSummary: "",
+                    rowSecondaryLabel: nil
+                )
+            },
+            didCommit: { execution in
+                recorder.record(execution)
+            }
+        )
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        let execution = try #require(recorder.executions.first)
+        #expect(recorder.executions.count == 1)
+        #expect(execution.plan.list?.filter == .all)
+        #expect(execution.plan.chatPages.isEmpty)
+        #expect(execution.batchCommit.list?.didCommit == true)
+        #expect(execution.batchCommit.chatPages.isEmpty)
+        #expect(execution.chatPageSnapshots.isEmpty)
+        #expect(execution.listSnapshot?.rows.map(\.title) == ["Projected List Only Room"])
+        #expect(await snapshotStore.currentChatPageSnapshotEvent(for: conversationID.uuidString).revision == 0)
     }
 
     @Test func snapshotCommitPipelineCancelDropsPendingExecutionAndReschedules() async throws {

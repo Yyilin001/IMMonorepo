@@ -14,6 +14,7 @@ struct IMAppApp: App {
     @State private var authManager: AuthManager
 
     init() {
+        IMPerformanceSignpost.event("AppInitStarted")
         let configuration = AppNetworkConfiguration.publicGateway
         _authManager = State(
             initialValue: AuthManager(
@@ -22,13 +23,21 @@ struct IMAppApp: App {
                 timelineCatchUpConfiguration: configuration.timelineCatchUpConfiguration
             )
         )
+        IMPerformanceSignpost.event("AppInitFinished")
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView(authManager: authManager)
+                .onAppear {
+                    IMPerformanceSignpost.event("RootContentAppeared")
+                }
                 .onChange(of: scenePhase) { _, newPhase in
                     Task {
+                        let signpost = IMPerformanceSignpost.begin("AppScenePhaseTransition")
+                        defer {
+                            IMPerformanceSignpost.end("AppScenePhaseTransition", signpost)
+                        }
                         switch newPhase {
                         case .active:
                             await authManager.appDidBecomeActive()

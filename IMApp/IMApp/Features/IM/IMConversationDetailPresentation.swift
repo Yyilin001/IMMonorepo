@@ -9,7 +9,195 @@ private struct IMChatScrollGeometrySnapshot: Equatable {
     let isNearBottom: Bool
 }
 
+struct IMConversationDetailObservedState: Equatable, Sendable {
+    let conversationID: String
+    let conversationSignature: IMConversationDetailSignature?
+    let statusMessage: String?
+
+    @MainActor
+    init(conversationStore: IMConversationStore, conversationID: String) {
+        self.conversationID = conversationID
+        self.conversationSignature = conversationStore.conversations
+            .first { $0.id == conversationID }
+            .map(IMConversationDetailSignature.init)
+        self.statusMessage = conversationStore.statusMessage
+    }
+
+    var debugSummary: String {
+        guard let conversationSignature else {
+            return "missing"
+        }
+        return "pending=\(conversationSignature.pendingMessageCount) messages=\(conversationSignature.messageCount) timeline=\(conversationSignature.timelineItemCount)"
+    }
+}
+
+struct IMConversationDetailAuxiliaryObservedState: Equatable, Sendable {
+    let conversationID: String
+    let isLoadingMessages: Bool
+    let isLoadingMembers: Bool
+    let receiptSummary: IMConversationReceiptSummaryResponseBody?
+    let currentUserID: UUID?
+    let blockedUserIDs: Set<UUID>
+
+    init(
+        conversationID: String,
+        isLoadingMessages: Bool,
+        isLoadingMembers: Bool,
+        receiptSummary: IMConversationReceiptSummaryResponseBody?,
+        currentUserID: UUID?,
+        blockedUserIDs: Set<UUID>
+    ) {
+        self.conversationID = conversationID
+        self.isLoadingMessages = isLoadingMessages
+        self.isLoadingMembers = isLoadingMembers
+        self.receiptSummary = receiptSummary
+        self.currentUserID = currentUserID
+        self.blockedUserIDs = blockedUserIDs
+    }
+
+    @MainActor
+    init(
+        conversationStore: IMConversationStore,
+        runtimeStore: IMConversationRuntimeStore,
+        conversationID: String
+    ) {
+        self.init(
+            conversationID: conversationID,
+            isLoadingMessages: conversationStore.isLoadingMessages,
+            isLoadingMembers: conversationStore.isLoadingMembers,
+            receiptSummary: conversationStore.receiptSummary(for: conversationID),
+            currentUserID: runtimeStore.currentUserID,
+            blockedUserIDs: runtimeStore.blockedUserIDs
+        )
+    }
+}
+
+struct IMConversationDetailSignature: Equatable, Sendable {
+    let id: String
+    let title: String
+    let kind: IMConversationKind
+    let directMessagingState: IMDirectMessagingState?
+    let directPeer: IMDirectPeer?
+    let notice: String?
+    let avatarPreset: IMConversationAvatarPreset?
+    let muteAll: Bool
+    let memberCount: Int
+    let members: [IMConversationMember]
+    let messages: [IMConversationMessageSignature]
+    let pendingMessages: [IMPendingConversationMessageSignature]
+    let notices: [IMTimelineNotice]
+    let hasMoreHistory: Bool
+    let updatedAt: Date
+
+    init(_ conversation: IMConversation) {
+        self.id = conversation.id
+        self.title = conversation.title
+        self.kind = conversation.kind
+        self.directMessagingState = conversation.directMessagingState
+        self.directPeer = conversation.directPeer
+        self.notice = conversation.notice
+        self.avatarPreset = conversation.avatarPreset
+        self.muteAll = conversation.muteAll
+        self.memberCount = conversation.memberCount
+        self.members = conversation.members
+        self.messages = conversation.messages.map(IMConversationMessageSignature.init)
+        self.pendingMessages = conversation.pendingMessages.map(IMPendingConversationMessageSignature.init)
+        self.notices = conversation.notices
+        self.hasMoreHistory = conversation.hasMoreHistory
+        self.updatedAt = conversation.updatedAt
+    }
+
+    var messageCount: Int {
+        messages.count
+    }
+
+    var pendingMessageCount: Int {
+        pendingMessages.count
+    }
+
+    var timelineItemCount: Int {
+        messages.count + notices.count + pendingMessages.count
+    }
+}
+
+struct IMConversationMessageSignature: Equatable, Sendable {
+    let id: String
+    let clientMessageID: String?
+    let serverMessageID: String
+    let senderUserID: UUID
+    let serverSequence: UInt64
+    let timelineSequence: UInt64
+    let content: IMMessageContent
+    let derivedState: MessageDerivedState
+    let direction: IMMessageDirection
+    let createdAt: Date
+    let deliveryState: IMMessageDeliveryState
+    let transferTaskID: TransferTaskID?
+    let localTransferState: IMMessageLocalTransferState?
+    let localDownloadState: IMMessageLocalDownloadState?
+
+    init(_ message: IMConversationMessage) {
+        self.id = message.id
+        self.clientMessageID = message.clientMessageID
+        self.serverMessageID = message.serverMessageID
+        self.senderUserID = message.senderUserID
+        self.serverSequence = message.serverSequence
+        self.timelineSequence = message.timelineSequence
+        self.content = message.content
+        self.derivedState = message.derivedState
+        self.direction = message.direction
+        self.createdAt = message.createdAt
+        self.deliveryState = message.deliveryState
+        self.transferTaskID = message.transferTaskID
+        self.localTransferState = message.localTransferState
+        self.localDownloadState = message.localDownloadState
+    }
+}
+
+struct IMPendingConversationMessageSignature: Equatable, Sendable {
+    let id: String
+    let localMessageID: String
+    let clientMessageID: String
+    let serverMessageID: String?
+    let senderUserID: UUID
+    let content: IMMessageContent
+    let createdAt: Date
+    let deliveryState: IMMessageDeliveryState
+    let transferTaskID: TransferTaskID?
+    let localTransferState: IMMessageLocalTransferState?
+    let localDownloadState: IMMessageLocalDownloadState?
+
+    init(_ message: IMPendingConversationMessage) {
+        self.id = message.id
+        self.localMessageID = message.localMessageID
+        self.clientMessageID = message.clientMessageID
+        self.serverMessageID = message.serverMessageID
+        self.senderUserID = message.senderUserID
+        self.content = message.content
+        self.createdAt = message.createdAt
+        self.deliveryState = message.deliveryState
+        self.transferTaskID = message.transferTaskID
+        self.localTransferState = message.localTransferState
+        self.localDownloadState = message.localDownloadState
+    }
+}
+
 extension IMConversationDetailView {
+    var conversationDetailObservedState: IMConversationDetailObservedState {
+        IMConversationDetailObservedState(
+            conversationStore: conversationStore,
+            conversationID: conversationID
+        )
+    }
+
+    var conversationDetailAuxiliaryObservedState: IMConversationDetailAuxiliaryObservedState {
+        IMConversationDetailAuxiliaryObservedState(
+            conversationStore: conversationStore,
+            runtimeStore: runtimeStore,
+            conversationID: conversationID
+        )
+    }
+
     func applyingScrollStateHandlers<Content: View>(
         to content: Content,
         proxy: ScrollViewProxy
@@ -63,26 +251,14 @@ extension IMConversationDetailView {
             .onChange(of: timelineRowOffsetsFromTop) { _, _ in
                 restorePendingHistoryScrollAnchor(proxy: proxy)
             }
-            .onChange(of: conversationStore.conversationMutationGeneration) { _, generation in
-                refreshChatPageSnapshot(invalidation: .conversationGenerationChanged(generation))
+            .onChange(of: conversationDetailObservedState) { _, state in
+                refreshChatPageSnapshot(invalidation: .conversationDetailChanged(state.conversationID))
                 IMAppLog.imUI.debug(
-                    "Conversation store generation changed conversationID=\(conversationID, privacy: .public) generation=\(generation, privacy: .public) pending=\(chatPageSnapshot.metrics.pendingMessageCount, privacy: .public) messages=\(chatPageSnapshot.metrics.messageCount, privacy: .public) timeline=\(chatPageSnapshot.metrics.timelineItemCount, privacy: .public) latestID=\(latestMessageID ?? "nil", privacy: .public) isNearBottom=\(isNearBottom, privacy: .public)"
+                    "Conversation detail observed state changed conversationID=\(conversationID, privacy: .public) state=\(state.debugSummary, privacy: .public) latestID=\(latestMessageID ?? "nil", privacy: .public) isNearBottom=\(isNearBottom, privacy: .public)"
                 )
             }
-            .onChange(of: conversationStore.isLoadingMessages) { _, isLoading in
-                refreshChatPageSnapshot(invalidation: .messagesLoadingChanged(isLoading))
-            }
-            .onChange(of: conversationStore.isLoadingMembers) { _, isLoading in
-                refreshChatPageSnapshot(invalidation: .membersLoadingChanged(isLoading))
-            }
-            .onChange(of: conversationStore.receiptSummary(for: conversationID)) { _, _ in
-                refreshChatPageSnapshot(invalidation: .receiptChanged(conversationID))
-            }
-            .onChange(of: runtimeStore.currentUserID) { _, currentUserID in
-                refreshChatPageSnapshot(invalidation: .currentUserChanged(currentUserID))
-            }
-            .onChange(of: runtimeStore.blockedUserIDs) { _, _ in
-                refreshChatPageSnapshot(invalidation: .blockedUsersChanged)
+            .onChange(of: conversationDetailAuxiliaryObservedState) { _, state in
+                refreshChatPageSnapshot(invalidation: .conversationDetailAuxiliaryChanged(state.conversationID))
             }
             .onChange(of: conversationStore.replyJumpMatchedMessageID) { _, matchedMessageID in
                 guard conversationStore.replyJumpConversationID == conversationID,

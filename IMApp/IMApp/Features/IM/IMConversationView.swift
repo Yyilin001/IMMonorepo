@@ -425,7 +425,7 @@ struct IMConversationView: View {
                 IMConversationSnapshotCommitEvent(
                     invalidation,
                     list: IMConversationListSnapshotCommitPlan(filter: conversationListFilter),
-                    chatPages: selectedChatPageSnapshotCommitRequests
+                    chatPages: []
                 ),
                 from: conversationStore,
                 to: snapshotStore,
@@ -449,19 +449,6 @@ struct IMConversationView: View {
                 }
             )
         }
-    }
-
-    var selectedChatPageSnapshotCommitRequests: [IMChatPageSnapshotCommitRequest] {
-        guard let conversationID = conversationStore.selectedConversationID else {
-            return []
-        }
-        return [
-            IMChatPageSnapshotCommitRequest(
-                conversationID: conversationID,
-                currentUserID: runtimeStore.currentUserID,
-                blockedUserIDs: runtimeStore.blockedUserIDs
-            )
-        ]
     }
 
     func logConversationListSnapshotEvent(_ event: IMConversationListSnapshotEvent) {

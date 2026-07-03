@@ -25,6 +25,7 @@ struct IMCreateConversationSheet: View {
     @State private var mode: IMCreateConversationMode = .direct
     @State private var conversationTitle = ""
     @State private var memberEmails = ""
+    @State private var memberEmailDraft = IMConversationMemberEmailDraft("")
     @State private var isSubmitting = false
     @State private var statusSnapshot = IMConversationStatusSnapshot(message: nil)
 
@@ -46,7 +47,7 @@ struct IMCreateConversationSheet: View {
                     TextField("群聊标题（可选）", text: $conversationTitle)
                 }
 
-                TextField(memberEmailPlaceholder, text: $memberEmails, axis: .vertical)
+                TextField(memberEmailPlaceholder, text: memberEmailsBinding, axis: .vertical)
                     .lineLimit(3...6)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -81,11 +82,12 @@ struct IMCreateConversationSheet: View {
                 } else {
                     Button("创建") {
                         Task {
+                            let emails = memberEmailDraft.emails
                             isSubmitting = true
                             let didCreate = await runtimeStore.createConversation(
                                 kind: conversationKind,
                                 title: createConversationTitle,
-                                memberEmails: parsedMemberEmails
+                                memberEmails: emails
                             )
                             isSubmitting = false
 
@@ -130,17 +132,20 @@ struct IMCreateConversationSheet: View {
     private var canSubmit: Bool {
         switch mode {
         case .direct:
-            return parsedMemberEmails.count == 1
+            return memberEmailDraft.hasSingleEmail
         case .group:
-            return !parsedMemberEmails.isEmpty
+            return !memberEmailDraft.isEmpty
         }
     }
 
-    private var parsedMemberEmails: [String] {
-        memberEmails
-            .components(separatedBy: CharacterSet(charactersIn: ",\n"))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { !$0.isEmpty }
+    private var memberEmailsBinding: Binding<String> {
+        Binding(
+            get: { memberEmails },
+            set: { newValue in
+                memberEmails = newValue
+                memberEmailDraft = IMConversationMemberEmailDraft(newValue)
+            }
+        )
     }
 
     private func refreshStatusSnapshot() {

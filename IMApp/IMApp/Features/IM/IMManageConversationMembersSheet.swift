@@ -10,6 +10,16 @@ struct IMManageMembersSnapshot: Equatable {
     let isLoading: Bool
     let isLoadingMore: Bool
     let canLoadMore: Bool
+
+    static let empty = IMManageMembersSnapshot(
+        hasConversation: false,
+        rows: [],
+        loadedMemberCount: 0,
+        memberTotal: 0,
+        isLoading: false,
+        isLoadingMore: false,
+        canLoadMore: false
+    )
 }
 
 /// Renderable member row plus the actions allowed for the current user's role.
@@ -154,6 +164,59 @@ struct IMManageMembersSnapshotBuilder {
     }
 }
 
+/// Lightweight dependency signature for rebuilding member-management snapshots.
+struct IMManageMembersObservedState: Equatable, Sendable {
+    let conversationID: String
+    let conversation: IMManageMembersConversationSignature?
+    let pageState: IMConversationMemberPageState
+    let currentUserID: UUID?
+    let visibleQuery: String
+
+    init(
+        conversationID: String,
+        conversation: IMManageMembersConversationSignature?,
+        pageState: IMConversationMemberPageState,
+        currentUserID: UUID?,
+        visibleQuery: String
+    ) {
+        self.conversationID = conversationID
+        self.conversation = conversation
+        self.pageState = pageState
+        self.currentUserID = currentUserID
+        self.visibleQuery = visibleQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @MainActor
+    init(
+        conversationStore: IMConversationStore,
+        conversationID: String,
+        currentUserID: UUID?,
+        visibleQuery: String
+    ) {
+        self.init(
+            conversationID: conversationID,
+            conversation: conversationStore.conversations
+                .first { $0.id == conversationID }
+                .map(IMManageMembersConversationSignature.init),
+            pageState: conversationStore.memberPageState(for: conversationID),
+            currentUserID: currentUserID,
+            visibleQuery: visibleQuery
+        )
+    }
+}
+
+struct IMManageMembersConversationSignature: Equatable, Sendable {
+    let id: String
+    let memberCount: Int
+    let members: [IMConversationMember]
+
+    init(conversation: IMConversation) {
+        self.id = conversation.id
+        self.memberCount = conversation.memberCount
+        self.members = conversation.members
+    }
+}
+
 @MainActor
 extension IMConversationStore {
     func manageMembersSnapshot(
@@ -185,6 +248,7 @@ struct IMManageConversationMembersSheet: View {
     let onLoadMoreMembers: () async -> Void
     @State private var query = ""
     @State private var searchTask: Task<Void, Never>?
+    @State private var memberSnapshot: IMManageMembersSnapshot = .empty
 
     var body: some View {
         List {
@@ -280,7 +344,12 @@ struct IMManageConversationMembersSheet: View {
         .navigationTitle("管理成员")
         .navigationBarTitleDisplayMode(.inline)
         .task {
+            refreshMemberSnapshot()
             await refreshCurrentQuery()
+            refreshMemberSnapshot()
+        }
+        .onChange(of: manageMembersObservedState) { _, _ in
+            refreshMemberSnapshot()
         }
         .onChange(of: query) { _, newValue in
             searchTask?.cancel()
@@ -304,8 +373,17 @@ struct IMManageConversationMembersSheet: View {
         }
     }
 
-    private var memberSnapshot: IMManageMembersSnapshot {
-        conversationStore.manageMembersSnapshot(
+    private var manageMembersObservedState: IMManageMembersObservedState {
+        IMManageMembersObservedState(
+            conversationStore: conversationStore,
+            conversationID: conversationID,
+            currentUserID: currentUserID,
+            visibleQuery: query
+        )
+    }
+
+    private func refreshMemberSnapshot() {
+        memberSnapshot = conversationStore.manageMembersSnapshot(
             conversationID: conversationID,
             currentUserID: currentUserID,
             visibleQuery: query

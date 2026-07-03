@@ -1,47 +1,50 @@
 import Foundation
 @testable import IMClientKit
+import Synchronization
 import Testing
 @testable import IMApp
 
 private final class MockBackgroundTransferMonitor: BackgroundTransferMonitoring, @unchecked Sendable {
-    private let lock = NSLock()
-    private var snapshots: [BackgroundTransferSnapshot]
-    private var continuations: [UUID: AsyncStream<BackgroundTransferSnapshot>.Continuation] = [:]
-    private var subscriberWaiters: [CheckedContinuation<Void, Never>] = []
-    private var cancelledTransfers: [(String, Int)] = []
+    private struct State {
+        var snapshots: [BackgroundTransferSnapshot]
+        var continuations: [UUID: AsyncStream<BackgroundTransferSnapshot>.Continuation] = [:]
+        var subscriberWaiters: [CheckedContinuation<Void, Never>] = []
+        var cancelledTransfers: [(String, Int)] = []
+    }
+
+    private let state: Mutex<State>
 
     init(initialSnapshots: [BackgroundTransferSnapshot] = []) {
-        self.snapshots = initialSnapshots
+        self.state = Mutex(State(snapshots: initialSnapshots))
     }
 
     func currentSnapshots() -> [BackgroundTransferSnapshot] {
-        lock.lock()
-        defer { lock.unlock() }
-        return snapshots
+        state.withLock { $0.snapshots }
     }
 
     func updates() -> AsyncStream<BackgroundTransferSnapshot> {
         AsyncStream(bufferingPolicy: .unbounded) { continuation in
             let identifier = UUID()
-            lock.lock()
-            continuations[identifier] = continuation
-            let waiters = subscriberWaiters
-            subscriberWaiters.removeAll()
-            lock.unlock()
+            let waiters = state.withLock { state in
+                state.continuations[identifier] = continuation
+                let waiters = state.subscriberWaiters
+                state.subscriberWaiters.removeAll()
+                return waiters
+            }
             waiters.forEach { $0.resume() }
 
             continuation.onTermination = { [weak self] _ in
-                self?.lock.lock()
-                self?.continuations.removeValue(forKey: identifier)
-                self?.lock.unlock()
+                self?.state.withLock { state in
+                    state.continuations.removeValue(forKey: identifier)
+                }
             }
         }
     }
 
     func cancelTransfer(sessionIdentifier: String, taskIdentifier: Int) async {
-        lock.lock()
-        cancelledTransfers.append((sessionIdentifier, taskIdentifier))
-        lock.unlock()
+        state.withLock { state in
+            state.cancelledTransfers.append((sessionIdentifier, taskIdentifier))
+        }
     }
 
     func emit(_ snapshot: BackgroundTransferSnapshot) {
@@ -53,47 +56,43 @@ private final class MockBackgroundTransferMonitor: BackgroundTransferMonitoring,
             activeState = false
         }
 
-        lock.lock()
-        if activeState {
-            snapshots.removeAll { $0.id == snapshot.id }
-            snapshots.append(snapshot)
-        } else {
-            snapshots.removeAll { $0.id == snapshot.id }
+        let currentContinuations = state.withLock { state in
+            if activeState {
+                state.snapshots.removeAll { $0.id == snapshot.id }
+                state.snapshots.append(snapshot)
+            } else {
+                state.snapshots.removeAll { $0.id == snapshot.id }
+            }
+            return Array(state.continuations.values)
         }
-        let currentContinuations = Array(continuations.values)
-        lock.unlock()
 
         currentContinuations.forEach { $0.yield(snapshot) }
     }
 
     func recordedCancels() -> [(String, Int)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return cancelledTransfers
+        state.withLock { $0.cancelledTransfers }
     }
 
     func hasUpdateSubscriber() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return !continuations.isEmpty
+        state.withLock { !$0.continuations.isEmpty }
     }
 
     func waitForUpdateSubscriber() async {
-        lock.lock()
-        if !continuations.isEmpty {
-            lock.unlock()
+        if hasUpdateSubscriber() {
             return
         }
-        lock.unlock()
 
         await withCheckedContinuation { continuation in
-            lock.lock()
-            if !continuations.isEmpty {
-                lock.unlock()
+            let shouldResume = state.withLock { state in
+                if !state.continuations.isEmpty {
+                    return true
+                } else {
+                    state.subscriberWaiters.append(continuation)
+                    return false
+                }
+            }
+            if shouldResume {
                 continuation.resume()
-            } else {
-                subscriberWaiters.append(continuation)
-                lock.unlock()
             }
         }
     }

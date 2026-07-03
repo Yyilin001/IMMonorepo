@@ -9,13 +9,14 @@ struct IMAddConversationMembersSheet: View {
     let conversationID: String
 
     @State private var memberEmails = ""
+    @State private var memberEmailDraft = IMConversationMemberEmailDraft("")
     @State private var isSubmitting = false
     @State private var statusSnapshot = IMConversationStatusSnapshot(message: nil)
 
     var body: some View {
         Form {
             Section("新增成员") {
-                TextField("成员邮箱，逗号或换行分隔", text: $memberEmails, axis: .vertical)
+                TextField("成员邮箱，逗号或换行分隔", text: memberEmailsBinding, axis: .vertical)
                     .lineLimit(3...6)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -50,10 +51,11 @@ struct IMAddConversationMembersSheet: View {
                 } else {
                     Button("添加") {
                         Task {
+                            let emails = memberEmailDraft.emails
                             isSubmitting = true
                             let didAdd = await runtimeStore.addConversationMembers(
                                 to: conversationID,
-                                memberEmails: parsedMemberEmails
+                                memberEmails: emails
                             )
                             isSubmitting = false
 
@@ -62,17 +64,20 @@ struct IMAddConversationMembersSheet: View {
                             }
                         }
                     }
-                    .disabled(parsedMemberEmails.isEmpty)
+                    .disabled(memberEmailDraft.isEmpty)
                 }
             }
         }
     }
 
-    private var parsedMemberEmails: [String] {
-        memberEmails
-            .components(separatedBy: CharacterSet(charactersIn: ",\n"))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { !$0.isEmpty }
+    private var memberEmailsBinding: Binding<String> {
+        Binding(
+            get: { memberEmails },
+            set: { newValue in
+                memberEmails = newValue
+                memberEmailDraft = IMConversationMemberEmailDraft(newValue)
+            }
+        )
     }
 
     private func refreshStatusSnapshot() {

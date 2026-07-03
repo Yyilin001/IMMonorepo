@@ -10,4 +10,9 @@ enum IMAppLog {
         subsystem: "com.stskcxfz.imapp",
         category: "im-ui"
     )
+
+    static let performance = Logger(
+        subsystem: "com.stskcxfz.imapp",
+        category: "performance"
+    )
 }
