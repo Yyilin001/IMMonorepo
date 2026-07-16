@@ -101,7 +101,7 @@ struct EnforceConversationShardSequenceInvariants: AsyncMigration {
                     IF NOT EXISTS (
                         SELECT 1
                         FROM pg_constraint
-                        WHERE conname = \(bind: constraint.name)
+                        WHERE conname = '\(unsafeRaw: constraint.name)'
                     ) THEN
                         ALTER TABLE \(ident: constraint.table)
                         ADD CONSTRAINT \(ident: constraint.name)

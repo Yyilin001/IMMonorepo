@@ -7,6 +7,13 @@ source "${SCRIPT_DIR}/common.sh"
 
 SYSTEMD_UNITS_RENDER_SELF_TEST="${SYSTEMD_UNITS_RENDER_SELF_TEST:-false}"
 
+bool_enabled() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 if [[ "${SYSTEMD_UNITS_RENDER_SELF_TEST}" == "true" ]]; then
   python3 - "${BASH_SOURCE[0]}" <<'PY'
 import sys

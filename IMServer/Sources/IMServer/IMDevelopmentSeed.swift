@@ -25,7 +25,7 @@ enum IMDevelopmentSeed {
         var seededEmails: [String] = []
         var updatedEmails: [String] = []
         for normalizedEmail in Array(Set(seedEmails)).sorted() {
-            if let existingUser = try await User.query(on: app.imWriteDB)
+            if let existingUser = try await User.query(on: app.db)
                 .filter(\.$email == normalizedEmail)
                 .first() {
                 if (existingUser.displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
