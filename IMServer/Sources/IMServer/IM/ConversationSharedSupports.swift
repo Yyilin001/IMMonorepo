@@ -3,10 +3,27 @@ import Foundation
 import SQLKit
 import Vapor
 
+struct ConversationCommandReceipt: Equatable, Sendable {
+    let conversationID: UUID
+    let eventID: UUID?
+    let eventType: ConversationDomainEventType
+    let acceptedAt: Date
+    let membershipRevision: Date?
+    let didMutate: Bool
+
+    var projectionPending: Bool {
+        eventID != nil
+    }
+}
+
+struct ConversationCreateCommandResult: Sendable {
+    let receipt: ConversationCommandReceipt
+    let kind: IMConversationKind
+    let memberUserIDs: [UUID]
+}
+
 struct ConversationMemberRemovalResult {
-    let requesterConversation: IMConversationResponse
-    let removedConversation: IMConversationResponse
-    let remainingUserIDs: [UUID]
+    let receipt: ConversationCommandReceipt
 }
 
 enum ConversationCommandNormalizationSupport {
@@ -47,6 +64,23 @@ struct ConversationUserLookupSupport {
             throw Abort(.notFound, reason: "用户不存在。")
         }
         return user
+    }
+}
+
+struct ConversationUserDirectory {
+    let db: any Database
+
+    func usersByID(_ userIDs: [UUID]) async throws -> [UUID: User] {
+        let uniqueUserIDs = Array(Set(userIDs))
+        guard !uniqueUserIDs.isEmpty else {
+            return [:]
+        }
+        let users = try await User.query(on: db)
+            .filter(\.$id ~~ uniqueUserIDs)
+            .all()
+        return Dictionary(uniqueKeysWithValues: try users.map { user in
+            (try user.requireID(), user)
+        })
     }
 }
 
@@ -160,14 +194,15 @@ struct ConversationOutboxEnqueuer {
         DatabaseOutboxConversationEventBus(db: db, domainEventMetrics: domainEventMetrics)
     }
 
+    @discardableResult
     func enqueueSummaryRefreshEvent(
         type: ConversationDomainEventType,
         conversationID: UUID,
         actorUserID: UUID?,
         recipientUserIDs: [UUID],
         on database: (any Database)? = nil
-    ) async throws {
-        _ = try await eventBus.publish(
+    ) async throws -> ConversationDomainEvent {
+        try await eventBus.publish(
             type: type,
             conversationID: conversationID,
             actorUserID: actorUserID,
@@ -178,13 +213,14 @@ struct ConversationOutboxEnqueuer {
         )
     }
 
+    @discardableResult
     func enqueueConversationRemovedEvent(
         conversationID: UUID,
         actorUserID: UUID?,
         affectedUserID: UUID,
         on database: (any Database)? = nil
-    ) async throws {
-        _ = try await eventBus.publish(
+    ) async throws -> ConversationDomainEvent {
+        try await eventBus.publish(
             type: .conversationRemovedForUser,
             conversationID: conversationID,
             actorUserID: actorUserID,
@@ -346,10 +382,11 @@ enum ConversationPresentationSupport {
 
     static func directPeer(
         from memberships: [ConversationMember],
-        currentUserID: UUID
+        currentUserID: UUID,
+        usersByID: [UUID: User]
     ) -> IMDirectPeerResponse? {
         guard let peerMembership = memberships.first(where: { $0.$user.id != currentUserID }),
-              let peerUser = peerMembership.$user.value
+              let peerUser = usersByID[peerMembership.$user.id]
         else {
             return nil
         }
@@ -415,13 +452,14 @@ struct ConversationSummaryRefreshPublisher {
         ConversationOutboxEnqueuer(db: db)
     }
 
+    @discardableResult
     func publish(
         _ type: ConversationDomainEventType,
         conversationID: UUID,
         actorUserID: UUID?,
         recipientUserIDs: [UUID],
         on database: (any Database)? = nil
-    ) async throws {
+    ) async throws -> ConversationDomainEvent {
         try await outboxEnqueuer.enqueueSummaryRefreshEvent(
             type: type,
             conversationID: conversationID,
@@ -431,12 +469,13 @@ struct ConversationSummaryRefreshPublisher {
         )
     }
 
+    @discardableResult
     func publishConversationRemoved(
         conversationID: UUID,
         actorUserID: UUID?,
         affectedUserID: UUID,
         on database: (any Database)? = nil
-    ) async throws {
+    ) async throws -> ConversationDomainEvent {
         try await outboxEnqueuer.enqueueConversationRemovedEvent(
             conversationID: conversationID,
             actorUserID: actorUserID,
@@ -449,10 +488,6 @@ struct ConversationSummaryRefreshPublisher {
 struct ConversationMessageEventPublisher {
     let db: any Database
 
-    private var membershipService: ConversationMembershipService {
-        ConversationMembershipService(db: db)
-    }
-
     private var outboxEnqueuer: ConversationOutboxEnqueuer {
         ConversationOutboxEnqueuer(db: db)
     }
@@ -463,10 +498,10 @@ struct ConversationMessageEventPublisher {
         requesterUserID: UUID,
         messageID: UUID
     ) async throws {
-        let recipientUserIDs = try await membershipService.listMemberResponses(
-            in: conversationID,
-            for: requesterUserID
-        ).map(\.id)
+        let recipientUserIDs = try await ConversationMember.query(on: db)
+            .filter(\.$conversation.$id == conversationID)
+            .all()
+            .map(\.$user.id)
         try await outboxEnqueuer.enqueueMessageEvent(
             type: type,
             conversationID: conversationID,

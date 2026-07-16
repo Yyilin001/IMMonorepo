@@ -58,6 +58,33 @@ MemoryAccounting=true
 TasksMax=65535
 EOF
   done
+  cat >"${self_test_dir}/systemd/imserver-stream-consumer@.service" <<EOF
+[Service]
+EnvironmentFile=${self_test_dir}/etc/common.env
+EnvironmentFile=${self_test_dir}/etc/roles/stream-consumer-%i.env
+ExecStart=/opt/imserver/bin/IMServer stream-consumer
+Restart=always
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitNOFILE=1048576
+CPUAccounting=true
+MemoryAccounting=true
+TasksMax=65535
+EOF
   cat >"${self_test_dir}/systemd/kafka.service" <<EOF
 [Service]
 User=kafka
@@ -174,6 +201,9 @@ unit_names=(
   imserver-stream-consumer
   imserver-domain-delivery-consumer
 )
+template_unit_names=(
+  imserver-stream-consumer@
+)
 kafka_unit_names=(
   kafka
 )
@@ -247,6 +277,42 @@ check_unit_file() {
   pass "${unit}" "file=${unit_file}"
 }
 
+check_stream_consumer_template_unit_file() {
+  local unit="$1"
+  local unit_file="${SYSTEMD_UNIT_DIR}/${unit}.service"
+  local directive
+
+  if [[ ! -f "${unit_file}" ]]; then
+    fail "${unit}" "unit_file_missing"
+    return
+  fi
+  if ! grep -Fq "EnvironmentFile=${common_env}" "${unit_file}"; then
+    fail "${unit}" "missing_common_environment_file"
+  fi
+  if ! grep -Fq "EnvironmentFile=${IMSERVER_ETC_DIR}/roles/stream-consumer-%i.env" "${unit_file}"; then
+    fail "${unit}" "missing_instance_role_environment_file"
+  fi
+  if ! grep -Eq '^ExecStart=.*IMServer[[:space:]]+stream-consumer' "${unit_file}"; then
+    fail "${unit}" "missing_stream_consumer_execstart"
+  fi
+  for directive in \
+    "Restart=always" "NoNewPrivileges=true" "PrivateTmp=true" \
+    "PrivateDevices=true" "ProtectHome=true" "ProtectSystem=full" \
+    "ProtectKernelTunables=true" "ProtectKernelModules=true" \
+    "ProtectControlGroups=true" "RestrictSUIDSGID=true" \
+    "RestrictRealtime=true" "RestrictNamespaces=true" \
+    "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" "LockPersonality=true" \
+    "SystemCallArchitectures=native" "CapabilityBoundingSet=" \
+    "AmbientCapabilities=" "LimitNOFILE=" "CPUAccounting=true" \
+    "MemoryAccounting=true" "TasksMax="
+  do
+    if ! grep -Fq "${directive}" "${unit_file}"; then
+      fail "${unit}" "missing_${directive%%=*}"
+    fi
+  done
+  pass "${unit}" "file=${unit_file}"
+}
+
 check_kafka_unit_file() {
   local unit="$1"
   local unit_file="${SYSTEMD_UNIT_DIR}/${unit}.service"
@@ -299,6 +365,10 @@ check_kafka_unit_file() {
 unit_files=()
 for unit in "${unit_names[@]}"; do
   check_unit_file "${unit}"
+  unit_files+=("${SYSTEMD_UNIT_DIR}/${unit}.service")
+done
+for unit in "${template_unit_names[@]}"; do
+  check_stream_consumer_template_unit_file "${unit}"
   unit_files+=("${SYSTEMD_UNIT_DIR}/${unit}.service")
 done
 for unit in "${kafka_unit_names[@]}"; do

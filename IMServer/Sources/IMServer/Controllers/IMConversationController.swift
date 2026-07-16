@@ -1,6 +1,8 @@
 import Vapor
 
 struct IMConversationController: RouteCollection {
+    static let commandReceiptMediaType = "application/vnd.im.conversation-command-receipt+json"
+
     func boot(routes: any RoutesBuilder) throws {
         try registerCommandRoutes(on: routes)
         try registerQueryRoutes(on: routes)
@@ -12,6 +14,7 @@ struct IMConversationController: RouteCollection {
                 AccessTokenAuthenticator(),
                 User.guardMiddleware(throwing: Abort(.unauthorized, reason: "用户未登录。"))
             )
+            .grouped(ConversationCellForwardingMiddleware())
 
         IMConversationCommandRoute.registerControllerRoutes(on: protected, controller: self)
     }
@@ -22,6 +25,7 @@ struct IMConversationController: RouteCollection {
                 AccessTokenAuthenticator(),
                 User.guardMiddleware(throwing: Abort(.unauthorized, reason: "用户未登录。"))
             )
+            .grouped(ConversationCellForwardingMiddleware())
 
         protected.get("conversations", use: conversations)
         protected.get("conversations", "changes", use: conversationChanges)
@@ -77,5 +81,51 @@ struct IMConversationController: RouteCollection {
                 throw Abort(.badRequest, reason: "客户端 timeline 补洞配置上报无效。")
             }
         }
+    }
+
+    func acceptsCommandReceipt(_ req: Request) -> Bool {
+        req.headers.first(name: "Accept")?.localizedCaseInsensitiveContains(Self.commandReceiptMediaType) == true
+    }
+
+    func requireCommandReceiptWhenSummaryReadModelIsSeparate(_ req: Request) throws {
+        let app = req.application
+        let usesSeparateSummaryReadModel = app.imSummaryDatabaseEnabled
+            || !app.summaryShardDatabaseIDs.isEmpty
+            || app.summaryStoreConfiguration.shardIDs.count > 1
+        guard !usesSeparateSummaryReadModel || acceptsCommandReceipt(req) else {
+            throw Abort(
+                .notAcceptable,
+                reason: "独立摘要读模型部署要求会话命令携带 Accept: \(Self.commandReceiptMediaType)。"
+            )
+        }
+    }
+
+    func commandReceiptResponse(_ receipt: ConversationCommandReceipt) throws -> Response {
+        let response = Response(status: .accepted)
+        try response.content.encode(IMConversationCommandReceiptResponse(receipt: receipt))
+        return response
+    }
+
+    func legacyConversationSummaryResponse(
+        app: Application,
+        receipt: ConversationCommandReceipt,
+        for userID: UUID
+    ) async throws -> Response {
+        let usesSeparateSummaryReadModel = app.imSummaryDatabaseEnabled
+            || !app.summaryShardDatabaseIDs.isEmpty
+            || app.summaryStoreConfiguration.shardIDs.count > 1
+        guard !usesSeparateSummaryReadModel else {
+            throw Abort(
+                .notAcceptable,
+                reason: "独立摘要读模型部署要求会话命令请求命令回执。"
+            )
+        }
+        let summary = try await IMConversationService.eventualRead(app: app).conversationSummary(
+            conversationID: receipt.conversationID,
+            for: userID
+        )
+        let response = Response(status: .ok)
+        try response.content.encode(summary)
+        return response
     }
 }

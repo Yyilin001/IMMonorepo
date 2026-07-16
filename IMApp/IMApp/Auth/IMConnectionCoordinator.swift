@@ -134,6 +134,7 @@ final class IMConnectionCoordinator {
 
     func appDidEnterBackground() {
         isAppActive = false
+        runtime?.cancelConversationGapSyncCatchUp()
         selectedConversationCatchUpTask?.cancel()
         selectedConversationCatchUpTask = nil
         foregroundSummaryRefreshTask?.cancel()
@@ -147,7 +148,6 @@ final class IMConnectionCoordinator {
             return
         }
 
-        runtime.cancelConversationGapSyncCatchUp()
         runtime.cancelQueuedTextMessageFlush()
         for task in runtime.mediaUploadRecoveryTasks.values {
             task.cancel()
@@ -157,10 +157,6 @@ final class IMConnectionCoordinator {
         eventTask = nil
         heartbeatTask?.cancel()
         heartbeatTask = nil
-        selectedConversationCatchUpTask?.cancel()
-        selectedConversationCatchUpTask = nil
-        foregroundSummaryRefreshTask?.cancel()
-        foregroundSummaryRefreshTask = nil
         connection = nil
 
         if error is CancellationError {
@@ -311,7 +307,6 @@ final class IMConnectionCoordinator {
 
     private func startSelectedConversationCatchUpLoopIfNeeded() {
         guard isAppActive,
-              connection != nil,
               selectedConversationCatchUpTask == nil
         else {
             return
@@ -338,7 +333,6 @@ final class IMConnectionCoordinator {
     private func runSelectedConversationPeriodicCatchUp() async {
         guard let runtime,
               isAppActive,
-              connection != nil,
               runtime.isSignedInProvider()
         else {
             selectedConversationCatchUpTask?.cancel()
@@ -354,7 +348,6 @@ final class IMConnectionCoordinator {
 
     private func startForegroundSummaryRefreshLoopIfNeeded() {
         guard isAppActive,
-              connection != nil,
               foregroundSummaryRefreshTask == nil
         else {
             return
@@ -381,7 +374,6 @@ final class IMConnectionCoordinator {
     private func runForegroundSummaryRefresh() async {
         guard let runtime,
               isAppActive,
-              connection != nil,
               runtime.isSignedInProvider()
         else {
             foregroundSummaryRefreshTask?.cancel()

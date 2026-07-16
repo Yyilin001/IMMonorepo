@@ -25,6 +25,22 @@ groups:
         annotations:
           summary: IMServer outbox backlog is accumulating
 
+      - alert: IMServerOutboxPublicationStalled
+        expr: im_outbox_backlog_events > 0 and im_outbox_oldest_pending_age_millis > 60000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: IMServer has outbox records pending for more than one minute
+
+      - alert: IMServerOutboxPublicationStalledCritical
+        expr: im_outbox_backlog_events > 0 and im_outbox_oldest_pending_age_millis > 300000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: IMServer has outbox records pending for more than five minutes
+
       - alert: IMServerProjectionLag
         expr: im_projection_lag_millis > 10000
         for: 10m
@@ -144,3 +160,29 @@ groups:
           severity: warning
         annotations:
           summary: IMServer message write batcher is not batching messages
+
+  - name: imserver-conversation-shard-migration
+    rules:
+      - alert: IMServerConversationShardMigrationCopyFailure
+        expr: increase(im_conversation_shard_migration_copy_failures_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: IMServer conversation-shard migration copy failed
+
+      - alert: IMServerConversationShardMigrationVerificationFailure
+        expr: increase(im_conversation_shard_migration_verify_failures_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: IMServer conversation-shard migration verification failed
+
+      - alert: IMServerConversationShardMigrationRemoteTransferFailure
+        expr: increase(im_conversation_shard_migration_remote_page_failures_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: IMServer cross-Cell conversation migration transfer failed

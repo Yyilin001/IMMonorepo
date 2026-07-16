@@ -86,6 +86,71 @@ extension IMServerTests {
         #expect(userInvalidated == nil)
     }
 
+    @Test("Redis auth cache revisions invalidate user, global, and session entries")
+    func redisAuthSessionCacheRevisionsInvalidateEntries() async throws {
+        guard let redisURL = Environment.get("IM_REDIS_INTEGRATION_URL"), !redisURL.isEmpty else {
+            return
+        }
+
+        let app = try await Application.make(.testing)
+        let principal = try makeAuthSessionPrincipal(
+            userID: UUID(),
+            sessionID: UUID(),
+            refreshExpiresAt: Date().addingTimeInterval(120)
+        )
+        let loads = AuthSessionCacheLoadCounter()
+        let cache = try RedisAuthSessionValidationCache(
+            configuration: AuthSessionCacheConfiguration(
+                mode: .redis,
+                ttlSeconds: 60,
+                maxEntries: 100,
+                redisMaxConnections: 2,
+                redisURL: redisURL
+            ),
+            nodeID: "auth-cache-test-\(UUID().uuidString.lowercased())",
+            logger: app.logger,
+            eventLoop: app.eventLoopGroup.next(),
+            metrics: AuthSessionCacheMetrics()
+        )
+
+        do {
+            try await cache.start(app: app)
+
+            _ = try await cache.principal(
+                sessionID: principal.sessionID,
+                userID: principal.userID,
+                loadFromDatabase: { await loads.load(principal) }
+            )
+            await cache.invalidate(userID: principal.userID)
+            _ = try await cache.principal(
+                sessionID: principal.sessionID,
+                userID: principal.userID,
+                loadFromDatabase: { await loads.load(principal) }
+            )
+            await cache.invalidateAll()
+            _ = try await cache.principal(
+                sessionID: principal.sessionID,
+                userID: principal.userID,
+                loadFromDatabase: { await loads.load(principal) }
+            )
+            await cache.invalidate(sessionID: principal.sessionID)
+            _ = try await cache.principal(
+                sessionID: principal.sessionID,
+                userID: principal.userID,
+                loadFromDatabase: { await loads.load(principal) }
+            )
+
+            let loadCount = await loads.count()
+            #expect(loadCount == 4)
+            await cache.shutdown()
+            try await app.asyncShutdown()
+        } catch {
+            await cache.shutdown()
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("Access auth cache avoids repeated database fallback")
     func accessAuthCacheAvoidsRepeatedDatabaseFallback() async throws {
         try await withLocalAuthSessionCache { app in
@@ -217,5 +282,18 @@ extension IMServerTests {
             lastSeenAt: nil
         )
         return try AuthenticatedPrincipal(user: user, session: session)
+    }
+}
+
+private actor AuthSessionCacheLoadCounter {
+    private var loadCount = 0
+
+    func load(_ principal: AuthenticatedPrincipal) -> AuthenticatedPrincipal {
+        loadCount += 1
+        return principal
+    }
+
+    func count() -> Int {
+        loadCount
     }
 }

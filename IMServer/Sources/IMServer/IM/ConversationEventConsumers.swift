@@ -30,6 +30,55 @@ struct ConversationEventEnvelope: Sendable {
     }
 }
 
+private func imConsumerDeliveryTrace(
+    for envelope: ConversationEventEnvelope,
+    app: Application
+) -> IMDeliveryTrace {
+    IMDeliveryTrace(
+        conversationID: envelope.conversationID,
+        eventID: envelope.eventID,
+        runtimeRole: app.imRuntimeRole.rawValue,
+        timelineSequence: UInt64(exactly: envelope.event.aggregateSequence)
+    )
+}
+
+private func imConsumerDeliveryTrace(
+    for payload: IMTCPChatDomainEventPayload,
+    app: Application
+) -> IMDeliveryTrace {
+    IMDeliveryTrace(
+        conversationID: payload.aggregateID,
+        eventID: payload.eventID,
+        runtimeRole: app.imRuntimeRole.rawValue,
+        timelineSequence: payload.aggregateSequence,
+        ownerSequence: payload.ownerAggregateSequence
+    )
+}
+
+private func imConsumerDeliveryFailureMetadata(
+    trace: IMDeliveryTrace,
+    app: Application,
+    outcome: String = "dropped",
+    error: any Error
+) -> Logger.Metadata {
+    let errorKind: String
+    if error is ConversationEventConsumerTimeoutError {
+        errorKind = "timeout"
+    } else if error is CancellationError {
+        errorKind = "cancelled"
+    } else if let abort = error as? Abort {
+        errorKind = "http_\(abort.status.code)"
+    } else {
+        errorKind = "processing_failed"
+    }
+    return imDeliveryFailureMetadata(
+        trace: trace,
+        runtimeRole: app.imRuntimeRole.rawValue,
+        outcome: outcome,
+        errorKind: errorKind
+    )
+}
+
 protocol ConversationEventConsumer: Sendable {
     var supportedEventTypes: Set<ConversationDomainEventType> { get }
     func consume(_ envelope: ConversationEventEnvelope) async throws
@@ -194,6 +243,27 @@ private func activeConversationRoutes(
     )
 }
 
+/// Activates a route reserved before a cross-database conversation write. The
+/// canonical membership event is durable on the conversation shard, so replay
+/// repairs the primary-directory side if the command process exits between the
+/// shard commit and its immediate route activation.
+struct ConversationRouteActivationConsumer: ConversationEventConsumer {
+    let app: Application
+
+    var supportedEventTypes: Set<ConversationDomainEventType> {
+        [.membershipAdded]
+    }
+
+    func consume(_ envelope: ConversationEventEnvelope) async throws {
+        guard envelope.eventType == .membershipAdded else {
+            return
+        }
+        try await app.conversationDirectory.activateConversation(
+            conversationID: envelope.conversationID
+        )
+    }
+}
+
 struct ConversationProjectionConsumer: ConversationEventConsumer {
     let app: Application
     let sourceDB: any Database
@@ -214,6 +284,7 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
             try await IMConversationSummaryProjectionService(
                 sourceDB: sourceDB,
                 readModelDB: target.readModelDB,
+                userDirectoryDB: app.db,
                 streamConsumerConfiguration: app.streamConsumerConfiguration,
                 domainEventMetrics: app.conversationDomainEventMetrics,
                 activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
@@ -236,6 +307,7 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
                     try await IMConversationSummaryProjectionService(
                         sourceDB: sourceDB,
                         readModelDB: target.readModelDB,
+                        userDirectoryDB: app.db,
                         streamConsumerConfiguration: app.streamConsumerConfiguration,
                         domainEventMetrics: app.conversationDomainEventMetrics,
                         activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
@@ -254,6 +326,7 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
                     try await IMConversationSummaryProjectionService(
                         sourceDB: sourceDB,
                         readModelDB: target.readModelDB,
+                        userDirectoryDB: app.db,
                         streamConsumerConfiguration: app.streamConsumerConfiguration,
                         domainEventMetrics: app.conversationDomainEventMetrics,
                         activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
@@ -272,6 +345,7 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
                     try await IMConversationSummaryProjectionService(
                         sourceDB: sourceDB,
                         readModelDB: target.readModelDB,
+                        userDirectoryDB: app.db,
                         streamConsumerConfiguration: app.streamConsumerConfiguration,
                         domainEventMetrics: app.conversationDomainEventMetrics,
                         activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
@@ -292,6 +366,7 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
                 try await IMConversationSummaryProjectionService(
                     sourceDB: sourceDB,
                     readModelDB: target.readModelDB,
+                    userDirectoryDB: app.db,
                     streamConsumerConfiguration: app.streamConsumerConfiguration,
                     domainEventMetrics: app.conversationDomainEventMetrics,
                     activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
@@ -310,6 +385,7 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
                     try await IMConversationSummaryProjectionService(
                         sourceDB: sourceDB,
                         readModelDB: target.readModelDB,
+                        userDirectoryDB: app.db,
                         streamConsumerConfiguration: app.streamConsumerConfiguration,
                         domainEventMetrics: app.conversationDomainEventMetrics,
                         activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
@@ -342,6 +418,7 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
                 try await IMConversationSummaryProjectionService(
                     sourceDB: sourceDB,
                     readModelDB: target.readModelDB,
+                    userDirectoryDB: app.db,
                     streamConsumerConfiguration: app.streamConsumerConfiguration,
                     domainEventMetrics: app.conversationDomainEventMetrics,
                     activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
@@ -581,6 +658,7 @@ struct ChangesLogConsumer: ConversationEventConsumer {
                     try await IMConversationSummaryProjectionService(
                         sourceDB: sourceDB,
                         readModelDB: target.readModelDB,
+                        userDirectoryDB: app.db,
                         streamConsumerConfiguration: app.streamConsumerConfiguration,
                         domainEventMetrics: app.conversationDomainEventMetrics,
                         activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
@@ -613,6 +691,7 @@ struct ChangesLogConsumer: ConversationEventConsumer {
                 try await IMConversationSummaryProjectionService(
                     sourceDB: sourceDB,
                     readModelDB: target.readModelDB,
+                    userDirectoryDB: app.db,
                     streamConsumerConfiguration: app.streamConsumerConfiguration,
                     domainEventMetrics: app.conversationDomainEventMetrics,
                     activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
@@ -1125,6 +1204,9 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
             title: row.title,
             kind: row.kind,
             directMessagingState: row.directMessagingState,
+            groupLifecycleState: row.kind == IMConversationKind.group.rawValue
+                ? row.groupLifecycleStateEnum.rawValue
+                : nil,
             directPeer: row.directPeerUserID.map { directPeerUserID in
                 IMDirectPeerResponse(
                     id: directPeerUserID,
@@ -1367,6 +1449,22 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
                 requestID: requestID
             )
             let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
+            if let first = envelopes.first {
+                await imLogSampledDeliveryTrace(
+                    app: app,
+                    trace: imConsumerDeliveryTrace(for: first, app: app),
+                    stage: "stream_consumer_realtime_relay_completed",
+                    additionalMetadata: [
+                        "event_count": .stringConvertible(envelopes.count),
+                        "recipient_count": .stringConvertible(
+                            relayBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
+                        ),
+                        "payload_batch_count": .stringConvertible(relayBatches.count),
+                        "event_lag_ms": .stringConvertible(eventLagMilliseconds),
+                        "total_ms": .stringConvertible(totalMilliseconds)
+                    ]
+                )
+            }
             if IMRealtimeDeliveryDiagnostics.shouldLogAny(
                 [eventLagMilliseconds, totalMilliseconds],
                 thresholdMilliseconds: slowLogMilliseconds
@@ -1430,6 +1528,24 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
         }
         let dispatchEnqueueMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: dispatchStartedAt)
         let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
+        if let first = envelopes.first {
+            await imLogSampledDeliveryTrace(
+                app: app,
+                trace: imConsumerDeliveryTrace(for: first, app: app),
+                stage: "stream_consumer_realtime_relay_enqueued",
+                additionalMetadata: [
+                    "event_count": .stringConvertible(envelopes.count),
+                    "recipient_count": .stringConvertible(recipientCount),
+                    "payload_batch_count": .stringConvertible(
+                        activeFullBatches.count + activeCompactBatches.count
+                    ),
+                    "event_lag_ms": .stringConvertible(eventLagMilliseconds),
+                    "payload_build_ms": .stringConvertible(payloadBuildMilliseconds),
+                    "dispatch_enqueue_ms": .stringConvertible(dispatchEnqueueMilliseconds),
+                    "total_ms": .stringConvertible(totalMilliseconds)
+                ]
+            )
+        }
         if IMRealtimeDeliveryDiagnostics.shouldLogAny(
             [eventLagMilliseconds, payloadBuildMilliseconds, splitMilliseconds, dispatchEnqueueMilliseconds, totalMilliseconds],
             thresholdMilliseconds: slowLogMilliseconds
@@ -1678,11 +1794,13 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
             await app.routingMetrics.recordActiveConversationFanoutRouteSplitDrop(
                 recipientCount: recipientCount
             )
-            app.logger.warning("Realtime delivery consumer pre-split failed; dropping realtime fanout.", metadata: [
-                "conversation_id": .string(first.conversationID.uuidString),
-                "recipient_count": .stringConvertible(recipientCount),
-                "error": .string(String(describing: error))
-            ])
+            var metadata = imConsumerDeliveryFailureMetadata(
+                trace: imConsumerDeliveryTrace(for: first, app: app),
+                app: app,
+                error: error
+            )
+            metadata["recipient_count"] = .stringConvertible(recipientCount)
+            app.logger.warning("Realtime delivery consumer pre-split failed; dropping realtime fanout.", metadata: metadata)
             return ActiveConversationFanoutSplit(didSplit: true)
         }
     }
@@ -1835,11 +1953,13 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
             await app.routingMetrics.recordActiveConversationFanoutRouteSplitDrop(
                 recipientCount: recipientCount
             )
-            app.logger.warning("Realtime delivery consumer pull-only pre-split failed; dropping realtime fanout.", metadata: [
-                "conversation_id": .string(first.conversationID.uuidString),
-                "recipient_count": .stringConvertible(recipientCount),
-                "error": .string(String(describing: error))
-            ])
+            var metadata = imConsumerDeliveryFailureMetadata(
+                trace: imConsumerDeliveryTrace(for: first, app: app),
+                app: app,
+                error: error
+            )
+            metadata["recipient_count"] = .stringConvertible(recipientCount)
+            app.logger.warning("Realtime delivery consumer pull-only pre-split failed; dropping realtime fanout.", metadata: metadata)
             return ActiveConversationFanoutSplit(didSplit: true)
         }
     }
@@ -1978,12 +2098,13 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
                 await app.routingMetrics.recordActiveConversationFanoutRouteSplitDrop(
                     recipientCount: batch.recipientUserIDs.count
                 )
-                app.logger.warning("Realtime delivery consumer active conversation split failed; dropping realtime fanout.", metadata: [
-                    "event_id": .string(batch.payload.eventID.uuidString),
-                    "conversation_id": .string(batch.payload.aggregateID.uuidString),
-                    "recipient_count": .stringConvertible(batch.recipientUserIDs.count),
-                    "error": .string(String(describing: error))
-                ])
+                var metadata = imConsumerDeliveryFailureMetadata(
+                    trace: imConsumerDeliveryTrace(for: batch.payload, app: app),
+                    app: app,
+                    error: error
+                )
+                metadata["recipient_count"] = .stringConvertible(batch.recipientUserIDs.count)
+                app.logger.warning("Realtime delivery consumer active conversation split failed; dropping realtime fanout.", metadata: metadata)
             }
         }
         return split
@@ -2577,18 +2698,16 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
                 [routeMilliseconds, totalMilliseconds],
                 thresholdMilliseconds: app.streamConsumerConfiguration.realtimeDeliverySlowLogMilliseconds
             ) {
-                app.logger.info("Domain delivery relay-after-record pre-split realtime relay.", metadata: [
-                    "event_id": .string(envelope.eventID?.uuidString ?? ""),
-                    "conversation_id": .string(envelope.conversationID.uuidString),
-                    "recipient_count": .stringConvertible(recipientCount),
-                    "active_full_recipient_count": .stringConvertible(0),
-                    "active_compact_recipient_count": .stringConvertible(activeUserIDs.count),
-                    "downgraded_active_recipient_count": .stringConvertible(activeUserIDs.count),
-                    "payload_batch_count": .stringConvertible(relayBatches.count),
-                    "active_route_cache_hit": .stringConvertible(routeCacheHit),
-                    "active_route_ms": .stringConvertible(routeMilliseconds),
-                    "total_ms": .stringConvertible(totalMilliseconds)
-                ])
+                var metadata = imConsumerDeliveryTrace(for: envelope, app: app).metadata(outcome: "slow")
+                metadata["recipient_count"] = .stringConvertible(recipientCount)
+                metadata["active_full_recipient_count"] = .stringConvertible(0)
+                metadata["active_compact_recipient_count"] = .stringConvertible(activeUserIDs.count)
+                metadata["downgraded_active_recipient_count"] = .stringConvertible(activeUserIDs.count)
+                metadata["payload_batch_count"] = .stringConvertible(relayBatches.count)
+                metadata["active_route_cache_hit"] = .stringConvertible(routeCacheHit)
+                metadata["active_route_ms"] = .stringConvertible(routeMilliseconds)
+                metadata["total_ms"] = .stringConvertible(totalMilliseconds)
+                app.logger.info("Domain delivery relay-after-record pre-split realtime relay.", metadata: metadata)
             }
             return relayBatches
         } catch {
@@ -2596,12 +2715,13 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
             await app.routingMetrics.recordActiveConversationFanoutRouteSplitDrop(
                 recipientCount: recipientCount
             )
-            app.logger.warning("Domain delivery relay-after-record pre-split failed; dropping unsplit realtime relay.", metadata: [
-                "event_id": .string(envelope.eventID?.uuidString ?? ""),
-                "conversation_id": .string(envelope.conversationID.uuidString),
-                "recipient_count": .stringConvertible(recipientCount),
-                "error": .string(String(describing: error))
-            ])
+            var metadata = imConsumerDeliveryFailureMetadata(
+                trace: imConsumerDeliveryTrace(for: envelope, app: app),
+                app: app,
+                error: error
+            )
+            metadata["recipient_count"] = .stringConvertible(recipientCount)
+            app.logger.warning("Domain delivery relay-after-record pre-split failed; dropping unsplit realtime relay.", metadata: metadata)
             return []
         }
     }

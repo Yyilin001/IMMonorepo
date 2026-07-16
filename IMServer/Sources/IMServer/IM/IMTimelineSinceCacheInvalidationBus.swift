@@ -7,17 +7,24 @@ enum IMTimelineSinceCacheInvalidationBusError: Error {
     case missingRedisURL
 }
 
-final class IMTimelineSinceCacheInvalidationBus: @unchecked Sendable {
-    private struct InvalidationMessage: Codable, Sendable {
-        let sourceNodeID: String
-        let conversationID: UUID
-    }
+protocol IMTimelineSinceCacheInvalidating: Sendable {
+    func start(app: Application) async throws
+    func publish(conversationID: UUID) async
+    func shutdown() async
+}
+
+struct IMTimelineSinceCacheInvalidationMessage: Codable, Sendable {
+    let sourceNodeID: String
+    let conversationID: UUID
+}
+
+final class IMTimelineSinceCacheInvalidationBus: IMTimelineSinceCacheInvalidating, @unchecked Sendable {
 
     private let pool: RedisConnectionPool
     private let nodeID: String
     private let logger: Logger
     private let metrics: IMTimelineReadMetrics
-    private let channel = RedisChannelName("im:timeline-since-cache:invalidate")
+    private let channel: RedisChannelName
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private weak var app: Application?
@@ -25,6 +32,7 @@ final class IMTimelineSinceCacheInvalidationBus: @unchecked Sendable {
     init(
         configuration: IMTimelineSinceCacheInvalidationConfiguration,
         nodeID: String,
+        cellID: String = IMRealtimeCellConfiguration.defaultCellID,
         logger: Logger,
         metrics: IMTimelineReadMetrics,
         eventLoop: any EventLoop
@@ -53,6 +61,9 @@ final class IMTimelineSinceCacheInvalidationBus: @unchecked Sendable {
             boundEventLoop: eventLoop
         )
         self.nodeID = nodeID
+        self.channel = RedisChannelName(
+            IMRealtimeRedisKeyspace(cellID: cellID).key("timeline-since-cache:invalidate")
+        )
         self.logger = logger
         self.metrics = metrics
     }
@@ -80,7 +91,7 @@ final class IMTimelineSinceCacheInvalidationBus: @unchecked Sendable {
 
     func publish(conversationID: UUID) async {
         do {
-            let message = InvalidationMessage(
+            let message = IMTimelineSinceCacheInvalidationMessage(
                 sourceNodeID: nodeID,
                 conversationID: conversationID
             )
@@ -112,9 +123,9 @@ final class IMTimelineSinceCacheInvalidationBus: @unchecked Sendable {
             await metrics.recordSinceDistributedInvalidationError()
             return
         }
-        let message: InvalidationMessage
+        let message: IMTimelineSinceCacheInvalidationMessage
         do {
-            message = try decoder.decode(InvalidationMessage.self, from: data)
+            message = try decoder.decode(IMTimelineSinceCacheInvalidationMessage.self, from: data)
         } catch {
             await metrics.recordSinceDistributedInvalidationError()
             logger.warning("Timeline since cache invalidation decode failed.", metadata: [
@@ -132,9 +143,9 @@ final class IMTimelineSinceCacheInvalidationBus: @unchecked Sendable {
 }
 
 final class IMTimelineSinceCacheInvalidationLifecycle: LifecycleHandler, @unchecked Sendable {
-    private let bus: IMTimelineSinceCacheInvalidationBus
+    private let bus: any IMTimelineSinceCacheInvalidating
 
-    init(bus: IMTimelineSinceCacheInvalidationBus) {
+    init(bus: any IMTimelineSinceCacheInvalidating) {
         self.bus = bus
     }
 
@@ -164,13 +175,28 @@ extension Application {
             return
         case .redis:
             do {
-                let bus = try IMTimelineSinceCacheInvalidationBus(
-                    configuration: configuration,
-                    nodeID: imNodeID,
-                    logger: logger,
-                    metrics: timelineReadMetrics,
-                    eventLoop: eventLoopGroup.next()
-                )
+                let routingConfiguration = imRedisRoutingConfigurationOverride
+                    ?? IMRedisRoutingConfiguration.load(from: environment)
+                let bus: any IMTimelineSinceCacheInvalidating
+                if routingConfiguration.deploymentTopology == .cluster {
+                    bus = try ValkeyClusterTimelineSinceCacheInvalidationBus(
+                        configuration: configuration,
+                        clusterSeedEndpoints: try routingConfiguration.requireClusterSeedEndpoints(),
+                        nodeID: imNodeID,
+                        cellID: imRealtimeCellID,
+                        logger: logger,
+                        metrics: timelineReadMetrics
+                    )
+                } else {
+                    bus = try IMTimelineSinceCacheInvalidationBus(
+                        configuration: configuration,
+                        nodeID: imNodeID,
+                        cellID: imRealtimeCellID,
+                        logger: logger,
+                        metrics: timelineReadMetrics,
+                        eventLoop: eventLoopGroup.next()
+                    )
+                }
                 try await bus.start(app: self)
                 timelineSinceCacheInvalidationBus = bus
                 lifecycle.use(IMTimelineSinceCacheInvalidationLifecycle(bus: bus))

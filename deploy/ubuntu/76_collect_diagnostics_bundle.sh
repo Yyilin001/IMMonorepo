@@ -38,6 +38,15 @@ service_units=(
   imserver-domain-delivery-consumer
 )
 
+if command -v systemctl >/dev/null 2>&1; then
+  while IFS= read -r unit; do
+    [[ -n "${unit}" ]] && service_units+=("${unit}")
+  done < <(
+    systemctl list-units --all --type=service --no-legend --plain 'imserver-stream-consumer@*.service' 2>/dev/null \
+      | awk '{print $1}'
+  )
+fi
+
 bool_enabled() {
   case "${1:-}" in
     1|true|TRUE|yes|YES|on|ON) return 0 ;;

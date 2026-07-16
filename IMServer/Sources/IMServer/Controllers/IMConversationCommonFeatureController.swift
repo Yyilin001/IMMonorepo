@@ -125,7 +125,7 @@ extension IMConversationController {
         )
         try ConversationMembershipGuard.requireOwnerOrAdmin(membership.memberRoleEnum, reason: "只有群主或管理员可以查看邀请链接。")
 
-        let rows = try await GroupInvite.query(on: req.application.imWriteDB)
+        let rows = try await GroupInvite.query(on: req.application.db)
             .filter(\.$conversationID == conversationID)
             .sort(\.$createdAt, .descending)
             .all()
@@ -154,7 +154,8 @@ extension IMConversationController {
         return .ok
     }
 
-    func joinInvite(req: Request) async throws -> IMConversationResponse {
+    func joinInvite(req: Request) async throws -> Response {
+        try requireCommandReceiptWhenSummaryReadModelIsSeparate(req)
         let user = try req.auth.require(User.self)
         let userID = try user.requireID()
         guard let token = req.parameters.get("token")?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -162,7 +163,7 @@ extension IMConversationController {
         else {
             throw Abort(.badRequest, reason: "邀请链接无效。")
         }
-        guard let invite = try await GroupInvite.find(token, on: req.application.imWriteDB) else {
+        guard let invite = try await GroupInvite.find(token, on: req.application.db) else {
             throw Abort(.notFound, reason: "邀请链接不存在。")
         }
         guard invite.revokedAt == nil, invite.expiresAt > Date() else {
@@ -173,17 +174,35 @@ extension IMConversationController {
             .filter(\.$conversation.$id == invite.conversationID)
             .filter(\.$user.$id == userID)
             .first()
+        let receipt: ConversationCommandReceipt
         if existing == nil {
-            _ = try await ConversationCommandSupport(db: db).addMembers(
+            receipt = try await ConversationCommandSupport(
+                db: db,
+                userDirectoryDB: req.application.db
+            ).addMembers(
                 in: invite.conversationID,
                 memberEmails: [user.email],
                 requesterUserID: invite.creatorUserID
             )
             invite.useCount += 1
-            try await invite.update(on: req.application.imWriteDB)
+            try await invite.update(on: req.application.db)
+        } else {
+            let conversation = try await Conversation.find(invite.conversationID, on: db)
+            receipt = ConversationCommandReceipt(
+                conversationID: invite.conversationID,
+                eventID: nil,
+                eventType: .membershipAdded,
+                acceptedAt: Date(),
+                membershipRevision: conversation?.membershipRevision,
+                didMutate: false
+            )
         }
-        return try await ConversationSummaryReadSupport(db: db).conversationSummary(
-            conversationID: invite.conversationID,
+        if acceptsCommandReceipt(req) {
+            return try commandReceiptResponse(receipt)
+        }
+        return try await legacyConversationSummaryResponse(
+            app: req.application,
+            receipt: receipt,
             for: userID
         )
     }

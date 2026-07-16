@@ -588,14 +588,28 @@ struct SessionClientTests {
                 let body = try Self.authResponseBody(accessToken: "access-1", refreshToken: "refresh-1")
                 return HTTPFixtures.response(statusCode: 200, body: body)
             case ("POST", "/api/im/conversations", "Bearer access-1"):
+                #expect(
+                    request.value(forHTTPHeaderField: "Accept")
+                        == "application/vnd.im.conversation-command-receipt+json"
+                )
                 let body = request.httpBody ?? Data()
                 let payload = try JSONDecoder().decode(IMConversationCreateRequestBody.self, from: body)
                 #expect(payload.kind == IMConversationKind.group.rawValue)
                 #expect(payload.title == "Demo Chat")
                 #expect(payload.memberEmails == ["peer@example.com"])
                 return HTTPFixtures.response(
-                    statusCode: 200,
-                    body: try Self.imConversationBody(conversationID: conversationID)
+                    statusCode: 202,
+                    body: try HTTPFixtures.jsonBody(
+                        IMConversationCommandReceiptBody(
+                            conversationID: conversationID,
+                            eventID: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd"),
+                            eventType: "membership_added",
+                            acceptedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                            membershipRevision: Date(timeIntervalSince1970: 1_700_000_000),
+                            didMutate: true,
+                            projectionPending: true
+                        )
+                    )
                 )
             default:
                 Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
@@ -611,17 +625,17 @@ struct SessionClientTests {
 
         let noDevice: DeviceMetadataPayload? = nil
         _ = try await client.login(email: Self.userEmail, password: "password123", device: noDevice)
-        let conversation = try await client.createIMConversation(
+        let receipt = try await client.createIMConversation(
             kind: .group,
             title: "Demo Chat",
             memberEmails: ["peer@example.com"]
         )
 
-        #expect(conversation.id == conversationID)
-        #expect(conversation.title == "Demo Chat")
-        #expect(conversation.kind == IMConversationKind.group.rawValue)
-        #expect(conversation.memberCount == 3)
-        #expect(conversation.memberUserIDs == [Self.userID])
+        #expect(receipt.conversationID == conversationID)
+        #expect(receipt.eventID == UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd"))
+        #expect(receipt.eventType == "membership_added")
+        #expect(receipt.didMutate)
+        #expect(receipt.projectionPending)
     }
 
     @Test func addIMConversationMembersUsesAuthorizedEndpoint() async throws {
@@ -635,12 +649,26 @@ struct SessionClientTests {
                 let body = try Self.authResponseBody(accessToken: "access-1", refreshToken: "refresh-1")
                 return HTTPFixtures.response(statusCode: 200, body: body)
             case ("POST", "/api/im/conversations/\(conversationID.uuidString)/members", "Bearer access-1"):
+                #expect(
+                    request.value(forHTTPHeaderField: "Accept")
+                        == "application/vnd.im.conversation-command-receipt+json"
+                )
                 let body = request.httpBody ?? Data()
                 let payload = try JSONDecoder().decode(IMConversationMemberUpdateRequestBody.self, from: body)
                 #expect(payload.memberEmails == ["peer@example.com", "new@example.com"])
                 return HTTPFixtures.response(
-                    statusCode: 200,
-                    body: try Self.imConversationBody(conversationID: conversationID)
+                    statusCode: 202,
+                    body: try HTTPFixtures.jsonBody(
+                        IMConversationCommandReceiptBody(
+                            conversationID: conversationID,
+                            eventID: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd"),
+                            eventType: "membership_added",
+                            acceptedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                            membershipRevision: Date(timeIntervalSince1970: 1_700_000_000),
+                            didMutate: true,
+                            projectionPending: true
+                        )
+                    )
                 )
             default:
                 Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
@@ -656,14 +684,14 @@ struct SessionClientTests {
 
         let noDevice: DeviceMetadataPayload? = nil
         _ = try await client.login(email: Self.userEmail, password: "password123", device: noDevice)
-        let conversation = try await client.addIMConversationMembers(
+        let receipt = try await client.addIMConversationMembers(
             conversationID: conversationID.uuidString,
             memberEmails: ["peer@example.com", "new@example.com"]
         )
 
-        #expect(conversation.id == conversationID)
-        #expect(conversation.kind == IMConversationKind.group.rawValue)
-        #expect(conversation.memberCount == 3)
+        #expect(receipt.conversationID == conversationID)
+        #expect(receipt.eventType == "membership_added")
+        #expect(receipt.projectionPending)
     }
 
     @Test func leaveIMConversationUsesAuthorizedEndpoint() async throws {
@@ -677,7 +705,24 @@ struct SessionClientTests {
                 let body = try Self.authResponseBody(accessToken: "access-1", refreshToken: "refresh-1")
                 return HTTPFixtures.response(statusCode: 200, body: body)
             case ("POST", "/api/im/conversations/\(conversationID.uuidString)/leave", "Bearer access-1"):
-                return HTTPFixtures.response(statusCode: 200, body: Data())
+                #expect(
+                    request.value(forHTTPHeaderField: "Accept")
+                        == "application/vnd.im.conversation-command-receipt+json"
+                )
+                return HTTPFixtures.response(
+                    statusCode: 202,
+                    body: try HTTPFixtures.jsonBody(
+                        IMConversationCommandReceiptBody(
+                            conversationID: conversationID,
+                            eventID: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd"),
+                            eventType: "membership_removed",
+                            acceptedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                            membershipRevision: Date(timeIntervalSince1970: 1_700_000_000),
+                            didMutate: true,
+                            projectionPending: true
+                        )
+                    )
+                )
             default:
                 Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
                 return HTTPFixtures.response(statusCode: 500)
@@ -693,6 +738,56 @@ struct SessionClientTests {
         let noDevice: DeviceMetadataPayload? = nil
         _ = try await client.login(email: Self.userEmail, password: "password123", device: noDevice)
         _ = try await client.leaveIMConversation(conversationID: conversationID.uuidString)
+    }
+
+    @Test func joinIMGroupInviteUsesCommandReceiptEndpoint() async throws {
+        let tokenStore = InMemoryTokenStore()
+        let userCache = InMemoryUserSessionCache()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let inviteToken = "group-invite-token"
+
+        let transport = MockHTTPTransport { request in
+            switch (request.httpMethod, request.url?.path, request.value(forHTTPHeaderField: "Authorization")) {
+            case ("POST", "/api/auth/login", _):
+                let body = try Self.authResponseBody(accessToken: "access-1", refreshToken: "refresh-1")
+                return HTTPFixtures.response(statusCode: 200, body: body)
+            case ("POST", "/api/im/invites/\(inviteToken)/join", "Bearer access-1"):
+                #expect(
+                    request.value(forHTTPHeaderField: "Accept")
+                        == "application/vnd.im.conversation-command-receipt+json"
+                )
+                return HTTPFixtures.response(
+                    statusCode: 202,
+                    body: try HTTPFixtures.jsonBody(
+                        IMConversationCommandReceiptBody(
+                            conversationID: conversationID,
+                            eventID: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd"),
+                            eventType: "membership_added",
+                            acceptedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                            membershipRevision: Date(timeIntervalSince1970: 1_700_000_000),
+                            didMutate: true,
+                            projectionPending: true
+                        )
+                    )
+                )
+            default:
+                Issue.record("收到未预期请求：\(request.httpMethod ?? "-") \(request.url?.absoluteString ?? "-")")
+                return HTTPFixtures.response(statusCode: 500)
+            }
+        }
+
+        let client = SessionClient(
+            httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: transport),
+            tokenStore: tokenStore,
+            userCache: userCache
+        )
+        let noDevice: DeviceMetadataPayload? = nil
+        _ = try await client.login(email: Self.userEmail, password: "password123", device: noDevice)
+        let receipt = try await client.joinIMGroupInvite(token: inviteToken)
+
+        #expect(receipt.conversationID == conversationID)
+        #expect(receipt.eventType == "membership_added")
+        #expect(receipt.projectionPending)
     }
 
     @Test func fetchContactRequestsUsesAuthorizedEndpoint() async throws {

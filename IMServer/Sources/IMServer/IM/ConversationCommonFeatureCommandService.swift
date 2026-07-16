@@ -7,6 +7,7 @@ struct ConversationCommonFeatureCommandService {
     func favoriteMessage(userID: UUID, conversationID: UUID, messageID: UUID) async throws -> IMMessageResponse {
         let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
         return try await db.transaction { database in
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
             let message = try await IMCommonFeatureService(db: database).favoriteMessage(
                 conversationID: conversationID,
                 messageID: messageID,
@@ -26,6 +27,7 @@ struct ConversationCommonFeatureCommandService {
     func unfavoriteMessage(userID: UUID, conversationID: UUID, messageID: UUID) async throws {
         let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
         try await db.transaction { database in
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
             try await IMCommonFeatureService(db: database).unfavoriteMessage(messageID: messageID, userID: userID)
             try await ConversationOutboxService(db: database).enqueue(
                 type: .messageFavoriteChanged,
@@ -40,6 +42,7 @@ struct ConversationCommonFeatureCommandService {
     func hideMessages(userID: UUID, conversationID: UUID, messageIDs: [UUID]) async throws {
         let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
         try await db.transaction { database in
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
             try await IMCommonFeatureService(db: database).hideMessages(
                 conversationID: conversationID,
                 messageIDs: messageIDs,
@@ -63,6 +66,7 @@ struct ConversationCommonFeatureCommandService {
     func clearConversation(userID: UUID, conversationID: UUID, deleteFromList: Bool) async throws {
         let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
         try await db.transaction { database in
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
             try await IMCommonFeatureService(db: database).clearConversation(
                 conversationID: conversationID,
                 userID: userID,
@@ -105,12 +109,15 @@ struct ConversationCommonFeatureCommandService {
         var responses: [IMMessageResponse] = []
         for targetConversationID in Array(Set(targetConversationIDs)) {
             let targetDB = try await app.conversationShardRouter.commandDatabase(forConversationID: targetConversationID)
-            _ = try await ConversationMembershipService(db: targetDB).requireMembershipRecord(
-                conversationID: targetConversationID,
-                userID: userID
-            )
             for sourceMessage in sourceMessages {
                 let response = try await targetDB.transaction { database in
+                    try await ConversationWriteFenceService.requireWritesAllowed(conversationID: targetConversationID, on: database)
+                    let conversation = try await ConversationMembershipService(db: database)
+                        .requireConversationAndMembership(
+                            conversationID: targetConversationID,
+                            userID: userID
+                        )
+                    try ConversationGovernanceService().requireUserMutationAllowed(in: conversation)
                     let now = Date()
                     let sequence = try await ConversationSequenceAllocator(db: database).allocateNextServerSequence(
                         conversationID: targetConversationID,
@@ -171,36 +178,50 @@ struct ConversationCommonFeatureCommandService {
 
     func createInvite(userID: UUID, conversationID: UUID, expiresInSeconds: Int?) async throws -> IMGroupInviteResponse {
         let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
-        let invite = try await db.transaction { database in
-            let conversation = try await ConversationMembershipService(db: database)
-                .requireConversationAndMembership(conversationID: conversationID, userID: userID)
-            try ConversationMembershipGuard.requireGroup(conversation, reason: "只有群聊支持邀请链接。")
-            let membership = try await ConversationMembershipService(db: database).requireMembershipRecord(
-                conversationID: conversationID,
-                userID: userID
-            )
-            try ConversationMembershipGuard.requireOwnerOrAdmin(membership.memberRoleEnum, reason: "只有群主或管理员可以创建邀请链接。")
+        try await authorizeInviteAdministration(
+            on: db,
+            conversationID: conversationID,
+            userID: userID,
+            action: "创建"
+        )
 
-            let expiresIn = min(max(expiresInSeconds ?? 7 * 24 * 60 * 60, 60), 30 * 24 * 60 * 60)
-            let invite = GroupInvite(
-                token: UUID().uuidString.replacingOccurrences(of: "-", with: ""),
-                conversationID: conversationID,
-                creatorUserID: userID,
-                expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn))
-            )
-            try await invite.create(on: app.imWriteDB)
-            let recipientUserIDs = try await ConversationMember.query(on: database)
-                .filter(\.$conversation.$id == conversationID)
-                .all()
-                .map(\.$user.id)
-            try await ConversationOutboxService(db: database).enqueue(
-                type: .inviteChanged,
-                conversationID: conversationID,
-                actorUserID: userID,
-                payload: .inviteChanged(recipientUserIDs: recipientUserIDs),
-                on: database
-            )
-            return invite
+        let expiresIn = min(max(expiresInSeconds ?? 7 * 24 * 60 * 60, 60), 30 * 24 * 60 * 60)
+        let invite = GroupInvite(
+            token: UUID().uuidString.replacingOccurrences(of: "-", with: ""),
+            conversationID: conversationID,
+            creatorUserID: userID,
+            expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn))
+        )
+
+        // Invite tokens are globally resolved before a conversation shard is known.
+        // Keep that index in the primary database, outside the shard transaction.
+        try await invite.create(on: app.db)
+        do {
+            try await db.transaction { database in
+                try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
+                try await authorizeInviteAdministration(
+                    on: database,
+                    conversationID: conversationID,
+                    userID: userID,
+                    action: "创建"
+                )
+                let recipientUserIDs = try await ConversationMember.query(on: database)
+                    .filter(\.$conversation.$id == conversationID)
+                    .all()
+                    .map(\.$user.id)
+                try await ConversationOutboxService(db: database).enqueue(
+                    type: .inviteChanged,
+                    conversationID: conversationID,
+                    actorUserID: userID,
+                    payload: .inviteChanged(recipientUserIDs: recipientUserIDs),
+                    on: database
+                )
+            }
+        } catch {
+            // The token was never returned to the caller, so compensation keeps a
+            // failed command from leaving a globally resolvable invitation behind.
+            try? await invite.delete(on: app.db)
+            throw error
         }
         guard let token = invite.id else {
             throw Abort(.internalServerError, reason: "邀请链接缺少 token。")
@@ -217,22 +238,33 @@ struct ConversationCommonFeatureCommandService {
 
     func revokeInvite(userID: UUID, conversationID: UUID, token: String) async throws {
         let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
+        try await authorizeInviteAdministration(
+            on: db,
+            conversationID: conversationID,
+            userID: userID,
+            action: "撤销",
+            allowsFrozenGroup: true
+        )
+        guard let invite = try await GroupInvite.find(token, on: app.db),
+              invite.conversationID == conversationID
+        else {
+            throw Abort(.notFound, reason: "邀请链接不存在。")
+        }
+
+        // Revocation favors security over notification availability: once this
+        // write succeeds the token is no longer usable, even if the outbox retry
+        // below later needs operational attention.
+        invite.revokedAt = invite.revokedAt ?? Date()
+        try await invite.update(on: app.db)
         try await db.transaction { database in
-            let conversation = try await ConversationMembershipService(db: database)
-                .requireConversationAndMembership(conversationID: conversationID, userID: userID)
-            try ConversationMembershipGuard.requireGroup(conversation, reason: "只有群聊支持邀请链接。")
-            let membership = try await ConversationMembershipService(db: database).requireMembershipRecord(
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
+            try await authorizeInviteAdministration(
+                on: database,
                 conversationID: conversationID,
-                userID: userID
+                userID: userID,
+                action: "撤销",
+                allowsFrozenGroup: true
             )
-            try ConversationMembershipGuard.requireOwnerOrAdmin(membership.memberRoleEnum, reason: "只有群主或管理员可以撤销邀请链接。")
-            guard let invite = try await GroupInvite.find(token, on: app.imWriteDB),
-                  invite.conversationID == conversationID
-            else {
-                throw Abort(.notFound, reason: "邀请链接不存在。")
-            }
-            invite.revokedAt = invite.revokedAt ?? Date()
-            try await invite.update(on: app.imWriteDB)
             let recipientUserIDs = try await ConversationMember.query(on: database)
                 .filter(\.$conversation.$id == conversationID)
                 .all()
@@ -245,5 +277,28 @@ struct ConversationCommonFeatureCommandService {
                 on: database
             )
         }
+    }
+
+    private func authorizeInviteAdministration(
+        on database: any Database,
+        conversationID: UUID,
+        userID: UUID,
+        action: String,
+        allowsFrozenGroup: Bool = false
+    ) async throws {
+        let conversation = try await ConversationMembershipService(db: database)
+            .requireConversationAndMembership(conversationID: conversationID, userID: userID)
+        try ConversationMembershipGuard.requireGroup(conversation, reason: "只有群聊支持邀请链接。")
+        if !allowsFrozenGroup {
+            try ConversationGovernanceService().requireUserMutationAllowed(in: conversation)
+        }
+        let membership = try await ConversationMembershipService(db: database).requireMembershipRecord(
+            conversationID: conversationID,
+            userID: userID
+        )
+        try ConversationMembershipGuard.requireOwnerOrAdmin(
+            membership.memberRoleEnum,
+            reason: "只有群主或管理员可以\(action)邀请链接。"
+        )
     }
 }

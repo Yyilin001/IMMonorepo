@@ -182,6 +182,15 @@ final class UserReport: Model, Content, @unchecked Sendable {
     @OptionalField(key: "handled_note")
     var handledNote: String?
 
+    @OptionalField(key: "assigned_reviewer_user_id")
+    var assignedReviewerUserID: UUID?
+
+    @OptionalField(key: "assigned_reviewer_actor")
+    var assignedReviewerActor: String?
+
+    @OptionalField(key: "assigned_at")
+    var assignedAt: Date?
+
     @Field(key: "status")
     var status: String
 
@@ -190,7 +199,7 @@ final class UserReport: Model, Content, @unchecked Sendable {
 
     init() {}
 
-    init(reporterUserID: UUID, targetType: String, targetID: String, conversationID: UUID?, messageID: UUID?, reason: String, detail: String?, messageSnapshotJSON: String? = nil, status: String = "pending", createdAt: Date = Date()) {
+    init(reporterUserID: UUID, targetType: String, targetID: String, conversationID: UUID?, messageID: UUID?, reason: String, detail: String?, messageSnapshotJSON: String? = nil, status: String = "pending", assignedReviewerUserID: UUID? = nil, assignedReviewerActor: String? = nil, assignedAt: Date? = nil, createdAt: Date = Date()) {
         self.reporterUserID = reporterUserID
         self.targetType = targetType
         self.targetID = targetID
@@ -200,7 +209,142 @@ final class UserReport: Model, Content, @unchecked Sendable {
         self.detail = detail
         self.messageSnapshotJSON = messageSnapshotJSON
         self.status = status
+        self.assignedReviewerUserID = assignedReviewerUserID
+        self.assignedReviewerActor = assignedReviewerActor
+        self.assignedAt = assignedAt
         self.createdAt = createdAt
+    }
+}
+
+final class ReportModerationDecision: Model, Content, @unchecked Sendable {
+    static let schema = "report_moderation_decisions"
+
+    @ID(key: .id)
+    var id: UUID?
+
+    @Parent(key: "report_id")
+    var report: UserReport
+
+    @Field(key: "reviewer_actor")
+    var reviewerActor: String
+
+    @OptionalField(key: "reviewer_user_id")
+    var reviewerUserID: UUID?
+
+    @Field(key: "reviewer_role")
+    var reviewerRole: String
+
+    @Field(key: "authentication_method")
+    var authenticationMethod: String
+
+    @Field(key: "previous_status")
+    var previousStatus: String
+
+    @Field(key: "status")
+    var status: String
+
+    @OptionalField(key: "resolution_category")
+    var resolutionCategory: String?
+
+    @OptionalField(key: "handled_note")
+    var handledNote: String?
+
+    @OptionalField(key: "request_id")
+    var requestID: String?
+
+    @OptionalField(key: "idempotency_key")
+    var idempotencyKey: String?
+
+    @Timestamp(key: "created_at", on: .create)
+    var createdAt: Date?
+
+    init() {}
+
+    init(
+        reportID: UUID,
+        reviewerActor: String,
+        reviewerUserID: UUID?,
+        reviewerRole: String,
+        authenticationMethod: String,
+        previousStatus: String,
+        status: String,
+        resolutionCategory: String?,
+        handledNote: String?,
+        requestID: String?,
+        idempotencyKey: String?
+    ) {
+        self.$report.id = reportID
+        self.reviewerActor = reviewerActor
+        self.reviewerUserID = reviewerUserID
+        self.reviewerRole = reviewerRole
+        self.authenticationMethod = authenticationMethod
+        self.previousStatus = previousStatus
+        self.status = status
+        self.resolutionCategory = resolutionCategory
+        self.handledNote = handledNote
+        self.requestID = requestID
+        self.idempotencyKey = idempotencyKey
+    }
+}
+
+final class ReportModerationEvidence: Model, Content, @unchecked Sendable {
+    static let schema = "report_moderation_evidence"
+
+    @ID(key: .id)
+    var id: UUID?
+
+    @Parent(key: "report_id")
+    var report: UserReport
+
+    @Field(key: "evidence_url")
+    var evidenceURL: String
+
+    @OptionalField(key: "label")
+    var label: String?
+
+    @Field(key: "submitted_by_actor")
+    var submittedByActor: String
+
+    @OptionalField(key: "submitted_by_user_id")
+    var submittedByUserID: UUID?
+
+    @Field(key: "submitter_role")
+    var submitterRole: String
+
+    @Field(key: "authentication_method")
+    var authenticationMethod: String
+
+    @OptionalField(key: "request_id")
+    var requestID: String?
+
+    @OptionalField(key: "idempotency_key")
+    var idempotencyKey: String?
+
+    @Timestamp(key: "created_at", on: .create)
+    var createdAt: Date?
+
+    init() {}
+
+    init(
+        reportID: UUID,
+        evidenceURL: String,
+        label: String?,
+        submittedByActor: String,
+        submittedByUserID: UUID?,
+        submitterRole: String,
+        authenticationMethod: String,
+        requestID: String?,
+        idempotencyKey: String?
+    ) {
+        self.$report.id = reportID
+        self.evidenceURL = evidenceURL
+        self.label = label
+        self.submittedByActor = submittedByActor
+        self.submittedByUserID = submittedByUserID
+        self.submitterRole = submitterRole
+        self.authenticationMethod = authenticationMethod
+        self.requestID = requestID
+        self.idempotencyKey = idempotencyKey
     }
 }
 

@@ -45,9 +45,31 @@ struct InternalReportsController: RouteCollection {
         guard let report = try await UserReport.find(reportID, on: req.db) else {
             throw Abort(.notFound, reason: "举报记录不存在。")
         }
-        report.status = status
-        report.handledNote = body.handledNote?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
-        try await report.update(on: req.db)
+        let transition = try ReportModerationWorkflow.transition(
+            from: report.status,
+            requestedStatus: status,
+            resolutionCategory: body.resolutionCategory,
+            handledNote: body.handledNote
+        )
+        try await req.db.transaction { database in
+            report.status = transition.status
+            report.handledNote = transition.handledNote
+            try await report.update(on: database)
+            let decision = ReportModerationDecision(
+                reportID: reportID,
+                reviewerActor: "internal",
+                reviewerUserID: nil,
+                reviewerRole: "system",
+                authenticationMethod: "internal_secret",
+                previousStatus: transition.previousStatus,
+                status: transition.status,
+                resolutionCategory: transition.resolutionCategory,
+                handledNote: transition.handledNote,
+                requestID: req.headers.first(name: "X-Request-ID"),
+                idempotencyKey: nil
+            )
+            try await decision.create(on: database)
+        }
         return try Self.response(from: report)
     }
 
@@ -78,14 +100,10 @@ struct InternalReportsController: RouteCollection {
             status: report.status,
             handledNote: report.handledNote,
             messageSnapshotJSON: report.messageSnapshotJSON,
+            assignedReviewerUserID: report.assignedReviewerUserID,
+            assignedReviewerActor: report.assignedReviewerActor,
+            assignedAt: report.assignedAt,
             createdAt: report.createdAt
         )
-    }
-}
-
-private extension String {
-    var nilIfBlank: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 }

@@ -93,10 +93,11 @@ extension IMConversationSummaryProjectionService {
 
     func directPeer(
         from memberships: [ConversationMember],
-        currentUserID: UUID
+        currentUserID: UUID,
+        usersByID: [UUID: User]
     ) -> IMDirectPeerResponse? {
         guard let peerMembership = memberships.first(where: { $0.$user.id != currentUserID }),
-              let peer = peerMembership.$user.value
+              let peer = usersByID[peerMembership.$user.id]
         else {
             return nil
         }

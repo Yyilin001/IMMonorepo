@@ -109,6 +109,176 @@ struct RedisPresenceIntegrationTests {
         }
     }
 
+    @Test("Redis presence exposes renewable user and session Cell routes")
+    func redisPresenceRoutesUserAndSessionCells() async throws {
+        guard let redisURL = Environment.get("IM_REDIS_INTEGRATION_URL"), !redisURL.isEmpty else {
+            return
+        }
+
+        let suffix = UUID().uuidString.lowercased()
+        let nodeA = "redis-cell-presence-a-\(suffix)"
+        let nodeB = "redis-cell-presence-b-\(suffix)"
+        let configuration = IMRedisRoutingConfiguration(
+            url: redisURL,
+            mode: .redis,
+            maximumConnectionCount: 2,
+            presenceHeartbeatTimeoutSeconds: 30
+        )
+        let appA = try await Application.make(.testing)
+        let appB = try await Application.make(.testing)
+        appA.imNodeID = nodeA
+        appB.imNodeID = nodeB
+        appA.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-a")
+        appB.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-b")
+        let backendA = try RedisConnectionRoutingBackend(
+            configuration: configuration,
+            nodeID: nodeA,
+            cellID: "cell-a",
+            logger: appA.logger,
+            eventLoop: appA.eventLoopGroup.next()
+        )
+        let backendB = try RedisConnectionRoutingBackend(
+            configuration: configuration,
+            nodeID: nodeB,
+            cellID: "cell-b",
+            logger: appB.logger,
+            eventLoop: appB.eventLoopGroup.next()
+        )
+
+        do {
+            try await backendA.start(app: appA)
+            try await backendB.start(app: appB)
+
+            let userID = UUID()
+            let sessionID = UUID()
+            try await backendA.presenceStore.activatePresence(forUserID: userID)
+            try await backendB.presenceStore.activatePresence(forUserID: userID)
+            try await backendB.presenceStore.activatePresence(forSessionID: sessionID, userID: userID)
+
+            let userCells = try await backendA.presenceStore.routeCellIDs(forUserIDs: [userID])
+            let sessionCells = try await backendA.presenceStore.routeCellIDs(forSessionIDs: [sessionID])
+            #expect(userCells[userID] == ["cell-a", "cell-b"])
+            #expect(sessionCells[sessionID] == ["cell-b"])
+
+            await backendB.shutdown()
+            await backendA.shutdown()
+            try await appB.asyncShutdown()
+            try await appA.asyncShutdown()
+        } catch {
+            await backendB.shutdown()
+            await backendA.shutdown()
+            try? await appB.asyncShutdown()
+            try? await appA.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("Redis presence isolates routes between realtime cells")
+    func redisPresenceIsolatesRoutesBetweenRealtimeCells() async throws {
+        guard let redisURL = Environment.get("IM_REDIS_INTEGRATION_URL"), !redisURL.isEmpty else {
+            return
+        }
+
+        let suffix = UUID().uuidString.lowercased()
+        let nodeA = "redis-cell-a-node-\(suffix)"
+        let nodeB = "redis-cell-b-node-\(suffix)"
+        let configuration = IMRedisRoutingConfiguration(
+            url: redisURL,
+            mode: .redis,
+            maximumConnectionCount: 2
+        )
+        let appA = try await Application.make(.testing)
+        let appB = try await Application.make(.testing)
+        appA.imNodeID = nodeA
+        appB.imNodeID = nodeB
+        let backendA = try RedisConnectionRoutingBackend(
+            configuration: configuration,
+            nodeID: nodeA,
+            cellID: "cell-a-\(suffix)",
+            logger: appA.logger,
+            eventLoop: appA.eventLoopGroup.next()
+        )
+        let backendB = try RedisConnectionRoutingBackend(
+            configuration: configuration,
+            nodeID: nodeB,
+            cellID: "cell-b-\(suffix)",
+            logger: appB.logger,
+            eventLoop: appB.eventLoopGroup.next()
+        )
+
+        do {
+            try await backendA.start(app: appA)
+            try await backendB.start(app: appB)
+
+            let userID = UUID()
+            try await backendA.presenceStore.activatePresence(forUserID: userID)
+            try await backendB.presenceStore.activatePresence(forUserID: userID)
+
+            let routesInCellA = try await backendA.presenceStore.routeNodeIDs(forUserIDs: [userID])
+            let routesInCellB = try await backendB.presenceStore.routeNodeIDs(forUserIDs: [userID])
+            #expect(routesInCellA[userID] == [nodeA])
+            #expect(routesInCellB[userID] == [nodeB])
+
+            await backendB.shutdown()
+            await backendA.shutdown()
+            try await appB.asyncShutdown()
+            try await appA.asyncShutdown()
+        } catch {
+            await backendB.shutdown()
+            await backendA.shutdown()
+            try? await appB.asyncShutdown()
+            try? await appA.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("Redis hot conversation limiter shares one cell-wide quota")
+    func redisHotConversationLimiterSharesOneCellWideQuota() async throws {
+        guard let redisURL = Environment.get("IM_REDIS_INTEGRATION_URL"), !redisURL.isEmpty else {
+            return
+        }
+
+        let app = try await Application.make(.testing)
+        let suffix = UUID().uuidString.lowercased()
+        let cellID = "hot-limit-\(suffix)"
+        let limiterA = try RedisHotConversationLimiter(
+            redisURL: redisURL,
+            cellID: cellID,
+            maximumConnectionCount: 2,
+            logger: app.logger,
+            eventLoop: app.eventLoopGroup.next()
+        )
+        let limiterB = try RedisHotConversationLimiter(
+            redisURL: redisURL,
+            cellID: cellID,
+            maximumConnectionCount: 2,
+            logger: app.logger,
+            eventLoop: app.eventLoopGroup.next()
+        )
+
+        do {
+            try await limiterA.start()
+            try await limiterB.start()
+            let conversationID = UUID()
+            let now = Date()
+            try await limiterA.reserve(conversationID: conversationID, limit: 1, now: now)
+            do {
+                try await limiterB.reserve(conversationID: conversationID, limit: 1, now: now)
+                Issue.record("Expected the second limiter instance to share the cell-wide quota")
+            } catch HotConversationLimiterError.rateLimited {
+            }
+
+            await limiterB.shutdown()
+            await limiterA.shutdown()
+            try await app.asyncShutdown()
+        } catch {
+            await limiterB.shutdown()
+            await limiterA.shutdown()
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("Redis presence routes active conversation users through conversation index")
     func redisPresenceRoutesActiveConversationUsersThroughConversationIndex() async throws {
         guard let redisURL = Environment.get("IM_REDIS_INTEGRATION_URL"), !redisURL.isEmpty else {

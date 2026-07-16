@@ -29,6 +29,12 @@ struct IMChatPageSnapshot: Equatable, Sendable {
         if isDirectPeerBlocked {
             return "已屏蔽对方"
         }
+        if contextSnapshot.isGroupDissolved {
+            return "群聊已解散"
+        }
+        if contextSnapshot.isGroupFrozen {
+            return "群聊已冻结"
+        }
         guard contextSnapshot.kind == .group,
               contextSnapshot.isMuteAll,
               currentGroupRole == .member
@@ -39,15 +45,15 @@ struct IMChatPageSnapshot: Equatable, Sendable {
     }
 
     var canAddMembers: Bool {
-        currentGroupRole?.canAddMembers ?? false
+        !contextSnapshot.isGroupReadOnly && (currentGroupRole?.canAddMembers ?? false)
     }
 
     var canRenameConversation: Bool {
-        currentGroupRole?.canRenameConversation ?? false
+        !contextSnapshot.isGroupReadOnly && (currentGroupRole?.canRenameConversation ?? false)
     }
 
     var canManageMembers: Bool {
-        currentGroupRole?.canManageRoles == true || currentGroupRole?.canAddMembers == true
+        !contextSnapshot.isGroupReadOnly && (currentGroupRole?.canManageRoles == true || currentGroupRole?.canAddMembers == true)
     }
 
     var latestItemID: String? {
@@ -287,7 +293,8 @@ struct IMChatPageSnapshotBuilder {
                 title: conversation?.title ?? "会话",
                 notice: conversation?.notice ?? "",
                 avatarPreset: conversation?.avatarPreset ?? .ocean,
-                muteAll: conversation?.muteAll == true
+                muteAll: conversation?.muteAll == true,
+                groupLifecycleState: conversation?.groupLifecycleState
             ),
             contextSnapshot: contextSnapshot,
             queueSummary: queueSummary,
@@ -313,7 +320,7 @@ struct IMChatPageSnapshotBuilder {
             return true
         }
         if conversation.kind == .group {
-            return !(conversation.muteAll && currentGroupRole == .member)
+            return !conversation.isGroupReadOnly && !(conversation.muteAll && currentGroupRole == .member)
         }
         if isDirectPeerBlocked {
             return false
@@ -334,8 +341,11 @@ struct IMChatPageSnapshotBuilder {
             isPinned: conversation?.isPinned == true,
             isMuted: conversation?.isMuted == true,
             isMuteAll: conversation?.muteAll == true,
+            isGroupFrozen: conversation?.isGroupFrozen == true,
+            isGroupDissolved: conversation?.isGroupDissolved == true,
             notice: conversation?.notice,
             directMessagingStatusMessage: conversation?.directMessagingStatusMessage,
+            groupLifecycleStatusMessage: conversation?.groupLifecycleStatusMessage,
             showsLoadingIndicator: isLoadingMembers || isLoadingMessages
         )
     }
@@ -473,6 +483,7 @@ struct IMChatConversationMetadataSnapshot: Equatable, Sendable {
     let notice: String
     let avatarPreset: IMConversationAvatarPreset
     let muteAll: Bool
+    let groupLifecycleState: IMGroupLifecycleState?
 }
 
 /// Direct-peer fields needed by the detail page after projection.
@@ -823,8 +834,11 @@ struct IMChatContextSnapshot: Equatable, Sendable {
     let isPinned: Bool
     let isMuted: Bool
     let isMuteAll: Bool
+    let isGroupFrozen: Bool
+    let isGroupDissolved: Bool
     let notice: String?
     let directMessagingStatusMessage: String?
+    let groupLifecycleStatusMessage: String?
     let showsLoadingIndicator: Bool
 
     var kindText: String {
@@ -852,6 +866,12 @@ struct IMChatContextSnapshot: Equatable, Sendable {
             || isPinned
             || isMuted
             || isMuteAll
+            || isGroupFrozen
+            || isGroupDissolved
             || showsLoadingIndicator
+    }
+
+    var isGroupReadOnly: Bool {
+        isGroupFrozen || isGroupDissolved
     }
 }

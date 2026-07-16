@@ -7,6 +7,71 @@ import VaporTesting
 import Testing
 
 extension IMServerTests {
+    @Test("IM preference command receipt does not synchronously create a summary")
+    func imPreferenceCommandReceiptDoesNotSynchronouslyCreateSummary() async throws {
+        try await withApp(configure: configure) { app in
+            let accessToken = try await loginAccessToken(
+                email: "demo@example.com",
+                password: "password1234",
+                deviceID: "preferences-receipt-device",
+                on: app
+            )
+            let demoUser = try await user(email: "demo@example.com", on: app)
+            let peerUser = try await makeUser(email: "preferences-receipt-peer@example.com", on: app)
+            let conversation = Conversation(title: "Preferences receipt", kind: .group, updatedAt: Date())
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+            let demoUserID = try demoUser.requireID()
+
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: demoUserID,
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: try peerUser.requireID(),
+                role: .member
+            ).create(on: app.db)
+
+            try await app.testing().test(
+                .PATCH,
+                "api/im/conversations/\(conversationID.uuidString)/preferences",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: accessToken)
+                    req.headers.replaceOrAdd(
+                        name: "Accept",
+                        value: IMConversationController.commandReceiptMediaType
+                    )
+                    try req.content.encode(
+                        IMConversationPreferencesUpdateRequest(isPinned: true, isMuted: true)
+                    )
+                },
+                afterResponse: { res async throws in
+                    #expect(res.status == .accepted)
+                    let receipt = try res.content.decode(IMConversationCommandReceiptResponse.self)
+                    #expect(receipt.conversationID == conversationID)
+                    #expect(receipt.eventType == ConversationDomainEventType.conversationSettingsChanged.rawValue)
+                    #expect(receipt.didMutate == true)
+                    #expect(receipt.projectionPending == true)
+                }
+            )
+
+            let membership = try await ConversationMember.query(on: app.db)
+                .filter(\.$conversation.$id == conversationID)
+                .filter(\.$user.$id == demoUserID)
+                .first()
+            #expect(membership?.isPinned == true)
+            #expect(membership?.pinnedAt != nil)
+            #expect(membership?.isMuted == true)
+            let summaryID = ConversationUserSummary.recordID(
+                ownerUserID: demoUserID,
+                conversationID: conversationID
+            )
+            #expect(try await ConversationUserSummary.find(summaryID, on: app.db) == nil)
+        }
+    }
+
     @Test("IM conversation preference changes sync across devices")
     func imConversationPreferenceChangesSyncAcrossDevices() async throws {
         try await withApp(configure: configure) { app in

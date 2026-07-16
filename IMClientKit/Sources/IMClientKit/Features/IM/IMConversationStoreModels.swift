@@ -526,6 +526,7 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
     public var title: String
     public var kind: IMConversationKind
     public var directMessagingState: IMDirectMessagingState?
+    public var groupLifecycleState: IMGroupLifecycleState?
     public var directPeer: IMDirectPeer?
     public var notice: String?
     public var avatarPreset: IMConversationAvatarPreset?
@@ -560,8 +561,20 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
         kind == .direct && directMessagingState == .frozenAfterUnfriend
     }
 
+    public var isGroupFrozen: Bool {
+        kind == .group && groupLifecycleState == .frozen
+    }
+
+    public var isGroupDissolved: Bool {
+        kind == .group && groupLifecycleState == .dissolved
+    }
+
+    public var isGroupReadOnly: Bool {
+        isGroupFrozen || isGroupDissolved
+    }
+
     public var canSendMessages: Bool {
-        !isDirectMessagingFrozen && !muteAll
+        !isDirectMessagingFrozen && !isGroupReadOnly && !muteAll
     }
 
     public var directMessagingStatusMessage: String? {
@@ -572,11 +585,23 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
         return "你们已不是好友，当前会话不能继续发送消息。"
     }
 
+    public var groupLifecycleStatusMessage: String? {
+        switch groupLifecycleState {
+        case .frozen:
+            return "群聊已被冻结，当前只能查看历史消息。"
+        case .dissolved:
+            return "群聊已解散，消息记录保留为只读。"
+        case .active, nil:
+            return nil
+        }
+    }
+
     public init(
         id: String,
         title: String,
         kind: IMConversationKind,
         directMessagingState: IMDirectMessagingState? = nil,
+        groupLifecycleState: IMGroupLifecycleState? = nil,
         directPeer: IMDirectPeer? = nil,
         notice: String? = nil,
         avatarPreset: IMConversationAvatarPreset? = nil,
@@ -603,6 +628,7 @@ public struct IMConversation: Identifiable, Equatable, Sendable {
         self.title = title
         self.kind = kind
         self.directMessagingState = directMessagingState
+        self.groupLifecycleState = groupLifecycleState
         self.directPeer = directPeer
         self.notice = notice
         self.avatarPreset = avatarPreset

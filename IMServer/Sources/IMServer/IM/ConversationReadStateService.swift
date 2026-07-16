@@ -113,15 +113,18 @@ struct ConversationReadStateService {
         userID: UUID,
         on database: any Database
     ) async throws -> ConversationSummaryPreferences {
-        let recordID = ConversationUserSummary.recordID(ownerUserID: userID, conversationID: conversationID)
-        guard let summary = try await ConversationUserSummary.find(recordID, on: database) else {
-            return ConversationSummaryPreferences(isPinned: false, pinnedAt: nil, isMuted: false)
+        guard let membership = try await ConversationMember.query(on: database)
+            .filter(\.$conversation.$id == conversationID)
+            .filter(\.$user.$id == userID)
+            .first()
+        else {
+            throw Abort(.notFound, reason: "会话不存在。")
         }
 
         return ConversationSummaryPreferences(
-            isPinned: summary.isPinned,
-            pinnedAt: summary.pinnedAt,
-            isMuted: summary.isMuted
+            isPinned: membership.isPinned,
+            pinnedAt: membership.pinnedAt,
+            isMuted: membership.isMuted
         )
     }
 }

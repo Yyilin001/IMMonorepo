@@ -2,7 +2,7 @@ import Fluent
 import Foundation
 import Vapor
 
-final class ConversationDomainEventSequence: Model, @unchecked Sendable {
+final class ConversationDomainEventSequence: Model, Content, @unchecked Sendable {
     static let schema = "conversation_domain_event_sequences"
 
     @ID(custom: "conversation_id", generatedBy: .user)
@@ -16,6 +16,17 @@ final class ConversationDomainEventSequence: Model, @unchecked Sendable {
     init(conversationID: UUID, lastSequence: Int = 0) {
         self.id = conversationID
         self.lastSequence = lastSequence
+    }
+
+    func migrationCopy() -> ConversationDomainEventSequence {
+        let copy = ConversationDomainEventSequence()
+        copy.id = id
+        copy.lastSequence = lastSequence
+        return copy
+    }
+
+    var migrationFingerprintFields: [String?] {
+        [id?.uuidString, String(lastSequence)]
     }
 }
 
@@ -206,5 +217,35 @@ final class ConversationTimelineNotice: Model, Content, @unchecked Sendable {
             throw Abort(.internalServerError, reason: "Timeline notice params 编码无效。")
         }
         return try JSONDecoder().decode([String: String].self, from: data)
+    }
+
+    func migrationCopy() -> ConversationTimelineNotice {
+        let copy = ConversationTimelineNotice()
+        copy.id = id
+        copy.conversationID = conversationID
+        copy.timelineSequence = timelineSequence
+        copy.eventType = eventType
+        copy.actorUserID = actorUserID
+        copy.targetUserIDsJSON = targetUserIDsJSON
+        copy.noticeKind = noticeKind
+        copy.paramsJSON = paramsJSON
+        copy.fallbackText = fallbackText
+        copy.createdAt = createdAt
+        return copy
+    }
+
+    var migrationFingerprintFields: [String?] {
+        [
+            id?.uuidString,
+            conversationID.uuidString,
+            String(timelineSequence),
+            eventType,
+            actorUserID?.uuidString,
+            targetUserIDsJSON,
+            noticeKind,
+            paramsJSON,
+            fallbackText,
+            String(createdAt.timeIntervalSince1970)
+        ]
     }
 }

@@ -141,6 +141,13 @@ protocol PresenceStore: Sendable {
     func routeNodeIDs(forActiveConversationID conversationID: UUID) async throws -> [UUID: Set<String>]
     func routeNodeIDs(forUserIDs userIDs: [UUID]) async throws -> [UUID: Set<String>]
     func routeNodeIDs(forSessionIDs sessionIDs: [UUID]) async throws -> [UUID: Set<String>]
+    /// Returns the realtime Cells that currently hold a renewable presence
+    /// lease for each user. Node routes remain Cell-local; callers use this
+    /// index before handing a packet to another Cell's Gateway ingress.
+    func routeCellIDs(forUserIDs userIDs: [UUID]) async throws -> [UUID: Set<String>]
+    func routeCellIDs(forSessionIDs sessionIDs: [UUID]) async throws -> [UUID: Set<String>]
+    func refreshPresence(forUserID userID: UUID) async throws
+    func refreshPresence(forSessionID sessionID: UUID, userID: UUID) async throws
     func activeNodeIDs() async throws -> Set<String>
 }
 
@@ -160,8 +167,13 @@ protocol ConnectionRoutingBackend: Sendable {
 
 enum RedisRoutingError: Error {
     case invalidURL(String)
+    case invalidRedisClusterSeed(String)
+    case unsupportedRedisScheme(String)
     case invalidDispatchPayload
     case redisRequiredInProduction
+    case redisClusterTopologyUnsupported
+    case redisClusterTopologyUnsupportedByComponents([String])
+    case invalidRedisDeploymentTopology(String)
 }
 
 enum IMRoutingMode: String, Sendable {
@@ -169,24 +181,52 @@ enum IMRoutingMode: String, Sendable {
     case redis
 }
 
+/// Chooses the routing transport. Standalone keeps the legacy RediStack backend;
+/// Cluster selects the Valkey-aware route backend and requires HTTP node dispatch.
+enum IMRedisDeploymentTopology: Sendable, Equatable {
+    case standalone
+    case cluster
+    case unsupported(String)
+
+    init(environmentValue: String?) {
+        let normalized = environmentValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch normalized {
+        case nil, "", "standalone":
+            self = .standalone
+        case "cluster":
+            self = .cluster
+        case let value?:
+            self = .unsupported(value)
+        }
+    }
+}
+
 struct IMRedisRoutingConfiguration: Sendable {
     let url: String?
     let mode: IMRoutingMode
+    let deploymentTopology: IMRedisDeploymentTopology
     let maximumConnectionCount: Int
     let presenceHeartbeatTimeoutSeconds: Int
     let activeConversationRouteTTLSeconds: Int
     let activeConversationRouteCacheTTLSeconds: Int
+    let clusterSeedEndpoints: [IMRedisClusterSeedEndpoint]
 
     init(
         url: String?,
         mode: IMRoutingMode,
+        deploymentTopology: IMRedisDeploymentTopology = .standalone,
         maximumConnectionCount: Int,
         presenceHeartbeatTimeoutSeconds: Int = 90,
         activeConversationRouteTTLSeconds: Int = 900,
-        activeConversationRouteCacheTTLSeconds: Int = 2
+        activeConversationRouteCacheTTLSeconds: Int = 2,
+        clusterSeedEndpoints: [IMRedisClusterSeedEndpoint] = []
     ) {
         self.url = url
         self.mode = mode
+        self.deploymentTopology = deploymentTopology
         self.maximumConnectionCount = maximumConnectionCount
         self.presenceHeartbeatTimeoutSeconds = max(1, presenceHeartbeatTimeoutSeconds)
         self.activeConversationRouteTTLSeconds = max(
@@ -194,12 +234,16 @@ struct IMRedisRoutingConfiguration: Sendable {
             activeConversationRouteTTLSeconds
         )
         self.activeConversationRouteCacheTTLSeconds = max(0, activeConversationRouteCacheTTLSeconds)
+        self.clusterSeedEndpoints = clusterSeedEndpoints
     }
 
     static func load(from environment: Environment) -> IMRedisRoutingConfiguration {
         let explicitMode = Environment.get("IM_ROUTING_MODE").flatMap(IMRoutingMode.init(rawValue:))
         let url = Environment.get("REDIS_URL")
         let mode = explicitMode ?? (url == nil ? .local : .redis)
+        let deploymentTopology = IMRedisDeploymentTopology(
+            environmentValue: Environment.get("IM_REDIS_DEPLOYMENT_TOPOLOGY")
+        )
         let maximumConnectionCount = max(2, Environment.get("IM_REDIS_MAX_CONNECTIONS").flatMap(Int.init(_:)) ?? 8)
         let heartbeatTimeoutSeconds = max(
             1,
@@ -213,13 +257,19 @@ struct IMRedisRoutingConfiguration: Sendable {
             0,
             Environment.get("IM_REDIS_ACTIVE_CONVERSATION_ROUTE_CACHE_TTL_SECONDS").flatMap(Int.init(_:)) ?? 2
         )
+        let clusterSeedEndpoints = (Environment.get("IM_REDIS_CLUSTER_NODES") ?? "")
+            .split(separator: ",")
+            .map(String.init)
+            .compactMap(IMRedisClusterSeedEndpoint.init(environmentValue:))
         return IMRedisRoutingConfiguration(
             url: url,
             mode: mode,
+            deploymentTopology: deploymentTopology,
             maximumConnectionCount: maximumConnectionCount,
             presenceHeartbeatTimeoutSeconds: heartbeatTimeoutSeconds,
             activeConversationRouteTTLSeconds: activeConversationRouteTTLSeconds,
-            activeConversationRouteCacheTTLSeconds: activeConversationRouteCacheTTLSeconds
+            activeConversationRouteCacheTTLSeconds: activeConversationRouteCacheTTLSeconds,
+            clusterSeedEndpoints: clusterSeedEndpoints
         )
     }
 
@@ -228,5 +278,53 @@ struct IMRedisRoutingConfiguration: Sendable {
             throw RedisRoutingError.redisRequiredInProduction
         }
         return url
+    }
+
+    func requireClusterSeedEndpoints() throws -> [IMRedisClusterSeedEndpoint] {
+        guard !clusterSeedEndpoints.isEmpty else {
+            throw RedisRoutingError.invalidRedisClusterSeed(
+                "IM_REDIS_CLUSTER_NODES must contain at least one host:port endpoint."
+            )
+        }
+        return clusterSeedEndpoints
+    }
+
+    func validateTopologySupport() throws {
+        guard mode == .redis else {
+            return
+        }
+
+        switch deploymentTopology {
+        case .standalone:
+            return
+        case .cluster:
+            return
+        case .unsupported(let value):
+            throw RedisRoutingError.invalidRedisDeploymentTopology(value)
+        }
+    }
+}
+
+struct IMRedisClusterSeedEndpoint: Sendable, Equatable {
+    let host: String
+    let port: Int
+
+    init?(environmentValue: String) {
+        let rawValue = environmentValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawValue.isEmpty else {
+            return nil
+        }
+        let valueWithScheme = rawValue.contains("://") ? rawValue : "redis://\(rawValue)"
+        guard let url = URL(string: valueWithScheme),
+              let host = url.host
+        else {
+            return nil
+        }
+        let port = url.port ?? 6379
+        guard (1...65_535).contains(port) else {
+            return nil
+        }
+        self.host = host
+        self.port = port
     }
 }

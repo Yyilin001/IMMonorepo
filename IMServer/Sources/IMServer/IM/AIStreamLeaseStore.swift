@@ -295,7 +295,9 @@ extension Application {
 
         let routingConfiguration = imRedisRoutingConfigurationOverride ?? IMRedisRoutingConfiguration.load(from: environment)
         let store: any AIStreamLeaseStore
-        if environment == .production {
+        if routingConfiguration.deploymentTopology == .cluster {
+            store = DatabaseAIStreamLeaseStore(database: db, nodeID: imNodeID)
+        } else if environment == .production {
             guard routingConfiguration.mode == .redis else {
                 throw RedisRoutingError.redisRequiredInProduction
             }

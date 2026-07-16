@@ -22,6 +22,9 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
     @OptionalField(key: "direct_messaging_state")
     var directMessagingState: String?
 
+    @Field(key: "group_lifecycle_state")
+    var groupLifecycleState: String
+
     @OptionalField(key: "direct_peer_user_id")
     var directPeerUserID: UUID?
 
@@ -87,6 +90,7 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
         title: String?,
         kind: String,
         directMessagingState: String?,
+        groupLifecycleState: IMGroupLifecycleState = .active,
         directPeerUserID: UUID?,
         directPeerEmail: String?,
         directPeerDisplayName: String? = nil,
@@ -112,6 +116,7 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
         self.title = title
         self.kind = kind
         self.directMessagingState = directMessagingState
+        self.groupLifecycleState = groupLifecycleState.rawValue
         self.directPeerUserID = directPeerUserID
         self.directPeerEmail = directPeerEmail
         self.directPeerDisplayName = directPeerDisplayName
@@ -161,6 +166,11 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
     var directPeerAvatarPresetEnum: UserAvatarPreset? {
         get { directPeerAvatarPreset.flatMap(UserAvatarPreset.init(rawValue:)) }
         set { directPeerAvatarPreset = newValue?.rawValue }
+    }
+
+    var groupLifecycleStateEnum: IMGroupLifecycleState {
+        get { IMGroupLifecycleState(rawValue: groupLifecycleState) ?? .active }
+        set { groupLifecycleState = newValue.rawValue }
     }
 
     static func recordID(ownerUserID: UUID, conversationID: UUID) -> String {

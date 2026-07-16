@@ -858,7 +858,7 @@ private struct IMTimelineSinceCacheInvalidationConfigurationStorageKey: StorageK
 }
 
 private struct IMTimelineSinceCacheInvalidationBusStorageKey: StorageKey {
-    typealias Value = IMTimelineSinceCacheInvalidationBus
+    typealias Value = any IMTimelineSinceCacheInvalidating
 }
 
 extension Application {
@@ -960,7 +960,7 @@ extension Application {
         }
     }
 
-    var timelineSinceCacheInvalidationBus: IMTimelineSinceCacheInvalidationBus? {
+    var timelineSinceCacheInvalidationBus: (any IMTimelineSinceCacheInvalidating)? {
         get {
             storage[IMTimelineSinceCacheInvalidationBusStorageKey.self]
         }

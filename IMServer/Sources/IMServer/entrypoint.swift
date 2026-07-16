@@ -145,6 +145,7 @@ enum Entrypoint {
                 || commandInput.arguments.contains("--repair-conversation-summary-owner")
                 || commandInput.arguments.contains("--requeue-failed-conversation-events")
                 || commandInput.arguments.contains("--replay-conversation-dead-letter-events")
+                || commandInput.arguments.contains("--process-admin-governance-commands")
                 || commandInput.arguments.contains("--reset-im-schema") && !commandInput.arguments.contains("serve")
             {
                 role = .ops

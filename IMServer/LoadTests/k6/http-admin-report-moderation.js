@@ -169,11 +169,11 @@ function listReports(reason, targetUserID) {
   return items.find((item) => item.reason === reason && item.targetID === targetUserID) || null;
 }
 
-function updateReport(reportID, status, note) {
+function updateReport(reportID, status, note, resolutionCategory) {
   const startedAt = Date.now();
   const res = http.patch(
     `${baseURL}/internal/reports/${reportID}`,
-    JSON.stringify({ status, handledNote: note }),
+    JSON.stringify({ status, handledNote: note, resolutionCategory }),
     internalHeaders()
   );
   updateLatency.add(Date.now() - startedAt);
@@ -210,7 +210,7 @@ export default function () {
     return;
   }
 
-  const resolved = updateReport(report.id, 'resolved', `resolved ${reason}`);
+  const resolved = updateReport(report.id, 'resolved', `resolved ${reason}`, 'action_taken');
   if (!resolved || resolved.status !== 'resolved') {
     adminReportErrors.add(true);
     return;

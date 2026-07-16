@@ -1,24 +1,34 @@
 import Vapor
 
 extension IMConversationController {
-    func createConversation(req: Request) async throws -> IMConversationResponse {
+    func createConversation(req: Request) async throws -> Response {
+        try requireCommandReceiptWhenSummaryReadModelIsSeparate(req)
         let user = try req.auth.require(User.self)
         let body = try req.content.decode(IMConversationCreateRequest.self)
         let creatorUserID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
 
-        let response = try await commandService.createConversation(
+        let result = try await commandService.createConversation(
             kind: body.kind,
             title: body.title,
             memberEmails: body.memberEmails,
             creatorUserID: creatorUserID
         )
+        if acceptsCommandReceipt(req) {
+            return try commandReceiptResponse(result.receipt)
+        }
+
         try await sideEffects.projectInlineOutboxIfAllowed()
-        return response
+        return try await legacyConversationSummaryResponse(
+            app: req.application,
+            receipt: result.receipt,
+            for: creatorUserID
+        )
     }
 
-    func addMembers(req: Request) async throws -> IMConversationResponse {
+    func addMembers(req: Request) async throws -> Response {
+        try requireCommandReceiptWhenSummaryReadModelIsSeparate(req)
         let user = try req.auth.require(User.self)
         let conversationID = try conversationID(from: req)
         let body = try req.content.decode(IMConversationMemberUpdateRequest.self)
@@ -26,17 +36,25 @@ extension IMConversationController {
         let commandService = IMConversationService.command(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
 
-        let response = try await commandService.addMembers(
+        let receipt = try await commandService.addMembers(
             in: conversationID,
             memberEmails: body.memberEmails,
             requesterUserID: requesterUserID
         )
         await sideEffects.invalidateMemberCacheEverywhere(conversationID: conversationID)
+        if acceptsCommandReceipt(req) {
+            return try commandReceiptResponse(receipt)
+        }
         try await sideEffects.projectInlineOutboxIfAllowed()
-        return response
+        return try await legacyConversationSummaryResponse(
+            app: req.application,
+            receipt: receipt,
+            for: requesterUserID
+        )
     }
 
-    func removeMember(req: Request) async throws -> IMConversationResponse {
+    func removeMember(req: Request) async throws -> Response {
+        try requireCommandReceiptWhenSummaryReadModelIsSeparate(req)
         let user = try req.auth.require(User.self)
         let conversationID = try conversationID(from: req)
         let memberUserID = try memberUserID(from: req)
@@ -49,12 +67,19 @@ extension IMConversationController {
             requesterUserID: requesterUserID
         )
         await sideEffects.invalidateMemberCacheEverywhere(conversationID: conversationID)
+        if acceptsCommandReceipt(req) {
+            return try commandReceiptResponse(result.receipt)
+        }
         try await sideEffects.projectInlineOutboxIfAllowed()
-
-        return result.requesterConversation
+        return try await legacyConversationSummaryResponse(
+            app: req.application,
+            receipt: result.receipt,
+            for: requesterUserID
+        )
     }
 
-    func updateMemberRole(req: Request) async throws -> IMConversationResponse {
+    func updateMemberRole(req: Request) async throws -> Response {
+        try requireCommandReceiptWhenSummaryReadModelIsSeparate(req)
         let user = try req.auth.require(User.self)
         let conversationID = try conversationID(from: req)
         let memberUserID = try memberUserID(from: req)
@@ -63,60 +88,83 @@ extension IMConversationController {
         let role = try body.normalizedRole()
         let commandService = IMConversationService.command(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
-        let response = try await commandService.updateMemberRole(
+        let receipt = try await commandService.updateMemberRole(
             in: conversationID,
             memberUserID: memberUserID,
             role: role,
             requesterUserID: requesterUserID
         )
         await sideEffects.invalidateMemberCacheEverywhere(conversationID: conversationID)
+        if acceptsCommandReceipt(req) {
+            return try commandReceiptResponse(receipt)
+        }
         try await sideEffects.projectInlineOutboxIfAllowed()
-
-        return response
+        return try await legacyConversationSummaryResponse(
+            app: req.application,
+            receipt: receipt,
+            for: requesterUserID
+        )
     }
 
-    func updateTitle(req: Request) async throws -> IMConversationResponse {
+    func updateTitle(req: Request) async throws -> Response {
+        try requireCommandReceiptWhenSummaryReadModelIsSeparate(req)
         let user = try req.auth.require(User.self)
         let conversationID = try conversationID(from: req)
         let body = try req.content.decode(IMConversationTitleUpdateRequest.self)
         let requesterUserID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
-        let response = try await commandService.updateConversationTitle(
+        let receipt = try await commandService.updateConversationTitle(
             in: conversationID,
             title: body.title,
             requesterUserID: requesterUserID
         )
+        if acceptsCommandReceipt(req) {
+            return try commandReceiptResponse(receipt)
+        }
         try await sideEffects.projectInlineOutboxIfAllowed()
-
-        return response
+        return try await legacyConversationSummaryResponse(
+            app: req.application,
+            receipt: receipt,
+            for: requesterUserID
+        )
     }
 
-    func updatePreferences(req: Request) async throws -> IMConversationResponse {
+    func updatePreferences(req: Request) async throws -> Response {
+        try requireCommandReceiptWhenSummaryReadModelIsSeparate(req)
         let user = try req.auth.require(User.self)
         let conversationID = try conversationID(from: req)
         let body = try req.content.decode(IMConversationPreferencesUpdateRequest.self)
         let requesterUserID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
+        let sideEffects = IMConversationCommandSideEffects(app: req.application)
 
-        let response = try await commandService.updateConversationPreferences(
+        let receipt = try await commandService.updateConversationPreferences(
             in: conversationID,
             isPinned: body.isPinned,
             isMuted: body.isMuted,
             requesterUserID: requesterUserID
         )
-
-        return response
+        if acceptsCommandReceipt(req) {
+            return try commandReceiptResponse(receipt)
+        }
+        try await sideEffects.projectInlineOutboxIfAllowed()
+        return try await legacyConversationSummaryResponse(
+            app: req.application,
+            receipt: receipt,
+            for: requesterUserID
+        )
     }
 
-    func updateMetadata(req: Request) async throws -> IMConversationResponse {
+    func updateMetadata(req: Request) async throws -> Response {
+        try requireCommandReceiptWhenSummaryReadModelIsSeparate(req)
         let user = try req.auth.require(User.self)
         let conversationID = try conversationID(from: req)
         let body = try req.content.decode(IMConversationMetadataUpdateRequest.self)
         let requesterUserID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
-        let response = try await commandService.updateConversationMetadata(
+        let receipt = try await commandService.updateConversationMetadata(
             in: conversationID,
             title: body.title,
             notice: body.notice,
@@ -124,26 +172,40 @@ extension IMConversationController {
             muteAll: body.muteAll,
             requesterUserID: requesterUserID
         )
+        if acceptsCommandReceipt(req) {
+            return try commandReceiptResponse(receipt)
+        }
         try await sideEffects.projectInlineOutboxIfAllowed()
-
-        return response
+        return try await legacyConversationSummaryResponse(
+            app: req.application,
+            receipt: receipt,
+            for: requesterUserID
+        )
     }
 
-    func updateMyMemberProfile(req: Request) async throws -> IMConversationResponse {
+    func updateMyMemberProfile(req: Request) async throws -> Response {
+        try requireCommandReceiptWhenSummaryReadModelIsSeparate(req)
         let user = try req.auth.require(User.self)
         let conversationID = try conversationID(from: req)
         let body = try req.content.decode(IMConversationMemberSelfUpdateRequest.self)
         let requesterUserID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
-        let response = try await commandService.updateMemberNickname(
+        let receipt = try await commandService.updateMemberNickname(
             in: conversationID,
             requesterUserID: requesterUserID,
             memberNickname: body.memberNickname
         )
         await sideEffects.invalidateMemberCacheEverywhere(conversationID: conversationID)
+        if acceptsCommandReceipt(req) {
+            return try commandReceiptResponse(receipt)
+        }
         try await sideEffects.projectInlineOutboxIfAllowed()
-        return response
+        return try await legacyConversationSummaryResponse(
+            app: req.application,
+            receipt: receipt,
+            for: requesterUserID
+        )
     }
 
     func markRead(req: Request) async throws -> IMConversationReadResponse {
@@ -233,19 +295,22 @@ extension IMConversationController {
         return message
     }
 
-    func leaveConversation(req: Request) async throws -> HTTPStatus {
+    func leaveConversation(req: Request) async throws -> Response {
         let user = try req.auth.require(User.self)
         let conversationID = try conversationID(from: req)
         let requesterUserID = try user.requireID()
         let commandService = IMConversationService.command(app: req.application)
         let sideEffects = IMConversationCommandSideEffects(app: req.application)
 
-        try await commandService.leaveConversation(
+        let receipt = try await commandService.leaveConversation(
             in: conversationID,
             requesterUserID: requesterUserID
         )
         await sideEffects.invalidateMemberCacheEverywhere(conversationID: conversationID)
+        if acceptsCommandReceipt(req) {
+            return try commandReceiptResponse(receipt)
+        }
         try await sideEffects.projectInlineOutboxIfAllowed()
-        return .ok
+        return Response(status: .ok)
     }
 }

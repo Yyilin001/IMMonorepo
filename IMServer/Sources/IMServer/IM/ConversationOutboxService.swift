@@ -32,6 +32,10 @@ struct ConversationOutboxService {
         on database: (any Database)? = nil
     ) async throws -> ConversationDomainEvent {
         let database = database ?? db
+        try await ConversationWriteFenceService.requireWritesAllowed(
+            conversationID: conversationID,
+            on: database
+        )
         let event: ConversationDomainEvent
         if database.inTransaction {
             event = try await enqueueWrites(
@@ -159,6 +163,10 @@ struct ConversationOutboxService {
             return 0
         }
         let database = database ?? db
+        try await ConversationWriteFenceService.requireWritesAllowed(
+            conversationID: conversationID,
+            on: database
+        )
         let insertedCount: Int
         if let sql = database as? any SQLDatabase,
            sql.dialect.name == "postgresql"
@@ -210,6 +218,10 @@ struct ConversationOutboxService {
         }
 
         return try await database.transaction { tx in
+            try await ConversationWriteFenceService.requireWritesAllowed(
+                conversationID: conversationID,
+                on: tx
+            )
             if let existingClaim = try await ConversationDomainEventSideEffect.find(normalizedKey, on: tx),
                let existingEvent = try await ConversationDomainEvent.find(existingClaim.eventID, on: tx)
             {

@@ -1,5 +1,7 @@
 import Fluent
 import FluentPostgresDriver
+import NIOConcurrencyHelpers
+import SQLKit
 import Vapor
 
 extension DatabaseID {
@@ -10,6 +12,18 @@ extension DatabaseID {
 struct RoutedShardDatabase {
     let shardID: String
     let database: any Database
+}
+
+struct ConversationRoute: Sendable, Equatable {
+    let cellID: String
+    let shardID: String
+    let version: Int
+
+    init(cellID: String, shardID: String, version: Int = 1) {
+        self.cellID = cellID
+        self.shardID = shardID
+        self.version = version
+    }
 }
 
 private struct IMReplicaDatabaseEnabledStorageKey: StorageKey {
@@ -30,6 +44,10 @@ private struct ConversationShardReplicaDatabaseIDsStorageKey: StorageKey {
 
 private struct SummaryShardDatabaseIDsStorageKey: StorageKey {
     typealias Value = [String: DatabaseID]
+}
+
+private struct ConversationShardRoutingConfigurationStorageKey: StorageKey {
+    typealias Value = IMConversationShardRoutingConfiguration
 }
 
 protocol ConversationShardRouter: Sendable {
@@ -60,16 +78,68 @@ protocol SummaryShardRouter: Sendable {
 protocol ConversationDirectory: Sendable {
     func shardID(for conversationID: UUID) async throws -> String
     func registerConversation(conversationID: UUID, shardID: String) async throws
+    func route(for conversationID: UUID) async throws -> ConversationRoute
+    func registerConversation(conversationID: UUID, shardID: String, cellID: String) async throws
+    func reserveConversation(conversationID: UUID, shardID: String, cellID: String) async throws
+    func activateConversation(conversationID: UUID) async throws
+    func cutoverConversation(
+        conversationID: UUID,
+        expectedRoute: ConversationRoute,
+        targetCellID: String,
+        targetShardID: String
+    ) async throws -> ConversationRoute
+}
+
+extension ConversationDirectory {
+    func route(for conversationID: UUID) async throws -> ConversationRoute {
+        ConversationRoute(
+            cellID: IMRealtimeCellConfiguration.defaultCellID,
+            shardID: try await shardID(for: conversationID)
+        )
+    }
+
+    func registerConversation(conversationID: UUID, shardID: String, cellID _: String) async throws {
+        try await registerConversation(conversationID: conversationID, shardID: shardID)
+    }
+
+    func reserveConversation(conversationID: UUID, shardID: String, cellID: String) async throws {
+        try await registerConversation(conversationID: conversationID, shardID: shardID, cellID: cellID)
+    }
+
+    func activateConversation(conversationID _: UUID) async throws { }
+
+    func cutoverConversation(
+        conversationID _: UUID,
+        expectedRoute _: ConversationRoute,
+        targetCellID _: String,
+        targetShardID _: String
+    ) async throws -> ConversationRoute {
+        throw Abort(.notImplemented, reason: "This conversation directory does not support physical shard cutover.")
+    }
 }
 
 protocol DirectConversationIndex: Sendable {
     func shardID(forMemberUserIDs memberUserIDs: [UUID]) async throws -> String
     func conversationID(forMemberUserIDs memberUserIDs: [UUID]) async throws -> UUID?
+    func reserveDirectConversation(
+        conversationID: UUID,
+        memberUserIDs: [UUID],
+        shardID: String
+    ) async throws -> DirectConversationIndexReservation
+    func releaseDirectConversationReservation(
+        conversationID: UUID,
+        memberUserIDs: [UUID]
+    ) async throws
     func registerDirectConversation(
         conversationID: UUID,
         memberUserIDs: [UUID],
         shardID: String
     ) async throws
+}
+
+enum DirectConversationIndexReservation: Sendable, Equatable {
+    case reserved
+    case existing(conversationID: UUID)
 }
 
 private struct ConversationShardRouterStorageKey: StorageKey {
@@ -150,7 +220,7 @@ struct DirectoryBackedConversationShardRouter: ConversationShardRouter {
     let shardDatabaseIDs: [String: DatabaseID]
     let shardReplicaDatabaseIDs: [String: DatabaseID]
     let directory: any ConversationDirectory
-    private let shardCache = ConversationShardIDLookupCache(maxEntries: 20_000)
+    private let routeCache: ConversationRouteLookupCache
 
     init(
         app: Application,
@@ -164,6 +234,10 @@ struct DirectoryBackedConversationShardRouter: ConversationShardRouter {
         self.shardDatabaseIDs = shardDatabaseIDs
         self.shardReplicaDatabaseIDs = shardReplicaDatabaseIDs
         self.directory = directory
+        self.routeCache = ConversationRouteLookupCache(
+            maxEntries: app.conversationShardRoutingConfiguration.directoryCacheMaxEntries,
+            ttl: app.conversationShardRoutingConfiguration.directoryCacheTTL
+        )
     }
 
     var routerName: String { "directory-backed-conversation-shard" }
@@ -197,19 +271,46 @@ struct DirectoryBackedConversationShardRouter: ConversationShardRouter {
     }
 
     func shardID(forConversationID conversationID: UUID) async throws -> String {
-        if let cachedShardID = await shardCache.shardID(for: conversationID),
-           shardIDs.contains(cachedShardID) {
-            return cachedShardID
+        if let cachedRoute = routeCache.route(for: conversationID),
+           cachedRoute.cellID == app.imRealtimeCellID,
+           shardIDs.contains(cachedRoute.shardID) {
+            await app.conversationShardRoutingMetrics.recordCacheHit()
+            return cachedRoute.shardID
         }
 
-        let storedShardID = try await directory.shardID(for: conversationID)
-        if shardIDs.contains(storedShardID) {
-            await shardCache.store(storedShardID, for: conversationID)
-            return storedShardID
+        await app.conversationShardRoutingMetrics.recordCacheMiss()
+        let lookupStartedAt = Date()
+        let route: ConversationRoute
+        do {
+            route = try await directory.route(for: conversationID)
+        } catch {
+            await app.conversationShardRoutingMetrics.recordDirectoryLookupFailure(
+                elapsedMilliseconds: max(0, Int(Date().timeIntervalSince(lookupStartedAt) * 1_000))
+            )
+            throw error
+        }
+        await app.conversationShardRoutingMetrics.recordDirectoryLookup(
+            elapsedMilliseconds: max(0, Int(Date().timeIntervalSince(lookupStartedAt) * 1_000))
+        )
+        guard route.cellID == app.imRealtimeCellID else {
+            await app.conversationShardRoutingMetrics.recordRemoteCellRouteRejected()
+            throw Abort(
+                .serviceUnavailable,
+                reason: "Conversation \(conversationID.uuidString) belongs to realtime cell \(route.cellID), not local cell \(app.imRealtimeCellID)."
+            )
+        }
+        if shardIDs.contains(route.shardID) {
+            let storeResult = routeCache.store(route, for: conversationID)
+            await app.conversationShardRoutingMetrics.recordCacheStore(
+                entryCount: storeResult.entryCount,
+                evictedCount: storeResult.evictedCount,
+                maxEntries: routeCache.maxEntries
+            )
+            return route.shardID
         }
         throw Abort(
             .internalServerError,
-            reason: "Conversation shard directory references unknown shard \(storedShardID) for conversation \(conversationID)."
+            reason: "Conversation shard directory references unknown shard \(route.shardID) for conversation \(conversationID)."
         )
     }
 
@@ -255,37 +356,122 @@ struct DirectoryBackedConversationShardRouter: ConversationShardRouter {
     }
 }
 
-private actor ConversationShardIDLookupCache {
-    private let maxEntries: Int
-    private var values: [UUID: String] = [:]
-    private var insertionOrder: [UUID] = []
+struct IMConversationShardRoutingConfiguration: Sendable {
+    static let defaultDirectoryCacheMaxEntries = 20_000
+    static let defaultDirectoryCacheTTLSeconds = 15
 
-    init(maxEntries: Int) {
+    let directoryCacheMaxEntries: Int
+    let directoryCacheTTLSeconds: Int
+
+    var directoryCacheTTL: TimeInterval {
+        TimeInterval(directoryCacheTTLSeconds)
+    }
+
+    init(
+        directoryCacheMaxEntries: Int = defaultDirectoryCacheMaxEntries,
+        directoryCacheTTLSeconds: Int = defaultDirectoryCacheTTLSeconds
+    ) {
+        self.directoryCacheMaxEntries = max(1, directoryCacheMaxEntries)
+        self.directoryCacheTTLSeconds = max(1, directoryCacheTTLSeconds)
+    }
+
+    static func load(from environment: Environment) -> Self {
+        .init(
+            directoryCacheMaxEntries: Environment.get("IM_CONVERSATION_SHARD_DIRECTORY_CACHE_MAX_ENTRIES")
+                .flatMap(Int.init(_:)) ?? defaultDirectoryCacheMaxEntries,
+            directoryCacheTTLSeconds: Environment.get("IM_CONVERSATION_SHARD_DIRECTORY_CACHE_TTL_SECONDS")
+                .flatMap(Int.init(_:)) ?? defaultDirectoryCacheTTLSeconds
+        )
+    }
+}
+
+private final class ConversationRouteLookupCache: @unchecked Sendable {
+    struct StoreResult: Sendable {
+        let entryCount: Int
+        let evictedCount: Int
+    }
+
+    private struct Entry {
+        var route: ConversationRoute
+        var expiresAt: Date
+        var recency: UInt64
+    }
+
+    private struct State {
+        var entries: [UUID: Entry] = [:]
+        var recencyQueue: [(conversationID: UUID, recency: UInt64)] = []
+        var nextRecency: UInt64 = 0
+    }
+
+    let maxEntries: Int
+    private let ttl: TimeInterval
+    private let state = NIOLockedValueBox(State())
+
+    init(maxEntries: Int, ttl: TimeInterval) {
         self.maxEntries = max(1, maxEntries)
+        self.ttl = max(1, ttl)
     }
 
-    func shardID(for conversationID: UUID) -> String? {
-        values[conversationID]
-    }
-
-    func store(_ shardID: String, for conversationID: UUID) {
-        if values[conversationID] == nil {
-            insertionOrder.append(conversationID)
+    func route(for conversationID: UUID) -> ConversationRoute? {
+        state.withLockedValue { state in
+            guard var entry = state.entries[conversationID] else {
+                return nil
+            }
+            guard entry.expiresAt > Date() else {
+                state.entries.removeValue(forKey: conversationID)
+                return nil
+            }
+            entry.recency = nextRecency(in: &state)
+            state.entries[conversationID] = entry
+            state.recencyQueue.append((conversationID, entry.recency))
+            compactRecencyQueueIfNeeded(&state)
+            return entry.route
         }
-        values[conversationID] = shardID
-        trimIfNeeded()
     }
 
-    private func trimIfNeeded() {
-        guard values.count > maxEntries else {
+    func store(_ route: ConversationRoute, for conversationID: UUID) -> StoreResult {
+        state.withLockedValue { state in
+            let recency = nextRecency(in: &state)
+            state.entries[conversationID] = Entry(
+                route: route,
+                expiresAt: Date().addingTimeInterval(ttl),
+                recency: recency
+            )
+            state.recencyQueue.append((conversationID, recency))
+            let evictedCount = trimIfNeeded(&state)
+            compactRecencyQueueIfNeeded(&state)
+            return StoreResult(entryCount: state.entries.count, evictedCount: evictedCount)
+        }
+    }
+
+    private func nextRecency(in state: inout State) -> UInt64 {
+        state.nextRecency &+= 1
+        if state.nextRecency == 0 {
+            state.nextRecency = 1
+        }
+        return state.nextRecency
+    }
+
+    private func trimIfNeeded(_ state: inout State) -> Int {
+        var evictedCount = 0
+        while state.entries.count > maxEntries, !state.recencyQueue.isEmpty {
+            let candidate = state.recencyQueue.removeFirst()
+            guard state.entries[candidate.conversationID]?.recency == candidate.recency else {
+                continue
+            }
+            state.entries[candidate.conversationID] = nil
+            evictedCount += 1
+        }
+        return evictedCount
+    }
+
+    private func compactRecencyQueueIfNeeded(_ state: inout State) {
+        guard state.recencyQueue.count > maxEntries * 4 else {
             return
         }
-
-        let overflow = values.count - maxEntries
-        for conversationID in insertionOrder.prefix(overflow) {
-            values[conversationID] = nil
+        state.recencyQueue.removeAll { candidate in
+            state.entries[candidate.conversationID]?.recency != candidate.recency
         }
-        insertionOrder.removeFirst(min(overflow, insertionOrder.count))
     }
 }
 
@@ -349,24 +535,140 @@ struct OwnerHashSummaryShardRouter: SummaryShardRouter {
 
 struct DatabaseConversationDirectory: ConversationDirectory {
     let db: any Database
+    let localCellID: String
+
+    init(db: any Database, localCellID: String = IMRealtimeCellConfiguration.defaultCellID) {
+        self.db = db
+        self.localCellID = localCellID
+    }
 
     func shardID(for conversationID: UUID) async throws -> String {
-        if let entry = try await ConversationDirectoryEntry.find(conversationID, on: db) {
-            return entry.shardID
+        let route = try await route(for: conversationID)
+        guard route.cellID == localCellID else {
+            throw Abort(
+                .serviceUnavailable,
+                reason: "Conversation \(conversationID.uuidString) belongs to realtime cell \(route.cellID), not local cell \(localCellID)."
+            )
         }
-        return SingleShardConversationShardRouter.defaultShardID
+        return route.shardID
     }
 
     func registerConversation(conversationID: UUID, shardID: String) async throws {
+        try await registerConversation(
+            conversationID: conversationID,
+            shardID: shardID,
+            cellID: localCellID
+        )
+    }
+
+    func route(for conversationID: UUID) async throws -> ConversationRoute {
         if let entry = try await ConversationDirectoryEntry.find(conversationID, on: db) {
-            entry.shardID = shardID
-            try await entry.update(on: db)
+            guard entry.lifecycleState == .active else {
+                throw Abort(
+                    .serviceUnavailable,
+                    reason: "Conversation \(conversationID.uuidString) route is \(entry.lifecycleState.rawValue) and is not ready."
+                )
+            }
+            return ConversationRoute(
+                cellID: entry.cellID,
+                shardID: entry.shardID,
+                version: entry.routeVersion
+            )
+        }
+        throw Abort(
+            .notFound,
+            reason: "Conversation \(conversationID.uuidString) is not registered in the conversation directory."
+        )
+    }
+
+    func registerConversation(conversationID: UUID, shardID: String, cellID: String) async throws {
+        try await reserveConversation(
+            conversationID: conversationID,
+            shardID: shardID,
+            cellID: cellID
+        )
+        try await activateConversation(conversationID: conversationID)
+    }
+
+    func reserveConversation(conversationID: UUID, shardID: String, cellID: String) async throws {
+        if let entry = try await ConversationDirectoryEntry.find(conversationID, on: db) {
+            guard entry.shardID == shardID, entry.cellID == cellID else {
+                throw Abort(
+                    .conflict,
+                    reason: "Conversation \(conversationID.uuidString) already reserves route \(entry.cellID)/\(entry.shardID)."
+                )
+            }
+            if entry.lifecycleState == .abandoned {
+                entry.lifecycleState = .pending
+                entry.routeVersion += 1
+                entry.activatedAt = nil
+                try await entry.update(on: db)
+            }
             return
         }
         try await ConversationDirectoryEntry(
             conversationID: conversationID,
-            shardID: shardID
+            shardID: shardID,
+            cellID: cellID,
+            lifecycleState: .pending
         ).create(on: db)
+    }
+
+    func activateConversation(conversationID: UUID) async throws {
+        guard let entry = try await ConversationDirectoryEntry.find(conversationID, on: db) else {
+            return
+        }
+        guard entry.lifecycleState == .pending else {
+            return
+        }
+        entry.lifecycleState = .active
+        entry.activatedAt = Date()
+        try await entry.update(on: db)
+    }
+
+    func cutoverConversation(
+        conversationID: UUID,
+        expectedRoute: ConversationRoute,
+        targetCellID: String,
+        targetShardID: String
+    ) async throws -> ConversationRoute {
+        guard !targetCellID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !targetShardID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw Abort(.badRequest, reason: "Conversation cutover target route is incomplete.")
+        }
+
+        return try await db.transaction { transaction in
+            if let sql = transaction as? any SQLDatabase,
+               sql.dialect.name == "postgresql" {
+                try await sql.raw("""
+                    SELECT conversation_id
+                    FROM conversation_directory
+                    WHERE conversation_id = \(bind: conversationID)
+                    FOR UPDATE
+                    """).run()
+            }
+            guard let entry = try await ConversationDirectoryEntry.find(conversationID, on: transaction) else {
+                throw Abort(.notFound, reason: "Conversation is not registered in the conversation directory.")
+            }
+            guard entry.lifecycleState == .active,
+                  entry.cellID == expectedRoute.cellID,
+                  entry.shardID == expectedRoute.shardID,
+                  entry.routeVersion == expectedRoute.version
+            else {
+                throw Abort(.conflict, reason: "Conversation route changed before shard cutover could commit.")
+            }
+
+            entry.cellID = targetCellID
+            entry.shardID = targetShardID
+            entry.routeVersion += 1
+            try await entry.update(on: transaction)
+            return ConversationRoute(
+                cellID: entry.cellID,
+                shardID: entry.shardID,
+                version: entry.routeVersion
+            )
+        }
     }
 }
 
@@ -382,6 +684,46 @@ struct DatabaseDirectConversationIndex: DirectConversationIndex {
 
     func conversationID(forMemberUserIDs memberUserIDs: [UUID]) async throws -> UUID? {
         try await entry(forMemberUserIDs: memberUserIDs)?.conversationID
+    }
+
+    func reserveDirectConversation(
+        conversationID: UUID,
+        memberUserIDs: [UUID],
+        shardID: String
+    ) async throws -> DirectConversationIndexReservation {
+        let pairHash = Self.pairHash(for: memberUserIDs)
+        guard !pairHash.isEmpty else {
+            throw Abort(.badRequest, reason: "A direct conversation requires exactly two members.")
+        }
+        if let existing = try await DirectConversationIndexEntry.find(pairHash, on: db) {
+            return .existing(conversationID: existing.conversationID)
+        }
+
+        do {
+            try await DirectConversationIndexEntry(
+                pairHash: pairHash,
+                conversationID: conversationID,
+                shardID: shardID
+            ).create(on: db)
+            return .reserved
+        } catch {
+            if let existing = try await DirectConversationIndexEntry.find(pairHash, on: db) {
+                return .existing(conversationID: existing.conversationID)
+            }
+            throw error
+        }
+    }
+
+    func releaseDirectConversationReservation(
+        conversationID: UUID,
+        memberUserIDs: [UUID]
+    ) async throws {
+        guard let entry = try await entry(forMemberUserIDs: memberUserIDs),
+              entry.conversationID == conversationID
+        else {
+            return
+        }
+        try await entry.delete(on: db)
     }
 
     func registerDirectConversation(
@@ -412,7 +754,10 @@ struct DatabaseDirectConversationIndex: DirectConversationIndex {
     }
 
     private static func pairHash(for memberUserIDs: [UUID]) -> String {
-        memberUserIDs
+        guard memberUserIDs.count == 2 else {
+            return ""
+        }
+        return memberUserIDs
             .map(\.uuidString)
             .sorted()
             .joined(separator: ":")
@@ -454,11 +799,25 @@ extension Application {
             if let directory = storage[ConversationDirectoryStorageKey.self] {
                 return directory
             }
-            let directory = DatabaseConversationDirectory(db: db)
+            let directory = DatabaseConversationDirectory(db: db, localCellID: imRealtimeCellID)
             storage[ConversationDirectoryStorageKey.self] = directory
             return directory
         }
         set { storage[ConversationDirectoryStorageKey.self] = newValue }
+    }
+
+    var conversationShardRoutingConfiguration: IMConversationShardRoutingConfiguration {
+        get {
+            if let configuration = storage[ConversationShardRoutingConfigurationStorageKey.self] {
+                return configuration
+            }
+            let configuration = IMConversationShardRoutingConfiguration.load(from: environment)
+            storage[ConversationShardRoutingConfigurationStorageKey.self] = configuration
+            return configuration
+        }
+        set {
+            storage[ConversationShardRoutingConfigurationStorageKey.self] = newValue
+        }
     }
 
     var directConversationIndex: any DirectConversationIndex {

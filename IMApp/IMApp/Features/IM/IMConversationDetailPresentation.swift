@@ -77,6 +77,7 @@ struct IMConversationDetailSignature: Equatable, Sendable {
     let title: String
     let kind: IMConversationKind
     let directMessagingState: IMDirectMessagingState?
+    let groupLifecycleState: IMGroupLifecycleState?
     let directPeer: IMDirectPeer?
     let notice: String?
     let avatarPreset: IMConversationAvatarPreset?
@@ -94,6 +95,7 @@ struct IMConversationDetailSignature: Equatable, Sendable {
         self.title = conversation.title
         self.kind = conversation.kind
         self.directMessagingState = conversation.directMessagingState
+        self.groupLifecycleState = conversation.groupLifecycleState
         self.directPeer = conversation.directPeer
         self.notice = conversation.notice
         self.avatarPreset = conversation.avatarPreset
@@ -677,6 +679,14 @@ extension IMConversationDetailView {
                             conversationContextBadge(title: "全员禁言", systemImage: "mic.slash.fill", tint: .orange)
                         }
 
+                        if context.isGroupFrozen {
+                            conversationContextBadge(title: "群已冻结", systemImage: "lock.fill", tint: .red)
+                        }
+
+                        if context.isGroupDissolved {
+                            conversationContextBadge(title: "群已解散", systemImage: "archivebox.fill", tint: .red)
+                        }
+
                         if context.showsLoadingIndicator {
                             ProgressView()
                                 .controlSize(.small)
@@ -692,6 +702,11 @@ extension IMConversationDetailView {
                 if let directMessagingStatusMessage = context.directMessagingStatusMessage {
                     AppStatusBanner(message: directMessagingStatusMessage, tone: .warning, systemImage: "lock.fill")
                         .accessibilityIdentifier("conversation.directMessagingStatus")
+                }
+
+                if let groupLifecycleStatusMessage = context.groupLifecycleStatusMessage {
+                    AppStatusBanner(message: groupLifecycleStatusMessage, tone: .warning, systemImage: "lock.fill")
+                        .accessibilityIdentifier("conversation.groupLifecycleStatus")
                 }
             }
         }

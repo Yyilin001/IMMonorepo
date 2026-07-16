@@ -11,6 +11,26 @@ struct ConversationMetadataChangeSet: Equatable, Sendable {
 }
 
 struct ConversationGovernanceService {
+    func requireUserMutationAllowed(in conversation: Conversation) throws {
+        guard conversation.conversationKind == .group else {
+            return
+        }
+        switch conversation.groupLifecycleStateEnum {
+        case .active:
+            return
+        case .frozen:
+            throw Abort(.forbidden, reason: "群聊已被冻结，成员只能查看历史消息。")
+        case .dissolved:
+            throw Abort(.forbidden, reason: "群聊已解散，消息记录仅供查看。")
+        }
+    }
+
+    func requireMembershipArchivalMutationAllowed(in conversation: Conversation) throws {
+        guard conversation.conversationKind != .group || conversation.groupLifecycleStateEnum != .dissolved else {
+            throw Abort(.forbidden, reason: "群聊已解散，成员关系已归档。")
+        }
+    }
+
     func makeMetadataChangeSet(
         title: String?,
         notice: String?,

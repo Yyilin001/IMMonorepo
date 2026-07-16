@@ -901,6 +901,85 @@ Hot conversation go/no-go:
 - `im_projection_lag_millis` returns below 10s after load stops.
 - `im_message_write_queue_rejected_total`, `im_sequence_block_reserve_failures_total`, and `im_conversation_owner_forward_failures_total` remain at zero.
 
+### Local hot-conversation stage report
+
+For a local IMServer only, use the wrapper below to capture Prometheus snapshots
+before and after the k6 run. It writes command, persistence-stage, outbox,
+projection, relay, and `timeline/since` window deltas to one JSON report. The
+wrapper rejects non-loopback URLs and never starts services or resets a
+database.
+
+```bash
+cd IMServer/LoadTests
+LOCAL_HOT_CONVERSATION_INTERNAL_SECRET="$IM_INTERNAL_SECRET" \
+  ./run_local_hot_conversation.sh check
+LOCAL_HOT_CONVERSATION_INTERNAL_SECRET="$IM_INTERNAL_SECRET" \
+  ./run_local_hot_conversation.sh run
+```
+
+The output is stored under `results/local-hot-conversation/<run-id>/`. All
+averages use counter deltas from that run window. `processLifetimeMaxMillis`
+fields are explicitly not window-scoped and must not be compared as a per-run
+maximum. A local combined runtime can legitimately have no relay or stream
+work, so its output is a regression diagnostic, not a production capacity
+claim.
+
+To include this stage in the local PostgreSQL acceptance flow, opt in explicitly:
+
+```bash
+cd IMServer/LoadTests
+LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION=true \
+  LOCAL_ACCEPTANCE_HOT_CONVERSATION_SEND_INTERVAL_MS=100 \
+  ./run_local_acceptance.sh run
+```
+
+The acceptance runner starts the local combined runtime, runs its HTTP smoke,
+runs the hot-conversation profile against that same loopback process, writes the
+stage report under `results/local-acceptance/hot-conversation/`, then stops the
+runtime. It resets only databases whose name begins with
+`imserver_local_acceptance` unless the unsafe-reset override is explicitly set.
+When this stage starts the local Swift/PostgreSQL runtime, it enables the
+production message-write batching profile by default (`true`, size `32`, delay
+`10ms`) so the development-only serial coordinator is not reported as the
+hot-write baseline. Set `LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_ENABLED=false`
+for the serial comparison; override size or delay with
+`LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_SIZE` and
+`LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_DELAY_MS`.
+The acceptance default paces each VU at 100 ms to keep this local regression
+check bounded; standalone k6 runs remain unpaced unless `IM_SEND_INTERVAL_MS`
+is set explicitly. The wrapper also writes its stage report when a k6 threshold
+fails, so failed local runs retain diagnostic evidence.
+
+### Local multi-node fault contracts
+
+The following runner verifies code-level multi-node failure policy without
+starting a service or using any remote infrastructure. It records a combined
+Swift test log and a per-invariant summary under
+`results/local-multinode-fault-contracts/<run-id>/`.
+
+```bash
+cd IMServer/LoadTests
+./run_local_multinode_fault_contracts.sh check
+./run_local_multinode_fault_contracts.sh run
+```
+
+To make it an explicit stage of the umbrella local acceptance runner without
+starting PostgreSQL or IMServer, use:
+
+```bash
+cd IMServer/LoadTests
+LOCAL_ACCEPTANCE_START_STACK=false \
+LOCAL_ACCEPTANCE_BACKEND=none \
+LOCAL_ACCEPTANCE_RUN_MULTINODE_FAULT_CONTRACTS=true \
+  ./run_local_acceptance.sh run
+```
+
+It covers Redis fail-closed behavior, outbox recovery, duplicate client retries,
+and replay idempotency for projections and owner delivery. A passing run is local
+contract evidence only; it is not multi-node availability or capacity evidence.
+See [multi-node-fault-validation.md](../docs/multi-node-fault-validation.md) for
+the invariant mapping and the later isolated-environment drills.
+
 ## Message Convergence HTTP k6
 
 Use this profile to measure the HTTP compensation path end to end. Each iteration sends one message, polls `messages/since` until the canonical message is visible, then polls the conversation list until the summary projection catches up to that message.

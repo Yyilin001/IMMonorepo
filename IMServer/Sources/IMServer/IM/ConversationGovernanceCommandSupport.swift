@@ -3,20 +3,23 @@ import Vapor
 
 struct ConversationGovernanceCommandSupport {
     let db: any Database
+    let userDirectoryDB: any Database
 
-    private var userLookup: ConversationUserLookupSupport { ConversationUserLookupSupport(db: db) }
-    private var membershipService: ConversationMembershipService { ConversationMembershipService(db: db) }
+    init(db: any Database, userDirectoryDB: (any Database)? = nil) {
+        self.db = db
+        self.userDirectoryDB = userDirectoryDB ?? db
+    }
+
+    private var userLookup: ConversationUserLookupSupport { ConversationUserLookupSupport(db: userDirectoryDB) }
+    private var membershipService: ConversationMembershipService {
+        ConversationMembershipService(db: db, userDirectoryDB: userDirectoryDB)
+    }
     private var governanceService: ConversationGovernanceService { ConversationGovernanceService() }
-    private var summaryProjectionService: IMConversationSummaryProjectionService { IMConversationSummaryProjectionService(db: db) }
-    private var readSupport: ConversationReadSupport { ConversationReadSupport(db: db) }
-    private var summaryReadSupport: ConversationSummaryReadSupport { ConversationSummaryReadSupport(db: db) }
-    private var refreshPublisher: ConversationSummaryRefreshPublisher { ConversationSummaryRefreshPublisher(db: db) }
-
     func updateConversationTitle(
         in conversationID: UUID,
         title: String,
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
+    ) async throws -> ConversationCommandReceipt {
         let conversation = try await requireConversationAndMembership(
             conversationID: conversationID,
             userID: requesterUserID
@@ -25,6 +28,7 @@ struct ConversationGovernanceCommandSupport {
             conversation,
             reason: "私聊会话不支持修改标题。"
         )
+        try governanceService.requireUserMutationAllowed(in: conversation)
         let requesterMembership = try await requireMembershipRecord(
             conversationID: conversationID,
             userID: requesterUserID
@@ -38,13 +42,15 @@ struct ConversationGovernanceCommandSupport {
             throw Abort(.badRequest, reason: "群聊名称不能为空。")
         }
         if conversation.title == normalizedTitle {
-            return try await readSupport.conversationSummary(
+            return noChangeReceipt(
                 conversationID: conversationID,
-                for: requesterUserID
+                eventType: .metadataUpdated,
+                membershipRevision: conversation.membershipRevision
             )
         }
 
-        let response = try await db.transaction { database in
+        return try await db.transaction { database in
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
             guard let persistedConversation = try await Conversation.find(conversationID, on: database) else {
                 throw Abort(.notFound, reason: "会话不存在。")
             }
@@ -52,21 +58,20 @@ struct ConversationGovernanceCommandSupport {
             persistedConversation.title = normalizedTitle
             try await persistedConversation.update(on: database)
 
-            let response = try await ConversationSummaryReadSupport(db: database).conversationSummary(
-                conversationID: conversationID,
-                for: requesterUserID
-            )
-            try await ConversationSummaryRefreshPublisher(db: database).publish(
+            let event = try await ConversationSummaryRefreshPublisher(db: database).publish(
                 .metadataUpdated,
                 conversationID: conversationID,
                 actorUserID: requesterUserID,
-                recipientUserIDs: response.memberUserIDs,
+                recipientUserIDs: try await memberUserIDs(in: conversationID, on: database),
                 on: database
             )
-            return response
+            return commandReceipt(
+                conversationID: conversationID,
+                event: event,
+                eventType: .metadataUpdated,
+                membershipRevision: persistedConversation.membershipRevision
+            )
         }
-
-        return response
     }
 
     func updateConversationMetadata(
@@ -76,7 +81,7 @@ struct ConversationGovernanceCommandSupport {
         avatarPreset: IMConversationAvatarPreset?,
         muteAll: Bool?,
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
+    ) async throws -> ConversationCommandReceipt {
         let conversation = try await requireConversationAndMembership(
             conversationID: conversationID,
             userID: requesterUserID
@@ -85,6 +90,7 @@ struct ConversationGovernanceCommandSupport {
             conversation,
             reason: "私聊会话不支持修改群资料。"
         )
+        try governanceService.requireUserMutationAllowed(in: conversation)
         let requesterMembership = try await requireMembershipRecord(
             conversationID: conversationID,
             userID: requesterUserID
@@ -101,70 +107,75 @@ struct ConversationGovernanceCommandSupport {
             muteAll: muteAll
         )
 
-        let response = try await db.transaction { database in
+        return try await db.transaction { database in
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
             guard let persistedConversation = try await Conversation.find(conversationID, on: database) else {
                 throw Abort(.notFound, reason: "会话不存在。")
             }
 
             let didUpdate = governanceService.apply(changeSet, to: persistedConversation)
             if !didUpdate {
-                return try await ConversationSummaryReadSupport(db: database).conversationSummary(
+                return noChangeReceipt(
                     conversationID: conversationID,
-                    for: requesterUserID
+                    eventType: .metadataUpdated,
+                    membershipRevision: persistedConversation.membershipRevision
                 )
             }
 
             try await persistedConversation.update(on: database)
 
-            let response = try await ConversationSummaryReadSupport(db: database).conversationSummary(
-                conversationID: conversationID,
-                for: requesterUserID
-            )
-            try await ConversationSummaryRefreshPublisher(db: database).publish(
+            let event = try await ConversationSummaryRefreshPublisher(db: database).publish(
                 .metadataUpdated,
                 conversationID: conversationID,
                 actorUserID: requesterUserID,
-                recipientUserIDs: response.memberUserIDs,
+                recipientUserIDs: try await memberUserIDs(in: conversationID, on: database),
                 on: database
             )
-            return response
+            return commandReceipt(
+                conversationID: conversationID,
+                event: event,
+                eventType: .metadataUpdated,
+                membershipRevision: persistedConversation.membershipRevision
+            )
         }
-
-        return response
     }
 
     func updateMemberNickname(
         in conversationID: UUID,
         requesterUserID: UUID,
         memberNickname: String?
-    ) async throws -> IMConversationResponse {
-        _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
+    ) async throws -> ConversationCommandReceipt {
+        let conversation = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
+        try governanceService.requireUserMutationAllowed(in: conversation)
         let normalized = memberNickname?.trimmingCharacters(in: .whitespacesAndNewlines)
         let storedNickname = normalized?.isEmpty == false ? normalized : nil
 
-        let response = try await db.transaction { database in
-            let membership = try await ConversationMembershipService(db: database).requireMembershipRecord(
+        return try await db.transaction { database in
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
+            let membership = try await ConversationMembershipService(
+                db: database,
+                userDirectoryDB: userDirectoryDB
+            ).requireMembershipRecord(
                 conversationID: conversationID,
                 userID: requesterUserID,
                 on: database
             )
             membership.memberNickname = storedNickname
             try await membership.update(on: database)
-            let response = try await ConversationSummaryReadSupport(db: database).conversationSummary(
-                conversationID: conversationID,
-                for: requesterUserID
-            )
-            try await ConversationSummaryRefreshPublisher(db: database).publish(
+            let event = try await ConversationSummaryRefreshPublisher(db: database).publish(
                 .metadataUpdated,
                 conversationID: conversationID,
                 actorUserID: requesterUserID,
-                recipientUserIDs: response.memberUserIDs,
+                recipientUserIDs: try await memberUserIDs(in: conversationID, on: database),
                 on: database
             )
-            return response
+            return commandReceipt(
+                conversationID: conversationID,
+                event: event,
+                eventType: .metadataUpdated,
+                membershipRevision: nil
+            )
         }
-
-        return response
     }
 
     func updateConversationPreferences(
@@ -172,51 +183,52 @@ struct ConversationGovernanceCommandSupport {
         isPinned: Bool?,
         isMuted: Bool?,
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
+    ) async throws -> ConversationCommandReceipt {
         _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
-        let recordID = ConversationUserSummary.recordID(ownerUserID: requesterUserID, conversationID: conversationID)
 
         return try await db.transaction { database in
-            let summary: ConversationUserSummary
-            if let existingSummary = try await ConversationUserSummary.find(recordID, on: database) {
-                summary = existingSummary
-            } else {
-                try await IMConversationSummaryProjectionService(db: database).refreshConversationSummaries(
-                    conversationID: conversationID,
-                    recipientUserIDs: [requesterUserID]
-                )
-                guard let refreshedSummary = try await ConversationUserSummary.find(recordID, on: database) else {
-                    throw Abort(.notFound, reason: "会话不存在。")
-                }
-                summary = refreshedSummary
-            }
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
+            let membership = try await ConversationMembershipService(
+                db: database,
+                userDirectoryDB: userDirectoryDB
+            ).requireMembershipRecord(
+                conversationID: conversationID,
+                userID: requesterUserID,
+                on: database
+            )
 
             var didUpdate = false
-            if let isPinned, summary.isPinned != isPinned {
-                summary.isPinned = isPinned
-                summary.pinnedAt = isPinned ? Date() : nil
+            if let isPinned, membership.isPinned != isPinned {
+                membership.isPinned = isPinned
+                membership.pinnedAt = isPinned ? Date() : nil
                 didUpdate = true
             }
-            if let isMuted, summary.isMuted != isMuted {
-                summary.isMuted = isMuted
+            if let isMuted, membership.isMuted != isMuted {
+                membership.isMuted = isMuted
                 didUpdate = true
             }
 
-            if didUpdate {
-                summary.updatedAt = Date()
-                try await summary.update(on: database)
-                try await ConversationSummaryRefreshPublisher(db: database).publish(
-                    .conversationSettingsChanged,
+            guard didUpdate else {
+                return noChangeReceipt(
                     conversationID: conversationID,
-                    actorUserID: requesterUserID,
-                    recipientUserIDs: [requesterUserID],
-                    on: database
+                    eventType: .conversationSettingsChanged,
+                    membershipRevision: nil
                 )
             }
 
-            return try await ConversationReadSupport(db: database).conversationSummary(
+            try await membership.update(on: database)
+            let event = try await ConversationSummaryRefreshPublisher(db: database).publish(
+                .conversationSettingsChanged,
                 conversationID: conversationID,
-                for: requesterUserID
+                actorUserID: requesterUserID,
+                recipientUserIDs: [requesterUserID],
+                on: database
+            )
+            return commandReceipt(
+                conversationID: conversationID,
+                event: event,
+                eventType: .conversationSettingsChanged,
+                membershipRevision: nil
             )
         }
     }
@@ -240,6 +252,47 @@ struct ConversationGovernanceCommandSupport {
         try await membershipService.requireConversationAndMembership(
             conversationID: conversationID,
             userID: userID
+        )
+    }
+
+    private func memberUserIDs(
+        in conversationID: UUID,
+        on database: any Database
+    ) async throws -> [UUID] {
+        try await ConversationMember.query(on: database)
+            .filter(\.$conversation.$id == conversationID)
+            .all()
+            .map(\.$user.id)
+    }
+
+    private func commandReceipt(
+        conversationID: UUID,
+        event: ConversationDomainEvent,
+        eventType: ConversationDomainEventType,
+        membershipRevision: Date?
+    ) -> ConversationCommandReceipt {
+        ConversationCommandReceipt(
+            conversationID: conversationID,
+            eventID: event.id,
+            eventType: eventType,
+            acceptedAt: event.createdAt,
+            membershipRevision: membershipRevision,
+            didMutate: true
+        )
+    }
+
+    private func noChangeReceipt(
+        conversationID: UUID,
+        eventType: ConversationDomainEventType,
+        membershipRevision: Date?
+    ) -> ConversationCommandReceipt {
+        ConversationCommandReceipt(
+            conversationID: conversationID,
+            eventID: nil,
+            eventType: eventType,
+            acceptedAt: Date(),
+            membershipRevision: membershipRevision,
+            didMutate: false
         )
     }
 }

@@ -36,15 +36,15 @@ extension AuthManager {
         }
 
         do {
-            let conversation = try await sessionClient.createIMConversation(
+            let receipt = try await sessionClient.createIMConversation(
                 kind: kind,
                 title: normalizedTitle.isEmpty ? nil : normalizedTitle,
                 memberEmails: normalizedEmails
             )
             markServerOnline()
-            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
+            scheduleIMConversationSummaryReadModelCorrection(force: true)
             scheduleIMConversationCachePersist()
-            await openIMConversation(conversation.id.uuidString)
+            await openIMConversation(receipt.conversationID.uuidString)
             return true
         } catch {
             await handleIMDataRequestError(error)
@@ -60,15 +60,15 @@ extension AuthManager {
         }
 
         do {
-            let conversation = try await sessionClient.createIMConversation(
+            let receipt = try await sessionClient.createIMConversation(
                 kind: .direct,
                 title: nil,
                 memberEmails: [normalizedEmail]
             )
             markServerOnline()
-            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
+            scheduleIMConversationSummaryReadModelCorrection(force: true)
             scheduleIMConversationCachePersist()
-            let conversationID = conversation.id.uuidString
+            let conversationID = receipt.conversationID.uuidString
             await openIMConversation(conversationID)
             return conversationID
         } catch {
@@ -99,12 +99,12 @@ extension AuthManager {
         }
 
         do {
-            let conversation = try await sessionClient.addIMConversationMembers(
+            _ = try await sessionClient.addIMConversationMembers(
                 conversationID: trimmedConversationID,
                 memberEmails: normalizedEmails
             )
             markServerOnline()
-            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
+            scheduleIMConversationSummaryReadModelCorrection(force: true)
             await conversationRuntimeController.loadConversationMembers(for: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
@@ -142,7 +142,7 @@ extension AuthManager {
         }
 
         do {
-            let conversation = try await sessionClient.updateIMConversationMetadata(
+            _ = try await sessionClient.updateIMConversationMetadata(
                 conversationID: trimmedConversationID,
                 title: title?.trimmingCharacters(in: .whitespacesAndNewlines),
                 notice: notice?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -150,7 +150,7 @@ extension AuthManager {
                 muteAll: muteAll
             )
             markServerOnline()
-            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
+            scheduleIMConversationSummaryReadModelCorrection(force: true)
             scheduleIMConversationCachePersist()
             return true
         } catch {
@@ -171,13 +171,13 @@ extension AuthManager {
         }
 
         do {
-            let conversation = try await sessionClient.updateIMConversationPreferences(
+            _ = try await sessionClient.updateIMConversationPreferences(
                 conversationID: trimmedConversationID,
                 isPinned: isPinned,
                 isMuted: isMuted
             )
             markServerOnline()
-            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
+            scheduleIMConversationSummaryReadModelCorrection(force: true)
             scheduleIMConversationCachePersist()
             return true
         } catch {
@@ -197,12 +197,12 @@ extension AuthManager {
         }
 
         do {
-            let conversation = try await sessionClient.removeIMConversationMember(
+            _ = try await sessionClient.removeIMConversationMember(
                 conversationID: trimmedConversationID,
                 memberUserID: memberUserID
             )
             markServerOnline()
-            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
+            scheduleIMConversationSummaryReadModelCorrection(force: true)
             await conversationRuntimeController.loadConversationMembers(for: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
@@ -225,13 +225,13 @@ extension AuthManager {
         }
 
         do {
-            let conversation = try await sessionClient.updateIMConversationMemberRole(
+            _ = try await sessionClient.updateIMConversationMemberRole(
                 conversationID: trimmedConversationID,
                 memberUserID: memberUserID,
                 role: role
             )
             markServerOnline()
-            await conversationRuntimeController.applyConversationSummaryReadModelAsync([conversation])
+            scheduleIMConversationSummaryReadModelCorrection(force: true)
             await conversationRuntimeController.loadConversationMembers(for: trimmedConversationID)
             scheduleIMConversationCachePersist()
             return true
@@ -257,6 +257,7 @@ extension AuthManager {
                 removedConversationIDs: [UUID(uuidString: trimmedConversationID)].compactMap { $0 }
             )
             await imConversationStore.removeConversationAsync(id: trimmedConversationID)
+            scheduleIMConversationSummaryReadModelCorrection(force: true)
             scheduleIMConversationCachePersist()
             return true
         } catch {

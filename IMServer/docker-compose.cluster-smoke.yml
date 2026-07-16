@@ -1,0 +1,157 @@
+# Overlay for docker-compose.production-smoke.yml. It keeps the base smoke
+# services intact while replacing their Redis client configuration with a real
+# three-primary Valkey Cluster. The standalone `redis` service remains only as
+# a base-compose dependency and is not used by IMServer in this profile.
+x-imserver-cluster-env: &imserver_cluster_env
+  REDIS_URL: redis://valkey-1:6379
+  IM_REDIS_DEPLOYMENT_TOPOLOGY: cluster
+  IM_REDIS_CLUSTER_NODES: valkey-1:6379,valkey-2:6379,valkey-3:6379
+  IM_NODE_DISPATCH_MODE: http
+  IM_GATEWAY_NODE_DISPATCH_ENDPOINTS: gateway-a=http://gateway:8080
+  IM_NODE_DISPATCH_SHARED_SECRET: cluster-smoke-node-dispatch-secret-0123456789
+  IM_DELIVERY_TRACE_SAMPLING_ENABLED: "true"
+  IM_DELIVERY_TRACE_SAMPLE_RATE_BPS: "10000"
+  IM_DELIVERY_TRACE_MAX_LOGS_PER_MINUTE: "20"
+
+x-imserver-cluster-depends: &imserver_cluster_depends
+  postgres:
+    condition: service_healthy
+  redpanda:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+  redpanda-init:
+    condition: service_completed_successfully
+  minio-init:
+    condition: service_completed_successfully
+  valkey-cluster-init:
+    condition: service_completed_successfully
+
+services:
+  valkey-1:
+    image: valkey/valkey:8.1.8-alpine
+    command:
+      - valkey-server
+      - --cluster-enabled
+      - "yes"
+      - --cluster-config-file
+      - nodes.conf
+      - --cluster-node-timeout
+      - "5000"
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -h 127.0.0.1 ping | grep -qx PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  valkey-2:
+    image: valkey/valkey:8.1.8-alpine
+    command:
+      - valkey-server
+      - --cluster-enabled
+      - "yes"
+      - --cluster-config-file
+      - nodes.conf
+      - --cluster-node-timeout
+      - "5000"
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -h 127.0.0.1 ping | grep -qx PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  valkey-3:
+    image: valkey/valkey:8.1.8-alpine
+    command:
+      - valkey-server
+      - --cluster-enabled
+      - "yes"
+      - --cluster-config-file
+      - nodes.conf
+      - --cluster-node-timeout
+      - "5000"
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -h 127.0.0.1 ping | grep -qx PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  valkey-cluster-init:
+    image: valkey/valkey:8.1.8-alpine
+    depends_on:
+      valkey-1:
+        condition: service_healthy
+      valkey-2:
+        condition: service_healthy
+      valkey-3:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command: >
+      if valkey-cli -h valkey-1 cluster info 2>/dev/null | grep -q 'cluster_state:ok'; then
+        exit 0;
+      fi;
+      yes yes | valkey-cli --cluster create
+      valkey-1:6379 valkey-2:6379 valkey-3:6379 --cluster-replicas 0;
+      valkey-cli -h valkey-1 cluster info | grep -q 'cluster_state:ok'
+
+  ops:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends
+
+  gateway:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends
+
+  command-api:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends
+
+  query-api:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends
+
+  outbox-relay:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends
+
+  stream-consumer-summary:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends
+
+  stream-consumer-changes:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends
+
+  stream-consumer-search:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends
+
+  stream-consumer-notification:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends
+
+  stream-consumer-repair:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends
+
+  stream-consumer-domain:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends
+
+  stream-consumer-realtime:
+    environment: *imserver_cluster_env
+    depends_on: *imserver_cluster_depends

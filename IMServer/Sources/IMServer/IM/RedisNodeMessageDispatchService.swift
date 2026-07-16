@@ -5,13 +5,21 @@ import Vapor
 final class RedisNodeMessageDispatchService: NodeMessageDispatchService, @unchecked Sendable {
     private let pool: RedisConnectionPool
     private let nodeID: String
+    private let keyspace: IMRealtimeRedisKeyspace
     private let dispatchChannel: RedisChannelName
     private let logger: Logger
 
-    init(pool: RedisConnectionPool, nodeID: String, logger: Logger) {
+    init(
+        pool: RedisConnectionPool,
+        nodeID: String,
+        cellID: String = IMRealtimeCellConfiguration.defaultCellID,
+        logger: Logger
+    ) {
         self.pool = pool
         self.nodeID = nodeID
-        self.dispatchChannel = RedisChannelName("im:dispatch:node:\(nodeID)")
+        let keyspace = IMRealtimeRedisKeyspace(cellID: cellID)
+        self.keyspace = keyspace
+        self.dispatchChannel = RedisChannelName(keyspace.key("dispatch:node:\(nodeID)"))
         self.logger = logger
     }
 
@@ -48,6 +56,9 @@ final class RedisNodeMessageDispatchService: NodeMessageDispatchService, @unchec
         guard let encoded = String(data: payload, encoding: .utf8) else {
             throw RedisRoutingError.invalidDispatchPayload
         }
-        _ = try await pool.publish(encoded, to: RedisChannelName("im:dispatch:node:\(nodeID)")).get()
+        _ = try await pool.publish(
+            encoded,
+            to: RedisChannelName(keyspace.key("dispatch:node:\(nodeID)"))
+        ).get()
     }
 }

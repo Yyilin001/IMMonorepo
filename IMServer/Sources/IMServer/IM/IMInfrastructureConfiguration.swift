@@ -82,6 +82,250 @@ struct IMCommandAPIIngressConfiguration: Sendable {
     }
 }
 
+enum IMCellIngressEndpointPurpose: String, CaseIterable, Sendable {
+    case command
+    case query
+    case realtime
+}
+
+struct IMCellIngressRegistryConfiguration: Sendable, Equatable {
+    enum Mode: String, Sendable {
+        case staticEndpoints = "static"
+        case database
+    }
+
+    let mode: Mode
+    let cacheTTLSeconds: Int
+    let invalidModeValue: String?
+
+    init(
+        mode: Mode = .staticEndpoints,
+        cacheTTLSeconds: Int = 15,
+        invalidModeValue: String? = nil
+    ) {
+        self.mode = mode
+        self.cacheTTLSeconds = min(300, max(1, cacheTTLSeconds))
+        self.invalidModeValue = invalidModeValue
+    }
+
+    static func load(from environment: Environment) -> Self {
+        let rawMode = Environment.get("IM_CELL_INGRESS_REGISTRY_MODE")?.lowercased()
+        return Self(
+            mode: rawMode.flatMap(Mode.init(rawValue:)) ?? .staticEndpoints,
+            cacheTTLSeconds: Environment.get("IM_CELL_INGRESS_REGISTRY_CACHE_TTL_SECONDS")
+                .flatMap(Int.init(_:)) ?? 15,
+            invalidModeValue: rawMode.flatMap(Mode.init(rawValue:)) == nil && rawMode != nil ? rawMode : nil
+        )
+    }
+}
+
+enum IMCellIngressEndpointSource: String, Sendable, Equatable {
+    case legacy = "IM_REALTIME_CELL_INGRESS_ENDPOINTS"
+    case command = "IM_CELL_INGRESS_COMMAND_ENDPOINTS"
+    case query = "IM_CELL_INGRESS_QUERY_ENDPOINTS"
+    case realtime = "IM_CELL_INGRESS_REALTIME_ENDPOINTS"
+}
+
+struct IMInvalidCellIngressEndpointEntry: Sendable, Equatable {
+    let source: IMCellIngressEndpointSource
+    let position: Int
+}
+
+struct IMCellIngressConfiguration: Sendable, Equatable {
+    /// Legacy Cell-wide ingress map. This remains a compatibility fallback for
+    /// deployments with an internal L7 router that dispatches by request path.
+    let endpointsByCellID: [String: String]
+    let commandEndpointsByCellID: [String: String]
+    let queryEndpointsByCellID: [String: String]
+    let realtimeEndpointsByCellID: [String: String]
+    let invalidEndpointEntries: [IMInvalidCellIngressEndpointEntry]
+    let sharedSecret: String?
+
+    init(
+        endpointsByCellID: [String: String] = [:],
+        commandEndpointsByCellID: [String: String] = [:],
+        queryEndpointsByCellID: [String: String] = [:],
+        realtimeEndpointsByCellID: [String: String] = [:],
+        invalidEndpointEntries: [IMInvalidCellIngressEndpointEntry] = [],
+        sharedSecret: String? = nil
+    ) {
+        self.endpointsByCellID = endpointsByCellID
+        self.commandEndpointsByCellID = commandEndpointsByCellID
+        self.queryEndpointsByCellID = queryEndpointsByCellID
+        self.realtimeEndpointsByCellID = realtimeEndpointsByCellID
+        self.invalidEndpointEntries = invalidEndpointEntries
+        self.sharedSecret = sharedSecret
+    }
+
+    static func load(from environment: Environment) -> IMCellIngressConfiguration {
+        let legacyEndpoints = parseEndpoints(
+            Environment.get(IMCellIngressEndpointSource.legacy.rawValue),
+            source: .legacy
+        )
+        let commandEndpoints = parseEndpoints(
+            Environment.get(IMCellIngressEndpointSource.command.rawValue),
+            source: .command
+        )
+        let queryEndpoints = parseEndpoints(
+            Environment.get(IMCellIngressEndpointSource.query.rawValue),
+            source: .query
+        )
+        let realtimeEndpoints = parseEndpoints(
+            Environment.get(IMCellIngressEndpointSource.realtime.rawValue),
+            source: .realtime
+        )
+        return IMCellIngressConfiguration(
+            endpointsByCellID: legacyEndpoints.endpointsByCellID,
+            commandEndpointsByCellID: commandEndpoints.endpointsByCellID,
+            queryEndpointsByCellID: queryEndpoints.endpointsByCellID,
+            realtimeEndpointsByCellID: realtimeEndpoints.endpointsByCellID,
+            invalidEndpointEntries: legacyEndpoints.invalidEntries
+                + commandEndpoints.invalidEntries
+                + queryEndpoints.invalidEntries
+                + realtimeEndpoints.invalidEntries,
+            sharedSecret: Environment.get("IM_CELL_INGRESS_SHARED_SECRET")
+                ?? Environment.get("IM_INTERNAL_SHARED_SECRET")
+        )
+    }
+
+    func endpoint(for cellID: String, purpose: IMCellIngressEndpointPurpose) -> String? {
+        switch purpose {
+        case .command:
+            return commandEndpointsByCellID[cellID] ?? endpointsByCellID[cellID]
+        case .query:
+            return queryEndpointsByCellID[cellID] ?? endpointsByCellID[cellID]
+        case .realtime:
+            return realtimeEndpointsByCellID[cellID] ?? endpointsByCellID[cellID]
+        }
+    }
+
+    var configuredEndpoints: [(purpose: IMCellIngressEndpointPurpose?, cellID: String, endpoint: String)] {
+        var result: [(purpose: IMCellIngressEndpointPurpose?, cellID: String, endpoint: String)] = []
+        result += endpointsByCellID.map { (purpose: nil, cellID: $0.key, endpoint: $0.value) }
+        result += commandEndpointsByCellID.map { (purpose: .command, cellID: $0.key, endpoint: $0.value) }
+        result += queryEndpointsByCellID.map { (purpose: .query, cellID: $0.key, endpoint: $0.value) }
+        result += realtimeEndpointsByCellID.map { (purpose: .realtime, cellID: $0.key, endpoint: $0.value) }
+        return result
+    }
+
+    var invalidEndpointEntryDescriptions: [String] {
+        invalidEndpointEntries.map { "\($0.source.rawValue) entry \($0.position)" }
+    }
+
+    private struct ParsedEndpoints {
+        let endpointsByCellID: [String: String]
+        let invalidEntries: [IMInvalidCellIngressEndpointEntry]
+    }
+
+    private static func parseEndpoints(
+        _ rawValue: String?,
+        source: IMCellIngressEndpointSource
+    ) -> ParsedEndpoints {
+        let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !rawValue.isEmpty else {
+            return ParsedEndpoints(endpointsByCellID: [:], invalidEntries: [])
+        }
+
+        let endpointEntries = rawValue.split(separator: ",", omittingEmptySubsequences: false)
+        var endpointsByCellID: [String: String] = [:]
+        var invalidEntries: [IMInvalidCellIngressEndpointEntry] = []
+        for (offset, rawEntry) in endpointEntries.enumerated() {
+            let entry = String(rawEntry)
+            let components = entry.split(separator: "=", maxSplits: 1).map(String.init)
+            guard components.count == 2 else {
+                invalidEntries.append(.init(source: source, position: offset + 1))
+                continue
+            }
+            let cellID = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let endpoint = components[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard IMRealtimeCellConfiguration.isValid(cellID: cellID),
+                  let url = URL(string: endpoint),
+                  let scheme = url.scheme?.lowercased(),
+                  ["http", "https"].contains(scheme),
+                  url.host != nil
+            else {
+                invalidEntries.append(.init(source: source, position: offset + 1))
+                continue
+            }
+            endpointsByCellID[cellID] = endpoint
+        }
+        return ParsedEndpoints(
+            endpointsByCellID: endpointsByCellID,
+            invalidEntries: invalidEntries
+        )
+    }
+}
+
+/// Controls Cell-local delivery after the presence store has resolved a
+/// recipient to a Gateway node. HTTP mode keeps node delivery independent from
+/// Redis Pub/Sub so the routing store can later move to a Redis Cluster without
+/// requiring a global Pub/Sub channel.
+struct IMNodeDispatchConfiguration: Sendable, Equatable {
+    enum Mode: String, Sendable {
+        case redis
+        case http
+    }
+
+    let mode: Mode
+    let endpointsByNodeID: [String: String]
+    let sharedSecret: String?
+    let invalidModeValue: String?
+
+    init(
+        mode: Mode,
+        endpointsByNodeID: [String: String],
+        sharedSecret: String?,
+        invalidModeValue: String? = nil
+    ) {
+        self.mode = mode
+        self.endpointsByNodeID = endpointsByNodeID
+        self.sharedSecret = sharedSecret
+        self.invalidModeValue = invalidModeValue
+    }
+
+    static func load(from environment: Environment) -> IMNodeDispatchConfiguration {
+        let rawMode = Environment.get("IM_NODE_DISPATCH_MODE")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let mode = rawMode.flatMap(Mode.init(rawValue:)) ?? .redis
+        let endpointEntries = (Environment.get("IM_GATEWAY_NODE_DISPATCH_ENDPOINTS") ?? "")
+            .split(separator: ",")
+            .map(String.init)
+        var endpointsByNodeID: [String: String] = [:]
+        for entry in endpointEntries {
+            let components = entry.split(separator: "=", maxSplits: 1).map(String.init)
+            guard components.count == 2 else {
+                continue
+            }
+            let nodeID = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let endpoint = components[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !nodeID.isEmpty,
+                  let url = URL(string: endpoint),
+                  let scheme = url.scheme?.lowercased(),
+                  ["http", "https"].contains(scheme),
+                  url.host != nil
+            else {
+                continue
+            }
+            endpointsByNodeID[nodeID] = endpoint
+        }
+        return IMNodeDispatchConfiguration(
+            mode: mode,
+            endpointsByNodeID: endpointsByNodeID,
+            sharedSecret: Environment.get("IM_NODE_DISPATCH_SHARED_SECRET")
+                ?? Environment.get("IM_CELL_INGRESS_SHARED_SECRET")
+                ?? Environment.get("IM_INTERNAL_SHARED_SECRET"),
+            invalidModeValue: rawMode.flatMap { Mode(rawValue: $0) == nil ? $0 : nil }
+        )
+    }
+
+    func endpoint(for nodeID: String) -> String? {
+        endpointsByNodeID[nodeID]
+    }
+}
+
 struct IMEventStreamConfiguration: Sendable {
     enum Driver: String, Sendable {
         case databaseOutbox = "database-outbox"
@@ -617,6 +861,18 @@ private struct IMCommandAPIIngressConfigurationStorageKey: StorageKey {
     typealias Value = IMCommandAPIIngressConfiguration
 }
 
+private struct IMCellIngressConfigurationStorageKey: StorageKey {
+    typealias Value = IMCellIngressConfiguration
+}
+
+private struct IMCellIngressRegistryConfigurationStorageKey: StorageKey {
+    typealias Value = IMCellIngressRegistryConfiguration
+}
+
+private struct IMNodeDispatchConfigurationStorageKey: StorageKey {
+    typealias Value = IMNodeDispatchConfiguration
+}
+
 private struct IMEventStreamConfigurationStorageKey: StorageKey {
     typealias Value = IMEventStreamConfiguration
 }
@@ -664,6 +920,42 @@ extension Application {
             return configuration
         }
         set { storage[IMCommandAPIIngressConfigurationStorageKey.self] = newValue }
+    }
+
+    var cellIngressConfiguration: IMCellIngressConfiguration {
+        get {
+            if let configuration = storage[IMCellIngressConfigurationStorageKey.self] {
+                return configuration
+            }
+            let configuration = IMCellIngressConfiguration.load(from: environment)
+            storage[IMCellIngressConfigurationStorageKey.self] = configuration
+            return configuration
+        }
+        set { storage[IMCellIngressConfigurationStorageKey.self] = newValue }
+    }
+
+    var cellIngressRegistryConfiguration: IMCellIngressRegistryConfiguration {
+        get {
+            if let configuration = storage[IMCellIngressRegistryConfigurationStorageKey.self] {
+                return configuration
+            }
+            let configuration = IMCellIngressRegistryConfiguration.load(from: environment)
+            storage[IMCellIngressRegistryConfigurationStorageKey.self] = configuration
+            return configuration
+        }
+        set { storage[IMCellIngressRegistryConfigurationStorageKey.self] = newValue }
+    }
+
+    var nodeDispatchConfiguration: IMNodeDispatchConfiguration {
+        get {
+            if let configuration = storage[IMNodeDispatchConfigurationStorageKey.self] {
+                return configuration
+            }
+            let configuration = IMNodeDispatchConfiguration.load(from: environment)
+            storage[IMNodeDispatchConfigurationStorageKey.self] = configuration
+            return configuration
+        }
+        set { storage[IMNodeDispatchConfigurationStorageKey.self] = newValue }
     }
 
     var eventStreamConfiguration: IMEventStreamConfiguration {

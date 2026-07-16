@@ -458,7 +458,6 @@ final class IMGapSyncCoordinator {
     func startCatchUpIfNeeded() {
         guard let runtime,
               let currentUserID = runtime.currentUserProvider()?.id,
-              runtime.imConnection != nil,
               catchUpTask == nil,
               !queue.isEmpty
         else {
@@ -486,8 +485,7 @@ final class IMGapSyncCoordinator {
         while !Task.isCancelled {
             guard let runtime,
                   generation == runtime.imConnectionGeneration,
-                  runtime.currentUserProvider()?.id == currentUserID,
-                  runtime.imConnection != nil
+                  runtime.currentUserProvider()?.id == currentUserID
             else {
                 clearCatchUpState()
                 return
@@ -521,7 +519,6 @@ final class IMGapSyncCoordinator {
 
             guard generation == runtime.imConnectionGeneration,
                   runtime.currentUserProvider()?.id == currentUserID,
-                  runtime.imConnection != nil,
                   !Task.isCancelled
             else {
                 clearCatchUpState()

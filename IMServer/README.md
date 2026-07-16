@@ -187,6 +187,9 @@ Postgres smoke 测试：
 IM_POSTGRES_SMOKE_DATABASE_URL=postgres://user:password@127.0.0.1:5432/imserver_smoke swift test --no-parallel
 ```
 
+该测试会创建并删除独立 schema，覆盖生产 PostgreSQL 的迁移、索引和核心 SQL 路径，包含两个
+worker 对同一治理命令的 `FOR UPDATE SKIP LOCKED` 原子领取验证。
+
 生产拓扑 smoke：
 
 ```bash

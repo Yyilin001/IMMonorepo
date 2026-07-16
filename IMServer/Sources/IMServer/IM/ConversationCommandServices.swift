@@ -20,7 +20,7 @@ struct ConversationCommandService {
         title: String?,
         memberEmails: [String],
         creatorUserID: UUID
-    ) async throws -> IMConversationResponse {
+    ) async throws -> ConversationCreateCommandResult {
         if let app {
             try await rejectBlockedDirectConversationIfNeeded(
                 kind: kind,
@@ -30,43 +30,110 @@ struct ConversationCommandService {
                 on: app.db
             )
         }
+        let directMemberUserIDs: [UUID]? = if let app {
+            try await directConversationMemberUserIDs(
+                app: app,
+                kind: kind,
+                title: title,
+                memberEmails: memberEmails,
+                creatorUserID: creatorUserID
+            )
+        } else {
+            nil
+        }
         if let app,
-           let existingDirectConversation = try await existingDirectConversation(
-            app: app,
-            kind: kind,
-            title: title,
-            memberEmails: memberEmails,
-            creatorUserID: creatorUserID
-           ) {
-            return existingDirectConversation
+           let directMemberUserIDs,
+           let existingConversationID = try await app.directConversationIndex
+            .conversationID(forMemberUserIDs: directMemberUserIDs) {
+            return try await existingDirectConversationResult(
+                app: app,
+                conversationID: existingConversationID,
+                memberUserIDs: directMemberUserIDs
+            )
         }
 
         let conversationID = UUID()
         let assignedShardID = app?.conversationShardRouter.shardID(forNewConversationID: conversationID)
             ?? SingleShardConversationShardRouter.defaultShardID
-        let commandDB = try commandDatabase(forShardID: assignedShardID)
-        let response = try await ConversationCommandSupport(db: commandDB).createConversation(
-            conversationID: conversationID,
-            assignedShardID: assignedShardID,
-            kind: kind,
-            title: title,
-            memberEmails: memberEmails,
-            creatorUserID: creatorUserID
-        )
-        if let app {
-            try await app.conversationDirectory.registerConversation(
-                conversationID: response.id,
+        var reservedDirectConversation = false
+        if let app, let directMemberUserIDs {
+            switch try await app.directConversationIndex.reserveDirectConversation(
+                conversationID: conversationID,
+                memberUserIDs: directMemberUserIDs,
                 shardID: assignedShardID
-            )
-            if response.kind == IMConversationKind.direct.rawValue {
-                try await app.directConversationIndex.registerDirectConversation(
-                    conversationID: response.id,
-                    memberUserIDs: response.memberUserIDs,
-                    shardID: assignedShardID
+            ) {
+            case .reserved:
+                reservedDirectConversation = true
+            case let .existing(existingConversationID):
+                return try await existingDirectConversationResult(
+                    app: app,
+                    conversationID: existingConversationID,
+                    memberUserIDs: directMemberUserIDs
                 )
             }
         }
-        return response
+        let result: ConversationCreateCommandResult
+        do {
+            if let app {
+                try await app.conversationDirectory.reserveConversation(
+                    conversationID: conversationID,
+                    shardID: assignedShardID,
+                    cellID: app.imRealtimeCellID
+                )
+            }
+            let commandDB = try commandDatabase(forShardID: assignedShardID)
+            result = try await commandSupport(for: commandDB).createConversation(
+                conversationID: conversationID,
+                assignedShardID: assignedShardID,
+                kind: kind,
+                title: title,
+                memberEmails: memberEmails,
+                creatorUserID: creatorUserID
+            )
+        } catch {
+            if let app, reservedDirectConversation, let directMemberUserIDs {
+                try? await app.directConversationIndex.releaseDirectConversationReservation(
+                    conversationID: conversationID,
+                    memberUserIDs: directMemberUserIDs
+                )
+            }
+            throw error
+        }
+        if let app, result.receipt.didMutate {
+            // The matching membership event activates a pending route during
+            // outbox replay if this immediate activation is interrupted.
+            do {
+                try await app.conversationDirectory.activateConversation(
+                    conversationID: result.receipt.conversationID
+                )
+            } catch {
+                app.logger.warning(
+                    "Conversation route activation deferred to outbox recovery",
+                    metadata: [
+                        "conversation_id": .string(result.receipt.conversationID.uuidString),
+                        "shard_id": .string(assignedShardID),
+                        "error": .string(String(describing: error))
+                    ]
+                )
+            }
+            if result.kind == .direct {
+                let memberUserIDs = result.memberUserIDs
+                try await app.directConversationIndex.registerDirectConversation(
+                    conversationID: result.receipt.conversationID,
+                    memberUserIDs: memberUserIDs,
+                    shardID: assignedShardID
+                )
+                if memberUserIDs.count == 2 {
+                    try await DirectConversationPairDirectoryService(db: app.db).upsert(
+                        lhs: memberUserIDs[0],
+                        rhs: memberUserIDs[1],
+                        conversationID: result.receipt.conversationID,
+                        directMessagingState: .active
+                    )
+                }
+            }
+        }
+        return result
     }
 
     private func rejectBlockedDirectConversationIfNeeded(
@@ -106,13 +173,13 @@ struct ConversationCommandService {
         }
     }
 
-    private func existingDirectConversation(
+    private func directConversationMemberUserIDs(
         app: Application,
         kind: String?,
         title: String?,
         memberEmails: [String],
         creatorUserID: UUID
-    ) async throws -> IMConversationResponse? {
+    ) async throws -> [UUID]? {
         let normalizedTitle = ConversationCommandNormalizationSupport.normalizedConversationTitle(title)
         let normalizedEmails = Array(
             Set(memberEmails.map(User.normalize).filter { !$0.isEmpty })
@@ -135,16 +202,57 @@ struct ConversationCommandService {
             normalizedTitle: normalizedTitle,
             memberUserIDs: memberUserIDs
         )
-        guard conversationKind == .direct,
-              let existingConversationID = try await app.directConversationIndex.conversationID(forMemberUserIDs: memberUserIDs)
-        else {
+        guard conversationKind == .direct else {
             return nil
         }
+        return memberUserIDs
+    }
 
-        let readDB = try await app.conversationShardRouter.strongReadDatabase(forConversationID: existingConversationID)
-        return try await ConversationSummaryReadSupport(db: readDB).conversationSummary(
-            conversationID: existingConversationID,
-            for: creatorUserID
+    private func directConversationResult(
+        conversationID: UUID,
+        memberUserIDs: [UUID]
+    ) -> ConversationCreateCommandResult {
+        return ConversationCreateCommandResult(
+            receipt: ConversationCommandReceipt(
+                conversationID: conversationID,
+                eventID: nil,
+                eventType: .membershipAdded,
+                acceptedAt: Date(),
+                membershipRevision: nil,
+                didMutate: false
+            ),
+            kind: .direct,
+            memberUserIDs: memberUserIDs
+        )
+    }
+
+    private func existingDirectConversationResult(
+        app: Application,
+        conversationID: UUID,
+        memberUserIDs: [UUID]
+    ) async throws -> ConversationCreateCommandResult {
+        do {
+            _ = try await app.conversationDirectory.route(for: conversationID)
+        } catch let error as Abort where error.status == .notFound {
+            // Older single-shard deployments may have a direct-pair index but
+            // no directory row. Keep that compatible only after confirming
+            // the canonical conversation exists. A missing row otherwise
+            // means another request is still holding the direct-pair reserve.
+            let shardID = try await app.directConversationIndex.shardID(
+                forMemberUserIDs: memberUserIDs
+            )
+            let database = app.conversationShardRouter.strongReadDatabase(forShardID: shardID)
+            guard try await Conversation.find(conversationID, on: database) != nil else {
+                throw Abort(
+                    .serviceUnavailable,
+                    reason: "Direct conversation creation is in progress. Retry the request."
+                )
+            }
+        }
+
+        return directConversationResult(
+            conversationID: conversationID,
+            memberUserIDs: memberUserIDs
         )
     }
 
@@ -152,8 +260,8 @@ struct ConversationCommandService {
         in conversationID: UUID,
         memberEmails: [String],
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).addMembers(
+    ) async throws -> ConversationCommandReceipt {
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).addMembers(
             in: conversationID,
             memberEmails: memberEmails,
             requesterUserID: requesterUserID
@@ -165,7 +273,7 @@ struct ConversationCommandService {
         memberUserID: UUID,
         requesterUserID: UUID
     ) async throws -> ConversationMemberRemovalResult {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).removeMember(
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).removeMember(
             in: conversationID,
             memberUserID: memberUserID,
             requesterUserID: requesterUserID
@@ -177,8 +285,8 @@ struct ConversationCommandService {
         memberUserID: UUID,
         role: IMConversationMemberRole,
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).updateMemberRole(
+    ) async throws -> ConversationCommandReceipt {
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).updateMemberRole(
             in: conversationID,
             memberUserID: memberUserID,
             role: role,
@@ -190,8 +298,8 @@ struct ConversationCommandService {
         in conversationID: UUID,
         title: String,
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).updateConversationTitle(
+    ) async throws -> ConversationCommandReceipt {
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).updateConversationTitle(
             in: conversationID,
             title: title,
             requesterUserID: requesterUserID
@@ -205,8 +313,8 @@ struct ConversationCommandService {
         avatarPreset: IMConversationAvatarPreset?,
         muteAll: Bool?,
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).updateConversationMetadata(
+    ) async throws -> ConversationCommandReceipt {
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).updateConversationMetadata(
             in: conversationID,
             title: title,
             notice: notice,
@@ -220,8 +328,8 @@ struct ConversationCommandService {
         in conversationID: UUID,
         requesterUserID: UUID,
         memberNickname: String?
-    ) async throws -> IMConversationResponse {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).updateMemberNickname(
+    ) async throws -> ConversationCommandReceipt {
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).updateMemberNickname(
             in: conversationID,
             requesterUserID: requesterUserID,
             memberNickname: memberNickname
@@ -233,8 +341,8 @@ struct ConversationCommandService {
         isPinned: Bool?,
         isMuted: Bool?,
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).updateConversationPreferences(
+    ) async throws -> ConversationCommandReceipt {
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).updateConversationPreferences(
             in: conversationID,
             isPinned: isPinned,
             isMuted: isMuted,
@@ -247,7 +355,7 @@ struct ConversationCommandService {
         for userID: UUID,
         readSequence: Int
     ) async throws -> IMConversationReadResponse {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).markConversationRead(
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).markConversationRead(
             in: conversationID,
             for: userID,
             readSequence: readSequence
@@ -259,7 +367,7 @@ struct ConversationCommandService {
         messageID: UUID,
         requesterUserID: UUID
     ) async throws -> IMMessageResponse {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).recallMessage(
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).recallMessage(
             in: conversationID,
             messageID: messageID,
             requesterUserID: requesterUserID
@@ -272,7 +380,7 @@ struct ConversationCommandService {
         body: IMRichTextContent,
         requesterUserID: UUID
     ) async throws -> IMMessageResponse {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).editMessage(
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).editMessage(
             in: conversationID,
             messageID: messageID,
             body: body,
@@ -286,7 +394,7 @@ struct ConversationCommandService {
         emoji: String,
         requesterUserID: UUID
     ) async throws -> IMMessageResponse {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).toggleReaction(
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).toggleReaction(
             in: conversationID,
             messageID: messageID,
             emoji: emoji,
@@ -297,8 +405,8 @@ struct ConversationCommandService {
     func leaveConversation(
         in conversationID: UUID,
         requesterUserID: UUID
-    ) async throws {
-        try await ConversationCommandSupport(db: commandDatabase(forConversationID: conversationID)).leaveConversation(
+    ) async throws -> ConversationCommandReceipt {
+        try await commandSupport(for: commandDatabase(forConversationID: conversationID)).leaveConversation(
             in: conversationID,
             requesterUserID: requesterUserID
         )
@@ -312,6 +420,16 @@ struct ConversationCommandService {
             throw Abort(.internalServerError, reason: "ConversationCommandService missing both app and database.")
         }
         return app.conversationShardRouter.commandDatabase(forShardID: shardID)
+    }
+
+    private func commandSupport(for db: any Database) -> ConversationCommandSupport {
+        ConversationCommandSupport(
+            db: db,
+            userDirectoryDB: app?.db,
+            // Application mode registers all primary-directory records after the
+            // conversation-shard transaction commits.
+            usesLocalConversationDirectoryTables: app == nil
+        )
     }
 
     private func commandDatabase(forConversationID conversationID: UUID) async throws -> any Database {
@@ -367,7 +485,10 @@ struct ConversationStrongReadService {
         conversationID: UUID,
         for userID: UUID
     ) async throws -> IMConversationResponse {
-        try await ConversationSummaryReadSupport(db: database(forConversationID: conversationID))
+        try await ConversationSummaryReadSupport(
+            db: database(forConversationID: conversationID),
+            userDirectoryDB: app?.db
+        )
             .conversationSummary(conversationID: conversationID, for: userID)
     }
 
@@ -422,6 +543,14 @@ struct ConversationEventualReadService {
             .listConversations(for: userID, cursor: cursor, limit: limit, kind: kind)
     }
 
+    func conversationSummary(
+        conversationID: UUID,
+        for userID: UUID
+    ) async throws -> IMConversationResponse {
+        try await ConversationSummaryReadSupport(db: try listDatabase())
+            .conversationSummary(conversationID: conversationID, for: userID)
+    }
+
     func listConversationChanges(
         for userID: UUID,
         afterToken: String,
@@ -433,7 +562,10 @@ struct ConversationEventualReadService {
     }
 
     func listMembers(in conversationID: UUID, for userID: UUID) async throws -> [IMConversationMemberResponse] {
-        try await ConversationMembershipService(db: database(forConversationID: conversationID))
+        try await ConversationMembershipService(
+            db: database(forConversationID: conversationID),
+            userDirectoryDB: app?.db
+        )
             .listMemberResponses(in: conversationID, for: userID)
     }
 
@@ -444,7 +576,10 @@ struct ConversationEventualReadService {
         limit: Int?,
         query: String?
     ) async throws -> IMConversationMemberPageResponse {
-        try await ConversationMembershipService(db: database(forConversationID: conversationID))
+        try await ConversationMembershipService(
+            db: database(forConversationID: conversationID),
+            userDirectoryDB: app?.db
+        )
             .listMemberPageResponses(
                 in: conversationID,
                 for: userID,

@@ -39,6 +39,7 @@ private func configureShared(_ app: Application) async throws {
     let authSessionCacheConfiguration = AuthSessionCacheConfiguration.load(from: app.environment)
     let imTCPConfiguration = IMTCPConfiguration.load(from: app.environment)
     let gatewayLocalFanoutConfiguration = IMGatewayLocalFanoutConfiguration.load()
+    app.imRealtimeCellConfiguration = try IMRealtimeCellConfiguration.load(from: app.environment)
     app.authClientIPResolver = AuthClientIPResolver.load(from: app.environment)
     app.gatewayRelayConfiguration = IMGatewayRelayConfiguration.load(from: app.environment)
     app.commandAPIIngressConfiguration = IMCommandAPIIngressConfiguration.load(from: app.environment)
@@ -61,11 +62,29 @@ private func configureShared(_ app: Application) async throws {
     app.imTCPConfiguration = imTCPConfiguration
     app.gatewayLocalFanoutConfiguration = gatewayLocalFanoutConfiguration
 
+    let redisRoutingConfiguration = app.imRedisRoutingConfigurationOverride
+        ?? IMRedisRoutingConfiguration.load(from: app.environment)
+    try IMRedisTopologyCompatibility.validate(
+        topology: redisRoutingConfiguration.deploymentTopology,
+        standaloneConsumers: IMRedisTopologyCompatibility.configuredStandaloneConsumers(
+            app: app,
+            routingConfiguration: redisRoutingConfiguration,
+            authSessionCacheConfiguration: authSessionCacheConfiguration,
+            authSecurityConfiguration: authSecurityConfiguration
+        )
+    )
+
     try app.metricsConfiguration.validateStartup(environment: app.environment)
     try IMMigrationStartupPolicy.validateStartup(app: app)
     try InlineOutboxProjectionPolicy.validateStartup(app: app)
     IMDatabaseConfigurator.configureDatabases(app)
     try IMProductionRuntimeValidator.validate(app: app)
+    if app.imRuntimeRole.servesCommandAPI {
+        app.hotConversationLimiter = try await HotConversationLimiterFactory.make(
+            app: app,
+            configuration: app.hotConversationConfiguration
+        )
+    }
     try await app.configureAIStreamLeaseStoreIfNeeded()
     app.authConfiguration = authConfiguration
     app.authSecurityConfiguration = authSecurityConfiguration

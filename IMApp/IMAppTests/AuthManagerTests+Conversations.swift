@@ -364,14 +364,13 @@ extension AuthManagerTests {
                     IMConversationPreferencesUpdateRequestBody.self,
                     from: request.httpBody ?? Data()
                 )
+                _ = await summaryState.updatePreferences(
+                    isPinned: payload.isPinned,
+                    isMuted: payload.isMuted
+                )
                 return HTTPFixtures.response(
-                    statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        await summaryState.updatePreferences(
-                            isPinned: payload.isPinned,
-                            isMuted: payload.isMuted
-                        )
-                    )
+                    statusCode: 202,
+                    body: try Self.imConversationCommandReceiptBody(for: request)
                 )
             case ("GET", "/api/contacts"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
@@ -483,15 +482,14 @@ extension AuthManagerTests {
                     IMConversationMetadataUpdateRequestBody.self,
                     from: request.httpBody ?? Data()
                 )
+                _ = await summaryState.updateMetadata(
+                    title: payload.title,
+                    notice: payload.notice,
+                    avatarPreset: payload.avatarPreset
+                )
                 return HTTPFixtures.response(
-                    statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(
-                        await summaryState.updateMetadata(
-                            title: payload.title,
-                            notice: payload.notice,
-                            avatarPreset: payload.avatarPreset
-                        )
-                    )
+                    statusCode: 202,
+                    body: try Self.imConversationCommandReceiptBody(for: request)
                 )
             case ("GET", "/api/contacts"):
                 return HTTPFixtures.response(statusCode: 200, body: try HTTPFixtures.jsonBody([ContactResponseBody]()))
@@ -1378,8 +1376,8 @@ extension AuthManagerTests {
                     lastReadSequence: 1
                 )
                 return HTTPFixtures.response(
-                    statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(await summaryState.currentSummary())
+                    statusCode: 202,
+                    body: try Self.imConversationCommandReceiptBody(for: request)
                 )
             default:
                 return try Self.defaultOrUnexpectedIMResponse(for: request)

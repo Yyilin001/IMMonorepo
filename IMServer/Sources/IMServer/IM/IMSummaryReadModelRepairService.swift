@@ -28,7 +28,8 @@ struct IMSummaryReadModelRepairService {
             for readModelDB in projectionReadModelDatabases(for: ownerUserID) {
                 try await IMConversationSummaryProjectionService(
                     sourceDB: sourceDB,
-                    readModelDB: readModelDB
+                    readModelDB: readModelDB,
+                    userDirectoryDB: app.db
                 ).refreshConversationSummaries(
                     conversationID: conversationID,
                     recipientUserIDs: [ownerUserID],
@@ -45,7 +46,8 @@ struct IMSummaryReadModelRepairService {
             for summary in existingSummaries where !activeConversationIDs.contains(summary.conversationID) && !summary.isRemoved {
                 try await IMConversationSummaryProjectionService(
                     sourceDB: app.imWriteDB,
-                    readModelDB: readModelDB
+                    readModelDB: readModelDB,
+                    userDirectoryDB: app.db
                 ).markConversationRemoved(
                     conversationID: summary.conversationID,
                     recipientUserID: ownerUserID,

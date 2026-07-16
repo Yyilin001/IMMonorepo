@@ -7,13 +7,24 @@ struct ConversationDomainEventSequenceAllocator {
     let db: any Database
 
     func allocate(conversationID: UUID, on database: (any Database)? = nil) async throws -> IMPositiveSequence {
-        let value = try await DomainEventSequenceSQLAllocator(
+        guard let value = try await allocateRange(count: 1, conversationID: conversationID, on: database).first else {
+            throw Abort(.internalServerError, reason: "领域事件 sequence 分配失败。")
+        }
+        return value
+    }
+
+    func allocateRange(
+        count: Int,
+        conversationID: UUID,
+        on database: (any Database)? = nil
+    ) async throws -> [IMPositiveSequence] {
+        let values = try await DomainEventSequenceSQLAllocator(
             db: database ?? db,
             table: ConversationDomainEventSequence.schema,
             idColumn: "conversation_id",
             valueColumn: "last_sequence"
-        ).allocate(id: conversationID)
-        return try IMPositiveSequence(databaseValue: value, field: "aggregate_sequence")
+        ).allocateRange(count: count, id: conversationID)
+        return try values.map { try IMPositiveSequence(databaseValue: $0, field: "aggregate_sequence") }
     }
 }
 
@@ -102,18 +113,33 @@ private struct DomainEventSequenceSQLAllocator {
     let valueColumn: String
 
     func allocate(id: UUID) async throws -> Int {
+        guard let value = try await allocateRange(count: 1, id: id).first else {
+            throw Abort(.internalServerError, reason: "领域事件 sequence 分配失败。")
+        }
+        return value
+    }
+
+    func allocateRange(count: Int, id: UUID) async throws -> [Int] {
+        guard count > 0 else {
+            return []
+        }
         guard let sql = db as? any SQLDatabase else {
             throw Abort(.internalServerError, reason: "领域事件 sequence allocator 需要 SQL database。")
         }
-        return try await allocateWithUpsert(id: id, on: sql)
+        let end = try await allocateRangeWithUpsert(id: id, count: count, on: sql)
+        guard end >= count else {
+            throw Abort(.internalServerError, reason: "领域事件 sequence 批量分配返回了无效范围。")
+        }
+        return Array((end - count + 1)...end)
     }
 
-    private func allocateWithUpsert(id: UUID, on sql: any SQLDatabase) async throws -> Int {
+    private func allocateRangeWithUpsert(id: UUID, count: Int, on sql: any SQLDatabase) async throws -> Int {
         guard let row = try await sql.raw("""
             INSERT INTO \(unsafeRaw: table) (\(unsafeRaw: idColumn), \(unsafeRaw: valueColumn))
-            VALUES (\(bind: id), 1)
+            VALUES (\(bind: id), \(bind: count))
             ON CONFLICT (\(unsafeRaw: idColumn)) DO UPDATE
-            SET \(unsafeRaw: valueColumn) = \(unsafeRaw: table).\(unsafeRaw: valueColumn) + 1
+            SET \(unsafeRaw: valueColumn) = \(unsafeRaw: table).\(unsafeRaw: valueColumn)
+                + excluded.\(unsafeRaw: valueColumn)
             RETURNING \(unsafeRaw: valueColumn) AS value
             """)
             .first(decoding: Row.self)

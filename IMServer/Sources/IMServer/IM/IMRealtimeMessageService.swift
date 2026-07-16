@@ -4,6 +4,23 @@ import Vapor
 struct IMInternalMessageSendRequest: Content, Sendable {
     let payload: IMTCPMessagePayload
     let senderUserID: UUID
+    let cellRoute: IMInternalMessageCellRoute?
+
+    init(
+        payload: IMTCPMessagePayload,
+        senderUserID: UUID,
+        cellRoute: IMInternalMessageCellRoute? = nil
+    ) {
+        self.payload = payload
+        self.senderUserID = senderUserID
+        self.cellRoute = cellRoute
+    }
+}
+
+struct IMInternalMessageCellRoute: Content, Sendable {
+    let originCellID: String
+    let targetCellID: String
+    let routeVersion: Int
 }
 
 struct IMRealtimeMessagePersistenceResult: Content, Sendable {

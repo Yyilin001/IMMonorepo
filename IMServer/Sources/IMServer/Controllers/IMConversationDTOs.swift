@@ -267,6 +267,7 @@ struct IMConversationResponse: Content, Equatable {
     let title: String?
     let kind: String
     let directMessagingState: String?
+    let groupLifecycleState: String?
     let directPeer: IMDirectPeerResponse?
     let notice: String?
     let avatarPreset: IMConversationAvatarPreset?
@@ -287,6 +288,7 @@ struct IMConversationResponse: Content, Equatable {
         title: String?,
         kind: String = IMConversationKind.group.rawValue,
         directMessagingState: String? = nil,
+        groupLifecycleState: String? = nil,
         directPeer: IMDirectPeerResponse? = nil,
         notice: String? = nil,
         avatarPreset: IMConversationAvatarPreset? = nil,
@@ -306,6 +308,7 @@ struct IMConversationResponse: Content, Equatable {
         self.title = title
         self.kind = kind
         self.directMessagingState = directMessagingState
+        self.groupLifecycleState = groupLifecycleState
         self.directPeer = directPeer
         self.notice = notice
         self.avatarPreset = avatarPreset
@@ -320,6 +323,26 @@ struct IMConversationResponse: Content, Equatable {
         self.isMuted = isMuted
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+}
+
+struct IMConversationCommandReceiptResponse: Content, Equatable {
+    let conversationID: UUID
+    let eventID: UUID?
+    let eventType: String
+    let acceptedAt: Date
+    let membershipRevision: Date?
+    let didMutate: Bool
+    let projectionPending: Bool
+
+    init(receipt: ConversationCommandReceipt) {
+        conversationID = receipt.conversationID
+        eventID = receipt.eventID
+        eventType = receipt.eventType.rawValue
+        acceptedAt = receipt.acceptedAt
+        membershipRevision = receipt.membershipRevision
+        didMutate = receipt.didMutate
+        projectionPending = receipt.projectionPending
     }
 }
 

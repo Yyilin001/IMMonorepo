@@ -1,8 +1,10 @@
-.PHONY: help test-client build-app build-app-local-device print-local-client-config local-dev local-server-start local-server-stop local-server-status local-server-health validate-ios-network-config validate-ios-debug-network-defaults validate-ios-debug-network-defaults-self-test validate-ios-production-config validate-android-network-config validate-production-static validate-production-gates verify-production-static-receipt production-worktree-inventory production-worktree-inventory-json production-worktree-plan production-worktree-plan-json verify-production-worktree-plan-json production-worktree-commit-runbook verify-production-worktree-commit-runbook production-worktree-stage-dry-run verify-production-worktree-stage-dry-run production-worktree-stage-dry-run-batch verify-production-worktree-stage-dry-run-batch verify-production-worktree-staging verify-production-worktree-staged-group check-production-worktree-inventory check-imserver-production-release-gate check-imserver-production-smoke run-imserver-production-smoke verify-imserver-production-smoke install-production-smoke-receipt run-imserver-production-release-gate verify-imserver-production-release-gate production-completion-status verify-production-completion-status production-evidence-recovery-plan production-evidence-recovery-plan-diagnostic verify-production-evidence-recovery-plan verify-production-evidence-recovery-plan-diagnostic check-production-evidence-recovery-diagnostic-paths validate-production-evidence-recovery-env production-readiness-status validate-production-acceptance-env run-current-production-readiness verify-current-production-readiness run-production-acceptance verify-production-acceptance assert-production-ready verify-production-ready-assertion package-production-ready-assertion verify-production-ready-archive check-production-ops run-production-readiness-gate run-operational-audit install-operational-audit-timer send-operational-alert install-backup-timer create-backup-single-node verify-backup run-restore-drill install-restore-drill-timer sync-offsite-backup run-non-large-group-regression-plan check-non-large-group-regression run-non-large-group-regression run-product-test-plan-plan check-product-test-plan run-product-test-plan run-product-scenario-suite-plan check-product-scenario-suite run-product-scenario-suite run-local-acceptance-plan check-local-acceptance run-local-acceptance verify-local-acceptance test-server test-all
+.PHONY: help test-client build-app build-app-local-device print-local-client-config local-dev local-server-start local-server-stop local-server-status local-server-health validate-ios-network-config validate-ios-debug-network-defaults validate-ios-debug-network-defaults-self-test validate-ios-production-config validate-android-network-config validate-production-static validate-production-gates verify-production-static-receipt production-worktree-inventory production-worktree-inventory-json production-worktree-plan production-worktree-plan-json verify-production-worktree-plan-json production-worktree-commit-runbook verify-production-worktree-commit-runbook production-worktree-stage-dry-run verify-production-worktree-stage-dry-run production-worktree-stage-dry-run-batch verify-production-worktree-stage-dry-run-batch verify-production-worktree-staging verify-production-worktree-staged-group check-production-worktree-inventory check-imserver-production-release-gate check-imserver-production-smoke check-imserver-cluster-smoke check-deploy-multinode-template run-imserver-production-smoke verify-imserver-production-smoke install-production-smoke-receipt run-imserver-production-release-gate verify-imserver-production-release-gate production-completion-status verify-production-completion-status production-evidence-recovery-plan production-evidence-recovery-plan-diagnostic verify-production-evidence-recovery-plan verify-production-evidence-recovery-plan-diagnostic check-production-evidence-recovery-diagnostic-paths validate-production-evidence-recovery-env production-readiness-status validate-production-acceptance-env run-current-production-readiness verify-current-production-readiness run-production-acceptance verify-production-acceptance assert-production-ready verify-production-ready-assertion package-production-ready-assertion verify-production-ready-archive check-production-ops run-production-readiness-gate run-operational-audit install-operational-audit-timer send-operational-alert install-backup-timer create-backup-single-node verify-backup run-restore-drill install-restore-drill-timer sync-offsite-backup run-non-large-group-regression-plan check-non-large-group-regression run-non-large-group-regression run-product-test-plan-plan check-product-test-plan run-product-test-plan run-product-scenario-suite-plan check-product-scenario-suite run-product-scenario-suite run-local-acceptance-plan check-local-acceptance run-local-acceptance verify-local-acceptance test-server test-all
+.PHONY: check-imserver-multicell-smoke run-imserver-multicell-smoke verify-imserver-multicell-smoke
 
 CURRENT_PRODUCTION_READINESS_JSON ?= IMServer/LoadTests/results/current-production-readiness/current-production-readiness.json
 IMSERVER_PRODUCTION_RELEASE_GATE_JSON ?= IMServer/reports/latest-production-release-gate.json
 IMSERVER_PRODUCTION_SMOKE_JSON ?= IMServer/reports/latest-production-smoke.json
+IMSERVER_MULTICELL_SMOKE_JSON ?= IMServer/reports/latest-multicell-smoke.json
 PRODUCTION_READY_ASSERTION_JSON ?= IMServer/LoadTests/results/production-ready/latest.json
 PRODUCTION_READY_ASSERTION_ARTIFACT_ROOT ?=
 PRODUCTION_READY_ASSERTION_ARCHIVE_DIR ?= IMServer/LoadTests/results/production-ready/archive
@@ -44,7 +46,7 @@ help:
 	@printf '%s\n' '  make validate-production-static | verify-production-static-receipt | validate-production-gates'
 	@printf '%s\n' '  make production-worktree-inventory | production-worktree-inventory-json | production-worktree-plan | production-worktree-plan-json | verify-production-worktree-plan-json | production-worktree-commit-runbook | verify-production-worktree-commit-runbook | production-worktree-stage-dry-run | verify-production-worktree-stage-dry-run | production-worktree-stage-dry-run-batch | verify-production-worktree-stage-dry-run-batch | verify-production-worktree-staging | verify-production-worktree-staged-group | check-production-worktree-inventory'
 	@printf '%s\n' '  make check-imserver-production-release-gate | run-imserver-production-release-gate | verify-imserver-production-release-gate'
-	@printf '%s\n' '  make check-imserver-production-smoke | run-imserver-production-smoke | verify-imserver-production-smoke | install-production-smoke-receipt'
+	@printf '%s\n' '  make check-imserver-production-smoke | check-imserver-cluster-smoke | check-imserver-multicell-smoke | check-deploy-multinode-template | run-imserver-production-smoke | run-imserver-multicell-smoke | verify-imserver-production-smoke | verify-imserver-multicell-smoke | install-production-smoke-receipt'
 	@printf '%s\n' '  make production-completion-status | verify-production-completion-status | production-evidence-recovery-plan | production-evidence-recovery-plan-diagnostic | verify-production-evidence-recovery-plan | verify-production-evidence-recovery-plan-diagnostic | validate-production-evidence-recovery-env | production-readiness-status | run-current-production-readiness | verify-current-production-readiness'
 	@printf '%s\n' '  make validate-production-acceptance-env | run-production-acceptance | verify-production-acceptance | assert-production-ready | verify-production-ready-assertion | package-production-ready-assertion | verify-production-ready-archive'
 	@printf '%s\n' ''
@@ -233,10 +235,27 @@ check-imserver-production-smoke:
 	python3 IMServer/scripts/verify_production_smoke.py --self-test
 	bash -n deploy/ubuntu/72_install_topology_smoke_receipt.sh
 	TOPOLOGY_SMOKE_INSTALL_SELF_TEST=true bash deploy/ubuntu/72_install_topology_smoke_receipt.sh
+	$(MAKE) check-imserver-cluster-smoke
+	$(MAKE) check-imserver-multicell-smoke
+	$(MAKE) check-deploy-multinode-template
+
+check-imserver-cluster-smoke:
+	cd IMServer && ./scripts/cluster_smoke.sh self-test
+
+check-imserver-multicell-smoke:
+	cd IMServer && ./scripts/multicell_smoke.sh self-test
+	python3 IMServer/scripts/verify_multicell_smoke.py --self-test
 
 run-imserver-production-smoke:
 	cd IMServer && ./scripts/production_smoke.sh run
 	$(MAKE) verify-imserver-production-smoke
+
+run-imserver-multicell-smoke:
+	cd IMServer && ./scripts/multicell_smoke.sh run
+	$(MAKE) verify-imserver-multicell-smoke
+
+verify-imserver-multicell-smoke:
+	python3 IMServer/scripts/verify_multicell_smoke.py --receipt-json "$(IMSERVER_MULTICELL_SMOKE_JSON)" --require-pass --require-artifacts-exist
 
 verify-imserver-production-smoke:
 	python3 IMServer/scripts/verify_production_smoke.py --receipt-json "$(IMSERVER_PRODUCTION_SMOKE_JSON)" --require-pass --require-artifacts-exist
@@ -426,6 +445,15 @@ check-local-acceptance:
 
 run-local-acceptance:
 	bash IMServer/LoadTests/run_local_acceptance.sh run
+
+check-local-multinode-fault-contracts:
+	bash IMServer/LoadTests/run_local_multinode_fault_contracts.sh check
+
+run-local-multinode-fault-contracts:
+	bash IMServer/LoadTests/run_local_multinode_fault_contracts.sh run
+
+check-deploy-multinode-template:
+	bash deploy/multinode/render_env_test.sh
 
 verify-local-acceptance:
 	python3 IMServer/LoadTests/verify_local_acceptance.py

@@ -82,6 +82,9 @@ extension UserController {
             status: report.status,
             handledNote: report.handledNote,
             messageSnapshotJSON: report.messageSnapshotJSON,
+            assignedReviewerUserID: report.assignedReviewerUserID,
+            assignedReviewerActor: report.assignedReviewerActor,
+            assignedAt: report.assignedAt,
             createdAt: report.createdAt
         )
     }

@@ -2,6 +2,7 @@ import Foundation
 import NIOCore
 import NIOPosix
 @preconcurrency import RediStack
+import Valkey
 import Vapor
 
 struct LoginRateLimitError: AbortError {
@@ -340,7 +341,7 @@ private enum AttemptKind: Sendable {
 }
 
 final class RedisAuthRateLimiter: AuthRateLimiting, @unchecked Sendable {
-    private struct Rule {
+    fileprivate struct Rule {
         let maxAttempts: Int
         let window: Int64
         let scopeDescription: String
@@ -466,6 +467,149 @@ final class RedisAuthRateLimiter: AuthRateLimiting, @unchecked Sendable {
     }
 }
 
+/// Cluster-aware counterpart to RedisAuthRateLimiter. Every rate-limit counter
+/// is independent, so Valkey Cluster can route the counter's fixed-window
+/// commands without cross-slot coordination.
+final class ValkeyClusterAuthRateLimiter: AuthRateLimiting, @unchecked Sendable {
+    private let client: ValkeyClusterClient
+    private let logger: Logger
+    private let keyPrefix = "im:auth:rate"
+    private let loginIPRule = RedisAuthRateLimiter.Rule(
+        maxAttempts: max(1, Environment.get("AUTH_LOGIN_IP_MAX_ATTEMPTS").flatMap(Int.init(_:)) ?? 20),
+        window: max(1, Int64(Environment.get("AUTH_LOGIN_IP_WINDOW_SECONDS").flatMap(Int.init(_:)) ?? 5 * 60)),
+        scopeDescription: "当前 IP 的"
+    )
+    private let loginAccountRule = RedisAuthRateLimiter.Rule(maxAttempts: 5, window: 15 * 60, scopeDescription: "当前账号的")
+    private let registrationIPRule = RedisAuthRateLimiter.Rule(maxAttempts: 10, window: 15 * 60, scopeDescription: "当前 IP 的注册")
+    private let registrationAccountRule = RedisAuthRateLimiter.Rule(maxAttempts: 3, window: 60 * 60, scopeDescription: "当前邮箱的注册")
+    private let refreshIPRule = RedisAuthRateLimiter.Rule(maxAttempts: 60, window: 5 * 60, scopeDescription: "当前 IP 的刷新令牌")
+    private let passwordResetIPRule = RedisAuthRateLimiter.Rule(maxAttempts: 10, window: 15 * 60, scopeDescription: "当前 IP 的密码重置")
+    private let passwordResetAccountRule = RedisAuthRateLimiter.Rule(maxAttempts: 3, window: 60 * 60, scopeDescription: "当前账号的密码重置")
+    private let verificationResendIPRule = RedisAuthRateLimiter.Rule(maxAttempts: 10, window: 15 * 60, scopeDescription: "当前 IP 的验证码")
+    private let verificationResendAccountRule = RedisAuthRateLimiter.Rule(maxAttempts: 5, window: 60 * 60, scopeDescription: "当前邮箱的验证码")
+    private let verificationConfirmIPRule = RedisAuthRateLimiter.Rule(maxAttempts: 30, window: 15 * 60, scopeDescription: "当前 IP 的验证码确认")
+    private let verificationConfirmAccountRule = RedisAuthRateLimiter.Rule(maxAttempts: 8, window: 15 * 60, scopeDescription: "当前邮箱的验证码确认")
+    private var runTask: Task<Void, Never>?
+
+    init(
+        redisURL: String,
+        clusterSeedEndpoints: [IMRedisClusterSeedEndpoint],
+        logger: Logger
+    ) throws {
+        guard let url = URL(string: redisURL),
+              let scheme = url.scheme?.lowercased()
+        else {
+            throw RedisRoutingError.invalidURL(redisURL)
+        }
+        guard scheme == "redis" else {
+            throw RedisRoutingError.unsupportedRedisScheme(scheme)
+        }
+        guard !clusterSeedEndpoints.isEmpty else {
+            throw RedisRoutingError.invalidRedisClusterSeed(
+                "IM_REDIS_CLUSTER_NODES must contain at least one host:port endpoint."
+            )
+        }
+        var clientConfiguration = ValkeyClientConfiguration(commandTimeout: .seconds(5))
+        if let password = url.password {
+            clientConfiguration.authentication = .init(username: url.user ?? "default", password: password)
+        }
+        clientConfiguration.connectionPool = .init(
+            minimumConnectionCount: 1,
+            maximumConnectionSoftLimit: 4,
+            maximumConnectionHardLimit: 8,
+            maximumConcurrentConnectionRequests: 4
+        )
+        self.client = ValkeyClusterClient(
+            nodeDiscovery: ValkeyStaticNodeDiscovery(clusterSeedEndpoints.map {
+                .init(endpoint: $0.host, port: $0.port)
+            }),
+            configuration: .init(
+                client: clientConfiguration,
+                maximumRedirects: 5,
+                clusterRefreshInterval: .seconds(30),
+                clusterConsensusCircuitBreaker: .seconds(30)
+            ),
+            logger: logger
+        )
+        self.logger = logger
+    }
+
+    func start() async throws {
+        runTask = Task { [client] in
+            await client.run()
+        }
+        for attempt in 0..<30 {
+            if (try? await client.ping()) != nil {
+                return
+            }
+            if attempt < 29 {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        runTask?.cancel()
+        runTask = nil
+        logger.error("Valkey Cluster client did not become ready for auth rate limiting")
+        throw RedisRoutingError.invalidRedisClusterSeed("Unable to connect to any configured Redis Cluster seed.")
+    }
+
+    func shutdown() async {
+        runTask?.cancel()
+        runTask = nil
+    }
+
+    func beginLoginAttempt(ipAddress: String?, account: String, now _: Date) async throws -> LoginAttemptReservation {
+        try await check(scope: "login:ip", key: normalize(ipAddress: ipAddress), rule: loginIPRule)
+        try await check(scope: "login:account", key: account, rule: loginAccountRule)
+        return LoginAttemptReservation(id: UUID())
+    }
+
+    func beginRegistrationAttempt(ipAddress: String?, account: String, now _: Date) async throws -> LoginAttemptReservation {
+        try await check(scope: "register:ip", key: normalize(ipAddress: ipAddress), rule: registrationIPRule)
+        try await check(scope: "register:account", key: account, rule: registrationAccountRule)
+        return LoginAttemptReservation(id: UUID())
+    }
+
+    func completeLoginAttempt(_: LoginAttemptReservation, succeeded _: Bool, now _: Date) async {}
+    func completeRegistrationAttempt(_: LoginAttemptReservation, succeeded _: Bool, now _: Date) async {}
+
+    func checkRefreshAttempt(ipAddress: String?, account _: String?, now _: Date) async throws {
+        try await check(scope: "refresh:ip", key: normalize(ipAddress: ipAddress), rule: refreshIPRule)
+    }
+
+    func checkPasswordResetAttempt(ipAddress: String?, account: String, now _: Date) async throws {
+        try await check(scope: "password_reset:ip", key: normalize(ipAddress: ipAddress), rule: passwordResetIPRule)
+        try await check(scope: "password_reset:account", key: account, rule: passwordResetAccountRule)
+    }
+
+    func checkVerificationResendAttempt(ipAddress: String?, account: String, now _: Date) async throws {
+        try await check(scope: "verification_resend:ip", key: normalize(ipAddress: ipAddress), rule: verificationResendIPRule)
+        try await check(scope: "verification_resend:account", key: account, rule: verificationResendAccountRule)
+    }
+
+    func checkVerificationConfirmAttempt(ipAddress: String?, account: String, now _: Date) async throws {
+        try await check(scope: "verification_confirm:ip", key: normalize(ipAddress: ipAddress), rule: verificationConfirmIPRule)
+        try await check(scope: "verification_confirm:account", key: account, rule: verificationConfirmAccountRule)
+    }
+
+    private func check(scope: String, key: String, rule: RedisAuthRateLimiter.Rule) async throws {
+        let redisKey = ValkeyKey("\(keyPrefix):\(scope):\(key)")
+        let count = try await client.incr(redisKey)
+        if count == 1 {
+            _ = try await client.expire(redisKey, seconds: Int(rule.window))
+        }
+        guard count <= rule.maxAttempts else {
+            let lifetime = try await client.ttl(redisKey)
+            let retryAfter = lifetime > 0 ? lifetime : Int(rule.window)
+            throw LoginRateLimitError(scopeDescription: rule.scopeDescription, retryAfter: max(1, retryAfter))
+        }
+    }
+
+    private func normalize(ipAddress: String?) -> String {
+        let trimmed = ipAddress?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "unknown" : trimmed
+    }
+}
+
 final class AuthRateLimiterLifecycle: LifecycleHandler {
     private let limiter: RedisAuthRateLimiter
 
@@ -481,6 +625,18 @@ final class AuthRateLimiterLifecycle: LifecycleHandler {
     }
 }
 
+final class ValkeyClusterAuthRateLimiterLifecycle: LifecycleHandler {
+    private let limiter: ValkeyClusterAuthRateLimiter
+
+    init(limiter: ValkeyClusterAuthRateLimiter) {
+        self.limiter = limiter
+    }
+
+    func shutdownAsync(_ application: Application) async {
+        await limiter.shutdown()
+    }
+}
+
 enum AuthRateLimiterFactory {
     static func make(app: Application, configuration: AuthSecurityConfiguration) async throws -> any AuthRateLimiting {
         switch configuration.rateLimitBackend {
@@ -488,6 +644,18 @@ enum AuthRateLimiterFactory {
             return AuthLoginRateLimiter()
         case .redis:
             let redisURL = try configuration.redisURL.unwrap(or: AuthConfigurationError.missingRedisURL)
+            let routingConfiguration = app.imRedisRoutingConfigurationOverride
+                ?? IMRedisRoutingConfiguration.load(from: app.environment)
+            if routingConfiguration.deploymentTopology == .cluster {
+                let limiter = try ValkeyClusterAuthRateLimiter(
+                    redisURL: redisURL,
+                    clusterSeedEndpoints: try routingConfiguration.requireClusterSeedEndpoints(),
+                    logger: app.logger
+                )
+                try await limiter.start()
+                app.lifecycle.use(ValkeyClusterAuthRateLimiterLifecycle(limiter: limiter))
+                return limiter
+            }
             let limiter = try RedisAuthRateLimiter(
                 redisURL: redisURL,
                 logger: app.logger,

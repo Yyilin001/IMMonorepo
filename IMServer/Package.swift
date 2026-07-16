@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "IMServer",
     platforms: [
-       .macOS(.v13)
+       .macOS(.v15)
     ],
     dependencies: [
         // 💧 服务端 Swift Web 框架。
@@ -15,6 +15,7 @@ let package = Package(
         .package(url: "https://github.com/vapor/jwt-kit.git", from: "5.0.0"),
         .package(url: "https://github.com/vapor/sql-kit.git", from: "3.35.0"),
         .package(url: "https://github.com/swift-server/RediStack.git", from: "1.6.0"),
+        .package(url: "https://github.com/valkey-io/valkey-swift.git", exact: "1.4.0"),
         .package(url: "https://github.com/swift-server/swift-kafka-client.git", exact: "1.0.0-alpha.9"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.3.0"),
         // 🔵 面向 Swift 的非阻塞、事件驱动网络库，用于自定义执行器
@@ -32,6 +33,7 @@ let package = Package(
                 .product(name: "JWTKit", package: "jwt-kit"),
                 .product(name: "SQLKit", package: "sql-kit"),
                 .product(name: "RediStack", package: "RediStack"),
+                .product(name: "Valkey", package: "valkey-swift"),
                 .product(name: "Kafka", package: "swift-kafka-client"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIOCore", package: "swift-nio"),

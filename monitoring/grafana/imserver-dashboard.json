@@ -121,6 +121,40 @@
         {"expr": "sum(rate(im_redis_presence_stale_cleanup_total[1m]))", "legendFormat": "stale cleanup/s"},
         {"expr": "sum(rate(im_session_count_query_failures_total[1m]))", "legendFormat": "session count failures/s"}
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox Publication Age",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 56},
+      "targets": [
+        {"expr": "max(im_outbox_oldest_pending_age_millis)", "legendFormat": "oldest pending ms"},
+        {"expr": "sum(im_outbox_backlog_events)", "legendFormat": "pending events"},
+        {"expr": "sum(rate(im_outbox_failed_events_total[1m]))", "legendFormat": "publish failures/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Conversation Shard Migration",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 56},
+      "targets": [
+        {"expr": "sum(rate(im_conversation_shard_migration_copy_successes_total[5m]))", "legendFormat": "copy successes/s"},
+        {"expr": "sum(rate(im_conversation_shard_migration_copy_failures_total[5m]))", "legendFormat": "copy failures/s"},
+        {"expr": "sum(rate(im_conversation_shard_migration_verify_successes_total[5m]))", "legendFormat": "verify successes/s"},
+        {"expr": "sum(rate(im_conversation_shard_migration_verify_failures_total[5m]))", "legendFormat": "verify failures/s"},
+        {"expr": "sum(rate(im_conversation_shard_migration_remote_page_failures_total[5m]))", "legendFormat": "remote page failures/s"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cross-Cell Migration Transfer",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 64},
+      "targets": [
+        {"expr": "sum(rate(im_conversation_shard_migration_remote_pages_total[5m]))", "legendFormat": "pages/s"},
+        {"expr": "sum(rate(im_conversation_shard_migration_remote_page_records_total[5m]))", "legendFormat": "records/s"},
+        {"expr": "sum(rate(im_conversation_shard_migration_remote_page_bytes_total[5m]))", "legendFormat": "bytes/s"},
+        {"expr": "max(im_conversation_shard_migration_remote_page_latency_avg_millis)", "legendFormat": "average latency ms"},
+        {"expr": "max(im_conversation_shard_migration_remote_page_latency_max_millis)", "legendFormat": "maximum latency ms"}
+      ]
     }
   ]
 }

@@ -8,6 +8,82 @@ import VaporTesting
 import Testing
 
 extension IMServerTests {
+    @Test("Database Cell ingress registry resolves role endpoints and fails closed for disabled Cells")
+    func databaseCellIngressRegistryResolvesRoleEndpoints() async throws {
+        try await withApp(configure: configure) { app in
+            app.cellIngressRegistryConfiguration = IMCellIngressRegistryConfiguration(
+                mode: .database,
+                cacheTTLSeconds: 60
+            )
+            let registry = IMCellIngressRegistryService(app: app)
+            _ = try await registry.upsert(
+                cellID: "cell-registry-b",
+                status: .active,
+                commandEndpoint: "https://command.cell-registry-b.internal",
+                queryEndpoint: "https://query.cell-registry-b.internal",
+                realtimeEndpoint: "https://gateway.cell-registry-b.internal"
+            )
+
+            #expect(
+                try await app.cellIngressEndpointResolver.endpoint(for: "cell-registry-b", purpose: .command)
+                    == "https://command.cell-registry-b.internal"
+            )
+            #expect(
+                try await app.cellIngressEndpointResolver.endpoint(for: "cell-registry-b", purpose: .query)
+                    == "https://query.cell-registry-b.internal"
+            )
+            #expect(
+                try await app.cellIngressEndpointResolver.endpoint(for: "cell-registry-b", purpose: .realtime)
+                    == "https://gateway.cell-registry-b.internal"
+            )
+
+            _ = try await registry.upsert(
+                cellID: "cell-registry-b",
+                status: .disabled,
+                commandEndpoint: "https://command.cell-registry-b.internal",
+                queryEndpoint: "https://query.cell-registry-b.internal",
+                realtimeEndpoint: "https://gateway.cell-registry-b.internal"
+            )
+            #expect(
+                try await app.cellIngressEndpointResolver.endpoint(for: "cell-registry-b", purpose: .command) == nil
+            )
+        }
+    }
+
+    @Test("Cell ingress configuration routes command query and realtime traffic independently with a legacy fallback")
+    func cellIngressConfigurationSelectsPurposeEndpoints() {
+        let configuration = IMCellIngressConfiguration(
+            endpointsByCellID: ["legacy-cell": "https://legacy.internal"],
+            commandEndpointsByCellID: ["cell-b": "https://command.cell-b.internal"],
+            queryEndpointsByCellID: ["cell-b": "https://query.cell-b.internal"],
+            realtimeEndpointsByCellID: ["cell-b": "https://gateway.cell-b.internal"],
+            sharedSecret: "cell-ingress-test-secret"
+        )
+
+        #expect(configuration.endpoint(for: "cell-b", purpose: .command) == "https://command.cell-b.internal")
+        #expect(configuration.endpoint(for: "cell-b", purpose: .query) == "https://query.cell-b.internal")
+        #expect(configuration.endpoint(for: "cell-b", purpose: .realtime) == "https://gateway.cell-b.internal")
+        #expect(configuration.endpoint(for: "legacy-cell", purpose: .command) == "https://legacy.internal")
+        #expect(configuration.endpoint(for: "legacy-cell", purpose: .query) == "https://legacy.internal")
+        #expect(configuration.endpoint(for: "legacy-cell", purpose: .realtime) == "https://legacy.internal")
+        #expect(configuration.configuredEndpoints.count == 4)
+    }
+
+    @Test("Cell ingress configuration retains malformed endpoint entries for production validation")
+    func cellIngressConfigurationRecordsMalformedEndpointEntries() {
+        let key = IMCellIngressEndpointSource.command.rawValue
+        let originalValue = Environment.get(key)
+        defer { restoreEnvironment(key, to: originalValue) }
+        setenv(key, "cell-b=https://command.cell-b.internal,not-an-endpoint", 1)
+
+        let configuration = IMCellIngressConfiguration.load(from: .testing)
+
+        #expect(configuration.endpoint(for: "cell-b", purpose: .command) == "https://command.cell-b.internal")
+        #expect(configuration.invalidEndpointEntries == [
+            IMInvalidCellIngressEndpointEntry(source: .command, position: 2)
+        ])
+    }
+
     @Test("Test Root Route Returns HTML")
     func rootRouteServesIndex() async throws {
         try await withApp(configure: configure) { app in
@@ -245,6 +321,153 @@ extension IMServerTests {
         try? await app.asyncShutdown()
     }
 
+    @Test("Routing rejects an unsupported Redis Cluster topology before startup")
+    func routingRejectsUnsupportedRedisClusterTopology() async throws {
+        let app = try await Application.make(.testing)
+        app.imRedisRoutingConfigurationOverride = IMRedisRoutingConfiguration(
+            url: "redis://redis.internal:6379",
+            mode: .redis,
+            deploymentTopology: .cluster,
+            maximumConnectionCount: 2
+        )
+
+        do {
+            try await app.configureConnectionRoutingServiceIfNeeded()
+            Issue.record("Expected Redis Cluster topology to be rejected before backend startup")
+        } catch RedisRoutingError.redisClusterTopologyUnsupported {
+        } catch {
+            Issue.record("Unexpected routing error: \(error)")
+        }
+
+        try? await app.asyncShutdown()
+    }
+
+    @Test("Cluster topology identifies every remaining RediStack consumer before startup")
+    func redisClusterTopologyReportsRemainingStandaloneConsumers() async throws {
+        let app = try await Application.make(.testing)
+        app.imRuntimeRole = .gateway
+        let routingConfiguration = IMRedisRoutingConfiguration(
+            url: "redis://redis.internal:6379",
+            mode: .redis,
+            deploymentTopology: .cluster,
+            maximumConnectionCount: 2
+        )
+        let authSessionCacheConfiguration = AuthSessionCacheConfiguration.load(from: .testing)
+        let authSecurityConfiguration = try AuthSecurityConfiguration.load(from: .testing)
+        let consumers = IMRedisTopologyCompatibility.configuredStandaloneConsumers(
+            app: app,
+            routingConfiguration: routingConfiguration,
+            authSessionCacheConfiguration: authSessionCacheConfiguration,
+            authSecurityConfiguration: authSecurityConfiguration
+        )
+
+        #expect(consumers == [.nodeRealtimeDispatch])
+
+        do {
+            try IMRedisTopologyCompatibility.validate(
+                topology: .cluster,
+                standaloneConsumers: consumers
+            )
+            Issue.record("Expected Cluster topology to be rejected before any RediStack consumer starts")
+        } catch RedisRoutingError.redisClusterTopologyUnsupportedByComponents(let componentNames) {
+            #expect(componentNames == ["node-realtime-dispatch"])
+        } catch {
+            Issue.record("Unexpected Redis topology error: \(error)")
+        }
+
+        try? await app.asyncShutdown()
+    }
+
+    @Test("Cluster topology does not reject deployments with no legacy Redis consumer")
+    func redisClusterTopologyPermitsNoLegacyRedisConsumers() throws {
+        try IMRedisTopologyCompatibility.validate(
+            topology: .cluster,
+            standaloneConsumers: []
+        )
+    }
+
+    @Test("Cluster topology permits Cluster-native state with HTTP node dispatch")
+    func redisClusterTopologyPermitsHTTPNodeDispatch() async throws {
+        let app = try await Application.make(.testing)
+        app.imRuntimeRole = .gateway
+        app.nodeDispatchConfiguration = IMNodeDispatchConfiguration(
+            mode: .http,
+            endpointsByNodeID: ["gateway-1": "https://gateway-1.internal"],
+            sharedSecret: "test-node-dispatch-secret"
+        )
+        let routingConfiguration = IMRedisRoutingConfiguration(
+            url: "redis://redis.internal:6379",
+            mode: .redis,
+            deploymentTopology: .cluster,
+            maximumConnectionCount: 2,
+            clusterSeedEndpoints: [
+                IMRedisClusterSeedEndpoint(environmentValue: "redis-1.internal:6379")!
+            ]
+        )
+        let consumers = IMRedisTopologyCompatibility.configuredStandaloneConsumers(
+            app: app,
+            routingConfiguration: routingConfiguration,
+            authSessionCacheConfiguration: AuthSessionCacheConfiguration.load(from: .testing),
+            authSecurityConfiguration: try AuthSecurityConfiguration.load(from: .testing)
+        )
+
+        #expect(consumers.isEmpty)
+        try IMRedisTopologyCompatibility.validate(
+            topology: .cluster,
+            standaloneConsumers: consumers
+        )
+        try? await app.asyncShutdown()
+    }
+
+    @Test("Redis Cluster routing requires explicit seed endpoints")
+    func redisClusterRoutingRequiresExplicitSeedEndpoints() throws {
+        let configuration = IMRedisRoutingConfiguration(
+            url: "redis://cache.internal:6379",
+            mode: .redis,
+            deploymentTopology: .cluster,
+            maximumConnectionCount: 4
+        )
+
+        do {
+            _ = try configuration.requireClusterSeedEndpoints()
+            Issue.record("Expected missing Cluster seed endpoints to be rejected")
+        } catch RedisRoutingError.invalidRedisClusterSeed {
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("Redis Cluster seed endpoint accepts host and port")
+    func redisClusterSeedEndpointParsesHostAndPort() {
+        let seed = IMRedisClusterSeedEndpoint(environmentValue: "cache-1.internal:6380")
+
+        #expect(seed == IMRedisClusterSeedEndpoint(environmentValue: "redis://cache-1.internal:6380"))
+        #expect(seed?.host == "cache-1.internal")
+        #expect(seed?.port == 6380)
+        #expect(IMRedisClusterSeedEndpoint(environmentValue: "not a valid seed") == nil)
+    }
+
+    @Test("Redis keyspace can pin a conversation-scoped key to one Cluster slot")
+    func redisKeyspacePinsConversationScopedKeyToOneClusterSlot() {
+        let conversationID = "7d2d597b-2ee3-4a65-9fea-4ecb5af4ef10"
+        let key = IMRealtimeRedisKeyspace(cellID: "cell-a").key(
+            hashedBy: conversationID,
+            suffix: "hot-conversation:\(conversationID):1700000000"
+        )
+
+        #expect(key == "im:cell:cell-a:{\(conversationID)}:hot-conversation:\(conversationID):1700000000")
+    }
+
+    @Test("Auth cache uses independently routed session and revision keys")
+    func authCacheUsesClusterSafeSessionAndRevisionKeys() {
+        let sessionID = UUID(uuidString: "7d2d597b-2ee3-4a65-9fea-4ecb5af4ef10")!
+        let userID = UUID(uuidString: "bce61bc9-0f1f-47cf-9b79-053875b1d46b")!
+
+        #expect(AuthSessionRedisKeyspace.sessionKey(sessionID: sessionID).rawValue == "im:auth:session:{7d2d597b-2ee3-4a65-9fea-4ecb5af4ef10}")
+        #expect(AuthSessionRedisKeyspace.userRevisionKey(userID: userID).rawValue == "im:auth:user:{bce61bc9-0f1f-47cf-9b79-053875b1d46b}:session-cache-revision")
+        #expect(AuthSessionRedisKeyspace.globalEpochKey.rawValue == "im:auth:session-cache:{global}:epoch")
+    }
+
     @Test("Production rejects combined runtime during startup")
     func productionRejectsCombinedRuntimeDuringStartup() async throws {
         let app = try await Application.make(.production)
@@ -416,6 +639,177 @@ extension IMServerTests {
         }
     }
 
+    @Test("Production runtime rejects malformed Cell ingress endpoint configuration")
+    func productionRuntimeRejectsMalformedCellIngressEndpointConfiguration() async throws {
+        try await withProductionRuntimeEnvironment {
+            let key = IMCellIngressEndpointSource.command.rawValue
+            let originalValue = Environment.get(key)
+            defer { restoreProductionRuntimeEnvironment(key, to: originalValue) }
+            setenv(key, "cell-b=https://command.cell-b.internal,not-an-endpoint", 1)
+
+            let app = try await productionRuntimeValidationApp(role: .gateway)
+            do {
+                try IMProductionRuntimeValidator.validate(app: app)
+                Issue.record("Expected production runtime validation to reject malformed Cell ingress endpoints")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains(key))
+                #expect(abort.reason.contains("entry 2"))
+            } catch {
+                Issue.record("Unexpected Cell ingress configuration error: \(error)")
+            }
+            try await app.asyncShutdown()
+        }
+    }
+
+    @Test("Multi-shard production requires an explicit usable directory cache limit")
+    func multiShardProductionRequiresDirectoryCacheLimit() async throws {
+        try await withProductionRuntimeEnvironment {
+            let values = [
+                "IM_CONVERSATION_SHARD_IDS": "shard-a,shard-b",
+                "DATABASE_CONVERSATION_SHARD_A_HOST": "conversation-a-db",
+                "DATABASE_CONVERSATION_SHARD_A_NAME": "imserver_conversation_a",
+                "DATABASE_CONVERSATION_SHARD_A_USERNAME": "imserver",
+                "DATABASE_CONVERSATION_SHARD_A_PASSWORD": "database-0123456789abcdef",
+                "DATABASE_CONVERSATION_SHARD_B_HOST": "conversation-b-db",
+                "DATABASE_CONVERSATION_SHARD_B_NAME": "imserver_conversation_b",
+                "DATABASE_CONVERSATION_SHARD_B_USERNAME": "imserver",
+                "DATABASE_CONVERSATION_SHARD_B_PASSWORD": "database-0123456789abcdef",
+                "IM_CONVERSATION_SHARD_DIRECTORY_CACHE_MAX_ENTRIES": "",
+                "IM_CONVERSATION_SHARD_DIRECTORY_CACHE_TTL_SECONDS": ""
+            ]
+            let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
+            defer {
+                for (key, value) in originalValues {
+                    restoreProductionRuntimeEnvironment(key, to: value)
+                }
+            }
+            for (key, value) in values {
+                setenv(key, value, 1)
+            }
+
+            let missingLimitApp = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMProductionRuntimeValidationSupport.validateConversationShardConfiguration(missingLimitApp)
+                Issue.record("Expected multi-shard validation to require a directory cache limit")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_CONVERSATION_SHARD_DIRECTORY_CACHE_MAX_ENTRIES"))
+            } catch {
+                Issue.record("Unexpected conversation shard configuration error: \(error)")
+            }
+            try await missingLimitApp.asyncShutdown()
+
+            setenv("IM_CONVERSATION_SHARD_DIRECTORY_CACHE_MAX_ENTRIES", "50000", 1)
+            setenv("IM_CONVERSATION_SHARD_DIRECTORY_CACHE_TTL_SECONDS", "15", 1)
+            let validApp = try await productionRuntimeValidationApp(role: .commandAPI)
+            try IMProductionRuntimeValidationSupport.validateConversationShardConfiguration(validApp)
+            try await validApp.asyncShutdown()
+        }
+    }
+
+    @Test("Realtime cell namespaces Redis routing and rejects invalid production configuration")
+    func realtimeCellNamespacesRedisRoutingAndRejectsInvalidProductionConfiguration() async throws {
+        let cellA = IMRealtimeRedisKeyspace(cellID: "cell-a")
+        let cellB = IMRealtimeRedisKeyspace(cellID: "cell-b")
+        #expect(cellA.key("route:active_nodes") == "im:cell:cell-a:route:active_nodes")
+        #expect(cellA.key("dispatch:node:gateway-a") == "im:cell:cell-a:dispatch:node:gateway-a")
+        #expect(cellA.key("route:active_nodes") != cellB.key("route:active_nodes"))
+        #expect(IMRealtimeCellConfiguration.isValid(cellID: "cell_a-01"))
+        #expect(!IMRealtimeCellConfiguration.isValid(cellID: "Cell-A"))
+        #expect(!IMRealtimeCellConfiguration.isValid(cellID: "cell a"))
+
+        try await withProductionRuntimeEnvironment {
+            let originalCellID = Environment.get("IM_REALTIME_CELL_ID")
+            defer { restoreProductionRuntimeEnvironment("IM_REALTIME_CELL_ID", to: originalCellID) }
+            unsetenv("IM_REALTIME_CELL_ID")
+
+            let app = try await productionRuntimeValidationApp(role: .gateway)
+            do {
+                try IMProductionRuntimeValidator.validate(app: app)
+                Issue.record("Expected production runtime validation to require IM_REALTIME_CELL_ID")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_REALTIME_CELL_ID"))
+            } catch {
+                Issue.record("Unexpected realtime cell configuration error: \(error)")
+            }
+            try await app.asyncShutdown()
+        }
+    }
+
+    @Test("Conversation directory stores cell routes and fails closed for a remote cell")
+    func conversationDirectoryStoresCellRoutesAndFailsClosedForRemoteCell() async throws {
+        try await withApp(configure: configure) { app in
+            let conversationID = UUID()
+            let directory = DatabaseConversationDirectory(db: app.db, localCellID: "cell-a")
+            try await directory.registerConversation(
+                conversationID: conversationID,
+                shardID: "shard-b",
+                cellID: "cell-b"
+            )
+
+            let route = try await directory.route(for: conversationID)
+            #expect(route == ConversationRoute(cellID: "cell-b", shardID: "shard-b"))
+            do {
+                _ = try await directory.shardID(for: conversationID)
+                Issue.record("Expected a remote conversation route to fail closed")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .serviceUnavailable)
+                #expect(abort.reason.contains("cell-b"))
+            } catch {
+                Issue.record("Unexpected remote conversation route error: \(error)")
+            }
+
+            do {
+                _ = try await directory.route(for: UUID())
+                Issue.record("Expected an unregistered conversation route to fail closed")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .notFound)
+                #expect(abort.reason.contains("not registered"))
+            } catch {
+                Issue.record("Unexpected missing conversation route error: \(error)")
+            }
+        }
+    }
+
+    @Test("Directory backed conversation shard router rejects a remote cell route")
+    func directoryBackedConversationShardRouterRejectsRemoteCellRoute() async throws {
+        try await withApp(configure: configure) { app in
+            app.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-a")
+            let conversationID = UUID()
+            let directory = DatabaseConversationDirectory(db: app.db, localCellID: "cell-a")
+            try await directory.registerConversation(
+                conversationID: conversationID,
+                shardID: "shard-b",
+                cellID: "cell-b"
+            )
+            let router = DirectoryBackedConversationShardRouter(
+                app: app,
+                shardIDs: ["shard-a", "shard-b"],
+                shardDatabaseIDs: [:],
+                shardReplicaDatabaseIDs: [:],
+                directory: directory
+            )
+
+            do {
+                _ = try await router.commandDatabase(forConversationID: conversationID)
+                Issue.record("Expected a remote conversation route to reject local database access")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .serviceUnavailable)
+                #expect(abort.reason.contains("cell-b"))
+                #expect(abort.reason.contains("cell-a"))
+            } catch {
+                Issue.record("Unexpected remote router error: \(error)")
+            }
+
+            let metrics = await app.conversationShardRoutingMetrics.currentSnapshot()
+            #expect(metrics.directoryLookupCount == 1)
+            #expect(metrics.remoteCellRouteRejectedCount == 1)
+            #expect(metrics.cacheEntryCount == 0)
+        }
+    }
+
     @Test("Per-role production validators accept complete role fixtures")
     func perRoleProductionValidatorsAcceptCompleteRoleFixtures() async throws {
         try await withProductionRuntimeEnvironment {
@@ -467,6 +861,27 @@ extension IMServerTests {
                 Issue.record("Unexpected command-api validation error: \(error)")
             }
             try? await app.asyncShutdown()
+        }
+    }
+
+    @Test("Production command API requires distributed hot conversation limiting")
+    func productionCommandAPIRequiresDistributedHotConversationLimiting() async throws {
+        try await withProductionRuntimeEnvironment {
+            let originalMode = Environment.get("IM_HOT_CONVERSATION_LIMITER_MODE")
+            defer { restoreProductionRuntimeEnvironment("IM_HOT_CONVERSATION_LIMITER_MODE", to: originalMode) }
+            setenv("IM_HOT_CONVERSATION_LIMITER_MODE", "local", 1)
+
+            let app = try await productionRuntimeValidationApp(role: .commandAPI)
+            do {
+                try IMProductionRuntimeValidationSupport.validateHotConversationProtectionConfiguration(app)
+                Issue.record("Expected production validation to reject local hot conversation limiting")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_HOT_CONVERSATION_LIMITER_MODE=redis"))
+            } catch {
+                Issue.record("Unexpected hot conversation limiter configuration error: \(error)")
+            }
+            try await app.asyncShutdown()
         }
     }
 
@@ -2720,6 +3135,7 @@ extension IMServerTests {
             app.databases.use(.sqlite(.memory), as: summaryDatabaseID)
             let summaryDB = app.db(summaryDatabaseID)
             try await prepareSummaryReadModelSchema(on: summaryDB)
+            app.summaryShardDatabaseIDs = ["summary-validator-test": summaryDatabaseID]
             app.summaryShardRouter = FixedSummaryShardRouter(
                 shardID: "summary-validator-test",
                 fixedDatabase: summaryDB
@@ -2789,6 +3205,76 @@ extension IMServerTests {
             #expect(tables.contains { $0.name == ConversationActivitySummary.schema })
             #expect(summaryIndexes.contains { $0.name == "im_conversation_user_summaries_kind_list_order_idx" })
             #expect(changesIndexes.contains { $0.name == "conversation_changes_log_owner_conversation_updated_idx" })
+
+            try await app.asyncShutdown()
+        } catch {
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("Migration registry provisions and validates independent conversation shards")
+    func migrationRegistryProvisionsConversationShardSchema() async throws {
+        let app = try await Application.make(.testing)
+        app.databases.use(.sqlite(.memory), as: .sqlite)
+        let shardDatabaseID = DatabaseID(string: "conversation-migration-test")
+        app.databases.use(.sqlite(.memory), as: shardDatabaseID)
+        app.conversationShardDatabaseIDs = ["conversation-migration-test": shardDatabaseID]
+
+        do {
+            IMMigrationRegistry.registerMigrations(app)
+            try await app.autoMigrate()
+            app.conversationShardRouter = DirectoryBackedConversationShardRouter(
+                app: app,
+                shardIDs: ["conversation-migration-test"],
+                shardDatabaseIDs: ["conversation-migration-test": shardDatabaseID],
+                shardReplicaDatabaseIDs: [:],
+                directory: DatabaseConversationDirectory(db: app.db)
+            )
+
+            try await IMSchemaValidator.validateIMSchema(app)
+
+            guard let shardSQL = app.db(shardDatabaseID) as? any SQLDatabase else {
+                Issue.record("Expected SQL conversation shard database")
+                try await app.asyncShutdown()
+                return
+            }
+
+            struct SQLiteTableRow: Decodable {
+                let name: String
+            }
+            struct SQLiteIndexRow: Decodable {
+                let name: String
+            }
+
+            let tables = try await shardSQL.raw("""
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                """).all(decoding: SQLiteTableRow.self)
+            let eventIndexes = try await shardSQL.raw(
+                "PRAGMA index_list(\(ident: ConversationDomainEvent.schema))"
+            ).all(decoding: SQLiteIndexRow.self)
+
+            #expect(tables.contains { $0.name == Conversation.schema })
+            #expect(tables.contains { $0.name == ConversationDomainEvent.schema })
+            #expect(tables.contains { $0.name == ConversationDomainEventSequence.schema })
+            #expect(tables.contains { $0.name == ConversationTimelineNotice.schema })
+            #expect(tables.contains { $0.name == ConversationUserSummary.schema } == false)
+            #expect(tables.contains { $0.name == User.schema } == false)
+            #expect(eventIndexes.contains { $0.name == "conversation_domain_events_status_created_idx" })
+
+            try await shardSQL.raw("DROP INDEX IF EXISTS conversation_domain_events_status_created_idx").run()
+            do {
+                try await IMSchemaValidator.validateIMSchema(app)
+                Issue.record("Expected conversation shard schema validation to fail when an outbox index is missing.")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("conversation-shard:conversation-migration-test"))
+                #expect(abort.reason.contains("conversation_domain_events_status_created_idx"))
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
 
             try await app.asyncShutdown()
         } catch {
@@ -3086,6 +3572,10 @@ extension IMServerTests {
     func internalMetricsEndpointHonorsConfiguration() async throws {
         try await withApp(configure: configure) { app in
             app.metricsConfiguration = IMMetricsConfiguration(isEnabled: true, internalSecret: "metrics-secret")
+            await app.conversationShardRoutingMetrics.recordRemoteCellForwardAttempt()
+            await app.conversationShardRoutingMetrics.recordRemoteCellForwardSuccess(elapsedMilliseconds: 8)
+            await app.conversationShardRoutingMetrics.recordRemoteCellForwardAttempt()
+            await app.conversationShardRoutingMetrics.recordRemoteCellForwardFailure(elapsedMilliseconds: 12)
             try await app.testing().test(.GET, "internal/metrics", afterResponse: { res async in
                 #expect(res.status == .unauthorized)
             })
@@ -3097,6 +3587,11 @@ extension IMServerTests {
                 #expect(res.headers.contentType?.type == "text")
                 #expect(res.body.string.contains("im_tcp_connections"))
                 #expect(res.body.string.contains("im_outbox_backlog_events"))
+                #expect(res.body.string.contains("im_conversation_shard_remote_cell_forward_attempts_total 2"))
+                #expect(res.body.string.contains("im_conversation_shard_remote_cell_forward_successes_total 1"))
+                #expect(res.body.string.contains("im_conversation_shard_remote_cell_forward_failures_total 1"))
+                #expect(res.body.string.contains("im_conversation_shard_remote_cell_forward_latency_avg_millis 10"))
+                #expect(res.body.string.contains("im_conversation_shard_remote_cell_forward_latency_max_millis 12"))
                 #expect(res.body.string.contains("im_auth_session_cache_hits_total"))
                 #expect(res.body.string.contains("im_realtime_active_conversation_fanout_splits_total"))
                 #expect(res.body.string.contains("im_realtime_active_conversation_fanout_downgraded_active_recipients_total"))
@@ -3117,11 +3612,13 @@ extension IMServerTests {
                 #expect(res.body.string.contains("im_gateway_http_relay_recipients_total"))
                 #expect(res.body.string.contains("im_gateway_http_relay_request_attempts_total"))
                 #expect(res.body.string.contains("im_gateway_http_relay_request_failures_total"))
+                #expect(res.body.string.contains("im_gateway_http_relay_request_latency_millis_total"))
                 #expect(res.body.string.contains("im_gateway_http_relay_request_body_bytes_total"))
                 #expect(res.body.string.contains("im_gateway_http_relay_request_max_body_bytes"))
                 #expect(res.body.string.contains("im_gateway_http_relay_binary_fallbacks_total"))
                 #expect(res.body.string.contains("im_gateway_http_relay_inbound_requests_total"))
                 #expect(res.body.string.contains("im_gateway_http_relay_inbound_failures_total"))
+                #expect(res.body.string.contains("im_gateway_http_relay_inbound_latency_millis_total"))
                 #expect(res.body.string.contains("im_realtime_inactive_conversation_hint_recipients_total"))
                 #expect(res.body.string.contains("im_realtime_inactive_conversation_hint_suppressed_recipients_total"))
                 #expect(res.body.string.contains("im_realtime_active_conversation_fanout_compact_active_recipients_total"))
@@ -3206,6 +3703,43 @@ extension IMServerTests {
             try await app.testing().test(.GET, "internal/metrics", afterResponse: { res async in
                 #expect(res.status == .notFound)
             })
+        }
+    }
+
+    @Test("Gateway drain control rejects unauthenticated changes and gates new TCP admissions")
+    func gatewayDrainControlGatesTCPAdmission() async throws {
+        let key = "IM_GATEWAY_CONTROL_SHARED_SECRET"
+        let originalValue = Environment.get(key)
+        defer { restoreEnvironment(key, to: originalValue) }
+        setenv(key, "gateway-drain-control-secret-at-least-32-bytes", 1)
+
+        struct DrainRequest: Content {
+            let draining: Bool
+            let disconnectExisting: Bool
+        }
+
+        try await withApp(configure: configure) { app in
+            try await app.testing().test(.GET, "internal/gateway/drain", afterResponse: { res async in
+                #expect(res.status == .unauthorized)
+            })
+
+            try await app.testing().test(.PUT, "internal/gateway/drain", beforeRequest: { req in
+                req.headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: "gateway-drain-control-secret-at-least-32-bytes")
+                try req.content.encode(DrainRequest(draining: true, disconnectExisting: false))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+                #expect(res.body.string.contains("\"draining\":true"))
+            })
+            #expect(app.imTCPAdmissionController.acquire().rejectionReason == .gatewayDraining)
+
+            try await app.testing().test(.PUT, "internal/gateway/drain", beforeRequest: { req in
+                req.headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: "gateway-drain-control-secret-at-least-32-bytes")
+                try req.content.encode(DrainRequest(draining: false, disconnectExisting: false))
+            }, afterResponse: { res async in
+                #expect(res.status == .ok)
+                #expect(res.body.string.contains("\"draining\":false"))
+            })
+            #expect(app.imTCPAdmissionController.acquire().isAccepted)
         }
     }
 
@@ -3585,6 +4119,7 @@ extension IMServerTests {
                 #expect(body.contains("im_gateway_http_relay_request_attempts_total 2"))
                 #expect(body.contains("im_gateway_http_relay_request_successes_total 1"))
                 #expect(body.contains("im_gateway_http_relay_request_failures_total 1"))
+                #expect(body.contains("im_gateway_http_relay_request_latency_millis_total 120"))
                 #expect(body.contains("im_gateway_http_relay_request_latency_avg_millis 60"))
                 #expect(body.contains("im_gateway_http_relay_request_latency_max_millis 80"))
                 #expect(body.contains("im_gateway_http_relay_request_body_bytes_total 512"))
@@ -3593,6 +4128,7 @@ extension IMServerTests {
                 #expect(body.contains("im_gateway_http_relay_inbound_requests_total 2"))
                 #expect(body.contains("im_gateway_http_relay_inbound_successes_total 1"))
                 #expect(body.contains("im_gateway_http_relay_inbound_failures_total 1"))
+                #expect(body.contains("im_gateway_http_relay_inbound_latency_millis_total 100"))
                 #expect(body.contains("im_gateway_http_relay_inbound_body_bytes_total 384"))
                 #expect(body.contains("im_gateway_http_relay_inbound_max_body_bytes 256"))
                 #expect(body.contains("im_gateway_http_relay_inbound_latency_avg_millis 50"))
@@ -4207,6 +4743,64 @@ extension IMServerTests {
         #expect(configuration.dropsRealtimeWhenNotWritable == true)
     }
 
+    @Test("TCP configuration and admission controller enforce a bounded Gateway connection budget")
+    func tcpConfigurationAndAdmissionControllerEnforceConnectionBudget() {
+        let values = [
+            "IM_TCP_MAX_CONNECTIONS": "2",
+            "IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND": "3"
+        ]
+        let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
+        defer {
+            for (key, value) in originalValues {
+                restoreEnvironment(key, to: value)
+            }
+        }
+
+        for (key, value) in values {
+            setenv(key, value, 1)
+        }
+        let configuration = IMTCPConfiguration.load(from: .production)
+        #expect(configuration.maximumConnectionCount == 2)
+        #expect(configuration.maximumNewConnectionsPerSecond == 3)
+
+        let controller = IMTCPAdmissionController(maximumConnectionCount: 2)
+        #expect(controller.acquire() == .init(isAccepted: true, activeConnectionCount: 1, maximumConnectionCount: 2, rejectionReason: nil))
+        #expect(controller.acquire() == .init(isAccepted: true, activeConnectionCount: 2, maximumConnectionCount: 2, rejectionReason: nil))
+        #expect(controller.acquire() == .init(isAccepted: false, activeConnectionCount: 2, maximumConnectionCount: 2, rejectionReason: .connectionLimit))
+        #expect(controller.release() == 1)
+        #expect(controller.acquire() == .init(isAccepted: true, activeConnectionCount: 2, maximumConnectionCount: 2, rejectionReason: nil))
+
+        let rateLimited = IMTCPAdmissionController(
+            maximumConnectionCount: 0,
+            maximumNewConnectionsPerSecond: 2
+        )
+        let start = Date(timeIntervalSince1970: 1_000)
+        #expect(rateLimited.acquire(now: start).isAccepted)
+        #expect(rateLimited.acquire(now: start.addingTimeInterval(0.5)).isAccepted)
+        #expect(
+            rateLimited.acquire(now: start.addingTimeInterval(0.9))
+                == .init(
+                    isAccepted: false,
+                    activeConnectionCount: 2,
+                    maximumConnectionCount: 0,
+                    rejectionReason: .connectionRateLimit
+                )
+        )
+        #expect(rateLimited.acquire(now: start.addingTimeInterval(1)).isAccepted)
+
+        let draining = IMTCPAdmissionController(maximumConnectionCount: 2)
+        #expect(draining.acquire().isAccepted)
+        #expect(
+            draining.setDraining(true)
+                == .init(isDraining: true, activeConnectionCount: 1, maximumConnectionCount: 2)
+        )
+        #expect(
+            draining.acquire().rejectionReason == .gatewayDraining
+        )
+        #expect(draining.setDraining(false).isDraining == false)
+        #expect(draining.acquire().isAccepted)
+    }
+
     @Test("Gateway relay configuration loads body limits")
     func gatewayRelayConfigurationLoadsBodyLimits() {
         let values = [
@@ -4240,6 +4834,7 @@ extension IMServerTests {
 private func withProductionRuntimeEnvironment(_ body: () async throws -> Void) async throws {
     let values = [
         "IM_NODE_ID": "node-a",
+        "IM_REALTIME_CELL_ID": "cell-a",
         "PUBLIC_BASE_URL": "https://chat.myim-prod.com",
         "IM_PUBLIC_BASE_URL": "",
         "IM_PRODUCTION_ALLOW_INSECURE_PUBLIC_BASE_URL": "",
@@ -4405,6 +5000,7 @@ private struct FixedSummaryShardRouter: SummaryShardRouter {
 
 private func prepareSummaryReadModelSchema(on database: any Database) async throws {
     try await CreateConversationUserSummary().prepare(on: database)
+    try await AddConversationUserSummaryGroupLifecycleState().prepare(on: database)
     try await AddConversationUserSummaryMembershipRevision().prepare(on: database)
     try await AddConversationUserSummaryDirectPeerProfileFields().prepare(on: database)
     try await AddConversationUserSummaryIndexes().prepare(on: database)

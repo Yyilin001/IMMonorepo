@@ -89,6 +89,7 @@ Important:
 - `shard-0` becomes `SHARD_0`
 - every shard listed in `IM_CONVERSATION_SHARD_IDS` must have a full `DATABASE_CONVERSATION_<SHARD>_*` block in production
 - `query-api`, `command-api`, `outbox-relay`, `stream-consumer`, and `ops` must all see the same conversation shard topology
+- multi-shard roles must set `IM_CONVERSATION_SHARD_DIRECTORY_CACHE_MAX_ENTRIES` explicitly; use `50000` as an initial cell-level value and tune from directory-cache miss and eviction metrics
 
 ## 3. Summary Shard Prerequisites
 
@@ -189,7 +190,13 @@ Do this last.
 2. provision `DATABASE_CONVERSATION_<SHARD>_*` for every listed shard
 3. optionally provision `DATABASE_CONVERSATION_<SHARD>_REPLICA_*`
 4. keep router-enabled single-shard mode first
-5. expand to multiple conversation shards only after Kafka + summary shards are stable; OpenSearch can remain disabled if database search meets the product requirement
+5. migrate every command shard through the `ops` role. The registry applies the conversation-only migration set to every configured shard, including `RemoveConversationUserForeignKeys` for existing databases and independent sequence constraints for fresh shards
+6. verify each command shard can serve member and direct-summary reads without a local `users` table
+7. expand to multiple conversation shards only after Kafka + summary shards are stable; OpenSearch can remain disabled if database search meets the product requirement
+
+The user-directory boundary and exact migration sequence are documented in
+[conversation-shard-user-directory.md](conversation-shard-user-directory.md). Conversation shard migration
+is an explicit deployment action; do not assume primary-database auto-migration has updated every shard.
 
 ## 5. Cutover Safety Rules
 
@@ -203,6 +210,7 @@ Do this last.
 - keep production `IM_EVENT_STREAM_DRIVER=kafka`; OpenSearch is optional
 - do not let production `stream-consumer` run multiple consumer groups in one process unless `IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP=true` is set for an explicitly grouped runtime process
 - do not let any production role bypass `IM_CONVERSATION_SHARD_IDS` once conversation router topology is enabled
+- do not ignore sustained `im_conversation_shard_directory_cache_misses_total` or cache evictions; they indicate the primary directory is receiving avoidable routing load
 
 ## 6. Production Verification Checklist
 

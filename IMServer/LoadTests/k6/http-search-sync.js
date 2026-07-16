@@ -1,4 +1,5 @@
 import http from 'k6/http';
+import { richTextContent, initialDerivedState } from './im-message-payload.js';
 import { check, fail, sleep } from 'k6';
 import { Rate, Trend } from 'k6/metrics';
 
@@ -168,8 +169,8 @@ function sendInternalMessage(senderUserID, conversationID, clientMessageID, sear
         senderUserID: null,
         serverSequence: null,
         serverTimestamp: null,
-        content: { type: 'text', text: `search-sync ${searchTerm}` },
-        derivedState: { reactions: [], editedAt: null, recalledAt: null },
+        content: richTextContent(`search-sync ${searchTerm}`),
+        derivedState: initialDerivedState(),
       },
     }),
     { headers: { 'Content-Type': 'application/json', 'X-IM-Internal-Secret': internalSecret } }

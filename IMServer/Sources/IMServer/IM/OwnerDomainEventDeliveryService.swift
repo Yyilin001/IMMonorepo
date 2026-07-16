@@ -104,8 +104,8 @@ struct OwnerDomainEventDeliveryService {
             let bytes = try IMTCPProtobufCodec.encodeDomainEvent(deliveryPayload)
             let row = OwnerDomainEventDelivery(
                 ownerUserID: ownerUserID,
-                ownerCursor: cursor.rawValue,
-                ownerAggregateSequence: ownerAggregateSequence.rawValue,
+                ownerCursor: try imIntSequence(cursor.rawValue, field: "owner_cursor"),
+                ownerAggregateSequence: try imIntSequence(ownerAggregateSequence.rawValue, field: "owner_aggregate_sequence"),
                 aggregateType: payload.aggregateType,
                 aggregateID: payload.aggregateID,
                 eventID: payload.eventID,
@@ -260,8 +260,8 @@ struct OwnerDomainEventDeliveryService {
                     let bytes = try IMTCPProtobufCodec.encodeDomainEvent(deliveryPayload)
                     return OwnerDomainEventDelivery(
                         ownerUserID: request.ownerUserID,
-                        ownerCursor: cursor,
-                        ownerAggregateSequence: ownerAggregateSequence,
+                        ownerCursor: try imIntSequence(cursor, field: "owner_cursor"),
+                        ownerAggregateSequence: try imIntSequence(ownerAggregateSequence, field: "owner_aggregate_sequence"),
                         aggregateType: request.payload.aggregateType,
                         aggregateID: request.payload.aggregateID,
                         eventID: request.payload.eventID,
@@ -389,9 +389,10 @@ struct OwnerDomainEventDeliveryService {
         limit requestedLimit: Int?
     ) async throws -> DomainEventChangesResponse {
         let limit = max(1, min(requestedLimit ?? 100, 200))
+        let afterCursorValue = try imIntSequence(afterCursor, field: "after_cursor")
         let rows = try await OwnerDomainEventDelivery.query(on: db)
             .filter(\.$ownerUserID == ownerUserID)
-            .filter(\.$ownerCursor > afterCursor)
+            .filter(\.$ownerCursor > afterCursorValue)
             .sort(\.$ownerCursor, .ascending)
             .limit(limit + 1)
             .all()
@@ -511,24 +512,16 @@ private extension OwnerDomainEventDeliveryService {
         let rows = try await sql.raw("""
             WITH \(ident: "input")(\(ident: "owner_user_id"), \(ident: "increment_by")) AS (
                 VALUES \(values)
-            ),
-            \(ident: "inserted") AS (
-                INSERT INTO \(ident: OwnerDomainEventDeliveryCursor.schema) (
-                    \(ident: "owner_user_id"),
-                    \(ident: "last_cursor")
-                )
-                SELECT \(ident: "owner_user_id"), 0 FROM \(ident: "input")
-                ON CONFLICT (\(ident: "owner_user_id")) DO NOTHING
-            ),
-            \(ident: "updated") AS (
-                UPDATE \(ident: OwnerDomainEventDeliveryCursor.schema) AS \(ident: "cursors")
-                SET \(ident: "last_cursor") = \(ident: "cursors").\(ident: "last_cursor") + \(ident: "input").\(ident: "increment_by")
-                FROM \(ident: "input")
-                WHERE \(ident: "cursors").\(ident: "owner_user_id") = \(ident: "input").\(ident: "owner_user_id")
-                RETURNING \(ident: "cursors").\(ident: "owner_user_id") AS \(ident: "owner_user_id"),
-                    \(ident: "cursors").\(ident: "last_cursor") AS \(ident: "value")
             )
-            SELECT \(ident: "owner_user_id"), \(ident: "value") FROM \(ident: "updated")
+            INSERT INTO \(ident: OwnerDomainEventDeliveryCursor.schema) (
+                \(ident: "owner_user_id"),
+                \(ident: "last_cursor")
+            )
+            SELECT \(ident: "owner_user_id"), \(ident: "increment_by") FROM \(ident: "input")
+            ON CONFLICT (\(ident: "owner_user_id")) DO UPDATE
+            SET \(ident: "last_cursor") = \(ident: OwnerDomainEventDeliveryCursor.schema).\(ident: "last_cursor")
+                + \(ident: "excluded").\(ident: "last_cursor")
+            RETURNING \(ident: "owner_user_id"), \(ident: "last_cursor") AS \(ident: "value")
             """).all(decoding: OwnerCursorAllocationRow.self)
 
         let valuesByOwnerID = Dictionary(uniqueKeysWithValues: rows.map { ($0.ownerUserID, $0.value) })
@@ -604,33 +597,25 @@ private extension OwnerDomainEventDeliveryService {
                 \(ident: "increment_by")
             ) AS (
                 VALUES \(values)
-            ),
-            \(ident: "inserted") AS (
-                INSERT INTO \(ident: OwnerDomainEventAggregateSequence.schema) (
-                    \(ident: "id"),
-                    \(ident: "owner_user_id"),
-                    \(ident: "aggregate_type"),
-                    \(ident: "aggregate_id"),
-                    \(ident: "last_sequence")
-                )
-                SELECT
-                    \(ident: "id"),
-                    \(ident: "owner_user_id"),
-                    \(ident: "aggregate_type"),
-                    \(ident: "aggregate_id"),
-                    0
-                FROM \(ident: "input")
-                ON CONFLICT (\(ident: "id")) DO NOTHING
-            ),
-            \(ident: "updated") AS (
-                UPDATE \(ident: OwnerDomainEventAggregateSequence.schema) AS \(ident: "sequences")
-                SET \(ident: "last_sequence") = \(ident: "sequences").\(ident: "last_sequence") + \(ident: "input").\(ident: "increment_by")
-                FROM \(ident: "input")
-                WHERE \(ident: "sequences").\(ident: "id") = \(ident: "input").\(ident: "id")
-                RETURNING \(ident: "sequences").\(ident: "id") AS \(ident: "id"),
-                    \(ident: "sequences").\(ident: "last_sequence") AS \(ident: "value")
             )
-            SELECT \(ident: "id"), \(ident: "value") FROM \(ident: "updated")
+            INSERT INTO \(ident: OwnerDomainEventAggregateSequence.schema) (
+                \(ident: "id"),
+                \(ident: "owner_user_id"),
+                \(ident: "aggregate_type"),
+                \(ident: "aggregate_id"),
+                \(ident: "last_sequence")
+            )
+            SELECT
+                \(ident: "id"),
+                \(ident: "owner_user_id"),
+                \(ident: "aggregate_type"),
+                \(ident: "aggregate_id"),
+                \(ident: "increment_by")
+            FROM \(ident: "input")
+            ON CONFLICT (\(ident: "id")) DO UPDATE
+            SET \(ident: "last_sequence") = \(ident: OwnerDomainEventAggregateSequence.schema).\(ident: "last_sequence")
+                + \(ident: "excluded").\(ident: "last_sequence")
+            RETURNING \(ident: "id"), \(ident: "last_sequence") AS \(ident: "value")
             """).all(decoding: OwnerAggregateSequenceAllocationRow.self)
 
         let valuesByID = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0.value) })
@@ -747,8 +732,11 @@ private extension OwnerDomainEventDeliveryService {
             guard let row = rowsByID[recordID] else {
                 return nil
             }
-            let rowOwnerCursor = UInt64(exactly: row.ownerCursor)
-            let rowOwnerAggregateSequence = UInt64(exactly: row.ownerAggregateSequence)
+            let rowOwnerCursor = try? imPositiveUInt64Sequence(row.ownerCursor, field: "owner_cursor")
+            let rowOwnerAggregateSequence = try? imPositiveUInt64Sequence(
+                row.ownerAggregateSequence,
+                field: "owner_aggregate_sequence"
+            )
             if let payload = canonicalPayloadsByID[recordID],
                payload.ownerCursor == rowOwnerCursor,
                payload.ownerAggregateSequence == rowOwnerAggregateSequence {

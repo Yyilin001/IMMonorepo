@@ -4,11 +4,25 @@ import Vapor
 extension IMRealtimeMessageService {
     func persistIncomingMessage(
         _ payload: IMTCPMessagePayload,
-        senderUserID: UUID
+        senderUserID: UUID,
+        expectedCellRoute: IMInternalMessageCellRoute? = nil
     ) async throws -> IMRealtimeMessagePersistenceResult {
         let normalizedConversationID = payload.conversationID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let conversationID = UUID(uuidString: normalizedConversationID) else {
             throw IMRealtimeMessageError.invalidConversationID
+        }
+
+        if let expectedCellRoute {
+            try await validateExpectedCellRoute(
+                expectedCellRoute,
+                for: conversationID
+            )
+        } else if let forwardedResult = try await forwardToRemoteCellIfNeeded(
+            payload,
+            senderUserID: senderUserID,
+            conversationID: conversationID
+        ) {
+            return forwardedResult
         }
 
         if let forwardedResult = try await forwardToOwnerIfNeeded(
@@ -40,6 +54,26 @@ extension IMRealtimeMessageService {
         }
 
         return try await persistOwnedIncomingMessage(payload, senderUserID: senderUserID)
+    }
+
+    private func validateExpectedCellRoute(
+        _ expectedCellRoute: IMInternalMessageCellRoute,
+        for conversationID: UUID
+    ) async throws {
+        guard let app else {
+            throw Abort(.internalServerError, reason: "Remote Cell message forwarding requires an application runtime.")
+        }
+        guard expectedCellRoute.targetCellID == app.imRealtimeCellID,
+              expectedCellRoute.originCellID != app.imRealtimeCellID
+        else {
+            throw Abort(.badGateway, reason: "Invalid remote Cell message forwarding route.")
+        }
+        let route = try await app.conversationDirectory.route(for: conversationID)
+        guard route.cellID == app.imRealtimeCellID,
+              route.version == expectedCellRoute.routeVersion
+        else {
+            throw Abort(.conflict, reason: "Conversation route changed before the target Cell accepted the message.")
+        }
     }
 
     func persistOwnedIncomingMessage(
@@ -80,6 +114,7 @@ extension IMRealtimeMessageService {
         let startedAt = Date()
         try await reserveHotConversationCapacityIfNeeded(conversationID: conversationID)
         try await rejectBlockedDirectMessageIfNeeded(conversationID: conversationID, senderUserID: senderUserID)
+        try await rejectInactiveGroupMessageIfNeeded(conversationID: conversationID)
         try await rejectMutedGroupMessageIfNeeded(conversationID: conversationID, senderUserID: senderUserID)
         let normalizedContent = try normalizedContent(from: payload.content)
         let trimmedClientMessageID = payload.clientMessageID?
@@ -116,6 +151,17 @@ extension IMRealtimeMessageService {
         case .member:
             throw Abort(.forbidden, reason: "群聊已开启全员禁言。")
         }
+    }
+
+    func rejectInactiveGroupMessageIfNeeded(conversationID: UUID) async throws {
+        let db = try await database(forConversationID: conversationID)
+        guard let conversation = try await Conversation.find(conversationID, on: db),
+              conversation.conversationKind == .group,
+              conversation.groupLifecycleStateEnum != .active
+        else {
+            return
+        }
+        throw Abort(.forbidden, reason: "群聊已被冻结，当前不能发送消息。")
     }
 
     func rejectBlockedDirectMessageIfNeeded(conversationID: UUID, senderUserID: UUID) async throws {
@@ -162,7 +208,8 @@ extension IMRealtimeMessageService {
         do {
             try await app.hotConversationLimiter.reserve(
                 conversationID: conversationID,
-                limit: configuration.messagesPerSecondLimit
+                limit: configuration.messagesPerSecondLimit,
+                now: Date()
             )
         } catch HotConversationLimiterError.rateLimited {
             await app.hotConversationMetrics.recordTrackedWindows(
@@ -170,6 +217,9 @@ extension IMRealtimeMessageService {
             )
             await app.hotConversationMetrics.recordRejectedMessage()
             throw IMRealtimeMessageError.hotConversationRateLimited
+        } catch {
+            await app.hotConversationMetrics.recordBackendError()
+            throw error
         }
         await app.hotConversationMetrics.recordTrackedWindows(
             await app.hotConversationLimiter.trackedWindowCount()

@@ -1084,7 +1084,21 @@ if [[ -d "${target_release_dir}/Public" ]]; then
 fi
 
 if bool_enabled "${IM_RELEASE_RESTART_SERVICES}"; then
-  systemctl restart "${service_units[@]}"
+  restart_units=()
+  for unit in "${service_units[@]}"; do
+    if systemctl is-active --quiet "${unit}"; then
+      restart_units+=("${unit}")
+    fi
+  done
+  while IFS= read -r unit; do
+    [[ -n "${unit}" ]] && restart_units+=("${unit}")
+  done < <(
+    systemctl list-units --type=service --state=active --no-legend --plain 'imserver-stream-consumer@*.service' 2>/dev/null \
+      | awk '{print $1}'
+  )
+  if (( ${#restart_units[@]} > 0 )); then
+    systemctl restart "${restart_units[@]}"
+  fi
 fi
 
 if bool_enabled "${IM_RELEASE_VERIFY_AFTER_ROLLBACK}"; then

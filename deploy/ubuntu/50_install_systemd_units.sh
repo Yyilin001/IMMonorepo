@@ -46,6 +46,7 @@ for unit in (
     "imserver-query-api",
     "imserver-outbox-relay",
     "imserver-stream-consumer",
+    "imserver-stream-consumer@",
     "imserver-domain-delivery-consumer",
 ):
     if f"/etc/systemd/system/{unit}.service" not in text:
@@ -68,6 +69,7 @@ IMSERVER_LIMIT_NOFILE="${IMSERVER_LIMIT_NOFILE:-1048576}"
 IMSERVER_TASKS_MAX="${IMSERVER_TASKS_MAX:-65535}"
 IMSERVER_HEALTHCHECK_RETRIES="${IMSERVER_HEALTHCHECK_RETRIES:-30}"
 IMSERVER_HEALTHCHECK_INTERVAL_SECONDS="${IMSERVER_HEALTHCHECK_INTERVAL_SECONDS:-1}"
+IMSERVER_ENABLE_DEFAULT_UNITS="${IMSERVER_ENABLE_DEFAULT_UNITS:-true}"
 
 ensure_user "${IMSERVER_USER}" "${IMSERVER_GROUP}" "${IMSERVER_HOME}"
 install -d -o root -g root -m 0750 "${IMSERVER_ETC_DIR}" "${IMSERVER_ETC_DIR}/roles"
@@ -155,6 +157,8 @@ IM_COMMAND_API_INTERNAL_BASE_URL=http://127.0.0.1:${IM_COMMAND_API_PORT}
 IM_GATEWAY_RELAY_MODE=local
 IM_TCP_PORT=${IM_TCP_PORT}
 IM_TCP_LISTEN_BACKLOG=${IM_TCP_LISTEN_BACKLOG:-8192}
+IM_TCP_MAX_CONNECTIONS=${IM_TCP_MAX_CONNECTIONS:-20000}
+IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND=${IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND:-500}
 IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE=${IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE:-true}
 EOF
 
@@ -352,6 +356,27 @@ ${service_common}
 WantedBy=multi-user.target
 EOF
 
+cat > /etc/systemd/system/imserver-stream-consumer@.service <<EOF
+[Unit]
+Description=IMServer stream consumer (%i)
+After=network-online.target postgresql.service kafka.service
+Wants=network-online.target kafka.service
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+User=${IMSERVER_USER}
+Group=${IMSERVER_GROUP}
+WorkingDirectory=${IMSERVER_HOME}
+EnvironmentFile=${common_env}
+EnvironmentFile=${IMSERVER_ETC_DIR}/roles/stream-consumer-%i.env
+ExecStart=${IMSERVER_BIN_DIR}/IMServer stream-consumer
+${service_common}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 cat > /etc/systemd/system/imserver-domain-delivery-consumer.service <<EOF
 [Unit]
 Description=IMServer domain delivery stream consumer
@@ -374,8 +399,13 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable imserver-gateway imserver-command-api imserver-query-api imserver-outbox-relay imserver-stream-consumer imserver-domain-delivery-consumer
+if bool_enabled "${IMSERVER_ENABLE_DEFAULT_UNITS}"; then
+  systemctl enable imserver-gateway imserver-command-api imserver-query-api imserver-outbox-relay imserver-stream-consumer imserver-domain-delivery-consumer
+else
+  echo "Skipped enabling default units because IMSERVER_ENABLE_DEFAULT_UNITS=false."
+fi
 
 echo "Installed systemd units. Start them with:"
 echo "  systemctl start imserver-gateway imserver-command-api imserver-query-api imserver-outbox-relay imserver-stream-consumer imserver-domain-delivery-consumer"
+echo "  systemctl enable --now imserver-stream-consumer@realtime_delivery_consumer"
 echo "Review ${common_env} before switching APP_ENV to production."

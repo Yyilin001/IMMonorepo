@@ -79,6 +79,19 @@ struct ConnectionRoutingService {
         let error: (any Error)?
     }
 
+    private struct RemoteCellDispatchWorkItem: Sendable {
+        let targetCellID: String
+        let targetCount: Int
+        let envelope: NodeMessageDispatchEnvelope
+    }
+
+    private struct RemoteCellDispatchResult: Sendable {
+        let targetCellID: String
+        let targetCount: Int
+        let latencyMilliseconds: Int
+        let error: (any Error)?
+    }
+
     private struct RemoteActiveConversationFanoutPlan: Sendable {
         let activeCompactUserIDs: [UUID]
         let downgradedActiveUserCount: Int
@@ -196,6 +209,11 @@ struct ConnectionRoutingService {
         guard let connection = await app.imConnectionRegistry.authenticatedConnection(for: connectionID) else {
             return
         }
+        try? await backend.presenceStore.refreshPresence(forUserID: connection.userID)
+        try? await backend.presenceStore.refreshPresence(
+            forSessionID: connection.sessionID,
+            userID: connection.userID
+        )
         let activeConversationIDs = await app.imConnectionRegistry.activeConversationIDs(forConnectionID: connectionID)
         guard !activeConversationIDs.isEmpty else {
             return
@@ -267,6 +285,7 @@ struct ConnectionRoutingService {
 
         let startedAt = Date()
         let uniqueUserCount = Set(userIDs).count
+        let trace = deliveryTrace(for: payload, requestID: requestID)
         await app.routingMetrics.recordUserFanout(targetUserCount: uniqueUserCount)
         let registryStartedAt = Date()
         await app.imConnectionRegistry.sendDomainEventPayload(payload, toUserIDs: userIDs, requestID: requestID)
@@ -279,17 +298,31 @@ struct ConnectionRoutingService {
                 payload: payload,
                 targetUserIDs: userIDs
             )
-            await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: userIDs)
+            await dispatchRemoteEnvelopeIfNeeded(
+                envelope,
+                forUserIDs: userIDs,
+                trace: trace
+            )
         } catch {
             await app.routingMetrics.recordCrossNodeDispatchFailed()
-            app.logger.warning("Domain-event packet dispatch encode failed.", metadata: [
-                "requestID": .string(requestID?.uuidString ?? ""),
-                "target_user_count": .stringConvertible(uniqueUserCount),
-                "error": .string(String(describing: error))
-            ])
+            var metadata = trace.metadata(outcome: "failed")
+            metadata["target_user_count"] = .stringConvertible(uniqueUserCount)
+            metadata["error_kind"] = .string("packet_encode_failed")
+            app.logger.warning("Domain-event packet dispatch encode failed.", metadata: metadata)
         }
         let remoteDispatchMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: remoteDispatchStartedAt)
         let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
+        await imLogSampledDeliveryTrace(
+            app: app,
+            trace: trace,
+            stage: "gateway_payload_delivery_completed",
+            additionalMetadata: [
+                "target_user_count": .stringConvertible(uniqueUserCount),
+                "registry_send_ms": .stringConvertible(registryMilliseconds),
+                "remote_dispatch_ms": .stringConvertible(remoteDispatchMilliseconds),
+                "total_ms": .stringConvertible(totalMilliseconds)
+            ]
+        )
         let slowLogMilliseconds = app.streamConsumerConfiguration.realtimeDeliverySlowLogMilliseconds
         if IMRealtimeDeliveryDiagnostics.shouldLogAny(
             [registryMilliseconds, remoteDispatchMilliseconds, totalMilliseconds],
@@ -328,6 +361,20 @@ struct ConnectionRoutingService {
         await dispatchRemotePayloadBatches(nonEmptyBatches, requestID: requestID)
         let remoteDispatchMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: remoteDispatchStartedAt)
         let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
+        if let firstBatch = nonEmptyBatches.first {
+            await imLogSampledDeliveryTrace(
+                app: app,
+                trace: deliveryTrace(for: firstBatch.payload, requestID: requestID),
+                stage: "gateway_payload_batch_delivery_completed",
+                additionalMetadata: [
+                    "payload_batch_count": .stringConvertible(nonEmptyBatches.count),
+                    "target_user_count": .stringConvertible(targetUserCount),
+                    "registry_send_ms": .stringConvertible(registryMilliseconds),
+                    "remote_dispatch_ms": .stringConvertible(remoteDispatchMilliseconds),
+                    "total_ms": .stringConvertible(totalMilliseconds)
+                ]
+            )
+        }
         let slowLogMilliseconds = app.streamConsumerConfiguration.realtimeDeliverySlowLogMilliseconds
         if IMRealtimeDeliveryDiagnostics.shouldLogAny(
             [registryMilliseconds, remoteDispatchMilliseconds, totalMilliseconds],
@@ -577,6 +624,16 @@ struct ConnectionRoutingService {
     }
 
     @discardableResult
+    func disconnectAllLocalConnectionsForGatewayDrain() async -> Int {
+        let removals = await app.imConnectionRegistry.kickAllConnections(
+            reason: .serverShutdown,
+            message: "Gateway is draining. Reconnect to continue."
+        )
+        await cleanupPresenceAfterLocalKick(removals)
+        return removals.count
+    }
+
+    @discardableResult
     private func kickLocalConnections(
         forUserID userID: UUID,
         reason: IMTCPKickReason,
@@ -684,9 +741,11 @@ struct ConnectionRoutingService {
     private func dispatchRemoteEnvelopeIfNeeded(
         _ envelope: NodeMessageDispatchEnvelope?,
         forUserIDs userIDs: [UUID],
-        includeLocalNode: Bool = false
+        includeLocalNode: Bool = false,
+        trace: IMDeliveryTrace? = nil
     ) async {
         guard let envelope else { return }
+        await dispatchRemoteCellsIfNeeded(envelope, forUserIDs: userIDs, trace: trace)
         let startedAt = Date()
         let uniqueUserCount = Set(userIDs).count
         do {
@@ -708,7 +767,8 @@ struct ConnectionRoutingService {
             await dispatchRemoteWorkItems(
                 workItems,
                 failureLogMessage: "Cross-node IM dispatch failed",
-                targetMetadataKey: "target_user_count"
+                targetMetadataKey: "target_user_count",
+                trace: trace
             )
             let dispatchMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: dispatchStartedAt)
             let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
@@ -734,15 +794,11 @@ struct ConnectionRoutingService {
             }
         } catch {
             await app.routingMetrics.recordCrossNodeDispatchFailed()
-            app.logger.warning(
-                "Cross-node IM dispatch failed",
-                metadata: [
-                    "node_id": .string(nodeID),
-                    "route_backend": .string(routeBackendName),
-                    "target_user_count": .stringConvertible(uniqueUserCount),
-                    "error": .string(String(describing: error))
-                ]
-            )
+            var metadata = deliveryFailureMetadata(trace: trace, error: error)
+            metadata["node_id"] = .string(nodeID)
+            metadata["route_backend"] = .string(routeBackendName)
+            metadata["target_user_count"] = .stringConvertible(uniqueUserCount)
+            app.logger.warning("Cross-node IM dispatch failed", metadata: metadata)
         }
     }
 
@@ -752,6 +808,7 @@ struct ConnectionRoutingService {
         includeLocalNode: Bool = false
     ) async {
         guard let envelope else { return }
+        await dispatchRemoteCellsIfNeeded(envelope, forSessionIDs: sessionIDs)
         do {
             let activeNodeIDs = try await backend.presenceStore.activeNodeIDs()
             let remoteNodeIDs = activeNodeIDs.filter { includeLocalNode || $0 != nodeID }
@@ -799,6 +856,183 @@ struct ConnectionRoutingService {
         }
     }
 
+    private func dispatchRemoteCellsIfNeeded(
+        _ envelope: NodeMessageDispatchEnvelope,
+        forUserIDs userIDs: [UUID],
+        trace: IMDeliveryTrace? = nil
+    ) async {
+        do {
+            let routes = try await backend.presenceStore.routeCellIDs(forUserIDs: userIDs)
+            var targetUserIDsByCellID: [String: Set<UUID>] = [:]
+            for (userID, cellIDs) in routes {
+                for cellID in cellIDs where cellID != app.imRealtimeCellID {
+                    targetUserIDsByCellID[cellID, default: []].insert(userID)
+                }
+            }
+            let workItems = remoteCellDispatchWorkItems(
+                envelope: envelope,
+                targetUserIDsByCellID: targetUserIDsByCellID
+            )
+            await dispatchRemoteCellWorkItems(workItems, trace: trace)
+        } catch {
+            await app.routingMetrics.recordCrossCellDispatchFailed(latencyMilliseconds: 0)
+            var metadata = deliveryFailureMetadata(trace: trace, error: error)
+            metadata["node_id"] = .string(nodeID)
+            metadata["target_user_count"] = .stringConvertible(Set(userIDs).count)
+            app.logger.warning("Cross-Cell IM dispatch route lookup failed.", metadata: metadata)
+        }
+    }
+
+    private func dispatchRemoteCellsIfNeeded(
+        _ envelope: NodeMessageDispatchEnvelope,
+        forSessionIDs sessionIDs: [UUID]
+    ) async {
+        do {
+            let routes = try await backend.presenceStore.routeCellIDs(forSessionIDs: sessionIDs)
+            var workItems: [RemoteCellDispatchWorkItem] = []
+            for (sessionID, cellIDs) in routes {
+                for cellID in cellIDs where cellID != app.imRealtimeCellID {
+                    workItems.append(
+                        RemoteCellDispatchWorkItem(
+                            targetCellID: cellID,
+                            targetCount: 1,
+                            envelope: envelope.withSessionID(sessionID)
+                        )
+                    )
+                }
+            }
+            await dispatchRemoteCellWorkItems(workItems)
+        } catch {
+            await app.routingMetrics.recordCrossCellDispatchFailed(latencyMilliseconds: 0)
+            var metadata = deliveryFailureMetadata(trace: nil, error: error)
+            metadata["node_id"] = .string(nodeID)
+            metadata["target_session_count"] = .stringConvertible(Set(sessionIDs).count)
+            app.logger.warning("Cross-Cell IM session dispatch route lookup failed.", metadata: metadata)
+        }
+    }
+
+    private func remoteCellDispatchWorkItems(
+        envelope: NodeMessageDispatchEnvelope,
+        targetUserIDsByCellID: [String: Set<UUID>]
+    ) -> [RemoteCellDispatchWorkItem] {
+        let userBatchSize = app.streamConsumerConfiguration.realtimeRemoteDispatchUserBatchSize
+        return targetUserIDsByCellID
+            .sorted { $0.key < $1.key }
+            .flatMap { targetCellID, targetUserIDs in
+                Self.sortedUUIDChunks(Array(targetUserIDs), batchSize: userBatchSize).map { chunk in
+                    RemoteCellDispatchWorkItem(
+                        targetCellID: targetCellID,
+                        targetCount: chunk.count,
+                        envelope: envelope.withTargetUserIDs(chunk)
+                    )
+                }
+            }
+    }
+
+    private func dispatchRemoteCellWorkItems(
+        _ workItems: [RemoteCellDispatchWorkItem],
+        trace: IMDeliveryTrace? = nil
+    ) async {
+        guard !workItems.isEmpty else {
+            return
+        }
+        let maxInFlight = app.streamConsumerConfiguration.realtimeRemoteDispatchMaxInFlight
+        var nextIndex = workItems.startIndex
+        await withTaskGroup(of: RemoteCellDispatchResult.self) { group in
+            var inFlight = 0
+            while nextIndex < workItems.endIndex && inFlight < maxInFlight {
+                let item = workItems[nextIndex]
+                nextIndex = workItems.index(after: nextIndex)
+                inFlight += 1
+                enqueueRemoteCellDispatch(item, in: &group)
+            }
+            while let result = await group.next() {
+                inFlight -= 1
+                await recordRemoteCellDispatchResult(result, trace: trace)
+                guard nextIndex < workItems.endIndex else {
+                    continue
+                }
+                let item = workItems[nextIndex]
+                nextIndex = workItems.index(after: nextIndex)
+                inFlight += 1
+                enqueueRemoteCellDispatch(item, in: &group)
+            }
+        }
+    }
+
+    private func enqueueRemoteCellDispatch(
+        _ item: RemoteCellDispatchWorkItem,
+        in group: inout TaskGroup<RemoteCellDispatchResult>
+    ) {
+        group.addTask {
+            await app.routingMetrics.recordCrossCellDispatchAttempt(recipientCount: item.targetCount)
+            let startedAt = Date()
+            do {
+                try await dispatchToRemoteCell(item)
+                return RemoteCellDispatchResult(
+                    targetCellID: item.targetCellID,
+                    targetCount: item.targetCount,
+                    latencyMilliseconds: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt),
+                    error: nil
+                )
+            } catch {
+                return RemoteCellDispatchResult(
+                    targetCellID: item.targetCellID,
+                    targetCount: item.targetCount,
+                    latencyMilliseconds: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt),
+                    error: error
+                )
+            }
+        }
+    }
+
+    private func dispatchToRemoteCell(_ item: RemoteCellDispatchWorkItem) async throws {
+        guard let baseURL = try await app.cellIngressEndpointResolver.endpoint(for: item.targetCellID, purpose: .realtime) else {
+            throw Abort(.serviceUnavailable, reason: "No realtime ingress endpoint configured for Cell \(item.targetCellID).")
+        }
+        guard let sharedSecret = app.cellIngressConfiguration.sharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sharedSecret.isEmpty
+        else {
+            throw Abort(.serviceUnavailable, reason: "Remote Cell realtime dispatch requires a Cell ingress secret.")
+        }
+        let body = IMCellRealtimeDispatchRequest(
+            originCellID: app.imRealtimeCellID,
+            targetCellID: item.targetCellID,
+            hop: 1,
+            expiresAtEpochSeconds: Int(Date().timeIntervalSince1970) + 15,
+            envelope: item.envelope
+        )
+        var headers = HTTPHeaders()
+        headers.replaceOrAdd(name: "Content-Type", value: "application/json")
+        headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: sharedSecret)
+        let response = try await app.client.post(
+            URI(string: "\(baseURL)/internal/im/realtime/dispatch"),
+            headers: headers
+        ) { request in
+            try request.content.encode(body)
+        }
+        guard response.status == .noContent else {
+            throw Abort(.badGateway, reason: "Remote Cell \(item.targetCellID) rejected realtime dispatch with HTTP \(response.status.code).")
+        }
+    }
+
+    private func recordRemoteCellDispatchResult(
+        _ result: RemoteCellDispatchResult,
+        trace: IMDeliveryTrace?
+    ) async {
+        if let error = result.error {
+            await app.routingMetrics.recordCrossCellDispatchFailed(latencyMilliseconds: result.latencyMilliseconds)
+            var metadata = deliveryFailureMetadata(trace: trace, error: error)
+            metadata["node_id"] = .string(nodeID)
+            metadata["target_cell_id"] = .string(result.targetCellID)
+            metadata["target_count"] = .stringConvertible(result.targetCount)
+            metadata["latency_ms"] = .stringConvertible(result.latencyMilliseconds)
+            app.logger.warning("Cross-Cell IM dispatch failed.", metadata: metadata)
+        } else {
+            await app.routingMetrics.recordCrossCellDispatchSucceeded(latencyMilliseconds: result.latencyMilliseconds)
+        }
+    }
+
     private func dispatchRemotePayloadBatches(
         _ batches: [IMGatewayDomainEventPayloadBatch],
         requestID: UUID?
@@ -818,10 +1052,7 @@ struct ConnectionRoutingService {
                 "payload_batch_count": .stringConvertible(batches.count),
                 "error": .string(String(describing: error))
             ])
-            return
-        }
-        guard !remoteNodeIDs.isEmpty else {
-            return
+            remoteNodeIDs = []
         }
 
         let maxInFlight = app.streamConsumerConfiguration.realtimeRemoteDispatchMaxInFlight
@@ -877,6 +1108,28 @@ struct ConnectionRoutingService {
         remoteNodeIDs: Set<String>,
         encodeCache: DomainEventPacketEncodeCache
     ) async {
+        let trace = deliveryTrace(for: batch.payload, requestID: requestID)
+        do {
+            let remoteCellEnvelope = try await encodeDomainEventPacketEnvelope(
+                requestID: requestID,
+                payload: batch.payload,
+                targetUserIDs: batch.recipientUserIDs,
+                fanoutIntent: batch.fanoutIntent,
+                encodeCache: encodeCache
+            )
+            await dispatchRemoteCellsIfNeeded(
+                remoteCellEnvelope,
+                forUserIDs: batch.recipientUserIDs,
+                trace: trace
+            )
+        } catch {
+            await app.routingMetrics.recordCrossCellDispatchFailed(latencyMilliseconds: 0)
+            var metadata = trace.metadata(outcome: "failed")
+            metadata["target_user_count"] = .stringConvertible(Set(batch.recipientUserIDs).count)
+            metadata["error_kind"] = .string("packet_encode_failed")
+            app.logger.warning("Cross-Cell IM payload batch dispatch encode failed.", metadata: metadata)
+        }
+
         if shouldSplitRemoteActiveConversationFanout(batch),
            await dispatchRemoteActiveConversationPayloadBatch(
                batch,
@@ -910,7 +1163,8 @@ struct ConnectionRoutingService {
             await dispatchRemoteWorkItems(
                 workItems,
                 failureLogMessage: "Cross-node IM dispatch failed",
-                targetMetadataKey: "target_user_count"
+                targetMetadataKey: "target_user_count",
+                trace: trace
             )
             let dispatchMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: dispatchStartedAt)
             let totalMilliseconds = routeMilliseconds + dispatchMilliseconds
@@ -934,12 +1188,9 @@ struct ConnectionRoutingService {
             }
         } catch {
             await app.routingMetrics.recordCrossNodeDispatchFailed()
-            app.logger.warning("Domain-event payload batch dispatch encode failed.", metadata: [
-                "requestID": .string(requestID?.uuidString ?? ""),
-                "event_id": .string(batch.payload.eventID.uuidString),
-                "target_user_count": .stringConvertible(Set(batch.recipientUserIDs).count),
-                "error": .string(String(describing: error))
-            ])
+            var metadata = deliveryFailureMetadata(trace: trace, error: error)
+            metadata["target_user_count"] = .stringConvertible(Set(batch.recipientUserIDs).count)
+            app.logger.warning("Domain-event payload batch dispatch failed.", metadata: metadata)
         }
     }
 
@@ -949,6 +1200,7 @@ struct ConnectionRoutingService {
         remoteNodeIDs: Set<String>,
         encodeCache: DomainEventPacketEncodeCache
     ) async -> Bool {
+        let trace = deliveryTrace(for: batch.payload, requestID: requestID)
         do {
             guard !remoteNodeIDs.isEmpty else {
                 return true
@@ -997,7 +1249,8 @@ struct ConnectionRoutingService {
             await dispatchRemoteWorkItems(
                 workItems,
                 failureLogMessage: "Cross-node active conversation IM dispatch failed",
-                targetMetadataKey: "target_user_count"
+                targetMetadataKey: "target_user_count",
+                trace: trace
             )
             let dispatchMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: dispatchStartedAt)
             let totalMilliseconds = activeRouteMilliseconds + dispatchMilliseconds
@@ -1028,13 +1281,9 @@ struct ConnectionRoutingService {
             await app.routingMetrics.recordRemoteActiveConversationFanoutRouteSplitDrop(
                 recipientCount: targetUserCount
             )
-            app.logger.warning("Cross-node active conversation fanout failed; dropping realtime fanout.", metadata: [
-                "requestID": .string(requestID?.uuidString ?? ""),
-                "event_id": .string(batch.payload.eventID.uuidString),
-                "conversation_id": .string(batch.payload.aggregateID.uuidString),
-                "target_user_count": .stringConvertible(targetUserCount),
-                "error": .string(String(describing: error))
-            ])
+            var metadata = deliveryFailureMetadata(trace: trace, outcome: "dropped", error: error)
+            metadata["target_user_count"] = .stringConvertible(targetUserCount)
+            app.logger.warning("Cross-node active conversation fanout failed; dropping realtime fanout.", metadata: metadata)
             return true
         }
     }
@@ -1079,7 +1328,8 @@ struct ConnectionRoutingService {
     private func dispatchRemoteWorkItems(
         _ workItems: [RemoteDispatchWorkItem],
         failureLogMessage: String,
-        targetMetadataKey: String
+        targetMetadataKey: String,
+        trace: IMDeliveryTrace? = nil
     ) async {
         guard !workItems.isEmpty else {
             return
@@ -1102,7 +1352,8 @@ struct ConnectionRoutingService {
                 await recordRemoteDispatchResult(
                     result,
                     failureLogMessage: failureLogMessage,
-                    targetMetadataKey: targetMetadataKey
+                    targetMetadataKey: targetMetadataKey,
+                    trace: trace
                 )
 
                 guard nextIndex < workItems.endIndex else {
@@ -1189,22 +1440,61 @@ struct ConnectionRoutingService {
     private func recordRemoteDispatchResult(
         _ result: RemoteDispatchResult,
         failureLogMessage: String,
-        targetMetadataKey: String
+        targetMetadataKey: String,
+        trace: IMDeliveryTrace?
     ) async {
         if let error = result.error {
             await app.routingMetrics.recordCrossNodeDispatchFailed(latencyMilliseconds: result.latencyMilliseconds)
-            var metadata: Logger.Metadata = [
-                "node_id": .string(nodeID),
-                "route_backend": .string(routeBackendName),
-                "target_node_id": .string(result.remoteNodeID),
-                "latency_ms": .stringConvertible(result.latencyMilliseconds),
-                "error": .string(String(describing: error))
-            ]
+            var metadata = deliveryFailureMetadata(trace: trace, error: error)
+            metadata["node_id"] = .string(nodeID)
+            metadata["route_backend"] = .string(routeBackendName)
+            metadata["target_node_id"] = .string(result.remoteNodeID)
+            metadata["latency_ms"] = .stringConvertible(result.latencyMilliseconds)
             metadata[targetMetadataKey] = .stringConvertible(result.targetCount)
             app.logger.warning(Logger.Message(stringLiteral: failureLogMessage), metadata: metadata)
         } else {
             await app.routingMetrics.recordCrossNodeDispatchSucceeded(latencyMilliseconds: result.latencyMilliseconds)
         }
+    }
+
+    private func deliveryTrace(
+        for payload: IMTCPChatDomainEventPayload,
+        requestID: UUID?
+    ) -> IMDeliveryTrace {
+        IMDeliveryTrace(
+            conversationID: payload.aggregateID,
+            eventID: payload.eventID,
+            requestID: requestID,
+            runtimeRole: app.imRuntimeRole.rawValue,
+            timelineSequence: payload.aggregateSequence,
+            ownerSequence: payload.ownerAggregateSequence
+        )
+    }
+
+    private func deliveryFailureMetadata(
+        trace: IMDeliveryTrace?,
+        outcome: String = "failed",
+        error: any Error
+    ) -> Logger.Metadata {
+        imDeliveryFailureMetadata(
+            trace: trace,
+            runtimeRole: app.imRuntimeRole.rawValue,
+            outcome: outcome,
+            errorKind: remoteDispatchErrorKind(error)
+        )
+    }
+
+    private func remoteDispatchErrorKind(_ error: any Error) -> String {
+        if error is ConnectionRoutingDispatchError {
+            return "timeout"
+        }
+        if error is CancellationError {
+            return "cancelled"
+        }
+        if let abort = error as? Abort {
+            return "http_\(abort.status.code)"
+        }
+        return "transport_error"
     }
 
     private static func sortedUUIDChunks(_ ids: [UUID], batchSize: Int) -> [[UUID]] {

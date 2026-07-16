@@ -1,4 +1,5 @@
 import http from 'k6/http';
+import { richTextContent, initialDerivedState } from './im-message-payload.js';
 import { check, fail, sleep } from 'k6';
 import { Rate, Trend } from 'k6/metrics';
 
@@ -174,8 +175,8 @@ function sendInternalMessage(senderUserID, conversationID, index) {
         senderUserID: null,
         serverSequence: null,
         serverTimestamp: null,
-        content: { type: 'text', text: `timeline pagination ${index}` },
-        derivedState: { reactions: [], editedAt: null, recalledAt: null },
+        content: richTextContent(`timeline pagination ${index}`),
+        derivedState: initialDerivedState(),
       },
     }),
     { headers: { 'Content-Type': 'application/json', 'X-IM-Internal-Secret': internalSecret } }

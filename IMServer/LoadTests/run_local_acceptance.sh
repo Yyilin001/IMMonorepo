@@ -15,6 +15,14 @@ if [[ -z "${LOCAL_ACCEPTANCE_BACKEND+x}" ]]; then
   fi
 fi
 LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS="${LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS:-false}"
+LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION="${LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION:-false}"
+LOCAL_ACCEPTANCE_RUN_MULTINODE_FAULT_CONTRACTS="${LOCAL_ACCEPTANCE_RUN_MULTINODE_FAULT_CONTRACTS:-false}"
+LOCAL_ACCEPTANCE_HOT_CONVERSATION_PROFILE="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_PROFILE:-local-hot-smoke}"
+LOCAL_ACCEPTANCE_HOT_CONVERSATION_SETTLE_SECONDS="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_SETTLE_SECONDS:-5}"
+LOCAL_ACCEPTANCE_HOT_CONVERSATION_SEND_INTERVAL_MS="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_SEND_INTERVAL_MS:-100}"
+LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_ENABLED="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_ENABLED:-true}"
+LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_SIZE="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_SIZE:-32}"
+LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_DELAY_MS="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_DELAY_MS:-10}"
 LOCAL_ACCEPTANCE_SUITE="${LOCAL_ACCEPTANCE_SUITE:-smoke}"
 LOCAL_ACCEPTANCE_RUN_ID="${LOCAL_ACCEPTANCE_RUN_ID:-local-acceptance-$(date +%Y%m%d-%H%M%S)}"
 LOCAL_ACCEPTANCE_RESULT_ROOT="${LOCAL_ACCEPTANCE_RESULT_ROOT:-${SCRIPT_DIR}/results/local-acceptance}"
@@ -42,6 +50,9 @@ LOCAL_ACCEPTANCE_DROPDB_BIN="${LOCAL_ACCEPTANCE_DROPDB_BIN:-dropdb}"
 LOCAL_ACCEPTANCE_SERVER_LOG_DIR="${LOCAL_ACCEPTANCE_SERVER_LOG_DIR:-${LOCAL_ACCEPTANCE_RESULT_ROOT}/server-logs}"
 LOCAL_ACCEPTANCE_SERVER_LOG_FILE="${LOCAL_ACCEPTANCE_SERVER_LOG_FILE:-${LOCAL_ACCEPTANCE_SERVER_LOG_DIR}/${LOCAL_ACCEPTANCE_RUN_ID}-swift-postgres.log}"
 LOCAL_ACCEPTANCE_HTTP_SMOKE_REPORT_FILE="${LOCAL_ACCEPTANCE_HTTP_SMOKE_REPORT_FILE:-${LOCAL_ACCEPTANCE_RESULT_ROOT}/http-smoke/${LOCAL_ACCEPTANCE_RUN_ID}-local-http-smoke.json}"
+LOCAL_ACCEPTANCE_HOT_CONVERSATION_RESULT_DIR="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_RESULT_DIR:-${LOCAL_ACCEPTANCE_RESULT_ROOT}/hot-conversation/${LOCAL_ACCEPTANCE_RUN_ID}}"
+LOCAL_ACCEPTANCE_HOT_CONVERSATION_REPORT_FILE="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_REPORT_FILE:-${LOCAL_ACCEPTANCE_HOT_CONVERSATION_RESULT_DIR}/stage-report.json}"
+LOCAL_ACCEPTANCE_MULTINODE_FAULT_CONTRACTS_RESULT_DIR="${LOCAL_ACCEPTANCE_MULTINODE_FAULT_CONTRACTS_RESULT_DIR:-${LOCAL_ACCEPTANCE_RESULT_ROOT}/multinode-fault-contracts/${LOCAL_ACCEPTANCE_RUN_ID}}"
 
 bool_enabled() {
   case "${1:-}" in
@@ -63,11 +74,21 @@ Purpose:
 Default run:
   - starts a local Swift combined server against local PostgreSQL
   - runs run_local_http_smoke.sh
+  - skips local hot-conversation k6 unless explicitly enabled
+  - skips multi-node fault contracts unless explicitly enabled
   - skips broader product scenarios unless explicitly enabled
 
 Common env:
   LOCAL_ACCEPTANCE_START_STACK=true|false
   LOCAL_ACCEPTANCE_BACKEND=swift-postgres|docker-compose|external|none
+  LOCAL_ACCEPTANCE_RUN_MULTINODE_FAULT_CONTRACTS=true|false
+  LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION=true|false
+  LOCAL_ACCEPTANCE_HOT_CONVERSATION_PROFILE=local-hot-smoke
+  LOCAL_ACCEPTANCE_HOT_CONVERSATION_SETTLE_SECONDS=5
+  LOCAL_ACCEPTANCE_HOT_CONVERSATION_SEND_INTERVAL_MS=100
+  LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_ENABLED=true|false
+  LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_SIZE=32
+  LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_DELAY_MS=10
   LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS=true|false
   LOCAL_ACCEPTANCE_SUITE=smoke|recommended|baseline|capacity
   LOCAL_ACCEPTANCE_RESULT_ROOT=IMServer/LoadTests/results/local-acceptance
@@ -90,6 +111,7 @@ Examples:
   ./run_local_acceptance.sh run
   LOCAL_ACCEPTANCE_BACKEND=docker-compose ./run_local_acceptance.sh run
   LOCAL_ACCEPTANCE_BACKEND=external ./run_local_acceptance.sh run
+  LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION=true ./run_local_acceptance.sh run
   LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS=true LOCAL_ACCEPTANCE_SUITE=smoke ./run_local_acceptance.sh run
 EOF
 }
@@ -112,13 +134,27 @@ validate_reset_database_safety() {
   fi
 }
 
+validate_hot_conversation_mode() {
+  if bool_enabled "${LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION}" \
+      && [[ "${LOCAL_ACCEPTANCE_BACKEND}" != "swift-postgres" ]] \
+      && [[ "${LOCAL_ACCEPTANCE_BACKEND}" != "external" ]]; then
+    printf 'local_acceptance result=fail reason=hot_conversation_requires_running_loopback_server backend=%s action=use_LOCAL_ACCEPTANCE_BACKEND_swift-postgres_or_external\n' \
+      "${LOCAL_ACCEPTANCE_BACKEND}" >&2
+    exit 2
+  fi
+}
+
 check_prerequisites() {
-  if [[ "${LOCAL_ACCEPTANCE_BACKEND}" == "none" ]] && ! bool_enabled "${LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS}"; then
-    printf 'local_acceptance result=fail reason=no_local_checks_enabled action=enable_LOCAL_ACCEPTANCE_START_STACK_or_LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS\n' >&2
+  if [[ "${LOCAL_ACCEPTANCE_BACKEND}" == "none" ]] \
+      && ! bool_enabled "${LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS}" \
+      && ! bool_enabled "${LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION}" \
+      && ! bool_enabled "${LOCAL_ACCEPTANCE_RUN_MULTINODE_FAULT_CONTRACTS}"; then
+    printf 'local_acceptance result=fail reason=no_local_checks_enabled action=enable_LOCAL_ACCEPTANCE_START_STACK_or_LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS_or_LOCAL_ACCEPTANCE_RUN_MULTINODE_FAULT_CONTRACTS\n' >&2
     exit 2
   fi
 
   validate_reset_database_safety
+  validate_hot_conversation_mode
 
   case "${LOCAL_ACCEPTANCE_BACKEND}" in
     swift-postgres)
@@ -158,8 +194,12 @@ check_prerequisites() {
       ;;
   esac
 
-  if bool_enabled "${LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS}" && ! bool_enabled "${LOCAL_ACCEPTANCE_DRY_RUN}"; then
+  if bool_enabled "${LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION}" \
+      || { bool_enabled "${LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS}" && ! bool_enabled "${LOCAL_ACCEPTANCE_DRY_RUN}"; }; then
     require_command "${LOCAL_ACCEPTANCE_K6_BIN}"
+  fi
+  if bool_enabled "${LOCAL_ACCEPTANCE_RUN_MULTINODE_FAULT_CONTRACTS}"; then
+    require_command "${LOCAL_ACCEPTANCE_SWIFT_BIN}"
   fi
 
   printf 'local_acceptance result=pass mode=check backend=%s productionEvidence=false\n' "${LOCAL_ACCEPTANCE_BACKEND}"
@@ -172,9 +212,11 @@ target baseURL=${LOCAL_ACCEPTANCE_BASE_URL} tcpHost=${LOCAL_ACCEPTANCE_TCP_HOST}
 backend=${LOCAL_ACCEPTANCE_BACKEND} start=${LOCAL_ACCEPTANCE_START_STACK} httpHost=${LOCAL_ACCEPTANCE_HTTP_HOST} httpPort=${LOCAL_ACCEPTANCE_HTTP_PORT}
 database resetSchema=${LOCAL_ACCEPTANCE_RESET_SCHEMA} host=${LOCAL_ACCEPTANCE_DATABASE_HOST} port=${LOCAL_ACCEPTANCE_DATABASE_PORT} name=${LOCAL_ACCEPTANCE_DATABASE_NAME}
 scripts docker=${SERVER_DIR}/scripts/production_smoke.sh localHTTP=${SCRIPT_DIR}/run_local_http_smoke.sh
+hotConversation enabled=${LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION} profile=${LOCAL_ACCEPTANCE_HOT_CONVERSATION_PROFILE} settleSeconds=${LOCAL_ACCEPTANCE_HOT_CONVERSATION_SETTLE_SECONDS} sendIntervalMs=${LOCAL_ACCEPTANCE_HOT_CONVERSATION_SEND_INTERVAL_MS} batchEnabled=${LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_ENABLED} batchMaxSize=${LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_SIZE} batchMaxDelayMs=${LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_DELAY_MS}
+multinodeFaultContracts enabled=${LOCAL_ACCEPTANCE_RUN_MULTINODE_FAULT_CONTRACTS} resultDir=${LOCAL_ACCEPTANCE_MULTINODE_FAULT_CONTRACTS_RESULT_DIR}
 productScenarios enabled=${LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS} suite=${LOCAL_ACCEPTANCE_SUITE} dryRun=${LOCAL_ACCEPTANCE_DRY_RUN}
 resultRoot=${LOCAL_ACCEPTANCE_RESULT_ROOT}
-artifacts httpSmokeReport=${LOCAL_ACCEPTANCE_HTTP_SMOKE_REPORT_FILE} serverLog=${LOCAL_ACCEPTANCE_SERVER_LOG_FILE}
+artifacts httpSmokeReport=${LOCAL_ACCEPTANCE_HTTP_SMOKE_REPORT_FILE} hotConversationReport=${LOCAL_ACCEPTANCE_HOT_CONVERSATION_REPORT_FILE} serverLog=${LOCAL_ACCEPTANCE_SERVER_LOG_FILE}
 note=local_results_do_not_satisfy_production_acceptance
 EOF
 }
@@ -202,6 +244,18 @@ run_local_http_smoke() {
   LOCAL_HTTP_SMOKE_REPORT_DIR="${LOCAL_ACCEPTANCE_RESULT_ROOT}/http-smoke" \
   LOCAL_HTTP_SMOKE_REPORT_FILE="${LOCAL_ACCEPTANCE_HTTP_SMOKE_REPORT_FILE}" \
     bash "${SCRIPT_DIR}/run_local_http_smoke.sh" run
+}
+
+run_local_hot_conversation() {
+  LOCAL_HOT_CONVERSATION_RUN_ID="${LOCAL_ACCEPTANCE_RUN_ID}" \
+  LOCAL_HOT_CONVERSATION_BASE_URL="${LOCAL_ACCEPTANCE_BASE_URL}" \
+  LOCAL_HOT_CONVERSATION_INTERNAL_SECRET="${LOCAL_ACCEPTANCE_INTERNAL_SECRET}" \
+  LOCAL_HOT_CONVERSATION_PROFILE="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_PROFILE}" \
+  LOCAL_HOT_CONVERSATION_SETTLE_SECONDS="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_SETTLE_SECONDS}" \
+  IM_SEND_INTERVAL_MS="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_SEND_INTERVAL_MS}" \
+  LOCAL_HOT_CONVERSATION_RESULT_DIR="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_RESULT_DIR}" \
+  LOCAL_HOT_CONVERSATION_K6_BIN="${LOCAL_ACCEPTANCE_K6_BIN}" \
+    bash "${SCRIPT_DIR}/run_local_hot_conversation.sh" run
 }
 
 kill_local_acceptance_servers() {
@@ -243,6 +297,14 @@ run_swift_postgres_backend() {
   mkdir -p "${LOCAL_ACCEPTANCE_SERVER_LOG_DIR}"
   kill_local_acceptance_servers
   ensure_swift_postgres_database
+  local message_write_batch_enabled="${IM_MESSAGE_WRITE_BATCH_ENABLED:-false}"
+  local message_write_batch_max_size="${IM_MESSAGE_WRITE_BATCH_MAX_SIZE:-32}"
+  local message_write_batch_max_delay_ms="${IM_MESSAGE_WRITE_BATCH_MAX_DELAY_MS:-10}"
+  if bool_enabled "${LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION}"; then
+    message_write_batch_enabled="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_ENABLED}"
+    message_write_batch_max_size="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_SIZE}"
+    message_write_batch_max_delay_ms="${LOCAL_ACCEPTANCE_HOT_CONVERSATION_BATCH_MAX_DELAY_MS}"
+  fi
   (
     cd "${SERVER_DIR}"
     server_args=(run IMServer serve --hostname "${LOCAL_ACCEPTANCE_HTTP_HOST}" --port "${LOCAL_ACCEPTANCE_HTTP_PORT}")
@@ -265,6 +327,9 @@ run_swift_postgres_backend() {
     IM_INLINE_OUTBOX_PROJECTION=true \
     IM_EVENT_STREAM_DRIVER=database-outbox \
     IM_ROUTING_MODE=local \
+    IM_MESSAGE_WRITE_BATCH_ENABLED="${message_write_batch_enabled}" \
+    IM_MESSAGE_WRITE_BATCH_MAX_SIZE="${message_write_batch_max_size}" \
+    IM_MESSAGE_WRITE_BATCH_MAX_DELAY_MS="${message_write_batch_max_delay_ms}" \
     IM_NODE_ID="${IM_NODE_ID:-local-acceptance-node}" \
     IM_INTERNAL_SHARED_SECRET="${LOCAL_ACCEPTANCE_INTERNAL_SECRET}" \
     IM_COMMAND_INTERNAL_SHARED_SECRET="${LOCAL_ACCEPTANCE_INTERNAL_SECRET}" \
@@ -289,6 +354,9 @@ run_swift_postgres_backend() {
 
   wait_for_local_server
   run_local_http_smoke
+  if bool_enabled "${LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION}"; then
+    run_local_hot_conversation
+  fi
   cleanup_swift_server
   trap - EXIT INT TERM
 }
@@ -304,6 +372,9 @@ run_selected_backend() {
       ;;
     external)
       run_local_http_smoke
+      if bool_enabled "${LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION}"; then
+        run_local_hot_conversation
+      fi
       ;;
     none)
       ;;
@@ -330,10 +401,22 @@ run_product_scenarios() {
     bash "${SCRIPT_DIR}/run_product_scenario_suite.sh"
 }
 
+run_local_multinode_fault_contracts() {
+  if ! bool_enabled "${LOCAL_ACCEPTANCE_RUN_MULTINODE_FAULT_CONTRACTS}"; then
+    return 0
+  fi
+  LOCAL_MULTINODE_FAULT_CONTRACTS_RUN_ID="${LOCAL_ACCEPTANCE_RUN_ID}" \
+  LOCAL_MULTINODE_FAULT_CONTRACTS_RESULT_DIR="${LOCAL_ACCEPTANCE_MULTINODE_FAULT_CONTRACTS_RESULT_DIR}" \
+  LOCAL_MULTINODE_FAULT_CONTRACTS_SWIFT_BIN="${LOCAL_ACCEPTANCE_SWIFT_BIN}" \
+    bash "${SCRIPT_DIR}/run_local_multinode_fault_contracts.sh" run
+}
+
 run_local_acceptance() {
   mkdir -p "${LOCAL_ACCEPTANCE_RESULT_ROOT}"
   print_plan | tee "${LOCAL_ACCEPTANCE_RESULT_ROOT}/${LOCAL_ACCEPTANCE_RUN_ID}-plan.txt"
   check_prerequisites
+
+  run_local_multinode_fault_contracts
 
   run_selected_backend
 
@@ -358,10 +441,14 @@ run_local_acceptance() {
   "backend": "${LOCAL_ACCEPTANCE_BACKEND}",
   "resetSchema": $(bool_enabled "${LOCAL_ACCEPTANCE_RESET_SCHEMA}" && printf 'true' || printf 'false'),
   "startStack": $(bool_enabled "${LOCAL_ACCEPTANCE_START_STACK}" && printf 'true' || printf 'false'),
+  "runHotConversation": $(bool_enabled "${LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION}" && printf 'true' || printf 'false'),
+  "runMultinodeFaultContracts": $(bool_enabled "${LOCAL_ACCEPTANCE_RUN_MULTINODE_FAULT_CONTRACTS}" && printf 'true' || printf 'false'),
   "runProductScenarios": $(bool_enabled "${LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS}" && printf 'true' || printf 'false'),
   "suite": "${LOCAL_ACCEPTANCE_SUITE}",
   "artifacts": {
     "httpSmokeReport": "${LOCAL_ACCEPTANCE_HTTP_SMOKE_REPORT_FILE}",
+    "hotConversationReport": "${LOCAL_ACCEPTANCE_HOT_CONVERSATION_REPORT_FILE}",
+    "multinodeFaultContractsResultDir": "${LOCAL_ACCEPTANCE_MULTINODE_FAULT_CONTRACTS_RESULT_DIR}",
     "serverLog": "${LOCAL_ACCEPTANCE_SERVER_LOG_FILE}"
   }
 }
@@ -426,6 +513,16 @@ run_self_test() {
   LOCAL_ACCEPTANCE_SELF_TEST=false \
   LOCAL_ACCEPTANCE_START_STACK=false \
   LOCAL_ACCEPTANCE_BACKEND=none \
+  LOCAL_ACCEPTANCE_RUN_MULTINODE_FAULT_CONTRACTS=true \
+  LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS=false \
+  LOCAL_ACCEPTANCE_RUN_ID=local-self-test \
+  LOCAL_ACCEPTANCE_RESULT_ROOT="${tmpdir}/results" \
+    bash "${BASH_SOURCE[0]}" --check >"${log}"
+  grep -q 'local_acceptance result=pass mode=check backend=none productionEvidence=false' "${log}"
+
+  LOCAL_ACCEPTANCE_SELF_TEST=false \
+  LOCAL_ACCEPTANCE_START_STACK=false \
+  LOCAL_ACCEPTANCE_BACKEND=none \
   LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS=true \
   LOCAL_ACCEPTANCE_DRY_RUN=true \
   LOCAL_ACCEPTANCE_RUN_ID=local-self-test \
@@ -441,6 +538,19 @@ run_self_test() {
   LOCAL_ACCEPTANCE_RESULT_ROOT="${tmpdir}/results" \
     bash "${BASH_SOURCE[0]}" --check >"${log}"
   grep -q 'local_acceptance result=pass mode=check backend=external productionEvidence=false' "${log}"
+
+  if LOCAL_ACCEPTANCE_SELF_TEST=false \
+      LOCAL_ACCEPTANCE_START_STACK=false \
+      LOCAL_ACCEPTANCE_BACKEND=none \
+      LOCAL_ACCEPTANCE_RUN_HOT_CONVERSATION=true \
+      LOCAL_ACCEPTANCE_RUN_PRODUCT_SCENARIOS=false \
+      LOCAL_ACCEPTANCE_RUN_ID=local-self-test \
+      LOCAL_ACCEPTANCE_RESULT_ROOT="${tmpdir}/results" \
+        bash "${BASH_SOURCE[0]}" --check >"${log}" 2>&1; then
+    printf 'local_acceptance_self_test result=fail reason=hot_conversation_without_server_passed\n' >&2
+    return 1
+  fi
+  grep -q 'reason=hot_conversation_requires_running_loopback_server' "${log}"
 
   printf 'local_acceptance_self_test result=pass\n'
 }

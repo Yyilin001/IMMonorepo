@@ -28,12 +28,12 @@ extension ConversationRuntimeController {
         }
 
         do {
-            let conversation = try await sessionClient.updateIMMyMemberProfile(
+            _ = try await sessionClient.updateIMMyMemberProfile(
                 conversationID: trimmedConversationID,
                 memberNickname: memberNickname?.trimmingCharacters(in: .whitespacesAndNewlines)
             )
             markServerOnline()
-            await applyConversationSummaryReadModelAsync([conversation])
+            scheduleConversationSummaryReadModelCorrection(force: true)
             await loadConversationMembers(for: trimmedConversationID)
             scheduleConversationCachePersist()
             return true

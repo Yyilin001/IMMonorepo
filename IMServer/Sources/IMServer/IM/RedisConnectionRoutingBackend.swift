@@ -11,7 +11,18 @@ final class RedisConnectionRoutingBackend: ConnectionRoutingBackend, @unchecked 
     private let pool: RedisConnectionPool
     private let logger: Logger
 
-    init(configuration: IMRedisRoutingConfiguration, nodeID: String, logger: Logger, eventLoop: any EventLoop) throws {
+    init(
+        configuration: IMRedisRoutingConfiguration,
+        nodeDispatchConfiguration: IMNodeDispatchConfiguration = .init(
+            mode: .redis,
+            endpointsByNodeID: [:],
+            sharedSecret: nil
+        ),
+        nodeID: String,
+        cellID: String = IMRealtimeCellConfiguration.defaultCellID,
+        logger: Logger,
+        eventLoop: any EventLoop
+    ) throws {
         self.logger = logger
 
         let url = try configuration.requireURL()
@@ -38,12 +49,25 @@ final class RedisConnectionRoutingBackend: ConnectionRoutingBackend, @unchecked 
         self.presenceStore = RedisPresenceStore(
             pool: pool,
             nodeID: nodeID,
+            cellID: cellID,
             logger: logger,
             heartbeatTimeoutSeconds: configuration.presenceHeartbeatTimeoutSeconds,
             activeConversationRouteTTLSeconds: configuration.activeConversationRouteTTLSeconds,
             activeConversationRouteCacheTTLSeconds: configuration.activeConversationRouteCacheTTLSeconds
         )
-        self.dispatchService = RedisNodeMessageDispatchService(pool: pool, nodeID: nodeID, logger: logger)
+        switch nodeDispatchConfiguration.mode {
+        case .redis:
+            self.dispatchService = RedisNodeMessageDispatchService(
+                pool: pool,
+                nodeID: nodeID,
+                cellID: cellID,
+                logger: logger
+            )
+        case .http:
+            self.dispatchService = HTTPNodeMessageDispatchService(
+                configuration: nodeDispatchConfiguration
+            )
+        }
     }
 
     var backendName: String { "redis" }

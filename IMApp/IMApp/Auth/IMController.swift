@@ -1,5 +1,6 @@
 import Foundation
 import IMClientKit
+import OSLog
 
 // App-level IM facade. It preserves the SwiftUI-facing API while delegating
 // connection, gap sync, read reporting, queued flush, media, and AI recovery to
@@ -685,6 +686,7 @@ final class ConversationRuntimeController {
             hasMore: response.hasMore
         )
         await imConversationStore.applyServerSummaryReadStatesAsync(response.items)
+        enqueueSelectedConversationTimelineCatchUpFromSummary(reason: "summary-replace")
         scheduleConversationCachePersist()
         return true
     }
@@ -728,8 +730,38 @@ final class ConversationRuntimeController {
             upserts: upserts,
             removedConversationIDs: removedConversationIDs
         )
+        enqueueSelectedConversationTimelineCatchUpFromSummary(reason: "summary-changes")
         scheduleConversationCachePersist()
         return true
+    }
+
+    private func enqueueSelectedConversationTimelineCatchUpFromSummary(reason: String) {
+        guard let selectedConversationID = imConversationStore.selectedConversationID,
+              let targetTimelineSequence = latestConversationSummariesProvider()
+                .first(where: { $0.id.uuidString == selectedConversationID })?
+                .lastMessage?
+                .timelineSequence,
+              let latestLoadedSequence = imConversationStore.latestLoadedTimelineSequence(
+                for: selectedConversationID
+              ),
+              latestLoadedSequence < targetTimelineSequence
+        else {
+            return
+        }
+
+        imConversationStore.recordTimelineCatchUpHintQueued(
+            conversationID: selectedConversationID,
+            targetTimelineSequence: targetTimelineSequence
+        )
+        IMAppLog.imRuntime.debug(
+            "Summary correction scheduling selected timeline catch-up reason=\(reason, privacy: .public) conversationID=\(selectedConversationID, privacy: .public) latestLoadedSequence=\(latestLoadedSequence, privacy: .public) targetTimelineSequence=\(targetTimelineSequence, privacy: .public)"
+        )
+        enqueueConversationGapSyncCatchUp(
+            for: selectedConversationID,
+            prioritize: true,
+            targetTimelineSequence: targetTimelineSequence,
+            bypassRateLimit: true
+        )
     }
 
     func loadMessagesPage(

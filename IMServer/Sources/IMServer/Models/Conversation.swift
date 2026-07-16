@@ -11,6 +11,13 @@ enum IMDirectMessagingState: String, Codable, Content, Sendable {
     case frozenAfterUnfriend = "frozen_after_unfriend"
 }
 
+enum IMGroupLifecycleState: String, Codable, Content, Sendable {
+    case active
+    case frozen
+    // Reserved for the separately designed, irreversible dissolution flow.
+    case dissolved
+}
+
 enum IMConversationMemberRole: String, Codable, Content, Sendable {
     case owner
     case admin
@@ -37,6 +44,9 @@ final class Conversation: Model, Content, @unchecked Sendable {
 
     @Field(key: "direct_messaging_state")
     var directMessagingState: String
+
+    @Field(key: "group_lifecycle_state")
+    var groupLifecycleState: String
 
     @Field(key: "mute_all")
     var muteAll: Bool
@@ -68,6 +78,7 @@ final class Conversation: Model, Content, @unchecked Sendable {
         avatarPreset: IMConversationAvatarPreset? = nil,
         kind: IMConversationKind = .group,
         directMessagingState: IMDirectMessagingState = .active,
+        groupLifecycleState: IMGroupLifecycleState = .active,
         muteAll: Bool = false,
         updatedAt: Date = Date(),
         lastMessageSequence: Int = 0,
@@ -79,6 +90,7 @@ final class Conversation: Model, Content, @unchecked Sendable {
         self.avatarPreset = avatarPreset?.rawValue
         self.kind = kind.rawValue
         self.directMessagingState = directMessagingState.rawValue
+        self.groupLifecycleState = groupLifecycleState.rawValue
         self.muteAll = muteAll
         self.updatedAt = updatedAt
         self.lastMessageSequence = lastMessageSequence
@@ -95,9 +107,55 @@ final class Conversation: Model, Content, @unchecked Sendable {
         set { directMessagingState = newValue.rawValue }
     }
 
+    var groupLifecycleStateEnum: IMGroupLifecycleState {
+        get { IMGroupLifecycleState(rawValue: groupLifecycleState) ?? .active }
+        set { groupLifecycleState = newValue.rawValue }
+    }
+
+    var groupLifecycleStateForPresentation: String? {
+        conversationKind == .group ? groupLifecycleStateEnum.rawValue : nil
+    }
+
     var avatarPresetEnum: IMConversationAvatarPreset? {
         get { avatarPreset.flatMap(IMConversationAvatarPreset.init(rawValue:)) }
         set { avatarPreset = newValue?.rawValue }
+    }
+
+    /// Copies every persisted canonical field without invoking timestamp defaults.
+    /// Physical shard migration uses this rather than domain constructors so the
+    /// destination timeline remains byte-for-byte equivalent to the source.
+    func migrationCopy() -> Conversation {
+        let copy = Conversation()
+        copy.id = id
+        copy.title = title
+        copy.notice = notice
+        copy.avatarPreset = avatarPreset
+        copy.kind = kind
+        copy.directMessagingState = directMessagingState
+        copy.groupLifecycleState = groupLifecycleState
+        copy.muteAll = muteAll
+        copy.updatedAt = updatedAt
+        copy.lastMessageSequence = lastMessageSequence
+        copy.membershipRevision = membershipRevision
+        copy.createdAt = createdAt
+        return copy
+    }
+
+    var migrationFingerprintFields: [String?] {
+        [
+            id?.uuidString,
+            title,
+            notice,
+            avatarPreset,
+            kind,
+            directMessagingState,
+            groupLifecycleState,
+            String(muteAll),
+            String(updatedAt.timeIntervalSince1970),
+            String(lastMessageSequence),
+            membershipRevision.map { String($0.timeIntervalSince1970) },
+            createdAt.map { String($0.timeIntervalSince1970) }
+        ]
     }
 }
 
@@ -125,6 +183,17 @@ final class ConversationMember: Model, Content, @unchecked Sendable {
     @OptionalField(key: "member_nickname")
     var memberNickname: String?
 
+    // Per-member preferences are canonical conversation-shard state. Summary
+    // rows mirror these fields for list/query performance.
+    @Field(key: "is_pinned")
+    var isPinned: Bool
+
+    @OptionalField(key: "pinned_at")
+    var pinnedAt: Date?
+
+    @Field(key: "is_muted")
+    var isMuted: Bool
+
     @Timestamp(key: "joined_at", on: .create)
     var joinedAt: Date?
 
@@ -137,7 +206,10 @@ final class ConversationMember: Model, Content, @unchecked Sendable {
         role: IMConversationMemberRole = .member,
         lastReadSequence: Int = 0,
         visibleFromSequence: Int = 0,
-        memberNickname: String? = nil
+        memberNickname: String? = nil,
+        isPinned: Bool = false,
+        pinnedAt: Date? = nil,
+        isMuted: Bool = false
     ) {
         self.id = id
         self.$conversation.id = conversationID
@@ -146,11 +218,46 @@ final class ConversationMember: Model, Content, @unchecked Sendable {
         self.lastReadSequence = lastReadSequence
         self.visibleFromSequence = visibleFromSequence
         self.memberNickname = memberNickname
+        self.isPinned = isPinned
+        self.pinnedAt = pinnedAt
+        self.isMuted = isMuted
     }
 
     var memberRoleEnum: IMConversationMemberRole {
         get { IMConversationMemberRole(rawValue: role) ?? .member }
         set { role = newValue.rawValue }
+    }
+
+    func migrationCopy() -> ConversationMember {
+        let copy = ConversationMember()
+        copy.id = id
+        copy.$conversation.id = $conversation.id
+        copy.$user.id = $user.id
+        copy.role = role
+        copy.lastReadSequence = lastReadSequence
+        copy.visibleFromSequence = visibleFromSequence
+        copy.memberNickname = memberNickname
+        copy.isPinned = isPinned
+        copy.pinnedAt = pinnedAt
+        copy.isMuted = isMuted
+        copy.joinedAt = joinedAt
+        return copy
+    }
+
+    var migrationFingerprintFields: [String?] {
+        [
+            id?.uuidString,
+            $conversation.id.uuidString,
+            $user.id.uuidString,
+            role,
+            String(lastReadSequence),
+            String(visibleFromSequence),
+            memberNickname,
+            String(isPinned),
+            pinnedAt.map { String($0.timeIntervalSince1970) },
+            String(isMuted),
+            joinedAt.map { String($0.timeIntervalSince1970) }
+        ]
     }
 }
 
@@ -250,5 +357,35 @@ final class ConversationMessage: Model, Content, @unchecked Sendable {
 
     static func encodeDerivedState(_ derivedState: IMMessageDerivedState) throws -> String {
         try derivedState.protobuf.serializedData().base64EncodedString()
+    }
+
+    func migrationCopy() -> ConversationMessage {
+        let copy = ConversationMessage()
+        copy.id = id
+        copy.$conversation.id = $conversation.id
+        copy.$sender.id = $sender.id
+        copy.serverSequence = serverSequence
+        copy.timelineSequence = timelineSequence
+        copy.kind = kind
+        copy.bodyJSON = bodyJSON
+        copy.derivedStateJSON = derivedStateJSON
+        copy.clientMessageID = clientMessageID
+        copy.createdAt = createdAt
+        return copy
+    }
+
+    var migrationFingerprintFields: [String?] {
+        [
+            id?.uuidString,
+            $conversation.id.uuidString,
+            $sender.id.uuidString,
+            String(serverSequence),
+            String(timelineSequence),
+            kind,
+            bodyJSON,
+            derivedStateJSON,
+            clientMessageID,
+            createdAt.map { String($0.timeIntervalSince1970) }
+        ]
     }
 }

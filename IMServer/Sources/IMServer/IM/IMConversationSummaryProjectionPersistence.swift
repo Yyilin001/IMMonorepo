@@ -435,6 +435,7 @@ extension IMConversationSummaryProjectionService {
                 \(bind: row.title),
                 \(bind: row.kind),
                 \(bind: row.directMessagingState),
+                \(bind: row.groupLifecycleState),
                 \(bind: row.directPeerUserID),
                 \(bind: row.directPeerEmail),
                 \(bind: row.directPeerDisplayName),
@@ -466,6 +467,7 @@ extension IMConversationSummaryProjectionService {
                 \(ident: "title"),
                 \(ident: "kind"),
                 \(ident: "direct_messaging_state"),
+                \(ident: "group_lifecycle_state"),
                 \(ident: "direct_peer_user_id"),
                 \(ident: "direct_peer_email"),
                 \(ident: "direct_peer_display_name"),
@@ -493,6 +495,7 @@ extension IMConversationSummaryProjectionService {
                 \(ident: "title") = \(ident: "excluded").\(ident: "title"),
                 \(ident: "kind") = \(ident: "excluded").\(ident: "kind"),
                 \(ident: "direct_messaging_state") = \(ident: "excluded").\(ident: "direct_messaging_state"),
+                \(ident: "group_lifecycle_state") = \(ident: "excluded").\(ident: "group_lifecycle_state"),
                 \(ident: "direct_peer_user_id") = \(ident: "excluded").\(ident: "direct_peer_user_id"),
                 \(ident: "direct_peer_email") = \(ident: "excluded").\(ident: "direct_peer_email"),
                 \(ident: "direct_peer_display_name") = \(ident: "excluded").\(ident: "direct_peer_display_name"),
@@ -506,6 +509,9 @@ extension IMConversationSummaryProjectionService {
                 \(ident: "last_message_json") = \(ident: "excluded").\(ident: "last_message_json"),
                 \(ident: "last_read_sequence") = \(ident: "excluded").\(ident: "last_read_sequence"),
                 \(ident: "unread_count") = \(ident: "excluded").\(ident: "unread_count"),
+                \(ident: "is_pinned") = \(ident: "excluded").\(ident: "is_pinned"),
+                \(ident: "pinned_at") = \(ident: "excluded").\(ident: "pinned_at"),
+                \(ident: "is_muted") = \(ident: "excluded").\(ident: "is_muted"),
                 \(ident: "last_activity_at") = \(ident: "excluded").\(ident: "last_activity_at"),
                 \(ident: "updated_at") = \(ident: "excluded").\(ident: "updated_at"),
                 \(ident: "is_removed") = \(ident: "excluded").\(ident: "is_removed")
@@ -523,6 +529,7 @@ extension IMConversationSummaryProjectionService {
             title: summary.title,
             kind: summary.kind,
             directMessagingState: summary.directMessagingState,
+            groupLifecycleState: summary.groupLifecycleState,
             directPeerUserID: summary.directPeerUserID,
             directPeerEmail: summary.directPeerEmail,
             directPeerDisplayName: summary.directPeerDisplayName,
@@ -568,6 +575,7 @@ struct MessageCreatedSummaryUpsertRow {
     let title: String?
     let kind: String
     let directMessagingState: String?
+    let groupLifecycleState: String
     let directPeerUserID: UUID?
     let directPeerEmail: String?
     let directPeerDisplayName: String?

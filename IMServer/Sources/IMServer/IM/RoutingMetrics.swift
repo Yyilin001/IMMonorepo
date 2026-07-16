@@ -18,6 +18,9 @@ actor RoutingMetrics {
         var tcpCloseInputClosedCount: Int = 0
         var tcpCloseResetByPeerCount: Int = 0
         var tcpCloseSlowWriteCount: Int = 0
+        var tcpCloseConnectionLimitCount: Int = 0
+        var tcpCloseConnectionRateLimitCount: Int = 0
+        var tcpCloseGatewayDrainingCount: Int = 0
         var tcpClosePeerWaitingForAuthCount: Int = 0
         var tcpClosePeerAuthenticatingCount: Int = 0
         var tcpClosePeerAuthenticatedCount: Int = 0
@@ -30,6 +33,9 @@ actor RoutingMetrics {
         var tcpWriteSlowTotalLatencyMillis: Int = 0
         var tcpWriteSlowMaxLatencyMillis: Int = 0
         var tcpWriteSlowConnectionClosedCount: Int = 0
+        var tcpAdmissionRejectedCount: Int = 0
+        var tcpAdmissionRateLimitedCount: Int = 0
+        var tcpAdmissionDrainingRejectedCount: Int = 0
         var tcpWriteTotalLatencyMillis: Int = 0
         var tcpWriteMaxLatencyMillis: Int = 0
         var userFanoutCount: Int = 0
@@ -43,6 +49,12 @@ actor RoutingMetrics {
         var crossNodeDispatchMaxTargetsPerPacket: Int = 0
         var crossNodeDispatchTotalLatencyMillis: Int = 0
         var crossNodeDispatchMaxLatencyMillis: Int = 0
+        var crossCellDispatchAttemptCount: Int = 0
+        var crossCellDispatchSuccessCount: Int = 0
+        var crossCellDispatchFailureCount: Int = 0
+        var crossCellDispatchRecipientCount: Int = 0
+        var crossCellDispatchTotalLatencyMillis: Int = 0
+        var crossCellDispatchMaxLatencyMillis: Int = 0
         var remoteDomainEventEncodedPacketCount: Int = 0
         var remoteDomainEventEncodeCacheHitCount: Int = 0
         var remoteDomainEventEncodedPacketBytes: Int = 0
@@ -209,6 +221,12 @@ actor RoutingMetrics {
             snapshot.tcpCloseErrorCount += 1
         case let reason? where reason == "slow_write":
             snapshot.tcpCloseSlowWriteCount += 1
+        case let reason? where reason == "connection_limit":
+            snapshot.tcpCloseConnectionLimitCount += 1
+        case let reason? where reason == "connection_rate_limit":
+            snapshot.tcpCloseConnectionRateLimitCount += 1
+        case let reason? where reason == "gateway_draining":
+            snapshot.tcpCloseGatewayDrainingCount += 1
         case let reason? where reason.hasPrefix("error"):
             snapshot.tcpCloseErrorCount += 1
         default:
@@ -232,6 +250,16 @@ actor RoutingMetrics {
 
     func recordTCPAuthReceived() {
         snapshot.tcpAuthReceivedCount += 1
+    }
+
+    func recordTCPAdmissionRejected(reason: IMTCPAdmissionController.RejectionReason) {
+        snapshot.tcpAdmissionRejectedCount += 1
+        if reason == .connectionRateLimit {
+            snapshot.tcpAdmissionRateLimitedCount += 1
+        }
+        if reason == .gatewayDraining {
+            snapshot.tcpAdmissionDrainingRejectedCount += 1
+        }
     }
 
     func recordTCPAuthOKSent() {
@@ -323,6 +351,27 @@ actor RoutingMetrics {
         let latency = max(0, latencyMilliseconds)
         snapshot.crossNodeDispatchTotalLatencyMillis += latency
         snapshot.crossNodeDispatchMaxLatencyMillis = max(snapshot.crossNodeDispatchMaxLatencyMillis, latency)
+    }
+
+    func recordCrossCellDispatchAttempt(recipientCount: Int) {
+        snapshot.crossCellDispatchAttemptCount += 1
+        snapshot.crossCellDispatchRecipientCount += max(0, recipientCount)
+    }
+
+    func recordCrossCellDispatchSucceeded(latencyMilliseconds: Int) {
+        snapshot.crossCellDispatchSuccessCount += 1
+        recordCrossCellDispatchLatency(latencyMilliseconds)
+    }
+
+    func recordCrossCellDispatchFailed(latencyMilliseconds: Int) {
+        snapshot.crossCellDispatchFailureCount += 1
+        recordCrossCellDispatchLatency(latencyMilliseconds)
+    }
+
+    private func recordCrossCellDispatchLatency(_ latencyMilliseconds: Int) {
+        let latency = max(0, latencyMilliseconds)
+        snapshot.crossCellDispatchTotalLatencyMillis += latency
+        snapshot.crossCellDispatchMaxLatencyMillis = max(snapshot.crossCellDispatchMaxLatencyMillis, latency)
     }
 
     func recordRemoteDomainEventPacketEncoding(

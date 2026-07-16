@@ -399,6 +399,15 @@ struct AuthManagerTests {
             return HTTPFixtures.response(statusCode: 200, body: try Self.emptyDomainEventsBody())
         case ("POST", "/api/im/client-health"):
             return HTTPFixtures.response(statusCode: 204, body: Data())
+        case (let method?, let path?) where
+            ["POST", "PATCH"].contains(method)
+                && path.hasPrefix("/api/im/conversations/")
+                && request.value(forHTTPHeaderField: "Accept")
+                    == "application/vnd.im.conversation-command-receipt+json":
+            return HTTPFixtures.response(
+                statusCode: 202,
+                body: try Self.imConversationCommandReceiptBody(for: request)
+            )
         case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/members") == true:
             return HTTPFixtures.response(statusCode: 200, body: try Self.emptyMembersBody())
         case ("GET", let path) where path?.hasPrefix("/api/im/conversations/") == true && path?.hasSuffix("/timeline/since") == true:
@@ -576,6 +585,33 @@ struct AuthManagerTests {
         return try imConversationReadBody(
             conversationID: conversationID,
             lastReadSequence: payload.readSequence
+        )
+    }
+
+    nonisolated static func imConversationCommandReceiptBody(for request: URLRequest) throws -> Data {
+        guard let path = request.url?.path else {
+            throw URLError(.badURL)
+        }
+
+        let components = path.split(separator: "/")
+        guard
+            let conversationsIndex = components.firstIndex(of: "conversations"),
+            components.indices.contains(components.index(after: conversationsIndex)),
+            let conversationID = UUID(uuidString: String(components[components.index(after: conversationsIndex)]))
+        else {
+            throw URLError(.badURL)
+        }
+
+        return try HTTPFixtures.jsonBody(
+            IMConversationCommandReceiptBody(
+                conversationID: conversationID,
+                eventID: UUID(),
+                eventType: "metadata_updated",
+                acceptedAt: Date(),
+                membershipRevision: nil,
+                didMutate: true,
+                projectionPending: true
+            )
         )
     }
 

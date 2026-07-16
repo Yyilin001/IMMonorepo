@@ -14,6 +14,8 @@ struct IMTCPConfiguration: Sendable {
     let heartbeatInterval: TimeInterval
     let idleTimeout: TimeInterval
     let listenBacklog: Int
+    let maximumConnectionCount: Int
+    let maximumNewConnectionsPerSecond: Int
     let maxFrameBytes: Int
     let writeBufferWaterMarkLow: Int
     let writeBufferWaterMarkHigh: Int
@@ -39,6 +41,14 @@ struct IMTCPConfiguration: Sendable {
             heartbeatInterval: Environment.get("IM_TCP_HEARTBEAT_INTERVAL").flatMap(TimeInterval.init(_:)) ?? 30,
             idleTimeout: Environment.get("IM_TCP_IDLE_TIMEOUT").flatMap(TimeInterval.init(_:)) ?? 90,
             listenBacklog: Environment.get("IM_TCP_LISTEN_BACKLOG").flatMap(Int.init(_:)) ?? 1024,
+            maximumConnectionCount: max(
+                0,
+                Environment.get("IM_TCP_MAX_CONNECTIONS").flatMap(Int.init(_:)) ?? 0
+            ),
+            maximumNewConnectionsPerSecond: max(
+                0,
+                Environment.get("IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND").flatMap(Int.init(_:)) ?? 0
+            ),
             maxFrameBytes: Environment.get("IM_TCP_MAX_FRAME_BYTES").flatMap(Int.init(_:)) ?? 64 * 1024,
             writeBufferWaterMarkLow: writeBufferLow,
             writeBufferWaterMarkHigh: writeBufferHigh,
@@ -56,6 +66,146 @@ struct IMTCPConfiguration: Sendable {
             ),
             requiresTLSTermination: parseBooleanEnvironment("IM_TCP_REQUIRES_TLS_TERMINATION", defaultValue: false)
         )
+    }
+}
+
+/// Bounds every accepted TCP channel, including channels that have not yet
+/// authenticated, so an authentication flood cannot bypass the Gateway limit.
+final class IMTCPAdmissionController: @unchecked Sendable {
+    enum RejectionReason: Sendable, Equatable {
+        case connectionLimit
+        case connectionRateLimit
+        case gatewayDraining
+    }
+
+    struct Decision: Sendable, Equatable {
+        let isAccepted: Bool
+        let activeConnectionCount: Int
+        let maximumConnectionCount: Int
+        let rejectionReason: RejectionReason?
+    }
+
+    struct Status: Sendable, Equatable {
+        let isDraining: Bool
+        let activeConnectionCount: Int
+        let maximumConnectionCount: Int
+    }
+
+    private struct State {
+        var activeConnectionCount = 0
+        var rateWindowStartedAt: Date?
+        var acceptedConnectionCountInRateWindow = 0
+        var isDraining = false
+    }
+
+    private let maximumConnectionCount: Int
+    private let maximumNewConnectionsPerSecond: Int
+    private let state = NIOLockedValueBox(State())
+
+    init(maximumConnectionCount: Int, maximumNewConnectionsPerSecond: Int = 0) {
+        self.maximumConnectionCount = max(0, maximumConnectionCount)
+        self.maximumNewConnectionsPerSecond = max(0, maximumNewConnectionsPerSecond)
+    }
+
+    func acquire(now: Date = Date()) -> Decision {
+        state.withLockedValue { state in
+            guard !state.isDraining else {
+                return Decision(
+                    isAccepted: false,
+                    activeConnectionCount: state.activeConnectionCount,
+                    maximumConnectionCount: maximumConnectionCount,
+                    rejectionReason: .gatewayDraining
+                )
+            }
+            if maximumNewConnectionsPerSecond > 0 {
+                if let rateWindowStartedAt = state.rateWindowStartedAt {
+                    if now.timeIntervalSince(rateWindowStartedAt) >= 1 {
+                        state.rateWindowStartedAt = now
+                        state.acceptedConnectionCountInRateWindow = 0
+                    }
+                } else {
+                    state.rateWindowStartedAt = now
+                    state.acceptedConnectionCountInRateWindow = 0
+                }
+                guard state.acceptedConnectionCountInRateWindow < maximumNewConnectionsPerSecond else {
+                    return Decision(
+                        isAccepted: false,
+                        activeConnectionCount: state.activeConnectionCount,
+                        maximumConnectionCount: maximumConnectionCount,
+                        rejectionReason: .connectionRateLimit
+                    )
+                }
+            }
+            guard maximumConnectionCount == 0 || state.activeConnectionCount < maximumConnectionCount else {
+                return Decision(
+                    isAccepted: false,
+                    activeConnectionCount: state.activeConnectionCount,
+                    maximumConnectionCount: maximumConnectionCount,
+                    rejectionReason: .connectionLimit
+                )
+            }
+            state.activeConnectionCount += 1
+            state.acceptedConnectionCountInRateWindow += 1
+            return Decision(
+                isAccepted: true,
+                activeConnectionCount: state.activeConnectionCount,
+                maximumConnectionCount: maximumConnectionCount,
+                rejectionReason: nil
+            )
+        }
+    }
+
+    func release() -> Int {
+        state.withLockedValue { state in
+            state.activeConnectionCount = max(0, state.activeConnectionCount - 1)
+            return state.activeConnectionCount
+        }
+    }
+
+    func currentConnectionCount() -> Int {
+        state.withLockedValue(\.activeConnectionCount)
+    }
+
+    func setDraining(_ isDraining: Bool) -> Status {
+        state.withLockedValue { state in
+            state.isDraining = isDraining
+            return Status(
+                isDraining: state.isDraining,
+                activeConnectionCount: state.activeConnectionCount,
+                maximumConnectionCount: maximumConnectionCount
+            )
+        }
+    }
+
+    func status() -> Status {
+        state.withLockedValue { state in
+            Status(
+                isDraining: state.isDraining,
+                activeConnectionCount: state.activeConnectionCount,
+                maximumConnectionCount: maximumConnectionCount
+            )
+        }
+    }
+}
+
+private struct IMTCPAdmissionControllerStorageKey: StorageKey {
+    typealias Value = IMTCPAdmissionController
+}
+
+extension Application {
+    var imTCPAdmissionController: IMTCPAdmissionController {
+        get {
+            if let controller = storage[IMTCPAdmissionControllerStorageKey.self] {
+                return controller
+            }
+            let controller = IMTCPAdmissionController(
+                maximumConnectionCount: imTCPConfiguration.maximumConnectionCount,
+                maximumNewConnectionsPerSecond: imTCPConfiguration.maximumNewConnectionsPerSecond
+            )
+            storage[IMTCPAdmissionControllerStorageKey.self] = controller
+            return controller
+        }
+        set { storage[IMTCPAdmissionControllerStorageKey.self] = newValue }
     }
 }
 
@@ -415,6 +565,26 @@ actor IMConnectionRegistry {
             }
         }
 
+        return removedConnections
+    }
+
+    func kickAllConnections(
+        reason: IMTCPKickReason,
+        message: String
+    ) -> [IMConnectionRemoval] {
+        let connectionIDs = Array(connectionsByID.keys)
+        var removedConnections: [IMConnectionRemoval] = []
+        removedConnections.reserveCapacity(connectionIDs.count)
+
+        for connectionID in connectionIDs {
+            guard let entry = connectionsByID[connectionID] else {
+                continue
+            }
+            entry.control.kick(reason: reason, message: message)
+            if let removed = remove(connectionID: connectionID) {
+                removedConnections.append(removed)
+            }
+        }
         return removedConnections
     }
 

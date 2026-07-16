@@ -1,0 +1,182 @@
+# Overlay for docker-compose.production-smoke.yml. It introduces a second Cell
+# without changing the base single-Cell smoke topology. Control-plane state
+# stays in the primary smoke database, while Cell B owns a separate physical
+# conversation-shard database. This makes cross-Cell copy/cutover testable.
+x-multicell-ingress-env: &multicell_ingress_env
+  IM_CELL_INGRESS_SHARED_SECRET: production-smoke-internal-secret
+  IM_CELL_INGRESS_COMMAND_ENDPOINTS: cell-a=http://command-api:8080,cell-b=http://command-api-cell-b:8080
+  IM_CELL_INGRESS_QUERY_ENDPOINTS: cell-a=http://query-api:8080,cell-b=http://query-api-cell-b:8080
+  IM_CELL_INGRESS_REALTIME_ENDPOINTS: cell-a=http://gateway:8080,cell-b=http://gateway-cell-b:8080
+  IM_COMMAND_NODE_URLS: command-a=http://command-api:8080,command-b=http://command-api-cell-b:8080
+
+services:
+  postgres-cell-b:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: imserver_smoke_cell_b
+      POSTGRES_USER: imserver
+      POSTGRES_PASSWORD: imserver_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U imserver -d imserver_smoke_cell_b"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ops:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  # Runs the same schema set against Cell B's conversation shard before any
+  # serving role can accept a remote migration page.
+  ops-cell-b:
+    extends:
+      file: docker-compose.production-smoke.yml
+      service: ops
+    environment:
+      <<: *multicell_ingress_env
+      IM_NODE_ID: ops-b
+      IM_REALTIME_CELL_ID: cell-b
+      DATABASE_CONVERSATION_SHARD_0_HOST: postgres-cell-b
+      DATABASE_CONVERSATION_SHARD_0_PORT: "5432"
+      DATABASE_CONVERSATION_SHARD_0_NAME: imserver_smoke_cell_b
+      DATABASE_CONVERSATION_SHARD_0_USERNAME: imserver
+      DATABASE_CONVERSATION_SHARD_0_PASSWORD: imserver_password
+    depends_on:
+      postgres-cell-b:
+        condition: service_healthy
+
+  gateway:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  command-api:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  query-api:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  outbox-relay:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  # Each Cell owns the outbox records written to its physical conversation
+  # shard, so Cell B needs an independent publisher after a migration cutover.
+  outbox-relay-cell-b:
+    extends:
+      file: docker-compose.production-smoke.yml
+      service: outbox-relay
+    environment:
+      <<: *multicell_ingress_env
+      IM_NODE_ID: outbox-relay-b
+      IM_REALTIME_CELL_ID: cell-b
+      DATABASE_CONVERSATION_SHARD_0_HOST: postgres-cell-b
+      DATABASE_CONVERSATION_SHARD_0_PORT: "5432"
+      DATABASE_CONVERSATION_SHARD_0_NAME: imserver_smoke_cell_b
+      DATABASE_CONVERSATION_SHARD_0_USERNAME: imserver
+      DATABASE_CONVERSATION_SHARD_0_PASSWORD: imserver_password
+    depends_on:
+      ops-cell-b:
+        condition: service_completed_successfully
+
+  stream-consumer-summary:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  stream-consumer-changes:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  stream-consumer-search:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  stream-consumer-notification:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  stream-consumer-repair:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  stream-consumer-domain:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  stream-consumer-realtime:
+    environment:
+      <<: *multicell_ingress_env
+      IM_REALTIME_CELL_ID: cell-a
+
+  gateway-cell-b:
+    extends:
+      file: docker-compose.production-smoke.yml
+      service: gateway
+    environment:
+      <<: *multicell_ingress_env
+      IM_NODE_ID: gateway-b
+      IM_REALTIME_CELL_ID: cell-b
+      IM_COMMAND_API_INTERNAL_BASE_URL: http://command-api-cell-b:8080
+      DATABASE_CONVERSATION_SHARD_0_HOST: postgres-cell-b
+      DATABASE_CONVERSATION_SHARD_0_PORT: "5432"
+      DATABASE_CONVERSATION_SHARD_0_NAME: imserver_smoke_cell_b
+      DATABASE_CONVERSATION_SHARD_0_USERNAME: imserver
+      DATABASE_CONVERSATION_SHARD_0_PASSWORD: imserver_password
+    depends_on:
+      ops-cell-b:
+        condition: service_completed_successfully
+    ports: !override
+      - "18080:8080"
+      - "9002:9001"
+
+  command-api-cell-b:
+    extends:
+      file: docker-compose.production-smoke.yml
+      service: command-api
+    environment:
+      <<: *multicell_ingress_env
+      IM_NODE_ID: command-api-b
+      IM_COMMAND_NODE_ID: command-b
+      IM_REALTIME_CELL_ID: cell-b
+      IM_GATEWAY_INTERNAL_BASE_URL: http://gateway-cell-b:8080
+      DATABASE_CONVERSATION_SHARD_0_HOST: postgres-cell-b
+      DATABASE_CONVERSATION_SHARD_0_PORT: "5432"
+      DATABASE_CONVERSATION_SHARD_0_NAME: imserver_smoke_cell_b
+      DATABASE_CONVERSATION_SHARD_0_USERNAME: imserver
+      DATABASE_CONVERSATION_SHARD_0_PASSWORD: imserver_password
+    depends_on:
+      ops-cell-b:
+        condition: service_completed_successfully
+    ports: !override
+      - "18081:8080"
+
+  query-api-cell-b:
+    extends:
+      file: docker-compose.production-smoke.yml
+      service: query-api
+    environment:
+      <<: *multicell_ingress_env
+      IM_NODE_ID: query-api-b
+      IM_REALTIME_CELL_ID: cell-b
+      DATABASE_CONVERSATION_SHARD_0_HOST: postgres-cell-b
+      DATABASE_CONVERSATION_SHARD_0_PORT: "5432"
+      DATABASE_CONVERSATION_SHARD_0_NAME: imserver_smoke_cell_b
+      DATABASE_CONVERSATION_SHARD_0_USERNAME: imserver
+      DATABASE_CONVERSATION_SHARD_0_PASSWORD: imserver_password
+    depends_on:
+      ops-cell-b:
+        condition: service_completed_successfully
+    ports: !override
+      - "18082:8080"

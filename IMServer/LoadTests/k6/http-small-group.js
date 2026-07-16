@@ -1,4 +1,5 @@
 import http from 'k6/http';
+import { richTextContent, initialDerivedState } from './im-message-payload.js';
 import { check, sleep } from 'k6';
 import { Rate, Trend } from 'k6/metrics';
 
@@ -105,8 +106,8 @@ function sendInternalMessage(userID, conversationID) {
         senderUserID: null,
         serverSequence: null,
         serverTimestamp: null,
-        content: { type: 'text', text: `hello ${__VU}/${__ITER}` },
-        derivedState: { reactions: [], editedAt: null, recalledAt: null },
+        content: richTextContent(`hello ${__VU}/${__ITER}`),
+        derivedState: initialDerivedState(),
       },
     }),
     { headers: { 'Content-Type': 'application/json', 'X-IM-Internal-Secret': internalSecret } }

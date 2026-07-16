@@ -46,6 +46,7 @@ struct IMConversationSummaryProjectionService {
 
     let sourceDB: any Database
     let readModelDB: any Database
+    let userDirectoryDB: any Database
     let streamConsumerConfiguration: IMStreamConsumerConfiguration
     let domainEventMetrics: ConversationDomainEventMetrics?
     let summaryReadMetrics: IMSummaryReadMetrics?
@@ -54,6 +55,7 @@ struct IMConversationSummaryProjectionService {
 
     init(
         db: any Database,
+        userDirectoryDB: (any Database)? = nil,
         streamConsumerConfiguration: IMStreamConsumerConfiguration = .load(from: .testing),
         domainEventMetrics: ConversationDomainEventMetrics? = nil,
         summaryReadMetrics: IMSummaryReadMetrics? = nil,
@@ -63,6 +65,7 @@ struct IMConversationSummaryProjectionService {
         self.init(
             sourceDB: db,
             readModelDB: db,
+            userDirectoryDB: userDirectoryDB,
             streamConsumerConfiguration: streamConsumerConfiguration,
             domainEventMetrics: domainEventMetrics,
             summaryReadMetrics: summaryReadMetrics,
@@ -74,6 +77,7 @@ struct IMConversationSummaryProjectionService {
     init(
         sourceDB: any Database,
         readModelDB: any Database,
+        userDirectoryDB: (any Database)? = nil,
         streamConsumerConfiguration: IMStreamConsumerConfiguration = .load(from: .testing),
         domainEventMetrics: ConversationDomainEventMetrics? = nil,
         summaryReadMetrics: IMSummaryReadMetrics? = nil,
@@ -82,6 +86,7 @@ struct IMConversationSummaryProjectionService {
     ) {
         self.sourceDB = sourceDB
         self.readModelDB = readModelDB
+        self.userDirectoryDB = userDirectoryDB ?? sourceDB
         self.streamConsumerConfiguration = streamConsumerConfiguration
         self.domainEventMetrics = domainEventMetrics
         self.summaryReadMetrics = summaryReadMetrics

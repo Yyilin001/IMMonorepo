@@ -11,9 +11,11 @@ struct ConversationMessageCommandSupport {
         messageID: UUID,
         requesterUserID: UUID
     ) async throws -> IMMessageResponse {
-        _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
+        let conversation = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
+        try ConversationGovernanceService().requireUserMutationAllowed(in: conversation)
 
         let recalledMessage = try await db.transaction { database in
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
             let message = try await ConversationMessageService(db: database).recallMessage(
                 in: conversationID,
                 messageID: messageID,
@@ -39,9 +41,11 @@ struct ConversationMessageCommandSupport {
         body: IMRichTextContent,
         requesterUserID: UUID
     ) async throws -> IMMessageResponse {
-        _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
+        let conversation = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
+        try ConversationGovernanceService().requireUserMutationAllowed(in: conversation)
 
         let editedMessage = try await db.transaction { database in
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
             let message = try await ConversationMessageService(db: database).editMessage(
                 in: conversationID,
                 messageID: messageID,
@@ -68,9 +72,11 @@ struct ConversationMessageCommandSupport {
         emoji: String,
         requesterUserID: UUID
     ) async throws -> IMMessageResponse {
-        _ = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
+        let conversation = try await requireConversationAndMembership(conversationID: conversationID, userID: requesterUserID)
+        try ConversationGovernanceService().requireUserMutationAllowed(in: conversation)
 
         let updatedMessage = try await db.transaction { database in
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
             let message = try await ConversationMessageService(db: database).toggleReaction(
                 in: conversationID,
                 messageID: messageID,
@@ -98,9 +104,10 @@ struct ConversationMessageCommandSupport {
         messageID: UUID,
         on database: any Database
     ) async throws {
-        let recipientUserIDs = try await ConversationMembershipService(db: database)
-            .listMemberResponses(in: conversationID, for: requesterUserID)
-            .map(\.id)
+        let recipientUserIDs = try await ConversationMember.query(on: database)
+            .filter(\.$conversation.$id == conversationID)
+            .all()
+            .map(\.$user.id)
         try await ConversationOutboxEnqueuer(db: database).enqueueMessageEvent(
             type: type,
             conversationID: conversationID,

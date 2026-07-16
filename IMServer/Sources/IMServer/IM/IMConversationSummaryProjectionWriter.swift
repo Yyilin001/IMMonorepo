@@ -240,13 +240,13 @@ extension IMConversationSummaryProjectionService {
 
         let memberships = try await ConversationMember.query(on: database)
             .filter(\.$conversation.$id == conversationID)
-            .with(\.$user)
             .all()
         guard !memberships.isEmpty else {
             return
         }
 
         let memberUserIDs = memberships.map(\.$user.id).sorted { $0.uuidString < $1.uuidString }
+        let usersByID = try await ConversationUserDirectory(db: userDirectoryDB).usersByID(memberUserIDs)
         let membershipsByUserID = Dictionary(uniqueKeysWithValues: memberships.map { ($0.$user.id, $0) })
         let latestMessageByVisibleFrom = try await latestVisibleMessagesByThreshold(
             conversationID: conversationID,
@@ -274,7 +274,11 @@ extension IMConversationSummaryProjectionService {
                 continue
             }
 
-            let directPeer = directPeer(from: memberships, currentUserID: recipientUserID)
+            let directPeer = directPeer(
+                from: memberships,
+                currentUserID: recipientUserID,
+                usersByID: usersByID
+            )
             let lastVisibleMessage = latestMessageByVisibleFrom[membership.visibleFromSequence] ?? nil
             let preview = try lastVisibleMessage.map(makePreview)
             let latestVisibleSequence = max(
@@ -296,6 +300,7 @@ extension IMConversationSummaryProjectionService {
                 title: conversation.title,
                 kind: conversation.kind,
                 directMessagingState: conversation.conversationKind == .direct ? conversation.directMessagingState : nil,
+                groupLifecycleState: conversation.groupLifecycleStateEnum,
                 directPeerUserID: directPeer?.id,
                 directPeerEmail: directPeer?.email,
                 directPeerDisplayName: directPeer?.displayName,
@@ -307,6 +312,9 @@ extension IMConversationSummaryProjectionService {
                 lastMessage: preview,
                 lastReadSequence: effectiveLastReadSequence,
                 unreadCount: max(0, latestVisibleSequence - effectiveLastReadSequence),
+                isPinned: membership.isPinned,
+                pinnedAt: membership.pinnedAt,
+                isMuted: membership.isMuted,
                 lastActivityAt: preview?.createdAt ?? conversation.updatedAt,
                 updatedAt: updatedAt,
                 isRemoved: false,
@@ -317,6 +325,7 @@ extension IMConversationSummaryProjectionService {
             summary.title = conversation.title
             summary.kind = conversation.kind
             summary.directMessagingState = conversation.conversationKind == .direct ? conversation.directMessagingState : nil
+            summary.groupLifecycleStateEnum = conversation.groupLifecycleStateEnum
             summary.directPeerUserID = directPeer?.id
             summary.directPeerEmail = directPeer?.email
             summary.directPeerDisplayName = directPeer?.displayName
@@ -329,6 +338,9 @@ extension IMConversationSummaryProjectionService {
             summary.lastMessage = preview
             summary.lastReadSequence = effectiveLastReadSequence
             summary.unreadCount = max(0, latestVisibleSequence - effectiveLastReadSequence)
+            summary.isPinned = membership.isPinned
+            summary.pinnedAt = membership.pinnedAt
+            summary.isMuted = membership.isMuted
             summary.lastActivityAt = preview?.createdAt ?? conversation.updatedAt
             summary.updatedAt = updatedAt
             summary.isRemoved = false
@@ -463,7 +475,7 @@ extension IMConversationSummaryProjectionService {
             return [:]
         }
 
-        guard let user = try await User.find(userID, on: sourceDB) else {
+        guard let user = try await User.find(userID, on: userDirectoryDB) else {
             return [:]
         }
 

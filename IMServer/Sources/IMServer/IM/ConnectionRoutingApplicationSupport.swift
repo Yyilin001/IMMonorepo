@@ -11,6 +11,10 @@ private struct IMNodeIDStorageKey: StorageKey {
     typealias Value = String
 }
 
+private struct IMRealtimeCellConfigurationStorageKey: StorageKey {
+    typealias Value = IMRealtimeCellConfiguration
+}
+
 private struct ConnectionRoutingServiceStorageKey: StorageKey {
     typealias Value = ConnectionRoutingService
 }
@@ -41,6 +45,24 @@ extension Application {
         set {
             storage[IMNodeIDStorageKey.self] = newValue
         }
+    }
+
+    var imRealtimeCellConfiguration: IMRealtimeCellConfiguration {
+        get {
+            if let configuration = storage[IMRealtimeCellConfigurationStorageKey.self] {
+                return configuration
+            }
+            let configuration = (try? IMRealtimeCellConfiguration.load(from: environment)) ?? .default
+            storage[IMRealtimeCellConfigurationStorageKey.self] = configuration
+            return configuration
+        }
+        set {
+            storage[IMRealtimeCellConfigurationStorageKey.self] = newValue
+        }
+    }
+
+    var imRealtimeCellID: String {
+        imRealtimeCellConfiguration.cellID
     }
 
     var routingMetrics: RoutingMetrics {
@@ -92,16 +114,31 @@ extension Application {
         if environment == .production, configuration.mode != .redis {
             throw RedisRoutingError.redisRequiredInProduction
         }
+        try configuration.validateTopologySupport()
 
         let backend: any ConnectionRoutingBackend
         switch configuration.mode {
         case .local:
             backend = LocalConnectionRoutingBackend(nodeID: imNodeID)
         case .redis:
+            if configuration.deploymentTopology == .cluster {
+                let clusterBackend = try ValkeyClusterConnectionRoutingBackend(
+                    configuration: configuration,
+                    nodeDispatchConfiguration: nodeDispatchConfiguration,
+                    nodeID: imNodeID,
+                    cellID: imRealtimeCellID,
+                    logger: logger
+                )
+                try await clusterBackend.start(app: self)
+                connectionRoutingService = ConnectionRoutingService(app: self, backend: clusterBackend)
+                return
+            }
             if environment == .production {
                 let redisBackend = try RedisConnectionRoutingBackend(
                     configuration: configuration,
+                    nodeDispatchConfiguration: nodeDispatchConfiguration,
                     nodeID: imNodeID,
+                    cellID: imRealtimeCellID,
                     logger: logger,
                     eventLoop: eventLoopGroup.next()
                 )
@@ -113,7 +150,9 @@ extension Application {
             do {
                 let redisBackend = try RedisConnectionRoutingBackend(
                     configuration: configuration,
+                    nodeDispatchConfiguration: nodeDispatchConfiguration,
                     nodeID: imNodeID,
+                    cellID: imRealtimeCellID,
                     logger: logger,
                     eventLoop: eventLoopGroup.next()
                 )

@@ -65,19 +65,9 @@ extension AuthManagerTests {
                 )
                 #expect(payload.memberEmails == ["new@example.com"])
                 await mutationState.markMutated()
-                let updatedSummary = IMConversationSummaryResponseBody(
-                    id: conversationID,
-                    title: "服务端群聊",
-                    kind: IMConversationKind.group.rawValue,
-                    memberCount: 3,
-                    memberUserIDs: [Self.user.id],
-                    lastMessage: nil,
-                    createdAt: Date(timeIntervalSince1970: 1_700_000_000),
-                    updatedAt: Date(timeIntervalSince1970: 1_700_001_100)
-                )
                 return HTTPFixtures.response(
-                    statusCode: 200,
-                    body: try HTTPFixtures.jsonBody(updatedSummary)
+                    statusCode: 202,
+                    body: try Self.imConversationCommandReceiptBody(for: request)
                 )
             default:
                 return try Self.defaultOrUnexpectedIMResponse(for: request)
@@ -177,7 +167,10 @@ extension AuthManagerTests {
                 return HTTPFixtures.response(statusCode: 200, body: try Self.emptyTimelineBody())
             case ("POST", "/api/im/conversations/\(currentConversationID.uuidString)/leave"):
                 await mutationState.markMutated()
-                return HTTPFixtures.response(statusCode: 200, body: Data())
+                return HTTPFixtures.response(
+                    statusCode: 202,
+                    body: try Self.imConversationCommandReceiptBody(for: request)
+                )
             default:
                 return try Self.defaultOrUnexpectedIMResponse(for: request)
             }
@@ -572,8 +565,7 @@ extension AuthManagerTests {
     }
 
 
-    @Test func foregroundPeriodicSyncCatchesUpSelectedConversationAndSummaryThenStopsInBackground() async throws {
-        let harness = IMConnectionTestHarness()
+    @Test func foregroundPeriodicHTTPSyncCatchesUpSelectedConversationWithoutTCPThenStopsInBackground() async throws {
         let requestCounter = IMRequestCounter()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
         let initialSummary = Self.imConversationSummary(
@@ -647,7 +639,7 @@ extension AuthManagerTests {
         store.openConversation(id: conversationID.uuidString)
         var latestSummaries = [initialSummary]
         var summaryRefreshAt: Date?
-        var summaryToken: String?
+        var summaryToken: String? = "snapshot-periodic-1"
         let controller = ConversationRuntimeController(
             sessionClient: SessionClient(
                 httpClient: HTTPClient(baseURL: HTTPFixtures.baseURL, transport: transport),
@@ -655,7 +647,7 @@ extension AuthManagerTests {
                 userCache: InMemoryUserSessionCache()
             ),
             openIMConnection: {
-                await harness.makeConnection()
+                throw IMTCPClientError.connectionClosed
             },
             imConversationStore: store,
             currentUserProvider: { Self.user },
@@ -683,12 +675,17 @@ extension AuthManagerTests {
             )
         )
 
-        controller.scheduleConnectionIfNeeded()
+        controller.appDidBecomeActive()
         try await Self.waitUntil {
             await requestCounter.count(for: "timelineSince") >= 1
         }
         try await Self.waitUntil {
             await requestCounter.count(for: "summaryChanges") >= 1
+        }
+        try await Self.waitUntil {
+            await MainActor.run {
+                store.selectedConversation?.messages.last?.text == "来自补洞接口"
+            }
         }
         let timelineCountBeforeBackground = await requestCounter.count(for: "timelineSince")
         let summaryCountBeforeBackground = await requestCounter.count(for: "summaryChanges")

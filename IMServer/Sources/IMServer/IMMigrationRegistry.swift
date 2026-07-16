@@ -24,10 +24,13 @@ enum IMMigrationRegistry {
         app.migrations.add(AddConversationMemberLastReadSequence())
         app.migrations.add(AddConversationKind())
         app.migrations.add(AddConversationDirectMessagingState())
+        app.migrations.add(AddConversationGroupLifecycleState())
         app.migrations.add(AddConversationMemberRole())
         app.migrations.add(AddConversationMetadataAndPreferences())
         app.migrations.add(AddConversationMuteAndMemberNickname())
+        app.migrations.add(AddConversationMemberPreferences())
         app.migrations.add(CreateConversationMessage())
+        app.migrations.add(RemoveConversationUserForeignKeys())
         app.migrations.add(AddConversationMessageDerivedState())
         app.migrations.add(AddConversationMessageClientMessageID())
         app.migrations.add(AddConversationMessageClientMessageIDUniqueIndex())
@@ -43,6 +46,14 @@ enum IMMigrationRegistry {
         app.migrations.add(CreateOwnerDomainEventDelivery())
         app.migrations.add(CreateDomainEventSequencesAndTimelineNotices())
         app.migrations.add(CreateConversationRoutingDirectories())
+        app.migrations.add(AddConversationDirectoryCellID())
+        app.migrations.add(AddConversationDirectoryRouteLifecycle())
+        app.migrations.add(CreateConversationShardMigrations())
+        app.migrations.add(AddConversationShardMigrationCopyState())
+        app.migrations.add(AddConversationShardMigrationCutoverLease())
+        app.migrations.add(AddConversationShardMigrationTransferAuthorization())
+        app.migrations.add(CreateConversationWriteFences())
+        app.migrations.add(CreateIMRealtimeCellRegistry())
         app.migrations.add(CreateDirectConversationPairDirectory())
         app.migrations.add(CreateConversationMessageSearchIndex())
         app.migrations.add(AddConversationMessageSearchResultFields())
@@ -50,6 +61,7 @@ enum IMMigrationRegistry {
         app.migrations.add(CreateConversationMediaAssetReference())
         app.migrations.add(CreateConversationMediaAssetReferenceDirectory())
         app.migrations.add(CreateConversationUserSummary())
+        app.migrations.add(AddConversationUserSummaryGroupLifecycleState())
         app.migrations.add(AddConversationUserSummaryMembershipRevision())
         app.migrations.add(AddConversationUserSummaryDirectPeerProfileFields())
         app.migrations.add(AddConversationUserSummaryIndexes())
@@ -66,12 +78,25 @@ enum IMMigrationRegistry {
         app.migrations.add(CreateIMCommonFeatureTables())
         app.migrations.add(AddIMCommonFeatureVisibilityIndexes())
         app.migrations.add(AddReportSnapshotFields())
+        app.migrations.add(CreateReportModerationDecisionHistory())
+        app.migrations.add(AddReportReviewerAssignmentFields())
+        app.migrations.add(CreateReportModerationEvidence())
+        app.migrations.add(AddReportModerationIdempotencyKeys())
+        app.migrations.add(AddAdminOperationsQueryIndexes())
+        app.migrations.add(CreateAdminWriteIdempotencyRecords())
+        app.migrations.add(CreateAdminConversationGovernanceCommands())
+        app.migrations.add(AddAdminConversationGovernanceRouteBinding())
+        app.migrations.add(AddAdminConversationGovernanceProcessingLease())
+        app.migrations.add(AddAdminConversationGovernanceCommandTargets())
+        app.migrations.add(AddAdminConversationGovernanceRequestedLifecycle())
+        app.migrations.add(CreateAIStreamLease())
         app.migrations.add(CreateAIMessageStreamIndex())
         app.migrations.add(EnforceV8SequenceInvariants())
         app.migrations.add(CreateConversationActivitySummaryReadModel())
         app.migrations.add(AddLargeGroupSummaryReadPathIndexes())
         app.migrations.add(AddTimelineReadPathIndexes())
         registerSummaryReadModelMigrations(app)
+        registerConversationShardMigrations(app)
     }
 
     private static func registerSummaryReadModelMigrations(_ app: Application) {
@@ -86,8 +111,10 @@ enum IMMigrationRegistry {
         for databaseID in databaseIDs {
             app.migrations.add([
                 CreateConversationUserSummary(),
+                AddConversationUserSummaryGroupLifecycleState(),
                 AddConversationUserSummaryMembershipRevision(),
                 AddConversationUserSummaryDirectPeerProfileFields(),
+                AddConversationGroupLifecycleState(),
                 AddConversationUserSummaryIndexes(),
                 AddConversationUserSummaryListOrderIndex(),
                 CreateConversationSummaryReadModelTables(),
@@ -96,6 +123,69 @@ enum IMMigrationRegistry {
                 AddLargeGroupSummaryReadPathIndexes()
             ], to: databaseID)
         }
+    }
+
+    private static func registerConversationShardMigrations(_ app: Application) {
+        let databaseIDs = app.conversationShardDatabaseIDs.compactMap { shardID, databaseID -> DatabaseID? in
+            guard requiresIndependentConversationShardMigration(shardID: shardID) else {
+                return nil
+            }
+            return databaseID
+        }
+        for databaseID in Set(databaseIDs) {
+            app.migrations.add(conversationShardMigrations(), to: databaseID)
+        }
+    }
+
+    private static func requiresIndependentConversationShardMigration(shardID: String) -> Bool {
+        guard shardID == SingleShardConversationShardRouter.defaultShardID else {
+            return true
+        }
+        return Environment.get("DATABASE_CONVERSATION_SHARD_0_HOST") != nil
+    }
+
+    static func conversationShardMigrations() -> [any Migration] {
+        [
+            CreateConversation(),
+            AddConversationMembershipRevision(),
+            AddConversationLastMessageSequence(),
+            CreateConversationMember(),
+            AddConversationMemberLastReadSequence(),
+            AddConversationKind(),
+            AddConversationDirectMessagingState(),
+            AddConversationGroupLifecycleState(),
+            AddConversationMemberRole(),
+            AddConversationMetadataAndPreferences(),
+            AddConversationMuteAndMemberNickname(),
+            AddConversationMemberPreferences(),
+            CreateConversationMessage(),
+            RemoveConversationUserForeignKeys(),
+            AddConversationMessageDerivedState(),
+            AddConversationMessageClientMessageID(),
+            AddConversationMessageClientMessageIDUniqueIndex(),
+            AddConversationMessageTimelineIndexes(),
+            CreateConversationDomainEvent(),
+            AddConversationDomainEventRetryCount(),
+            AddConversationDomainEventStreamPublicationFields(),
+            AddConversationDomainEventStreamClaimFields(),
+            AddConversationDomainEventIndexes(),
+            AddConversationDomainEventActor(),
+            AddConversationDomainEventSideEffectKey(),
+            CreateConversationShardSequenceTables(),
+            CreateConversationWriteFences(),
+            CreateConversationMessageSearchIndex(),
+            AddConversationMessageSearchResultFields(),
+            AddConversationMessageSearchIndexIndexes(),
+            AddConversationSearchIndexLowerTrigramIndex(),
+            CreateConversationMediaAssetReference(),
+            CreateConversationDomainEventRecipientSet(),
+            CreateConversationDomainEventRecipientSetMembers(),
+            CreateConversationDomainEventRecipientSnapshot(),
+            AddConversationDomainEventRecipientSnapshotHash(),
+            CreateAIMessageStreamIndex(),
+            AddTimelineReadPathIndexes(),
+            EnforceConversationShardSequenceInvariants()
+        ]
     }
 
     static func resetIMSchemaIfRequested(_ app: Application) async throws {
@@ -115,9 +205,14 @@ enum IMMigrationRegistry {
 
         let tablesToDrop = [
             DirectConversationIndexEntry.schema,
+            AdminConversationGovernanceCommand.schema,
+            AdminWriteIdempotencyRecord.schema,
             AdminAuditEvent.schema,
             DirectConversationPairDirectory.schema,
             ConversationDirectoryEntry.schema,
+            ConversationShardMigration.schema,
+            ConversationWriteFence.schema,
+            IMRealtimeCellRegistryEntry.schema,
             ConversationReadModelToken.schema,
             ConversationChangesLogEntry.schema,
             ConversationActivitySummary.schema,
@@ -127,9 +222,12 @@ enum IMMigrationRegistry {
             ConversationDomainEventRecipientSet.schema,
             ConversationNotificationEntry.schema,
             MessageReceipt.schema,
+            AIStreamLease.schema,
             AIMessageStreamIndex.schema,
             PushDeviceToken.schema,
             GroupInvite.schema,
+            ReportModerationEvidence.schema,
+            ReportModerationDecision.schema,
             UserReport.schema,
             UserBlock.schema,
             ContactChangeLogEntry.schema,
@@ -208,10 +306,13 @@ private let imMigrationNames: [String] = [
     "AddConversationMemberLastReadSequence",
     "AddConversationKind",
     "AddConversationDirectMessagingState",
+    "AddConversationGroupLifecycleState",
     "AddConversationMemberRole",
     "AddConversationMetadataAndPreferences",
     "AddConversationMuteAndMemberNickname",
+    "AddConversationMemberPreferences",
     "CreateConversationMessage",
+    "RemoveConversationUserForeignKeys",
     "AddConversationMessageDerivedState",
     "AddConversationMessageClientMessageID",
     "AddConversationMessageClientMessageIDUniqueIndex",
@@ -227,6 +328,14 @@ private let imMigrationNames: [String] = [
     "CreateOwnerDomainEventDelivery",
     "CreateDomainEventSequencesAndTimelineNotices",
     "CreateConversationRoutingDirectories",
+    "AddConversationDirectoryCellID",
+    "AddConversationDirectoryRouteLifecycle",
+    "CreateConversationShardMigrations",
+    "AddConversationShardMigrationCopyState",
+    "AddConversationShardMigrationCutoverLease",
+    "AddConversationShardMigrationTransferAuthorization",
+    "CreateConversationWriteFences",
+    "CreateIMRealtimeCellRegistry",
     "CreateDirectConversationPairDirectory",
     "CreateConversationMessageSearchIndex",
     "AddConversationMessageSearchResultFields",
@@ -234,6 +343,7 @@ private let imMigrationNames: [String] = [
     "CreateConversationMediaAssetReference",
     "CreateConversationMediaAssetReferenceDirectory",
     "CreateConversationUserSummary",
+    "AddConversationUserSummaryGroupLifecycleState",
     "AddConversationUserSummaryMembershipRevision",
     "AddConversationUserSummaryDirectPeerProfileFields",
     "AddConversationUserSummaryIndexes",
@@ -250,6 +360,18 @@ private let imMigrationNames: [String] = [
     "CreateIMCommonFeatureTables",
     "AddIMCommonFeatureVisibilityIndexes",
     "AddReportSnapshotFields",
+    "CreateReportModerationDecisionHistory",
+    "AddReportReviewerAssignmentFields",
+    "CreateReportModerationEvidence",
+    "AddReportModerationIdempotencyKeys",
+    "AddAdminOperationsQueryIndexes",
+    "CreateAdminWriteIdempotencyRecords",
+    "CreateAdminConversationGovernanceCommands",
+    "AddAdminConversationGovernanceRouteBinding",
+    "AddAdminConversationGovernanceProcessingLease",
+    "AddAdminConversationGovernanceCommandTargets",
+    "AddAdminConversationGovernanceRequestedLifecycle",
+    "CreateAIStreamLease",
     "CreateAIMessageStreamIndex",
     "EnforceV8SequenceInvariants",
     "CreateContactChangesLog",

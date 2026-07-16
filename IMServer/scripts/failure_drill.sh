@@ -4,13 +4,18 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SMOKE_SCRIPT="${ROOT_DIR}/scripts/production_smoke.sh"
 COMPOSE_FILE="${ROOT_DIR}/docker-compose.production-smoke.yml"
+COMPOSE_EXTRA_FILE="${IM_SMOKE_COMPOSE_EXTRA_FILE:-}"
 PROJECT_NAME="${COMPOSE_PROJECT_NAME:-imserver-production-smoke}"
 REPORT_DIR="${ROOT_DIR}/reports"
 STATE_FILE="${REPORT_DIR}/production-smoke-state.env"
 SCENARIO="${1:-}"
 
 compose() {
-  docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
+  local args=(docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}")
+  if [[ -n "${COMPOSE_EXTRA_FILE}" ]]; then
+    args+=(-f "${COMPOSE_EXTRA_FILE}")
+  fi
+  "${args[@]}" "$@"
 }
 
 usage() {

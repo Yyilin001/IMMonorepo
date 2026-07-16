@@ -6,6 +6,8 @@ import Vapor
 final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
     private let pool: RedisConnectionPool
     private let nodeID: String
+    private let cellID: String
+    private let keyspace: IMRealtimeRedisKeyspace
     private let logger: Logger
     private let heartbeatTimeoutSeconds: Int
     private let activeConversationRouteTTLSeconds: Int
@@ -14,11 +16,13 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
     private let activeConversationRouteCache: RedisActiveConversationRouteCache
     private let activeNodeCache = RedisPresenceActiveNodeCache(ttl: 2)
     private let heartbeatThrottle = RedisPresenceHeartbeatThrottle(minimumInterval: 1)
+    private let globalCellLeaseRefreshThrottle: RedisPresenceHeartbeatThrottle
     private var metrics: RoutingMetrics?
 
     init(
         pool: RedisConnectionPool,
         nodeID: String,
+        cellID: String = IMRealtimeCellConfiguration.defaultCellID,
         logger: Logger,
         heartbeatTimeoutSeconds: Int = 90,
         activeConversationRouteTTLSeconds: Int = 900,
@@ -26,11 +30,16 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
     ) {
         self.pool = pool
         self.nodeID = nodeID
+        self.cellID = cellID
+        self.keyspace = IMRealtimeRedisKeyspace(cellID: cellID)
         self.logger = logger
         self.heartbeatTimeoutSeconds = heartbeatTimeoutSeconds
         self.activeConversationRouteTTLSeconds = max(heartbeatTimeoutSeconds, activeConversationRouteTTLSeconds)
         self.activeConversationRouteCache = RedisActiveConversationRouteCache(
             ttl: TimeInterval(max(0, activeConversationRouteCacheTTLSeconds))
+        )
+        self.globalCellLeaseRefreshThrottle = RedisPresenceHeartbeatThrottle(
+            minimumInterval: TimeInterval(max(5, heartbeatTimeoutSeconds / 3))
         )
     }
 
@@ -38,13 +47,13 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
 
     func start(app: Application) async throws {
         metrics = app.routingMetrics
-        _ = try await pool.sadd(nodeID, to: RedisKey("im:route:active_nodes")).get()
+        _ = try await pool.sadd(nodeID, to: activeNodesKey).get()
         try await refreshHeartbeat(force: true)
         try await clearStaleNodePresence(for: nodeID)
     }
 
     func shutdown() async {
-        _ = try? await pool.srem(nodeID, from: RedisKey("im:route:active_nodes")).get()
+        _ = try? await pool.srem(nodeID, from: activeNodesKey).get()
         _ = try? await pool.delete(heartbeatKey(for: nodeID)).get()
         try? await clearStaleNodePresence(for: nodeID)
     }
@@ -53,6 +62,7 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         try await refreshHeartbeat()
         _ = try await pool.sadd(nodeID, to: userRouteKey(for: userID)).get()
         _ = try await pool.sadd(userID.uuidString.lowercased(), to: nodeUsersKey(for: nodeID)).get()
+        try await refreshGlobalCellPresenceLease(forUserID: userID)
         await routeCache.store([nodeID], for: userID)
         await activeNodeCache.invalidate()
     }
@@ -64,10 +74,16 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         await routeCache.invalidate(userID)
     }
 
+    func refreshPresence(forUserID userID: UUID) async throws {
+        try await refreshHeartbeat()
+        try await refreshGlobalCellPresenceLease(forUserID: userID)
+    }
+
     func activatePresence(forSessionID sessionID: UUID, userID: UUID) async throws {
         try await refreshHeartbeat()
         _ = try await pool.sadd(nodeID, to: sessionRouteKey(for: sessionID)).get()
         _ = try await pool.sadd(sessionID.uuidString.lowercased(), to: nodeSessionsKey(for: nodeID)).get()
+        try await refreshGlobalCellPresenceLease(forSessionID: sessionID)
         await sessionRouteCache.store([nodeID], for: sessionID)
         await activeNodeCache.invalidate()
     }
@@ -77,6 +93,11 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         _ = try await pool.srem(nodeID, from: sessionRouteKey(for: sessionID)).get()
         _ = try await pool.srem(sessionID.uuidString.lowercased(), from: nodeSessionsKey(for: nodeID)).get()
         await sessionRouteCache.invalidate(sessionID)
+    }
+
+    func refreshPresence(forSessionID sessionID: UUID, userID: UUID) async throws {
+        try await refreshHeartbeat()
+        try await refreshGlobalCellPresenceLease(forSessionID: sessionID)
     }
 
     func activateConversationPresence(conversationID: UUID, userID: UUID) async throws {
@@ -276,47 +297,69 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         return result
     }
 
+    func routeCellIDs(forUserIDs userIDs: [UUID]) async throws -> [UUID: Set<String>] {
+        try await routeCellIDs(
+            identities: userIDs,
+            keyForIdentity: globalUserCellPresenceKey
+        )
+    }
+
+    func routeCellIDs(forSessionIDs sessionIDs: [UUID]) async throws -> [UUID: Set<String>] {
+        try await routeCellIDs(
+            identities: sessionIDs,
+            keyForIdentity: globalSessionCellPresenceKey
+        )
+    }
+
     func activeNodeIDs() async throws -> Set<String> {
         try await refreshHeartbeat()
-        let nodeIDs = try await pool.smembers(of: RedisKey("im:route:active_nodes"), as: String.self).get()
+        let nodeIDs = try await pool.smembers(of: activeNodesKey, as: String.self).get()
             .compactMap { $0 }
         return Set(try await filterActiveNodeIDs(nodeIDs))
     }
 
     private func userRouteKey(for userID: UUID) -> RedisKey {
-        RedisKey("im:route:user:\(userID.uuidString.lowercased()):nodes")
+        RedisKey(keyspace.key("route:user:\(userID.uuidString.lowercased()):nodes"))
     }
 
     private func nodeUsersKey(for nodeID: String) -> RedisKey {
-        RedisKey("im:route:node:\(nodeID):users")
+        RedisKey(keyspace.key("route:node:\(nodeID):users"))
+    }
+
+    private func globalUserCellPresenceKey(for userID: UUID) -> RedisKey {
+        RedisKey("im:global:presence:user:{\(userID.uuidString.lowercased())}:cells")
+    }
+
+    private func globalSessionCellPresenceKey(for sessionID: UUID) -> RedisKey {
+        RedisKey("im:global:presence:session:{\(sessionID.uuidString.lowercased())}:cells")
     }
 
     private func sessionRouteKey(for sessionID: UUID) -> RedisKey {
-        RedisKey("im:route:session:\(sessionID.uuidString.lowercased()):nodes")
+        RedisKey(keyspace.key("route:session:\(sessionID.uuidString.lowercased()):nodes"))
     }
 
     private func nodeSessionsKey(for nodeID: String) -> RedisKey {
-        RedisKey("im:route:node:\(nodeID):sessions")
+        RedisKey(keyspace.key("route:node:\(nodeID):sessions"))
     }
 
     private func activeConversationRouteKey(conversationID: UUID, userID: UUID) -> RedisKey {
-        RedisKey(
-            "im:route:conversation:\(conversationID.uuidString.lowercased()):user:\(userID.uuidString.lowercased()):nodes"
-        )
+        RedisKey(keyspace.key(
+            "route:conversation:\(conversationID.uuidString.lowercased()):user:\(userID.uuidString.lowercased()):nodes"
+        ))
     }
 
     private func nodeActiveConversationUsersKey(for nodeID: String) -> RedisKey {
-        RedisKey("im:route:node:\(nodeID):active_conversation_users")
+        RedisKey(keyspace.key("route:node:\(nodeID):active_conversation_users"))
     }
 
     private func activeConversationUsersKey(conversationID: UUID) -> RedisKey {
-        RedisKey("im:route:conversation:\(conversationID.uuidString.lowercased()):active_users")
+        RedisKey(keyspace.key("route:conversation:\(conversationID.uuidString.lowercased()):active_users"))
     }
 
     private func activeConversationNodeUsersKey(conversationID: UUID, nodeID: String) -> RedisKey {
-        RedisKey(
-            "im:route:conversation:\(conversationID.uuidString.lowercased()):node:\(nodeID):active_users"
-        )
+        RedisKey(keyspace.key(
+            "route:conversation:\(conversationID.uuidString.lowercased()):node:\(nodeID):active_users"
+        ))
     }
 
     private func activeConversationRouteEntry(conversationID: UUID, userID: UUID) -> String {
@@ -487,7 +530,7 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
     }
 
     private func heartbeatKey(for nodeID: String) -> RedisKey {
-        RedisKey("im:route:node:\(nodeID):heartbeat")
+        RedisKey(keyspace.key("route:node:\(nodeID):heartbeat"))
     }
 
     private func refreshHeartbeat(force: Bool = false) async throws {
@@ -498,6 +541,94 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         }
         let timestamp = String(Int(Date().timeIntervalSince1970))
         _ = try await pool.set(heartbeatKey(for: nodeID), to: timestamp).get()
+        try await refreshGlobalCellPresenceLeasesIfNeeded()
+    }
+
+    private func refreshGlobalCellPresenceLeasesIfNeeded() async throws {
+        guard await globalCellLeaseRefreshThrottle.shouldRefresh() else {
+            return
+        }
+        let rawUserIDs = try await pool.smembers(of: nodeUsersKey(for: nodeID), as: String.self).get()
+            .compactMap { $0 }
+        let rawSessionIDs = try await pool.smembers(of: nodeSessionsKey(for: nodeID), as: String.self).get()
+            .compactMap { $0 }
+        let userIDs = rawUserIDs.compactMap(UUID.init(uuidString:))
+        let sessionIDs = rawSessionIDs.compactMap(UUID.init(uuidString:))
+        try await refreshGlobalCellPresenceLeases(
+            identities: userIDs,
+            keyForIdentity: globalUserCellPresenceKey
+        )
+        try await refreshGlobalCellPresenceLeases(
+            identities: sessionIDs,
+            keyForIdentity: globalSessionCellPresenceKey
+        )
+    }
+
+    private func refreshGlobalCellPresenceLease(forUserID userID: UUID) async throws {
+        try await refreshGlobalCellPresenceLeases(
+            identities: [userID],
+            keyForIdentity: globalUserCellPresenceKey
+        )
+    }
+
+    private func refreshGlobalCellPresenceLease(forSessionID sessionID: UUID) async throws {
+        try await refreshGlobalCellPresenceLeases(
+            identities: [sessionID],
+            keyForIdentity: globalSessionCellPresenceKey
+        )
+    }
+
+    private func refreshGlobalCellPresenceLeases(
+        identities: [UUID],
+        keyForIdentity: @escaping @Sendable (UUID) -> RedisKey
+    ) async throws {
+        guard !identities.isEmpty else {
+            return
+        }
+        let expiresAt = Int(Date().timeIntervalSince1970) + heartbeatTimeoutSeconds
+        let ttl = TimeAmount.seconds(Int64(heartbeatTimeoutSeconds))
+        try await pool.leaseConnection { connection in
+            let operations = identities.flatMap { identity -> [EventLoopFuture<Void>] in
+                let key = keyForIdentity(identity)
+                return [
+                    connection.hset(self.cellID, to: expiresAt, in: key).map { _ in () },
+                    connection.expire(key, after: ttl).map { _ in () }
+                ]
+            }
+            return EventLoopFuture.andAllSucceed(operations, on: connection.eventLoop)
+        }.get()
+    }
+
+    private func routeCellIDs(
+        identities: [UUID],
+        keyForIdentity: @escaping @Sendable (UUID) -> RedisKey
+    ) async throws -> [UUID: Set<String>] {
+        let uniqueIdentities = Array(Set(identities))
+        guard !uniqueIdentities.isEmpty else {
+            return [:]
+        }
+        let now = Int(Date().timeIntervalSince1970)
+        let records = try await pool.leaseConnection { connection in
+            let operations = uniqueIdentities.map { identity in
+                connection.hgetall(from: keyForIdentity(identity), as: String.self)
+                    .map { values in (identity, values) }
+            }
+            return EventLoopFuture.whenAllSucceed(operations, on: connection.eventLoop)
+        }.get()
+
+        var routes: [UUID: Set<String>] = [:]
+        for (identity, leases) in records {
+            let liveCells = Set(leases.compactMap { cellID, rawExpiry -> String? in
+                guard let rawExpiry, let expiry = Int(rawExpiry), expiry >= now else {
+                    return nil
+                }
+                return IMRealtimeCellConfiguration.isValid(cellID: cellID) ? cellID : nil
+            })
+            if !liveCells.isEmpty {
+                routes[identity] = liveCells
+            }
+        }
+        return routes
     }
 
     private func cachedActiveNodeIDs() async throws -> [String] {
@@ -506,7 +637,7 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         }
 
         let activeNodeIDs = try await filterActiveNodeIDs(
-            try await pool.smembers(of: RedisKey("im:route:active_nodes"), as: String.self).get()
+            try await pool.smembers(of: activeNodesKey, as: String.self).get()
                 .compactMap { $0 }
         )
         await activeNodeCache.store(activeNodeIDs)
@@ -544,7 +675,7 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
             Task {
                 for staleNodeID in staleNodeIDs {
                     try? await self.clearStaleNodePresence(for: staleNodeID)
-                    _ = try? await self.pool.srem(staleNodeID, from: RedisKey("im:route:active_nodes")).get()
+                    _ = try? await self.pool.srem(staleNodeID, from: self.activeNodesKey).get()
                     _ = try? await self.pool.delete(self.heartbeatKey(for: staleNodeID)).get()
                 }
             }
@@ -557,7 +688,7 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         let users = try await pool.smembers(of: nodeUsersKey(for: staleNodeID), as: String.self).get()
             .compactMap { $0 }
         for rawUserID in users {
-            _ = try await pool.srem(staleNodeID, from: RedisKey("im:route:user:\(rawUserID):nodes")).get()
+            _ = try await pool.srem(staleNodeID, from: RedisKey(keyspace.key("route:user:\(rawUserID):nodes"))).get()
             if let userID = UUID(uuidString: rawUserID) {
                 await routeCache.invalidate(userID)
             }
@@ -565,7 +696,7 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         let sessions = try await pool.smembers(of: nodeSessionsKey(for: staleNodeID), as: String.self).get()
             .compactMap { $0 }
         for rawSessionID in sessions {
-            _ = try await pool.srem(staleNodeID, from: RedisKey("im:route:session:\(rawSessionID):nodes")).get()
+            _ = try await pool.srem(staleNodeID, from: RedisKey(keyspace.key("route:session:\(rawSessionID):nodes"))).get()
             if let sessionID = UUID(uuidString: rawSessionID) {
                 await sessionRouteCache.invalidate(sessionID)
             }
@@ -600,6 +731,10 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         _ = try await pool.delete(nodeSessionsKey(for: staleNodeID)).get()
         _ = try await pool.delete(nodeActiveConversationUsersKey(for: staleNodeID)).get()
         await activeNodeCache.invalidate()
+    }
+
+    private var activeNodesKey: RedisKey {
+        RedisKey(keyspace.key("route:active_nodes"))
     }
 }
 

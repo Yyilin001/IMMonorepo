@@ -35,6 +35,9 @@ enum ConversationSummaryResponseOverlay {
             title: summary.title,
             kind: summary.kind,
             directMessagingState: summary.directMessagingState,
+            groupLifecycleState: summary.kind == IMConversationKind.group.rawValue
+                ? summary.groupLifecycleStateEnum.rawValue
+                : nil,
             directPeer: summary.directPeerUserID.map { directPeerUserID in
                 IMDirectPeerResponse(
                     id: directPeerUserID,

@@ -31,9 +31,22 @@ enum IMProductionRuntimeValidator {
             throw Abort(.internalServerError, reason: "Production requires IM_NODE_ID to be explicitly configured.")
         }
 
+        guard let configuredCellID = Environment.get("IM_REALTIME_CELL_ID")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !configuredCellID.isEmpty,
+            IMRealtimeCellConfiguration.isValid(cellID: configuredCellID)
+        else {
+            throw Abort(
+                .internalServerError,
+                reason: "Production requires a valid explicit IM_REALTIME_CELL_ID to isolate Redis presence and realtime dispatch by cell."
+            )
+        }
+
         try IMProductionRuntimeValidationSupport.validatePublicBaseURLConfiguration()
         try IMProductionRuntimeValidationSupport.validatePrimaryDatabaseConfiguration()
         try IMProductionRuntimeValidationSupport.validateProductionSecretConfiguration(app)
+        try IMProductionRuntimeValidationSupport.validateCellIngressConfiguration(app)
+        try IMProductionRuntimeValidationSupport.validateNodeDispatchConfiguration(app)
         try IMProductionRuntimeValidationSupport.validateDevelopmentSeedConfigurationDisabled()
         try app.metricsConfiguration.validateStartup(environment: app.environment)
 

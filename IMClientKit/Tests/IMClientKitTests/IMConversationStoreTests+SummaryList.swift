@@ -473,6 +473,59 @@ extension IMConversationStoreTests {
         #expect(store.selectedConversation?.isDirectMessagingFrozen == false)
     }
 
+    @Test func replaceConversationSummariesImportsFrozenGroupLifecycle() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Frozen Group",
+                    kind: IMConversationKind.group.rawValue,
+                    groupLifecycleState: IMGroupLifecycleState.frozen.rawValue,
+                    memberCount: 3,
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_200_000)
+                )
+            ]
+        )
+
+        #expect(store.selectedConversation?.groupLifecycleState == .frozen)
+        #expect(store.selectedConversation?.isGroupFrozen == true)
+        #expect(store.selectedConversation?.canSendMessages == false)
+        #expect(store.selectedConversation?.groupLifecycleStatusMessage == "群聊已被冻结，当前只能查看历史消息。")
+    }
+
+    @Test func replaceConversationSummariesImportsDissolvedGroupLifecycle() {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+
+        store.replaceConversationSummaries(
+            [
+                IMConversationSummaryResponseBody(
+                    id: conversationID,
+                    title: "Dissolved Group",
+                    kind: IMConversationKind.group.rawValue,
+                    groupLifecycleState: IMGroupLifecycleState.dissolved.rawValue,
+                    memberCount: 3,
+                    memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                    lastMessage: nil,
+                    createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_200_000)
+                )
+            ]
+        )
+
+        #expect(store.selectedConversation?.groupLifecycleState == .dissolved)
+        #expect(store.selectedConversation?.isGroupDissolved == true)
+        #expect(store.selectedConversation?.isGroupReadOnly == true)
+        #expect(store.selectedConversation?.canSendMessages == false)
+        #expect(store.selectedConversation?.groupLifecycleStatusMessage == "群聊已解散，消息记录保留为只读。")
+    }
+
     @Test func groupConversationIgnoresDirectMessagingState() {
         let store = IMConversationStore()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!

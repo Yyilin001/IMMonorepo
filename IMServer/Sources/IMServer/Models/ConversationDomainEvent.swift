@@ -735,7 +735,7 @@ struct ConversationEventStreamEnvelope: Codable, Equatable, Sendable {
     }
 }
 
-final class ConversationDomainEvent: Model, @unchecked Sendable {
+final class ConversationDomainEvent: Model, Content, @unchecked Sendable {
     static let schema = "conversation_domain_events"
 
     @ID(key: .id)
@@ -850,6 +850,50 @@ final class ConversationDomainEvent: Model, @unchecked Sendable {
         }
         return json
     }
+
+    func migrationCopy() -> ConversationDomainEvent {
+        let copy = ConversationDomainEvent()
+        copy.id = id
+        copy.conversationID = conversationID
+        copy.eventType = eventType
+        copy.actorUserID = actorUserID
+        copy.aggregateSequence = aggregateSequence
+        copy.sideEffectKey = sideEffectKey
+        copy.payloadJSON = payloadJSON
+        copy.status = status
+        copy.errorMessage = errorMessage
+        copy.createdAt = createdAt
+        copy.processingStartedAt = processingStartedAt
+        copy.processedAt = processedAt
+        copy.streamPublishedAt = streamPublishedAt
+        copy.streamPublishError = streamPublishError
+        copy.streamPublishStartedAt = streamPublishStartedAt
+        copy.streamPublishClaimedBy = streamPublishClaimedBy
+        copy.retryCount = retryCount
+        return copy
+    }
+
+    var migrationFingerprintFields: [String?] {
+        [
+            id?.uuidString,
+            conversationID.uuidString,
+            eventType,
+            actorUserID?.uuidString,
+            String(aggregateSequence),
+            sideEffectKey,
+            payloadJSON,
+            status,
+            errorMessage,
+            String(createdAt.timeIntervalSince1970),
+            processingStartedAt.map { String($0.timeIntervalSince1970) },
+            processedAt.map { String($0.timeIntervalSince1970) },
+            streamPublishedAt.map { String($0.timeIntervalSince1970) },
+            streamPublishError,
+            streamPublishStartedAt.map { String($0.timeIntervalSince1970) },
+            streamPublishClaimedBy,
+            String(retryCount)
+        ]
+    }
 }
 
 final class ContactDomainEvent: Model, @unchecked Sendable {
@@ -962,10 +1006,10 @@ final class OwnerDomainEventDelivery: Model, @unchecked Sendable {
     var ownerUserID: UUID
 
     @Field(key: "owner_cursor")
-    var ownerCursor: UInt64
+    var ownerCursor: Int
 
     @Field(key: "owner_aggregate_sequence")
-    var ownerAggregateSequence: UInt64
+    var ownerAggregateSequence: Int
 
     @Field(key: "aggregate_type")
     var aggregateType: String
@@ -992,8 +1036,8 @@ final class OwnerDomainEventDelivery: Model, @unchecked Sendable {
 
     init(
         ownerUserID: UUID,
-        ownerCursor: UInt64,
-        ownerAggregateSequence: UInt64,
+        ownerCursor: Int,
+        ownerAggregateSequence: Int,
         aggregateType: String,
         aggregateID: UUID,
         eventID: UUID,
@@ -1020,7 +1064,7 @@ final class OwnerDomainEventDelivery: Model, @unchecked Sendable {
     }
 }
 
-final class ConversationDomainEventSideEffect: Model, @unchecked Sendable {
+final class ConversationDomainEventSideEffect: Model, Content, @unchecked Sendable {
     static let schema = "conversation_domain_event_side_effects"
 
     @ID(custom: "side_effect_key", generatedBy: .user)

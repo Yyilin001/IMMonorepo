@@ -7,6 +7,180 @@ import VaporTesting
 import Testing
 
 extension IMServerTests {
+    @Test("Remote Cell message ingress validates the route binding before persistence")
+    func remoteCellMessageIngressValidatesRouteBinding() async throws {
+        try await withApp(configure: configure) { app in
+            app.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-b")
+            app.conversationDirectory = DatabaseConversationDirectory(db: app.db, localCellID: "cell-b")
+            app.cellIngressConfiguration = IMCellIngressConfiguration(
+                endpointsByCellID: ["cell-b": "https://cell-b.internal"],
+                sharedSecret: "cell-ingress-message-test-secret"
+            )
+
+            let sender = try await user(email: "demo@example.com", on: app)
+            let senderID = try sender.requireID()
+            let peer = try await makeUser(email: "cell-message-peer@example.com", on: app)
+            let created = try await IMConversationService.command(app: app).createConversation(
+                kind: IMConversationKind.direct.rawValue,
+                title: nil,
+                memberEmails: [peer.email],
+                creatorUserID: senderID
+            )
+            let conversationID = created.receipt.conversationID
+            let route = try await app.conversationDirectory.route(for: conversationID)
+            let payload = imTCPTextPayload(
+                conversationID: conversationID,
+                clientMessageID: "remote-cell-ingress-message",
+                text: "hello from cell-a"
+            )
+
+            try await app.testing().test(.POST, "internal/im/messages/send", beforeRequest: { request in
+                request.headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: "cell-ingress-message-test-secret")
+                request.headers.replaceOrAdd(name: "X-IM-Internal-Response", value: "full")
+                try request.content.encode(
+                    IMInternalMessageSendRequest(
+                        payload: payload,
+                        senderUserID: senderID,
+                        cellRoute: IMInternalMessageCellRoute(
+                            originCellID: "cell-a",
+                            targetCellID: "cell-b",
+                            routeVersion: route.version
+                        )
+                    )
+                )
+            }, afterResponse: { response async throws in
+                #expect(response.status == .ok)
+                let result = try response.content.decode(IMRealtimeMessagePersistenceResult.self)
+                #expect(result.acknowledgement.status == "accepted")
+                #expect(result.didCreateMessage)
+            })
+
+            try await app.testing().test(.POST, "internal/im/messages/send", beforeRequest: { request in
+                request.headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: "cell-ingress-message-test-secret")
+                try request.content.encode(
+                    IMInternalMessageSendRequest(
+                        payload: payload,
+                        senderUserID: senderID,
+                        cellRoute: IMInternalMessageCellRoute(
+                            originCellID: "cell-a",
+                            targetCellID: "cell-b",
+                            routeVersion: route.version - 1
+                        )
+                    )
+                )
+            }, afterResponse: { response async in
+                #expect(response.status == .conflict)
+            })
+        }
+    }
+
+    @Test("Delivery trace uses standard correlation fields")
+    func deliveryTraceUsesStandardCorrelationFields() {
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let eventID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
+        let requestID = UUID(uuidString: "eeeeeeee-1111-2222-3333-ffffffffffff")!
+        let trace = IMDeliveryTrace(
+            conversationID: conversationID,
+            eventID: eventID,
+            requestID: requestID,
+            clientMessageID: " client-message-42 "
+        )
+
+        #expect(trace.fields(outcome: "slow") == [
+            "client_message_id": "client-message-42",
+            "conversation_id": conversationID.uuidString,
+            "event_id": eventID.uuidString,
+            "outcome": "slow",
+            "request_id": requestID.uuidString
+        ])
+        #expect(
+            IMDeliveryTrace(conversationID: conversationID, clientMessageID: "  ")
+                .fields(outcome: "completed") == [
+                    "conversation_id": conversationID.uuidString,
+                    "outcome": "completed"
+                ]
+        )
+    }
+
+    @Test("Delivery failure metadata retains correlation without payload or raw error fields")
+    func deliveryFailureMetadataRetainsCorrelationWithoutPayloadOrRawErrorFields() {
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let eventID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
+        let requestID = UUID(uuidString: "eeeeeeee-1111-2222-3333-ffffffffffff")!
+        let trace = IMDeliveryTrace(
+            conversationID: conversationID,
+            eventID: eventID,
+            requestID: requestID,
+            clientMessageID: "client-message-42",
+            runtimeRole: "gateway",
+            timelineSequence: 99,
+            ownerSequence: 42
+        )
+
+        let metadata = imDeliveryFailureMetadata(
+            trace: trace,
+            runtimeRole: "combined",
+            errorKind: "timeout"
+        )
+
+        #expect(Set(metadata.keys) == [
+            "client_message_id",
+            "conversation_id",
+            "error_kind",
+            "event_id",
+            "outcome",
+            "owner_sequence",
+            "request_id",
+            "runtime_role",
+            "timeline_sequence"
+        ])
+        #expect(metadata["error_kind"] == .string("timeout"))
+        #expect(metadata["conversation_id"] == .string(conversationID.uuidString))
+        #expect(metadata["event_id"] == .string(eventID.uuidString))
+        #expect(metadata["request_id"] == .string(requestID.uuidString))
+        #expect(metadata["runtime_role"] == .string("gateway"))
+        #expect(metadata["timeline_sequence"] == .string("99"))
+        #expect(metadata["owner_sequence"] == .string("42"))
+        #expect(metadata["payload"] == nil)
+        #expect(metadata["message_body"] == nil)
+        #expect(metadata["error"] == nil)
+    }
+
+    @Test("Delivery trace sampler is disabled by default configuration and capped per minute")
+    func deliveryTraceSamplerIsDisabledByDefaultConfigurationAndCappedPerMinute() async {
+        let trace = IMDeliveryTrace(
+            conversationID: UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!,
+            eventID: UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!,
+            requestID: UUID(uuidString: "eeeeeeee-1111-2222-3333-ffffffffffff")!,
+            runtimeRole: "stream-consumer",
+            timelineSequence: 99
+        )
+        let sampler = IMDeliveryTraceSampler()
+        let minute = Date(timeIntervalSince1970: 1_200)
+
+        let disabled = IMDeliveryTraceSamplingConfiguration(
+            enabled: false,
+            sampleRateBasisPoints: 10_000,
+            maxLogsPerMinute: 1
+        )
+        #expect(await sampler.shouldSample(trace, configuration: disabled, now: minute) == false)
+
+        let enabled = IMDeliveryTraceSamplingConfiguration(
+            enabled: true,
+            sampleRateBasisPoints: 10_000,
+            maxLogsPerMinute: 1
+        )
+        #expect(await sampler.shouldSample(trace, configuration: enabled, now: minute))
+        #expect(await sampler.shouldSample(trace, configuration: enabled, now: minute) == false)
+        #expect(
+            await sampler.shouldSample(
+                trace,
+                configuration: enabled,
+                now: minute.addingTimeInterval(60)
+            )
+        )
+    }
+
     @Test("Realtime persistence pipeline returns empty result for empty batch")
     func realtimePersistencePipelineReturnsEmptyResultForEmptyBatch() async throws {
         try await withApp(configure: configure) { app in
@@ -18,6 +192,86 @@ extension IMServerTests {
 
             let results = try await pipeline.run()
             #expect(results.isEmpty)
+        }
+    }
+
+    @Test("Realtime persistence batch reserves consecutive aggregate sequences only for new messages")
+    func realtimePersistenceBatchReservesAggregateSequencesForNewMessages() async throws {
+        try await withApp(configure: configure) { app in
+            let sender = try await user(email: "demo@example.com", on: app)
+            let peer = try await makeUser(email: "batch-sequence-peer@example.com", on: app)
+            let senderID = try sender.requireID()
+            let conversation = Conversation(
+                title: "Batch sequence chat",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_700_100_001)
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+            try await ConversationMember(conversationID: conversationID, userID: senderID, role: .owner).create(on: app.db)
+            try await ConversationMember(conversationID: conversationID, userID: try peer.requireID()).create(on: app.db)
+
+            let service = IMRealtimeMessageService(fixedDatabaseForLowLevelTest: app.db)
+            var firstBatch: [IMPreparedIncomingMessage] = []
+            for index in 1...3 {
+                firstBatch.append(
+                    try await service.prepareIncomingMessage(
+                        imTCPTextPayload(
+                            conversationID: conversationID,
+                            clientMessageID: "batch-sequence-\(index)",
+                            text: "message \(index)"
+                        ),
+                        senderUserID: senderID,
+                        conversationID: conversationID
+                    )
+                )
+            }
+
+            let firstResults = try await service.persistOwnedIncomingMessagesBatch(
+                firstBatch,
+                conversationID: conversationID
+            )
+            #expect(firstResults.map(\.didCreateMessage) == [true, true, true])
+            #expect(firstResults.compactMap(\.message.serverSequence) == [1, 2, 3])
+
+            let retry = try await service.prepareIncomingMessage(
+                imTCPTextPayload(
+                    conversationID: conversationID,
+                    clientMessageID: "batch-sequence-2",
+                    text: "duplicate"
+                ),
+                senderUserID: senderID,
+                conversationID: conversationID
+            )
+            let newMessage = try await service.prepareIncomingMessage(
+                imTCPTextPayload(
+                    conversationID: conversationID,
+                    clientMessageID: "batch-sequence-4",
+                    text: "message 4"
+                ),
+                senderUserID: senderID,
+                conversationID: conversationID
+            )
+            let retryResults = try await service.persistOwnedIncomingMessagesBatch(
+                [retry, newMessage],
+                conversationID: conversationID
+            )
+            #expect(retryResults.map(\.didCreateMessage) == [false, true])
+
+            let messages = try await ConversationMessage.query(on: app.db)
+                .filter(\.$conversation.$id == conversationID)
+                .sort(\.$timelineSequence)
+                .all()
+            #expect(messages.map(\.timelineSequence) == [1, 2, 3, 4])
+
+            let events = try await ConversationDomainEvent.query(on: app.db)
+                .filter(\.$conversationID == conversationID)
+                .sort(\.$aggregateSequence)
+                .all()
+            #expect(events.map(\.aggregateSequence) == [1, 2, 3, 4])
+            #expect(
+                try #require(await ConversationDomainEventSequence.find(conversationID, on: app.db)).lastSequence == 4
+            )
         }
     }
 

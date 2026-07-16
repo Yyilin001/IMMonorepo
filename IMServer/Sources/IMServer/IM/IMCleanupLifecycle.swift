@@ -85,11 +85,11 @@ struct IMCleanupService {
 
     private func deleteExpiredUnusedInvites(now: Date) async throws -> Int {
         let cutoff = now.addingTimeInterval(-30 * 24 * 60 * 60)
-        let rows = try await GroupInvite.query(on: app.imWriteDB)
+        let rows = try await GroupInvite.query(on: app.db)
             .filter(\.$expiresAt < cutoff)
             .filter(\.$useCount == 0)
             .all()
-        try await rows.delete(on: app.imWriteDB)
+        try await rows.delete(on: app.db)
         return rows.count
     }
 

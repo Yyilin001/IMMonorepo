@@ -42,6 +42,10 @@ AUDIT_KAFKA_LAG_GROUPS="${AUDIT_KAFKA_LAG_GROUPS:-summary-projection-consumer do
 AUDIT_KAFKA_LAG_MAX_TOTAL="${AUDIT_KAFKA_LAG_MAX_TOTAL:-10000}"
 AUDIT_KAFKA_LAG_MAX_PARTITION="${AUDIT_KAFKA_LAG_MAX_PARTITION:-5000}"
 AUDIT_KAFKA_LAG_REQUIRE_GROUPS="${AUDIT_KAFKA_LAG_REQUIRE_GROUPS:-true}"
+# Comma-separated instance suffixes for multi-node consumer hosts, for example
+# realtime_delivery_consumer,domain_delivery_consumer. When set, the audit
+# checks these templated units instead of the single-node legacy consumer units.
+AUDIT_STREAM_CONSUMER_INSTANCE_UNITS="${AUDIT_STREAM_CONSUMER_INSTANCE_UNITS:-}"
 AUDIT_REQUIRE_CLOUD_SECURITY_GROUP="${AUDIT_REQUIRE_CLOUD_SECURITY_GROUP:-}"
 AUDIT_CLOUD_SECURITY_GROUP_RULES_FILE="${AUDIT_CLOUD_SECURITY_GROUP_RULES_FILE:-${IMSERVER_ETC_DIR}/cloud-security-group.json}"
 AUDIT_CLOUD_SECURITY_GROUP_PUBLIC_CLIENT_PORTS="${AUDIT_CLOUD_SECURITY_GROUP_PUBLIC_CLIENT_PORTS:-80 443 9000}"
@@ -4073,6 +4077,7 @@ printf 'topologySmoke require=%s receipt=%s maxAgeSeconds=%s maxFutureSkewSecond
   "${AUDIT_TOPOLOGY_SMOKE_MAX_AGE_SECONDS}" \
   "${AUDIT_TOPOLOGY_SMOKE_MAX_FUTURE_SKEW_SECONDS}" \
   "${AUDIT_TOPOLOGY_SMOKE_REQUIRE_ARTIFACTS}"
+printf 'streamConsumerInstances=%s\n' "${AUDIT_STREAM_CONSUMER_INSTANCE_UNITS:-<legacy-units>}"
 
 for service in \
   postgresql \
@@ -4082,12 +4087,25 @@ for service in \
   imserver-command-api \
   imserver-gateway \
   imserver-query-api \
-  imserver-outbox-relay \
-  imserver-stream-consumer \
-  imserver-domain-delivery-consumer
+  imserver-outbox-relay
 do
   check_service "${service}"
 done
+
+if [[ -n "${AUDIT_STREAM_CONSUMER_INSTANCE_UNITS}" ]]; then
+  IFS=',' read -r -a stream_consumer_instances <<< "${AUDIT_STREAM_CONSUMER_INSTANCE_UNITS}"
+  for instance in "${stream_consumer_instances[@]}"; do
+    instance="${instance//[[:space:]]/}"
+    if [[ ! "${instance}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+      fail "stream-consumer-instance" "invalid_instance_name_${instance}"
+      continue
+    fi
+    check_service "imserver-stream-consumer@${instance}"
+  done
+else
+  check_service imserver-stream-consumer
+  check_service imserver-domain-delivery-consumer
+fi
 
 check_timer imserver-backup.timer
 check_backup_timer_units

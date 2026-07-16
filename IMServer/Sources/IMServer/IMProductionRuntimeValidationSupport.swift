@@ -121,6 +121,99 @@ enum IMProductionRuntimeValidationSupport {
         }
     }
 
+    static func validateCellIngressConfiguration(_ app: Application) throws {
+        let registryConfiguration = app.cellIngressRegistryConfiguration
+        if let invalidModeValue = registryConfiguration.invalidModeValue {
+            throw Abort(
+                .internalServerError,
+                reason: "IM_CELL_INGRESS_REGISTRY_MODE must be static or database; got \(invalidModeValue)."
+            )
+        }
+        let configuration = app.cellIngressConfiguration
+        if registryConfiguration.mode == .database {
+            guard let sharedSecret = configuration.sharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  sharedSecret.count >= 32
+            else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Database Cell registry requires IM_CELL_INGRESS_SHARED_SECRET or IM_INTERNAL_SHARED_SECRET with at least 32 characters."
+                )
+            }
+            return
+        }
+        guard configuration.invalidEndpointEntries.isEmpty else {
+            throw Abort(
+                .internalServerError,
+                reason: "Invalid Cell ingress endpoint configuration: \(configuration.invalidEndpointEntryDescriptions.joined(separator: ", "))."
+            )
+        }
+        guard !configuration.configuredEndpoints.isEmpty else {
+            return
+        }
+        guard let sharedSecret = configuration.sharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
+              sharedSecret.count >= 32
+        else {
+            throw Abort(
+                .internalServerError,
+                reason: "Cell ingress endpoint maps require IM_CELL_INGRESS_SHARED_SECRET or IM_INTERNAL_SHARED_SECRET with at least 32 characters."
+            )
+        }
+        for entry in configuration.configuredEndpoints {
+            let purpose = entry.purpose?.rawValue ?? "legacy"
+            guard let components = URLComponents(string: entry.endpoint),
+                  components.scheme?.lowercased() == "https",
+                  let host = components.host,
+                  !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production \(purpose) Cell ingress endpoint for \(entry.cellID) must use https and include a host."
+                )
+            }
+        }
+    }
+
+    static func validateNodeDispatchConfiguration(_ app: Application) throws {
+        let configuration = app.nodeDispatchConfiguration
+        if let invalidModeValue = configuration.invalidModeValue {
+            throw Abort(
+                .internalServerError,
+                reason: "IM_NODE_DISPATCH_MODE must be redis or http; got \(invalidModeValue)."
+            )
+        }
+        guard configuration.mode == .http else {
+            return
+        }
+        guard !configuration.endpointsByNodeID.isEmpty,
+              let sharedSecret = configuration.sharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
+              sharedSecret.count >= 32
+        else {
+            throw Abort(
+                .internalServerError,
+                reason: "IM_NODE_DISPATCH_MODE=http requires IM_GATEWAY_NODE_DISPATCH_ENDPOINTS and IM_NODE_DISPATCH_SHARED_SECRET (or a Cell/internal fallback) with at least 32 characters."
+            )
+        }
+        if app.imRuntimeRole == .gateway,
+           configuration.endpoint(for: app.imNodeID) == nil {
+            throw Abort(
+                .internalServerError,
+                reason: "Production HTTP node dispatch requires IM_GATEWAY_NODE_DISPATCH_ENDPOINTS to include this gateway IM_NODE_ID."
+            )
+        }
+        for (nodeID, endpoint) in configuration.endpointsByNodeID {
+            guard let components = URLComponents(string: endpoint),
+                  components.scheme?.lowercased() == "https",
+                  let host = components.host,
+                  !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production node dispatch endpoint for \(nodeID) must use https and include a host."
+                )
+            }
+        }
+    }
+
     static func validateGatewayRealtimeFanoutProtection(_ app: Application) throws {
         guard app.imTCPConfiguration.dropsRealtimeWhenNotWritable else {
             throw Abort(
@@ -211,6 +304,40 @@ enum IMProductionRuntimeValidationSupport {
                 .internalServerError,
                 reason: "Conversation shards are missing database configuration for: \(missing). Set DATABASE_CONVERSATION_<SHARD>_* for every IM_CONVERSATION_SHARD_IDS entry in production."
             )
+        }
+
+        if configuredShardIDs.count > 1 {
+            let rawCacheLimit = Environment.get("IM_CONVERSATION_SHARD_DIRECTORY_CACHE_MAX_ENTRIES")
+            guard let rawCacheLimit,
+                  !rawCacheLimit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Multi-shard production requires IM_CONVERSATION_SHARD_DIRECTORY_CACHE_MAX_ENTRIES so directory lookup memory and fallback load are explicit."
+                )
+            }
+            guard app.conversationShardRoutingConfiguration.directoryCacheMaxEntries >= 1_024 else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Multi-shard production requires IM_CONVERSATION_SHARD_DIRECTORY_CACHE_MAX_ENTRIES >= 1024."
+                )
+            }
+            let rawCacheTTL = Environment.get("IM_CONVERSATION_SHARD_DIRECTORY_CACHE_TTL_SECONDS")
+            guard let rawCacheTTL,
+                  !rawCacheTTL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Multi-shard production requires IM_CONVERSATION_SHARD_DIRECTORY_CACHE_TTL_SECONDS so Cell route migration staleness is bounded."
+                )
+            }
+            let cacheTTL = app.conversationShardRoutingConfiguration.directoryCacheTTLSeconds
+            guard (1...300).contains(cacheTTL) else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Multi-shard production requires IM_CONVERSATION_SHARD_DIRECTORY_CACHE_TTL_SECONDS between 1 and 300."
+                )
+            }
         }
     }
 
@@ -471,6 +598,12 @@ enum IMProductionRuntimeValidationSupport {
     static func validateHotConversationProtectionConfiguration(_ app: Application) throws {
         guard app.hotConversationConfiguration.isEnabled else {
             throw Abort(.internalServerError, reason: "Production command-api requires IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT to protect ordered conversation sequence allocation.")
+        }
+        guard app.hotConversationConfiguration.limiterMode == .redis else {
+            throw Abort(.internalServerError, reason: "Production command-api requires IM_HOT_CONVERSATION_LIMITER_MODE=redis so hot conversation limits remain global across command-api replicas.")
+        }
+        guard app.hotConversationConfiguration.redisURL != nil else {
+            throw Abort(.internalServerError, reason: "Production command-api requires IM_HOT_CONVERSATION_LIMITER_REDIS_URL or REDIS_URL for distributed hot conversation limits.")
         }
     }
 

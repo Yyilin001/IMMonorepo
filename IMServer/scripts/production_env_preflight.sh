@@ -210,11 +210,14 @@ is_placeholder_value() {
   value="$(trim "$1")"
   lowered="$(to_lower "${value}")"
   case "${lowered}" in
-    replace-me|change-me|changeme|password|secret|token|example)
+    replace-me|replace-with-*|change-me|change-with-*|changeme|password|secret|token|example)
       return 0
       ;;
   esac
   [[ "${lowered}" == *"replace-me"* ]] && return 0
+  [[ "${lowered}" == *"replace-with-"* ]] && return 0
+  [[ "${lowered}" == *"change-with-"* ]] && return 0
+  [[ "${lowered}" == *"placeholder"* ]] && return 0
   [[ "${lowered}" == *"user:pass"* ]] && return 0
   [[ "${lowered}" == *".example"* ]] && return 0
   [[ "${lowered}" == *"example:"* ]] && return 0
@@ -781,6 +784,35 @@ require_gateway_command_ingress() {
   require_non_empty "${file}" "IM_INTERNAL_SHARED_SECRET" "${label}" || true
 }
 
+require_gateway_node_dispatch() {
+  local file="$1"
+  local label="$2"
+  local mode node_id endpoints node_secret internal_secret
+  mode="$(to_lower "$(env_value "${file}" "IM_NODE_DISPATCH_MODE" || printf 'redis')")"
+  case "${mode}" in
+    redis)
+      return 0
+      ;;
+    http)
+      node_id="$(env_value "${file}" "IM_NODE_ID" || true)"
+      endpoints="$(env_value "${file}" "IM_GATEWAY_NODE_DISPATCH_ENDPOINTS" || true)"
+      node_secret="$(env_value "${file}" "IM_NODE_DISPATCH_SHARED_SECRET" || true)"
+      internal_secret="$(env_value "${file}" "IM_INTERNAL_SHARED_SECRET" || true)"
+      if [[ -z "${endpoints}" ]]; then
+        record_failure "${label} requires IM_GATEWAY_NODE_DISPATCH_ENDPOINTS when IM_NODE_DISPATCH_MODE=http"
+      elif [[ ",${endpoints}," != *",${node_id}="* ]]; then
+        record_failure "${label} requires IM_GATEWAY_NODE_DISPATCH_ENDPOINTS to include IM_NODE_ID=${node_id} when IM_NODE_DISPATCH_MODE=http"
+      fi
+      if [[ -z "${node_secret}" && -z "${internal_secret}" ]]; then
+        record_failure "${label} requires IM_NODE_DISPATCH_SHARED_SECRET or IM_INTERNAL_SHARED_SECRET when IM_NODE_DISPATCH_MODE=http"
+      fi
+      ;;
+    *)
+      record_failure "${label} has unsupported IM_NODE_DISPATCH_MODE=${mode}; expected redis or http"
+      ;;
+  esac
+}
+
 require_search_configuration() {
   local file="$1"
   local label="$2"
@@ -818,6 +850,47 @@ require_timeline_since_cache_invalidation() {
     record_failure "${label} requires REDIS_URL or IM_TIMELINE_SINCE_CACHE_INVALIDATION_REDIS_URL for distributed timeline/since cache invalidation"
   fi
   require_int_at_least "${file}" "IM_TIMELINE_SINCE_CACHE_INVALIDATION_REDIS_MAX_CONNECTIONS" 2 "${label}" || true
+}
+
+require_supported_redis_topology() {
+  local file="$1"
+  local label="$2"
+  local redis_url dedicated_redis_url topology consumer_groups dispatch_mode endpoints dispatch_secret internal_secret
+  redis_url="$(env_value "${file}" "REDIS_URL" || true)"
+  dedicated_redis_url="$(env_value "${file}" "IM_TIMELINE_SINCE_CACHE_INVALIDATION_REDIS_URL" || true)"
+  [[ -n "${redis_url}" || -n "${dedicated_redis_url}" ]] || return 0
+
+  topology="$(to_lower "$(env_value "${file}" "IM_REDIS_DEPLOYMENT_TOPOLOGY" || true)")"
+  case "${topology}" in
+    standalone)
+      return 0
+      ;;
+    cluster)
+      require_non_empty "${file}" "IM_REDIS_CLUSTER_NODES" "${label}" || true
+      consumer_groups="$(env_value "${file}" "IM_STREAM_CONSUMER_GROUPS" || true)"
+      if [[ "${label}" == "gateway" || ",${consumer_groups}," == *",realtime-delivery-consumer,"* ]]; then
+        dispatch_mode="$(to_lower "$(env_value "${file}" "IM_NODE_DISPATCH_MODE" || true)")"
+        endpoints="$(env_value "${file}" "IM_GATEWAY_NODE_DISPATCH_ENDPOINTS" || true)"
+        dispatch_secret="$(env_value "${file}" "IM_NODE_DISPATCH_SHARED_SECRET" || true)"
+        internal_secret="$(env_value "${file}" "IM_INTERNAL_SHARED_SECRET" || true)"
+        if [[ "${dispatch_mode}" != "http" ]]; then
+          record_failure "${label} requires IM_NODE_DISPATCH_MODE=http when IM_REDIS_DEPLOYMENT_TOPOLOGY=cluster"
+        fi
+        if [[ -z "${endpoints}" ]]; then
+          record_failure "${label} requires IM_GATEWAY_NODE_DISPATCH_ENDPOINTS when IM_REDIS_DEPLOYMENT_TOPOLOGY=cluster"
+        fi
+        if [[ -z "${dispatch_secret}" && -z "${internal_secret}" ]]; then
+          record_failure "${label} requires IM_NODE_DISPATCH_SHARED_SECRET or IM_INTERNAL_SHARED_SECRET when IM_REDIS_DEPLOYMENT_TOPOLOGY=cluster"
+        fi
+      fi
+      ;;
+    "")
+      record_failure "${label} requires IM_REDIS_DEPLOYMENT_TOPOLOGY=standalone when Redis is configured"
+      ;;
+    *)
+      record_failure "${label} has unsupported IM_REDIS_DEPLOYMENT_TOPOLOGY=${topology}; expected standalone or cluster"
+      ;;
+  esac
 }
 
 validate_command_api() {
@@ -859,7 +932,10 @@ validate_gateway() {
   require_jwt_rotation_configuration "${GATEWAY_ENV}" "${label}" || true
   require_primary_database "${GATEWAY_ENV}" "${label}"
   require_gateway_command_ingress "${GATEWAY_ENV}" "${label}"
+  require_gateway_node_dispatch "${GATEWAY_ENV}" "${label}"
   require_tcp_tls_termination_for_public_bind "${GATEWAY_ENV}" "${label}" || true
+  require_int_at_least "${GATEWAY_ENV}" "IM_TCP_MAX_CONNECTIONS" 1 "${label}" || true
+  require_int_at_least "${GATEWAY_ENV}" "IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND" 1 "${label}" || true
   require_true "${GATEWAY_ENV}" "IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE" "${label}" || true
   require_true "${GATEWAY_ENV}" "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED" "${label}" || true
   require_int_at_least "${GATEWAY_ENV}" "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_LIMIT" 1 "${label}" || true
@@ -1150,6 +1226,19 @@ validate_strict_secret_files() {
   done
 }
 
+validate_redis_topology_files() {
+  require_supported_redis_topology "${COMMAND_API_ENV}" "command-api"
+  require_supported_redis_topology "${GATEWAY_ENV}" "gateway"
+  require_supported_redis_topology "${QUERY_API_ENV}" "query-api"
+  require_supported_redis_topology "${OUTBOX_RELAY_ENV}" "outbox-relay"
+  require_supported_redis_topology "${OPS_ENV}" "ops"
+
+  local file
+  for file in "${STREAM_CONSUMER_ENVS[@]}"; do
+    require_supported_redis_topology "${file}" "stream-consumer:${file}"
+  done
+}
+
 validate_command_api
 validate_gateway
 validate_query_api
@@ -1160,6 +1249,7 @@ for stream_env in "${STREAM_CONSUMER_ENVS[@]}"; do
 done
 validate_cross_stream_topology
 validate_cross_role_event_stream
+validate_redis_topology_files
 validate_strict_secret_files
 
 if [[ "${#failures[@]}" -gt 0 ]]; then

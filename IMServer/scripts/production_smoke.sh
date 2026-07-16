@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="${ROOT_DIR}/docker-compose.production-smoke.yml"
+COMPOSE_EXTRA_FILE="${IM_SMOKE_COMPOSE_EXTRA_FILE:-}"
 PROJECT_NAME="${COMPOSE_PROJECT_NAME:-imserver-production-smoke}"
 REPORT_DIR="${ROOT_DIR}/reports"
 STATE_FILE="${REPORT_DIR}/production-smoke-state.env"
@@ -19,9 +20,15 @@ OWNER_EMAIL="${IM_SMOKE_OWNER_EMAIL:-smoke-owner@example.com}"
 PEER_A_EMAIL="${IM_SMOKE_PEER_A_EMAIL:-smoke-peer-a@example.com}"
 PEER_B_EMAIL="${IM_SMOKE_PEER_B_EMAIL:-smoke-peer-b@example.com}"
 SMOKE_PASSWORD="${IM_SMOKE_PASSWORD:-Password1234!}"
+SMOKE_REQUIRE_DELIVERY_TRACE="${IM_SMOKE_REQUIRE_DELIVERY_TRACE:-false}"
+SMOKE_REQUIRE_GATEWAY_TCP_RELAY="${IM_SMOKE_REQUIRE_GATEWAY_TCP_RELAY:-false}"
 
 compose() {
-  docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" "$@"
+  local args=(docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}")
+  if [[ -n "${COMPOSE_EXTRA_FILE}" ]]; then
+    args+=(-f "${COMPOSE_EXTRA_FILE}")
+  fi
+  "${args[@]}" "$@"
 }
 
 require_command() {
@@ -392,6 +399,149 @@ assert_metrics_protected() {
   curl -fsS -H "X-IM-Internal-Secret: ${INTERNAL_SECRET}" "${COMMAND_URL}/internal/metrics" >/dev/null
 }
 
+assert_sampled_delivery_trace() {
+  local service="$1"
+  local expected_stage_pattern="$2"
+  local trace_log="$3"
+  local trace_name="$4"
+  require_command rg
+  local trace_lines=""
+  local attempt
+  for attempt in $(seq 1 30); do
+    trace_lines="$(compose logs --no-color --tail=300 "${service}" 2>&1 | rg 'IM delivery trace' || true)"
+    if [[ -n "${trace_lines}" ]]; then
+      break
+    fi
+    sleep 1
+  done
+
+  if [[ -z "${trace_lines}" ]]; then
+    echo "Timed out waiting for sampled ${trace_name} delivery trace" >&2
+    compose logs --no-color --tail=300 "${service}" >&2 || true
+    return 1
+  fi
+
+  if ! printf '%s\n' "${trace_lines}" | rg -q "trace_stage[:=][[:space:]]*${expected_stage_pattern}"; then
+    echo "${trace_name} delivery trace is missing its expected stage" >&2
+    printf '%s\n' "${trace_lines}" >&2
+    return 1
+  fi
+
+  if ! printf '%s\n' "${trace_lines}" | rg -q 'conversation_id[:=]'; then
+    echo "${trace_name} delivery trace is missing conversation correlation" >&2
+    printf '%s\n' "${trace_lines}" >&2
+    return 1
+  fi
+
+  if printf '%s\n' "${trace_lines}" | rg -i -q '(^|[[:space:],\[])(message_body|content|payload|error)[=:]'; then
+    echo "${trace_name} delivery trace contains a forbidden payload or raw-error field" >&2
+    printf '%s\n' "${trace_lines}" >&2
+    return 1
+  fi
+
+  if printf '%s\n' "${trace_lines}" | rg -q 'production smoke (direct|group) message'; then
+    echo "${trace_name} delivery trace contains smoke message text" >&2
+    printf '%s\n' "${trace_lines}" >&2
+    return 1
+  fi
+
+  printf '%s\n' "${trace_lines}" > "${trace_log}"
+}
+
+require_sampled_realtime_delivery_trace() {
+  case "${SMOKE_REQUIRE_DELIVERY_TRACE}" in
+    true|TRUE|1|yes|YES)
+      assert_sampled_delivery_trace \
+        "stream-consumer-realtime" \
+        "stream_consumer_realtime_relay_(enqueued|completed)" \
+        "${REPORT_DIR}/production-smoke-delivery-trace.log" \
+        "realtime-consumer" || return $?
+      echo "sampled_realtime_delivery_trace=ok"
+      ;;
+  esac
+}
+
+require_sampled_gateway_delivery_trace() {
+  assert_sampled_delivery_trace \
+    "gateway" \
+    "gateway_payload(_batch)?_delivery_completed" \
+    "${REPORT_DIR}/production-smoke-gateway-delivery-trace.log" \
+    "gateway" || return $?
+  echo "sampled_gateway_delivery_trace=ok"
+}
+
+require_gateway_tcp_recipient_relay() {
+  case "${SMOKE_REQUIRE_GATEWAY_TCP_RELAY}" in
+    true|TRUE|1|yes|YES)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  require_command swift
+  require_command python3
+  local account_file
+  account_file="$(mktemp)"
+  local driver_log="${REPORT_DIR}/production-smoke-gateway-tcp-relay.txt"
+  printf '%s,%s\n%s,%s\n' \
+    "${OWNER_EMAIL}" "${SMOKE_PASSWORD}" \
+    "${PEER_A_EMAIL}" "${SMOKE_PASSWORD}" > "${account_file}"
+
+  set +e
+  (
+    cd "${ROOT_DIR}/LoadTests/TCPDriver"
+    swift run -c release IMTCPLoadDriver \
+      --profile custom \
+      --base-url "${GATEWAY_URL}" \
+      --tcp-host 127.0.0.1 \
+      --tcp-port 9001 \
+      --account-file "${account_file}" \
+      --account-devices-per-user 1 \
+      --conversation-id "${1}" \
+      --connections 2 \
+      --messages 1 \
+      --message-profile pair-delivery \
+      --message-completion-mode full \
+      --message-sender-every 2 \
+      --message-receiver-offset 1 \
+      --hold-seconds 0 \
+      --timeout-seconds 30 \
+      --login-concurrency 2 \
+      --connection-queue-pool-size 2
+  ) > "${driver_log}" 2>&1
+  local driver_exit_code=$?
+  set -e
+  rm -f "${account_file}"
+
+  if [[ "${driver_exit_code}" -ne 0 ]]; then
+    echo "Gateway TCP recipient relay driver failed; output=${driver_log}" >&2
+    cat "${driver_log}" >&2 || true
+    return 1
+  fi
+
+  python3 - "${driver_log}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+required = (
+    r"successes=2(?:\s|$)",
+    r"sent=1\s+ack=1\s+canonical=0\s+duplicateCanonical=0\s+delivered=1\s+duplicateDelivered=0",
+    r"deliverySuccessRate=1\.0000",
+)
+missing = [pattern for pattern in required if re.search(pattern, text) is None]
+if missing:
+    raise SystemExit(
+        "gateway_tcp_recipient_relay result=fail reason=driver_summary_missing "
+        + ",".join(missing)
+    )
+print("gateway_tcp_recipient_relay result=pass")
+PY
+  require_sampled_gateway_delivery_trace
+}
+
 write_state() {
   local _access_token="$1"
   local owner_user_id="$2"
@@ -426,6 +576,8 @@ write_smoke_receipt() {
     "${GATEWAY_URL}" \
     "${COMMAND_URL}" \
     "${QUERY_URL}" \
+    "${SMOKE_REQUIRE_DELIVERY_TRACE}" \
+    "${SMOKE_REQUIRE_GATEWAY_TCP_RELAY}" \
     "${RECEIPT_FILE}" <<'PY'
 import json
 import subprocess
@@ -446,6 +598,8 @@ from pathlib import Path
     gateway_url,
     command_url,
     query_url,
+    require_delivery_trace,
+    require_gateway_tcp_relay,
     receipt_file,
 ) = sys.argv[1:]
 
@@ -500,6 +654,16 @@ payload = {
         {"name": "outbox_recovery", "status": "passed"},
     ],
 }
+if require_delivery_trace.lower() in {"true", "1", "yes"}:
+    payload["artifacts"]["deliveryTrace"] = str(Path(report_file).parent / "production-smoke-delivery-trace.log")
+    payload["checks"].append({"name": "sampled_realtime_delivery_trace", "status": "passed"})
+if require_gateway_tcp_relay.lower() in {"true", "1", "yes"}:
+    payload["artifacts"]["gatewayTCPRelay"] = str(Path(report_file).parent / "production-smoke-gateway-tcp-relay.txt")
+    payload["artifacts"]["gatewayDeliveryTrace"] = str(Path(report_file).parent / "production-smoke-gateway-delivery-trace.log")
+    payload["checks"].extend([
+        {"name": "gateway_tcp_recipient_relay", "status": "passed"},
+        {"name": "sampled_gateway_delivery_trace", "status": "passed"},
+    ])
 path = Path(receipt_file)
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -764,6 +928,8 @@ run_smoke() {
   assert_metrics_protected
   wait_for_outbox_recovery >/tmp/imserver-production-smoke-outbox.txt
   compose run --rm ops ops --env production-smoke --inspect-conversation-outbox > "${REPORT_DIR}/production-smoke-outbox-inspect.txt"
+  require_sampled_realtime_delivery_trace >/tmp/imserver-production-smoke-delivery-trace.txt
+  require_gateway_tcp_recipient_relay "${direct_id}" >/tmp/imserver-production-smoke-gateway-tcp-relay.txt
 
   write_state "${owner_token}" "${owner_user_id}" "${direct_id}" "${group_id}"
   collect_logs
@@ -782,6 +948,16 @@ run_smoke() {
     echo "- messages_since: ok"
     echo "- gateway_command_bridge: ok"
     echo "- metrics_secret: ok"
+    case "${SMOKE_REQUIRE_DELIVERY_TRACE}" in
+      true|TRUE|1|yes|YES)
+        cat /tmp/imserver-production-smoke-delivery-trace.txt
+        ;;
+    esac
+    case "${SMOKE_REQUIRE_GATEWAY_TCP_RELAY}" in
+      true|TRUE|1|yes|YES)
+        cat /tmp/imserver-production-smoke-gateway-tcp-relay.txt
+        ;;
+    esac
     echo "- im_runtime_role_query_api: ok"
     cat /tmp/imserver-production-smoke-outbox.txt
     echo

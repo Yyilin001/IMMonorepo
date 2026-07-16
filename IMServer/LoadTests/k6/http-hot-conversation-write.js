@@ -1,4 +1,5 @@
 import http from 'k6/http';
+import { richTextContent, initialDerivedState } from './im-message-payload.js';
 import { check, fail, sleep } from 'k6';
 import { Gauge, Rate, Trend } from 'k6/metrics';
 
@@ -7,6 +8,7 @@ const profiles = {
   'local-hot-smoke': {
     vus: 50,
     duration: '1m',
+    summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
     thresholds: {
       http_req_failed: ['rate<0.005'],
       im_hot_write_errors: ['rate<0.001'],
@@ -131,8 +133,8 @@ function sendInternalMessage(senderUserID, conversationID) {
         senderUserID: null,
         serverSequence: null,
         serverTimestamp: null,
-        content: { type: 'text', text: `hot ${__VU}/${__ITER}` },
-        derivedState: { reactions: [], editedAt: null, recalledAt: null },
+        content: richTextContent(`hot ${__VU}/${__ITER}`),
+        derivedState: initialDerivedState(),
       },
     }),
     { headers: { 'Content-Type': 'application/json', 'X-IM-Internal-Secret': internalSecret } }

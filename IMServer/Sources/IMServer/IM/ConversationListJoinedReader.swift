@@ -68,6 +68,7 @@ struct ConversationListJoinedReader {
                     \(ident: "summary").\(ident: "title") AS \(ident: "summary_title"),
                     \(ident: "summary").\(ident: "kind") AS \(ident: "summary_kind"),
                     \(ident: "summary").\(ident: "direct_messaging_state") AS \(ident: "summary_direct_messaging_state"),
+                    \(ident: "summary").\(ident: "group_lifecycle_state") AS \(ident: "summary_group_lifecycle_state"),
                     \(ident: "summary").\(ident: "direct_peer_user_id") AS \(ident: "summary_direct_peer_user_id"),
                     \(ident: "summary").\(ident: "direct_peer_email") AS \(ident: "summary_direct_peer_email"),
                     \(ident: "summary").\(ident: "direct_peer_display_name") AS \(ident: "summary_direct_peer_display_name"),
@@ -148,6 +149,7 @@ struct JoinedConversationSummaryRow: Decodable {
     let summaryTitle: String?
     let summaryKind: String
     let summaryDirectMessagingState: String?
+    let summaryGroupLifecycleState: String
     let summaryDirectPeerUserID: UUID?
     let summaryDirectPeerEmail: String?
     let summaryDirectPeerDisplayName: String?
@@ -175,6 +177,7 @@ struct JoinedConversationSummaryRow: Decodable {
         case summaryTitle = "summary_title"
         case summaryKind = "summary_kind"
         case summaryDirectMessagingState = "summary_direct_messaging_state"
+        case summaryGroupLifecycleState = "summary_group_lifecycle_state"
         case summaryDirectPeerUserID = "summary_direct_peer_user_id"
         case summaryDirectPeerEmail = "summary_direct_peer_email"
         case summaryDirectPeerDisplayName = "summary_direct_peer_display_name"
@@ -224,6 +227,9 @@ struct JoinedConversationSummaryRow: Decodable {
             title: summaryTitle,
             kind: summaryKind,
             directMessagingState: summaryDirectMessagingState,
+            groupLifecycleState: summaryKind == IMConversationKind.group.rawValue
+                ? (IMGroupLifecycleState(rawValue: summaryGroupLifecycleState) ?? .active).rawValue
+                : nil,
             directPeer: summaryDirectPeerUserID.map {
                 IMDirectPeerResponse(
                     id: $0,

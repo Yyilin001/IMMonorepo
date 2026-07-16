@@ -3,6 +3,7 @@ import Foundation
 import NIOCore
 import NIOPosix
 @preconcurrency import RediStack
+import Valkey
 import Vapor
 
 enum AuthSessionCacheMode: String, Sendable {
@@ -55,6 +56,7 @@ struct AuthenticatedPrincipal: Codable, Equatable, Sendable {
     let email: String
     let displayName: String?
     let avatarPreset: UserAvatarPreset?
+    let adminRole: String?
     let refreshExpiresAt: Date
 
     init(user: User, session: AuthSession) throws {
@@ -64,6 +66,7 @@ struct AuthenticatedPrincipal: Codable, Equatable, Sendable {
         self.email = user.email
         self.displayName = user.displayName
         self.avatarPreset = user.avatarPresetEnum
+        self.adminRole = user.adminRole
         self.refreshExpiresAt = session.refreshExpiresAt
     }
 
@@ -75,7 +78,8 @@ struct AuthenticatedPrincipal: Codable, Equatable, Sendable {
             status: .active,
             displayName: displayName,
             avatarPreset: avatarPreset,
-            emailVerifiedAt: nil
+            emailVerifiedAt: nil,
+            adminRole: adminRole
         )
     }
 
@@ -294,6 +298,12 @@ actor LocalAuthSessionPrincipalStore {
 }
 
 final class RedisAuthSessionValidationCache: AuthSessionValidationCaching, @unchecked Sendable {
+    private struct CachedPrincipal: Codable, Sendable {
+        let principal: AuthenticatedPrincipal
+        let userRevision: Int
+        let globalEpoch: Int
+    }
+
     private struct InvalidationMessage: Codable, Sendable {
         enum Kind: String, Codable, Sendable {
             case session
@@ -417,13 +427,14 @@ final class RedisAuthSessionValidationCache: AuthSessionValidationCaching, @unch
 
     func invalidate(userID: UUID) async {
         await localStore.invalidate(userID: userID)
-        await deleteRedisUser(userID: userID)
+        await advanceRedisUserRevision(userID: userID)
         await publish(.init(sourceNodeID: nodeID, kind: .user, id: userID))
         await recordInvalidation()
     }
 
     func invalidateAll() async {
         await localStore.invalidateAll()
+        await advanceRedisGlobalEpoch()
         await publish(.init(sourceNodeID: nodeID, kind: .all, id: nil))
         await recordInvalidation()
     }
@@ -458,15 +469,18 @@ final class RedisAuthSessionValidationCache: AuthSessionValidationCaching, @unch
 
     private func redisValue(sessionID: UUID, userID: UUID) async -> AuthenticatedPrincipal? {
         do {
-            guard let value = try await pool.get(sessionKey(sessionID: sessionID, userID: userID), as: String.self).get(),
-                  let data = value.data(using: .utf8)
+            guard let value = try await pool.get(sessionKey(sessionID: sessionID), as: String.self).get(),
+                  let data = value.data(using: .utf8),
+                  let cached = try? decoder.decode(CachedPrincipal.self, from: data)
             else {
                 return nil
             }
-            let principal = try decoder.decode(AuthenticatedPrincipal.self, from: data)
+            let principal = cached.principal
             guard principal.sessionID == sessionID,
                   principal.userID == userID,
-                  principal.refreshExpiresAt > Date()
+                  principal.refreshExpiresAt > Date(),
+                  cached.userRevision == (try await userRevision(for: userID)),
+                  cached.globalEpoch == (try await globalEpoch())
             else {
                 return nil
             }
@@ -479,25 +493,22 @@ final class RedisAuthSessionValidationCache: AuthSessionValidationCaching, @unch
 
     private func storeInRedis(_ principal: AuthenticatedPrincipal) async {
         do {
-            let data = try encoder.encode(principal)
+            let cached = CachedPrincipal(
+                principal: principal,
+                userRevision: try await userRevision(for: principal.userID),
+                globalEpoch: try await globalEpoch()
+            )
+            let data = try encoder.encode(cached)
             guard let value = String(data: data, encoding: .utf8) else {
                 return
             }
-            let key = sessionKey(sessionID: principal.sessionID, userID: principal.userID)
+            let key = sessionKey(sessionID: principal.sessionID)
             _ = try await pool.set(
                 key,
                 to: value,
                 onCondition: .none,
                 expiration: .seconds(ttlSeconds)
             ).get()
-            _ = try await pool.set(
-                sessionIndexKey(sessionID: principal.sessionID),
-                to: key.rawValue,
-                onCondition: .none,
-                expiration: .seconds(ttlSeconds)
-            ).get()
-            _ = try await pool.sadd(key.rawValue, to: userIndexKey(userID: principal.userID)).get()
-            _ = try await pool.expire(userIndexKey(userID: principal.userID), after: .seconds(Int64(ttlSeconds))).get()
         } catch {
             await recordRedisError()
         }
@@ -505,27 +516,23 @@ final class RedisAuthSessionValidationCache: AuthSessionValidationCaching, @unch
 
     private func deleteRedisSession(sessionID: UUID) async {
         do {
-            let indexKey = sessionIndexKey(sessionID: sessionID)
-            if let rawSessionKey = try await pool.get(indexKey, as: String.self).get() {
-                _ = try await pool.delete([RedisKey(rawSessionKey), indexKey]).get()
-            } else {
-                _ = try await pool.delete([indexKey]).get()
-            }
+            _ = try await pool.delete([sessionKey(sessionID: sessionID)]).get()
         } catch {
             await recordRedisError()
         }
     }
 
-    private func deleteRedisUser(userID: UUID) async {
+    private func advanceRedisUserRevision(userID: UUID) async {
         do {
-            let userKey = userIndexKey(userID: userID)
-            let rawKeys = try await pool.smembers(of: userKey, as: String.self).get()
-            let keys = rawKeys.compactMap { rawKey -> RedisKey? in
-                rawKey.map { RedisKey($0) }
-            } + [userKey]
-            if !keys.isEmpty {
-                _ = try await pool.delete(keys).get()
-            }
+            _ = try await pool.increment(userRevisionKey(userID: userID)).get()
+        } catch {
+            await recordRedisError()
+        }
+    }
+
+    private func advanceRedisGlobalEpoch() async {
+        do {
+            _ = try await pool.increment(globalEpochKey).get()
         } catch {
             await recordRedisError()
         }
@@ -543,17 +550,30 @@ final class RedisAuthSessionValidationCache: AuthSessionValidationCaching, @unch
         }
     }
 
-    private func sessionKey(sessionID: UUID, userID: UUID) -> RedisKey {
-        RedisKey("im:auth:session:\(userID.uuidString.lowercased()):\(sessionID.uuidString.lowercased())")
+    private func sessionKey(sessionID: UUID) -> RedisKey {
+        AuthSessionRedisKeyspace.sessionKey(sessionID: sessionID)
     }
 
-    private func sessionIndexKey(sessionID: UUID) -> RedisKey {
-        RedisKey("im:auth:session-index:\(sessionID.uuidString.lowercased())")
+    private func userRevision(for userID: UUID) async throws -> Int {
+        try await revisionValue(for: userRevisionKey(userID: userID))
     }
 
-    private func userIndexKey(userID: UUID) -> RedisKey {
-        RedisKey("im:auth:user:\(userID.uuidString.lowercased()):sessions")
+    private func globalEpoch() async throws -> Int {
+        try await revisionValue(for: globalEpochKey)
     }
+
+    private func revisionValue(for key: RedisKey) async throws -> Int {
+        guard let rawValue = try await pool.get(key, as: String.self).get() else {
+            return 0
+        }
+        return Int(rawValue) ?? 0
+    }
+
+    private func userRevisionKey(userID: UUID) -> RedisKey {
+        AuthSessionRedisKeyspace.userRevisionKey(userID: userID)
+    }
+
+    private let globalEpochKey = AuthSessionRedisKeyspace.globalEpochKey
 
     private func recordHit() async {
         await metrics.recordHit()
@@ -586,6 +606,211 @@ final class RedisAuthSessionValidationCache: AuthSessionValidationCaching, @unch
     }
 }
 
+/// Cluster-mode auth cache intentionally avoids a node-local L1. Session
+/// deletion and user/global revision changes are observed on every lookup, so
+/// invalidation remains correct without relying on ordinary Redis Pub/Sub.
+final class ValkeyClusterAuthSessionValidationCache: AuthSessionValidationCaching, @unchecked Sendable {
+    private struct CachedPrincipal: Codable, Sendable {
+        let principal: AuthenticatedPrincipal
+        let userRevision: Int
+        let globalEpoch: Int
+    }
+
+    private let client: ValkeyClusterClient
+    private let ttlSeconds: Int
+    private let metrics: AuthSessionCacheMetrics
+    private let logger: Logger
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+    private var runTask: Task<Void, Never>?
+
+    init(
+        configuration: AuthSessionCacheConfiguration,
+        clusterSeedEndpoints: [IMRedisClusterSeedEndpoint],
+        logger: Logger,
+        metrics: AuthSessionCacheMetrics
+    ) throws {
+        let redisURLString = try configuration.redisURL.unwrap(or: AuthSessionValidationCacheError.missingRedisURL)
+        guard let url = URL(string: redisURLString),
+              let scheme = url.scheme?.lowercased()
+        else {
+            throw RedisRoutingError.invalidURL(redisURLString)
+        }
+        guard scheme == "redis" else {
+            throw RedisRoutingError.unsupportedRedisScheme(scheme)
+        }
+        guard !clusterSeedEndpoints.isEmpty else {
+            throw RedisRoutingError.invalidRedisClusterSeed(
+                "IM_REDIS_CLUSTER_NODES must contain at least one host:port endpoint."
+            )
+        }
+        var clientConfiguration = ValkeyClientConfiguration(commandTimeout: .seconds(5))
+        if let password = url.password {
+            clientConfiguration.authentication = .init(username: url.user ?? "default", password: password)
+        }
+        let maximumConnections = max(2, configuration.redisMaxConnections)
+        clientConfiguration.connectionPool = .init(
+            minimumConnectionCount: 1,
+            maximumConnectionSoftLimit: maximumConnections,
+            maximumConnectionHardLimit: maximumConnections * 2,
+            maximumConcurrentConnectionRequests: maximumConnections
+        )
+        self.client = ValkeyClusterClient(
+            nodeDiscovery: ValkeyStaticNodeDiscovery(clusterSeedEndpoints.map {
+                .init(endpoint: $0.host, port: $0.port)
+            }),
+            configuration: .init(
+                client: clientConfiguration,
+                maximumRedirects: 5,
+                clusterRefreshInterval: .seconds(30),
+                clusterConsensusCircuitBreaker: .seconds(30)
+            ),
+            logger: logger
+        )
+        self.ttlSeconds = configuration.ttlSeconds
+        self.metrics = metrics
+        self.logger = logger
+    }
+
+    func start(app _: Application) async throws {
+        runTask = Task { [client] in
+            await client.run()
+        }
+        for attempt in 0..<30 {
+            if (try? await client.ping()) != nil {
+                return
+            }
+            if attempt < 29 {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        runTask?.cancel()
+        runTask = nil
+        logger.error("Valkey Cluster client did not become ready for auth session caching")
+        throw RedisRoutingError.invalidRedisClusterSeed("Unable to connect to any configured Redis Cluster seed.")
+    }
+
+    func principal(
+        sessionID: UUID,
+        userID: UUID,
+        loadFromDatabase: @Sendable () async throws -> AuthenticatedPrincipal
+    ) async throws -> AuthenticatedPrincipal {
+        if let cached = await valkeyValue(sessionID: sessionID, userID: userID) {
+            await metrics.recordHit()
+            return cached
+        }
+
+        await metrics.recordMiss()
+        await metrics.recordDatabaseFallback()
+        let principal = try await loadFromDatabase()
+        await storeInValkey(principal)
+        await metrics.recordStore()
+        return principal
+    }
+
+    func store(_ principal: AuthenticatedPrincipal) async {
+        await storeInValkey(principal)
+        await metrics.recordStore()
+    }
+
+    func invalidate(sessionID: UUID) async {
+        do {
+            _ = try await client.del(keys: [sessionKey(sessionID: sessionID)])
+        } catch {
+            await metrics.recordRedisError()
+        }
+        await metrics.recordInvalidation()
+    }
+
+    func invalidate(userID: UUID) async {
+        do {
+            _ = try await client.incr(userRevisionKey(userID: userID))
+        } catch {
+            await metrics.recordRedisError()
+        }
+        await metrics.recordInvalidation()
+    }
+
+    func invalidateAll() async {
+        do {
+            _ = try await client.incr(globalEpochKey)
+        } catch {
+            await metrics.recordRedisError()
+        }
+        await metrics.recordInvalidation()
+    }
+
+    func shutdown() async {
+        runTask?.cancel()
+        runTask = nil
+    }
+
+    private func valkeyValue(sessionID: UUID, userID: UUID) async -> AuthenticatedPrincipal? {
+        do {
+            guard let value = try await client.get(sessionKey(sessionID: sessionID)),
+                  let data = String(value).data(using: .utf8),
+                  let cached = try? decoder.decode(CachedPrincipal.self, from: data)
+            else {
+                return nil
+            }
+            let principal = cached.principal
+            guard principal.sessionID == sessionID,
+                  principal.userID == userID,
+                  principal.refreshExpiresAt > Date()
+            else {
+                return nil
+            }
+            async let userRevision = revisionValue(for: userRevisionKey(userID: userID))
+            async let globalEpoch = revisionValue(for: globalEpochKey)
+            guard cached.userRevision == (try await userRevision),
+                  cached.globalEpoch == (try await globalEpoch)
+            else {
+                return nil
+            }
+            return principal
+        } catch {
+            await metrics.recordRedisError()
+            return nil
+        }
+    }
+
+    private func storeInValkey(_ principal: AuthenticatedPrincipal) async {
+        do {
+            async let userRevision = revisionValue(for: userRevisionKey(userID: principal.userID))
+            async let globalEpoch = revisionValue(for: globalEpochKey)
+            let cached = try await CachedPrincipal(
+                principal: principal,
+                userRevision: userRevision,
+                globalEpoch: globalEpoch
+            )
+            let data = try encoder.encode(cached)
+            guard let value = String(data: data, encoding: .utf8) else {
+                return
+            }
+            try await client.setex(sessionKey(sessionID: principal.sessionID), seconds: ttlSeconds, value: value)
+        } catch {
+            await metrics.recordRedisError()
+        }
+    }
+
+    private func revisionValue(for key: ValkeyKey) async throws -> Int {
+        guard let rawValue = try await client.get(key) else {
+            return 0
+        }
+        return Int(String(rawValue)) ?? 0
+    }
+
+    private func sessionKey(sessionID: UUID) -> ValkeyKey {
+        ValkeyKey("im:auth:session:{\(sessionID.uuidString.lowercased())}")
+    }
+
+    private func userRevisionKey(userID: UUID) -> ValkeyKey {
+        ValkeyKey("im:auth:user:{\(userID.uuidString.lowercased())}:session-cache-revision")
+    }
+
+    private let globalEpochKey = ValkeyKey("im:auth:session-cache:{global}:epoch")
+}
+
 enum AuthSessionValidationCacheError: Error {
     case missingRedisURL
 }
@@ -604,6 +829,19 @@ enum AuthSessionValidationCacheFactory {
             )
         case .redis:
             do {
+                let routingConfiguration = app.imRedisRoutingConfigurationOverride
+                    ?? IMRedisRoutingConfiguration.load(from: app.environment)
+                if routingConfiguration.deploymentTopology == .cluster {
+                    let cache = try ValkeyClusterAuthSessionValidationCache(
+                        configuration: configuration,
+                        clusterSeedEndpoints: try routingConfiguration.requireClusterSeedEndpoints(),
+                        logger: app.logger,
+                        metrics: metrics
+                    )
+                    try await cache.start(app: app)
+                    app.lifecycle.use(AuthSessionValidationCacheLifecycle(cache: cache))
+                    return cache
+                }
                 let cache = try RedisAuthSessionValidationCache(
                     configuration: configuration,
                     nodeID: app.imNodeID,
@@ -616,6 +854,15 @@ enum AuthSessionValidationCacheFactory {
                 return cache
             } catch {
                 await metrics.recordRedisError()
+                if app.environment == .production,
+                   (app.imRedisRoutingConfigurationOverride ?? IMRedisRoutingConfiguration.load(from: app.environment))
+                    .deploymentTopology == .cluster {
+                    app.logger.error(
+                        "Auth session Valkey Cluster cache unavailable; using database validation without a local cache.",
+                        metadata: ["error": .string(String(describing: error))]
+                    )
+                    return DisabledAuthSessionValidationCache(metrics: metrics)
+                }
                 app.logger.warning(
                     "Auth session Redis cache unavailable; falling back to local cache.",
                     metadata: ["error": .string(String(describing: error))]

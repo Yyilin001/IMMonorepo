@@ -39,7 +39,7 @@ sanitize_template_placeholders() {
   local dir="$1"
   local file
   for file in "${dir}"/*.env; do
-    perl -0pi -e 's/replace-me/prod-secret-value/g; s/user:pass/prod-user:prod-pass/g; s/\.example/.internal/g' "${file}"
+    perl -0pi -e 's/replace-with-[A-Za-z0-9-]+/prod-secret-value/g; s/replace-me/prod-secret-value/g; s/user:pass/prod-user:prod-pass/g; s/\.example/.internal/g' "${file}"
   done
 }
 
@@ -141,6 +141,11 @@ run_should_pass "default templates pass" "${PREFLIGHT}"
 run_should_fail "strict secrets rejects template placeholders" "strict secrets requires JWT_SECRETS to not use placeholder value" \
   "${PREFLIGHT}" --strict-secrets
 
+replace_with_placeholder_dir="$(copy_templates replace-with-placeholder)"
+replace_env_value "${replace_with_placeholder_dir}/gateway.env" "IM_INTERNAL_SHARED_SECRET" "replace-with-node-dispatch-secret"
+run_should_fail "strict secrets rejects replace-with placeholders" "gateway strict secrets requires IM_INTERNAL_SHARED_SECRET to not use placeholder value" \
+  run_preflight "${replace_with_placeholder_dir}" --strict-secrets
+
 run_should_fail "release gate real env requires complete role args" "Real env preflight requires --command-api, --gateway, --query-api, --outbox-relay, --ops, and at least one --stream-consumer." \
   "${RELEASE_GATE}" --command-api /tmp/command-api.env --strict-secrets
 
@@ -156,6 +161,27 @@ run_should_fail "release gate real env requires strict secrets" "Real env prefli
 full_dir="$(copy_templates full)"
 run_should_pass "four stream-consumer topology passes" run_preflight "${full_dir}" \
   --require-groups summary-projection-consumer,domain-delivery-consumer,realtime-delivery-consumer,notification-consumer
+
+redis_cluster_dir="$(copy_templates redis-cluster)"
+replace_env_value "${redis_cluster_dir}/gateway.env" "IM_REDIS_DEPLOYMENT_TOPOLOGY" "cluster"
+run_should_fail "Redis Cluster topology requires seeds" "gateway requires IM_REDIS_CLUSTER_NODES" \
+  run_preflight "${redis_cluster_dir}"
+
+replace_env_value "${redis_cluster_dir}/gateway.env" "IM_REDIS_CLUSTER_NODES" "cache-1.internal:6379,cache-2.internal:6379,cache-3.internal:6379"
+replace_env_value "${redis_cluster_dir}/gateway.env" "IM_NODE_DISPATCH_MODE" "http"
+replace_env_value "${redis_cluster_dir}/gateway.env" "IM_GATEWAY_NODE_DISPATCH_ENDPOINTS" "gateway-1=https://gateway-1.internal"
+run_should_pass "Redis Cluster gateway topology passes" run_preflight "${redis_cluster_dir}"
+
+http_node_dispatch_dir="$(copy_templates http-node-dispatch)"
+replace_env_value "${http_node_dispatch_dir}/gateway.env" "IM_NODE_DISPATCH_MODE" "http"
+replace_env_value "${http_node_dispatch_dir}/gateway.env" "IM_GATEWAY_NODE_DISPATCH_ENDPOINTS" "gateway-1=https://gateway-1.internal"
+run_should_pass "HTTP node dispatch gateway topology passes" run_preflight "${http_node_dispatch_dir}"
+
+http_node_dispatch_missing_self_dir="$(copy_templates http-node-dispatch-missing-self)"
+replace_env_value "${http_node_dispatch_missing_self_dir}/gateway.env" "IM_NODE_DISPATCH_MODE" "http"
+replace_env_value "${http_node_dispatch_missing_self_dir}/gateway.env" "IM_GATEWAY_NODE_DISPATCH_ENDPOINTS" "gateway-2=https://gateway-2.internal"
+run_should_fail "HTTP node dispatch requires local gateway entry" "gateway requires IM_GATEWAY_NODE_DISPATCH_ENDPOINTS to include IM_NODE_ID=gateway-1" \
+  run_preflight "${http_node_dispatch_missing_self_dir}"
 
 jwt_legacy_dir="$(copy_templates jwt-legacy)"
 replace_env_value "${jwt_legacy_dir}/command-api.env" "JWT_SECRET" "0123456789abcdef0123456789abcdef"
@@ -206,6 +232,16 @@ gateway_public_tcp_tls_dir="$(copy_templates gateway-public-tcp-tls)"
 delete_env_key "${gateway_public_tcp_tls_dir}/gateway.env" "IM_TCP_REQUIRES_TLS_TERMINATION"
 run_should_fail "gateway public tcp bind without tls termination marker fails" "gateway requires IM_TCP_REQUIRES_TLS_TERMINATION=true when IM_TCP_HOST binds a public address" \
   run_preflight "${gateway_public_tcp_tls_dir}"
+
+gateway_connection_budget_dir="$(copy_templates gateway-connection-budget)"
+delete_env_key "${gateway_connection_budget_dir}/gateway.env" "IM_TCP_MAX_CONNECTIONS"
+run_should_fail "gateway requires an explicit TCP connection budget" "gateway requires IM_TCP_MAX_CONNECTIONS >= 1" \
+  run_preflight "${gateway_connection_budget_dir}"
+
+gateway_connection_rate_budget_dir="$(copy_templates gateway-connection-rate-budget)"
+delete_env_key "${gateway_connection_rate_budget_dir}/gateway.env" "IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND"
+run_should_fail "gateway requires an explicit TCP reconnect budget" "gateway requires IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND >= 1" \
+  run_preflight "${gateway_connection_rate_budget_dir}"
 
 gateway_payload_budget_dir="$(copy_templates gateway-payload-budget)"
 delete_env_key "${gateway_payload_budget_dir}/gateway.env" "IM_REALTIME_ACTIVE_CONVERSATION_FULL_FANOUT_PAYLOAD_BYTE_BUDGET"

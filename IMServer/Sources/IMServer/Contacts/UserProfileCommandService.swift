@@ -21,7 +21,8 @@ struct UserProfileCommandService {
         for readModelDB in summaryReadModelDatabases(for: app) {
             let refreshed = try await IMConversationSummaryProjectionService(
                 sourceDB: app.imWriteDB,
-                readModelDB: readModelDB
+                readModelDB: readModelDB,
+                userDirectoryDB: app.db
             ).refreshDirectPeerProfiles(for: userID)
             mergeRecipientUserIDs(refreshed, into: &affectedConversationRecipientUserIDs)
         }

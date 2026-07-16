@@ -3,7 +3,10 @@ import Vapor
 
 enum IMSchemaValidator {
     static func validateIMSchema(_ app: Application) async throws {
-        guard let writeSQL = app.imWriteDB as? any SQLDatabase else {
+        // The default database owns user/auth/admin directory data. In a
+        // sharded deployment `imWriteDB` is a conversation shard, so using it
+        // here would incorrectly require primary tables on every shard.
+        guard let writeSQL = app.db as? any SQLDatabase else {
             return
         }
 
@@ -18,7 +21,7 @@ enum IMSchemaValidator {
         )
 
         if app.imReplicaDatabaseEnabled,
-           let readSQL = app.imReadDB as? any SQLDatabase {
+           let readSQL = app.db(.imReplica) as? any SQLDatabase {
             try await validateIMSchema(
                 on: readSQL,
                 role: "replica",
@@ -31,12 +34,18 @@ enum IMSchemaValidator {
         }
 
         try await validateSummaryShardSchemas(app)
+        try await validateConversationShardSchemas(app)
     }
 
     private static func validateSummaryShardSchemas(_ app: Application) async throws {
-        let router = app.summaryShardRouter
-        for shardID in router.shardIDs {
-            guard let summarySQL = router.database(forShardID: shardID) as? any SQLDatabase else {
+        var databasesByShardID = app.summaryShardDatabaseIDs
+        if app.imSummaryDatabaseEnabled,
+           databasesByShardID.values.contains(.imSummary) == false {
+            databasesByShardID["summary"] = .imSummary
+        }
+
+        for (shardID, databaseID) in databasesByShardID {
+            guard let summarySQL = app.db(databaseID) as? any SQLDatabase else {
                 continue
             }
             try await validateIMSchema(
@@ -47,6 +56,24 @@ enum IMSchemaValidator {
                 resetAllowed: app.environment == .development || app.environment == .testing,
                 tableRequirements: imSummaryReadModelSchemaRequirements,
                 indexRequirements: imSummaryReadModelIndexRequirements
+            )
+        }
+    }
+
+    private static func validateConversationShardSchemas(_ app: Application) async throws {
+        let router = app.conversationShardRouter
+        for shard in router.allCommandDatabases() {
+            guard let conversationSQL = shard.database as? any SQLDatabase else {
+                continue
+            }
+            try await validateIMSchema(
+                on: conversationSQL,
+                role: "conversation-shard:\(shard.shardID)",
+                environment: app.environment,
+                logger: app.logger,
+                resetAllowed: app.environment == .development || app.environment == .testing,
+                tableRequirements: imConversationShardSchemaRequirements,
+                indexRequirements: imConversationShardIndexRequirements
             )
         }
     }
@@ -214,6 +241,90 @@ private let imSchemaRequirements: [IMTableSchemaRequirement] = [
         ]
     ),
     IMTableSchemaRequirement(
+        table: AdminConversationGovernanceCommand.schema,
+        requiredColumns: [
+            "id",
+            "action",
+            "conversation_id",
+            "target_shard_id",
+            "target_cell_id",
+            "target_route_version",
+            "actor",
+            "actor_user_id",
+            "actor_role",
+            "authentication_method",
+            "idempotency_key",
+            "request_digest",
+            "requested_mute_all",
+            "requested_group_lifecycle_state",
+            "target_member_user_id",
+            "destructive_confirmed",
+            "reason",
+            "status",
+            "attempt_count",
+            "last_error_code",
+            "processing_token",
+            "processing_started_at",
+            "accepted_at",
+            "applied_at",
+            "updated_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
+        table: ReportModerationDecision.schema,
+        requiredColumns: [
+            "id",
+            "report_id",
+            "reviewer_actor",
+            "reviewer_user_id",
+            "reviewer_role",
+            "authentication_method",
+            "previous_status",
+            "status",
+            "resolution_category",
+            "handled_note",
+            "request_id",
+            "idempotency_key",
+            "created_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
+        table: UserReport.schema,
+        requiredColumns: [
+            "id",
+            "reporter_user_id",
+            "target_type",
+            "target_id",
+            "conversation_id",
+            "message_id",
+            "reason",
+            "detail",
+            "message_snapshot_json",
+            "handled_note",
+            "assigned_reviewer_user_id",
+            "assigned_reviewer_actor",
+            "assigned_at",
+            "status",
+            "created_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
+        table: ReportModerationEvidence.schema,
+        requiredColumns: [
+            "id",
+            "report_id",
+            "evidence_url",
+            "label",
+            "submitted_by_actor",
+            "submitted_by_user_id",
+            "submitter_role",
+            "authentication_method",
+            "request_id",
+            "idempotency_key",
+            "created_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
         table: Conversation.schema,
         requiredColumns: [
             "id",
@@ -222,6 +333,7 @@ private let imSchemaRequirements: [IMTableSchemaRequirement] = [
             "kind",
             "avatar_preset",
             "direct_messaging_state",
+            "group_lifecycle_state",
             "last_message_sequence",
             "created_at",
             "updated_at"
@@ -236,7 +348,30 @@ private let imSchemaRequirements: [IMTableSchemaRequirement] = [
             "visible_from_sequence",
             "last_read_sequence",
             "role",
+            "is_pinned",
+            "pinned_at",
+            "is_muted",
             "joined_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
+        table: ConversationDirectoryEntry.schema,
+        requiredColumns: [
+            "conversation_id",
+            "shard_id",
+            "cell_id",
+            "route_state",
+            "route_version",
+            "created_at",
+            "updated_at",
+            "activated_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
+        table: AIStreamLease.schema,
+        requiredColumns: [
+            "stream_id", "conversation_id", "user_id", "node_id", "state",
+            "cancel_requested", "expires_at", "created_at", "updated_at"
         ]
     ),
     IMTableSchemaRequirement(
@@ -310,6 +445,7 @@ private let imSchemaRequirements: [IMTableSchemaRequirement] = [
             "avatar_preset",
             "kind",
             "direct_messaging_state",
+            "group_lifecycle_state",
             "direct_peer_user_id",
             "direct_peer_email",
             "direct_peer_display_name",
@@ -412,6 +548,14 @@ private let imSchemaRequirements: [IMTableSchemaRequirement] = [
 
 private let imIndexRequirements: [IMTableIndexRequirement] = [
     IMTableIndexRequirement(
+        table: AIStreamLease.schema,
+        requiredIndexes: [
+            "im_ai_stream_leases_user_expires_idx",
+            "im_ai_stream_leases_conversation_expires_idx",
+            "im_ai_stream_leases_expires_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
         table: ConversationMessage.schema,
         requiredIndexes: [
             "im_messages_conversation_timeline_sequence_idx",
@@ -455,7 +599,56 @@ private let imIndexRequirements: [IMTableIndexRequirement] = [
         table: AdminAuditEvent.schema,
         requiredIndexes: [
             "admin_audit_events_created_idx",
-            "admin_audit_events_action_created_idx"
+            "admin_audit_events_action_created_idx",
+            "admin_audit_events_actor_created_idx",
+            "admin_audit_events_target_created_idx",
+            "admin_audit_events_request_id_created_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: AdminWriteIdempotencyRecord.schema,
+        requiredIndexes: [
+            "admin_write_idempotency_scope_key_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: AdminConversationGovernanceCommand.schema,
+        requiredIndexes: [
+            "admin_governance_command_actor_action_key_idx",
+            "admin_governance_command_status_updated_idx",
+            "admin_governance_command_recovery_idx",
+            "admin_governance_command_target_member_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: ReportModerationDecision.schema,
+        requiredIndexes: [
+            "report_moderation_decisions_report_created_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: UserReport.schema,
+        requiredIndexes: [
+            "reports_assigned_reviewer_status_created_idx",
+            "reports_status_created_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: ReportModerationEvidence.schema,
+        requiredIndexes: [
+            "report_moderation_evidence_report_created_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: ReportModerationDecision.schema,
+        requiredIndexes: [
+            "report_moderation_decisions_report_idempotency_key_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: ReportModerationEvidence.schema,
+        requiredIndexes: [
+            "report_moderation_evidence_report_idempotency_key_idx"
         ]
     )
 ]
@@ -477,3 +670,71 @@ private let imSummaryReadModelIndexRequirements: [IMTableIndexRequirement] = imI
         ConversationActivitySummary.schema
     ].contains($0.table)
 }
+
+private let imConversationShardSchemaRequirements: [IMTableSchemaRequirement] = imSchemaRequirements.filter {
+    [
+        Conversation.schema,
+        ConversationMember.schema,
+        ConversationMessage.schema,
+        ConversationDomainEvent.schema,
+        ConversationMessageSearchIndex.schema,
+        ConversationMediaAssetReference.schema,
+        ConversationDomainEventRecipientSet.schema,
+        ConversationDomainEventRecipientSetMember.schema,
+        ConversationDomainEventRecipientSnapshot.schema
+    ].contains($0.table)
+} + [
+    IMTableSchemaRequirement(
+        table: ConversationDomainEventSequence.schema,
+        requiredColumns: ["conversation_id", "last_sequence"]
+    ),
+    IMTableSchemaRequirement(
+        table: ConversationTimelineNotice.schema,
+        requiredColumns: [
+            "event_id", "conversation_id", "timeline_sequence", "event_type",
+            "target_user_ids_json", "notice_kind", "params_json", "fallback_text", "created_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
+        table: AIMessageStreamIndex.schema,
+        requiredColumns: [
+            "stream_id", "message_id", "conversation_id", "user_id", "state",
+            "last_chunk_index", "created_at", "updated_at"
+        ]
+    )
+]
+
+private let imConversationShardIndexRequirements: [IMTableIndexRequirement] = imIndexRequirements.filter {
+    [
+        ConversationMessage.schema,
+        ConversationDomainEventRecipientSetMember.schema
+    ].contains($0.table)
+} + [
+    IMTableIndexRequirement(
+        table: ConversationDomainEvent.schema,
+        requiredIndexes: [
+            "conversation_domain_events_status_created_idx",
+            "conversation_domain_events_conversation_created_idx",
+            "conversation_domain_events_conversation_sequence_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: ConversationTimelineNotice.schema,
+        requiredIndexes: ["conversation_timeline_notices_conversation_sequence_idx"]
+    ),
+    IMTableIndexRequirement(
+        table: ConversationMessageSearchIndex.schema,
+        requiredIndexes: [
+            "conversation_message_search_index_lookup_idx",
+            "conversation_message_search_index_message_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: AIMessageStreamIndex.schema,
+        requiredIndexes: [
+            "im_ai_message_streams_state_updated_idx",
+            "im_ai_message_streams_user_state_idx",
+            "im_ai_message_streams_conversation_state_idx"
+        ]
+    )
+]

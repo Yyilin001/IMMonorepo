@@ -1,4 +1,5 @@
 import http from 'k6/http';
+import { richTextContent, initialDerivedState } from './im-message-payload.js';
 import { check, fail, sleep } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 
@@ -171,8 +172,8 @@ function sendOfflineMessages(state) {
           senderUserID: null,
           serverSequence: null,
           serverTimestamp: null,
-          content: { type: 'text', text: `offline catchup ${clientMessageID}` },
-          derivedState: { reactions: [], editedAt: null, recalledAt: null },
+          content: richTextContent(`offline catchup ${clientMessageID}`),
+          derivedState: initialDerivedState(),
         },
       }),
       { headers: { 'Content-Type': 'application/json', 'X-IM-Internal-Secret': internalSecret } }

@@ -2,6 +2,7 @@ import Crypto
 import Fluent
 import Foundation
 import SQLKit
+import Vapor
 
 final class ConversationDomainEventRecipientSet: Model, @unchecked Sendable {
     static let schema = "conversation_domain_event_recipient_sets"
@@ -245,7 +246,7 @@ private extension Array {
     }
 }
 
-final class ConversationDomainEventRecipientSnapshot: Model, @unchecked Sendable {
+final class ConversationDomainEventRecipientSnapshot: Model, Content, @unchecked Sendable {
     static let schema = "conversation_domain_event_recipient_snapshots"
 
     @ID(custom: "event_id", generatedBy: .user)

@@ -11,10 +11,17 @@ struct IMMessagePersistencePipeline {
             return []
         }
         let diagnostics = IMMessagePersistenceDiagnostics()
+        let trace = IMDeliveryTrace(
+            conversationID: conversationID,
+            clientMessageID: preparedMessages.count == 1
+                ? preparedMessages[0].normalizedClientMessageID
+                : nil,
+            runtimeRole: service.app?.imRuntimeRole.rawValue
+        )
         defer {
             diagnostics.logIfSlow(
                 app: service.app,
-                conversationID: conversationID,
+                trace: trace,
                 messageCount: preparedMessages.count
             )
         }
@@ -33,6 +40,7 @@ struct IMMessagePersistencePipeline {
 
         let results = try await diagnostics.measure("transaction", operation: {
             try await routedDatabase.transaction { database in
+                try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
                 let membershipContext = try await diagnostics.measure("membershipContext", operation: {
                     try await service.requireConversationMembershipContext(
                         conversationID: conversationID,
@@ -49,8 +57,10 @@ struct IMMessagePersistencePipeline {
                 directMessagingState: membershipContext.directMessagingState,
                 memberUserIDs: recipientUserIDs
             )
-            var results: [IMRealtimeMessagePersistenceResult] = []
-            results.reserveCapacity(preparedMessages.count)
+            var resultsByIndex: [Int: IMRealtimeMessagePersistenceResult] = [:]
+            resultsByIndex.reserveCapacity(preparedMessages.count)
+            var creations: [(index: Int, prepared: IMPreparedIncomingMessage, serverSequence: Int)] = []
+            creations.reserveCapacity(preparedMessages.count)
             var outboxItems: [ConversationMessageCreatedOutboxItem] = []
             outboxItems.reserveCapacity(preparedMessages.count)
 
@@ -68,7 +78,7 @@ struct IMMessagePersistencePipeline {
                         on: database
                     )
                 }) {
-                    results.append(result)
+                    resultsByIndex[index] = result
                     continue
                 }
 
@@ -97,25 +107,42 @@ struct IMMessagePersistencePipeline {
                     })
                 }
 
-                let message = try await createMessage(
-                    prepared: prepared,
-                    serverSequence: serverSequence,
-                    recipientUserIDs: recipientUserIDs,
+                directPolicyContext.recordCreated(senderUserID: prepared.senderUserID)
+                creations.append((index: index, prepared: prepared, serverSequence: serverSequence))
+            }
+
+            let aggregateSequences = try await diagnostics.measure("aggregateSequencePreallocate", operation: {
+                try await ConversationDomainEventSequenceAllocator(db: database).allocateRange(
+                    count: creations.count,
+                    conversationID: conversationID,
                     on: database
                 )
-                directPolicyContext.recordCreated(senderUserID: prepared.senderUserID)
-                results.append(
-                    try service.makePersistenceResult(
-                        conversationID: conversationID,
-                        message: message,
-                        recipientUserIDs: recipientUserIDs,
-                        didCreateMessage: true,
-                        fallbackTimestamp: prepared.serverTimestamp
-                    )
+            })
+            guard aggregateSequences.count == creations.count else {
+                throw Abort(.internalServerError, reason: "消息领域事件 sequence 批量分配返回了不完整结果。")
+            }
+
+            for (creation, aggregateSequence) in zip(creations, aggregateSequences) {
+                let aggregateSequenceValue = try imIntSequence(
+                    aggregateSequence.rawValue,
+                    field: "aggregate_sequence"
+                )
+                let message = try await createMessage(
+                    prepared: creation.prepared,
+                    serverSequence: creation.serverSequence,
+                    aggregateSequence: aggregateSequenceValue,
+                    on: database
+                )
+                resultsByIndex[creation.index] = try service.makePersistenceResult(
+                    conversationID: conversationID,
+                    message: message,
+                    recipientUserIDs: recipientUserIDs,
+                    didCreateMessage: true,
+                    fallbackTimestamp: creation.prepared.serverTimestamp
                 )
                 outboxItems.append(
                     ConversationMessageCreatedOutboxItem(
-                        actorUserID: prepared.senderUserID,
+                        actorUserID: creation.prepared.senderUserID,
                         messageID: try message.requireID(),
                         aggregateSequence: message.timelineSequence,
                         preview: try ConversationMessageCreatedPreview(
@@ -144,7 +171,12 @@ struct IMMessagePersistencePipeline {
                     )
                 })
             }
-            return results
+            return try preparedMessages.indices.map { index in
+                guard let result = resultsByIndex[index] else {
+                    throw Abort(.internalServerError, reason: "消息批量持久化缺少结果。")
+                }
+                return result
+            }
             }
         })
         if results.contains(where: \.didCreateMessage) {
@@ -184,7 +216,7 @@ struct IMMessagePersistencePipeline {
     private func createMessage(
         prepared: IMPreparedIncomingMessage,
         serverSequence: Int,
-        recipientUserIDs: [UUID],
+        aggregateSequence: Int,
         on database: any Database
     ) async throws -> ConversationMessage {
         let canonicalContent = try await service.canonicalizeReplyReferenceIfNeeded(
@@ -192,11 +224,6 @@ struct IMMessagePersistencePipeline {
             conversationID: conversationID,
             on: database
         )
-        let sequence = try await ConversationDomainEventSequenceAllocator(db: database).allocate(
-            conversationID: conversationID,
-            on: database
-        )
-        let aggregateSequence = try imIntSequence(sequence.rawValue, field: "aggregate_sequence")
         let message = try ConversationMessage(
             conversationID: conversationID,
             senderUserID: prepared.senderUserID,

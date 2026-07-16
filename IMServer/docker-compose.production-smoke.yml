@@ -238,6 +238,8 @@ services:
       IM_TCP_AUTH_TIMEOUT: "30"
       IM_TCP_IDLE_TIMEOUT: "300"
       IM_TCP_LISTEN_BACKLOG: "8192"
+      IM_TCP_MAX_CONNECTIONS: "20000"
+      IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND: "500"
     depends_on: *imserver_depends
     ulimits:
       nofile:

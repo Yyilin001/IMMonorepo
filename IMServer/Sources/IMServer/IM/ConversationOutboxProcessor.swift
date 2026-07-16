@@ -471,6 +471,7 @@ struct ConversationOutboxProcessor {
     private func makeRegistries(app: Application) -> ConversationOutboxConsumerRegistries {
         ConversationOutboxConsumerRegistries(
             critical: ConversationEventConsumerRegistry(consumers: [
+                ConversationRouteActivationConsumer(app: app),
                 ConversationMediaAssetReferenceConsumer(db: db, app: app),
                 ConversationProjectionConsumer(app: app, sourceDB: db),
                 ChangesLogConsumer(app: app, sourceDB: db),

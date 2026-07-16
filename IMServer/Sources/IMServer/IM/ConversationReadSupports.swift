@@ -4,9 +4,15 @@ import Vapor
 
 struct ConversationSummaryReadSupport {
     let db: any Database
+    let userDirectoryDB: any Database
+
+    init(db: any Database, userDirectoryDB: (any Database)? = nil) {
+        self.db = db
+        self.userDirectoryDB = userDirectoryDB ?? db
+    }
 
     private var membershipService: ConversationMembershipService {
-        ConversationMembershipService(db: db)
+        ConversationMembershipService(db: db, userDirectoryDB: userDirectoryDB)
     }
 
     private var readStateService: ConversationReadStateService {
@@ -18,7 +24,7 @@ struct ConversationSummaryReadSupport {
     }
 
     private var summaryProjectionService: IMConversationSummaryProjectionService {
-        IMConversationSummaryProjectionService(db: db)
+        IMConversationSummaryProjectionService(db: db, userDirectoryDB: userDirectoryDB)
     }
 
     func conversationSummary(
@@ -34,6 +40,7 @@ struct ConversationSummaryReadSupport {
                let conversationRevision = conversation.membershipRevision,
                let summaryRevision = summary.membershipRevision,
                conversationRevision == summaryRevision,
+               summary.groupLifecycleStateEnum == conversation.groupLifecycleStateEnum,
                summary.memberUserIDs.contains(userID)
             {
                 return try await ConversationSummaryResponseOverlay.responseLoadingActivity(
@@ -119,7 +126,6 @@ struct ConversationSummaryReadSupport {
 
         let memberships = try await ConversationMember.query(on: database)
             .filter(\.$conversation.$id == conversationID)
-            .with(\.$user)
             .all()
         let memberUserIDs = memberships.map(\.$user.id).sorted { $0.uuidString < $1.uuidString }
         guard memberUserIDs.contains(userID) else {
@@ -128,6 +134,7 @@ struct ConversationSummaryReadSupport {
         guard let membership = memberships.first(where: { $0.$user.id == userID }) else {
             throw Abort(.notFound, reason: "会话不存在。")
         }
+        let usersByID = try await ConversationUserDirectory(db: userDirectoryDB).usersByID(memberUserIDs)
 
         let lastMessageRows = try await ConversationMessage.query(on: database)
             .filter(\.$conversation.$id == conversationID)
@@ -155,7 +162,12 @@ struct ConversationSummaryReadSupport {
             title: conversation.title,
             kind: conversation.kind,
             directMessagingState: ConversationPresentationSupport.directMessagingState(for: conversation),
-            directPeer: ConversationPresentationSupport.directPeer(from: memberships, currentUserID: userID),
+            groupLifecycleState: conversation.groupLifecycleStateForPresentation,
+            directPeer: ConversationPresentationSupport.directPeer(
+                from: memberships,
+                currentUserID: userID,
+                usersByID: usersByID
+            ),
             notice: conversation.notice,
             avatarPreset: conversation.avatarPresetEnum,
             muteAll: conversation.muteAll,
@@ -1244,9 +1256,15 @@ struct ConversationSearchReadSupport {
 
 struct ConversationReadSupport {
     let db: any Database
+    let userDirectoryDB: any Database
+
+    init(db: any Database, userDirectoryDB: (any Database)? = nil) {
+        self.db = db
+        self.userDirectoryDB = userDirectoryDB ?? db
+    }
 
     private var summaryReadSupport: ConversationSummaryReadSupport {
-        ConversationSummaryReadSupport(db: db)
+        ConversationSummaryReadSupport(db: db, userDirectoryDB: userDirectoryDB)
     }
 
     private var timelineReadSupport: ConversationTimelineReadSupport {

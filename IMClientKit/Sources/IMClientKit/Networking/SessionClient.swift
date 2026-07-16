@@ -373,7 +373,7 @@ public actor SessionClient {
         kind: IMConversationKind,
         title: String?,
         memberEmails: [String]
-    ) async throws -> IMConversationSummaryResponseBody {
+    ) async throws -> IMConversationCommandReceiptBody {
         try await executor.execute(
             IMRequest.createConversation(
                 kind: kind,
@@ -395,7 +395,7 @@ public actor SessionClient {
     public func addIMConversationMembers(
         conversationID: String,
         memberEmails: [String]
-    ) async throws -> IMConversationSummaryResponseBody {
+    ) async throws -> IMConversationCommandReceiptBody {
         try await executor.execute(
             IMRequest.addMembers(
                 conversationID: conversationID,
@@ -407,7 +407,7 @@ public actor SessionClient {
     public func removeIMConversationMember(
         conversationID: String,
         memberUserID: UUID
-    ) async throws -> IMConversationSummaryResponseBody {
+    ) async throws -> IMConversationCommandReceiptBody {
         try await executor.execute(
             IMRequest.removeMember(
                 conversationID: conversationID,
@@ -420,7 +420,7 @@ public actor SessionClient {
         conversationID: String,
         memberUserID: UUID,
         role: IMConversationMemberRole
-    ) async throws -> IMConversationSummaryResponseBody {
+    ) async throws -> IMConversationCommandReceiptBody {
         try await executor.execute(
             IMRequest.updateMemberRole(
                 conversationID: conversationID,
@@ -433,7 +433,7 @@ public actor SessionClient {
     public func updateIMConversationTitle(
         conversationID: String,
         title: String
-    ) async throws -> IMConversationSummaryResponseBody {
+    ) async throws -> IMConversationCommandReceiptBody {
         try await executor.execute(
             IMRequest.updateTitle(
                 conversationID: conversationID,
@@ -446,7 +446,7 @@ public actor SessionClient {
         conversationID: String,
         isPinned: Bool? = nil,
         isMuted: Bool? = nil
-    ) async throws -> IMConversationSummaryResponseBody {
+    ) async throws -> IMConversationCommandReceiptBody {
         try await executor.execute(
             IMRequest.updatePreferences(
                 conversationID: conversationID,
@@ -462,7 +462,7 @@ public actor SessionClient {
         notice: String? = nil,
         avatarPreset: IMConversationAvatarPreset? = nil,
         muteAll: Bool? = nil
-    ) async throws -> IMConversationSummaryResponseBody {
+    ) async throws -> IMConversationCommandReceiptBody {
         try await executor.execute(
             IMRequest.updateMetadata(
                 conversationID: conversationID,
@@ -477,7 +477,7 @@ public actor SessionClient {
     public func updateIMMyMemberProfile(
         conversationID: String,
         memberNickname: String?
-    ) async throws -> IMConversationSummaryResponseBody {
+    ) async throws -> IMConversationCommandReceiptBody {
         try await executor.execute(
             IMRequest.updateMyMemberProfile(conversationID: conversationID, memberNickname: memberNickname)
         )
@@ -642,7 +642,7 @@ public actor SessionClient {
         try await executor.execute(IMRequest.revokeInvite(conversationID: conversationID, token: token))
     }
 
-    public func joinIMGroupInvite(token: String) async throws -> IMConversationSummaryResponseBody {
+    public func joinIMGroupInvite(token: String) async throws -> IMConversationCommandReceiptBody {
         try await executor.execute(IMRequest.joinInvite(token: token))
     }
 
@@ -734,7 +734,7 @@ public actor SessionClient {
 
     public func leaveIMConversation(
         conversationID: String
-    ) async throws -> EmptyResponse {
+    ) async throws -> IMConversationCommandReceiptBody {
         try await executor.execute(IMRequest.leaveConversation(conversationID: conversationID))
     }
 

@@ -3,6 +3,12 @@ import Vapor
 
 struct ConversationMembershipService {
     let db: any Database
+    let userDirectoryDB: any Database
+
+    init(db: any Database, userDirectoryDB: (any Database)? = nil) {
+        self.db = db
+        self.userDirectoryDB = userDirectoryDB ?? db
+    }
 
     func requireMembershipRecord(
         conversationID: UUID,
@@ -67,13 +73,14 @@ struct ConversationMembershipService {
 
         let memberships = try await ConversationMember.query(on: db)
             .filter(\.$conversation.$id == conversationID)
-            .with(\.$user)
             .all()
+        let usersByID = try await ConversationUserDirectory(db: userDirectoryDB)
+            .usersByID(memberships.map(\.$user.id))
 
         let allItems = try memberships
             .map { membership -> IMConversationMemberResponse in
-                guard let user = membership.$user.value else {
-                    throw Abort(.internalServerError, reason: "会话成员数据不完整。")
+                guard let user = usersByID[membership.$user.id] else {
+                    throw Abort(.internalServerError, reason: "会话成员缺少主库用户目录记录。")
                 }
                 let displayTitle = membership.memberNickname?.trimmingCharacters(in: .whitespacesAndNewlines)
                     ?? user.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)

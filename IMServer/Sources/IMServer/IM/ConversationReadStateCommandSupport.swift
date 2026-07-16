@@ -22,6 +22,7 @@ struct ConversationReadStateCommandSupport {
         }
 
         let readState = try await db.transaction { database in
+            try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
             try await ConversationReadStateService(db: database).advanceConversationRead(
                 conversationID: conversationID,
                 userID: userID,

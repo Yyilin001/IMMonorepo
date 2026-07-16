@@ -17,6 +17,8 @@ struct InternalMetricsController: RouteCollection {
         }
 
         let routing = await req.application.routingMetrics.currentSnapshot()
+        let conversationShardRouting = await req.application.conversationShardRoutingMetrics.currentSnapshot()
+        let conversationShardMigration = await req.application.conversationShardMigrationMetrics.currentSnapshot()
         let outbox = await req.application.outboxMetrics.currentSnapshot()
         let hotConversations = await req.application.hotConversationMetrics.currentSnapshot()
         let http = await req.application.httpMetrics.currentSnapshot()
@@ -32,6 +34,9 @@ struct InternalMetricsController: RouteCollection {
         let clientHealth = await req.application.clientHealthMetrics.currentSnapshot()
         let fanoutConfiguration = req.application.gatewayLocalFanoutConfiguration
         let streamConsumerConfiguration = req.application.streamConsumerConfiguration
+        let nodeDispatchConfiguration = req.application.nodeDispatchConfiguration
+        let tcpConfiguration = req.application.imTCPConfiguration
+        let tcpAdmissionStatus = req.application.imTCPAdmissionController.status()
         let liveLag = await collectLiveLagSnapshot(app: req.application)
 
         var lines: [String] = []
@@ -41,8 +46,23 @@ struct InternalMetricsController: RouteCollection {
         appendGauge("im_http_request_latency_max_millis", value: http.maxLatencyMillis, to: &lines)
         appendGauge("im_tcp_connections", value: routing.currentTCPConnectionCount, to: &lines)
         appendGauge("im_tcp_channels", value: routing.currentTCPChannelCount, to: &lines)
+        appendGauge("im_gateway_draining", value: tcpAdmissionStatus.isDraining ? 1 : 0, to: &lines)
+        appendGauge("im_tcp_admission_active_channels", value: tcpAdmissionStatus.activeConnectionCount, to: &lines)
+        appendGauge(
+            "im_tcp_configured_connection_limit",
+            value: tcpConfiguration.maximumConnectionCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_tcp_configured_new_connections_per_second_limit",
+            value: tcpConfiguration.maximumNewConnectionsPerSecond,
+            to: &lines
+        )
         appendCounter("im_tcp_channel_active_total", value: routing.tcpChannelActiveCount, to: &lines)
         appendCounter("im_tcp_channel_inactive_total", value: routing.tcpChannelInactiveCount, to: &lines)
+        appendCounter("im_tcp_admission_rejections_total", value: routing.tcpAdmissionRejectedCount, to: &lines)
+        appendCounter("im_tcp_admission_rate_limited_total", value: routing.tcpAdmissionRateLimitedCount, to: &lines)
+        appendCounter("im_tcp_admission_draining_rejected_total", value: routing.tcpAdmissionDrainingRejectedCount, to: &lines)
         appendCounter("im_tcp_auth_received_total", value: routing.tcpAuthReceivedCount, to: &lines)
         appendCounter("im_tcp_auth_ok_total", value: routing.tcpAuthOKCount, to: &lines)
         appendCounter("im_tcp_auth_error_total", value: routing.tcpAuthErrorCount, to: &lines)
@@ -57,6 +77,9 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_tcp_close_input_closed_total", value: routing.tcpCloseInputClosedCount, to: &lines)
         appendCounter("im_tcp_close_reset_by_peer_total", value: routing.tcpCloseResetByPeerCount, to: &lines)
         appendCounter("im_tcp_close_slow_write_total", value: routing.tcpCloseSlowWriteCount, to: &lines)
+        appendCounter("im_tcp_close_connection_limit_total", value: routing.tcpCloseConnectionLimitCount, to: &lines)
+        appendCounter("im_tcp_close_connection_rate_limit_total", value: routing.tcpCloseConnectionRateLimitCount, to: &lines)
+        appendCounter("im_tcp_close_gateway_draining_total", value: routing.tcpCloseGatewayDrainingCount, to: &lines)
         appendCounter("im_tcp_close_peer_waiting_for_auth_total", value: routing.tcpClosePeerWaitingForAuthCount, to: &lines)
         appendCounter("im_tcp_close_peer_authenticating_total", value: routing.tcpClosePeerAuthenticatingCount, to: &lines)
         appendCounter("im_tcp_close_peer_authenticated_total", value: routing.tcpClosePeerAuthenticatedCount, to: &lines)
@@ -97,6 +120,57 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_auth_session_cache_redis_errors_total", value: authSessionCache.redisErrors, to: &lines)
         appendCounter("im_auth_session_cache_database_fallbacks_total", value: authSessionCache.databaseFallbacks, to: &lines)
         appendCounter("im_redis_route_registrations_total", value: routing.redisRouteRegistrations, to: &lines)
+        appendCounter("im_conversation_shard_directory_cache_hits_total", value: conversationShardRouting.cacheHitCount, to: &lines)
+        appendCounter("im_conversation_shard_directory_cache_misses_total", value: conversationShardRouting.cacheMissCount, to: &lines)
+        appendCounter("im_conversation_shard_directory_cache_stores_total", value: conversationShardRouting.cacheStoreCount, to: &lines)
+        appendCounter("im_conversation_shard_directory_cache_evictions_total", value: conversationShardRouting.cacheEvictionCount, to: &lines)
+        appendCounter("im_conversation_shard_directory_lookups_total", value: conversationShardRouting.directoryLookupCount, to: &lines)
+        appendCounter("im_conversation_shard_directory_lookup_failures_total", value: conversationShardRouting.directoryLookupFailureCount, to: &lines)
+        appendCounter("im_conversation_shard_remote_cell_rejections_total", value: conversationShardRouting.remoteCellRouteRejectedCount, to: &lines)
+        appendCounter("im_conversation_shard_remote_cell_forward_attempts_total", value: conversationShardRouting.remoteCellForwardAttemptCount, to: &lines)
+        appendCounter("im_conversation_shard_remote_cell_forward_successes_total", value: conversationShardRouting.remoteCellForwardSuccessCount, to: &lines)
+        appendCounter("im_conversation_shard_remote_cell_forward_failures_total", value: conversationShardRouting.remoteCellForwardFailureCount, to: &lines)
+        appendCounter("im_conversation_shard_migration_copy_attempts_total", value: conversationShardMigration.copyAttemptCount, to: &lines)
+        appendCounter("im_conversation_shard_migration_copy_successes_total", value: conversationShardMigration.copySuccessCount, to: &lines)
+        appendCounter("im_conversation_shard_migration_copy_failures_total", value: conversationShardMigration.copyFailureCount, to: &lines)
+        appendCounter("im_conversation_shard_migration_verify_attempts_total", value: conversationShardMigration.verifyAttemptCount, to: &lines)
+        appendCounter("im_conversation_shard_migration_verify_successes_total", value: conversationShardMigration.verifySuccessCount, to: &lines)
+        appendCounter("im_conversation_shard_migration_verify_failures_total", value: conversationShardMigration.verifyFailureCount, to: &lines)
+        appendCounter("im_conversation_shard_migration_remote_pages_total", value: conversationShardMigration.remotePageAttemptCount, to: &lines)
+        appendCounter("im_conversation_shard_migration_remote_page_successes_total", value: conversationShardMigration.remotePageSuccessCount, to: &lines)
+        appendCounter("im_conversation_shard_migration_remote_page_failures_total", value: conversationShardMigration.remotePageFailureCount, to: &lines)
+        appendCounter("im_conversation_shard_migration_remote_page_records_total", value: conversationShardMigration.remotePageRecordCount, to: &lines)
+        appendCounter("im_conversation_shard_migration_remote_page_bytes_total", value: conversationShardMigration.remotePageByteCount, to: &lines)
+        appendGauge(
+            "im_conversation_shard_migration_remote_page_latency_avg_millis",
+            value: average(
+                total: conversationShardMigration.remotePageTotalMillis,
+                count: conversationShardMigration.remotePageSuccessCount + conversationShardMigration.remotePageFailureCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_conversation_shard_migration_remote_page_latency_max_millis",
+            value: conversationShardMigration.remotePageMaxMillis,
+            to: &lines
+        )
+        appendGauge(
+            "im_conversation_shard_remote_cell_forward_latency_avg_millis",
+            value: average(
+                total: conversationShardRouting.remoteCellForwardTotalMillis,
+                count: conversationShardRouting.remoteCellForwardLatencyCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_conversation_shard_remote_cell_forward_latency_max_millis",
+            value: conversationShardRouting.remoteCellForwardMaxMillis,
+            to: &lines
+        )
+        appendGauge("im_conversation_shard_directory_lookup_latency_avg_millis", value: average(total: conversationShardRouting.directoryLookupTotalMillis, count: conversationShardRouting.directoryLookupCount + conversationShardRouting.directoryLookupFailureCount), to: &lines)
+        appendGauge("im_conversation_shard_directory_lookup_latency_max_millis", value: conversationShardRouting.directoryLookupMaxMillis, to: &lines)
+        appendGauge("im_conversation_shard_directory_cache_entries", value: conversationShardRouting.cacheEntryCount, to: &lines)
+        appendGauge("im_conversation_shard_directory_cache_max_entries", value: conversationShardRouting.cacheMaxEntries, to: &lines)
         appendCounter("im_redis_presence_route_cache_hits_total", value: routing.redisPresenceRouteCacheHits, to: &lines)
         appendCounter("im_redis_presence_route_cache_misses_total", value: routing.redisPresenceRouteCacheMisses, to: &lines)
         appendCounter("im_redis_presence_pipeline_lookups_total", value: routing.redisPresencePipelineLookupCount, to: &lines)
@@ -118,6 +192,7 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_cross_node_dispatch_failures_total", value: routing.crossNodeDispatchFailureCount, to: &lines)
         appendCounter("im_cross_node_dispatch_attempts_total", value: routing.crossNodeDispatchAttemptCount, to: &lines)
         appendCounter("im_cross_node_dispatch_targets_total", value: routing.crossNodeDispatchTargetCount, to: &lines)
+        lines.append("im_node_dispatch_transport{transport=\"\(nodeDispatchConfiguration.mode.rawValue)\"} 1")
         appendGauge(
             "im_cross_node_dispatch_max_targets_per_packet",
             value: routing.crossNodeDispatchMaxTargetsPerPacket,
@@ -134,6 +209,23 @@ struct InternalMetricsController: RouteCollection {
         appendGauge(
             "im_cross_node_dispatch_latency_max_millis",
             value: routing.crossNodeDispatchMaxLatencyMillis,
+            to: &lines
+        )
+        appendCounter("im_cross_cell_dispatch_attempts_total", value: routing.crossCellDispatchAttemptCount, to: &lines)
+        appendCounter("im_cross_cell_dispatch_successes_total", value: routing.crossCellDispatchSuccessCount, to: &lines)
+        appendCounter("im_cross_cell_dispatch_failures_total", value: routing.crossCellDispatchFailureCount, to: &lines)
+        appendCounter("im_cross_cell_dispatch_recipients_total", value: routing.crossCellDispatchRecipientCount, to: &lines)
+        appendGauge(
+            "im_cross_cell_dispatch_latency_avg_millis",
+            value: average(
+                total: routing.crossCellDispatchTotalLatencyMillis,
+                count: routing.crossCellDispatchSuccessCount + routing.crossCellDispatchFailureCount
+            ),
+            to: &lines
+        )
+        appendGauge(
+            "im_cross_cell_dispatch_latency_max_millis",
+            value: routing.crossCellDispatchMaxLatencyMillis,
             to: &lines
         )
         appendGauge(
@@ -207,6 +299,11 @@ struct InternalMetricsController: RouteCollection {
             value: routing.gatewayHTTPRelayRequestFailureCount,
             to: &lines
         )
+        appendCounter(
+            "im_gateway_http_relay_request_latency_millis_total",
+            value: routing.gatewayHTTPRelayRequestTotalLatencyMillis,
+            to: &lines
+        )
         appendGauge(
             "im_gateway_http_relay_request_latency_avg_millis",
             value: average(
@@ -248,6 +345,11 @@ struct InternalMetricsController: RouteCollection {
         appendCounter(
             "im_gateway_http_relay_inbound_failures_total",
             value: routing.gatewayHTTPRelayInboundFailureCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_gateway_http_relay_inbound_latency_millis_total",
+            value: routing.gatewayHTTPRelayInboundTotalLatencyMillis,
             to: &lines
         )
         appendCounter(
@@ -753,6 +855,7 @@ struct InternalMetricsController: RouteCollection {
         appendGauge("im_outbox_backlog_events", value: outbox.backlogCount, to: &lines)
         appendGauge("im_outbox_oldest_pending_age_millis", value: outbox.oldestPendingAgeMillis, to: &lines)
         appendCounter("im_hot_conversation_rejections_total", value: hotConversations.rejectedMessages, to: &lines)
+        appendCounter("im_hot_conversation_limiter_errors_total", value: hotConversations.backendErrors, to: &lines)
         appendGauge("im_hot_conversation_tracked_windows", value: hotConversations.trackedWindows, to: &lines)
         appendCounter("im_db_operations_total", value: database.operationCount, to: &lines)
         appendCounter("im_db_operation_failures_total", value: database.failedOperationCount, to: &lines)

@@ -3,13 +3,29 @@ import Vapor
 
 struct ConversationCommandSupport {
     let db: any Database
+    let userDirectoryDB: any Database
+    let usesLocalConversationDirectoryTables: Bool
+
+    init(
+        db: any Database,
+        userDirectoryDB: (any Database)? = nil,
+        usesLocalConversationDirectoryTables: Bool = true
+    ) {
+        self.db = db
+        self.userDirectoryDB = userDirectoryDB ?? db
+        self.usesLocalConversationDirectoryTables = usesLocalConversationDirectoryTables
+    }
 
     private var membershipMutateSupport: ConversationMembershipCommandSupport {
-        ConversationMembershipCommandSupport(db: db)
+        ConversationMembershipCommandSupport(
+            db: db,
+            userDirectoryDB: userDirectoryDB,
+            usesLocalConversationDirectoryTables: usesLocalConversationDirectoryTables
+        )
     }
 
     private var governanceMutateSupport: ConversationGovernanceCommandSupport {
-        ConversationGovernanceCommandSupport(db: db)
+        ConversationGovernanceCommandSupport(db: db, userDirectoryDB: userDirectoryDB)
     }
 
     private var messageMutateSupport: ConversationMessageCommandSupport {
@@ -27,7 +43,7 @@ struct ConversationCommandSupport {
         title: String?,
         memberEmails: [String],
         creatorUserID: UUID
-    ) async throws -> IMConversationResponse {
+    ) async throws -> ConversationCreateCommandResult {
         try await membershipMutateSupport.createConversation(
             conversationID: conversationID,
             assignedShardID: assignedShardID,
@@ -42,7 +58,7 @@ struct ConversationCommandSupport {
         in conversationID: UUID,
         memberEmails: [String],
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
+    ) async throws -> ConversationCommandReceipt {
         try await membershipMutateSupport.addMembers(
             in: conversationID,
             memberEmails: memberEmails,
@@ -67,7 +83,7 @@ struct ConversationCommandSupport {
         memberUserID: UUID,
         role: IMConversationMemberRole,
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
+    ) async throws -> ConversationCommandReceipt {
         try await membershipMutateSupport.updateMemberRole(
             in: conversationID,
             memberUserID: memberUserID,
@@ -80,7 +96,7 @@ struct ConversationCommandSupport {
         in conversationID: UUID,
         title: String,
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
+    ) async throws -> ConversationCommandReceipt {
         try await governanceMutateSupport.updateConversationTitle(
             in: conversationID,
             title: title,
@@ -95,7 +111,7 @@ struct ConversationCommandSupport {
         avatarPreset: IMConversationAvatarPreset?,
         muteAll: Bool? = nil,
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
+    ) async throws -> ConversationCommandReceipt {
         try await governanceMutateSupport.updateConversationMetadata(
             in: conversationID,
             title: title,
@@ -110,7 +126,7 @@ struct ConversationCommandSupport {
         in conversationID: UUID,
         requesterUserID: UUID,
         memberNickname: String?
-    ) async throws -> IMConversationResponse {
+    ) async throws -> ConversationCommandReceipt {
         try await governanceMutateSupport.updateMemberNickname(
             in: conversationID,
             requesterUserID: requesterUserID,
@@ -123,7 +139,7 @@ struct ConversationCommandSupport {
         isPinned: Bool?,
         isMuted: Bool?,
         requesterUserID: UUID
-    ) async throws -> IMConversationResponse {
+    ) async throws -> ConversationCommandReceipt {
         try await governanceMutateSupport.updateConversationPreferences(
             in: conversationID,
             isPinned: isPinned,
@@ -187,7 +203,7 @@ struct ConversationCommandSupport {
     func leaveConversation(
         in conversationID: UUID,
         requesterUserID: UUID
-    ) async throws {
+    ) async throws -> ConversationCommandReceipt {
         try await membershipMutateSupport.leaveConversation(
             in: conversationID,
             requesterUserID: requesterUserID

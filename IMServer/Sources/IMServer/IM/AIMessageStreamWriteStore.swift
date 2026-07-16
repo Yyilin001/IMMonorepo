@@ -16,7 +16,12 @@ struct AIMessageStreamWriteStore {
             let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
             let now = Date()
             return try await db.transaction { database in
+                try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
                 let realtimeService = IMRealtimeMessageService(app: app)
+                guard let conversation = try await Conversation.find(conversationID, on: database) else {
+                    throw Abort(.notFound, reason: "Conversation not found.")
+                }
+                try ConversationGovernanceService().requireUserMutationAllowed(in: conversation)
                 let membership = try await realtimeService.requireConversationMembershipContext(
                     conversationID: conversationID,
                     senderUserID: userID,
@@ -137,6 +142,7 @@ struct AIMessageStreamWriteStore {
         let update = try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
             let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
             return try await db.transaction { database in
+                try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
                 guard let message = try await ConversationMessage.query(on: database)
                     .filter(\.$id == messageID)
                     .filter(\.$conversation.$id == conversationID)
@@ -225,6 +231,7 @@ struct AIMessageStreamWriteStore {
         let envelope = try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
             let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
             return try await db.transaction { database in
+                try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
                 guard let message = try await ConversationMessage.query(on: database)
                     .filter(\.$id == messageID)
                     .filter(\.$conversation.$id == conversationID)
@@ -345,6 +352,7 @@ struct AIMessageStreamWriteStore {
         return try await app.conversationWriteCoordinator.run(conversationID: conversationID, app: app) {
             let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
             return try await db.transaction { database -> Bool in
+                try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
                 guard let lockedIndex = try await AIMessageStreamIndex.find(streamID, on: database),
                       lockedIndex.lifecycleState == .streaming,
                       let lockedMessage = try await ConversationMessage.query(on: database)

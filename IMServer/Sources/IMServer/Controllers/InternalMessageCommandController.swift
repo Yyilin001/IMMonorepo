@@ -17,14 +17,18 @@ struct InternalMessageCommandController: RouteCollection {
         let fullResponse = req.headers.first(name: "X-IM-Internal-Response") == "full"
 
         do {
-            try requireInternalSecret(req)
             let decodeStartedAt = Date()
             let body = try req.content.decode(IMInternalMessageSendRequest.self)
             decodeMillis = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: decodeStartedAt)
+            try requireInternalSecret(req, acceptsCellIngress: body.cellRoute != nil)
 
             let persistStartedAt = Date()
             let result = try await IMRealtimeMessageService(app: req.application)
-                .persistIncomingMessage(body.payload, senderUserID: body.senderUserID)
+                .persistIncomingMessage(
+                    body.payload,
+                    senderUserID: body.senderUserID,
+                    expectedCellRoute: body.cellRoute
+                )
             persistMillis = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: persistStartedAt)
 
             let response = Response(status: .ok)
@@ -73,18 +77,26 @@ struct InternalMessageCommandController: RouteCollection {
         return .ok
     }
 
-    private func requireInternalSecret(_ req: Request) throws {
-        guard let expected = req.application.commandOwnerRoutingConfiguration.sharedSecret?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !expected.isEmpty
-        else {
+    private func requireInternalSecret(_ req: Request, acceptsCellIngress: Bool = false) throws {
+        let commandOwnerSecret = req.application.commandOwnerRoutingConfiguration.sharedSecret?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let cellIngressSecret = acceptsCellIngress
+            ? req.application.cellIngressConfiguration.sharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+        let expectedSecrets = Set<String>([commandOwnerSecret, cellIngressSecret].compactMap { secret in
+            guard let secret, !secret.isEmpty else { return nil }
+            return secret
+        })
+        guard !expectedSecrets.isEmpty else {
             if req.application.environment == .production {
                 throw Abort(.internalServerError, reason: "IM_COMMAND_INTERNAL_SHARED_SECRET is required in production.")
             }
             return
         }
 
-        guard req.headers.first(name: "X-IM-Internal-Secret") == expected else {
+        guard let actualSecret = req.headers.first(name: "X-IM-Internal-Secret"),
+              expectedSecrets.contains(actualSecret)
+        else {
             throw Abort(.unauthorized, reason: "Invalid internal command secret.")
         }
     }

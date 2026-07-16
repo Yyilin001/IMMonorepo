@@ -57,17 +57,19 @@ struct IMAPNSPushService {
         do {
             let db = try await app.conversationShardRouter.strongReadDatabase(forConversationID: envelope.conversationID)
             guard let message = try await ConversationMessage.query(on: db)
-                .with(\.$sender)
                 .filter(\.$id == messageID)
                 .first()
             else {
                 return
             }
+            let sender = try await ConversationUserLookupSupport(db: app.db)
+                .requireUser(id: message.$sender.id)
 
             try await sendMessagePush(
                 configuration: configuration,
                 envelope: envelope,
                 message: message,
+                sender: sender,
                 content: try message.decodedContent(),
                 sourceDB: db,
                 candidateUserIDs: candidateUserIDs
@@ -87,6 +89,7 @@ struct IMAPNSPushService {
         configuration: IMAPNSConfiguration,
         envelope: ConversationEventEnvelope,
         message: ConversationMessage,
+        sender: User,
         content: IMMessageContent,
         sourceDB: any Database,
         candidateUserIDs: [UUID]?
@@ -127,7 +130,7 @@ struct IMAPNSPushService {
         }
 
         let authToken = try makeProviderJWT(configuration: configuration)
-        let senderName = message.sender.displayName?.nilIfBlank ?? message.sender.email
+        let senderName = sender.displayName?.nilIfBlank ?? sender.email
         let conversationTitle = try await pushConversationTitle(
             conversationID: envelope.conversationID,
             fallback: senderName

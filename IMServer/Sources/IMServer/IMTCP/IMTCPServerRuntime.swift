@@ -198,12 +198,39 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
     private var lastDebugError: String?
     private var didReceiveInputClosed = false
     private var authTimeoutTask: Scheduled<Void>?
+    private var holdsAdmissionSlot = false
 
     init(application: Application) {
         self.application = application
     }
 
     func channelActive(context: ChannelHandlerContext) {
+        let admission = application.imTCPAdmissionController.acquire()
+        guard admission.isAccepted else {
+            let rejectionReason = admission.rejectionReason ?? .connectionLimit
+            switch rejectionReason {
+            case .connectionLimit:
+                closeReason = "connection_limit"
+            case .connectionRateLimit:
+                closeReason = "connection_rate_limit"
+            case .gatewayDraining:
+                closeReason = "gateway_draining"
+            }
+            Task {
+                await self.application.routingMetrics.recordTCPAdmissionRejected(reason: rejectionReason)
+            }
+            application.logger.warning(
+                "Rejecting IM TCP channel because Gateway admission is unavailable",
+                metadata: logMetadata(channel: context.channel, extra: [
+                    "active_connection_count": .stringConvertible(admission.activeConnectionCount),
+                    "maximum_connection_count": .stringConvertible(admission.maximumConnectionCount),
+                    "rejection_reason": .string(Self.admissionRejectionReasonName(rejectionReason))
+                ])
+            )
+            context.close(promise: nil)
+            return
+        }
+        holdsAdmissionSlot = true
         let timeout = application.imTCPConfiguration.authTimeout
         let delay = TimeAmount.milliseconds(Int64(timeout * 1000))
         let channel = context.channel
@@ -233,9 +260,24 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
+    private static func admissionRejectionReasonName(_ reason: IMTCPAdmissionController.RejectionReason) -> String {
+        switch reason {
+        case .connectionLimit:
+            "connection_limit"
+        case .connectionRateLimit:
+            "connection_rate_limit"
+        case .gatewayDraining:
+            "gateway_draining"
+        }
+    }
+
     func channelInactive(context: ChannelHandlerContext) {
         authTimeoutTask?.cancel()
         authTimeoutTask = nil
+        if holdsAdmissionSlot {
+            _ = application.imTCPAdmissionController.release()
+            holdsAdmissionSlot = false
+        }
 
         if case .authenticated(let connection) = state {
             Task {

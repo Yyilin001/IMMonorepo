@@ -5,6 +5,12 @@ public enum IMDirectMessagingState: String, Codable, Equatable, Sendable {
     case frozenAfterUnfriend = "frozen_after_unfriend"
 }
 
+public enum IMGroupLifecycleState: String, Codable, Equatable, Sendable {
+    case active
+    case frozen
+    case dissolved
+}
+
 public struct IMDirectPeerResponseBody: Codable, Equatable, Sendable, APIResponseBody {
     public let id: UUID
     public let email: String
@@ -28,6 +34,34 @@ public struct IMConversationCreateRequestBody: Codable, Sendable {
     public let kind: String
     public let title: String?
     public let memberEmails: [String]
+}
+
+public struct IMConversationCommandReceiptBody: Codable, Equatable, Sendable, APIResponseBody {
+    public let conversationID: UUID
+    public let eventID: UUID?
+    public let eventType: String
+    public let acceptedAt: Date
+    public let membershipRevision: Date?
+    public let didMutate: Bool
+    public let projectionPending: Bool
+
+    public init(
+        conversationID: UUID,
+        eventID: UUID?,
+        eventType: String,
+        acceptedAt: Date,
+        membershipRevision: Date?,
+        didMutate: Bool,
+        projectionPending: Bool
+    ) {
+        self.conversationID = conversationID
+        self.eventID = eventID
+        self.eventType = eventType
+        self.acceptedAt = acceptedAt
+        self.membershipRevision = membershipRevision
+        self.didMutate = didMutate
+        self.projectionPending = projectionPending
+    }
 }
 
 public struct IMConversationMemberUpdateRequestBody: Codable, Sendable {
@@ -266,6 +300,7 @@ public struct IMConversationSummaryResponseBody: Codable, Equatable, Sendable, A
     public let title: String?
     public let kind: String
     public let directMessagingState: String?
+    public let groupLifecycleState: String?
     public let directPeer: IMDirectPeerResponseBody?
     public let memberCount: Int
     public let memberUserIDs: [UUID]
@@ -286,6 +321,7 @@ public struct IMConversationSummaryResponseBody: Codable, Equatable, Sendable, A
         title: String?,
         kind: String = IMConversationKind.group.rawValue,
         directMessagingState: String? = nil,
+        groupLifecycleState: String? = nil,
         directPeer: IMDirectPeerResponseBody? = nil,
         memberCount: Int? = nil,
         memberUserIDs: [UUID],
@@ -305,6 +341,7 @@ public struct IMConversationSummaryResponseBody: Codable, Equatable, Sendable, A
         self.title = title
         self.kind = kind
         self.directMessagingState = directMessagingState
+        self.groupLifecycleState = groupLifecycleState
         self.directPeer = directPeer
         self.memberCount = memberCount ?? memberUserIDs.count
         self.memberUserIDs = memberUserIDs
@@ -503,11 +540,15 @@ public struct IMConversationMessageSearchPageResponseBody: Codable, Equatable, S
 
 enum IMRequest {
     public struct CreateConversation: AuthorizedEndpoint {
-        public typealias Response = IMConversationSummaryResponseBody
+        public typealias Response = IMConversationCommandReceiptBody
 
         let payload: IMConversationCreateRequestBody
 
-        let baseRequestSpec = HTTPRequestSpec(path: "api/im/conversations", method: .post)
+        let baseRequestSpec = HTTPRequestSpec(
+            path: "api/im/conversations",
+            method: .post,
+            headers: ["Accept": "application/vnd.im.conversation-command-receipt+json"]
+        )
 
         var requestContentType: String? { "application/json" }
 
@@ -631,11 +672,15 @@ enum IMRequest {
     }
 
     public struct UpdateMyMemberProfile: AuthorizedEndpoint {
-        public typealias Response = IMConversationSummaryResponseBody
+        public typealias Response = IMConversationCommandReceiptBody
         let conversationID: String
         let payload: IMConversationMemberSelfUpdateRequestBody
         var baseRequestSpec: HTTPRequestSpec {
-            .init(path: "api/im/conversations/\(conversationID)/members/me", method: .patch)
+            .init(
+                path: "api/im/conversations/\(conversationID)/members/me",
+                method: .patch,
+                headers: ["Accept": "application/vnd.im.conversation-command-receipt+json"]
+            )
         }
         var requestContentType: String? { "application/json" }
         public func makeBody(using encoder: JSONEncoder) throws -> Data? {
@@ -644,7 +689,7 @@ enum IMRequest {
     }
 
     public struct AddMembers: AuthorizedEndpoint {
-        public typealias Response = IMConversationSummaryResponseBody
+        public typealias Response = IMConversationCommandReceiptBody
 
         let conversationID: String
         let payload: IMConversationMemberUpdateRequestBody
@@ -652,7 +697,8 @@ enum IMRequest {
         var baseRequestSpec: HTTPRequestSpec {
             .init(
                 path: "api/im/conversations/\(conversationID)/members",
-                method: .post
+                method: .post,
+                headers: ["Accept": "application/vnd.im.conversation-command-receipt+json"]
             )
         }
 
@@ -664,7 +710,7 @@ enum IMRequest {
     }
 
     public struct RemoveMember: AuthorizedEndpoint {
-        public typealias Response = IMConversationSummaryResponseBody
+        public typealias Response = IMConversationCommandReceiptBody
 
         let conversationID: String
         let memberUserID: String
@@ -672,13 +718,14 @@ enum IMRequest {
         var baseRequestSpec: HTTPRequestSpec {
             .init(
                 path: "api/im/conversations/\(conversationID)/members/\(memberUserID)/remove",
-                method: .post
+                method: .post,
+                headers: ["Accept": "application/vnd.im.conversation-command-receipt+json"]
             )
         }
     }
 
     public struct UpdateMemberRole: AuthorizedEndpoint {
-        public typealias Response = IMConversationSummaryResponseBody
+        public typealias Response = IMConversationCommandReceiptBody
 
         let conversationID: String
         let memberUserID: String
@@ -687,7 +734,8 @@ enum IMRequest {
         var baseRequestSpec: HTTPRequestSpec {
             .init(
                 path: "api/im/conversations/\(conversationID)/members/\(memberUserID)/role",
-                method: .post
+                method: .post,
+                headers: ["Accept": "application/vnd.im.conversation-command-receipt+json"]
             )
         }
 
@@ -699,7 +747,7 @@ enum IMRequest {
     }
 
     public struct UpdateTitle: AuthorizedEndpoint {
-        public typealias Response = IMConversationSummaryResponseBody
+        public typealias Response = IMConversationCommandReceiptBody
 
         let conversationID: String
         let payload: IMConversationTitleUpdateRequestBody
@@ -707,7 +755,8 @@ enum IMRequest {
         var baseRequestSpec: HTTPRequestSpec {
             .init(
                 path: "api/im/conversations/\(conversationID)/title",
-                method: .post
+                method: .post,
+                headers: ["Accept": "application/vnd.im.conversation-command-receipt+json"]
             )
         }
 
@@ -719,7 +768,7 @@ enum IMRequest {
     }
 
     public struct UpdatePreferences: AuthorizedEndpoint {
-        public typealias Response = IMConversationSummaryResponseBody
+        public typealias Response = IMConversationCommandReceiptBody
 
         let conversationID: String
         let payload: IMConversationPreferencesUpdateRequestBody
@@ -727,7 +776,8 @@ enum IMRequest {
         var baseRequestSpec: HTTPRequestSpec {
             .init(
                 path: "api/im/conversations/\(conversationID)/preferences",
-                method: .patch
+                method: .patch,
+                headers: ["Accept": "application/vnd.im.conversation-command-receipt+json"]
             )
         }
 
@@ -739,7 +789,7 @@ enum IMRequest {
     }
 
     public struct UpdateMetadata: AuthorizedEndpoint {
-        public typealias Response = IMConversationSummaryResponseBody
+        public typealias Response = IMConversationCommandReceiptBody
 
         let conversationID: String
         let payload: IMConversationMetadataUpdateRequestBody
@@ -747,7 +797,8 @@ enum IMRequest {
         var baseRequestSpec: HTTPRequestSpec {
             .init(
                 path: "api/im/conversations/\(conversationID)/metadata",
-                method: .patch
+                method: .patch,
+                headers: ["Accept": "application/vnd.im.conversation-command-receipt+json"]
             )
         }
 
@@ -1021,12 +1072,16 @@ enum IMRequest {
     }
 
     public struct JoinInvite: AuthorizedEndpoint {
-        public typealias Response = IMConversationSummaryResponseBody
+        public typealias Response = IMConversationCommandReceiptBody
 
         let token: String
 
         var baseRequestSpec: HTTPRequestSpec {
-            .init(path: "api/im/invites/\(token)/join", method: .post)
+            .init(
+                path: "api/im/invites/\(token)/join",
+                method: .post,
+                headers: ["Accept": "application/vnd.im.conversation-command-receipt+json"]
+            )
         }
     }
 
@@ -1108,14 +1163,15 @@ enum IMRequest {
     }
 
     public struct LeaveConversation: AuthorizedEndpoint {
-        public typealias Response = EmptyResponse
+        public typealias Response = IMConversationCommandReceiptBody
 
         let conversationID: String
 
         var baseRequestSpec: HTTPRequestSpec {
             .init(
                 path: "api/im/conversations/\(conversationID)/leave",
-                method: .post
+                method: .post,
+                headers: ["Accept": "application/vnd.im.conversation-command-receipt+json"]
             )
         }
     }

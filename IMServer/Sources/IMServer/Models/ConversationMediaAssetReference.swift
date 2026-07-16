@@ -1,7 +1,8 @@
 import Fluent
 import Foundation
+import Vapor
 
-final class ConversationMediaAssetReference: Model, @unchecked Sendable {
+final class ConversationMediaAssetReference: Model, Content, @unchecked Sendable {
     static let schema = "conversation_media_asset_references"
 
     @ID(custom: .id, generatedBy: .user)
@@ -56,5 +57,33 @@ final class ConversationMediaAssetReference: Model, @unchecked Sendable {
 
     static func recordID(messageID: UUID) -> String {
         messageID.uuidString.lowercased()
+    }
+
+    func migrationCopy() -> ConversationMediaAssetReference {
+        let copy = ConversationMediaAssetReference()
+        copy.id = id
+        copy.assetID = assetID
+        copy.ownerUserID = ownerUserID
+        copy.conversationID = conversationID
+        copy.messageID = messageID
+        copy.serverSequence = serverSequence
+        copy.kind = kind
+        copy.createdAt = createdAt
+        copy.updatedAt = updatedAt
+        return copy
+    }
+
+    var migrationFingerprintFields: [String?] {
+        [
+            id,
+            assetID,
+            ownerUserID.uuidString,
+            conversationID.uuidString,
+            messageID.uuidString,
+            String(serverSequence),
+            kind,
+            String(createdAt.timeIntervalSince1970),
+            String(updatedAt.timeIntervalSince1970)
+        ]
     }
 }

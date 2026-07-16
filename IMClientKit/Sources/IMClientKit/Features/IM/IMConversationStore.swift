@@ -4031,6 +4031,9 @@ public final class IMConversationStore {
                 from: isActivityOnlySummary ? existing?.directMessagingState?.rawValue ?? response.directMessagingState : response.directMessagingState,
                 conversationKind: conversationKind
             ),
+            groupLifecycleState: isActivityOnlySummary
+                ? existing?.groupLifecycleState
+                : Self.groupLifecycleState(from: response.groupLifecycleState, conversationKind: conversationKind),
             directPeer: resolvedDirectPeer,
             notice: isActivityOnlySummary ? existing?.notice ?? response.notice : response.notice,
             avatarPreset: isActivityOnlySummary ? existing?.avatarPreset ?? response.avatarPreset : response.avatarPreset,
@@ -4063,6 +4066,7 @@ public final class IMConversationStore {
     ) -> Bool {
         response.title == nil
             && response.directMessagingState == nil
+            && response.groupLifecycleState == nil
             && response.directPeer == nil
             && response.notice == nil
             && response.avatarPreset == nil
@@ -4100,6 +4104,10 @@ public final class IMConversationStore {
             kind: conversationKind,
             directMessagingState: Self.directMessagingState(
                 from: response.directMessagingState,
+                conversationKind: conversationKind
+            ),
+            groupLifecycleState: Self.groupLifecycleState(
+                from: response.groupLifecycleState,
                 conversationKind: conversationKind
             ),
             directPeer: directPeer,
@@ -4469,6 +4477,16 @@ public final class IMConversationStore {
         }
 
         return state
+    }
+
+    nonisolated private static func groupLifecycleState(
+        from rawValue: String?,
+        conversationKind: IMConversationKind
+    ) -> IMGroupLifecycleState? {
+        guard conversationKind == .group else {
+            return nil
+        }
+        return IMGroupLifecycleState(rawValue: rawValue ?? "active") ?? .active
     }
 
     nonisolated private static func directPeer(

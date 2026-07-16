@@ -31,6 +31,9 @@ struct ReportResponse: Content, Equatable {
     let status: String
     let handledNote: String?
     let messageSnapshotJSON: String?
+    let assignedReviewerUserID: UUID?
+    let assignedReviewerActor: String?
+    let assignedAt: Date?
     let createdAt: Date
 }
 
@@ -50,6 +53,7 @@ struct ReportPageResponse: Content, Equatable {
 struct ReportUpdateRequest: Content {
     let status: String
     let handledNote: String?
+    let resolutionCategory: String?
 }
 
 struct ReportMessageSnapshot: Codable, Equatable, Sendable {

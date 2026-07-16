@@ -9,6 +9,209 @@ import Vapor
 import VaporTesting
 
 extension IMServerTests {
+    @Test("Remote node realtime ingress rejects invalid routes and does not re-forward")
+    func remoteNodeRealtimeIngressValidatesRoute() async throws {
+        try await withApp(configure: configure) { app in
+            app.imNodeID = "node-b"
+            app.nodeDispatchConfiguration = IMNodeDispatchConfiguration(
+                mode: .http,
+                endpointsByNodeID: ["node-b": "https://node-b.internal"],
+                sharedSecret: "node-realtime-ingress-test-secret"
+            )
+            let envelope = NodeMessageDispatchEnvelope(
+                requestID: UUID(),
+                payload: .kickUser(userID: UUID(), reason: .duplicateConnection, message: "test")
+            )
+
+            func send(originNodeID: String, targetNodeID: String, secret: String) async throws -> HTTPStatus {
+                var status: HTTPStatus = .internalServerError
+                try await app.testing().test(.POST, "internal/im/realtime/node-dispatch", beforeRequest: { request in
+                    request.headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: secret)
+                    try request.content.encode(
+                        IMNodeRealtimeDispatchRequest(
+                            originNodeID: originNodeID,
+                            targetNodeID: targetNodeID,
+                            expiresAtEpochSeconds: Int(Date().timeIntervalSince1970) + 30,
+                            envelope: envelope
+                        )
+                    )
+                }, afterResponse: { response async in
+                    status = response.status
+                })
+                return status
+            }
+
+            let validStatus = try await send(
+                originNodeID: "node-a",
+                targetNodeID: "node-b",
+                secret: "node-realtime-ingress-test-secret"
+            )
+            let loopStatus = try await send(
+                originNodeID: "node-b",
+                targetNodeID: "node-b",
+                secret: "node-realtime-ingress-test-secret"
+            )
+            let invalidSecretStatus = try await send(
+                originNodeID: "node-a",
+                targetNodeID: "node-b",
+                secret: "wrong-secret"
+            )
+            #expect(validStatus == .noContent)
+            #expect(loopStatus == .badGateway)
+            #expect(invalidSecretStatus == .unauthorized)
+        }
+    }
+
+    @Test("HTTP node dispatch targets configured node ingress")
+    func httpNodeDispatchTargetsConfiguredNode() async throws {
+        let app = try await Application.make(.testing)
+        try await configure(app)
+        app.imNodeID = "node-a"
+        app.nodeDispatchConfiguration = IMNodeDispatchConfiguration(
+            mode: .http,
+            endpointsByNodeID: ["node-b": "https://node-b.internal"],
+            sharedSecret: "node-dispatch-test-secret"
+        )
+        let client = RecordingHTTPClient(eventLoop: app.eventLoopGroup.next())
+        app.clients.use { _ in client }
+        let dispatchService = HTTPNodeMessageDispatchService(configuration: app.nodeDispatchConfiguration)
+        let envelope = NodeMessageDispatchEnvelope(
+            requestID: UUID(),
+            payload: .kickUser(userID: UUID(), reason: .duplicateConnection, message: "test")
+        )
+
+        try await dispatchService.start(app: app)
+        try await dispatchService.dispatch(envelope, toNodeID: "node-b")
+
+        let requests = client.requests()
+        #expect(requests.count == 1)
+        guard let request = requests.first else {
+            Issue.record("Expected one remote node realtime request.")
+            await dispatchService.shutdown()
+            try await app.asyncShutdown()
+            return
+        }
+        #expect(request.method == .POST)
+        #expect(request.url.path == "/internal/im/realtime/node-dispatch")
+        #expect(request.headers.first(name: "X-IM-Internal-Secret") == "node-dispatch-test-secret")
+        let forwarded = try request.content.decode(IMNodeRealtimeDispatchRequest.self)
+        #expect(forwarded.originNodeID == "node-a")
+        #expect(forwarded.targetNodeID == "node-b")
+        #expect(forwarded.envelope.requestID == envelope.requestID)
+
+        await dispatchService.shutdown()
+        try await app.asyncShutdown()
+    }
+
+    @Test("Remote Cell realtime ingress rejects invalid routes and does not re-forward")
+    func remoteCellRealtimeIngressValidatesRoute() async throws {
+        try await withApp(configure: configure) { app in
+            app.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-b")
+            app.cellIngressConfiguration = IMCellIngressConfiguration(
+                endpointsByCellID: ["cell-b": "https://cell-b.internal"],
+                sharedSecret: "cell-realtime-ingress-test-secret"
+            )
+            let envelope = NodeMessageDispatchEnvelope(
+                requestID: UUID(),
+                payload: .kickUser(userID: UUID(), reason: .duplicateConnection, message: "test")
+            )
+
+            func send(originCellID: String, targetCellID: String, secret: String) async throws -> HTTPStatus {
+                var status: HTTPStatus = .internalServerError
+                try await app.testing().test(.POST, "internal/im/realtime/dispatch", beforeRequest: { request in
+                    request.headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: secret)
+                    try request.content.encode(
+                        IMCellRealtimeDispatchRequest(
+                            originCellID: originCellID,
+                            targetCellID: targetCellID,
+                            hop: 1,
+                            expiresAtEpochSeconds: Int(Date().timeIntervalSince1970) + 30,
+                            envelope: envelope
+                        )
+                    )
+                }, afterResponse: { response async in
+                    status = response.status
+                })
+                return status
+            }
+
+            let validStatus = try await send(
+                originCellID: "cell-a",
+                targetCellID: "cell-b",
+                secret: "cell-realtime-ingress-test-secret"
+            )
+            let loopStatus = try await send(
+                originCellID: "cell-b",
+                targetCellID: "cell-b",
+                secret: "cell-realtime-ingress-test-secret"
+            )
+            let invalidSecretStatus = try await send(
+                originCellID: "cell-a",
+                targetCellID: "cell-b",
+                secret: "wrong-secret"
+            )
+            #expect(validStatus == .noContent)
+            #expect(loopStatus == .badGateway)
+            #expect(invalidSecretStatus == .unauthorized)
+        }
+    }
+
+    @Test("Connection routing plans remote Cell delivery even without remote local nodes")
+    func connectionRoutingPlansRemoteCellDeliveryWithoutRemoteNode() async throws {
+        let app = try await Application.make(.testing)
+        try await configure(app)
+        app.imNodeID = "node-a"
+        app.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-a")
+        app.cellIngressConfiguration = IMCellIngressConfiguration(
+            endpointsByCellID: ["cell-b": "https://cell-b.internal"],
+            sharedSecret: "cross-cell-dispatch-test-secret"
+        )
+        let client = RecordingHTTPClient(eventLoop: app.eventLoopGroup.next())
+        app.clients.use { _ in client }
+
+        let recipientUserID = UUID()
+        let presenceStore = FakePresenceStore()
+        await presenceStore.setUserCellRoutes([recipientUserID: ["cell-b"]])
+        let dispatchService = FakeNodeMessageDispatchService()
+        let routingService = ConnectionRoutingService(
+            app: app,
+            backend: FakeConnectionRoutingBackend(
+                presenceStore: presenceStore,
+                dispatchService: dispatchService
+            )
+        )
+        let payload = imTestDomainEventPayload(
+            eventID: UUID(),
+            conversationID: UUID(),
+            senderUserID: recipientUserID,
+            sequence: 1,
+            text: "cross cell"
+        )
+
+        await routingService.sendDomainEventPayload(payload, toUserIDs: [recipientUserID], requestID: payload.eventID)
+
+        let metrics = await app.routingMetrics.currentSnapshot()
+        #expect(metrics.crossCellDispatchAttemptCount == 1)
+        #expect(metrics.crossCellDispatchSuccessCount == 1)
+        #expect(await dispatchService.dispatches().isEmpty)
+        let requests = client.requests()
+        #expect(requests.count == 1)
+        guard let request = requests.first else {
+            Issue.record("Expected one remote Cell realtime request.")
+            try await app.asyncShutdown()
+            return
+        }
+        #expect(request.method == .POST)
+        #expect(request.url.path == "/internal/im/realtime/dispatch")
+        #expect(request.headers.first(name: "X-IM-Internal-Secret") == "cross-cell-dispatch-test-secret")
+        let forwarded = try request.content.decode(IMCellRealtimeDispatchRequest.self)
+        #expect(forwarded.originCellID == "cell-a")
+        #expect(forwarded.targetCellID == "cell-b")
+        #expect(forwarded.hop == 1)
+        #expect(forwarded.envelope.targetUserIDs == [recipientUserID])
+        try await app.asyncShutdown()
+    }
+
     @Test("Two TCP devices receive canonical message echo when one device sends")
     func twoTCPDevicesReceiveCanonicalMessageEchoFromSender() async throws {
         try await withApp(configure: { app in
@@ -22,6 +225,8 @@ extension IMServerTests {
                 heartbeatInterval: 30,
                 idleTimeout: 90,
                 listenBacklog: 1024,
+                maximumConnectionCount: 0,
+                maximumNewConnectionsPerSecond: 0,
                 maxFrameBytes: 64 * 1024,
                 writeBufferWaterMarkLow: 512 * 1024,
                 writeBufferWaterMarkHigh: 1024 * 1024,
@@ -126,6 +331,8 @@ extension IMServerTests {
                 heartbeatInterval: 30,
                 idleTimeout: 90,
                 listenBacklog: 1024,
+                maximumConnectionCount: 0,
+                maximumNewConnectionsPerSecond: 0,
                 maxFrameBytes: 64 * 1024,
                 writeBufferWaterMarkLow: 512 * 1024,
                 writeBufferWaterMarkHigh: 1024 * 1024,
@@ -234,6 +441,8 @@ extension IMServerTests {
                 heartbeatInterval: 30,
                 idleTimeout: 90,
                 listenBacklog: 1024,
+                maximumConnectionCount: 0,
+                maximumNewConnectionsPerSecond: 0,
                 maxFrameBytes: 64 * 1024,
                 writeBufferWaterMarkLow: 512 * 1024,
                 writeBufferWaterMarkHigh: 1024 * 1024,
@@ -359,6 +568,8 @@ extension IMServerTests {
                 heartbeatInterval: 30,
                 idleTimeout: 90,
                 listenBacklog: 1024,
+                maximumConnectionCount: 0,
+                maximumNewConnectionsPerSecond: 0,
                 maxFrameBytes: 64 * 1024,
                 writeBufferWaterMarkLow: 512 * 1024,
                 writeBufferWaterMarkHigh: 1024 * 1024,
@@ -436,6 +647,8 @@ extension IMServerTests {
                 heartbeatInterval: 30,
                 idleTimeout: 0.1,
                 listenBacklog: 1024,
+                maximumConnectionCount: 0,
+                maximumNewConnectionsPerSecond: 0,
                 maxFrameBytes: 64 * 1024,
                 writeBufferWaterMarkLow: 512 * 1024,
                 writeBufferWaterMarkHigh: 1024 * 1024,
@@ -4639,6 +4852,8 @@ private actor FakePresenceStore: PresenceStore {
 
     private var userRoutes: [UUID: Set<String>] = [:]
     private var sessionRoutes: [UUID: Set<String>] = [:]
+    private var userCellRoutes: [UUID: Set<String>] = [:]
+    private var sessionCellRoutes: [UUID: Set<String>] = [:]
     private var activeConversationRoutes: [UUID: [UUID: Set<String>]] = [:]
     private var activeConversationActivations: [(conversationID: UUID, userID: UUID)] = []
     private var activeConversationDeactivations: [(conversationID: UUID, userID: UUID)] = []
@@ -4655,6 +4870,14 @@ private actor FakePresenceStore: PresenceStore {
 
     func setSessionRoutes(_ routes: [UUID: Set<String>]) {
         sessionRoutes = routes
+    }
+
+    func setUserCellRoutes(_ routes: [UUID: Set<String>]) {
+        userCellRoutes = routes
+    }
+
+    func setSessionCellRoutes(_ routes: [UUID: Set<String>]) {
+        sessionCellRoutes = routes
     }
 
     func setActiveConversationRoutes(_ routes: [UUID: [UUID: Set<String>]]) {
@@ -4695,6 +4918,8 @@ private actor FakePresenceStore: PresenceStore {
     func deactivatePresence(forUserID userID: UUID) async throws {}
     func activatePresence(forSessionID sessionID: UUID, userID: UUID) async throws {}
     func deactivatePresence(forSessionID sessionID: UUID, userID: UUID) async throws {}
+    func refreshPresence(forUserID userID: UUID) async throws {}
+    func refreshPresence(forSessionID sessionID: UUID, userID: UUID) async throws {}
     func activateConversationPresence(conversationID: UUID, userID: UUID) async throws {
         activeConversationActivations.append((conversationID: conversationID, userID: userID))
     }
@@ -4735,6 +4960,14 @@ private actor FakePresenceStore: PresenceStore {
         return Dictionary(uniqueKeysWithValues: sessionIDs.map { ($0, sessionRoutes[$0] ?? []) })
     }
 
+    func routeCellIDs(forUserIDs userIDs: [UUID]) async throws -> [UUID: Set<String>] {
+        Dictionary(uniqueKeysWithValues: userIDs.map { ($0, userCellRoutes[$0] ?? []) })
+    }
+
+    func routeCellIDs(forSessionIDs sessionIDs: [UUID]) async throws -> [UUID: Set<String>] {
+        Dictionary(uniqueKeysWithValues: sessionIDs.map { ($0, sessionCellRoutes[$0] ?? []) })
+    }
+
     func activeNodeIDs() async throws -> Set<String> {
         Set(userRoutes.values.flatMap { $0 })
             .union(sessionRoutes.values.flatMap { $0 })
@@ -4744,6 +4977,33 @@ private actor FakePresenceStore: PresenceStore {
 
 private enum FakePresenceStoreError: Error {
     case activeConversationRouteLookupFailed
+}
+
+private final class RecordingHTTPClient: Client, @unchecked Sendable {
+    let eventLoop: any EventLoop
+    private let lock = NSLock()
+    private var recordedRequests: [ClientRequest] = []
+
+    init(eventLoop: any EventLoop) {
+        self.eventLoop = eventLoop
+    }
+
+    func delegating(to eventLoop: any EventLoop) -> any Client {
+        self
+    }
+
+    func send(_ request: ClientRequest) -> EventLoopFuture<ClientResponse> {
+        lock.lock()
+        recordedRequests.append(request)
+        lock.unlock()
+        return eventLoop.makeSucceededFuture(ClientResponse(status: .noContent))
+    }
+
+    func requests() -> [ClientRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedRequests
+    }
 }
 
 private actor FakeNodeMessageDispatchService: NodeMessageDispatchService {

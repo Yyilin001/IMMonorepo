@@ -387,8 +387,11 @@ extension IMServerTests {
                 )
             }
 
-            try await OwnerDomainEventDeliveryConsumer(app: app, sourceDB: app.db)
-                .consumeMessageCreatedRun(envelopes)
+            let consumer = OwnerDomainEventDeliveryConsumer(app: app, sourceDB: app.db)
+            try await consumer.consumeMessageCreatedRun(envelopes)
+            // Replaying the same stream run after a consumer restart must reuse
+            // canonical owner deliveries instead of allocating new cursors.
+            try await consumer.consumeMessageCreatedRun(envelopes)
 
             let deliveryCount = try await OwnerDomainEventDelivery.query(on: app.imSummaryDB).count()
             #expect(deliveryCount == memberUserIDs.count * eventIDs.count)
@@ -677,8 +680,13 @@ extension IMServerTests {
                 deliveryContext: nil
             )
 
-            try await ConversationProjectionConsumer(app: app, sourceDB: app.db).consume(envelope)
-            try await ChangesLogConsumer(app: app, sourceDB: app.db).consume(envelope)
+            let projectionConsumer = ConversationProjectionConsumer(app: app, sourceDB: app.db)
+            let changesLogConsumer = ChangesLogConsumer(app: app, sourceDB: app.db)
+            // A restarted consumer can receive the same stream envelope again.
+            try await projectionConsumer.consume(envelope)
+            try await changesLogConsumer.consume(envelope)
+            try await projectionConsumer.consume(envelope)
+            try await changesLogConsumer.consume(envelope)
 
             for userID in memberUserIDs {
                 let recordID = ConversationUserSummary.recordID(
@@ -707,6 +715,8 @@ extension IMServerTests {
                 let token = try #require(maybeToken)
                 #expect(token.targetToken.isEmpty == false)
             }
+            #expect(try await ConversationUserSummary.query(on: app.imSummaryDB).count() == memberUserIDs.count)
+            #expect(try await ConversationChangesLogEntry.query(on: app.imSummaryDB).count() == memberUserIDs.count)
         }
     }
 
@@ -3580,6 +3590,41 @@ extension IMServerTests {
         }
     }
 
+    @Test("Directory backed shard router uses a bounded LRU cache and records directory metrics")
+    func directoryBackedShardRouterUsesBoundedLRUCache() async throws {
+        try await withApp(configure: configure) { app in
+            app.conversationShardRoutingConfiguration = IMConversationShardRoutingConfiguration(
+                directoryCacheMaxEntries: 2
+            )
+            let directory = CountingConversationDirectory(shardID: "shard-a")
+            let router = DirectoryBackedConversationShardRouter(
+                app: app,
+                shardIDs: ["shard-a", "shard-b"],
+                shardDatabaseIDs: [:],
+                shardReplicaDatabaseIDs: [:],
+                directory: directory
+            )
+            let firstConversationID = UUID()
+            let secondConversationID = UUID()
+            let thirdConversationID = UUID()
+
+            _ = try await router.shardID(forConversationID: firstConversationID)
+            _ = try await router.shardID(forConversationID: secondConversationID)
+            _ = try await router.shardID(forConversationID: firstConversationID)
+            _ = try await router.shardID(forConversationID: thirdConversationID)
+            _ = try await router.shardID(forConversationID: secondConversationID)
+
+            #expect(await directory.lookupCount == 4)
+            let metrics = await app.conversationShardRoutingMetrics.currentSnapshot()
+            #expect(metrics.cacheHitCount == 1)
+            #expect(metrics.cacheMissCount == 4)
+            #expect(metrics.cacheEvictionCount == 2)
+            #expect(metrics.cacheEntryCount == 2)
+            #expect(metrics.cacheMaxEntries == 2)
+            #expect(metrics.directoryLookupCount == 4)
+        }
+    }
+
     @Test("Outbox failure increments retry count")
     func conversationOutboxFailureIncrementsRetryCount() async throws {
         try await withApp(configure: configure) { app in
@@ -3814,8 +3859,13 @@ extension IMServerTests {
     @Test("Outbox relay marks stream publication once per event")
     func conversationOutboxRelayMarksPublishedEvents() async throws {
         try await withApp(configure: configure) { app in
+            let conversationID = UUID()
+            try await app.conversationDirectory.registerConversation(
+                conversationID: conversationID,
+                shardID: "shard-0"
+            )
             let event = try ConversationDomainEvent(
-                conversationID: UUID(),
+                conversationID: conversationID,
                 eventType: .metadataUpdated,
                 payload: .metadataUpdated(recipientUserIDs: [UUID()])
             )
@@ -3850,8 +3900,13 @@ extension IMServerTests {
                 maxRetries: 5,
                 claimTimeoutNanoseconds: 1_000_000_000
             )
+            let conversationID = UUID()
+            try await app.conversationDirectory.registerConversation(
+                conversationID: conversationID,
+                shardID: "shard-0"
+            )
             let event = try ConversationDomainEvent(
-                conversationID: UUID(),
+                conversationID: conversationID,
                 eventType: .metadataUpdated,
                 payload: .metadataUpdated(recipientUserIDs: [UUID()])
             )
