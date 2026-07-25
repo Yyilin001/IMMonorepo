@@ -1,7 +1,7 @@
 # IM V2 实现审计与实施路线图
 
-审计日期：2026-07-25  
-审计基线：`main` 分支、提交 `c02af08` 的 V2-only 工作树。
+审计日期：2026-07-26
+审计基线：`main` 分支的当前 V2-only 工作树。
 结论：**架构方向可行，核心正确性边界已有较好实现；当前不具备生产发布条件。**
 
 本文是实施优先级与验收计划，不替代 [implementation status](implementation-status.md) 的逐项证据登记。
@@ -85,7 +85,11 @@
 1. 完成真实对象存储、扫描 provider、provider cleanup 与媒体滥用/失败回归。
 2. 完成真实 APNs 凭据、Push-enabled profile、用户开关、失效 token 和后台 sync 真机回归。
 3. 完成两台设备的登录、离线发送、断网重连、snapshot reset、撤回/编辑/reaction/receipt、陌生人设置和群成员管理 E2E。
-4. 在 [ADR-012](00-foundation/ADR-012-public-identity-and-discovery.md) 已接受并完成第一阶段的基础上，补齐 profile 同步投影、联系人/会话标题/群成员显示名、无障碍和人工产品验收。
+4. [ADR-012](00-foundation/ADR-012-public-identity-and-discovery.md) 的 direct-profile
+   同步投影、会话标题和群成员显示名已实现：direct room 创建与 snapshot reset
+   只携带对端的有界公开资料，显示名更新通过独立 outbox 按接收者预算增量投递。
+   本阶段剩余的是两台真机的离线/重连 E2E、无障碍和人工产品验收；群成员资料继续
+   仅通过按需目录读取，不能扩展成 roster fan-out。
 
 **完成条件**：普通私聊与中小群在预发布环境有可重复的真机 E2E 套件和故障恢复记录。
 

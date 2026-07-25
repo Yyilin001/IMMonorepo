@@ -17,6 +17,14 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-26: `main` reran the disposable PostgreSQL Server regression
+  (**190 tests / 50 suites**). It includes the direct-profile propagation
+  recovery: a display-name update atomically creates its source outbox row,
+  retries an expired pre-checkpoint lease without duplicating the user-sync
+  record, pages two direct peers under a one-recipient budget, checkpoints only
+  after each target reaches its current shard, and completes without a later
+  replay. This is durable correctness evidence for the direct-contact graph;
+  it is not a multi-device or profile-propagation capacity claim.
 - 2026-07-26: the native client now explicitly owns its foreground realtime
   lifecycle. A scene entering `background` cancels the app-owned connection
   task and stops the TLS runtime; a later `active` scene reuses the signed-in
