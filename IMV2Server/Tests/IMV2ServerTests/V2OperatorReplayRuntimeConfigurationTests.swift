@@ -11,6 +11,9 @@ struct V2OperatorReplayRuntimeConfigurationTests {
         #expect(configuration.authenticator.isAuthorized(bearerToken: values["IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64"]))
         #expect(!configuration.authenticator.isAuthorized(bearerToken: "wrong"))
         #expect(configuration.operatorPrincipal == "oncall-primary")
+        #expect(configuration.accountDisableAuthenticator.isAuthorized(bearerToken: values["IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64"]))
+        #expect(!configuration.accountDisableAuthenticator.isAuthorized(bearerToken: values["IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64"]))
+        #expect(configuration.accountDisableOperatorPrincipal == "account-safety-primary")
         #expect(configuration.userShardStorage.map(\.bucket) == ["users-primary", "users-next"])
     }
 
@@ -26,6 +29,11 @@ struct V2OperatorReplayRuntimeConfigurationTests {
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64")) {
             _ = try V2OperatorReplayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(weakValues))
         }
+        var weakAccountDisableValues = values
+        weakAccountDisableValues["IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64"] = Data(repeating: 1, count: 31).base64EncodedString()
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64")) {
+            _ = try V2OperatorReplayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(weakAccountDisableValues))
+        }
     }
 
     private var values: [String: String] {
@@ -35,6 +43,8 @@ struct V2OperatorReplayRuntimeConfigurationTests {
             "IM_V2_OPERATOR_REPLAY_LISTEN_PORT": "9445",
             "IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64": Data(repeating: 12, count: 32).base64EncodedString(),
             "IM_V2_OPERATOR_REPLAY_PRINCIPAL": "oncall-primary",
+            "IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64": Data(repeating: 13, count: 32).base64EncodedString(),
+            "IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL": "account-safety-primary",
             "IM_V2_USER_SHARD_STORES_JSON": """
             [{"bucket":"users-primary","database_url":"postgres://v2:password@db/im_v2","schema":"im_v2"},
              {"bucket":"users-next","database_url":"postgres://v2:password@db-next/im_v2","schema":"im_v2"}]

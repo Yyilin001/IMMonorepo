@@ -12,6 +12,7 @@ V2 是一条没有历史兼容层的 greenfield 路径。本文档只描述当�
 | 查找已接受或待批准的设计决定 | [ADR register](ADR-REGISTER.md) |
 | 使用 100k 成员配置或准备压测 | [standard 100k contract](09-capacity/standard-100k.md) |
 | 处理 paused durable work | [operator replay runbook](10-operations/durable-work-operator-replay.md) |
+| 执行已批准的单账号禁用 | [account-disable runbook](10-operations/account-disable-runbook.md) |
 | 查看 metrics、告警与尚缺运行证据 | [observability](10-operations/observability.md) |
 | 执行用户分片迁移 | [user-shard migration runbook](10-operations/user-shard-migration-runbook.md) |
 

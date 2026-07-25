@@ -93,6 +93,8 @@ check_example "${repo_root}/IMV2Server/operator-replay.env.example" \
   IM_V2_OPERATOR_REPLAY_LISTEN_PORT \
   IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64 \
   IM_V2_OPERATOR_REPLAY_PRINCIPAL \
+  IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64 \
+  IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL \
   IM_V2_USER_SHARD_STORES_JSON
 
 printf 'V2 runtime environment examples declare every required variable.\n'

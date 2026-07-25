@@ -26,6 +26,12 @@ Accepted — 2026-07-24
   变更在同一 PostgreSQL 事务中记录审计事实。审计只保存结果、时间、请求的
   device ID 与已知的 user ID；不得保存 account handle、密码、密码 hash、断言
   或网络转发头。已锁定请求不额外写入逐请求审计，避免攻击流量放大审计存储。
+- 人工禁用是不可在此接口恢复的账户级 credential fence：独立、loopback-only
+  operator 凭据一次只能禁用一个 UUID 用户，理由只能取封闭原因码。事务先持有与
+  credential 签发/刷新相同的账户状态锁，再记录操作 ID、operator principal、
+  原因和时间，撤销该用户全部设备的 access/refresh credential，并为每台设备写入
+  gateway 撤销事件。已禁用用户的密码查询与新 credential 签发均失败；旧的短期
+  assertion 也不能在禁用后换取新凭据。
 
 ## 后果
 
@@ -36,5 +42,6 @@ Accepted — 2026-07-24
 - 实际部署必须提供可审计的 WebAuthn 验证器和挑战一次性存储；在此之前
   不得把 Passkey 登录入口暴露为生产可用。
 - 公网 HTTPS 边缘仍必须在可信客户端/IP 维度实施独立限流，并为现有密码审计
-  确定访问权限、保留、账户恢复和人工禁用政策；不能用可伪造的转发头代替边缘身份。
+  确定访问权限、保留和账户恢复政策。账户禁用的实际 bastion/mTLS 审批、独立
+  secret 管理和演练记录也是发布前证据；不能用可伪造的转发头代替边缘身份。
 - SSO 可以以后作为另一种账户因子接入，但不作为首发唯一入口。

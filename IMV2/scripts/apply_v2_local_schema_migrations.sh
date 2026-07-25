@@ -114,6 +114,9 @@ migration_marker() {
     0018_account_edge_client_rate_limit.sql)
       printf "%s" "SELECT to_regclass('im_v2.account_edge_client_rate_limits') IS NOT NULL"
       ;;
+    0019_account_disable.sql)
+      printf "%s" "SELECT to_regclass('im_v2.account_disables') IS NOT NULL"
+      ;;
     *)
       printf 'missing local migration marker for %s; add one before using a retained volume.\n' "$1" >&2
       return 1

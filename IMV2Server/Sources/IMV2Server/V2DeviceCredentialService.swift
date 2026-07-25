@@ -185,6 +185,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             guard let sql = transaction as? any SQLDatabase else { throw V2DeviceCredentialServiceError.unavailable }
             let userUUID = try credentialUUID(request.userID)
             let deviceUUID = try credentialUUID(request.deviceID)
+            try await lockAccountState(sql, userID: userUUID)
+            guard !(try await isAccountDisabled(sql, userID: userUUID)) else { return .deviceUnavailable }
             try await lock(sql, key: "register:" + deviceUUID.uuidString)
 
             if let prior = try await credentialOperation(sql, deviceID: deviceUUID, operationID: request.operationID) {
@@ -221,6 +223,11 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             let userUUID = try credentialUUID(request.userID)
             let deviceUUID = try credentialUUID(request.deviceID)
             let incomingRefreshHMAC = tokenHMACKey.digest(request.refreshCredential)
+            try await lockAccountState(sql, userID: userUUID)
+            guard !(try await isAccountDisabled(sql, userID: userUUID)) else {
+                try await revokeDevice(sql, userID: userUUID, deviceID: deviceUUID, at: issuedAt)
+                return .terminalRejection
+            }
             try await lock(sql, key: "refresh:" + deviceUUID.uuidString)
 
             if let prior = try await credentialOperation(sql, deviceID: deviceUUID, operationID: request.operationID) {
@@ -295,6 +302,14 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
 
     private func lock(_ sql: any SQLDatabase, key: String) async throws {
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
+    }
+
+    private func lockAccountState(_ sql: any SQLDatabase, userID: UUID) async throws {
+        try await lock(sql, key: "account-state:" + userID.uuidString)
+    }
+
+    private func isAccountDisabled(_ sql: any SQLDatabase, userID: UUID) async throws -> Bool {
+        try await sql.raw("SELECT 1 FROM im_v2.account_disables WHERE user_id = \(bind: userID)").first() != nil
     }
 
     private func replayContext(userID: UserID, deviceID: DeviceID, operationID: UUID) -> Data {

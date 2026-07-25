@@ -2343,6 +2343,81 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("account disable fences credential issuance, revokes every device, and preserves one audit fact")
+    func accountDisableRevokesCredentialsAndFencesFutureIssue() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2AccountDisableError.unavailable }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let tokenKey = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 0x41, count: 32))
+            let replayKey = try V2CredentialReplayEnvelopeKey(rawBytes: Data(repeating: 0x42, count: 32))
+            let issuer = try V2PostgresDeviceCredentialService(
+                database: app.db(.psql), tokenHMACKey: tokenKey, replayEnvelopeKey: replayKey, now: { now }
+            )
+            let userID = try UserID("00000000-0000-0000-0000-000000000991")
+            let firstDeviceID = try DeviceID("00000000-0000-0000-0000-000000000992")
+            let secondDeviceID = try DeviceID("00000000-0000-0000-0000-000000000993")
+            let firstRegistration = V2TrustedDeviceRegistration(userID: userID, deviceID: firstDeviceID, operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000994")!)
+            let secondRegistration = V2TrustedDeviceRegistration(userID: userID, deviceID: secondDeviceID, operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000995")!)
+            guard case .issued(let firstCredentials) = try await issuer.register(firstRegistration),
+                  case .issued(let secondCredentials) = try await issuer.register(secondRegistration)
+            else { Issue.record("expected initial device credentials"); return }
+            let userUUID = try #require(UUID(uuidString: userID.rawValue))
+            let passwordHash = String(repeating: "x", count: 60)
+            try await sql.raw("INSERT INTO im_v2.account_password_credentials (account_handle, user_id, password_hash, created_at) VALUES ('account991', \(bind: userUUID), \(bind: passwordHash), \(bind: now))").run()
+
+            let disable = try V2PostgresAccountDisableService(database: app.db(.psql), operatorPrincipal: "account-safety-primary", now: { now.addingTimeInterval(1) })
+            let command = try V2AccountDisableCommand(
+                userID: userID, operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000996")!, reason: .credentialCompromise
+            )
+            #expect(try await disable.disable(command) == .disabled(disabledAt: now.addingTimeInterval(1)))
+            #expect(try await disable.disable(command) == .idempotent(disabledAt: now.addingTimeInterval(1)))
+            let conflictingOperation = try V2AccountDisableCommand(
+                userID: try UserID("00000000-0000-0000-0000-000000000999"), operationID: command.operationID, reason: .credentialCompromise
+            )
+            await #expect(throws: V2AccountDisableError.operationConflict) {
+                _ = try await disable.disable(conflictingOperation)
+            }
+            let otherOperation = try V2AccountDisableCommand(userID: userID, operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000997")!, reason: .policyEnforcement)
+            #expect(try await disable.disable(otherOperation) == .alreadyDisabled(disabledAt: now.addingTimeInterval(1)))
+
+            let gateway = V2PostgresGatewayAuthenticator(database: app.db(.psql), tokenKey: tokenKey, now: { now.addingTimeInterval(2) })
+            await #expect(throws: V2GatewayAuthenticationError.unauthenticated) {
+                try await gateway.authenticate(accessToken: firstCredentials.accessToken, deviceID: firstDeviceID)
+            }
+            await #expect(throws: V2GatewayAuthenticationError.unauthenticated) {
+                try await gateway.authenticate(accessToken: secondCredentials.accessToken, deviceID: secondDeviceID)
+            }
+            #expect(try await issuer.register(firstRegistration) == .deviceUnavailable)
+            let refresh = try V2DeviceCredentialRefresh(
+                userID: userID, deviceID: firstDeviceID, refreshCredential: firstCredentials.refreshCredential,
+                operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000998")!
+            )
+            #expect(try await issuer.refresh(refresh) == .terminalRejection)
+            #expect(try await V2PostgresPasswordAccountStore(database: app.db(.psql)).passwordCredential(for: "account991") == nil)
+            #expect(try await count("im_v2.account_disables", on: sql) == 1)
+            #expect(try await count("im_v2.device_revocation_events", on: sql) == 2)
+            #expect(try await count("im_v2.auth_devices WHERE revoked_at IS NULL", on: sql) == 0)
+            #expect(try await count("im_v2.device_access_tokens WHERE revoked_at IS NULL", on: sql) == 0)
+            #expect(try await count("im_v2.device_refresh_sessions WHERE revoked_at IS NULL", on: sql) == 0)
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("account HTTP retries replay one durable credential result after response loss")
     func deviceCredentialHTTPRetriesReplayPersistedResult() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),

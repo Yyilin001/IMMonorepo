@@ -49,7 +49,7 @@
 
 设备凭证刷新、注销与 Keychain 边界设计良好；当前可部署的账户因子却只有密码 fallback。WebAuthn 的 challenge 生命周期、RP ID/origin 校验、签名 counter、credential 注册、撤销与审计未形成生产闭环。
 
-**建议**：把账户服务作为独立安全项目完成，而不是继续在 gateway 内追加路由。完成第三方审计或至少安全评审后，再将 Passkey 设为默认入口；密码 fallback 已有跨副本、按 account handle 持久化的失败窗口与锁定，并已把注册、成功和已执行 bcrypt 的失败结果与相应状态同事务审计（不保留 handle、密码、verifier 或转发 IP）。账户服务现已在 HTTPS edge proof 之后对每个有效 edge-derived client address 执行跨副本固定窗口预算，数据库只保留独立 HMAC key 的派生值并会有界清理过期窗口。仍必须批准生产 trusted-proxy/DDoS 拓扑、审计访问/保留、恢复和人工禁用政策。
+**建议**：把账户服务作为独立安全项目完成，而不是继续在 gateway 内追加路由。完成第三方审计或至少安全评审后，再将 Passkey 设为默认入口；密码 fallback 已有跨副本、按 account handle 持久化的失败窗口与锁定，并已把注册、成功和已执行 bcrypt 的失败结果与相应状态同事务审计（不保留 handle、密码、verifier 或转发 IP）。账户服务现已在 HTTPS edge proof 之后对每个有效 edge-derived client address 执行跨副本固定窗口预算，数据库只保留独立 HMAC key 的派生值并会有界清理过期窗口。已实现的单账号禁用会以独立 operator 凭据原子撤销全部设备凭据、阻断旧断言再签发并发出 gateway 撤销事件；仍必须批准生产 trusted-proxy/DDoS 拓扑、审计访问/保留、恢复政策，以及禁用操作的 bastion/mTLS 审批和演练。
 
 ### 2.4 媒体与 Push 不能按“接口已存在”计入产品完成度
 
@@ -75,7 +75,7 @@
 
 1. 选择生产部署平台并交付 V2-only IaC/Compose/Kubernetes 清单；account、gateway、operator、metrics 分别最小权限部署。
 2. 接入 secret manager、TLS 证书轮换、数据库 migration runner、备份/WAL 策略和只读 metrics scrape。
-3. 完成 WebAuthn verifier 与 one-time challenge/counter store；为密码 fallback 批准生产 trusted-proxy/DDoS 边界、审计访问/保留和恢复/禁用策略。
+3. 完成 WebAuthn verifier 与 one-time challenge/counter store；为密码 fallback 批准生产 trusted-proxy/DDoS 边界、审计访问/保留和恢复策略，并完成账号禁用的 bastion/mTLS 审批演练。
 4. 将 operator 放在 bastion 或 mTLS proxy 后，完成一次 paused replay 演练和审计留存验证。
 
 **完成条件**：预发布环境无 localhost/开发密钥，能执行注册、设备凭证、重连、replay、撤销和回滚演练。

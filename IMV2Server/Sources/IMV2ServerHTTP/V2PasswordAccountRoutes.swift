@@ -68,7 +68,7 @@ public struct V2PostgresPasswordAccountStore: Sendable {
     public func passwordCredential(for accountHandle: String) async throws -> V2PasswordCredential? {
         let handle = try canonicalAccountHandle(accountHandle)
         guard let sql = database as? any SQLDatabase else { throw V2PasswordAccountStoreError.unavailable }
-        guard let row = try await sql.raw("SELECT user_id, password_hash FROM im_v2.account_password_credentials WHERE account_handle = \(bind: handle)").first(decoding: PasswordCredentialRow.self),
+        guard let row = try await sql.raw("SELECT credential.user_id, credential.password_hash FROM im_v2.account_password_credentials AS credential LEFT JOIN im_v2.account_disables AS disabled ON disabled.user_id = credential.user_id WHERE credential.account_handle = \(bind: handle) AND disabled.user_id IS NULL").first(decoding: PasswordCredentialRow.self),
               let userID = try? UserID(row.userID.uuidString)
         else { return nil }
         return .init(userID: userID, passwordHash: row.passwordHash)

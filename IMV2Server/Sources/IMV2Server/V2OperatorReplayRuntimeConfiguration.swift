@@ -21,6 +21,8 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
     public let listener: V2OperatorReplayListenerConfiguration
     public let authenticator: V2OperatorReplayBearerAuthenticator
     public let operatorPrincipal: String
+    public let accountDisableAuthenticator: V2OperatorReplayBearerAuthenticator
+    public let accountDisableOperatorPrincipal: String
     public let userShardStorage: [V2UserShardStorageConfiguration]
 
     public init(environment: any V2RuntimeEnvironment) throws {
@@ -40,6 +42,17 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_OPERATOR_REPLAY_PRINCIPAL")
         }
         operatorPrincipal = principal
+        let accountDisableToken = try Self.required("IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64", environment: environment)
+        do {
+            accountDisableAuthenticator = try .init(base64EncodedBearerToken: accountDisableToken)
+        } catch {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64")
+        }
+        let accountDisablePrincipal = try Self.required("IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL", environment: environment)
+        guard V2DurableWorkOperatorReplayService.isValidPrincipal(accountDisablePrincipal) else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL")
+        }
+        accountDisableOperatorPrincipal = accountDisablePrincipal
         userShardStorage = try V2UserShardStorageConfiguration.parseRegistryJSON(
             Self.required("IM_V2_USER_SHARD_STORES_JSON", environment: environment)
         )

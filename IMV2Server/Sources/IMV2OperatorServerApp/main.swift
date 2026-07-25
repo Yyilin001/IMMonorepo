@@ -61,6 +61,13 @@ enum IMV2OperatorServerApp {
                     )
                 )
             ).register(on: app)
+            V2VaporAccountDisableOperatorRoutes(
+                authenticator: configuration.accountDisableAuthenticator,
+                service: try V2PostgresAccountDisableService(
+                    database: database,
+                    operatorPrincipal: configuration.accountDisableOperatorPrincipal
+                )
+            ).register(on: app)
             try await app.startup()
             app.logger.notice("IM V2 durable-work operator service bound", metadata: [
                 "host": "\(configuration.listener.host)",
