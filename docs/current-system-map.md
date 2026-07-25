@@ -39,8 +39,12 @@ flowchart LR
 - 每个群成员目录条目都只携带公开 `@handle` 与显示名，并由 active-member 授权；App
   不显示内部 `user_id`。该资料随单个有界页面读取，不进入群 roster 的 fan-out 或 sync
   投影。通过 `@handle` 显式打开私聊时，客户端把该次已授权解析的资料和 direct room
-  绑定到本机 SQLite，用于会话列表与详情标题；未知资料只显示“会话”。跨设备资料更新
-  的 sync projection 尚未实现。
+  绑定到本机 SQLite，用于会话列表与详情标题；未知资料只显示“会话”。仅对 active direct
+  room，snapshot v11 会重建权威的对方公开资料；打开私聊时也会写入双方各一条有界资料
+  投影。显示名变更与来源事件在同一 PostgreSQL 事务内写入控制面 outbox，gateway 按接收者
+  预算投递、按 checkpoint 恢复，并在迁移 forwarding 期间镜像到目标 user shard。ClientKit
+  始终优先使用该服务端同步资料，而非设备本地的显式查询缓存。群 roster 仍保持按需读取，
+  不做资料 fan-out。
 - 非好友可以发起私聊，但陌生人消息在服务端持久化事务中按接收方设置和窗口限额准入。默认基线为每个发送者 24 小时 3 条；接收方可关闭此类消息。
 - 撤回、编辑、reaction、read receipt、mute/freeze 与 moderation 都通过独立、幂等、可同步的命令/投影处理；UI 不以网络响应直接覆盖同步投影。
 
