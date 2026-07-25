@@ -4,7 +4,7 @@
 [当前系统地图](../../docs/current-system-map.md)。本文件把“实现存在”与“可作为
 发布证据”分开记录；未特别说明的本地或 CI 结果不是生产批准。
 
-Last reviewed: 2026-07-25
+Last reviewed: 2026-07-26
 
 This is an evidence register, not a release approval. “Implemented” means the
 named code path exists and its test target compiles; it does **not** mean a
@@ -17,6 +17,35 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-26: `main` at `31b2be1` passed the disposable PostgreSQL Server
+  regression (**190 tests / 50 suites**) after adding the gateway
+  device-revocation startup cursor test. A gateway node ID seen for the first
+  time inserts its cursor at the pre-listener revocation-event watermark, so
+  a scale-out replica with no live sockets does not replay append-only
+  history; an existing cursor is never advanced at startup and therefore
+  keeps crash recovery work. The runtime rejects unbounded/unsafe node IDs,
+  and the regression proves events committed after the watermark remain
+  consumable. This is database and runtime correctness evidence, not a
+  multi-replica capacity result.
+- 2026-07-26: `main` at `704920a` rebuilt the complete local account,
+  gateway and loopback operator stack from a multi-stage Linux image. The
+  final image contains only release runtime artifacts (no server source,
+  SwiftPM checkouts or `.build/repositories`) and measured 1.54 GB on this
+  machine, down from about 2.25 GB for the former runtime image. The black-box
+  local verification passed HTTPS invalid-input handling, password
+  registration/device issuance, shared failure-rate lockout, Push endpoint
+  register/remove, account disable and old-credential rejection, TLS 1.3,
+  and private metrics. This avoids local Docker disk exhaustion during
+  repeated verification; it is not a production container-hardening claim.
+- 2026-07-26: with Xcode 26.6, the `IMApp` Debug app and test bundles built
+  for the generic iOS Simulator. All `IMAppTests` passed on an iPhone 17 /
+  iOS 26.5 arm64 Simulator, and the focused conversation-store, Push-wake and
+  launch UI tests also passed on the dynamically selected compatible
+  simulator. `1286b67` changed the checked-in test workflow to derive the
+  deployment target and choose an available iPhone runtime at or above that
+  target, preventing a host with older installed runtimes from selecting an
+  incompatible simulator. This remains simulator evidence, not real-device
+  Push, passkey or production-network evidence.
 - 2026-07-25: GitHub-hosted Actions is currently unavailable for this private
   repository because GitHub rejected runner assignment for the owner account's
   billing/spending state. The checked-in workflow remains an optional
