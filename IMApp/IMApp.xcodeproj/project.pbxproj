@@ -255,6 +255,7 @@
 /* Begin PBXShellScriptBuildPhase section */
 		1BADBC3D2F73859E00E89B24 /* Validate Release Network Configuration */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
@@ -267,9 +268,9 @@
 			name = "Validate Release Network Configuration";
 			outputFileListPaths = (
 			);
-			// This is a security gate over build settings. It intentionally has no
-			// declared output so Xcode reruns it when a caller changes a Release
-			// configuration in an otherwise incremental derived-data build.
+			// This is a security gate over build settings. It intentionally runs on
+			// every build so a caller cannot bypass Release validation through an
+			// otherwise incremental derived-data build.
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
