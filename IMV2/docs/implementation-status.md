@@ -39,10 +39,13 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   stopped connection. ClientKit's full local package suite passed (**119 tests
   / 26 suites**) including stop-then-reconnect and handshake-cancellation
   regressions, and the generic iOS Simulator app/test-bundle build passed with
-  Xcode 26.6. A subsequent simulator execution could not start because the
-  local CoreSimulator service reported `Data Migration Failed` and a debugger
-  version-store error before tests launched; this is recorded as host tooling
-  failure, not as iOS test evidence.
+  Xcode 26.6. At `8401b2b`, all **32** focused
+  `V2ConversationStoreTests` passed on an iPhone 17 / iOS 26.2 arm64
+  Simulator, including stale-refresh suppression and cancellation checks that
+  prevent direct/group creation from continuing after a non-cooperative
+  identity-directory response. The earlier CoreSimulator migration failure is
+  therefore not the current local test blocker; this remains simulator
+  evidence, not a signed-device or production-network result.
 - 2026-07-26: `main` at `31b2be1` passed the disposable PostgreSQL Server
   regression (**190 tests / 50 suites**) after adding the gateway
   device-revocation startup cursor test. A gateway node ID seen for the first
