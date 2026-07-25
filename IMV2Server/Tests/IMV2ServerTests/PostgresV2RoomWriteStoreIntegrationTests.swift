@@ -7,6 +7,7 @@ import IMV2ServerHTTP
 import SQLKit
 import Testing
 import Vapor
+import VaporTesting
 
 @Suite("V2 PostgreSQL room write", .serialized)
 struct PostgresV2RoomWriteStoreIntegrationTests {
@@ -2301,6 +2302,110 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.device_refresh_sessions", on: sql) == 1)
             #expect(try await count("im_v2.device_credential_operations", on: sql) == 2)
             #expect(try await count("im_v2.device_revocation_events", on: sql) == 1)
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run(); try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown(); throw error
+        }
+    }
+
+    @Test("account HTTP retries replay one durable credential result after response loss")
+    func deviceCredentialHTTPRetriesReplayPersistedResult() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_100)
+            let tokenKey = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 0x31, count: 32))
+            let replayKey = try V2CredentialReplayEnvelopeKey(rawBytes: Data(repeating: 0x32, count: 32))
+            let assertionIssuer = try V2HMACAccountAssertionIssuer(rawKey: Data(repeating: 0x33, count: 32), now: { now })
+            let issuer = try V2PostgresDeviceCredentialService(
+                database: app.db(.psql),
+                tokenHMACKey: tokenKey,
+                replayEnvelopeKey: replayKey,
+                now: { now }
+            )
+            V2VaporDeviceCredentialRoutes(assertionVerifier: assertionIssuer, issuer: issuer).register(on: app)
+
+            let userID = try UserID("00000000-0000-0000-0000-000000000211")
+            let deviceID = try DeviceID("00000000-0000-0000-0000-000000000212")
+            let registrationOperationID = UUID(uuidString: "00000000-0000-0000-0000-000000000213")!
+            let registration = V2DeviceCredentialIssueHTTPRequest(
+                accountAssertion: try assertionIssuer.issue(userID: userID, deviceID: deviceID),
+                deviceID: deviceID.rawValue,
+                operationID: registrationOperationID
+            )
+
+            // Model a client that lost the first successful response: the
+            // second identical request is the only response it observes.
+            var firstRegistration: V2DeviceCredentialIssueHTTPResponse?
+            try await app.testing().test(.POST, "v2/device-credentials", beforeRequest: { request in
+                try request.content.encode(registration)
+            }) { response async in
+                #expect(response.status == .ok)
+                #expect(response.headers.first(name: .cacheControl) == "no-store")
+                expectContent(V2DeviceCredentialIssueHTTPResponse.self, response) { firstRegistration = $0 }
+            }
+            var replayedRegistration: V2DeviceCredentialIssueHTTPResponse?
+            try await app.testing().test(.POST, "v2/device-credentials", beforeRequest: { request in
+                try request.content.encode(registration)
+            }) { response async in
+                #expect(response.status == .ok)
+                #expect(response.headers.first(name: .cacheControl) == "no-store")
+                expectContent(V2DeviceCredentialIssueHTTPResponse.self, response) { replayedRegistration = $0 }
+            }
+            let initial = try #require(firstRegistration)
+            let replayedInitial = try #require(replayedRegistration)
+            #expect(replayedInitial.userID == initial.userID)
+            #expect(replayedInitial.deviceID == initial.deviceID)
+            #expect(replayedInitial.accessToken == initial.accessToken)
+            #expect(replayedInitial.accessTokenExpiresAtMilliseconds == initial.accessTokenExpiresAtMilliseconds)
+            #expect(replayedInitial.refreshCredential == initial.refreshCredential)
+
+            let refreshOperationID = UUID(uuidString: "00000000-0000-0000-0000-000000000214")!
+            let refresh = V2DeviceCredentialRefreshHTTPRequest(
+                userID: initial.userID,
+                deviceID: initial.deviceID,
+                refreshCredential: initial.refreshCredential,
+                operationID: refreshOperationID
+            )
+            var firstRefresh: V2DeviceCredentialIssueHTTPResponse?
+            try await app.testing().test(.POST, "v2/device-credentials/refresh", beforeRequest: { request in
+                try request.content.encode(refresh)
+            }) { response async in
+                #expect(response.status == .ok)
+                #expect(response.headers.first(name: .cacheControl) == "no-store")
+                expectContent(V2DeviceCredentialIssueHTTPResponse.self, response) { firstRefresh = $0 }
+            }
+            var replayedRefresh: V2DeviceCredentialIssueHTTPResponse?
+            try await app.testing().test(.POST, "v2/device-credentials/refresh", beforeRequest: { request in
+                try request.content.encode(refresh)
+            }) { response async in
+                #expect(response.status == .ok)
+                #expect(response.headers.first(name: .cacheControl) == "no-store")
+                expectContent(V2DeviceCredentialIssueHTTPResponse.self, response) { replayedRefresh = $0 }
+            }
+            let successor = try #require(firstRefresh)
+            let replayedSuccessor = try #require(replayedRefresh)
+            #expect(successor.accessToken != initial.accessToken)
+            #expect(successor.refreshCredential != initial.refreshCredential)
+            #expect(replayedSuccessor.accessToken == successor.accessToken)
+            #expect(replayedSuccessor.accessTokenExpiresAtMilliseconds == successor.accessTokenExpiresAtMilliseconds)
+            #expect(replayedSuccessor.refreshCredential == successor.refreshCredential)
+
+            let gateway = V2PostgresGatewayAuthenticator(database: app.db(.psql), tokenKey: tokenKey, now: { now })
+            #expect(try await gateway.authenticate(accessToken: successor.accessToken, deviceID: deviceID) == userID)
+            #expect(try await count("im_v2.auth_devices", on: sql) == 1)
+            #expect(try await count("im_v2.device_refresh_sessions", on: sql) == 1)
+            #expect(try await count("im_v2.device_credential_operations", on: sql) == 2)
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run(); try await app.asyncShutdown()
         } catch {
             if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
