@@ -257,13 +257,17 @@ private struct ProjectionSupportingSnapshot: Sendable {
     let receipts: [ProjectionReceiptRow]
 
     func canonicalLines() -> [String] {
-        (sequence.map { ["sequence|\($0.nextSequence)"] } ?? [])
-        + inbox.map(ProjectionInboxRow.canonicalLine)
-        + cursors.map(ProjectionCursorRow.canonicalLine)
-        + snapshots.map(ProjectionSnapshotRow.canonicalLine)
-        + pages.map(ProjectionSnapshotPageRow.canonicalLine)
-        + tokens.map(ProjectionTokenRow.canonicalLine)
-        + receipts.map(ProjectionReceiptRow.canonicalLine)
+        // Keep the construction deliberately incremental.  The chained array
+        // concatenation is concise, but exceeds the Linux Swift compiler's
+        // type-checking budget for this generic-heavy module.
+        var lines = sequence.map { ["sequence|\($0.nextSequence)"] } ?? []
+        lines.append(contentsOf: inbox.map(ProjectionInboxRow.canonicalLine))
+        lines.append(contentsOf: cursors.map(ProjectionCursorRow.canonicalLine))
+        lines.append(contentsOf: snapshots.map(ProjectionSnapshotRow.canonicalLine))
+        lines.append(contentsOf: pages.map(ProjectionSnapshotPageRow.canonicalLine))
+        lines.append(contentsOf: tokens.map(ProjectionTokenRow.canonicalLine))
+        lines.append(contentsOf: receipts.map(ProjectionReceiptRow.canonicalLine))
+        return lines
     }
 }
 
