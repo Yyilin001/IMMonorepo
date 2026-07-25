@@ -105,9 +105,21 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource {
                 isOutgoing: message.senderUserID.rawValue == userID
             )
         }
-        let knownRoomIDs = Set(messageItems.map(\.id))
-        let emptyItems: [V2ConversationListItem] = profiles.compactMap { profile in
-            guard !knownRoomIDs.contains(profile.roomID.rawValue) else { return nil }
+        return Self.mergingEmptyProjectionItems(
+            messageItems: messageItems,
+            profiles: profiles,
+            directIdentities: directIdentities
+        )
+    }
+
+    static func mergingEmptyProjectionItems(
+        messageItems: [V2ConversationListItem],
+        profiles: [V2ClientRoomProfileProjection],
+        directIdentities: [V2ClientDirectRoomIdentity]
+    ) -> [V2ConversationListItem] {
+        let messageRoomIDs = Set(messageItems.map(\.id))
+        let emptyProfileItems: [V2ConversationListItem] = profiles.compactMap { profile in
+            guard !messageRoomIDs.contains(profile.roomID.rawValue) else { return nil }
             return V2ConversationListItem(
                 id: profile.roomID.rawValue,
                 title: profile.title,
@@ -116,7 +128,22 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource {
                 isOutgoing: false
             )
         }
-        return (messageItems + emptyItems).sorted { lhs, rhs in
+        let representedRoomIDs = messageRoomIDs.union(emptyProfileItems.map(\.id))
+        let emptyDirectItems: [V2ConversationListItem] = directIdentities.compactMap { identity in
+            // Direct-room profiles are durable sync projections. The local
+            // lookup cache may temporarily be the only available title while
+            // the creation sync is in flight, so it must still make the empty
+            // direct room discoverable without exposing an opaque room ID.
+            guard !representedRoomIDs.contains(identity.roomID.rawValue) else { return nil }
+            return V2ConversationListItem(
+                id: identity.roomID.rawValue,
+                title: identity.publicIdentity.displayName,
+                preview: "暂无消息",
+                lastActivity: identity.updatedAt,
+                isOutgoing: false
+            )
+        }
+        return (messageItems + emptyProfileItems + emptyDirectItems).sorted { lhs, rhs in
             lhs.lastActivity == rhs.lastActivity ? lhs.id < rhs.id : lhs.lastActivity > rhs.lastActivity
         }
     }

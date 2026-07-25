@@ -6,6 +6,25 @@ import Testing
 
 @MainActor
 struct V2ConversationStoreTests {
+    @Test func conversationListShowsAnEmptyDirectRoomWithItsAuthorizedIdentity() throws {
+        let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000e02")
+        let identity = try V2PublicIdentity(
+            userID: .init("00000000-0000-0000-0000-000000000e03"),
+            handle: .init("empty_direct"),
+            displayName: "尚未聊天的用户"
+        )
+        let updatedAt = Date(timeIntervalSince1970: 1_750_000_000)
+        let items = V2GRDBConversationDataSource.mergingEmptyProjectionItems(
+            messageItems: [],
+            profiles: [],
+            directIdentities: [.init(roomID: roomID, publicIdentity: identity, updatedAt: updatedAt)]
+        )
+
+        #expect(items == [
+            .init(id: roomID.rawValue, title: "尚未聊天的用户", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false)
+        ])
+    }
+
     @Test func listRefreshUsesOnlyTheConversationDataSource() async {
         let date = Date(timeIntervalSince1970: 1_700_000_000)
         let source = V2ConversationDataSourceFake(
