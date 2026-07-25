@@ -62,6 +62,7 @@ final class V2PrivacySettingsStore {
         guard !isSaving, desiredValue != allowsStrangerMessages else { return }
         isSaving = true
         feedback = nil
+        defer { isSaving = false }
         do {
             switch try await updater.update(allowsStrangerMessages: desiredValue) {
             case .accepted:
@@ -78,7 +79,6 @@ final class V2PrivacySettingsStore {
         } catch {
             feedback = "无法保存设置，请稍后重试。"
         }
-        isSaving = false
     }
 }
 

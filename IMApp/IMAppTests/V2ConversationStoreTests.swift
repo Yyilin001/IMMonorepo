@@ -588,6 +588,21 @@ struct V2ConversationStoreTests {
         #expect(store.allowsStrangerMessages)
         #expect(store.feedback == "设置被拒绝（FORBIDDEN）。")
     }
+
+    @Test func strangerMessagePreferenceCancellationRestoresTheSavingState() async {
+        let reader = V2StrangerMessagePreferenceReaderFake(value: true)
+        let updater = V2StrangerMessagePreferenceUpdaterFake(error: CancellationError())
+        let store = V2PrivacySettingsStore(reader: reader, updater: updater)
+
+        await store.refresh()
+        await store.setAllowsStrangerMessages(false)
+
+        #expect(store.state == .loaded)
+        #expect(store.allowsStrangerMessages)
+        #expect(!store.isSaving)
+        #expect(store.feedback == nil)
+        #expect(await updater.requestedValues() == [false])
+    }
 }
 
 private actor V2ConversationDataSourceFake: V2ConversationDataSource {
@@ -917,16 +932,20 @@ private actor V2StrangerMessagePreferenceReaderFake: V2StrangerMessagePreference
 }
 
 private actor V2StrangerMessagePreferenceUpdaterFake: V2StrangerMessagePreferenceUpdating {
-    private let result: V2StrangerMessagePreferenceUpdateOutcome
+    private let result: Result<V2StrangerMessagePreferenceUpdateOutcome, Error>
     private var values: [Bool] = []
 
     init(result: V2StrangerMessagePreferenceUpdateOutcome) {
-        self.result = result
+        self.result = .success(result)
+    }
+
+    init(error: Error) {
+        self.result = .failure(error)
     }
 
     func update(allowsStrangerMessages: Bool) async throws -> V2StrangerMessagePreferenceUpdateOutcome {
         values.append(allowsStrangerMessages)
-        return result
+        return try result.get()
     }
 
     func requestedValues() -> [Bool] {
