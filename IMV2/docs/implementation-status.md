@@ -43,9 +43,11 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   `V2ConversationStoreTests` passed on an iPhone 17 / iOS 26.2 arm64
   Simulator, including stale-refresh suppression and cancellation checks that
   prevent direct/group creation from continuing after a non-cooperative
-  identity-directory response. The earlier CoreSimulator migration failure is
-  therefore not the current local test blocker; this remains simulator
-  evidence, not a signed-device or production-network result.
+  identity-directory response. The same simulator then passed the complete
+  `IMApp` test plan: conversation, app-store and Push-wake unit suites plus
+  the deterministic fresh-launch UI test. The earlier CoreSimulator migration
+  failure is therefore not the current local test blocker; this remains
+  simulator evidence, not a signed-device or production-network result.
 - 2026-07-26: `main` at `31b2be1` passed the disposable PostgreSQL Server
   regression (**190 tests / 50 suites**) after adding the gateway
   device-revocation startup cursor test. A gateway node ID seen for the first
