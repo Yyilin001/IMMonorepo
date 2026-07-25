@@ -731,6 +731,37 @@ struct V2ConversationStoreTests {
         #expect(await reader.requestedCursors() == [nil, "member-a"])
     }
 
+    @Test func groupMemberLoadAllowsOnlyOneInFlightDirectoryRequest() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let reader = V2SuspendingGroupMemberDirectory(page: .init(
+            membershipRevision: 3,
+            actorRole: "成员",
+            members: [.init(id: "owner", role: "群主")],
+            nextCursor: nil
+        ))
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            groupMemberDirectory: reader
+        )
+
+        let firstLoad = Task { await store.loadGroupMembers(reset: true) }
+        await reader.waitUntilRequested()
+        await store.loadGroupMembers(reset: true)
+
+        #expect(store.isLoadingGroupMembers)
+        #expect(await reader.requestedCursors() == [nil])
+        await reader.complete()
+        await firstLoad.value
+
+        #expect(!store.isLoadingGroupMembers)
+        #expect(store.groupMembers.map(\.id) == ["owner"])
+        #expect(store.groupMemberFeedback == nil)
+    }
+
     @Test func groupMembershipChangeUsesTheDirectoryRevisionAndRefreshes() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let page = V2GroupMemberPage(
@@ -1218,6 +1249,39 @@ private actor V2GroupMemberDirectoryFake: V2GroupMemberDirectoryReading {
         cursors.append(cursor)
         guard let page = pages[cursor] else { throw CancellationError() }
         return page
+    }
+
+    func requestedCursors() -> [String?] { cursors }
+}
+
+private actor V2SuspendingGroupMemberDirectory: V2GroupMemberDirectoryReading {
+    private let page: V2GroupMemberPage
+    private var cursors: [String?] = []
+    private var requestWaiter: CheckedContinuation<Void, Never>?
+    private var completion: CheckedContinuation<Void, Never>?
+
+    init(page: V2GroupMemberPage) {
+        self.page = page
+    }
+
+    func members(in _: String, cursor: String?) async throws -> V2GroupMemberPage {
+        cursors.append(cursor)
+        requestWaiter?.resume()
+        requestWaiter = nil
+        await withCheckedContinuation { completion = $0 }
+        return page
+    }
+
+    func waitUntilRequested() async {
+        guard !cursors.isEmpty else {
+            await withCheckedContinuation { requestWaiter = $0 }
+            return
+        }
+    }
+
+    func complete() {
+        completion?.resume()
+        completion = nil
     }
 
     func requestedCursors() -> [String?] { cursors }

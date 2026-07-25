@@ -443,6 +443,7 @@ final class V2ConversationDetailStore {
     private(set) var groupActorRole: String?
     private(set) var canLoadMoreGroupMembers = false
     private(set) var groupMemberFeedback: String?
+    private(set) var isLoadingGroupMembers = false
     private(set) var attachments: [V2ConversationAttachmentItem] = []
     private(set) var mediaDownloadStates: [MediaID: V2ConversationMediaDownloadState] = [:]
     private var nextGroupMemberCursor: String?
@@ -779,14 +780,18 @@ final class V2ConversationDetailStore {
     }
 
     func loadGroupMembers(reset: Bool = false) async {
+        guard !isLoadingGroupMembers else { return }
         guard let groupMemberDirectory else {
             groupMemberFeedback = "成员目录暂不可用。"
             return
         }
         let cursor = reset ? nil : nextGroupMemberCursor
         if !reset, cursor == nil, !groupMembers.isEmpty { return }
+        isLoadingGroupMembers = true
+        defer { isLoadingGroupMembers = false }
         do {
             let page = try await groupMemberDirectory.members(in: roomID, cursor: cursor)
+            try Task.checkCancellation()
             if reset {
                 groupMembers = []
                 groupActorRole = nil
@@ -811,11 +816,11 @@ final class V2ConversationDetailStore {
     }
 
     var canAddGroupMembers: Bool {
-        groupActorRole == "群主"
+        !isLoadingGroupMembers && groupActorRole == "群主"
     }
 
     func canRemoveGroupMember(_ member: V2GroupMemberItem) -> Bool {
-        guard member.id != userID, member.role != "群主" else { return false }
+        guard !isLoadingGroupMembers, member.id != userID, member.role != "群主" else { return false }
         return groupActorRole == "群主" || groupActorRole == "管理员"
     }
 
@@ -1445,6 +1450,7 @@ private struct V2GroupMembersSheet: View {
                 }
                 if store.canLoadMoreGroupMembers {
                     Button("加载更多") { Task { await store.loadGroupMembers() } }
+                        .disabled(store.isLoadingGroupMembers)
                         .accessibilityIdentifier("v2.group.members.load-more")
                 }
                 if let feedback = store.groupMemberFeedback {
@@ -1453,7 +1459,7 @@ private struct V2GroupMembersSheet: View {
                 }
             }
             .overlay {
-                if store.groupMembers.isEmpty, store.groupMemberFeedback == nil {
+                if store.isLoadingGroupMembers, store.groupMembers.isEmpty, store.groupMemberFeedback == nil {
                     ProgressView("正在读取成员…")
                 }
             }
@@ -1462,6 +1468,8 @@ private struct V2GroupMembersSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
                 ToolbarItem(placement: .primaryAction) {
                     Button("刷新") { Task { await store.loadGroupMembers(reset: true) } }
+                        .disabled(store.isLoadingGroupMembers)
+                        .accessibilityValue(store.isLoadingGroupMembers ? "正在读取成员" : "")
                 }
             }
             .task { await store.loadGroupMembers(reset: true) }
