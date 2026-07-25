@@ -314,10 +314,22 @@ for metric in \
   }
 done
 
+# The per-gateway revocation backlog is intentionally identified by the
+# scrape target, never a Prometheus node/device/user label. A label here
+# would disclose topology or identity and create cardinality pressure.
+if ! printf '%s\n' "${metrics_response}" | grep -Eq '^im_v2_device_revocation_events_pending [0-9]+$'; then
+  printf 'V2 private metrics listener omitted the device-revocation backlog sample\n' >&2
+  exit 1
+fi
+if printf '%s\n' "${metrics_response}" | grep -Fq 'im_v2_device_revocation_events_pending{'; then
+  printf 'V2 private metrics listener exposed a label on device-revocation backlog\n' >&2
+  exit 1
+fi
+
 printf 'local account HTTPS validation: 400\n'
 printf 'local password registration and device credential issuance: 200\n'
 printf 'local password failure limit: 5 x 401, then 429 no-store with Retry-After\n'
 printf 'local Push endpoint register/remove: 204, no-store\n'
 printf 'local loopback operator account disable: 200 no-store, then access/refresh 401 and prior assertion 403\n'
 printf 'local V2 TLS gateway: TLS 1.3 verified\n'
-printf 'local V2 private metrics: HTTP 200, no-store, durable-work metric vocabulary verified\n'
+printf 'local V2 private metrics: HTTP 200, no-store, durable-work and revocation metric vocabulary verified\n'

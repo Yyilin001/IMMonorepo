@@ -220,11 +220,19 @@ a local-CA-verified TLS 1.3 gateway handshake, and the gateway container's
 private metrics endpoint. The latter asserts HTTP 200,
 `no-store`, no host-published metrics port, the complete durable-work
 ready/leased/scheduled/paused metric vocabulary, and Push-wake
-ready/leased/suppressed metrics; it therefore catches a stale
+ready/leased/suppressed metrics, and the unlabelled
+`im_v2_device_revocation_events_pending` gauge; it therefore catches a stale
 gateway image that otherwise passes only the TLS health check. No assertion or
 credential is printed. This is local integration evidence only; it is not
 production WebAuthn, Alertmanager routing, rate-limit, capacity, or release
 evidence.
+
+On 2026-07-26, the latest Linux release image built from the then-current
+`main` application sources (including `5cfaf36`) was forced through that same
+local stack and passed the complete smoke script. This confirms the new
+per-gateway device-revocation backlog metric reaches the running private
+endpoint as an unlabelled numeric sample; it remains local integration
+evidence, not a production deployment or capacity conclusion.
 
 The V2 GitHub workflow now also starts that stack in its own Linux Compose
 project and runs the same smoke script, followed by volume removal. A remote
