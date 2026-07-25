@@ -792,6 +792,42 @@ struct V2ConversationStoreTests {
         #expect(store.groupMemberFeedback == nil)
     }
 
+    @Test func groupMembershipChangeAllowsOnlyOneInFlightCommand() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let page = V2GroupMemberPage(
+            membershipRevision: 8,
+            actorRole: "群主",
+            members: [.init(id: "member-a", role: "成员")],
+            nextCursor: nil
+        )
+        let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
+        let changer = V2SuspendingGroupMembershipChanger(result: .queuedForRetry)
+        let resolver = V2ConversationPublicIdentityResolverFake(values: ["member_b": "member-b"])
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            groupMemberDirectory: reader,
+            groupMembershipChanger: changer,
+            publicIdentityResolver: resolver
+        )
+        await store.loadGroupMembers(reset: true)
+
+        let firstChange = Task { await store.changeGroupMembership(targetUserID: "@member_b", action: .add) }
+        await changer.waitUntilRequested()
+        await store.changeGroupMembership(targetUserID: "member-a", action: .remove)
+
+        #expect(store.isChangingGroupMembership)
+        #expect(await changer.requests() == [.init(roomID: "room-group", targetUserID: "member-b", action: .add, expectedMembershipRevision: 8)])
+        await changer.complete()
+        await firstChange.value
+
+        #expect(!store.isChangingGroupMembership)
+        #expect(store.groupMemberFeedback == "成员变更已安全保存，连接恢复后会继续。")
+    }
+
     @Test func strangerMessagePreferenceKeepsDurableQueuedIntentVisible() async {
         let reader = V2StrangerMessagePreferenceReaderFake(value: false)
         let updater = V2StrangerMessagePreferenceUpdaterFake(result: .queuedForRetry)
@@ -1303,6 +1339,44 @@ private actor V2GroupMembershipChangerFake: V2GroupMembershipChanging {
     func changeMembership(roomID: String, targetUserID: String, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2GroupMembershipChangeOutcome {
         requestsValue.append(.init(roomID: roomID, targetUserID: targetUserID, action: action, expectedMembershipRevision: expectedMembershipRevision))
         return result
+    }
+
+    func requests() -> [Request] { requestsValue }
+}
+
+private actor V2SuspendingGroupMembershipChanger: V2GroupMembershipChanging {
+    struct Request: Equatable, Sendable {
+        let roomID: String
+        let targetUserID: String
+        let action: V2RoomMembershipAction
+        let expectedMembershipRevision: UInt64
+    }
+
+    private let result: V2GroupMembershipChangeOutcome
+    private var requestsValue: [Request] = []
+    private var requestWaiter: CheckedContinuation<Void, Never>?
+    private var completion: CheckedContinuation<Void, Never>?
+
+    init(result: V2GroupMembershipChangeOutcome) {
+        self.result = result
+    }
+
+    func changeMembership(roomID: String, targetUserID: String, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2GroupMembershipChangeOutcome {
+        requestsValue.append(.init(roomID: roomID, targetUserID: targetUserID, action: action, expectedMembershipRevision: expectedMembershipRevision))
+        requestWaiter?.resume()
+        requestWaiter = nil
+        await withCheckedContinuation { completion = $0 }
+        return result
+    }
+
+    func waitUntilRequested() async {
+        guard requestsValue.isEmpty else { return }
+        await withCheckedContinuation { requestWaiter = $0 }
+    }
+
+    func complete() {
+        completion?.resume()
+        completion = nil
     }
 
     func requests() -> [Request] { requestsValue }

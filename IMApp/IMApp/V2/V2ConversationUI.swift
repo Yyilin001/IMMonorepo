@@ -444,6 +444,7 @@ final class V2ConversationDetailStore {
     private(set) var canLoadMoreGroupMembers = false
     private(set) var groupMemberFeedback: String?
     private(set) var isLoadingGroupMembers = false
+    private(set) var isChangingGroupMembership = false
     private(set) var attachments: [V2ConversationAttachmentItem] = []
     private(set) var mediaDownloadStates: [MediaID: V2ConversationMediaDownloadState] = [:]
     private var nextGroupMemberCursor: String?
@@ -816,15 +817,16 @@ final class V2ConversationDetailStore {
     }
 
     var canAddGroupMembers: Bool {
-        !isLoadingGroupMembers && groupActorRole == "群主"
+        groupActorRole == "群主"
     }
 
     func canRemoveGroupMember(_ member: V2GroupMemberItem) -> Bool {
-        guard !isLoadingGroupMembers, member.id != userID, member.role != "群主" else { return false }
+        guard member.id != userID, member.role != "群主" else { return false }
         return groupActorRole == "群主" || groupActorRole == "管理员"
     }
 
     func changeGroupMembership(targetUserID: String, action: V2RoomMembershipAction) async {
+        guard !isLoadingGroupMembers, !isChangingGroupMembership else { return }
         let input = targetUserID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else {
             groupMemberFeedback = action == .add ? "请输入成员公开 ID。" : "请输入成员。"
@@ -838,6 +840,8 @@ final class V2ConversationDetailStore {
             groupMemberFeedback = "成员变更暂不可用。"
             return
         }
+        isChangingGroupMembership = true
+        defer { isChangingGroupMembership = false }
         do {
             let target: String
             if action == .add {
@@ -1417,13 +1421,15 @@ private struct V2GroupMembersSheet: View {
                         TextField("成员公开 ID（@handle）", text: $newMemberUserID)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                            .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership)
                             .accessibilityIdentifier("v2.group.members.add-input")
                         Button("添加") {
                             let target = newMemberUserID
                             newMemberUserID = ""
                             Task { await store.changeGroupMembership(targetUserID: target, action: .add) }
                         }
-                        .disabled(newMemberUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || newMemberUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityValue(store.isChangingGroupMembership ? "正在保存成员变更" : "")
                         .accessibilityIdentifier("v2.group.members.add")
                     }
                 }
@@ -1443,6 +1449,8 @@ private struct V2GroupMembersSheet: View {
                             Button("移除", role: .destructive) {
                                 Task { await store.changeGroupMembership(targetUserID: member.id, action: .remove) }
                             }
+                            .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership)
+                            .accessibilityValue(store.isChangingGroupMembership ? "正在保存成员变更" : "")
                             .accessibilityIdentifier("v2.group.member.remove.\(member.id)")
                         }
                     }
