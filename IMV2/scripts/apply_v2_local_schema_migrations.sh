@@ -25,6 +25,25 @@ compose=(docker compose --project-name "${compose_project}" --env-file "${env_fi
 psql() {
   "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 "$@"
 }
+
+# `docker compose up --wait --force-recreate` reports the healthcheck from the
+# newly-created container, but on a cold Linux runner PostgreSQL can still be
+# finishing the handoff from its bootstrap process when the first `exec` is
+# issued.  Wait for an actual SQL round trip rather than treating the Compose
+# health transition as a schema-migration readiness guarantee.
+wait_for_postgres_sql() {
+  for _ in {1..60}; do
+    if "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 -c 'SELECT 1' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'PostgreSQL did not accept a local schema-migration SQL connection within 60 seconds.\n' >&2
+  exit 1
+}
+
+wait_for_postgres_sql
+
 scalar() {
   psql -tAc "$1" | tr -d '[:space:]'
 }
