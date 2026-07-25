@@ -17,6 +17,13 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-25: the V2 static migration gates now cross-check every numbered SQL
+  migration against both the all-service startup schema gate and the retained
+  local-volume ledger marker. A newly added migration cannot silently omit
+  either check; the marker remains an explicitly reviewed immutable schema
+  fact, rather than a reason to re-run historical non-idempotent SQL. This
+  protects local development recovery only and is not a production migration
+  runner or release approval.
 - 2026-07-25: isolated PostgreSQL Server regression passed **176 tests / 49
   suites** after adding password-factor audit facts. Registration, rejected
   bcrypt verification and successful assertion each commit their minimal audit

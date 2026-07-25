@@ -13,6 +13,7 @@ on:
       - "scripts/check_v2_protobuf_generated.sh"
       - "scripts/generate_v2_sql_migration_manifest.sh"
       - "scripts/check_v2_sql_migration_manifest.sh"
+      - "scripts/check_v2_local_schema_migration_markers.sh"
       - "scripts/check_v2_schema_readiness_tables.sh"
       - "scripts/check_v2_prometheus_rules.sh"
       - "scripts/check_v2_runtime_env_examples.sh"
@@ -29,6 +30,7 @@ on:
       - "scripts/check_v2_protobuf_generated.sh"
       - "scripts/generate_v2_sql_migration_manifest.sh"
       - "scripts/check_v2_sql_migration_manifest.sh"
+      - "scripts/check_v2_local_schema_migration_markers.sh"
       - "scripts/check_v2_schema_readiness_tables.sh"
       - "scripts/check_v2_prometheus_rules.sh"
       - "scripts/check_v2_runtime_env_examples.sh"
@@ -92,6 +94,9 @@ jobs:
 
       - name: Verify SQL migration manifest
         run: ./scripts/check_v2_sql_migration_manifest.sh
+
+      - name: Verify local schema migration marker coverage
+        run: bash ./scripts/check_v2_local_schema_migration_markers.sh
 
       - name: Verify schema readiness table coverage
         run: bash ./scripts/check_v2_schema_readiness_tables.sh
