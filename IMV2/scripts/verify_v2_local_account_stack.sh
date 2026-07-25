@@ -133,6 +133,8 @@ issued_credentials="$(curl --silent --show-error --fail \
   --data "{\"accountAssertion\":\"${assertion}\",\"deviceID\":\"${device_id}\",\"operationID\":\"${operation_id}\"}" \
   https://localhost:8443/v2/device-credentials)"
 access_token="$(printf '%s' "${issued_credentials}" | jq -er '.accessToken')"
+refresh_credential="$(printf '%s' "${issued_credentials}" | jq -er '.refreshCredential')"
+user_id="$(printf '%s' "${issued_credentials}" | jq -er '.userID')"
 
 # This exercises the authenticated endpoint route without printing or
 # persisting either credential. The opaque smoke token is deliberately not a
@@ -168,6 +170,59 @@ push_delete_status="$(curl --silent --show-error --output /dev/null --write-out 
   https://localhost:8443/v2/push-endpoint)"
 test "${push_delete_status}" = '204' || {
   printf 'unexpected Push endpoint removal status: %s\n' "${push_delete_status}" >&2
+  exit 1
+}
+
+# The operator listener has no host-published port and is not connected to
+# Caddy. Probe it only from its own container namespace, preserving the
+# production invariant that this destructive API is loopback-only. The bearer
+# comes from that container's local environment and is never printed.
+disable_operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+disable_body="{\"operationID\":\"${disable_operation_id}\",\"userID\":\"${user_id}\",\"reason\":\"credential_compromise\"}"
+phase="operator account disable"
+operator_response="$(docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
+  exec -T operator bash -c '
+    body="$1"
+    exec 3<>/dev/tcp/127.0.0.1/9445
+    printf "POST /internal/v2/accounts/disable HTTP/1.1\\r\\nHost: localhost\\r\\nAuthorization: Bearer %s\\r\\nContent-Type: application/json\\r\\nContent-Length: %s\\r\\nConnection: close\\r\\n\\r\\n%s" "$IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64" "${#body}" "$body" >&3
+    cat <&3
+  ' operator-disable "${disable_body}")"
+printf '%s' "${operator_response}" | grep -Eq '^HTTP/1\.[01] 200 ' || {
+  printf 'operator account-disable request did not return HTTP 200\n' >&2
+  exit 1
+}
+printf '%s' "${operator_response}" | grep -Eiq $'\r?\ncache-control:.*no-store' || {
+  printf 'operator account-disable response omitted no-store cache control\n' >&2
+  exit 1
+}
+printf '%s' "${operator_response}" | grep -Fq '"outcome":"disabled"' || {
+  printf 'operator account-disable response did not report a new disable\n' >&2
+  exit 1
+}
+
+phase="disabled access credential rejection"
+disabled_access_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  --cacert "${ca_path}" \
+  --request PUT \
+  --header "Authorization: Bearer ${access_token}" \
+  --header "X-IM-Device-ID: ${device_id}" \
+  --header 'Content-Type: application/json' \
+  --data "{\"provider\":\"apns\",\"environment\":\"development\",\"token\":\"disabled-smoke-push-token-${suffix}\"}" \
+  https://localhost:8443/v2/push-endpoint)"
+test "${disabled_access_status}" = '401' || {
+  printf 'disabled access credential was unexpectedly accepted: %s\n' "${disabled_access_status}" >&2
+  exit 1
+}
+
+phase="disabled refresh credential rejection"
+disabled_refresh_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  --cacert "${ca_path}" \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data "{\"userID\":\"${user_id}\",\"deviceID\":\"${device_id}\",\"refreshCredential\":\"${refresh_credential}\",\"operationID\":\"$(uuidgen | tr '[:upper:]' '[:lower:]')\"}" \
+  https://localhost:8443/v2/device-credentials/refresh)"
+test "${disabled_refresh_status}" = '401' || {
+  printf 'disabled refresh credential was unexpectedly accepted: %s\n' "${disabled_refresh_status}" >&2
   exit 1
 }
 
@@ -238,5 +293,6 @@ printf 'local account HTTPS validation: 400\n'
 printf 'local password registration and device credential issuance: 200\n'
 printf 'local password failure limit: 5 x 401, then 429 no-store with Retry-After\n'
 printf 'local Push endpoint register/remove: 204, no-store\n'
+printf 'local loopback operator account disable: 200 no-store, then access/refresh 401\n'
 printf 'local V2 TLS gateway: TLS 1.3 verified\n'
 printf 'local V2 private metrics: HTTP 200, no-store, durable-work metric vocabulary verified\n'

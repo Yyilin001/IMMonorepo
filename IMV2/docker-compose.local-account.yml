@@ -118,6 +118,33 @@ services:
     mem_limit: 2g
     pids_limit: 256
 
+  # This process is deliberately not published to the host, Caddy, or any
+  # application-facing network edge. The local smoke script enters its own
+  # container namespace to exercise the same loopback-only operator boundary
+  # that production must place behind a bastion or mTLS proxy.
+  operator:
+    image: imv2localaccount-v2server
+    command: ["/workspace/IMV2Server/.build/release/IMV2OperatorServerApp"]
+    env_file:
+      - .env.local
+    environment:
+      IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
+      IM_V2_OPERATOR_REPLAY_LISTEN_HOST: 127.0.0.1
+      IM_V2_OPERATOR_REPLAY_LISTEN_PORT: 9445
+      IM_V2_OPERATOR_REPLAY_PRINCIPAL: local-operator-replay
+      IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL: local-account-safety
+      IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ': > /dev/tcp/127.0.0.1/9445'"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    mem_limit: 1g
+    pids_limit: 128
+
   caddy:
     image: caddy:2.8-alpine
     network_mode: service:account

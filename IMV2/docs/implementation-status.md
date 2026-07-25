@@ -58,13 +58,18 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   trusted-proxy/DDoS policy, audit-reader authorization, account recovery and
   human-disable operator-access approval/exercise remain release blockers.
 - 2026-07-25: a retained local account-stack PostgreSQL volume was migrated
-  through `0019_account_disable.sql`; a newly built Linux account/gateway
-  image containing the account credential-fence check then passed the real HTTPS smoke path:
-  invalid input (`400`), two password registrations, five rejected assertions
-  and no-store lockout, device credentials, Push endpoint register/remove, TLS
-  1.3 and private metrics. The HTTPS edge injected both the account-edge proof
-  and derived client address; its loopback account process would reject that
-  public path without the proof.
+  through `0019_account_disable.sql`; a newly built Linux
+  account/gateway/operator image containing the credential fence passed the
+  real HTTPS smoke path: invalid input (`400`), two password registrations,
+  five rejected assertions and no-store lockout, device credentials, Push
+  endpoint register/remove, TLS 1.3 and private metrics. The separate
+  operator process has no host-published port; the script reaches its
+  loopback listener with its dedicated local bearer, receives `200 no-store`
+  for a single disable operation, then proves the already-issued access token
+  and refresh credential both receive `401` through the public HTTPS path.
+  The HTTPS edge injected both the account-edge proof and derived client
+  address; its loopback account process would reject that public path without
+  the proof.
   The aggregate audit table contained two registration
   facts and five rejection facts, without inspecting or printing identities or
   credentials. This remains local deployment evidence, not a production
@@ -197,14 +202,17 @@ disaster-recovery deployment.
 
 The local account stack is separate from those test runners: on 2026-07-25,
 `IMV2/scripts/run_v2_local_account_stack.sh` completed only after PostgreSQL,
-the loopback account issuer, Caddy HTTPS edge, and the V2 TLS gateway became
-healthy. Its companion `verify_v2_local_account_stack.sh` then verified an
-HTTPS invalid-input rejection, password registration to device-credential
-issuance hand-off, five rejected password assertions followed by a no-store
-`429` with a positive `Retry-After`, authenticated Push endpoint
-register/remove with `204` and `no-store` (without printing either token), a
-local-CA-verified TLS 1.3 gateway handshake, and the gateway container's
-private metrics endpoint. The latter asserts HTTP 200,
+the loopback account issuer, the un-published loopback-only operator, Caddy
+HTTPS edge, and the V2 TLS gateway became healthy. Its companion
+`verify_v2_local_account_stack.sh` then verified an HTTPS invalid-input
+rejection, password registration to device-credential issuance hand-off, five
+rejected password assertions followed by a no-store `429` with a positive
+`Retry-After`, authenticated Push endpoint register/remove with `204` and
+`no-store` (without printing either token), a local-only operator disable with
+a dedicated bearer returning `200 no-store` followed by public HTTPS `401` for
+both the previously issued access and refresh credentials, a local-CA-verified
+TLS 1.3 gateway handshake, and the gateway container's private metrics
+endpoint. The latter asserts HTTP 200,
 `no-store`, no host-published metrics port, the complete durable-work
 ready/leased/scheduled/paused metric vocabulary, and Push-wake
 ready/leased/suppressed metrics; it therefore catches a stale

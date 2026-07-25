@@ -48,6 +48,15 @@ POST /internal/v2/accounts/disable
    受控验证证明旧 access token、refresh credential 和已有 assertion 都不能获得
    新 credential。若任一项失败，停止后续处置并升级安全 incident。
 
+## 本机隔离验证边界
+
+`scripts/run_v2_local_account_stack.sh` 会为本机 Compose 栈生成独立的 operator
+bearer，并使 operator 容器只在自身 `127.0.0.1:9445` 监听、不发布宿主机端口。
+`scripts/verify_v2_local_account_stack.sh` 从该容器内部执行一次禁用，随后经公开
+HTTPS 路径验证同一 access token 与 refresh credential 均被 `401` 拒绝；脚本不输出
+身份或凭据。该验证证明代码与容器编排的闭环，不能替代 bastion/mTLS、人工审批、真实
+操作者审计或生产演练。
+
 账号禁用会保留业务数据和登录标识，且当前没有解禁 API；这是为了避免未经定义的
 恢复路径绕过取证、凭据验证或审计。只有在恢复政策、身份核验、审批、凭据重置与
 审计保留全部获批准后，才可另行设计恢复能力。

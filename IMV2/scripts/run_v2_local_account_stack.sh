@@ -28,6 +28,8 @@ if [[ ! -f "${env_file}" ]]; then
   edge_authorization_secret="$(openssl rand -base64 32 | tr -d '\n')"
   edge_client_rate_limit_key="$(openssl rand -base64 32 | tr -d '\n')"
   assertion_key="$(openssl rand -base64 32 | tr -d '\n')"
+  operator_replay_bearer_token="$(openssl rand -base64 32 | tr -d '\n')"
+  operator_account_disable_bearer_token="$(openssl rand -base64 32 | tr -d '\n')"
   dummy_hash="$(htpasswd -bnBC 12 '' 'v2-local-dummy-password' | tr -d ':\n')"
   # Compose interpolates `$name` even in an env file. Double each dollar so
   # the container receives the original bcrypt digest verbatim.
@@ -42,6 +44,8 @@ if [[ ! -f "${env_file}" ]]; then
     printf 'IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64=%s\n' "${edge_authorization_secret}"
     printf 'IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64=%s\n' "${edge_client_rate_limit_key}"
     printf 'IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64=%s\n' "${assertion_key}"
+    printf 'IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64=%s\n' "${operator_replay_bearer_token}"
+    printf 'IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64=%s\n' "${operator_account_disable_bearer_token}"
     printf 'IM_V2_PASSWORD_DUMMY_BCRYPT_HASH=%s\n' "${dummy_hash_for_compose}"
   } > "${env_file}"
   printf 'created local-only secret configuration: %s\n' "${env_file}"
@@ -68,6 +72,20 @@ if ! grep -q '^IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64=' "${env_file}"; 
   umask 077
   printf 'IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64=%s\n' "${edge_client_rate_limit_key}" >> "${env_file}"
   printf 'added local-only account-edge client rate-limit key: %s\n' "${env_file}"
+fi
+
+if ! grep -q '^IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64=' "${env_file}"; then
+  operator_replay_bearer_token="$(openssl rand -base64 32 | tr -d '\n')"
+  umask 077
+  printf 'IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64=%s\n' "${operator_replay_bearer_token}" >> "${env_file}"
+  printf 'added local-only operator replay bearer token: %s\n' "${env_file}"
+fi
+
+if ! grep -q '^IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64=' "${env_file}"; then
+  operator_account_disable_bearer_token="$(openssl rand -base64 32 | tr -d '\n')"
+  umask 077
+  printf 'IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64=%s\n' "${operator_account_disable_bearer_token}" >> "${env_file}"
+  printf 'added local-only operator account-disable bearer token: %s\n' "${env_file}"
 fi
 
 # Older local Docker installations can lack Buildx and therefore ignore a
@@ -97,6 +115,7 @@ docker compose --project-name "${compose_project}" --env-file "${env_file}" --fi
 # cannot stay "healthy" after its certificate expires. The local CA volume is
 # retained, so simulators that trust its root do not need to be reconfigured.
 docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" up -d --wait account
+docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" up -d --wait operator
 docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" up -d --force-recreate caddy
 mkdir -p "${v2_dir}/local-ca"
 ca_path="${v2_dir}/local-ca/root.crt"
