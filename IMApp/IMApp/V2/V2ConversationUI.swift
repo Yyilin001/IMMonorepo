@@ -850,6 +850,7 @@ final class V2ConversationDetailStore {
                     return
                 }
                 target = try await publicIdentityResolver.resolve(handle: input).userID.rawValue
+                try Task.checkCancellation()
             } else {
                 target = input
             }
@@ -1407,6 +1408,7 @@ private struct V2GroupMembersSheet: View {
     @Bindable var store: V2ConversationDetailStore
     @Environment(\.dismiss) private var dismiss
     @State private var newMemberUserID = ""
+    @State private var membershipChangeTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
@@ -1426,7 +1428,7 @@ private struct V2GroupMembersSheet: View {
                         Button("添加") {
                             let target = newMemberUserID
                             newMemberUserID = ""
-                            Task { await store.changeGroupMembership(targetUserID: target, action: .add) }
+                            runMembershipChange(target: target, action: .add)
                         }
                         .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || newMemberUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .accessibilityValue(store.isChangingGroupMembership ? "正在保存成员变更" : "")
@@ -1447,7 +1449,7 @@ private struct V2GroupMembersSheet: View {
                         Text(member.role).foregroundStyle(.secondary)
                         if store.canRemoveGroupMember(member) {
                             Button("移除", role: .destructive) {
-                                Task { await store.changeGroupMembership(targetUserID: member.id, action: .remove) }
+                                runMembershipChange(target: member.id, action: .remove)
                             }
                             .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership)
                             .accessibilityValue(store.isChangingGroupMembership ? "正在保存成员变更" : "")
@@ -1472,6 +1474,7 @@ private struct V2GroupMembersSheet: View {
                 }
             }
             .navigationTitle("群成员")
+            .onDisappear { membershipChangeTask?.cancel() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
                 ToolbarItem(placement: .primaryAction) {
@@ -1481,6 +1484,12 @@ private struct V2GroupMembersSheet: View {
                 }
             }
             .task { await store.loadGroupMembers(reset: true) }
+        }
+    }
+
+    private func runMembershipChange(target: String, action: V2RoomMembershipAction) {
+        membershipChangeTask = Task {
+            await store.changeGroupMembership(targetUserID: target, action: action)
         }
     }
 }

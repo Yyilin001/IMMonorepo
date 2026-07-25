@@ -828,6 +828,40 @@ struct V2ConversationStoreTests {
         #expect(store.groupMemberFeedback == "成员变更已安全保存，连接恢复后会继续。")
     }
 
+    @Test func cancellingMemberAdditionAfterAnUncooperativeIdentityResolutionDoesNotChangeMembership() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let page = V2GroupMemberPage(
+            membershipRevision: 8,
+            actorRole: "群主",
+            members: [.init(id: "member-a", role: "成员")],
+            nextCursor: nil
+        )
+        let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
+        let changer = V2GroupMembershipChangerFake(result: .accepted)
+        let resolver = V2CancellationIgnoringConversationPublicIdentityResolver()
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            groupMemberDirectory: reader,
+            groupMembershipChanger: changer,
+            publicIdentityResolver: resolver
+        )
+        await store.loadGroupMembers(reset: true)
+
+        let change = Task { await store.changeGroupMembership(targetUserID: "@member_b", action: .add) }
+        await resolver.waitUntilResolving()
+        change.cancel()
+        await resolver.completeResolution()
+        await change.value
+
+        #expect(await changer.requests().isEmpty)
+        #expect(!store.isChangingGroupMembership)
+        #expect(store.groupMemberFeedback == nil)
+    }
+
     @Test func strangerMessagePreferenceKeepsDurableQueuedIntentVisible() async {
         let reader = V2StrangerMessagePreferenceReaderFake(value: false)
         let updater = V2StrangerMessagePreferenceUpdaterFake(result: .queuedForRetry)
