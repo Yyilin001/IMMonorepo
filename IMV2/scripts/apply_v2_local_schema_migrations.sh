@@ -77,6 +77,9 @@ migration_marker() {
     0012_user_shard_migration_retention_leases.sql)
       printf "%s" "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'user_shard_migrations' AND column_name = 'retention_claim_token')"
       ;;
+    0013_user_shard_migration_forwarding.sql)
+      printf "%s" "SELECT EXISTS (SELECT 1 FROM pg_constraint AS c JOIN pg_class AS relation ON relation.oid = c.conrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND relation.relname = 'user_shard_migrations' AND c.conname = 'user_shard_migrations_phase_check' AND pg_get_constraintdef(c.oid) LIKE '%forwarding%')"
+      ;;
     *)
       printf 'missing local migration marker for %s; add one before using a retained volume.\n' "$1" >&2
       return 1

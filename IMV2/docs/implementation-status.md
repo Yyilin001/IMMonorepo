@@ -77,20 +77,42 @@ Support child and removes it afterward. The Linux workflow
 for ClientKit unit tests and disposable-PostgreSQL integration tests; it does
 not change the client runtime deployment model.
 
-On 2026-07-25, the IMApp Debug simulator `build-for-testing` build compiled
-the V2 conversation surface, `IMAppTests`, `IMAppUITests`, and the focused
-`V2ConversationStoreTests` bundle for the iPhone 17 / iOS 26.5 simulator under
-Xcode 26.6, including injected message-withdrawal, message-reaction,
-message-edit, read-receipt, and injected Push-wake lifecycle/store tests. The native
-ClientKit test targets also compile the
-room-batched reaction projection query/snapshot assertion and the
-restart-safe receipt-high-water assertion. A focused `V2ConversationStoreTests` run
-could not complete on this machine because CoreSimulatorService interrupted the
-prepared device launch; no runtime test pass is claimed. The macOS CI configuration
-dynamically selects and boots an available iPhone simulator before running
-`V2ConversationStoreTests`, so App Store tests are no longer limited to a
-generic simulator build; a completed remote CI run is still required before
-this becomes passing App-test evidence.
+On 2026-07-25, the IMApp Debug simulator baseline was repaired by declaring
+`IMV2Core` as a direct local package product of both IMApp and IMAppTests. The
+V2-only App surface imports Core types directly, so relying on ClientKit's
+transitive package dependency left the app/test link steps without the Core
+framework. Under Xcode 26.6, a generic iOS Simulator `build-for-testing` now
+passes for both arm64 and x86_64, compiling the V2 conversation surface,
+`IMAppTests`, and `IMAppUITests`. A booted iPhone 17 / iOS 26.5 arm64 simulator
+also passed focused `V2ConversationStoreTests` and `V2PushWakeSettingsTests`.
+That run additionally fixed the media-cache cleanup regression: interrupted
+hidden `.partial` files are now enumerated and removed, while complete cache
+files remain untouched. The macOS CI configuration first performs the generic
+Simulator `build-for-testing`, then dynamically selects and boots an available
+iPhone simulator to run both `V2ConversationStoreTests` and
+`V2PushWakeSettingsTests` with `test-without-building`; a completed remote CI
+run is still required as independent, clean-environment evidence.
+
+The same baseline audit found that the old macOS workflow called removed
+`Makefile` targets and that the Release build phase directly executed a
+non-executable validation script. The workflow now invokes the checked-in
+scripts with `bash`, and the build phase also uses an explicit shell. Because
+this gate validates build settings, it deliberately declares no output: Xcode
+therefore reruns it when Release configuration changes in an incremental
+derived-data build. A local production-valued Release build passed after
+reading its processed Info.plist; changing its account URL to HTTP failed the
+build with `production_v2_account_requires_https`. The Linux V2 workflow now
+uses Swift 6.3, matching the local account/gateway image and satisfying
+ClientKit's Swift-tools 6.2 manifest. Remote CI evidence is still pending.
+
+On 2026-07-25, `scripts/check_v2_runtime_env_examples.sh` was added to the V2
+CI path. It checks declarations only—never real secret values—across the
+gateway, loopback-only account service and loopback-only operator examples.
+In particular, the account example now declares the required Push endpoint
+envelope key, preventing a documented configuration from failing before the
+service binds its listener. This is a deployment-configuration contract, not
+evidence of a production secret manager, public ingress, rollback or
+disaster-recovery deployment.
 
 The local account stack is separate from those test runners: on 2026-07-25,
 `IMV2/scripts/run_v2_local_account_stack.sh` completed only after PostgreSQL,
@@ -108,16 +130,25 @@ credential is printed. This is local integration evidence only; it is not
 production WebAuthn, Alertmanager routing, rate-limit, capacity, or release
 evidence.
 
-Before starting account/gateway, the local stack now records its numbered SQL
-migrations in a local-only `im_v2.local_schema_migrations` ledger. A retained
-development volume is bootstrapped from immutable schema markers and receives
-only missing incremental SQL; historical non-idempotent migrations are never
-blindly re-run and no local data is dropped. This convenience helper is not a
+The V2 GitHub workflow now also starts that stack in its own Linux Compose
+project and runs the same smoke script, followed by volume removal. A remote
+result is still required before it can be counted as CI evidence; the job
+proves the checked-in startup and verification path can be exercised without
+developer credentials or an existing local stack.
+
+Before starting account/gateway, the local stack refreshes PostgreSQL's
+read-only SQL bind mount by recreating only the container (the named data
+volume is retained), then records numbered SQL migrations in a local-only
+`im_v2.local_schema_migrations` ledger. A retained development volume is
+bootstrapped from immutable schema markers and receives only missing
+incremental SQL; historical non-idempotent migrations are never blindly
+re-run and no local data is dropped. This convenience helper is not a
 production migration runner. Its disposable regression bootstraps a fresh
-volume, removes the `0009` encrypted Push-endpoint table/ledger row, and proves that
-only `0009` is reapplied before a no-op repeat run. The GitHub V2 workflow runs that
-disposable regression with a generated one-time local environment file; it
-never consumes or writes a developer's real `.env.local`.
+volume, removes the `0010` user-shard router control table/ledger row, and
+proves that only `0010` is reapplied before a no-op repeat run. The GitHub V2
+workflow runs that disposable regression with a generated one-time local
+environment file; it never consumes or writes a developer's real
+`.env.local`.
 
 The opt-in isolated 100k delivery-drain regression described in
 `docs/09-capacity/standard-100k.md` passed on 2026-07-24 in 170.6 seconds. Its

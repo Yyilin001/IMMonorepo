@@ -85,8 +85,13 @@ public final class V2TLSGatewayServer {
         let transportMetrics = transportMetrics
         let channel = try await ServerBootstrap(group: group)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(NIOSSLServerHandler(context: sslContext)).flatMap {
-                    channel.pipeline.addHandler(
+                // This closure is already invoked on the child EventLoop.
+                // Both handlers are deliberately loop-confined and therefore
+                // must use NIO's synchronous pipeline view rather than the
+                // cross-concurrency `ChannelHandler & Sendable` overload.
+                channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.addHandler(NIOSSLServerHandler(context: sslContext))
+                    try channel.pipeline.syncOperations.addHandler(
                         V2NIOGatewayChannelHandler(
                             stream: factory.make(),
                             maximumQueuedInboundBytes: inboundLimit,

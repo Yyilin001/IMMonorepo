@@ -9,7 +9,6 @@ on:
       - "IMV2Core/**"
       - "IMV2Server/**"
       - "IMV2/**"
-      - "Makefile"
   push:
     branches:
       - main
@@ -21,7 +20,6 @@ on:
       - "IMV2Core/**"
       - "IMV2Server/**"
       - "IMV2/**"
-      - "Makefile"
   workflow_dispatch:
     inputs:
       account_base_url:
@@ -61,7 +59,7 @@ jobs:
         run: xcodebuild -version
 
       - name: Validate network config gate behavior
-        run: make validate-ios-network-config
+        run: IMAPP_NETWORK_CONFIG_SELF_TEST=true bash IMApp/Scripts/validate_network_configuration.sh
 
       - name: Validate development config
         env:
@@ -69,12 +67,23 @@ jobs:
           IM_V2_GATEWAY_HOST: localhost
           IM_V2_GATEWAY_PORT: "7443"
           IM_V2_PASSKEY_RP_ID: localhost
+          IM_V2_PUSH_ENVIRONMENT: development
         run: IMAPP_NETWORK_CONFIG_MODE=development IMApp/Scripts/validate_network_configuration.sh
 
       - name: Validate Debug network defaults
-        run: make validate-ios-debug-network-defaults
+        run: IMAPP_DEBUG_NETWORK_DEFAULTS_SELF_TEST=true bash IMApp/Scripts/validate_debug_network_defaults.sh
 
-      - name: Build and run V2 conversation store tests on a simulator
+      - name: Build V2 App and test bundles for generic Simulator
+        run: |
+          xcodebuild build-for-testing \
+            -project IMApp/IMApp.xcodeproj \
+            -scheme IMApp \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Run focused V2 App tests on a booted simulator
         run: |
           simulator_id="$(xcrun simctl list devices available -j | python3 -c '
           import json
@@ -88,14 +97,20 @@ jobs:
           raise SystemExit("No available iPhone simulator found")
           ')"
           test -n "${simulator_id}"
+          simulator_arch="$(uname -m)"
+          case "${simulator_arch}" in
+            arm64|x86_64) ;;
+            *) echo "Unsupported macOS architecture: ${simulator_arch}" >&2; exit 1 ;;
+          esac
           xcrun simctl boot "${simulator_id}" 2>/dev/null || true
           xcrun simctl bootstatus "${simulator_id}" -b
-          xcodebuild test \
+          xcodebuild test-without-building \
             -project IMApp/IMApp.xcodeproj \
             -scheme IMApp \
             -configuration Debug \
-            -destination "platform=iOS Simulator,id=${simulator_id}" \
+            -destination "platform=iOS Simulator,id=${simulator_id},arch=${simulator_arch}" \
             -only-testing:IMAppTests/V2ConversationStoreTests \
+            -only-testing:IMAppTests/V2PushWakeSettingsTests \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Validate production config
@@ -105,7 +120,8 @@ jobs:
           IM_V2_GATEWAY_HOST: ${{ inputs.gateway_host }}
           IM_V2_GATEWAY_PORT: ${{ inputs.gateway_port }}
           IM_V2_PASSKEY_RP_ID: ${{ inputs.passkey_rp_id }}
-        run: make validate-ios-production-config
+          IM_V2_PUSH_ENVIRONMENT: production
+        run: IMAPP_NETWORK_CONFIG_MODE=production bash IMApp/Scripts/validate_network_configuration.sh
 
       - name: Build Release with production config
         if: github.event_name == 'workflow_dispatch'
@@ -114,6 +130,7 @@ jobs:
           IM_V2_GATEWAY_HOST: ${{ inputs.gateway_host }}
           IM_V2_GATEWAY_PORT: ${{ inputs.gateway_port }}
           IM_V2_PASSKEY_RP_ID: ${{ inputs.passkey_rp_id }}
+          IM_V2_PUSH_ENVIRONMENT: production
         run: |
           xcodebuild build \
             -project IMApp/IMApp.xcodeproj \
@@ -124,4 +141,5 @@ jobs:
             IM_V2_ACCOUNT_BASE_URL="${IM_V2_ACCOUNT_BASE_URL}" \
             IM_V2_GATEWAY_HOST="${IM_V2_GATEWAY_HOST}" \
             IM_V2_GATEWAY_PORT="${IM_V2_GATEWAY_PORT}" \
-            IM_V2_PASSKEY_RP_ID="${IM_V2_PASSKEY_RP_ID}"
+            IM_V2_PASSKEY_RP_ID="${IM_V2_PASSKEY_RP_ID}" \
+            IM_V2_PUSH_ENVIRONMENT="${IM_V2_PUSH_ENVIRONMENT}"

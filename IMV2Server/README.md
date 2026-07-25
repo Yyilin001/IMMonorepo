@@ -30,9 +30,19 @@ and the [V2 document entry](../IMV2/docs/README.md).
    the device issuer; it is not a passkey verifier itself. The fallback
    `V2PasswordAccountRoutes` stores bcrypt verifiers only and requires an
    equal-cost dummy bcrypt digest for unknown-account timing resistance.
+   The account service also requires its own Push endpoint envelope key, used
+   to encrypt the opaque APNs token at rest; do not place this key in the iOS
+   app or a client-visible configuration file.
 5. Set every required variable in [`.env.example`](.env.example), then run the
    V2 app. The `IM_V2_NATS_*` variables are an all-or-nothing optional hint
    layer, not a required broker dependency.
+
+Before packaging a deployment, verify that the three checked-in examples still
+match their strict runtime constructors:
+
+```sh
+./scripts/check_v2_runtime_env_examples.sh
+```
 
 ## Durable-work operator replay
 
@@ -108,6 +118,9 @@ bash IMV2/scripts/verify_v2_local_account_stack.sh
 
 The smoke check creates one uniquely named account in the local Docker volume;
 it never contacts a public endpoint or writes a token to disk/output.
+The same stack is exercised on Linux CI under an isolated Compose project;
+that CI evidence remains local-stack coverage, not a production deployment
+approval.
 
 ## Operational notes
 

@@ -7,6 +7,7 @@ V2 是一条没有历史兼容层的 greenfield 路径。本文档只描述当�
 | 目标 | 文档 |
 | --- | --- |
 | 了解当前组件、数据流、群聊和 NATS 边界 | [当前架构](../../docs/current-system-map.md) |
+| 获取当前问题清单、优先级和实施路线 | [实现审计与路线图](implementation-review-and-roadmap.md) |
 | 判断某项能力是否已实现及其验证等级 | [implementation status](implementation-status.md) |
 | 查找已接受或待批准的设计决定 | [ADR register](ADR-REGISTER.md) |
 | 使用 100k 成员配置或准备压测 | [standard 100k contract](09-capacity/standard-100k.md) |

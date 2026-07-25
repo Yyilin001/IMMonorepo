@@ -129,7 +129,7 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading {
         guard let entries = try? fileManager.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
+            options: []
         ) else { return }
         for entry in entries {
             let candidate = entry.standardizedFileURL

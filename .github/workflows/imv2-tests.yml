@@ -14,6 +14,7 @@ on:
       - "scripts/generate_v2_sql_migration_manifest.sh"
       - "scripts/check_v2_sql_migration_manifest.sh"
       - "scripts/check_v2_prometheus_rules.sh"
+      - "scripts/check_v2_runtime_env_examples.sh"
   push:
     branches: [main, master]
     paths:
@@ -28,6 +29,7 @@ on:
       - "scripts/generate_v2_sql_migration_manifest.sh"
       - "scripts/check_v2_sql_migration_manifest.sh"
       - "scripts/check_v2_prometheus_rules.sh"
+      - "scripts/check_v2_runtime_env_examples.sh"
   workflow_dispatch:
 
 jobs:
@@ -55,7 +57,9 @@ jobs:
 
       - uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "6.1"
+          # ClientKit's manifest requires Swift tools 6.2; use the same Swift
+          # release line that builds the local account/gateway image.
+          swift-version: "6.3"
 
       - name: Install protobuf compiler
         run: |
@@ -88,3 +92,39 @@ jobs:
 
       - name: Validate V2 Prometheus rules
         run: ./scripts/check_v2_prometheus_rules.sh
+
+      - name: Validate V2 runtime environment examples
+        run: ./scripts/check_v2_runtime_env_examples.sh
+
+  local-account-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install local stack prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apache2-utils jq rsync
+
+      - name: Start local V2 account stack
+        env:
+          V2_LOCAL_COMPOSE_PROJECT: imv2-ci-account
+        run: bash IMV2/scripts/run_v2_local_account_stack.sh
+
+      - name: Verify local V2 account stack
+        env:
+          V2_LOCAL_COMPOSE_PROJECT: imv2-ci-account
+        run: bash IMV2/scripts/verify_v2_local_account_stack.sh
+
+      - name: Remove local V2 account stack
+        if: always()
+        env:
+          V2_LOCAL_COMPOSE_PROJECT: imv2-ci-account
+        run: |
+          docker compose \
+            --project-name "${V2_LOCAL_COMPOSE_PROJECT}" \
+            --env-file IMV2/.env.local \
+            --file IMV2/docker-compose.local-account.yml \
+            down --volumes --remove-orphans || true
+          rm -rf IMV2/.env.local IMV2/local-ca

@@ -244,7 +244,9 @@ struct V2ConversationStoreTests {
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("v2-media-cache-" + UUID().uuidString, isDirectory: true)
         defer { try? fileManager.removeItem(at: root) }
-        let reference = V2MediaReference(mediaID: try .init("media/identifier-must-not-be-a-path"))
+        // Media IDs are deliberately URL-path-safe. The cache name must still
+        // be opaque rather than exposing even a valid identifier.
+        let reference = V2MediaReference(mediaID: try .init("media-identifier-must-not-be-a-path"))
         let target = try V2ClientMediaTransferTarget(
             url: #require(URL(string: "https://media.invalid/object")),
             expiresAt: .distantFuture,

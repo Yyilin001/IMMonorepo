@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		1BADBC402F73859E00E89B24 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC422F73859E00E89B24 /* IMV2ClientKit */; };
 		1BADBC432F73859E00E89B24 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC442F73859E00E89B24 /* IMV2ClientKit */; };
+		1BADBC452F73859E00E89B24 /* IMV2Core in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC482F73859E00E89B24 /* IMV2Core */; };
+		1BADBC462F73859E00E89B24 /* IMV2Core in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC492F73859E00E89B24 /* IMV2Core */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -58,6 +60,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1BADBC402F73859E00E89B24 /* IMV2ClientKit in Frameworks */,
+				1BADBC452F73859E00E89B24 /* IMV2Core in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -66,6 +69,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1BADBC432F73859E00E89B24 /* IMV2ClientKit in Frameworks */,
+				1BADBC462F73859E00E89B24 /* IMV2Core in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -121,6 +125,7 @@
 			name = IMApp;
 			packageProductDependencies = (
 				1BADBC422F73859E00E89B24 /* IMV2ClientKit */,
+				1BADBC482F73859E00E89B24 /* IMV2Core */,
 			);
 			productName = IMApp;
 			productReference = 1BADBC0E2F73859D00E89B24 /* IMApp.app */;
@@ -145,6 +150,7 @@
 			name = IMAppTests;
 			packageProductDependencies = (
 				1BADBC442F73859E00E89B24 /* IMV2ClientKit */,
+				1BADBC492F73859E00E89B24 /* IMV2Core */,
 			);
 			productName = IMAppTests;
 			productReference = 1BADBC1B2F73859E00E89B24 /* IMAppTests.xctest */;
@@ -208,6 +214,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				1BADBC412F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2ClientKit" */,
+				1BADBC472F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2Core" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1BADBC0F2F73859D00E89B24 /* Products */;
@@ -260,12 +267,14 @@
 			name = "Validate Release Network Configuration";
 			outputFileListPaths = (
 			);
+			// This is a security gate over build settings. It intentionally has no
+			// declared output so Xcode reruns it when a caller changes a Release
+			// configuration in an otherwise incremental derived-data build.
 			outputPaths = (
-				"$(DERIVED_FILE_DIR)/validate_network_configuration-$(CONFIGURATION).stamp",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "if [ \"${CONFIGURATION}\" != \"Release\" ]; then\n  mkdir -p \"$(dirname \"${SCRIPT_OUTPUT_FILE_0}\")\"\n  touch \"${SCRIPT_OUTPUT_FILE_0}\"\n  exit 0\nfi\nINFO_PLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\" \\\nIMAPP_NETWORK_CONFIG_MODE=production \\\nIMAPP_NETWORK_CONFIG_USE_ENV_OVERRIDES=false \\\n\"${SRCROOT}/Scripts/validate_network_configuration.sh\"\nmkdir -p \"$(dirname \"${SCRIPT_OUTPUT_FILE_0}\")\"\ntouch \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			shellScript = "if [ \"${CONFIGURATION}\" != \"Release\" ]; then\n  exit 0\nfi\nINFO_PLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\" \\\nIMAPP_NETWORK_CONFIG_MODE=production \\\nIMAPP_NETWORK_CONFIG_USE_ENV_OVERRIDES=false \\\n/bin/bash \"${SRCROOT}/Scripts/validate_network_configuration.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -636,6 +645,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../IMV2ClientKit;
 		};
+		1BADBC472F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2Core" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../IMV2Core;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -648,6 +661,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 1BADBC412F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2ClientKit" */;
 			productName = IMV2ClientKit;
+		};
+		1BADBC482F73859E00E89B24 /* IMV2Core */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1BADBC472F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2Core" */;
+			productName = IMV2Core;
+		};
+		1BADBC492F73859E00E89B24 /* IMV2Core */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1BADBC472F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2Core" */;
+			productName = IMV2Core;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
