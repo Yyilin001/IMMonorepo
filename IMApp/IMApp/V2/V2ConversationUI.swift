@@ -8,11 +8,31 @@ import UniformTypeIdentifiers
 /// App-facing, value-only view data. The UI never reads SQLite rows or sync
 /// event payloads directly, which keeps navigation and rendering testable.
 struct V2ConversationListItem: Hashable, Identifiable, Sendable {
+    enum Kind: Hashable, Sendable {
+        /// A direct room with an authorized, bounded public-identity projection.
+        case direct
+        /// A group room with a compact room-profile projection.
+        case group
+        /// A message arrived before its corresponding room projection. Keep
+        /// it readable, but do not expose group-only controls speculatively.
+        case unknown
+    }
+
     let id: String
     let title: String
     let preview: String
     let lastActivity: Date
     let isOutgoing: Bool
+    let kind: Kind
+
+    init(id: String, title: String, preview: String, lastActivity: Date, isOutgoing: Bool, kind: Kind = .unknown) {
+        self.id = id
+        self.title = title
+        self.preview = preview
+        self.lastActivity = lastActivity
+        self.isOutgoing = isOutgoing
+        self.kind = kind
+    }
 }
 
 struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
@@ -94,6 +114,8 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource {
         let titles = Dictionary(uniqueKeysWithValues: profiles.map { ($0.roomID, $0.title) })
         let directIdentities = try await localStore.directRoomIdentities()
         let directTitles = Dictionary(uniqueKeysWithValues: directIdentities.map { ($0.roomID, $0.publicIdentity.displayName) })
+        let groupRoomIDs = Set(profiles.map(\.roomID))
+        let directRoomIDs = Set(directIdentities.map(\.roomID))
         let summaries = try await localStore.conversationSummaries()
         let messageItems: [V2ConversationListItem] = summaries.map { summary in
             let message = summary.lastMessage
@@ -102,7 +124,8 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource {
                 title: titles[summary.roomID] ?? directTitles[summary.roomID] ?? Self.roomTitle(summary.roomID.rawValue),
                 preview: Self.preview(for: message),
                 lastActivity: message.createdAt,
-                isOutgoing: message.senderUserID.rawValue == userID
+                isOutgoing: message.senderUserID.rawValue == userID,
+                kind: groupRoomIDs.contains(summary.roomID) ? .group : (directRoomIDs.contains(summary.roomID) ? .direct : .unknown)
             )
         }
         return Self.mergingEmptyProjectionItems(
@@ -125,7 +148,8 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource {
                 title: profile.title,
                 preview: "暂无消息",
                 lastActivity: profile.createdAt,
-                isOutgoing: false
+                isOutgoing: false,
+                kind: .group
             )
         }
         let representedRoomIDs = messageRoomIDs.union(emptyProfileItems.map(\.id))
@@ -140,7 +164,8 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource {
                 title: identity.publicIdentity.displayName,
                 preview: "暂无消息",
                 lastActivity: identity.updatedAt,
-                isOutgoing: false
+                isOutgoing: false,
+                kind: .direct
             )
         }
         return (messageItems + emptyProfileItems + emptyDirectItems).sorted { lhs, rhs in
@@ -228,6 +253,7 @@ final class V2ConversationListStore {
     private(set) var directConversationFeedback: String?
     private(set) var groupConversationFeedback: String?
     private var explicitRoomTitles: [String: String] = [:]
+    private var explicitRoomKinds: [String: V2ConversationListItem.Kind] = [:]
     private var refreshGeneration = 0
 
     init(
@@ -303,6 +329,8 @@ final class V2ConversationListStore {
             try Task.checkCancellation()
             switch try await groupConversationCreator.createConversation(title: title, initialMemberUserIDs: members) {
             case .created(let roomID):
+                explicitRoomTitles[roomID] = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                explicitRoomKinds[roomID] = .group
                 groupConversationFeedback = nil
                 return roomID
             case .queuedForRetry:
@@ -339,8 +367,10 @@ final class V2ConversationListStore {
     }
 
     func detailStore(for roomID: String) -> V2ConversationDetailStore {
-        let title = explicitRoomTitles[roomID] ?? items.first(where: { $0.id == roomID })?.title ?? "会话"
-        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader)
+        let item = items.first(where: { $0.id == roomID })
+        let title = explicitRoomTitles[roomID] ?? item?.title ?? "会话"
+        let kind = explicitRoomKinds[roomID] ?? item?.kind ?? .unknown
+        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader)
     }
 
     func openDirectConversation(handle: String) async -> String? {
@@ -366,6 +396,7 @@ final class V2ConversationListStore {
             }
             let roomID = try await directConversationOpener.openConversation(with: identity)
             explicitRoomTitles[roomID] = identity.displayName
+            explicitRoomKinds[roomID] = .direct
             directConversationFeedback = nil
             return roomID
         } catch is CancellationError {
@@ -401,6 +432,7 @@ final class V2ConversationDetailStore {
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
     let roomID: String
     let title: String
+    let isGroupConversation: Bool
     private(set) var messages: [V2ConversationMessageItem] = []
     private(set) var state: State = .loading
     private(set) var sendFeedback: String?
@@ -419,7 +451,7 @@ final class V2ConversationDetailStore {
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
-    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil) {
+    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil) {
         self.dataSource = dataSource
         self.sender = sender
         self.messageWithdrawer = messageWithdrawer
@@ -429,6 +461,7 @@ final class V2ConversationDetailStore {
         self.userID = userID
         self.roomID = roomID
         self.title = title
+        self.isGroupConversation = isGroupConversation
         self.groupMemberDirectory = groupMemberDirectory
         self.groupMembershipChanger = groupMembershipChanger
         self.publicIdentityResolver = publicIdentityResolver
@@ -1083,10 +1116,13 @@ private struct V2ConversationDetailView: View {
         .navigationTitle(store.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            Button("成员", systemImage: "person.3") {
-                isPresentingGroupMembers = true
+            if store.isGroupConversation {
+                Button("成员", systemImage: "person.3") {
+                    isPresentingGroupMembers = true
+                }
+                .accessibilityHint("查看和管理群成员")
+                .accessibilityIdentifier("v2.group.members")
             }
-            .accessibilityIdentifier("v2.group.members")
         }
         .sheet(isPresented: $isPresentingGroupMembers) {
             V2GroupMembersSheet(store: store)

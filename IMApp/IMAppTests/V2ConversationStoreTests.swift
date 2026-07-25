@@ -21,8 +21,24 @@ struct V2ConversationStoreTests {
         )
 
         #expect(items == [
-            .init(id: roomID.rawValue, title: "尚未聊天的用户", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false)
+            .init(id: roomID.rawValue, title: "尚未聊天的用户", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false, kind: .direct)
         ])
+    }
+
+    @Test func detailStoreExposesGroupControlsOnlyForKnownGroupRooms() async {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let source = V2ConversationDataSourceFake(
+            summaries: [
+                .init(id: "room-direct", title: "私聊", preview: "你好", lastActivity: date, isOutgoing: false, kind: .direct),
+                .init(id: "room-group", title: "项目群", preview: "大家好", lastActivity: date, isOutgoing: false, kind: .group)
+            ],
+            messages: []
+        )
+        let store = V2ConversationListStore(dataSource: source, userID: "current-user")
+        await store.refresh()
+
+        #expect(!store.detailStore(for: "room-direct").isGroupConversation)
+        #expect(store.detailStore(for: "room-group").isGroupConversation)
     }
 
     @Test func listRefreshUsesOnlyTheConversationDataSource() async {
@@ -662,6 +678,7 @@ struct V2ConversationStoreTests {
 
         #expect(roomID == "room-group")
         #expect(await creator.requests() == [.init(title: " 项目群 ", memberUserIDs: ["user-a", "user-b"])])
+        #expect(store.detailStore(for: "room-group").isGroupConversation)
     }
 
     @Test func groupConversationKeepsDurableRetryVisible() async {
