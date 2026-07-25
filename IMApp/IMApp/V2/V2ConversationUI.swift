@@ -201,6 +201,7 @@ final class V2ConversationListStore {
     private(set) var directConversationFeedback: String?
     private(set) var groupConversationFeedback: String?
     private var explicitRoomTitles: [String: String] = [:]
+    private var refreshGeneration = 0
 
     init(
         dataSource: any V2ConversationDataSource,
@@ -265,12 +266,14 @@ final class V2ConversationListStore {
                 var resolved: [String] = []
                 for handle in handles {
                     resolved.append(try await publicIdentityResolver.resolve(handle: handle).userID.rawValue)
+                    try Task.checkCancellation()
                 }
                 members = resolved
             } else {
                 groupConversationFeedback = "身份目录暂不可用，无法解析成员公开 ID。"
                 return nil
             }
+            try Task.checkCancellation()
             switch try await groupConversationCreator.createConversation(title: title, initialMemberUserIDs: members) {
             case .created(let roomID):
                 groupConversationFeedback = nil
@@ -291,13 +294,19 @@ final class V2ConversationListStore {
     }
 
     func refresh() async {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
         state = .loading
         do {
-            items = try await dataSource.conversationSummaries(for: userID)
+            let refreshedItems = try await dataSource.conversationSummaries(for: userID)
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
+            items = refreshedItems
             state = .loaded
         } catch is CancellationError {
             return
         } catch {
+            guard generation == refreshGeneration else { return }
             state = .failed
         }
     }
@@ -323,6 +332,7 @@ final class V2ConversationListStore {
         }
         do {
             let identity = try await publicIdentityResolver.resolve(handle: target)
+            try Task.checkCancellation()
             guard identity.userID.rawValue != userID else {
                 directConversationFeedback = "不能与自己创建私聊。"
                 return nil
@@ -376,6 +386,7 @@ final class V2ConversationDetailStore {
     private(set) var attachments: [V2ConversationAttachmentItem] = []
     private(set) var mediaDownloadStates: [MediaID: V2ConversationMediaDownloadState] = [:]
     private var nextGroupMemberCursor: String?
+    private var refreshGeneration = 0
     var draft = ""
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
@@ -399,10 +410,15 @@ final class V2ConversationDetailStore {
     }
 
     func refresh() async {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
         state = .loading
         do {
-            messages = try await dataSource.messages(in: roomID, for: userID)
-            let visibleMediaIDs = Set(messages.lazy
+            let refreshedMessages = try await dataSource.messages(in: roomID, for: userID)
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
+            messages = refreshedMessages
+            let visibleMediaIDs = Set(refreshedMessages.lazy
                 .filter { !$0.isWithdrawn }
                 .flatMap(\.media)
                 .map(\.mediaID))

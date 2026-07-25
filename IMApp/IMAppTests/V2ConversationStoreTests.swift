@@ -23,6 +23,26 @@ struct V2ConversationStoreTests {
         #expect(store.items.first?.preview == "你好")
     }
 
+    @Test func listRefreshIgnoresAResponseSupersededByANewerRefresh() async {
+        let source = V2SequencedConversationDataSource()
+        let store = V2ConversationListStore(dataSource: source, userID: "current-user")
+        let staleItem = V2ConversationListItem(id: "room-stale", title: "旧会话", preview: "旧消息", lastActivity: .now, isOutgoing: false)
+        let currentItem = V2ConversationListItem(id: "room-current", title: "新会话", preview: "新消息", lastActivity: .now, isOutgoing: false)
+
+        let firstRefresh = Task { await store.refresh() }
+        await source.waitUntilSummaryRequestCount(1)
+        let secondRefresh = Task { await store.refresh() }
+        await source.waitUntilSummaryRequestCount(2)
+
+        await source.completeSummaryRequest(at: 1, with: [currentItem])
+        await secondRefresh.value
+        await source.completeSummaryRequest(at: 0, with: [staleItem])
+        await firstRefresh.value
+
+        #expect(store.state == .loaded)
+        #expect(store.items == [currentItem])
+    }
+
     @Test func messageRefreshPreservesOnlyOpaqueAttachmentReferences() async throws {
         let reference = V2MediaReference(mediaID: try .init("00000000-0000-0000-0000-000000000501"))
         let message = V2ConversationMessageItem(
@@ -491,6 +511,48 @@ struct V2ConversationStoreTests {
         #expect(store.directConversationFeedback == nil)
     }
 
+    @Test func cancellingDirectConversationAfterAnUncooperativeResolutionDoesNotOpenARoom() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let opener = V2DirectConversationOpenerFake(roomID: "room-direct")
+        let resolver = V2CancellationIgnoringConversationPublicIdentityResolver()
+        let store = V2ConversationListStore(
+            dataSource: source,
+            userID: "current-user",
+            directConversationOpener: opener,
+            publicIdentityResolver: resolver
+        )
+
+        let operation = Task { await store.openDirectConversation(handle: "@other_user") }
+        await resolver.waitUntilResolving()
+        operation.cancel()
+        await resolver.completeResolution()
+
+        #expect(await operation.value == nil)
+        #expect(await opener.targets().isEmpty)
+        #expect(store.directConversationFeedback == nil)
+    }
+
+    @Test func cancellingGroupCreationAfterAnUncooperativeResolutionDoesNotCreateARoom() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let creator = V2GroupConversationCreatorFake(result: .created(roomID: "room-group"))
+        let resolver = V2CancellationIgnoringConversationPublicIdentityResolver()
+        let store = V2ConversationListStore(
+            dataSource: source,
+            userID: "current-user",
+            publicIdentityResolver: resolver,
+            groupConversationCreator: creator
+        )
+
+        let operation = Task { await store.createGroupConversation(title: "项目群", memberHandlesText: "@other_user") }
+        await resolver.waitUntilResolving()
+        operation.cancel()
+        await resolver.completeResolution()
+
+        #expect(await operation.value == nil)
+        #expect(await creator.requests().isEmpty)
+        #expect(store.groupConversationFeedback == nil)
+    }
+
     @Test func groupConversationSplitsCanonicalMemberInputAndReturnsRoom() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let creator = V2GroupConversationCreatorFake(result: .created(roomID: "room-group"))
@@ -645,6 +707,40 @@ private actor V2ConversationDataSourceFake: V2ConversationDataSource {
     }
 
     func messageRequestCount() -> Int { requestedMessageCount }
+}
+
+private actor V2SequencedConversationDataSource: V2ConversationDataSource {
+    private var summaryRequestCount = 0
+    private var summaryRequestWaiters: [CheckedContinuation<Void, Never>] = []
+    private var summaryContinuations: [CheckedContinuation<[V2ConversationListItem], Never>?] = []
+
+    func conversationSummaries(for _: String) async throws -> [V2ConversationListItem] {
+        summaryRequestCount += 1
+        let waiters = summaryRequestWaiters
+        summaryRequestWaiters = []
+        waiters.forEach { $0.resume() }
+        return await withCheckedContinuation { continuation in
+            summaryContinuations.append(continuation)
+        }
+    }
+
+    func messages(in _: String, for _: String) async throws -> [V2ConversationMessageItem] {
+        []
+    }
+
+    func waitUntilSummaryRequestCount(_ expectedCount: Int) async {
+        while summaryRequestCount < expectedCount {
+            await withCheckedContinuation { summaryRequestWaiters.append($0) }
+        }
+    }
+
+    func completeSummaryRequest(at index: Int, with items: [V2ConversationListItem]) {
+        guard summaryContinuations.indices.contains(index), let continuation = summaryContinuations[index] else {
+            return
+        }
+        summaryContinuations[index] = nil
+        continuation.resume(returning: items)
+    }
 }
 
 private actor V2ConversationSenderFake: V2ConversationSending {
@@ -904,6 +1000,30 @@ private actor V2SuspendingConversationPublicIdentityResolver: V2ConversationPubl
     func waitUntilResolving() async {
         guard !beganResolving else { return }
         await withCheckedContinuation { startWaiter = $0 }
+    }
+}
+
+private actor V2CancellationIgnoringConversationPublicIdentityResolver: V2ConversationPublicIdentityResolving {
+    private var beganResolving = false
+    private var startWaiter: CheckedContinuation<Void, Never>?
+    private var resolutionContinuation: CheckedContinuation<Void, Never>?
+
+    func resolve(handle _: String) async throws -> V2PublicIdentity {
+        beganResolving = true
+        startWaiter?.resume()
+        startWaiter = nil
+        await withCheckedContinuation { resolutionContinuation = $0 }
+        return try .init(userID: .init("other-user"), handle: .init("other_user"), displayName: "Other")
+    }
+
+    func waitUntilResolving() async {
+        guard !beganResolving else { return }
+        await withCheckedContinuation { startWaiter = $0 }
+    }
+
+    func completeResolution() {
+        resolutionContinuation?.resume()
+        resolutionContinuation = nil
     }
 }
 
