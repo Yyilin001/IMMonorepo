@@ -1,7 +1,7 @@
 # IM V2 实现审计与实施路线图
 
 审计日期：2026-07-25  
-审计基线：`main` 分支、提交 `e326f95` 之后的 V2-only 工作树。  
+审计基线：`main` 分支、提交 `014f706` 的 V2-only 工作树。
 结论：**架构方向可行，核心正确性边界已有较好实现；当前不具备生产发布条件。**
 
 本文是实施优先级与验收计划，不替代 [implementation status](implementation-status.md) 的逐项证据登记。
@@ -22,7 +22,6 @@
 
 | 优先级 | 问题 | 影响 | 发布门槛 |
 | --- | --- | --- | --- |
-| P0 | iOS V2 本机构建与聚焦测试已恢复，但尚无该修复的远程 CI 记录 | 干净环境的重复性尚未被独立证明 | 在 macOS CI 执行通用 Simulator build 与聚焦 V2 测试，并保存结果 |
 | P0 | 没有 V2 生产部署拓扑、secret 管理、入口暴露和回滚方案 | 无法安全部署 gateway、account、operator、metrics | 建立 IaC/部署清单、环境分层、上线/回滚 runbook |
 | P0 | Passkey 只有客户端/传输边界；未部署审计级 WebAuthn RP verifier、challenge/counter 存储 | 主认证路径不可用 | WebAuthn 端到端真机与攻击/重放测试通过 |
 | P0 | 媒体、扫描、对象存储只有协议/服务边界，缺生产 provider 与 scanner | 附件功能不能作为生产能力交付 | 真实 provider、扫描隔离、失败恢复、滥用测试通过 |
@@ -67,8 +66,8 @@
 ### 阶段 0：恢复可验证基线（P0，先完成）
 
 1. [已完成，本机 2026-07-25] 显式链接 `IMV2Core` 到 IMApp/IMAppTests，修复 V2-only 清理后的链接缺失；iPhone 17 / iOS 26.5 arm64 已通过 `V2ConversationStoreTests`、`V2PushWakeSettingsTests`，通用 Simulator 双架构 `build-for-testing` 已通过。
-2. 在 GitHub Actions 记录一次完整 V2 CI：macOS iOS generic build + 聚焦运行时测试，以及 Core、ClientKit、Server、disposable PostgreSQL、protobuf/SQL manifest、Prometheus rule。
-3. 将每条本地验证写入带 commit SHA、环境、命令、结果和限制的 evidence record；移除过期测试计数。
+2. [已完成，GitHub Actions，`014f706`] [macOS iOS configuration gate](https://github.com/Yyilin001/IMMonorepo/actions/runs/30149614470) 通过 generic Simulator build 与聚焦运行时测试；[Linux V2 gate](https://github.com/Yyilin001/IMMonorepo/actions/runs/30149614481) 通过 Core、ClientKit、Server/PostgreSQL、迁移账本、逻辑恢复、protobuf/SQL manifest、Prometheus 环境契约及本地账号栈冷启动冒烟。
+3. [已完成，2026-07-25] `implementation-status.md` 记录本地与远程验证的 commit、环境、命令、结果和限制；证据仍不是生产发布批准。
 
 **完成条件**：干净 checkout 上，CI 与本机指定模拟器都能重复得到相同成功结果。
 
@@ -118,4 +117,4 @@
 
 ## 5. 下一步建议
 
-本机构建基线已恢复；下一项工作应是**记录该修复的 macOS CI 证据，并完成 V2 CI 全套门禁**。这能验证干净环境的可重复性，并为随后认证、部署、媒体和容量工作提供可信起点。
+阶段 0 已完成；下一项工作应进入**阶段 1 的首发安全与最小部署**。首先需要由项目方确定生产平台、密钥管理与公网入口边界；在此之前，不能用本地 Compose 或开发证书冒充生产部署。
