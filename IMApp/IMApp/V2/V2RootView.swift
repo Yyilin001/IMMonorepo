@@ -179,6 +179,9 @@ private struct V2SignedInRootView: View {
                         .font(.title2)
                         .padding()
                 }
+                .accessibilityLabel("账户和设置")
+                .accessibilityHint("打开资料、消息接收设置和退出登录菜单")
+                .accessibilityIdentifier("v2.account-menu")
             }
             .onDisappear { signOutTask?.cancel() }
             .sheet(isPresented: $isPresentingPrivacySettings) {
