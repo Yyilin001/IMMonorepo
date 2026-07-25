@@ -41,6 +41,35 @@ struct V2PasswordAccountRoutesTests {
             #expect(response.body.string.isEmpty)
         }
     }
+
+    @Test("password registration missing public profile fields remains a bad request")
+    func passwordRegistrationMissingPublicProfileReturnsBadRequest() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        app.databases.use(
+            try .postgres(url: "postgres://im_v2_test:im_v2_test@127.0.0.1:1/im_v2_test"),
+            as: .psql,
+            isDefault: true
+        )
+        let assertionIssuer = try V2HMACAccountAssertionIssuer(rawKey: Data(repeating: 2, count: 32))
+        V2PasswordAccountRoutes(
+            store: .init(database: app.db(.psql)),
+            assertionIssuer: assertionIssuer,
+            dummyPasswordHash: "$2b$12$123456789012345678901u12345678901234567890123456789012",
+            loginAttemptLimiter: BlockedPasswordAttemptLimiter(retryAfterSeconds: 1)
+        ).register(on: app)
+
+        let body = V2PasswordAccountHTTPRequest(
+            accountHandle: "new-account",
+            password: "a-valid-length-password",
+            deviceID: "00000000-0000-0000-0000-000000000902"
+        )
+        try await app.testing().test(.POST, "v2/account-auth/password/register", beforeRequest: { request in
+            try request.content.encode(body)
+        }) { response async in
+            #expect(response.status == .badRequest)
+        }
+    }
 }
 
 private struct BlockedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {

@@ -24,13 +24,16 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   fact, rather than a reason to re-run historical non-idempotent SQL. This
   protects local development recovery only and is not a production migration
   runner or release approval.
-- 2026-07-25: isolated PostgreSQL Server regression passed **176 tests / 49
-  suites** after adding password-factor audit facts. Registration, rejected
-  bcrypt verification and successful assertion each commit their minimal audit
-  record atomically with the relevant account/rate-limit state; the record has
-  no account handle, password, verifier, assertion or forwarded client IP.
-  This is implementation evidence only: audit-reader authorization, retention,
-  account recovery and human disable policy remain release blockers.
+- 2026-07-25: isolated PostgreSQL Server regression passed **177 tests / 49
+  suites** after adding password-factor audit facts and a password-registration
+  transport validation regression. Registration, rejected bcrypt verification
+  and successful assertion each commit their minimal audit record atomically
+  with the relevant account/rate-limit state; the record has no account handle,
+  password, verifier, assertion or forwarded client IP. A malformed password
+  registration remains a `400` client error instead of being misreported as a
+  dependency outage. This is implementation evidence only: audit-reader
+  authorization, retention, account recovery and human disable policy remain
+  release blockers.
 - 2026-07-25: a retained local account-stack PostgreSQL volume was migrated
   through the new `0017_public_profile_update_outbox.sql` repair migration.
   The account service and TLS gateway then passed the real HTTPS smoke path:

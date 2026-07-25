@@ -130,6 +130,10 @@ public struct V2PasswordAccountRoutes: Sendable {
                 throw Abort(.badRequest)
             } catch V2PasswordRouteError.invalidPassword {
                 throw Abort(.badRequest)
+            } catch let abort as Abort {
+                // Missing registration fields and other transport validation
+                // failures are client errors, never a dependency outage.
+                throw abort
             } catch {
                 throw Abort(.serviceUnavailable)
             }
