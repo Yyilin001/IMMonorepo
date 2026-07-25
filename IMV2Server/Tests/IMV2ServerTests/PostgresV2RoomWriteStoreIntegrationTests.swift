@@ -2098,11 +2098,29 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 SET target_shard_bucket = 'test-users-b'
                 WHERE target_user_id = \(bind: senderUUID)
                 """).run()
+            let readyProfileUpdateID = UUID(uuidString: "00000000-0000-0000-0000-000000000701")!
+            let leasedProfileUpdateID = UUID(uuidString: "00000000-0000-0000-0000-000000000702")!
+            let profileLeaseToken = UUID(uuidString: "00000000-0000-0000-0000-000000000703")!
+            // Metrics are evaluated against PostgreSQL CURRENT_TIMESTAMP, so
+            // the lease assertion must use the same wall-clock domain rather
+            // than this test's fixed room-event clock.
+            let metricsLeaseExpiry = Date().addingTimeInterval(60)
+            try await sql.raw("""
+                INSERT INTO im_v2.public_profile_update_outbox
+                    (source_event_id, source_user_id, public_handle, display_name, revision, profile_updated_at,
+                     state, claim_token, lease_expires_at, created_at)
+                VALUES (\(bind: readyProfileUpdateID), \(bind: senderUUID), 'sender012', '发送者', 1, \(bind: now),
+                        'pending', NULL, NULL, \(bind: now)),
+                       (\(bind: leasedProfileUpdateID), \(bind: senderUUID), 'sender012', '发送者', 1, \(bind: now),
+                        'claimed', \(bind: profileLeaseToken), \(bind: metricsLeaseExpiry), \(bind: now))
+                """).run()
 
             let snapshot = await metrics.durableWorkMetricsSnapshot()
             #expect(snapshot.isAvailable)
             #expect(snapshot.readyRoomOutboxRows == 0)
             #expect(snapshot.leasedRoomOutboxRows == 0)
+            #expect(snapshot.readyDirectProfileUpdates == 1)
+            #expect(snapshot.leasedDirectProfileUpdates == 1)
             #expect(snapshot.openFanoutPlans == 1)
             #expect(snapshot.readyFanoutDeliveries == 2)
             #expect(snapshot.leasedFanoutDeliveries == 0)

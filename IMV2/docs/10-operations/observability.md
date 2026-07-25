@@ -54,12 +54,15 @@ EOF、协议错误和设备撤销都会走同一注销路径。它们仅描述�
 `im_v2_durable_work_metrics_available` 为 `0` 表示本次数据库快照失败，但
 `/metrics` 本身仍保持可抓取；该值必须被单独告警。快照包含
 `im_v2_room_outbox_backlog`、`im_v2_fanout_plans_open`、
-`im_v2_fanout_delivery_backlog`、
+`im_v2_direct_profile_update_backlog`、`im_v2_fanout_delivery_backlog`、
 `im_v2_sync_pending_records_across_devices` 与
 `im_v2_sync_reset_pending_devices`。room outbox 和投递只使用固定的
 `ready`/`leased`/`scheduled`/`paused` 标签；`scheduled` 表示仍处于退避等待期，
 `paused` 表示重试预算已耗尽、必须经受控
 operator replay 才会再次入队的 durable row，绝不能将它当作已投递或已终态。
+direct-profile outbox 只使用 `ready`/`leased`：资料投递 worker 每轮按接收者预算
+推进 checkpoint，因而没有独立的退避或 paused 状态；`leased` 超时会重新变为
+`ready`。它不含用户、room 或 shard 标签。
 投递统计覆盖本副本部署 registry 显式配置的全部逻辑 user-shard bucket，
 但不把 bucket 值作为标签。同步积压按每个 ready device cursor 计算，故多设备
 用户会被分别计入；这反映实际待同步工作量，而不是独立消息数。

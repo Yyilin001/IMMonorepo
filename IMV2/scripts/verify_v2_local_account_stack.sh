@@ -217,6 +217,8 @@ for metric in \
   'im_v2_room_outbox_backlog{state="leased"}' \
   'im_v2_room_outbox_backlog{state="scheduled"}' \
   'im_v2_room_outbox_backlog{state="paused"}' \
+  'im_v2_direct_profile_update_backlog{state="ready"}' \
+  'im_v2_direct_profile_update_backlog{state="leased"}' \
   'im_v2_fanout_delivery_backlog{state="ready"}' \
   'im_v2_fanout_delivery_backlog{state="leased"}' \
   'im_v2_fanout_delivery_backlog{state="scheduled"}' \

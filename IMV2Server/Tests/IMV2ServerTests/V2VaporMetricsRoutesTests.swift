@@ -83,6 +83,8 @@ struct V2VaporMetricsRoutesTests {
             leasedRoomOutboxRows: 1,
             scheduledRoomOutboxRows: 6,
             pausedRoomOutboxRows: 7,
+            readyDirectProfileUpdates: 15,
+            leasedDirectProfileUpdates: 16,
             openFanoutPlans: 3,
             readyFanoutDeliveries: 4,
             leasedFanoutDeliveries: 5,
@@ -102,6 +104,8 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_room_outbox_backlog{state=\"ready\"} 2"))
             #expect(body.contains("im_v2_room_outbox_backlog{state=\"scheduled\"} 6"))
             #expect(body.contains("im_v2_room_outbox_backlog{state=\"paused\"} 7"))
+            #expect(body.contains("im_v2_direct_profile_update_backlog{state=\"ready\"} 15"))
+            #expect(body.contains("im_v2_direct_profile_update_backlog{state=\"leased\"} 16"))
             #expect(body.contains("im_v2_fanout_delivery_backlog{state=\"leased\"} 5"))
             #expect(body.contains("im_v2_fanout_delivery_backlog{state=\"scheduled\"} 8"))
             #expect(body.contains("im_v2_fanout_delivery_backlog{state=\"paused\"} 9"))

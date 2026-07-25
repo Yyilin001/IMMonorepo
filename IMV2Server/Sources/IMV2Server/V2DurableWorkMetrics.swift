@@ -16,6 +16,8 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public let leasedRoomOutboxRows: Int
     public let scheduledRoomOutboxRows: Int
     public let pausedRoomOutboxRows: Int
+    public let readyDirectProfileUpdates: Int
+    public let leasedDirectProfileUpdates: Int
     public let openFanoutPlans: Int
     public let readyFanoutDeliveries: Int
     public let leasedFanoutDeliveries: Int
@@ -33,6 +35,8 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         leasedRoomOutboxRows: Int = 0,
         scheduledRoomOutboxRows: Int = 0,
         pausedRoomOutboxRows: Int = 0,
+        readyDirectProfileUpdates: Int = 0,
+        leasedDirectProfileUpdates: Int = 0,
         openFanoutPlans: Int = 0,
         readyFanoutDeliveries: Int = 0,
         leasedFanoutDeliveries: Int = 0,
@@ -49,6 +53,8 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.leasedRoomOutboxRows = max(0, leasedRoomOutboxRows)
         self.scheduledRoomOutboxRows = max(0, scheduledRoomOutboxRows)
         self.pausedRoomOutboxRows = max(0, pausedRoomOutboxRows)
+        self.readyDirectProfileUpdates = max(0, readyDirectProfileUpdates)
+        self.leasedDirectProfileUpdates = max(0, leasedDirectProfileUpdates)
         self.openFanoutPlans = max(0, openFanoutPlans)
         self.readyFanoutDeliveries = max(0, readyFanoutDeliveries)
         self.leasedFanoutDeliveries = max(0, leasedFanoutDeliveries)
@@ -110,6 +116,15 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                         AS scheduled_room_outbox_rows,
                     (SELECT COUNT(*) FROM im_v2.room_outbox WHERE state = 'paused')
                         AS paused_room_outbox_rows,
+                    (SELECT COUNT(*)
+                     FROM im_v2.public_profile_update_outbox, snapshot_now
+                     WHERE state = 'pending'
+                        OR (state = 'claimed' AND lease_expires_at <= snapshot_now.value))
+                        AS ready_direct_profile_updates,
+                    (SELECT COUNT(*)
+                     FROM im_v2.public_profile_update_outbox, snapshot_now
+                     WHERE state = 'claimed' AND lease_expires_at > snapshot_now.value)
+                        AS leased_direct_profile_updates,
                     (SELECT COUNT(*) FROM im_v2.fanout_plans WHERE state <> 'terminal')
                         AS open_fanout_plans,
                     (SELECT COUNT(*)
@@ -162,6 +177,8 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
             leasedRoomOutboxRows: v2MetricCount(row.leasedRoomOutboxRows),
             scheduledRoomOutboxRows: v2MetricCount(row.scheduledRoomOutboxRows),
             pausedRoomOutboxRows: v2MetricCount(row.pausedRoomOutboxRows),
+            readyDirectProfileUpdates: v2MetricCount(row.readyDirectProfileUpdates),
+            leasedDirectProfileUpdates: v2MetricCount(row.leasedDirectProfileUpdates),
             openFanoutPlans: v2MetricCount(row.openFanoutPlans),
             readyFanoutDeliveries: v2MetricCount(row.readyFanoutDeliveries),
             leasedFanoutDeliveries: v2MetricCount(row.leasedFanoutDeliveries),
@@ -203,6 +220,10 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "im_v2_room_outbox_backlog{state=\"leased\"} \(snapshot.leasedRoomOutboxRows)",
         "im_v2_room_outbox_backlog{state=\"scheduled\"} \(snapshot.scheduledRoomOutboxRows)",
         "im_v2_room_outbox_backlog{state=\"paused\"} \(snapshot.pausedRoomOutboxRows)",
+        "# HELP im_v2_direct_profile_update_backlog Durable direct-profile update sources awaiting or held by propagation.",
+        "# TYPE im_v2_direct_profile_update_backlog gauge",
+        "im_v2_direct_profile_update_backlog{state=\"ready\"} \(snapshot.readyDirectProfileUpdates)",
+        "im_v2_direct_profile_update_backlog{state=\"leased\"} \(snapshot.leasedDirectProfileUpdates)",
         "# HELP im_v2_fanout_plans_open Durable fan-out plans not yet terminal.",
         "# TYPE im_v2_fanout_plans_open gauge",
         "im_v2_fanout_plans_open \(snapshot.openFanoutPlans)",
@@ -231,6 +252,8 @@ private struct DurableWorkMetricsRow: Decodable {
     let leasedRoomOutboxRows: Int64
     let scheduledRoomOutboxRows: Int64
     let pausedRoomOutboxRows: Int64
+    let readyDirectProfileUpdates: Int64
+    let leasedDirectProfileUpdates: Int64
     let openFanoutPlans: Int64
     let readyFanoutDeliveries: Int64
     let leasedFanoutDeliveries: Int64
@@ -247,6 +270,8 @@ private struct DurableWorkMetricsRow: Decodable {
         case leasedRoomOutboxRows = "leased_room_outbox_rows"
         case scheduledRoomOutboxRows = "scheduled_room_outbox_rows"
         case pausedRoomOutboxRows = "paused_room_outbox_rows"
+        case readyDirectProfileUpdates = "ready_direct_profile_updates"
+        case leasedDirectProfileUpdates = "leased_direct_profile_updates"
         case openFanoutPlans = "open_fanout_plans"
         case readyFanoutDeliveries = "ready_fanout_deliveries"
         case leasedFanoutDeliveries = "leased_fanout_deliveries"

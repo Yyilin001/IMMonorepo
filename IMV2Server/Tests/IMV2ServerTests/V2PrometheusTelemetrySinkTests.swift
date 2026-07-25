@@ -78,6 +78,8 @@ struct V2PrometheusTelemetrySinkTests {
             leasedRoomOutboxRows: 2,
             scheduledRoomOutboxRows: 3,
             pausedRoomOutboxRows: 4,
+            readyDirectProfileUpdates: 15,
+            leasedDirectProfileUpdates: 16,
             openFanoutPlans: 5,
             readyFanoutDeliveries: 6,
             leasedFanoutDeliveries: 7,
@@ -97,6 +99,8 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"leased\"} 2"))
         #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"scheduled\"} 3"))
         #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"paused\"} 4"))
+        #expect(rendered.contains("im_v2_direct_profile_update_backlog{state=\"ready\"} 15"))
+        #expect(rendered.contains("im_v2_direct_profile_update_backlog{state=\"leased\"} 16"))
         #expect(rendered.contains("im_v2_fanout_plans_open 5"))
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"ready\"} 6"))
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"leased\"} 7"))
