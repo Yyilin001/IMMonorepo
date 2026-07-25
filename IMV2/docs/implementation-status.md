@@ -66,7 +66,9 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   operator process has no host-published port; the script reaches its
   loopback listener with its dedicated local bearer, receives `200 no-store`
   for a single disable operation, then proves the already-issued access token
-  and refresh credential both receive `401` through the public HTTPS path.
+  and refresh credential both receive `401` and a still-valid, pre-disable
+  account assertion receives `403` when it attempts new credential issuance
+  through the public HTTPS path.
   The HTTPS edge injected both the account-edge proof and derived client
   address; its loopback account process would reject that public path without
   the proof.
@@ -210,9 +212,10 @@ rejected password assertions followed by a no-store `429` with a positive
 `Retry-After`, authenticated Push endpoint register/remove with `204` and
 `no-store` (without printing either token), a local-only operator disable with
 a dedicated bearer returning `200 no-store` followed by public HTTPS `401` for
-both the previously issued access and refresh credentials, a local-CA-verified
-TLS 1.3 gateway handshake, and the gateway container's private metrics
-endpoint. The latter asserts HTTP 200,
+both the previously issued access and refresh credentials and `403` for a
+still-valid pre-disable account assertion attempting new credential issuance,
+a local-CA-verified TLS 1.3 gateway handshake, and the gateway container's
+private metrics endpoint. The latter asserts HTTP 200,
 `no-store`, no host-published metrics port, the complete durable-work
 ready/leased/scheduled/paused metric vocabulary, and Push-wake
 ready/leased/suppressed metrics; it therefore catches a stale

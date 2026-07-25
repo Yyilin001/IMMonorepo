@@ -136,6 +136,19 @@ access_token="$(printf '%s' "${issued_credentials}" | jq -er '.accessToken')"
 refresh_credential="$(printf '%s' "${issued_credentials}" | jq -er '.refreshCredential')"
 user_id="$(printf '%s' "${issued_credentials}" | jq -er '.userID')"
 
+# Capture a second, short-lived device-bound assertion before disabling the
+# account. It remains intentionally unexchanged until after the operator
+# action, where the credential issuer must fence it even though its HMAC is
+# otherwise syntactically valid and still within its lifetime.
+pre_disable_device_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+phase="pre-disable account assertion"
+pre_disable_assertion="$(curl --silent --show-error --fail \
+  --cacert "${ca_path}" \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data "{\"accountHandle\":\"${account_handle}\",\"password\":\"v2-local-smoke-password\",\"deviceID\":\"${pre_disable_device_id}\"}" \
+  https://localhost:8443/v2/account-auth/password/assertion | jq -er '.accountAssertion')"
+
 # This exercises the authenticated endpoint route without printing or
 # persisting either credential. The opaque smoke token is deliberately not a
 # real APNs token and is removed immediately after the no-store response.
@@ -226,6 +239,18 @@ test "${disabled_refresh_status}" = '401' || {
   exit 1
 }
 
+phase="disabled account assertion rejection"
+disabled_assertion_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  --cacert "${ca_path}" \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data "{\"accountAssertion\":\"${pre_disable_assertion}\",\"deviceID\":\"${pre_disable_device_id}\",\"operationID\":\"$(uuidgen | tr '[:upper:]' '[:lower:]')\"}" \
+  https://localhost:8443/v2/device-credentials)"
+test "${disabled_assertion_status}" = '403' || {
+  printf 'disabled account assertion was unexpectedly allowed to issue a credential: %s\n' "${disabled_assertion_status}" >&2
+  exit 1
+}
+
 phase="TLS gateway handshake"
 gateway_probe="$(openssl s_client \
   -connect localhost:7443 \
@@ -293,6 +318,6 @@ printf 'local account HTTPS validation: 400\n'
 printf 'local password registration and device credential issuance: 200\n'
 printf 'local password failure limit: 5 x 401, then 429 no-store with Retry-After\n'
 printf 'local Push endpoint register/remove: 204, no-store\n'
-printf 'local loopback operator account disable: 200 no-store, then access/refresh 401\n'
+printf 'local loopback operator account disable: 200 no-store, then access/refresh 401 and prior assertion 403\n'
 printf 'local V2 TLS gateway: TLS 1.3 verified\n'
 printf 'local V2 private metrics: HTTP 200, no-store, durable-work metric vocabulary verified\n'
