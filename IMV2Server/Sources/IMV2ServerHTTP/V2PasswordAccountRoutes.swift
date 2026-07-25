@@ -60,6 +60,7 @@ public struct V2PasswordAccountRoutes: Sendable {
     private let store: V2PostgresPasswordAccountStore
     private let assertionIssuer: V2HMACAccountAssertionIssuer
     private let dummyPasswordHash: String
+    private let loginAttemptLimiter: any V2PasswordLoginAttemptLimiting
 
     /// `dummyPasswordHash` must be a valid bcrypt digest at the same cost as
     /// the configured application password hasher. It equalizes unknown-handle
@@ -67,11 +68,13 @@ public struct V2PasswordAccountRoutes: Sendable {
     public init(
         store: V2PostgresPasswordAccountStore,
         assertionIssuer: V2HMACAccountAssertionIssuer,
-        dummyPasswordHash: String
+        dummyPasswordHash: String,
+        loginAttemptLimiter: any V2PasswordLoginAttemptLimiting
     ) {
         self.store = store
         self.assertionIssuer = assertionIssuer
         self.dummyPasswordHash = dummyPasswordHash
+        self.loginAttemptLimiter = loginAttemptLimiter
     }
 
     public func register(on routes: RoutesBuilder) {
@@ -99,10 +102,18 @@ public struct V2PasswordAccountRoutes: Sendable {
             let deviceID = try parsedDeviceID(input.deviceID)
             do {
                 try validatePassword(input.password)
+                _ = try canonicalAccountHandle(input.accountHandle)
+                if let retryAfter = try await loginAttemptLimiter.blockedRetryAfterSeconds(accountHandle: input.accountHandle) {
+                    return noStoreRetryAfterResponse(seconds: retryAfter)
+                }
                 let credential = try await store.passwordCredential(for: input.accountHandle)
                 let candidateHash = credential?.passwordHash ?? dummyPasswordHash
                 let matches = try await request.password.async.verify(input.password, created: candidateHash).get()
-                guard let credential, matches else { throw V2PasswordRouteError.rejected }
+                guard let credential, matches else {
+                    try await loginAttemptLimiter.recordFailure(accountHandle: input.accountHandle)
+                    throw V2PasswordRouteError.rejected
+                }
+                try await loginAttemptLimiter.reset(accountHandle: input.accountHandle)
                 return try noStoreJSONResponse(.init(accountAssertion: try assertionIssuer.issue(userID: credential.userID, deviceID: deviceID)))
             } catch V2PasswordRouteError.rejected {
                 throw Abort(.unauthorized)
@@ -133,6 +144,14 @@ public struct V2PasswordAccountRoutes: Sendable {
         headers.replaceOrAdd(name: "Pragma", value: "no-cache")
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
+
+    private func noStoreRetryAfterResponse(seconds: Int) -> Response {
+        var headers = HTTPHeaders()
+        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        headers.replaceOrAdd(name: "Retry-After", value: String(seconds))
+        return .init(status: .tooManyRequests, headers: headers)
+    }
 }
 
 public struct V2PasswordAccountHTTPRequest: Content, Sendable {
@@ -153,7 +172,7 @@ private struct PasswordCredentialRow: Decodable {
     enum CodingKeys: String, CodingKey { case userID = "user_id"; case passwordHash = "password_hash" }
 }
 
-private func canonicalAccountHandle(_ value: String) throws -> String {
+func canonicalAccountHandle(_ value: String) throws -> String {
     let normalized = value.lowercased()
     let scalars = normalized.unicodeScalars
     guard (3 ... 64).contains(scalars.count), scalars.allSatisfy({ scalar in

@@ -27,6 +27,9 @@ services:
       IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
       IM_V2_ACCOUNT_LISTEN_HOST: 127.0.0.1
       IM_V2_ACCOUNT_LISTEN_PORT: 8444
+      IM_V2_PASSWORD_LOGIN_MAX_FAILURES: 5
+      IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS: 900
+      IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS: 900
     depends_on:
       postgres:
         condition: service_healthy

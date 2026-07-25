@@ -99,6 +99,9 @@ migration_marker() {
     0013_user_shard_migration_forwarding.sql)
       printf "%s" "SELECT EXISTS (SELECT 1 FROM pg_constraint AS c JOIN pg_class AS relation ON relation.oid = c.conrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND relation.relname = 'user_shard_migrations' AND c.conname = 'user_shard_migrations_phase_check' AND pg_get_constraintdef(c.oid) LIKE '%forwarding%')"
       ;;
+    0014_account_password_login_rate_limit.sql)
+      printf "%s" "SELECT to_regclass('im_v2.account_password_login_rate_limits') IS NOT NULL"
+      ;;
     *)
       printf 'missing local migration marker for %s; add one before using a retained volume.\n' "$1" >&2
       return 1

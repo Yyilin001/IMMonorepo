@@ -28,6 +28,7 @@ public struct V2AccountRuntimeConfiguration: Sendable {
     public let pushEndpointEnvelopeKey: V2PushEndpointEnvelopeKey
     public let accountAssertionKey: Data
     public let dummyPasswordHash: String
+    public let passwordLoginRateLimit: V2PasswordLoginRateLimitPolicy
 
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
@@ -48,6 +49,18 @@ public struct V2AccountRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_PASSWORD_DUMMY_BCRYPT_HASH")
         }
         dummyPasswordHash = dummy
+        let maximumFailures = try Self.integer("IM_V2_PASSWORD_LOGIN_MAX_FAILURES", environment: environment)
+        let windowSeconds = try Self.integer("IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS", environment: environment)
+        let lockoutSeconds = try Self.integer("IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS", environment: environment)
+        do {
+            passwordLoginRateLimit = try .init(
+                maximumFailures: maximumFailures,
+                window: TimeInterval(windowSeconds),
+                lockout: TimeInterval(lockoutSeconds)
+            )
+        } catch V2PasswordLoginRateLimitError.invalidPolicy {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_PASSWORD_LOGIN_MAX_FAILURES/IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS/IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS")
+        }
     }
 
     private static func required(_ key: String, environment: any V2RuntimeEnvironment) throws -> String {

@@ -46,7 +46,11 @@ enum IMV2AccountServerApp {
             V2PasswordAccountRoutes(
                 store: .init(database: database),
                 assertionIssuer: assertionIssuer,
-                dummyPasswordHash: configuration.dummyPasswordHash
+                dummyPasswordHash: configuration.dummyPasswordHash,
+                loginAttemptLimiter: V2PostgresPasswordLoginAttemptLimiter(
+                    database: database,
+                    policy: configuration.passwordLoginRateLimit
+                )
             ).register(on: app)
             try await app.startup()
             app.logger.notice("IM V2 account service bound", metadata: ["host": "\(configuration.listener.host)", "port": "\(configuration.listener.port)"])

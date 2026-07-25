@@ -78,6 +78,13 @@ The password fallback uses bcrypt cost 12. Generate
 account executes the same expensive comparison as a wrong password. Keep the
 account assertion HMAC key and the device-credential replay-envelope key in
 this service's secret scope only; neither belongs in the realtime gateway.
+Each failed password assertion also updates the canonical-account failure
+state in PostgreSQL, shared across account-service replicas. Its maximum
+failures, window and lockout duration are required `IM_V2_PASSWORD_LOGIN_*`
+configuration values; a lockout returns no-store `429` with `Retry-After`.
+This protects an account handle only. The public proxy must separately enforce
+a trusted-client/IP policy and provide audit, recovery and account-disable
+operations.
 
 The client-side passkey flow has a complete challenge/assertion transport
 boundary, but this executable does not yet mount public WebAuthn endpoints:

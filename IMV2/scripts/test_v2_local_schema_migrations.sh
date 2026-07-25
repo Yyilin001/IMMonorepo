@@ -43,7 +43,7 @@ run_migrator() {
 }
 
 bootstrap_output="$(run_migrator)"
-test "$(printf '%s\n' "${bootstrap_output}" | grep -Fc 'local V2 migration recorded:')" = '13'
+test "$(printf '%s\n' "${bootstrap_output}" | grep -Fc 'local V2 migration recorded:')" = '14'
 
 psql() {
   "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 "$@"

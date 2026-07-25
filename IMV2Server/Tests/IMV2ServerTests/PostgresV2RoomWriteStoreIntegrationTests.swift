@@ -2,6 +2,7 @@ import Fluent
 import FluentPostgresDriver
 import Foundation
 import IMV2Core
+import IMV2ServerHTTP
 @testable import IMV2Server
 import SQLKit
 import Testing
@@ -2937,6 +2938,49 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         } catch {
             if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
             if let secondarySQL = app.db(DatabaseID(string: "secondary")) as? any SQLDatabase { try? await secondarySQL.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("password fallback failure limits persist across account-service instances")
+    func persistsPasswordLoginFailureLimit() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else {
+            return
+        }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2PasswordLoginRateLimitError.unavailable
+            }
+            let schemaExists = try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self)
+            guard schemaExists?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let policy = try V2PasswordLoginRateLimitPolicy(maximumFailures: 2, window: 60, lockout: 60)
+            let firstInstance = V2PostgresPasswordLoginAttemptLimiter(database: app.db(.psql), policy: policy)
+            let secondInstance = V2PostgresPasswordLoginAttemptLimiter(database: app.db(.psql), policy: policy)
+            #expect(try await firstInstance.blockedRetryAfterSeconds(accountHandle: "limit-test") == nil)
+            try await firstInstance.recordFailure(accountHandle: "limit-test")
+            #expect(try await secondInstance.blockedRetryAfterSeconds(accountHandle: "limit-test") == nil)
+            try await secondInstance.recordFailure(accountHandle: "limit-test")
+            let retryAfter = try #require(try await firstInstance.blockedRetryAfterSeconds(accountHandle: "limit-test"))
+            #expect((1 ... 60).contains(retryAfter))
+            try await secondInstance.reset(accountHandle: "limit-test")
+            #expect(try await firstInstance.blockedRetryAfterSeconds(accountHandle: "limit-test") == nil)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
             try? await app.asyncShutdown()
             throw error
         }
