@@ -57,9 +57,10 @@ jobs:
 
       - uses: swift-actions/setup-swift@v2
         with:
-          # ClientKit's manifest requires Swift tools 6.2; use the same Swift
-          # release line that builds the local account/gateway image.
-          swift-version: "6.3"
+          # ClientKit's manifest requires Swift tools 6.2. Pin the newest
+          # release line currently published by this setup action; the local
+          # account/gateway image independently builds on Swift 6.3.
+          swift-version: "6.2"
 
       - name: Install protobuf compiler
         run: |

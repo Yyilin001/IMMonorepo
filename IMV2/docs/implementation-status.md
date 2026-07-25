@@ -102,8 +102,9 @@ therefore reruns it when Release configuration changes in an incremental
 derived-data build. A local production-valued Release build passed after
 reading its processed Info.plist; changing its account URL to HTTP failed the
 build with `production_v2_account_requires_https`. The Linux V2 workflow now
-uses Swift 6.3, matching the local account/gateway image and satisfying
-ClientKit's Swift-tools 6.2 manifest. Remote CI evidence is still pending.
+uses Swift 6.2, satisfying ClientKit's Swift-tools 6.2 manifest; the local
+account/gateway image independently builds with Swift 6.3. Remote CI evidence
+is still pending.
 
 On 2026-07-25, `scripts/check_v2_runtime_env_examples.sh` was added to the V2
 CI path. It checks declarations only—never real secret values—across the

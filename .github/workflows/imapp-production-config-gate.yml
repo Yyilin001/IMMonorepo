@@ -68,7 +68,7 @@ jobs:
           IM_V2_GATEWAY_PORT: "7443"
           IM_V2_PASSKEY_RP_ID: localhost
           IM_V2_PUSH_ENVIRONMENT: development
-        run: IMAPP_NETWORK_CONFIG_MODE=development IMApp/Scripts/validate_network_configuration.sh
+        run: IMAPP_NETWORK_CONFIG_MODE=development bash IMApp/Scripts/validate_network_configuration.sh
 
       - name: Validate Debug network defaults
         run: IMAPP_DEBUG_NETWORK_DEFAULTS_SELF_TEST=true bash IMApp/Scripts/validate_debug_network_defaults.sh
