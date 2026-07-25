@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import IMV2Core
 
 /// Ephemeral provider target returned by the authenticated media edge. This is

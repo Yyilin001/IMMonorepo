@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import IMV2Core
 
 /// A single-use, account-factor result. The app passes it straight to the

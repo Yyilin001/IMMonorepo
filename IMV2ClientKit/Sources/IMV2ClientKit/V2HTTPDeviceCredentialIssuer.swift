@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import IMV2Core
 
 /// A separately approved account system returns a short-lived opaque assertion

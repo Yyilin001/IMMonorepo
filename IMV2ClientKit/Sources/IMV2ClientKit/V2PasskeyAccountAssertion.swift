@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import IMV2Core
 
 /// The server creates this one-time challenge and associates its opaque ID

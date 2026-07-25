@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import IMV2Core
 
 /// Narrow provider set mirrored by the account edge. It is intentionally not
