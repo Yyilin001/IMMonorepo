@@ -85,6 +85,7 @@ final class V2PrivacySettingsStore {
 struct V2PrivacySettingsView: View {
     @Bindable var store: V2PrivacySettingsStore
     let pushWakeSettingsStore: V2PushWakeSettingsStore?
+    @State private var preferenceTask: Task<Void, Never>?
 
     var body: some View {
         Form {
@@ -97,7 +98,7 @@ struct V2PrivacySettingsView: View {
                     systemImage: "exclamationmark.triangle",
                     description: Text("请检查本地数据后重试。")
                 )
-                Button("重试") { Task { await store.refresh() } }
+                Button("重试") { run { await store.refresh() } }
             case .loaded:
                 Section("陌生人消息") {
                     Toggle(
@@ -105,7 +106,7 @@ struct V2PrivacySettingsView: View {
                         isOn: Binding(
                             get: { store.allowsStrangerMessages },
                             set: { desiredValue in
-                                Task { await store.setAllowsStrangerMessages(desiredValue) }
+                                run { await store.setAllowsStrangerMessages(desiredValue) }
                             }
                         )
                     )
@@ -131,11 +132,18 @@ struct V2PrivacySettingsView: View {
         }
         .navigationTitle("消息接收设置")
         .task { await store.refresh() }
+        .onDisappear { preferenceTask?.cancel() }
+    }
+
+    private func run(_ operation: @escaping @MainActor @Sendable () async -> Void) {
+        preferenceTask?.cancel()
+        preferenceTask = Task { await operation() }
     }
 }
 
 private struct V2PushWakeSettingsSection: View {
     @Bindable var store: V2PushWakeSettingsStore
+    @State private var preferenceTask: Task<Void, Never>?
 
     var body: some View {
         Section("后台同步唤醒") {
@@ -144,7 +152,8 @@ private struct V2PushWakeSettingsSection: View {
                 isOn: Binding(
                     get: { store.isEnabled },
                     set: { desiredValue in
-                        Task { await store.setEnabled(desiredValue) }
+                        preferenceTask?.cancel()
+                        preferenceTask = Task { await store.setEnabled(desiredValue) }
                     }
                 )
             )
@@ -163,5 +172,6 @@ private struct V2PushWakeSettingsSection: View {
                     .accessibilityIdentifier("v2.push-wake.feedback")
             }
         }
+        .onDisappear { preferenceTask?.cancel() }
     }
 }
