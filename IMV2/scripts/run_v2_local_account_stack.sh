@@ -114,8 +114,10 @@ docker compose --project-name "${compose_project}" --env-file "${env_file}" --fi
 # the local TLS edge on every explicit start so a retained Compose project
 # cannot stay "healthy" after its certificate expires. The local CA volume is
 # retained, so simulators that trust its root do not need to be reconfigured.
-docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" up -d --wait account
-docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" up -d --wait operator
+# The image tag stays stable for convenient local use. Explicitly recreate all
+# binaries after each build so a successful smoke test can never exercise a
+# stale account, operator, or gateway process left behind by Compose.
+docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" up -d --wait --force-recreate account operator
 docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" up -d --force-recreate caddy
 mkdir -p "${v2_dir}/local-ca"
 ca_path="${v2_dir}/local-ca/root.crt"

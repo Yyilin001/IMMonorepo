@@ -95,4 +95,9 @@ private struct V2DeviceRevocationEventRow: Decodable {
     let eventID: Int64
     let userID: UUID
     let deviceID: UUID
+    enum CodingKeys: String, CodingKey {
+        case eventID = "event_id"
+        case userID = "user_id"
+        case deviceID = "device_id"
+    }
 }

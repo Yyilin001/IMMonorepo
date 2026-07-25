@@ -2418,6 +2418,49 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("PostgreSQL device-revocation cursor decodes events and advances per gateway node")
+    func deviceRevocationCursorReadsAndAcknowledgesEvents() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2GatewayAuthenticationError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let firstUser = UUID(uuidString: "00000000-0000-0000-0000-000000000981")!
+            let firstDevice = UUID(uuidString: "00000000-0000-0000-0000-000000000982")!
+            let secondUser = UUID(uuidString: "00000000-0000-0000-0000-000000000983")!
+            let secondDevice = UUID(uuidString: "00000000-0000-0000-0000-000000000984")!
+            let occurredAt = Date(timeIntervalSince1970: 1_750_000_000)
+            try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at) VALUES (\(bind: firstUser), \(bind: firstDevice), \(bind: occurredAt)), (\(bind: secondUser), \(bind: secondDevice), \(bind: occurredAt))").run()
+            try await sql.raw("INSERT INTO im_v2.device_revocation_events (user_id, device_id, created_at) VALUES (\(bind: firstUser), \(bind: firstDevice), \(bind: occurredAt)), (\(bind: secondUser), \(bind: secondDevice), \(bind: occurredAt))").run()
+
+            let store = V2PostgresDeviceRevocationEventStore(database: app.db(.psql))
+            let nodeID = "gateway-revocation-cursor-test"
+            let firstPage = try await store.events(afterCursorFor: nodeID, limit: 8)
+            #expect(firstPage.map(\.userID) == [try UserID(firstUser.uuidString), try UserID(secondUser.uuidString)])
+            #expect(firstPage.map(\.deviceID) == [try DeviceID(firstDevice.uuidString), try DeviceID(secondDevice.uuidString)])
+
+            try await store.markProcessed(eventID: firstPage[0].eventID, nodeID: nodeID, now: occurredAt)
+            let secondPage = try await store.events(afterCursorFor: nodeID, limit: 8)
+            #expect(secondPage.map(\.eventID) == [firstPage[1].eventID])
+            try await store.markProcessed(eventID: secondPage[0].eventID, nodeID: nodeID, now: occurredAt)
+            #expect(try await store.events(afterCursorFor: nodeID, limit: 8).isEmpty)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("account HTTP retries replay one durable credential result after response loss")
     func deviceCredentialHTTPRetriesReplayPersistedResult() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),

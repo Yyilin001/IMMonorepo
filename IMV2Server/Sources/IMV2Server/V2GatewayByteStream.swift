@@ -13,7 +13,11 @@ public actor V2GatewayByteStream {
     private let connectionID: UUID
     private let registry: V2DeviceConnectionRegistry?
     private var registeredIdentity: V2AuthenticatedConnection?
-    private var deviceRevocationHandler: (@Sendable () -> Void)?
+    // A revocation worker must not advance its durable cursor until the
+    // transport confirms the local channel has closed. The handler therefore
+    // bridges the NIO close future into this actor rather than merely
+    // scheduling a best-effort close.
+    private var deviceRevocationHandler: (@Sendable () async -> Void)?
     private var outboundWriter: (@Sendable (Data) -> Void)?
 
     public init(
@@ -79,10 +83,12 @@ public actor V2GatewayByteStream {
     public func revokeDevice() async {
         await unregisterAuthenticatedDevice()
         await session.revokeDevice()
-        deviceRevocationHandler?()
+        if let deviceRevocationHandler {
+            await deviceRevocationHandler()
+        }
     }
 
-    public func setDeviceRevocationHandler(_ handler: @escaping @Sendable () -> Void) {
+    public func setDeviceRevocationHandler(_ handler: @escaping @Sendable () async -> Void) {
         deviceRevocationHandler = handler
     }
 

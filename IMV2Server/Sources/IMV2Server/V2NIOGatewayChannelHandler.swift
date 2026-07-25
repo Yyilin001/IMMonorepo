@@ -19,6 +19,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private var queuedInboundBytes = 0
     private var processing = false
     private var closed = false
+    // `V2GatewayByteStream` is an actor, so installing its channel callbacks
+    // crosses an async boundary. Never let an authenticate frame register in
+    // the live-device registry before the revocation-close callback exists.
+    private var callbacksReady = false
     private var lastInboundAt: NIODeadline?
     private var idleCheck: Scheduled<Void>?
     private var closeReason: V2GatewayConnectionClosure?
@@ -48,12 +52,25 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let stream = stream
         Task {
             await stream.setDeviceRevocationHandler {
-                eventLoop.execute {
-                    boundHandler.value.close(
-                        context: boundContext.value,
-                        reason: .deviceRevoked,
-                        revokeDevice: false
-                    )
+                await withCheckedContinuation { continuation in
+                    eventLoop.execute {
+                        let handler = boundHandler.value
+                        let context = boundContext.value
+                        guard !handler.closed else {
+                            continuation.resume()
+                            return
+                        }
+                        let closePromise = eventLoop.makePromise(of: Void.self)
+                        closePromise.futureResult.whenComplete { _ in
+                            continuation.resume()
+                        }
+                        handler.close(
+                            context: context,
+                            reason: .deviceRevoked,
+                            revokeDevice: false,
+                            closePromise: closePromise
+                        )
+                    }
                 }
             }
             await stream.setOutboundWriter { bytes in
@@ -64,6 +81,12 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                     buffer.writeBytes(bytes)
                     context.writeAndFlush(boundHandler.value.wrapOutboundOut(buffer), promise: nil)
                 }
+            }
+            eventLoop.execute {
+                let handler = boundHandler.value
+                guard !handler.closed else { return }
+                handler.callbacksReady = true
+                handler.processNext(context: boundContext.value)
             }
         }
     }
@@ -101,7 +124,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     }
 
     private func processNext(context: ChannelHandlerContext) {
-        guard !closed, !processing, !pending.isEmpty else { return }
+        guard callbacksReady, !closed, !processing, !pending.isEmpty else { return }
         processing = true
         let inbound = pending.removeFirst()
         queuedInboundBytes -= inbound.count
@@ -133,9 +156,13 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private func close(
         context: ChannelHandlerContext,
         reason: V2GatewayConnectionClosure,
-        revokeDevice: Bool = true
+        revokeDevice: Bool = true,
+        closePromise: EventLoopPromise<Void>? = nil
     ) {
-        guard !closed else { return }
+        guard !closed else {
+            closePromise?.succeed(())
+            return
+        }
         closed = true
         closeReason = reason
         idleCheck?.cancel()
@@ -146,7 +173,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             let stream = stream
             Task { await stream.revokeDevice() }
         }
-        context.close(promise: nil)
+        context.close(promise: closePromise)
     }
 
     private func scheduleIdleCheck(context: ChannelHandlerContext) {
