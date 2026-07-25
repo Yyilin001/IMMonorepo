@@ -1,0 +1,77 @@
+import Fluent
+import Foundation
+import IMV2Core
+import SQLKit
+
+/// The small non-fan-out part of user sync (relationship, block and receive
+/// preference) is authoritative in the control store. This boundary mirrors
+/// its already-committed records to the current write owner, plus the target
+/// while a migration still writes at source. The source operation ID is the
+/// durable retry key, so a lost response can safely repeat the mirror without
+/// allocating another target sequence.
+public protocol V2UserShardProjectionShadowing: Sendable {
+    func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws
+}
+
+public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectionShadowing, Sendable {
+    private let control: any Database
+    private let router: any V2UserShardRouter
+    private let migrations: any V2UserShardMigrationStoring
+    private let registry: any V2UserShardStorageResolving
+
+    public init(control: any Database, router: any V2UserShardRouter, migrations: any V2UserShardMigrationStoring, registry: any V2UserShardStorageResolving) {
+        self.control = control
+        self.router = router
+        self.migrations = migrations
+        self.registry = registry
+    }
+
+    public func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws {
+        guard !projectionKinds.isEmpty,
+              let sql = control as? any SQLDatabase,
+              let userUUID = UUID(uuidString: userID.rawValue),
+              let eventUUID = UUID(uuidString: sourceEventID.rawValue)
+        else { return }
+        let routes = try await router.routes(for: [userID])
+        guard routes.count == 1 else { throw V2UserShardRouterError.resultCountMismatch }
+        let current = try registry.location(for: routes[0].bucket)
+        let migration = try await migrations.load(userID: userID)
+        for kind in projectionKinds.sorted() {
+            guard let row = try await sql.raw("""
+                SELECT user_sync_sequence, projection_kind, payload::text AS payload_json, created_at
+                FROM im_v2.user_sync_log
+                WHERE user_id = \(bind: userUUID) AND source_event_id = \(bind: eventUUID)
+                  AND projection_kind = \(bind: kind)
+                """).first(decoding: ShadowSourceRow.self)
+            else { continue }
+            let currentProjector = try PostgresV2UserShardFanoutProjector(database: current.database, schema: current.schema)
+            let sequence = try await currentProjector.projectAllocated(
+                userID: userID, sourceEventID: sourceEventID, projectionKind: row.projectionKind,
+                payloadJSON: row.payloadJSON, createdAt: row.createdAt
+            )
+            if let migration,
+               (migration.phase == .forwarding || migration.phase == .verified),
+               migration.sourceBucket == routes[0].bucket {
+                let target = try registry.location(for: migration.targetBucket)
+                let targetProjector = try PostgresV2UserShardFanoutProjector(database: target.database, schema: target.schema)
+                _ = try await targetProjector.mirror(.init(
+                    userID: userID, sequence: sequence, sourceEventID: sourceEventID,
+                    projectionKind: row.projectionKind, payloadJSON: row.payloadJSON, createdAt: row.createdAt
+                ))
+            }
+        }
+    }
+}
+
+private struct ShadowSourceRow: Decodable {
+    let sequence: Int64
+    let projectionKind: String
+    let payloadJSON: String
+    let createdAt: Date
+    enum CodingKeys: String, CodingKey {
+        case sequence = "user_sync_sequence"
+        case projectionKind = "projection_kind"
+        case payloadJSON = "payload_json"
+        case createdAt = "created_at"
+    }
+}

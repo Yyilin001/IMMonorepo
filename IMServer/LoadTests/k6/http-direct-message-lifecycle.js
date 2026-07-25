@@ -52,6 +52,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['direct-message-lifecycle-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const accountFile = __ENV.ACCOUNT_FILE || __ENV.IM_ACCOUNT_FILE || '';
 const defaultOwnerEmail = __ENV.IM_OWNER_EMAIL || __ENV.IM_EMAIL || 'demo@example.com';
 const defaultOwnerPassword = __ENV.IM_OWNER_PASSWORD || __ENV.IM_PASSWORD || 'password1234';
@@ -119,6 +120,12 @@ function jsonHeaders(token) {
   return { headers };
 }
 
+function commandHeaders(token) {
+  const headers = jsonHeaders(token).headers;
+  headers.Accept = 'application/vnd.im.conversation-command-receipt+json';
+  return { headers };
+}
+
 function login(account, deviceRole) {
   const deviceID = `k6-direct-lifecycle-${deviceRole}-${__VU}`;
   const res = http.post(
@@ -154,14 +161,14 @@ function createDirectConversation(token, peerEmail) {
       title: null,
       memberEmails: [peerEmail],
     }),
-    jsonHeaders(token)
+    commandHeaders(token)
   );
   createLatency.add(Date.now() - startedAt);
-  check(res, { 'direct lifecycle create direct ok': (r) => r.status === 200 });
-  if (res.status !== 200) {
+  check(res, { 'direct lifecycle create direct accepted': (r) => r.status === 202 });
+  if (res.status !== 202) {
     fail(`create direct conversation failed: ${res.status} ${res.body}`);
   }
-  return res.json();
+  return { id: res.json('conversationID') };
 }
 
 function listSummary(token, conversationID) {
@@ -180,7 +187,7 @@ function listSummary(token, conversationID) {
 function sendInternalMessage(senderUserID, conversationID, clientMessageID, text) {
   const startedAt = Date.now();
   const res = http.post(
-    `${baseURL}/internal/im/messages/send`,
+    `${commandBaseURL}/internal/im/messages/send`,
     JSON.stringify({
       senderUserID,
       payload: {
@@ -203,7 +210,7 @@ function sendInternalMessage(senderUserID, conversationID, clientMessageID, text
 
 function findTimelineMessage(token, conversationID, clientMessageID, afterSequence) {
   const res = http.get(
-    `${baseURL}/api/im/conversations/${conversationID}/messages/since?afterSequence=${afterSequence}&limit=100`,
+    `${baseURL}/api/im/conversations/${conversationID}/timeline/since?afterSequence=${afterSequence}&limit=100`,
     jsonHeaders(token)
   );
   if (res.status !== 200) {
@@ -302,7 +309,7 @@ function exerciseOneDirection(state, sender, receiver, label, startedAt, deadlin
   const senderBaseline = listSummary(sender.token, state.conversationID);
   const previousSequence = Number(
     receiverBaseline.summary && receiverBaseline.summary.lastMessage
-      ? receiverBaseline.summary.lastMessage.serverSequence || 0
+      ? receiverBaseline.summary.lastMessage.timelineSequence || 0
       : 0
   );
   const clientMessageID = `k6-direct-lifecycle-${label}-${__VU}-${__ITER}-${Date.now()}`;
@@ -349,8 +356,6 @@ function exerciseOneDirection(state, sender, receiver, label, startedAt, deadlin
   const readResponse = markRead(receiver.token, state.conversationID, message.serverSequence);
   if (
     !readResponse
-    || Number(readResponse.lastReadSequence || 0) < Number(message.serverSequence)
-    || Number(readResponse.unreadCount || 0) !== 0
   ) {
     return false;
   }

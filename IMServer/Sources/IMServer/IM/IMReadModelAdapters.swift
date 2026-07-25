@@ -167,7 +167,10 @@ struct DatabaseConversationSearchAdapter: ConversationSearchAdapter {
         cursor: String?,
         limit: Int?
     ) async throws -> IMConversationMessageSearchPageResponse {
-        try await ConversationSearchReadSupport(db: database(forConversationID: conversationID)).searchMessages(
+        try await ConversationSearchReadSupport(
+            db: database(forConversationID: conversationID),
+            featureDB: app?.db
+        ).searchMessages(
             in: conversationID,
             for: userID,
             query: query,

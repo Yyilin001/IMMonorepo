@@ -38,7 +38,9 @@ RUN mkdir /staging
 
 # 构建应用，启用优化、静态链接，并使用 jemalloc
 # 注意：jemalloc 的静态版本与 Swift 静态运行时不兼容。
-RUN --mount=type=cache,target=/build/.build \
+# SwiftPM's build directory is mutable. A dedicated locked cache prevents
+# concurrent Compose targets from corrupting incremental object metadata.
+RUN --mount=type=cache,id=imserver-swift-build,target=/build/.build,sharing=locked \
     swift build -c release \
         --product IMServer \
         --static-swift-stdlib \

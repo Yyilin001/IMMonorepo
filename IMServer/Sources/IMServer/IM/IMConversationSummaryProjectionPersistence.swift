@@ -414,6 +414,20 @@ extension IMConversationSummaryProjectionService {
             return
         }
 
+        // Each row binds 26 values. Keep Postgres extended-protocol statements
+        // comfortably below its 65,535 parameter limit for large groups.
+        let maxRowsPerStatement = 500
+        if summaries.count > maxRowsPerStatement {
+            for start in stride(from: 0, to: summaries.count, by: maxRowsPerStatement) {
+                let end = min(start + maxRowsPerStatement, summaries.count)
+                try await upsertMessageCreatedSummaries(
+                    Array(summaries[start..<end]),
+                    on: database
+                )
+            }
+            return
+        }
+
         guard let sql = database as? any SQLDatabase else {
             for item in summaries {
                 if item.exists {

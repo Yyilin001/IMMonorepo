@@ -11,6 +11,7 @@ SOURCE_EMAIL="${SOURCE_EMAIL:-demo@example.com}"
 SSH_HOST="${SSH_HOST:-}"
 DB_NAME="${DB_NAME:-imserver}"
 DB_USER="${DB_USER:-postgres}"
+POSTGRES_DOCKER_CONTAINER="${POSTGRES_DOCKER_CONTAINER:-}"
 OUTPUT_FILE="${OUTPUT_FILE:-${SCRIPT_DIR}/accounts/${PREFIX}-${COUNT}.csv}"
 PROVISION_REMOTE="${PROVISION_REMOTE:-true}"
 PROVISION_LOAD_ACCOUNTS_SELF_TEST="${PROVISION_LOAD_ACCOUNTS_SELF_TEST:-false}"
@@ -35,6 +36,7 @@ validate_inputs() {
   [[ "${SOURCE_EMAIL}" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9._-]+$ ]] || fail "invalid_source_email email=${SOURCE_EMAIL}"
   [[ "${DB_NAME}" =~ ^[A-Za-z0-9._-]+$ ]] || fail "invalid_db_name db=${DB_NAME}"
   [[ "${DB_USER}" =~ ^[A-Za-z0-9._-]+$ ]] || fail "invalid_db_user user=${DB_USER}"
+  [[ -z "${POSTGRES_DOCKER_CONTAINER}" || "${POSTGRES_DOCKER_CONTAINER}" =~ ^[A-Za-z0-9._-]+$ ]] || fail "invalid_postgres_docker_container"
   if bool_enabled "${PROVISION_REMOTE}" && [[ -z "${SSH_HOST}" ]]; then
     fail "ssh_host_required set_SSH_HOST_or_PROVISION_REMOTE_false"
   fi
@@ -104,16 +106,34 @@ fi
 
 echo "Provisioning ${COUNT} users on ${SSH_HOST}..."
 ssh "${SSH_HOST}" \
-  "COUNT='${COUNT}' PREFIX='${PREFIX}' DOMAIN='${DOMAIN}' SOURCE_EMAIL='${SOURCE_EMAIL}' DB_NAME='${DB_NAME}' DB_USER='${DB_USER}' bash -s" <<'REMOTE'
+  "COUNT='${COUNT}' PREFIX='${PREFIX}' DOMAIN='${DOMAIN}' SOURCE_EMAIL='${SOURCE_EMAIL}' DB_NAME='${DB_NAME}' DB_USER='${DB_USER}' POSTGRES_DOCKER_CONTAINER='${POSTGRES_DOCKER_CONTAINER}' bash -s" <<'REMOTE'
 set -euo pipefail
 
-source_count="$(sudo -u "${DB_USER}" psql -d "${DB_NAME}" -v source_email="${SOURCE_EMAIL}" -tAc "SELECT count(*) FROM users WHERE email = :'source_email'")"
+if [[ -n "${POSTGRES_DOCKER_CONTAINER}" ]]; then
+  psql_exec() {
+    docker exec -i "${POSTGRES_DOCKER_CONTAINER}" psql -U "${DB_USER}" -d "${DB_NAME}" "$@"
+  }
+else
+  psql_exec() {
+    sudo -u "${DB_USER}" psql -d "${DB_NAME}" "$@"
+  }
+fi
+
+source_count="$(psql_exec \
+  -v ON_ERROR_STOP=1 \
+  -v source_email="${SOURCE_EMAIL}" \
+  -At <<'SQL'
+SELECT count(*)
+FROM users
+WHERE email = :'source_email';
+SQL
+)"
 if [[ "${source_count}" != "1" ]]; then
   echo "Source account not found or not unique: ${SOURCE_EMAIL}" >&2
   exit 1
 fi
 
-sudo -u "${DB_USER}" psql -d "${DB_NAME}" \
+psql_exec \
   -v ON_ERROR_STOP=1 \
   -v count="${COUNT}" \
   -v prefix="${PREFIX}" \
@@ -127,7 +147,15 @@ WITH source AS (
 generated AS (
   SELECT
     gen_random_uuid() AS id,
-    format('%s-%s@%s', :'prefix', lpad(series::text, 5, '0'), :'domain') AS email,
+    format(
+      '%s-%s@%s',
+      :'prefix',
+      CASE
+        WHEN series < 100000 THEN lpad(series::text, 5, '0')
+        ELSE series::text
+      END,
+      :'domain'
+    ) AS email,
     (SELECT password_hash FROM source) AS password_hash,
     format('Load %s', lpad(series::text, 5, '0')) AS display_name
   FROM generate_series(1, :'count'::int) AS series
@@ -164,7 +192,7 @@ SET
   updated_at = now();
 SQL
 
-sudo -u "${DB_USER}" psql -d "${DB_NAME}" \
+psql_exec \
   -v ON_ERROR_STOP=1 \
   -v prefix="${PREFIX}" \
   -v domain="${DOMAIN}" <<'SQL'
@@ -174,5 +202,5 @@ WHERE email LIKE :'prefix' || '-%@' || :'domain';
 SQL
 REMOTE
 
-echo "provision_load_accounts result=pass mode=remote output=${OUTPUT_FILE} count=${COUNT} sshHost=${SSH_HOST}"
+echo "provision_load_accounts result=pass mode=remote output=${OUTPUT_FILE} count=${COUNT} sshHost=${SSH_HOST} postgresDockerContainer=${POSTGRES_DOCKER_CONTAINER:-none}"
 echo "Done. Use ACCOUNT_FILE=${OUTPUT_FILE}"

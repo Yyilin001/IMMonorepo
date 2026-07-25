@@ -11,6 +11,11 @@ enum IMGatewayDomainEventFanoutIntent: String, Codable, Sendable {
     case preSplitInactiveHint
 }
 
+enum IMGatewayRelayHeader {
+    static let reliableDelivery = "X-IM-Reliable-Realtime-Relay"
+    static let reliableDeliveryValue = "1"
+}
+
 struct IMGatewayDomainEventPayloadBatch: Sendable {
     let payload: IMTCPChatDomainEventPayload
     let recipientUserIDs: [UUID]
@@ -47,6 +52,10 @@ protocol GatewaySessionTransport: Sendable {
         _ batches: [IMGatewayDomainEventPayloadBatch],
         requestID: UUID?
     ) async
+    func sendDomainEventPayloadBatchesReliably(
+        _ batches: [IMGatewayDomainEventPayloadBatch],
+        requestID: UUID?
+    ) async throws
     func sendDomainEventPayloads(
         _ deliveries: [IMCanonicalDomainEventDelivery],
         requestID: UUID?
@@ -130,6 +139,13 @@ struct LocalGatewaySessionTransport: GatewaySessionTransport {
         requestID: UUID?
     ) async {
         await routingService.sendDomainEventPayloadBatches(batches, requestID: requestID)
+    }
+
+    func sendDomainEventPayloadBatchesReliably(
+        _ batches: [IMGatewayDomainEventPayloadBatch],
+        requestID: UUID?
+    ) async throws {
+        try await routingService.sendDomainEventPayloadBatchesReliably(batches, requestID: requestID)
     }
 
     func sendDomainEventPayloads(
@@ -278,6 +294,35 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
                 "relay_concurrency": .stringConvertible(relayConcurrency),
                 "recipient_batch_size": .stringConvertible(groupedRecipientBatchSize)
             ])
+        }
+    }
+
+    func sendDomainEventPayloadBatchesReliably(
+        _ batches: [IMGatewayDomainEventPayloadBatch],
+        requestID: UUID?
+    ) async throws {
+        let nonEmptyBatches = batches.filter { !$0.recipientUserIDs.isEmpty }
+        guard !nonEmptyBatches.isEmpty else {
+            return
+        }
+
+        let relayBatchSize = max(1, app.streamConsumerConfiguration.domainDeliveryRelayBatchSize)
+        let groupedRecipientBatchSize = max(relayBatchSize, relayBatchSize * 64)
+        let workPlan = makeDomainEventPayloadBatchWorkPlan(
+            nonEmptyBatches,
+            recipientBatchSize: groupedRecipientBatchSize,
+            maxBinaryBodyBytes: configuration.domainEventPacketBinaryMaxBodyBytes
+        )
+        await app.routingMetrics.recordGatewayHTTPRelay(
+            workItemCount: workPlan.workItems.count,
+            payloadBatchCount: workPlan.payloadBatchCount,
+            recipientCount: workPlan.recipientCount,
+            skippedRecipientCount: workPlan.skippedRecipientCount,
+            encodedPayloadBytes: workPlan.encodedPayloadBytes,
+            maxRecipientsPerWorkItem: workPlan.maxRecipientsPerWorkItem
+        )
+        for workItem in workPlan.workItems {
+            try await relayDomainEventPayloadWorkItemReliably(workItem, requestID: requestID)
         }
     }
 
@@ -742,6 +787,68 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         }
     }
 
+    private func relayDomainEventPayloadWorkItemReliably(
+        _ workItem: GatewayRelayDomainEventPayloadWorkItem,
+        requestID: UUID?
+    ) async throws {
+        switch workItem {
+        case .groupedBinary(let payloadData, let recipientUserIDs, let fanoutIntent):
+            do {
+                let body = try IMGatewayRelayBinaryCodec.encodeDomainEventPacket(
+                    payloadData: payloadData,
+                    recipientUserIDs: recipientUserIDs,
+                    requestID: requestID
+                )
+                try await postRaw(
+                    path: "/internal/gateway/realtime/domain-event-packet-bin",
+                    body: body,
+                    fanoutIntent: fanoutIntent,
+                    reliableDelivery: true
+                )
+            } catch {
+                await app.routingMetrics.recordGatewayHTTPRelayBinaryFallback()
+                try await relayDomainEventPayloadJSONFallbackReliably(
+                    payloadBase64: payloadData.base64EncodedString(),
+                    recipientUserIDs: recipientUserIDs,
+                    requestID: requestID,
+                    fanoutIntent: fanoutIntent
+                )
+            }
+        case .groupedBinaryBatch(let entries):
+            do {
+                let body = try IMGatewayRelayBinaryCodec.encodeDomainEventPacketBatch(
+                    entries: entries.map {
+                        IMGatewayRelayBinaryCodec.DomainEventPacketBatchEntry(
+                            payloadData: $0.payloadData,
+                            recipientUserIDs: $0.recipientUserIDs,
+                            fanoutIntent: $0.fanoutIntent
+                        )
+                    },
+                    requestID: requestID
+                )
+                try await postRaw(
+                    path: "/internal/gateway/realtime/domain-event-packets-bin",
+                    body: body,
+                    reliableDelivery: true
+                )
+            } catch {
+                await app.routingMetrics.recordGatewayHTTPRelayBinaryFallback()
+                for entry in entries {
+                    try await relayDomainEventPayloadWorkItemReliably(
+                        .groupedBinary(
+                            payloadData: entry.payloadData,
+                            recipientUserIDs: entry.recipientUserIDs,
+                            fanoutIntent: entry.fanoutIntent
+                        ),
+                        requestID: requestID
+                    )
+                }
+            }
+        case .batch(let batch):
+            try await relayDomainEventPayloadBatchReliably(batch, requestID: requestID)
+        }
+    }
+
     private func relayDomainEventPayloadJSONFallback(
         payloadBase64: String,
         recipientUserIDs: [UUID],
@@ -762,6 +869,31 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
                     requestID: requestID,
                     fanoutIntent: fanoutIntent
                 )
+            )
+        }
+    }
+
+    private func relayDomainEventPayloadJSONFallbackReliably(
+        payloadBase64: String,
+        recipientUserIDs: [UUID],
+        requestID: UUID?,
+        fanoutIntent: IMGatewayDomainEventFanoutIntent = .unspecified
+    ) async throws {
+        for chunk in makeGatewayRelayPayloadRecipientChunks(
+            payloadBase64: payloadBase64,
+            recipientUserIDs: recipientUserIDs,
+            requestID: requestID,
+            maxBodyBytes: configuration.domainEventPacketMaxBodyBytes
+        ) {
+            try await post(
+                path: "/internal/gateway/realtime/domain-event-packet",
+                payload: GatewayRelayDomainEventPayloadRequest(
+                    payloadBase64: payloadBase64,
+                    recipientUserIDs: chunk,
+                    requestID: requestID,
+                    fanoutIntent: fanoutIntent
+                ),
+                reliableDelivery: true
             )
         }
     }
@@ -791,6 +923,37 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
                         deliveries: chunk,
                         requestID: requestID
                     )
+                )
+            }
+        }
+    }
+
+    private func relayDomainEventPayloadBatchReliably(
+        _ batch: [GatewayRelayDomainEventPayloadBatchEntry],
+        requestID: UUID?
+    ) async throws {
+        guard !batch.isEmpty else {
+            return
+        }
+        for chunk in makeGatewayRelayPayloadBatchEntryChunks(
+            batch,
+            requestID: requestID,
+            maxBodyBytes: configuration.domainEventPacketsMaxBodyBytes
+        ) {
+            if chunk.count == 1, let entry = chunk.first {
+                try await relayDomainEventPayloadJSONFallbackReliably(
+                    payloadBase64: entry.payloadBase64,
+                    recipientUserIDs: [entry.ownerUserID],
+                    requestID: requestID
+                )
+            } else {
+                try await post(
+                    path: "/internal/gateway/realtime/domain-event-packets",
+                    payload: GatewayRelayDomainEventPayloadBatchRequest(
+                        deliveries: chunk,
+                        requestID: requestID
+                    ),
+                    reliableDelivery: true
                 )
             }
         }
@@ -868,8 +1031,16 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         }
     }
 
-    private func post<Payload: Content>(path: String, payload: Payload) async throws {
-        let _: EmptyGatewayRelayResponse = try await post(path: path, payload: payload)
+    private func post<Payload: Content>(
+        path: String,
+        payload: Payload,
+        reliableDelivery: Bool = false
+    ) async throws {
+        let _: EmptyGatewayRelayResponse = try await post(
+            path: path,
+            payload: payload,
+            reliableDelivery: reliableDelivery
+        )
     }
 
     private func postOrLog<Payload: Content>(path: String, payload: Payload) async {
@@ -888,7 +1059,11 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
         }
     }
 
-    private func post<Payload: Content, Response: Content>(path: String, payload: Payload) async throws -> Response {
+    private func post<Payload: Content, Response: Content>(
+        path: String,
+        payload: Payload,
+        reliableDelivery: Bool = false
+    ) async throws -> Response {
         guard let baseURL = configuration.baseURL else {
             throw GatewayRelayTransportError.missingBaseURL
         }
@@ -900,6 +1075,12 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
             response = try await app.client.post(URI(string: "\(baseURL)\(path)")) { request in
                 if let sharedSecret = configuration.sharedSecret, !sharedSecret.isEmpty {
                     request.headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: sharedSecret)
+                }
+                if reliableDelivery {
+                    request.headers.replaceOrAdd(
+                        name: IMGatewayRelayHeader.reliableDelivery,
+                        value: IMGatewayRelayHeader.reliableDeliveryValue
+                    )
                 }
                 try request.content.encode(payload)
             }
@@ -962,7 +1143,8 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
     private func postRaw(
         path: String,
         body: Data,
-        fanoutIntent: IMGatewayDomainEventFanoutIntent = .unspecified
+        fanoutIntent: IMGatewayDomainEventFanoutIntent = .unspecified,
+        reliableDelivery: Bool = false
     ) async throws {
         guard let baseURL = configuration.baseURL else {
             throw GatewayRelayTransportError.missingBaseURL
@@ -977,6 +1159,12 @@ struct HTTPGatewaySessionTransport: GatewaySessionTransport {
                 }
                 if fanoutIntent != .unspecified {
                     request.headers.replaceOrAdd(name: "X-IM-Fanout-Intent", value: fanoutIntent.rawValue)
+                }
+                if reliableDelivery {
+                    request.headers.replaceOrAdd(
+                        name: IMGatewayRelayHeader.reliableDelivery,
+                        value: IMGatewayRelayHeader.reliableDeliveryValue
+                    )
                 }
                 request.headers.contentType = HTTPMediaType(type: "application", subType: "octet-stream")
                 request.body = .init(data: body)
@@ -1180,6 +1368,14 @@ struct LoggingUnavailableGatewaySessionTransport: GatewaySessionTransport {
         logUnavailable()
     }
 
+    func sendDomainEventPayloadBatchesReliably(
+        _ batches: [IMGatewayDomainEventPayloadBatch],
+        requestID: UUID?
+    ) async throws {
+        logUnavailable()
+        throw Abort(.serviceUnavailable, reason: "Gateway session transport is unavailable for role \(role.rawValue).")
+    }
+
     func sendDomainEventPayloads(
         _ deliveries: [IMCanonicalDomainEventDelivery],
         requestID: UUID?
@@ -1296,6 +1492,21 @@ struct GatewaySessionService {
             }
         )
         await transport.sendDomainEventPayloadBatches(batches, requestID: requestID)
+    }
+
+    func sendDomainEventPayloadBatchesReliably(
+        _ batches: [IMGatewayDomainEventPayloadBatch],
+        requestID: UUID? = UUID()
+    ) async throws {
+        await recordRealtimePayloadMetrics(
+            batches.map {
+                RealtimePayloadMetricBatch(
+                    payload: $0.payload,
+                    recipientCount: $0.recipientUserIDs.count
+                )
+            }
+        )
+        try await transport.sendDomainEventPayloadBatchesReliably(batches, requestID: requestID)
     }
 
     func sendDomainEventPayloads(

@@ -1,0 +1,21 @@
+# Local-only account service image. Source is copied at build time; the V2
+# client stays native on macOS and never needs to enter this container.
+FROM swift:6.3-jammy
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+COPY IMV2Core ./IMV2Core
+COPY IMV2Server ./IMV2Server
+
+# The local stack runs the account issuer and the V2 TLS gateway from one
+# immutable source image, but as separate processes with separate listeners.
+# Build both executable products now. Running `swift run` in a container would
+# otherwise compile the selected executable after the listener port is already
+# published, producing a misleading short-lived 502/connection-refused state.
+RUN swift build -c release --package-path IMV2Server --product IMV2AccountServerApp \
+    && swift build -c release --package-path IMV2Server --product IMV2ServerApp
+
+CMD ["/workspace/IMV2Server/.build/release/IMV2AccountServerApp"]

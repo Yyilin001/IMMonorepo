@@ -221,6 +221,64 @@ struct IMTCPChatDomainEventPayload: Sendable {
     }
 }
 
+extension IMTCPChatDomainEventPayload {
+    /// Owner-delivery records are individual, durable notifications. Keep the
+    /// aggregate size and membership count, but avoid an O(n^2) payload when a
+    /// group membership event is delivered to every member of a large group.
+    func scopedForOwner(_ ownerUserID: UUID) -> Self {
+        let scopedBody: IMTCPChatDomainEventBody
+        switch body {
+        case .memberChanged(let memberUserIDs):
+            scopedBody = .memberChanged(
+                memberUserIDs: memberUserIDs.contains(ownerUserID) ? [ownerUserID] : []
+            )
+        default:
+            scopedBody = body
+        }
+        return Self(
+            eventID: eventID,
+            eventType: eventType,
+            aggregateType: aggregateType,
+            aggregateID: aggregateID,
+            aggregateSequence: aggregateSequence,
+            occurredAt: occurredAt,
+            actorUserID: actorUserID,
+            conversation: conversation.map { $0.scopedForOwner(ownerUserID) },
+            timelineNotice: timelineNotice,
+            requiresTimelineNotice: requiresTimelineNotice,
+            ownerCursor: ownerCursor,
+            ownerAggregateSequence: ownerAggregateSequence,
+            body: scopedBody
+        )
+    }
+}
+
+private extension IMConversationResponse {
+    func scopedForOwner(_ ownerUserID: UUID) -> Self {
+        Self(
+            id: id,
+            title: title,
+            kind: kind,
+            directMessagingState: directMessagingState,
+            groupLifecycleState: groupLifecycleState,
+            directPeer: directPeer,
+            notice: notice,
+            avatarPreset: avatarPreset,
+            muteAll: muteAll,
+            memberCount: memberCount,
+            memberUserIDs: memberUserIDs.contains(ownerUserID) ? [ownerUserID] : [],
+            lastMessage: lastMessage,
+            lastReadSequence: lastReadSequence,
+            unreadCount: unreadCount,
+            isPinned: isPinned,
+            pinnedAt: pinnedAt,
+            isMuted: isMuted,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+}
+
 enum IMTCPKickReason: String, Codable, Sendable {
     case sessionRevoked = "session_revoked"
     case logoutCurrent = "logout_current"

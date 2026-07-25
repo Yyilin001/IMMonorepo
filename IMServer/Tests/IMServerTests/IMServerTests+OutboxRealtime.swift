@@ -7,6 +7,90 @@ import VaporTesting
 import Testing
 
 extension IMServerTests {
+    @Test("Direct message policy keeps user relationships in the primary database when conversations are sharded")
+    func directMessagePolicyUsesPrimaryUserRelationshipsWithIndependentConversationShard() async throws {
+        try await withApp(configure: configure) { app in
+            let shardID = "direct-policy-shard"
+            let shardDatabaseID = DatabaseID(string: "direct-policy-shard-db")
+            app.databases.use(.sqlite(.memory), as: shardDatabaseID)
+            app.migrations.add(IMMigrationRegistry.conversationShardMigrations(), to: shardDatabaseID)
+            try await app.autoMigrate()
+
+            app.conversationShardRouter = DirectoryBackedConversationShardRouter(
+                app: app,
+                shardIDs: [shardID],
+                shardDatabaseIDs: [shardID: shardDatabaseID],
+                shardReplicaDatabaseIDs: [:],
+                directory: DatabaseConversationDirectory(db: app.db)
+            )
+            let sender = try await makeUser(email: "direct-policy-shard-sender@example.com", on: app)
+            let peer = try await makeUser(email: "direct-policy-shard-peer@example.com", on: app)
+            let senderID = try sender.requireID()
+            let peerID = try peer.requireID()
+            let created = try await IMConversationService.command(app: app).createConversation(
+                kind: IMConversationKind.direct.rawValue,
+                title: nil,
+                memberEmails: [peer.email],
+                creatorUserID: senderID
+            )
+            let conversationID = created.receipt.conversationID
+            let service = IMRealtimeMessageService(app: app)
+
+            let accepted = try await service.persistOwnedIncomingMessage(
+                imTCPTextPayload(
+                    conversationID: conversationID,
+                    clientMessageID: "primary-user-state-accepted",
+                    text: "uses the primary user directory"
+                ),
+                senderUserID: senderID
+            )
+            #expect(accepted.didCreateMessage)
+            let acceptedSequence = try #require(accepted.message.serverSequence)
+            let acceptedMessageID = try #require(accepted.message.messageID.flatMap(UUID.init(uuidString:)))
+
+            try await MessageFavorite(
+                ownerUserID: senderID,
+                conversationID: conversationID,
+                messageID: acceptedMessageID,
+                serverSequence: Int(acceptedSequence)
+            ).create(on: app.db)
+            let favorites = try await IMCommonFeatureService(
+                db: app.db,
+                featureDB: app.db,
+                messageDatabaseForConversation: { conversationID in
+                    try await app.conversationShardRouter.strongReadDatabase(forConversationID: conversationID)
+                }
+            ).listFavorites(userID: senderID, conversationID: nil, cursor: nil, limit: 20)
+            #expect(favorites.items.map(\.id).contains(acceptedMessageID))
+
+            try await ConversationVisibilityOverride(
+                ownerUserID: senderID,
+                conversationID: conversationID,
+                hiddenBeforeSequence: Int(acceptedSequence),
+                isDeleted: false
+            ).create(on: app.db)
+            let hiddenTimeline = try await IMConversationService.eventualRead(app: app).listTimelineSince(
+                in: conversationID,
+                for: senderID,
+                afterSequence: 0,
+                limit: 20
+            )
+            #expect(hiddenTimeline.items.isEmpty)
+
+            try await UserBlock(ownerUserID: senderID, blockedUserID: peerID).create(on: app.db)
+            await #expect(throws: Abort.self) {
+                try await service.persistOwnedIncomingMessage(
+                    imTCPTextPayload(
+                        conversationID: conversationID,
+                        clientMessageID: "primary-user-state-blocked",
+                        text: "must be rejected"
+                    ),
+                    senderUserID: senderID
+                )
+            }
+        }
+    }
+
     @Test("Remote Cell message ingress validates the route binding before persistence")
     func remoteCellMessageIngressValidatesRouteBinding() async throws {
         try await withApp(configure: configure) { app in

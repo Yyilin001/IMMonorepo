@@ -79,14 +79,22 @@ enum IMDatabaseConfigurator {
             "DATABASE_CONNECTION_POOL_TIMEOUT_SECONDS"
         ])
 
-        guard maxConnections != nil || timeoutSeconds != nil else {
-            return nil
-        }
-
         return IMPostgresConnectionPoolConfiguration(
-            maxConnectionsPerEventLoop: max(1, maxConnections ?? 1),
+            maxConnectionsPerEventLoop: max(
+                1,
+                maxConnections ?? defaultMaxConnectionsPerEventLoop(for: app.imRuntimeRole)
+            ),
             connectionPoolTimeoutSeconds: max(1, timeoutSeconds ?? 10)
         )
+    }
+
+    private static func defaultMaxConnectionsPerEventLoop(for role: IMRuntimeRole) -> Int {
+        switch role {
+        case .gateway, .outboxRelay, .projectionWorker, .ops:
+            return 2
+        case .commandAPI, .queryAPI, .streamConsumer, .combined:
+            return 4
+        }
     }
 
     private static func firstIntEnvironment(_ keys: [String]) -> Int? {

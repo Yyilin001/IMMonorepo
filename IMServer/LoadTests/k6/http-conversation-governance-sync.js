@@ -54,6 +54,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['governance-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const accountFile = __ENV.ACCOUNT_FILE || __ENV.IM_ACCOUNT_FILE || '';
 const defaultOwnerEmail = __ENV.IM_EMAIL || 'demo@example.com';
 const defaultOwnerPassword = __ENV.IM_PASSWORD || 'password1234';
@@ -205,7 +206,7 @@ function listSummary(token, conversationID) {
 
 function findTimelineMessage(token, conversationID, messageID, afterSequence) {
   const res = http.get(
-    `${baseURL}/api/im/conversations/${conversationID}/messages/since?afterSequence=${afterSequence}&limit=100`,
+    `${baseURL}/api/im/conversations/${conversationID}/timeline/since?afterSequence=${afterSequence}&limit=100`,
     jsonHeaders(token)
   );
   if (res.status !== 200) {
@@ -224,7 +225,7 @@ function findTimelineMessage(token, conversationID, messageID, afterSequence) {
 
 function sendInternalMessage(senderUserID, conversationID, clientMessageID) {
   const res = http.post(
-    `${baseURL}/internal/im/messages/send`,
+    `${commandBaseURL}/internal/im/messages/send`,
     JSON.stringify({
       senderUserID,
       payload: {
@@ -238,7 +239,12 @@ function sendInternalMessage(senderUserID, conversationID, clientMessageID) {
           type: 'rich_text',
           body: { text: `governance ${clientMessageID}`, entities: [] },
         },
-        derivedState: { recallState: 'active', edits: [], reactions: [], streamState: null },
+        derivedState: {
+          recallState: { active: {} },
+          edits: [],
+          reactions: [],
+          streamState: null,
+        },
       },
     }),
     { headers: { 'Content-Type': 'application/json', 'X-IM-Internal-Secret': internalSecret } }

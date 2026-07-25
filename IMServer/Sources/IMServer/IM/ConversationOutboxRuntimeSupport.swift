@@ -258,7 +258,9 @@ extension Application {
             return
         }
 
-        _ = try await ContactOutboxService(db: imWriteDB).processPendingBatch(
+        // Contact events are stored in the shared control-plane database, not
+        // in the Cell-local conversation shard selected by `imWriteDB`.
+        _ = try await ContactOutboxService(db: db).processPendingBatch(
             app: self,
             configuration: conversationOutboxConfiguration
         )

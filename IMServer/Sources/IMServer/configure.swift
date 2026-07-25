@@ -96,9 +96,17 @@ private func configureShared(_ app: Application) async throws {
     app.authLoginRateLimiter = try await AuthRateLimiterFactory.make(app: app, configuration: authSecurityConfiguration)
     app.authEmailSender = try AuthEmailSenderFactory.make(app: app, configuration: authSecurityConfiguration)
     app.lifecycle.use(ConversationEventStreamProducerLifecycle())
-    app.lifecycle.use(IMConsistencyRepairLifecycle())
-    app.lifecycle.use(IMCleanupLifecycle())
-    app.lifecycle.use(IMAIStreamRepairLifecycle())
+    if IMMaintenanceConfiguration.load().enabled {
+        guard app.imRuntimeRole == .ops else {
+            throw Abort(
+                .internalServerError,
+                reason: "IM_MAINTENANCE_ENABLED=true is only valid for the dedicated ops role."
+            )
+        }
+        app.lifecycle.use(IMConsistencyRepairLifecycle())
+        app.lifecycle.use(IMCleanupLifecycle())
+        app.lifecycle.use(IMAIStreamRepairLifecycle())
+    }
     app.asyncCommands.use(IMProjectionWorkerCommand(), as: "worker")
     app.asyncCommands.use(IMProjectionWorkerCommand(), as: "projection-worker")
     app.asyncCommands.use(IMOutboxRelayCommand(), as: "outbox-relay")

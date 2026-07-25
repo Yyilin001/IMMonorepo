@@ -275,6 +275,54 @@ enum ConversationDomainEventPayload: Codable, Equatable, Sendable {
         }
     }
 
+    // Notification rows are owner-scoped. Persisting the complete recipient or
+    // membership list in every row turns one large-group event into O(n^2) data.
+    func scopedNotificationPayload(for ownerUserID: UUID) -> ConversationDomainEventPayload {
+        switch self {
+        case .messageCreated(let messageID, _, let preview):
+            .messageCreated(messageID: messageID, recipientUserIDs: [ownerUserID], preview: preview)
+        case .messageUpdated(let messageID, _):
+            .messageUpdated(messageID: messageID, recipientUserIDs: [ownerUserID])
+        case .messageRecalled(let messageID, _):
+            .messageRecalled(messageID: messageID, recipientUserIDs: [ownerUserID])
+        case .messageVisibilityChanged,
+             .messageFavoriteChanged,
+             .settingsChanged,
+             .conversationRemovedForSelf,
+             .conversationVisibilityChanged,
+             .readAdvanced:
+            self
+        case .conversationCreated:
+            .conversationCreated(recipientUserIDs: [ownerUserID])
+        case .metadataUpdated:
+            .metadataUpdated(recipientUserIDs: [ownerUserID])
+        case .directPeerUpdated:
+            .directPeerUpdated(recipientUserIDs: [ownerUserID])
+        case .memberAdded(let memberUserIDs, _):
+            .memberAdded(
+                memberUserIDs: memberUserIDs.contains(ownerUserID) ? [ownerUserID] : [],
+                recipientUserIDs: [ownerUserID]
+            )
+        case .memberRemoved(let memberUserIDs, _):
+            .memberRemoved(
+                memberUserIDs: memberUserIDs.contains(ownerUserID) ? [ownerUserID] : [],
+                recipientUserIDs: [ownerUserID]
+            )
+        case .memberRoleUpdated(let memberUserID, _):
+            .memberRoleUpdated(memberUserID: memberUserID, recipientUserIDs: [ownerUserID])
+        case .inviteChanged:
+            .inviteChanged(recipientUserIDs: [ownerUserID])
+        case .streamStarted(let messageID, let streamID, _):
+            .streamStarted(messageID: messageID, streamID: streamID, recipientUserIDs: [ownerUserID])
+        case .streamCompleted(let messageID, let streamID, _):
+            .streamCompleted(messageID: messageID, streamID: streamID, recipientUserIDs: [ownerUserID])
+        case .streamFailed(let messageID, let streamID, _):
+            .streamFailed(messageID: messageID, streamID: streamID, recipientUserIDs: [ownerUserID])
+        case .streamCancelled(let messageID, let streamID, _):
+            .streamCancelled(messageID: messageID, streamID: streamID, recipientUserIDs: [ownerUserID])
+        }
+    }
+
     var streamID: String? {
         switch self {
         case .streamStarted(_, let id, _),

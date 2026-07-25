@@ -200,13 +200,19 @@ struct ConversationOutboxEnqueuer {
         conversationID: UUID,
         actorUserID: UUID?,
         recipientUserIDs: [UUID],
+        memberUserIDs: [UUID]? = nil,
         on database: (any Database)? = nil
     ) async throws -> ConversationDomainEvent {
         try await eventBus.publish(
             type: type,
             conversationID: conversationID,
             actorUserID: actorUserID,
-            payload: summaryRefreshPayload(type: type, recipientUserIDs: recipientUserIDs, actorUserID: actorUserID),
+            payload: summaryRefreshPayload(
+                type: type,
+                recipientUserIDs: recipientUserIDs,
+                memberUserIDs: memberUserIDs,
+                actorUserID: actorUserID
+            ),
             recipientSnapshotUserIDs: nil,
             recipientSnapshotDeduplicationThreshold: 0,
             on: database ?? db
@@ -266,6 +272,7 @@ struct ConversationOutboxEnqueuer {
     private func summaryRefreshPayload(
         type: ConversationDomainEventType,
         recipientUserIDs: [UUID],
+        memberUserIDs: [UUID]?,
         actorUserID: UUID?
     ) throws -> ConversationDomainEventPayload {
         switch type {
@@ -286,9 +293,15 @@ struct ConversationOutboxEnqueuer {
             }
             return .readAdvanced(ownerUserID: actorUserID)
         case .membershipAdded:
-            return .memberAdded(memberUserIDs: recipientUserIDs, recipientUserIDs: recipientUserIDs)
+            return .memberAdded(
+                memberUserIDs: memberUserIDs ?? recipientUserIDs,
+                recipientUserIDs: recipientUserIDs
+            )
         case .membershipRemoved:
-            return .memberRemoved(memberUserIDs: recipientUserIDs, recipientUserIDs: recipientUserIDs)
+            return .memberRemoved(
+                memberUserIDs: memberUserIDs ?? recipientUserIDs,
+                recipientUserIDs: recipientUserIDs
+            )
         case .membershipRoleUpdated:
             guard let actorUserID else {
                 throw Abort(.internalServerError, reason: "成员角色事件缺少 actor。")
@@ -458,6 +471,7 @@ struct ConversationSummaryRefreshPublisher {
         conversationID: UUID,
         actorUserID: UUID?,
         recipientUserIDs: [UUID],
+        memberUserIDs: [UUID]? = nil,
         on database: (any Database)? = nil
     ) async throws -> ConversationDomainEvent {
         try await outboxEnqueuer.enqueueSummaryRefreshEvent(
@@ -465,6 +479,7 @@ struct ConversationSummaryRefreshPublisher {
             conversationID: conversationID,
             actorUserID: actorUserID,
             recipientUserIDs: recipientUserIDs,
+            memberUserIDs: memberUserIDs,
             on: database
         )
     }

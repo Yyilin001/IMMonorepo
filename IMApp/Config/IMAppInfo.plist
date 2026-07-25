@@ -24,12 +24,16 @@
 	<false/>
 	<key>IMDemoLoginEnabled</key>
 	<true/>
-	<key>IMAPIBaseURL</key>
-	<string>$(IM_API_BASE_URL)</string>
-	<key>IMTCPHost</key>
-	<string>$(IM_TCP_HOST)</string>
-	<key>IMTCPPort</key>
-	<string>$(IM_TCP_PORT)</string>
+	<key>IMV2AccountBaseURL</key>
+	<string>$(IM_V2_ACCOUNT_BASE_URL)</string>
+	<key>IMV2GatewayHost</key>
+	<string>$(IM_V2_GATEWAY_HOST)</string>
+	<key>IMV2GatewayPort</key>
+	<string>$(IM_V2_GATEWAY_PORT)</string>
+	<key>IMV2PasskeyRelyingPartyID</key>
+	<string>$(IM_V2_PASSKEY_RP_ID)</string>
+	<key>IMV2PushEnvironment</key>
+	<string>$(IM_V2_PUSH_ENVIRONMENT)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -57,6 +61,10 @@
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
 	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>

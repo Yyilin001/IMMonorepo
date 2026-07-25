@@ -224,7 +224,8 @@ extension IMRealtimeMessageService {
     }
 
     func areContacts(_ lhs: UUID, _ rhs: UUID, on database: any Database) async throws -> Bool {
-        if let sql = database as? any SQLDatabase {
+        let userDirectoryDatabase = userDirectoryDatabase(fallingBackTo: database)
+        if let sql = userDirectoryDatabase as? any SQLDatabase {
             struct ContactRow: Decodable {
                 let exists: Int
             }
@@ -243,7 +244,7 @@ extension IMRealtimeMessageService {
             return row != nil
         }
 
-        return try await UserContact.query(on: database)
+        return try await UserContact.query(on: userDirectoryDatabase)
             .group(.or) { group in
                 group.group(.and) { relation in
                     relation.filter(\.$owner.$id == lhs)
@@ -267,7 +268,11 @@ extension IMRealtimeMessageService {
             return cached
         }
 
-        let directConversationIDs = try await DirectConversationPairDirectoryService(db: database)
+        // This is a global pair directory. The conversation rows themselves
+        // remain sharded and are resolved separately when messages are read.
+        let directConversationIDs = try await DirectConversationPairDirectoryService(
+            db: userDirectoryDatabase(fallingBackTo: database)
+        )
             .conversationIDsBetween(lhs, rhs)
         if let app {
             await app.directConversationPairCache.store(directConversationIDs, lhs: lhs, rhs: rhs)

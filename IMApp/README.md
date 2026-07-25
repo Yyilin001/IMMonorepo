@@ -1,258 +1,105 @@
-# IMApp
+# IMApp V2
 
-`IMApp` 是一个基于 SwiftUI 构建的 iOS IM 客户端，用来对接 `IMServer`，完成登录认证、设备会话管理、会话列表、聊天详情、实时消息收发、历史拉取、增量补洞和文件传输等基础能力。
+`IMApp` 的运行入口已经切换为 V2。它不再恢复、写入或依赖 V1 的
+登录态、HTTP API 或 TCP 会话；旧源文件尚留在工程中，供后续清理，但
+不属于当前 App 的组合根。
 
-项目当前重点不是做视觉包装，而是把一条真实可运行的 IM 链路在 iOS 端落通：HTTP 负责登录与数据接口，TCP 负责实时消息和连接状态。
+## 当前可运行链路
 
-## 项目定位
+- SwiftUI V2 根状态机：启动时仅恢复 V2 Keychain 设备凭证。
+- 设备专属 Keychain：设备 ID、刷新凭证和本地安装绑定均不进入
+  `UserDefaults`。
+- 本地 V2 SQLite：只有认证成功后才打开。
+- 密码兜底：注册或登录会将一次性密码直接交给 HTTPS 账户服务；App
+  不持久化密码。
+- 设备凭证：账户断言必须绑定本机设备 ID，随后才换取访问/刷新凭证。
+- Passkey：客户端 AuthenticationServices 与 WebAuthn 传输边界已经存在，
+  但服务端的审计级 WebAuthn 验签和一次性 challenge 存储尚未部署，所以
+  当前本地栈应使用密码兜底。
 
-- iOS 端登录与设备会话管理
-- 会话列表和聊天详情页
-- HTTP 历史消息拉取
-- TCP 实时收发与重连
-- 断线后的消息补洞同步
-- 已读上报与未读校正
-- 文件上传/下载演示链路
+认证完成后，App 会打开 V2 本地会话列表，并启动 TLS 网关的同步、心跳和
+持久化命令重试。普通私聊可输入对方的 V2 用户 ID 创建；服务端以幂等操作
+返回两人唯一房间。发送文本时，客户端先把命令写入本地 outbox，再尝试投递；
+网络中断会显示“已安全保存”，恢复连接后重试。会话和消息界面只读取 SQLite
+同步投影，不直接读取网络响应。
 
-## 当前能力
+个人菜单中的“消息接收设置”可关闭非好友消息。该操作与消息发送一样先写入
+独立的本地 social outbox；即使离线退出，也会在下次认证、初始同步或后续同步
+提示到达后补发。远端同步投影才是多设备之间的最终事实来源。
 
-### 认证与会话
+个人菜单的“后台同步唤醒”默认关闭。用户明确打开后，App 才向系统申请远程通知
+注册，并将仅存在内存中的 APNs token 直接提交给已认证的 V2 账户入口；通知本身不
+含消息、房间或发送者内容，只会触发现有的同步路径。退出登录会尽力撤销服务端端点，
+而该用户的本机偏好会保留，方便下次登录同一账号时重新申请系统 token。
 
-- 注册 / 登录 / refresh
-- 当前设备退出
-- 退出全部设备
-- 指定设备踢下线
+这仍不是发布完成状态：真实设备端到端回归、生产 WebAuthn、Push-enabled App ID /
+provisioning profile 与真实 APNs 凭据、媒体供应商接入，以及联系人身份展示仍未完成。
+普通群聊的创建、成员分页和角色受限管理界面已接入 V2 的持久化命令与同步投影。
 
-### IM 能力
+## 本地开发
 
-- TabView 首页结构
-- “消息”页展示真实会话列表
-- 进入会话详情后查看历史消息
-- 基于 TCP 的实时消息接收与发送
-- 断线重连后的 `messages/since` 增量补洞
-- 已读节流上报
-- 本地未读增量与服务端摘要未读合并
+客户端直接使用 Xcode 在 macOS 上运行。账户服务、数据库和本地 HTTPS
+代理使用隔离 Docker 栈：
 
-### 文件能力
+```sh
+bash IMV2/scripts/run_v2_local_account_stack.sh
+```
 
-- 上传文件到服务端
-- 下载服务端最近一次上传文件
+该脚本会：
 
-## 技术栈
+- 创建被 Git 忽略的 `IMV2/.env.local`，其中是仅本机使用的随机密钥；
+- 启动 PostgreSQL、仅监听容器回环地址的账户服务、V2 TLS 网关，以及 Caddy；
+- 仅向 macOS 发布 `https://localhost:8443`（账户 HTTPS）和
+  `localhost:7443`（V2 TLS 网关），不会发布数据库、指标或账户服务的
+  内部 HTTP 端口；
+- 输出 `IMV2/local-ca/root.crt`。首次使用时，将该证书导入所选模拟器并
+  启用完全信任，否则 URLSession 会正确拒绝本地 HTTPS 证书。
 
-- Swift
-- SwiftUI
-- URLSession / 自定义 HTTPClient
-- 自定义 TCP client
-- XCTest
-
-## 目录结构
+Debug 默认配置已经是：
 
 ```text
-IMApp/App                App 级配置与 AppDelegate
-IMApp/Auth               登录态、token、AuthManager
-IMApp/Networking         HTTP / TCP / 传输封装
-IMApp/Services           API 请求模型
-IMApp/Features/Auth      登录页面
-IMApp/Features/Home      首页、设备管理、文件传输、探测
-IMApp/Features/IM        会话列表、会话详情、会话状态存储
-IMAppTests               单元测试与测试支撑
-IMAppUITests             UI 测试入口
+IM_V2_ACCOUNT_BASE_URL=https://localhost:8443
+IM_V2_GATEWAY_HOST=localhost
+IM_V2_GATEWAY_PORT=7443
+IM_V2_PASSKEY_RP_ID=localhost
 ```
 
-## 运行要求
+停止本地栈时使用脚本输出的 `docker compose ... down` 命令。数据库卷会被
+保留，便于重复运行；如需清空本地账户数据，请明确执行 Compose 的
+`down --volumes`，不要把该操作用于任何非本地环境。
 
-- Xcode 16+
-- iOS Simulator
-- 本地已启动 [IMServer](https://github.com/Yyilin001/IMServer)
+## 发布配置
 
-## 环境配置
+`Config/IMAppInfo.plist` 从 Xcode build settings 读取：
 
-客户端不再从 `IMClientKit` 读取默认地址，服务端地址统一由 `IMApp` 在组合根注入。默认本地开发配置定义在 [AppNetworkConfiguration.swift](/Users/yyl/Desktop/Code/IMMonorepo/IMApp/IMApp/App/AppNetworkConfiguration.swift:1)：
+- `IMV2AccountBaseURL` / `IM_V2_ACCOUNT_BASE_URL`
+- `IMV2PasskeyRelyingPartyID` / `IM_V2_PASSKEY_RP_ID`
+- `IMV2GatewayHost` / `IM_V2_GATEWAY_HOST`
+- `IMV2GatewayPort` / `IM_V2_GATEWAY_PORT`
+- `IMV2PushEnvironment` / `IM_V2_PUSH_ENVIRONMENT`
 
-```swift
-static let local = AppNetworkConfiguration(
-    apiBaseURL: URL(string: "http://127.0.0.1:8080")!,
-    imTCPHost: "127.0.0.1",
-    imTCPPort: 9000
-)
+Release 校验要求账户入口为真实 HTTPS 域名（默认 443），RP ID 为该域名
+或其父域，且 Push 环境必须为 `production`；占位域名、裸 IP、localhost、
+明文 HTTP 和未解析的构建变量都会失败。`Config/IMApp.entitlements` 也会请求
+`aps-environment`，因此真实设备签名必须使用启用 Push 的 App ID 和描述文件。自检：
+
+```sh
+IMAPP_NETWORK_CONFIG_SELF_TEST=true \
+  bash IMApp/Scripts/validate_network_configuration.sh
 ```
 
-生产网络入口由 `Config/IMAppInfo.plist` 提供，值来自 Xcode build settings；调试、CI 和发布脚本也可以用环境变量覆盖：
+## 验证
 
-- `IMAPIBaseURL` / `IM_API_BASE_URL`
-- `IMTCPHost` / `IM_TCP_HOST`
-- `IMTCPPort` / `IM_TCP_PORT`
+```sh
+# V2 ClientKit 的编译与测试目标
+xcrun --toolchain XcodeDefault swift build --build-tests \
+  --package-path IMV2ClientKit --jobs 4
 
-长期生产包必须使用 HTTPS 真实域名和公网 TCP 真实域名，不允许裸 IP、占位域名、旧临时服务器 IP、localhost、明文公网 HTTP、非默认 HTTPS 端口或非 `9000` 的 TCP 端口。发布前运行：
-
-```bash
-IM_API_BASE_URL=https://<your-domain> \
-IM_TCP_HOST=<your-domain> \
-IM_TCP_PORT=9000 \
-IMAPP_NETWORK_CONFIG_MODE=production \
-  ./Scripts/validate_network_configuration.sh
+# Core + Server + disposable PostgreSQL 的隔离回归
+docker compose -f IMV2/docker-compose.isolated-tests.yml \
+  run --rm --build swift-tests
 ```
 
-或使用仓库统一入口：
-
-```bash
-IM_API_BASE_URL=https://<your-domain> \
-IM_TCP_HOST=<your-domain> \
-IM_TCP_PORT=9000 \
-make validate-ios-production-config
-```
-
-网络配置校验自身也有负例自测，覆盖公网 IP、占位域名、非默认 HTTPS 端口和非生产 TCP 端口：
-
-```bash
-make validate-ios-network-config
-```
-
-Debug 构建的实际 Xcode build settings 也有独立校验，防止本地开发默认地址被误改成公网、占位域名或未解析的 `$(IM_API_BASE_URL)`：
-
-```bash
-make validate-ios-debug-network-defaults
-```
-
-GitHub Actions 的 `IMApp Production Config Gate` 会在 PR/push 时验证开发配置和模拟器构建；手动触发 `workflow_dispatch` 时必须输入真实生产 `api_base_url`、`tcp_host`、`tcp_port`，并执行同一个 production config gate 和 Release 构建。Xcode 的 IMApp target 也有 Release-only build phase，会校验最终打进 App 包的 processed Info.plist；没有真实生产域名时 Release/Archive 会失败。
-
-本地开发可以继续使用 `127.0.0.1:8080`，但 production/release 校验会拒绝它。应用入口会在 [IMAppApp.swift](/Users/yyl/Desktop/Code/IMMonorepo/IMApp/IMApp/IMAppApp.swift:12) 里显式构造 `NetworkEnvironment` 和 `IMTCPClientConfiguration` 后注入 `AuthManager`。
-
-## 快速开始
-
-### 1. 启动服务端
-
-从仓库根目录启动本地服务端：
-
-```bash
-IMServer/scripts/run_local.sh
-```
-
-先启动 `IMServer`，确保：
-
-- HTTP 可访问：`http://127.0.0.1:8080`
-- TCP IM 端口可连：`127.0.0.1:9000`
-
-### 2. 打开工程
-
-用 Xcode 打开 `IMApp.xcodeproj`。
-
-### 3. 运行客户端
-
-选择 iPhone 模拟器，直接运行 `IMApp` scheme。
-
-如果云服务器已经关闭、需要真机连 Mac 本地服务，先确认手机和 Mac 在同一个 Wi-Fi，然后从仓库根目录运行：
-
-```bash
-make print-local-client-config
-make build-app-local-device
-```
-
-脚本会自动探测 Mac 局域网 IP，并用 `IM_API_BASE_URL=http://<Mac-LAN-IP>:8080`、`IM_TCP_HOST=<Mac-LAN-IP>`、`IM_TCP_PORT=9000` 覆盖 Debug 构建。不要把临时局域网 IP 写进 Release 配置。
-
-## 交互模型
-
-### 首页结构
-
-当前应用采用 `TabView`：
-
-- 首页
-- 消息
-- 文件
-- 设备
-
-### 消息页
-
-消息页不是 demo 式的单页堆叠，而是更接近正式 IM 的结构：
-
-- 首屏显示会话列表
-- 点击会话后进入聊天详情
-- 会话详情里负责历史消息、发送、已读推进
-
-### 数据流拆分
-
-- HTTP
-  负责认证、分页会话摘要、增量摘要变更、历史消息、补洞、成员列表、mark read、文件接口
-- TCP
-  负责握手鉴权、实时消息、heartbeat、ack、kick
-
-### 消息协议
-
-消息内容已经从弱类型的 `kind + body` 收紧成强类型 `content`。当前纯文本也统一表达为富文本消息：
-
-```json
-{
-  "type": "rich_text",
-  "body": {
-    "text": "hello",
-    "entities": []
-  }
-}
-```
-
-这套结构会同时用于：
-
-- TCP 实时消息
-- 会话历史接口
-- `messages/since` 补洞接口
-- 会话列表里的最后一条消息预览
-
-## 当前实现重点
-
-这个客户端目前已经把几条关键链路接通了：
-
-- 登录后自动建连 TCP
-- 登出时主动断开连接
-- 被服务端 kick 时回到登录失效状态
-- 会话页接入真实 `conversationID`
-- 重连后自动做增量补洞
-- 已读采用“最高序号合并后上报”的节流策略，避免实时消息连续到达时每条都请求 `/read`
-- 会话摘要首屏分页拉取与后续增量同步
-
-## 测试
-
-当前仓库包含较完整的单元测试，覆盖了：
-
-- `SessionClient`
-- `AuthManager`
-- `IMConversationStore`
-- TCP / HTTP / 文件传输相关支撑逻辑
-
-在 Xcode 中直接运行测试，或者使用：
-
-```bash
-xcodebuild test \
-  -project IMApp.xcodeproj \
-  -scheme IMApp \
-  -destination 'platform=iOS Simulator,name=iPhone 17'
-```
-
-如果本机模拟器名称不同，请改成你自己的 destination。
-
-## 当前状态
-
-`IMApp` 已经不是纯 demo UI，而是一个正在成型的 IM 客户端工程。它已经具备真实的前后端链路，但还没有进入“可上线产品”阶段。
-
-当前还未完整覆盖的方向包括：
-
-- 更完整的 UI/视觉打磨
-- 多媒体消息
-- 群会话高级管理
-- 更细粒度的未读模型
-- 离线缓存和持久化
-- 完整 push 通知链路
-
-## 配套服务端
-
-配套后端仓库：
-
-- [IMServer](https://github.com/Yyilin001/IMServer)
-
-## Roadmap
-
-- 继续收紧未读与已读状态模型
-- 增强历史分页和自动加载体验
-- 扩展消息类型与附件能力
-- 引入更清晰的本地持久化边界
-- 为未来更正式的产品 UI 做分层准备
+发布前还必须完成生产 WebAuthn verifier、账户服务 HTTPS/限流部署、真实设备
+端到端回归，以及群聊、推送、媒体等 V2 产品界面。完整证据见
+[`IMV2/docs/implementation-status.md`](../IMV2/docs/implementation-status.md)。

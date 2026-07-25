@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLIENT_DIR="$ROOT_DIR/IMV2ClientKit/Sources/IMV2ClientKit/Generated"
+SERVER_DIR="$ROOT_DIR/IMV2Server/Sources/IMV2Server/Generated"
+
+[[ -d "$CLIENT_DIR/Protobuf" && -d "$SERVER_DIR/Protobuf" ]] || {
+  echo "V2 generated protobuf is missing. Run scripts/generate_v2_protobuf.sh." >&2
+  exit 1
+}
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+V2_PROTOBUF_CLIENT_OUT="$TMP_DIR/client/Protobuf" \
+V2_PROTOBUF_SERVER_OUT="$TMP_DIR/server/Protobuf" \
+V2_PROTOBUF_CLIENT_VERSION="$TMP_DIR/client/IMV2ProtocolVersion.swift" \
+V2_PROTOBUF_SERVER_VERSION="$TMP_DIR/server/IMV2ProtocolVersion.swift" \
+"$ROOT_DIR/scripts/generate_v2_protobuf.sh"
+diff -ru "$TMP_DIR/client" "$CLIENT_DIR"
+diff -ru "$TMP_DIR/server" "$SERVER_DIR"
+echo "V2 protobuf generated check passed."

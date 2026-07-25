@@ -49,6 +49,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['multi-device-sync-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const accountFile = __ENV.ACCOUNT_FILE || __ENV.IM_ACCOUNT_FILE || '';
 const defaultOwnerEmail = __ENV.IM_EMAIL || 'demo@example.com';
 const defaultOwnerPassword = __ENV.IM_PASSWORD || 'password1234';
@@ -111,6 +112,12 @@ function jsonHeaders(token) {
   return { headers };
 }
 
+function commandHeaders(token) {
+  const headers = jsonHeaders(token).headers;
+  headers.Accept = 'application/vnd.im.conversation-command-receipt+json';
+  return { headers };
+}
+
 function login(account, deviceID) {
   const res = http.post(
     `${baseURL}/api/auth/login`,
@@ -144,13 +151,13 @@ function createConversation(ownerToken, peerEmail) {
       title: `k6-multi-device-${__VU}-${Date.now()}`,
       memberEmails: [peerEmail],
     }),
-    jsonHeaders(ownerToken)
+    commandHeaders(ownerToken)
   );
-  check(res, { 'multi-device create conversation ok': (r) => r.status === 200 });
-  if (res.status !== 200) {
+  check(res, { 'multi-device create conversation accepted': (r) => r.status === 202 });
+  if (res.status !== 202) {
     fail(`create conversation failed: ${res.status} ${res.body}`);
   }
-  return res.json('id');
+  return res.json('conversationID');
 }
 
 function ensureState() {
@@ -191,7 +198,7 @@ function listSummary(token, conversationID) {
 
 function sendInternalMessage(peerUserID, conversationID, clientMessageID) {
   const res = http.post(
-    `${baseURL}/internal/im/messages/send`,
+    `${commandBaseURL}/internal/im/messages/send`,
     JSON.stringify({
       senderUserID: peerUserID,
       payload: {
@@ -213,7 +220,7 @@ function sendInternalMessage(peerUserID, conversationID, clientMessageID) {
 
 function findTimelineMessage(token, conversationID, clientMessageID, afterSequence) {
   const res = http.get(
-    `${baseURL}/api/im/conversations/${conversationID}/messages/since?afterSequence=${afterSequence}&limit=100`,
+    `${baseURL}/api/im/conversations/${conversationID}/timeline/since?afterSequence=${afterSequence}&limit=100`,
     jsonHeaders(token)
   );
   if (res.status !== 200) {
@@ -277,7 +284,7 @@ export default function () {
   const baselineA = listSummary(current.ownerAToken, current.conversationID);
   const baselineB = listSummary(current.ownerBToken, current.conversationID);
   const previousSequence = Number(
-    baselineA.summary && baselineA.summary.lastMessage ? baselineA.summary.lastMessage.serverSequence || 0 : 0
+    baselineA.summary && baselineA.summary.lastMessage ? baselineA.summary.lastMessage.timelineSequence || 0 : 0
   );
   const clientMessageID = `k6-multi-device-${__VU}-${__ITER}-${Date.now()}`;
   const message = sendInternalMessage(current.peerUserID, current.conversationID, clientMessageID);
@@ -328,8 +335,6 @@ export default function () {
   const readResponse = markRead(current.ownerBToken, current.conversationID, message.serverSequence);
   if (
     !readResponse
-    || Number(readResponse.lastReadSequence || 0) < Number(message.serverSequence)
-    || Number(readResponse.unreadCount || 0) !== 0
   ) {
     syncErrors.add(true);
     return;

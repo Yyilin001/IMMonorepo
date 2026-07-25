@@ -52,6 +52,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['timeline-pagination-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const accountFile = __ENV.ACCOUNT_FILE || __ENV.IM_ACCOUNT_FILE || '';
 const defaultOwnerEmail = __ENV.IM_EMAIL || 'demo@example.com';
 const defaultOwnerPassword = __ENV.IM_PASSWORD || 'password1234';
@@ -165,7 +166,7 @@ function createConversation(token, memberEmail) {
 function sendInternalMessage(senderUserID, conversationID, index) {
   const clientMessageID = `k6-timeline-page-${conversationID}-${index}-${Date.now()}`;
   const res = http.post(
-    `${baseURL}/internal/im/messages/send`,
+    `${commandBaseURL}/internal/im/messages/send`,
     JSON.stringify({
       senderUserID,
       payload: {

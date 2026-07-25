@@ -46,6 +46,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['cold-start-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const email = __ENV.IM_EMAIL || 'demo@example.com';
 const password = __ENV.IM_PASSWORD || 'password1234';
 const memberEmails = (__ENV.IM_MEMBER_EMAILS || 'alice@example.com')
@@ -113,7 +114,7 @@ function createConversation(token, index) {
 
 function sendInternalMessage(senderUserID, conversationID, clientMessageID) {
   const res = http.post(
-    `${baseURL}/internal/im/messages/send`,
+    `${commandBaseURL}/internal/im/messages/send`,
     JSON.stringify({
       senderUserID,
       payload: {
@@ -191,7 +192,7 @@ export default function (data) {
 
   for (const conversationID of data.conversationIDs) {
     const sinceRes = timedGet(
-      `${baseURL}/api/im/conversations/${conversationID}/messages/since?afterSequence=0&limit=${sinceLimit}`,
+      `${baseURL}/api/im/conversations/${conversationID}/timeline/since?afterSequence=0&limit=${sinceLimit}`,
       data.token,
       messagesSinceLatency,
       'cold messages since ok'

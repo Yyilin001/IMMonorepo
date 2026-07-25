@@ -3,7 +3,8 @@ import Valkey
 import Vapor
 
 /// Cluster-specific routing backend. Unlike the legacy RediStack backend, every
-/// Presence Store operation is scoped to one Redis Cluster hash slot.
+/// Presence Store operation is scoped to one Redis Cluster hash slot and
+/// cross-node realtime dispatch uses a target-node Valkey Stream.
 final class ValkeyClusterConnectionRoutingBackend: ConnectionRoutingBackend, @unchecked Sendable {
     let presenceStore: any PresenceStore
     let dispatchService: any NodeMessageDispatchService
@@ -19,7 +20,7 @@ final class ValkeyClusterConnectionRoutingBackend: ConnectionRoutingBackend, @un
         cellID: String,
         logger: Logger
     ) throws {
-        guard nodeDispatchConfiguration.mode == .http else {
+        guard nodeDispatchConfiguration.mode == .valkeyStream else {
             throw RedisRoutingError.redisClusterTopologyUnsupported
         }
 
@@ -71,7 +72,12 @@ final class ValkeyClusterConnectionRoutingBackend: ConnectionRoutingBackend, @un
             heartbeatTimeoutSeconds: configuration.presenceHeartbeatTimeoutSeconds,
             activeConversationRouteTTLSeconds: configuration.activeConversationRouteTTLSeconds
         )
-        self.dispatchService = HTTPNodeMessageDispatchService(configuration: nodeDispatchConfiguration)
+        self.dispatchService = ValkeyStreamNodeMessageDispatchService(
+            client: client,
+            nodeID: nodeID,
+            cellID: cellID,
+            logger: logger
+        )
     }
 
     var backendName: String { "valkey-cluster" }

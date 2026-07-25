@@ -1314,7 +1314,6 @@ python3 /opt/imserver/IMMonorepo/IMServer/LoadTests/tcp_online_driver.py \
   --hold-seconds 1200 \
   --timeout-seconds 240 \
   --heartbeat-interval-seconds 30 \
-  --barrier-keepalive-seconds 15 \
   --barrier-batch-size 500 \
   --login-cache-file /tmp/imtcp-login-cache-new-5000.json \
   --login-cache-ttl-guard-seconds 30 \
@@ -3490,7 +3489,7 @@ Idle online: online-idle-1000, online-idle-5000, online-idle-10000
 Reconnect recovery: reconnect-soak-1000, reconnect-soak-5000, reconnect-drill-1000
 Multi-device TCP: multi-device-online-1x5, multi-device-online-100x2, multi-device-delivery-100x2-10
 Pair delivery: pair-delivery-1000-10, pair-delivery-1000-50, pair-delivery-1000-100, pair-delivery-2000-50, pair-delivery-3000-50
-Large group compact/timeline-pull: large-group-1000-10, large-group-1000-50, large-group-5000-50, large-group-10000-200
+Large group compact/timeline-pull: large-group-1000-10, large-group-1000-50, large-group-5000-50, large-group-10000-5, large-group-10000-10, large-group-10000-200
 ```
 
 For broad testing beyond large groups, use the normal-product presets first:
@@ -3513,7 +3512,9 @@ PERF_PRODUCTION_GATE_PROFILE=normal-product-baseline ./run_production_profile.sh
 # Product-plan form with entrypoint gate, prerequisite audit, runbook, and receipt.
 PRODUCT_TEST_PHASES="entrypoint normal-product-baseline" ./run_product_test_plan.sh
 
-# Run large-group only after the normal product surface has passed.
+# Run large-group only after the normal product surface has passed. Start with
+# the 10,000-member 5 and 10 msg/s steady-state steps; 200 msg/s is a separate
+# pressure/drain test rather than a normal latency baseline.
 SCENARIO_GROUPS="large-group" ./run_perf_scenarios.sh
 ```
 
@@ -3869,9 +3870,9 @@ Message fanout interpretation:
 - `im_realtime_active_conversation_fanout_backpressure_downgraded_active_recipients_total`
   is the subset downgraded because all local connections for that active user
   were non-writable when `IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE=true`. These
-  recipients are not converted into inactive `conversation_activity_hint`
-  recipients; they recover through the normal selected-chat timeline catch-up
-  or reconnect path instead of receiving a list-summary hint while active.
+  clients are disconnected and recover through the normal reconnect and
+  selected-chat timeline catch-up path instead of receiving a list-summary hint
+  while active.
 - `im_realtime_inactive_conversation_hint_recipients_total` shows how many hint
   recipients were actually flushed after debounce/coalescing in relay mode.
   Production `pull-only` runs should not depend on this metric for list
@@ -3897,23 +3898,18 @@ Message fanout interpretation:
 
 Realtime relay tuning:
 
-- Keep `IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED=false` for strict synchronous
-  relay semantics.
-- Use `IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED=true` for realtime latency
-  capacity tests. In this mode the realtime Kafka consumer commits after placing
-  relay work into a bounded in-process dispatcher; durable owner delivery remains
-  the catch-up source if the process exits before a best-effort live relay
+- `IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED=true` uses a bounded-concurrency
+  dispatcher. It applies backpressure when saturated and does not silently drop
+  relay work; the consuming Kafka event remains in flight until its relay call
   finishes.
 - `IM_REALTIME_DELIVERY_ASYNC_MAX_IN_FLIGHT` caps concurrent gateway relay jobs.
   Start with `32`; if gateway CPU, relay errors, or TCP send completion latency
   spikes, lower it. If realtime Kafka lag grows while gateway has headroom, raise
   it cautiously.
-- `IM_REALTIME_DELIVERY_ASYNC_MAX_QUEUED` caps relay jobs waiting for an async
-  dispatcher slot. Start with `1024`; lower it if stream-consumer memory grows
-  during hot-group bursts. When this queue is saturated, the server drops the
-  best-effort live relay and relies on owner-delivery cursor or timeline catch-up;
-  track `im_realtime_async_relay_*` metrics before increasing in-flight relay
-  concurrency.
+- `IM_REALTIME_DELIVERY_ASYNC_MAX_QUEUED` is the queue-depth alert threshold.
+  Start with `1024`; when exceeded the dispatcher records saturation and applies
+  upstream backpressure rather than dropping a live relay. Investigate the relay
+  path before raising it.
 - `IM_REALTIME_REMOTE_DISPATCH_USER_BATCH_SIZE` caps the number of target users
   in one cross-node realtime packet. Start with `512`; lower it if gateway relay
   body size, Redis dispatch latency, or TCP local fanout latency spikes.
@@ -3929,6 +3925,11 @@ Realtime relay tuning:
 - Use `im_cross_node_dispatch_latency_avg_millis` and
   `im_cross_node_dispatch_latency_max_millis` to separate remote gateway relay
   latency from local TCP fanout latency during multi-gateway large-group tests.
+- In Cluster deployments, require `IM_NODE_DISPATCH_MODE=valkey-stream` and
+  scrape `im_durable_node_dispatch_enqueued_total`,
+  `im_durable_node_dispatch_acknowledged_total`, and
+  `im_durable_node_dispatch_retries_total`. Enqueued and acknowledged counts
+  must converge after a Gateway restart test.
 - `IM_GATEWAY_LOCAL_FANOUT_BATCH_SIZE` caps how many local TCP connections one
   fanout chunk writes to. Start with `64`; lower it if a single hot-room relay
   monopolizes gateway EventLoops. Production gateway validation rejects values
@@ -3956,14 +3957,16 @@ Realtime relay tuning:
   them if slow clients retain too much memory, and raise them only when
   `im_local_fanout_*` metrics show gateway fanout is healthy but brief network
   bursts trigger unnecessary writability churn.
-- `IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE=true` drops best-effort realtime
-  domain-event fanout for a connection that is already non-writable. ACK/kick
-  control packets still use the normal write path. Keep this enabled for
-  large-group tests so slow clients catch up through owner cursor or
-  `timeline/since` instead of retaining unbounded gateway buffers.
+- `IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE=true` prevents an unbounded
+  best-effort realtime buffer for a connection that is already non-writable.
+  The gateway records the rejected realtime packet, closes that connection, and
+  the client reconnects through its domain-event and timeline cursor catch-up
+  path. ACK/kick control packets still use the normal write path. Keep this
+  enabled for large-group tests.
 - `im_tcp_write_completions_total`, `im_tcp_write_failures_total`,
   `im_tcp_write_backpressure_total`,
-  `im_tcp_write_dropped_backpressure_total`, and
+  `im_tcp_write_dropped_backpressure_total`,
+  `im_tcp_close_realtime_backpressure_total`, and
   `im_tcp_write_latency_*_millis` show whether fanout work is reaching the socket
   layer cleanly. Treat rising backpressure or write latency during steady load as
   a gateway/client-network bottleneck before increasing realtime relay
@@ -3993,10 +3996,12 @@ Realtime relay tuning:
   `im_domain_event_message_created_preview_missing_total`; production hot-group
   tests should show embedded previews growing, message lookups staying flat, and
   missing previews at zero.
-- When active-conversation route lookup or pre-split fanout fails, the system
-  drops the best-effort realtime fanout. It does not fall back to full unsplit
-  group fanout and does not convert active-chat delivery into inactive
-  `conversation_activity_hint` semantics. Track
+- A direct best-effort gateway routing call fails closed when its
+  active-conversation route lookup fails; it does not fall back to full unsplit
+  group fanout or convert active-chat delivery into inactive
+  `conversation_activity_hint` semantics. Kafka realtime/domain delivery
+  consumers instead classify the lookup failure as transient and retry before
+  committing the stream record. Track
   `im_realtime_active_conversation_fanout_route_split_drops_total`,
   `im_realtime_active_conversation_fanout_route_split_drop_recipients_total`,
   `im_realtime_remote_active_conversation_fanout_route_split_drops_total`, and
@@ -4232,6 +4237,12 @@ Realtime relay tuning:
   API for member details. Start with `500` so 1000+ member group list/change
   reads and membership/settings realtime payloads do not repeatedly transfer or
   decode full member JSON.
+- `IM_SUMMARY_STORED_MEMBER_USER_IDS_LIMIT` caps the member IDs persisted in
+  each owner summary row. Above the limit, the projection retains the true
+  `member_count` but stores an empty member ID array, preventing a 10,000-member
+  group from duplicating roughly 100 million UUIDs across 10,000 summaries. It
+  defaults to `IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT`; keep both at `500`
+  unless a small-group fast path has a measured need for a different threshold.
 - Track `im_realtime_payload_summary_member_ids_omitted_total` and
   `im_realtime_payload_summary_member_ids_omitted_members_total` during large
   membership/settings realtime tests. They should increase for 1000+ member

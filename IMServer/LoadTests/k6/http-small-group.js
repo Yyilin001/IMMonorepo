@@ -34,6 +34,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['local-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const email = __ENV.IM_EMAIL || 'demo@example.com';
 const password = __ENV.IM_PASSWORD || 'password1234';
 const memberEmails = (__ENV.IM_MEMBER_EMAILS || 'alice@example.com')
@@ -96,7 +97,7 @@ function sendInternalMessage(userID, conversationID) {
     return;
   }
   const res = http.post(
-    `${baseURL}/internal/im/messages/send`,
+    `${commandBaseURL}/internal/im/messages/send`,
     JSON.stringify({
       senderUserID: userID,
       payload: {
@@ -137,7 +138,7 @@ export default function () {
   check(changesRes, { 'changes ok': (r) => r.status === 200 || r.status === 400 });
 
   const sinceRes = http.get(
-    `${baseURL}/api/im/conversations/${conversationID}/messages/since?afterSequence=0&limit=50`,
+    `${baseURL}/api/im/conversations/${conversationID}/timeline/since?afterSequence=0&limit=50`,
     jsonHeaders(token)
   );
   check(sinceRes, { 'messages since ok': (r) => r.status === 200 });

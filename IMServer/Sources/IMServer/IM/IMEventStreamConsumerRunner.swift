@@ -30,6 +30,7 @@ struct KafkaConversationEventStreamConsumerRunner {
     let topics: [String]
     let replayRecordsEnabled: Bool
     let autoOffsetReset: KafkaConsumerConfiguration.AutoOffsetReset
+    let coalesceInterleavedMessageCreatedBatches: Bool
     let consumerFactory: @Sendable (String) -> [any ConversationEventConsumer]
 
     init(
@@ -39,6 +40,7 @@ struct KafkaConversationEventStreamConsumerRunner {
         topics: [String],
         replayRecordsEnabled: Bool = true,
         autoOffsetReset: KafkaConsumerConfiguration.AutoOffsetReset = .earliest,
+        coalesceInterleavedMessageCreatedBatches: Bool = false,
         consumerFactory: @escaping @Sendable (String) -> [any ConversationEventConsumer]
     ) {
         self.app = app
@@ -47,6 +49,7 @@ struct KafkaConversationEventStreamConsumerRunner {
         self.topics = topics
         self.replayRecordsEnabled = replayRecordsEnabled
         self.autoOffsetReset = autoOffsetReset
+        self.coalesceInterleavedMessageCreatedBatches = coalesceInterleavedMessageCreatedBatches
         self.consumerFactory = consumerFactory
     }
 
@@ -224,6 +227,15 @@ struct KafkaConversationEventStreamConsumerRunner {
         consumer: KafkaConsumer,
         deadLetterProducer: KafkaConversationEventStreamProducer
     ) async throws {
+        if coalesceInterleavedMessageCreatedBatches,
+           try await processInterleavedMessageCreatedBatchIfEligible(
+               messages,
+               consumer: consumer,
+               deadLetterProducer: deadLetterProducer
+           ) {
+            return
+        }
+
         var currentRun: [QueuedDecodedStreamMessage] = []
 
         for message in messages {
@@ -279,6 +291,97 @@ struct KafkaConversationEventStreamConsumerRunner {
         )
     }
 
+    /// Kafka preserves partition order, but independent conversations in a partition do not
+    /// require each other to be delivered serially. Re-grouping a homogeneous message-created
+    /// batch restores the existing bulk fanout path without changing ordering within a
+    /// conversation. The final offset is committed only after every re-grouped run succeeds.
+    private func processInterleavedMessageCreatedBatchIfEligible(
+        _ messages: [KafkaConsumerMessage],
+        consumer: KafkaConsumer,
+        deadLetterProducer: KafkaConversationEventStreamProducer
+    ) async throws -> Bool {
+        guard messages.count > 1 else {
+            return false
+        }
+
+        var decodedMessages: [QueuedDecodedStreamMessage] = []
+        decodedMessages.reserveCapacity(messages.count)
+        for message in messages {
+            let streamEnvelope: ConversationEventStreamEnvelope
+            do {
+                streamEnvelope = try decodeEnvelope(from: message)
+            } catch {
+                return false
+            }
+            if replayRecordsEnabled,
+               try await hasAlreadyProcessed(streamEnvelope.eventID) {
+                return false
+            }
+            let decoded: DecodedStreamMessage
+            do {
+                decoded = try decodedMessage(
+                    from: streamEnvelope,
+                    sourceTopic: message.topic,
+                    partition: message.partition.rawValue,
+                    offset: message.offset.rawValue,
+                    deadLetterError: headerValue(
+                        named: "dead-letter-error",
+                        in: message.headers
+                    )
+                )
+            } catch {
+                return false
+            }
+            decodedMessages.append(QueuedDecodedStreamMessage(raw: message, decoded: decoded))
+        }
+
+        guard ConversationEventStreamMessageRunGrouper.isInterleavedMessageCreatedBatchEligible(
+            decodedMessages.map(\.decoded.metadata)
+        ) else {
+            return false
+        }
+
+        struct RunKey: Hashable {
+            let conversationID: UUID
+            let producerShard: String
+        }
+        var orderedKeys: [RunKey] = []
+        var runs: [RunKey: [QueuedDecodedStreamMessage]] = [:]
+        for message in decodedMessages {
+            let key = RunKey(
+                conversationID: message.decoded.streamEnvelope.conversationID,
+                producerShard: message.decoded.producerShard
+            )
+            if runs[key] == nil {
+                orderedKeys.append(key)
+                runs[key] = []
+            }
+            runs[key]?.append(message)
+        }
+
+        guard orderedKeys.count > 1 else {
+            return false
+        }
+
+        for key in orderedKeys {
+            guard let run = runs[key] else {
+                continue
+            }
+            try await processDecodedRun(
+                run,
+                consumer: consumer,
+                deadLetterProducer: deadLetterProducer,
+                commitAfterProcessing: false
+            )
+            try Task.checkCancellation()
+        }
+        if let last = messages.last {
+            try Task.checkCancellation()
+            try await consumer.commit(last)
+        }
+        return true
+    }
+
     private func flushDecodedRun(
         _ run: inout [QueuedDecodedStreamMessage],
         consumer: KafkaConsumer,
@@ -295,13 +398,19 @@ struct KafkaConversationEventStreamConsumerRunner {
     private func processDecodedRun(
         _ run: [QueuedDecodedStreamMessage],
         consumer: KafkaConsumer,
-        deadLetterProducer: KafkaConversationEventStreamProducer
+        deadLetterProducer: KafkaConversationEventStreamProducer,
+        commitAfterProcessing: Bool = true
     ) async throws {
         guard !run.isEmpty else {
             return
         }
         guard run.count > 1 else {
-            try await processKafkaMessage(run[0].raw, consumer: consumer, deadLetterProducer: deadLetterProducer)
+            try await processKafkaMessage(
+                run[0].raw,
+                consumer: consumer,
+                deadLetterProducer: deadLetterProducer,
+                commitAfterProcessing: commitAfterProcessing
+            )
             return
         }
 
@@ -336,7 +445,7 @@ struct KafkaConversationEventStreamConsumerRunner {
                 for _ in run {
                     await app.streamMetrics.recordConsumed(groupID: groupID)
                 }
-                if let last = run.last {
+                if commitAfterProcessing, let last = run.last {
                     try await consumer.commit(last.raw)
                 }
                 return
@@ -354,7 +463,12 @@ struct KafkaConversationEventStreamConsumerRunner {
                             "error": .string(String(describing: transientError))
                         ]
                     )
-                    try await processDecodedRunIndividually(run, consumer: consumer, deadLetterProducer: deadLetterProducer)
+                    try await processDecodedRunIndividually(
+                        run,
+                        consumer: consumer,
+                        deadLetterProducer: deadLetterProducer,
+                        commitAfterProcessing: commitAfterProcessing
+                    )
                     return
                 }
                 app.logger.warning(
@@ -378,7 +492,12 @@ struct KafkaConversationEventStreamConsumerRunner {
                         "error": .string(String(describing: error))
                     ]
                 )
-                try await processDecodedRunIndividually(run, consumer: consumer, deadLetterProducer: deadLetterProducer)
+                try await processDecodedRunIndividually(
+                    run,
+                    consumer: consumer,
+                    deadLetterProducer: deadLetterProducer,
+                    commitAfterProcessing: commitAfterProcessing
+                )
                 return
             }
         }
@@ -429,17 +548,24 @@ struct KafkaConversationEventStreamConsumerRunner {
     private func processDecodedRunIndividually(
         _ run: [QueuedDecodedStreamMessage],
         consumer: KafkaConsumer,
-        deadLetterProducer: KafkaConversationEventStreamProducer
+        deadLetterProducer: KafkaConversationEventStreamProducer,
+        commitAfterProcessing: Bool
     ) async throws {
         for message in run {
-            try await processKafkaMessage(message.raw, consumer: consumer, deadLetterProducer: deadLetterProducer)
+            try await processKafkaMessage(
+                message.raw,
+                consumer: consumer,
+                deadLetterProducer: deadLetterProducer,
+                commitAfterProcessing: commitAfterProcessing
+            )
         }
     }
 
     private func processKafkaMessage(
         _ message: KafkaConsumerMessage,
         consumer: KafkaConsumer,
-        deadLetterProducer: KafkaConversationEventStreamProducer
+        deadLetterProducer: KafkaConversationEventStreamProducer,
+        commitAfterProcessing: Bool = true
     ) async throws {
         var transientAttempt = 0
         while !Task.isCancelled {
@@ -447,7 +573,9 @@ struct KafkaConversationEventStreamConsumerRunner {
                 let streamEnvelope = try decodeEnvelope(from: message)
                 if replayRecordsEnabled, try await hasAlreadyProcessed(streamEnvelope.eventID) {
                     await app.streamMetrics.recordDuplicate(groupID: groupID)
-                    try await consumer.commit(message)
+                    if commitAfterProcessing {
+                        try await consumer.commit(message)
+                    }
                     return
                 }
                 let decoded = try decodedMessage(
@@ -487,7 +615,9 @@ struct KafkaConversationEventStreamConsumerRunner {
                     try await recordProcessed(streamEnvelope)
                 }
                 await app.streamMetrics.recordConsumed(groupID: groupID)
-                try await consumer.commit(message)
+                if commitAfterProcessing {
+                    try await consumer.commit(message)
+                }
                 return
             } catch let transientError as ConversationEventTransientProcessingError {
                 transientAttempt += 1
@@ -504,7 +634,9 @@ struct KafkaConversationEventStreamConsumerRunner {
                         ]
                     )
                     if await publishDeadLetter(for: message, error: transientError, producer: deadLetterProducer) {
-                        try? await consumer.commit(message)
+                        if commitAfterProcessing {
+                            try? await consumer.commit(message)
+                        }
                         return
                     }
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -522,11 +654,33 @@ struct KafkaConversationEventStreamConsumerRunner {
                 let retryDelay = UInt64(app.streamConsumerConfiguration.domainDeliveryTimelineNoticeRetryDelayMilliseconds) * 1_000_000
                 try? await Task.sleep(nanoseconds: retryDelay)
             } catch {
+                // Most dependency failures are surfaced as generic errors by the
+                // underlying client libraries. Do not turn a transient outage into
+                // a permanent delivery loss just because it lacks our marker type.
+                transientAttempt += 1
+                let maxTransientAttempts = app.streamConsumerConfiguration.domainDeliveryTransientMaxAttempts
+                if transientAttempt < maxTransientAttempts {
+                    app.logger.warning(
+                        "Kafka stream consumer unclassified processing failed; retrying without commit",
+                        metadata: [
+                            "group_id": .string(groupID),
+                            "attempt": .stringConvertible(transientAttempt),
+                            "max_attempts": .stringConvertible(maxTransientAttempts),
+                            "error": .string(String(describing: error))
+                        ]
+                    )
+                    let retryDelay = UInt64(app.streamConsumerConfiguration.domainDeliveryTimelineNoticeRetryDelayMilliseconds) * 1_000_000
+                    try? await Task.sleep(nanoseconds: retryDelay)
+                    continue
+                }
+
                 await app.streamMetrics.recordFailed(groupID: groupID)
                 app.logger.warning(
-                    "Kafka stream consumer message processing failed",
+                    "Kafka stream consumer unclassified processing exhausted; publishing to dead letter",
                     metadata: [
                         "group_id": .string(groupID),
+                        "attempt": .stringConvertible(transientAttempt),
+                        "max_attempts": .stringConvertible(maxTransientAttempts),
                         "error": .string(String(describing: error))
                     ]
                 )
@@ -535,7 +689,9 @@ struct KafkaConversationEventStreamConsumerRunner {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     continue
                 }
-                try? await consumer.commit(message)
+                if commitAfterProcessing {
+                    try? await consumer.commit(message)
+                }
                 return
             }
         }
@@ -592,6 +748,13 @@ struct KafkaConversationEventStreamConsumerRunner {
                 consumers: consumerFactory(messages[0].producerShard)
             )
             try await registry.consumeMessageCreatedRun(messages.map(\.eventEnvelope))
+            return
+        }
+        if ConversationEventStreamMessageRunGrouper.isMembershipAddedRun(messages.map(\.metadata)) {
+            let registry = ConversationEventConsumerRegistry(
+                consumers: consumerFactory(messages[0].producerShard)
+            )
+            try await registry.consumeMembershipAddedRun(messages.map(\.eventEnvelope))
             return
         }
 
@@ -729,8 +892,7 @@ struct ConversationEventStreamMessageRunGrouper {
             && previous.offset + 1 == message.offset
             && previous.envelope.conversationID == message.envelope.conversationID
             && previous.envelope.producerShard == message.envelope.producerShard
-            && isMessageCreated(previous.envelope)
-            && isMessageCreated(message.envelope)
+            && sameCoalescibleEventType(previous.envelope, message.envelope)
     }
 
     static func isMessageCreatedRun(_ envelopes: [ConversationEventStreamEnvelope]) -> Bool {
@@ -761,9 +923,51 @@ struct ConversationEventStreamMessageRunGrouper {
         return true
     }
 
+    static func isInterleavedMessageCreatedBatchEligible(_ messages: [Metadata]) -> Bool {
+        guard let first = messages.first,
+              isMessageCreated(first.envelope)
+        else {
+            return false
+        }
+        return messages.allSatisfy {
+            $0.topic == first.topic
+                && $0.partition == first.partition
+                && isMessageCreated($0.envelope)
+        }
+    }
+
+    static func isMembershipAddedRun(_ messages: [Metadata]) -> Bool {
+        guard let first = messages.first else {
+            return false
+        }
+        var previous = first
+        guard isMembershipAdded(first.envelope) else {
+            return false
+        }
+        for message in messages.dropFirst() {
+            guard canAppend(message, after: previous) else {
+                return false
+            }
+            previous = message
+        }
+        return true
+    }
+
+    private static func sameCoalescibleEventType(
+        _ lhs: ConversationEventStreamEnvelope,
+        _ rhs: ConversationEventStreamEnvelope
+    ) -> Bool {
+        (isMessageCreated(lhs) && isMessageCreated(rhs))
+            || (isMembershipAdded(lhs) && isMembershipAdded(rhs))
+    }
+
     private static func isMessageCreated(_ envelope: ConversationEventStreamEnvelope) -> Bool {
         envelope.eventType == ConversationDomainEventType.messageCreated.rawValue
             && envelope.payload.messageID != nil
+    }
+
+    private static func isMembershipAdded(_ envelope: ConversationEventStreamEnvelope) -> Bool {
+        envelope.eventType == ConversationDomainEventType.membershipAdded.rawValue
     }
 }
 
@@ -776,8 +980,9 @@ enum ConversationEventStreamBatchFillPolicy {
     }
 
     static func isEligible(_ envelope: ConversationEventStreamEnvelope) -> Bool {
-        envelope.eventType == ConversationDomainEventType.messageCreated.rawValue
-            && envelope.payload.messageID != nil
+        (envelope.eventType == ConversationDomainEventType.messageCreated.rawValue
+            && envelope.payload.messageID != nil)
+            || envelope.eventType == ConversationDomainEventType.membershipAdded.rawValue
     }
 }
 

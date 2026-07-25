@@ -17,7 +17,9 @@ final class ConversationProjectionWorkerLifecycle: LifecycleHandler, @unchecked 
                 while !Task.isCancelled {
                     do {
                         var processedCount = 0
-                        processedCount += try await ContactOutboxProcessor(db: application.imWriteDB).processPendingBatch(
+                        // Contact events are control-plane data. A Cell-local
+                        // conversation shard must never be used to scan them.
+                        processedCount += try await ContactOutboxProcessor(db: application.db).processPendingBatch(
                             app: application,
                             configuration: configuration
                         )

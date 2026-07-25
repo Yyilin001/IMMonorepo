@@ -264,6 +264,7 @@ struct IMCellIngressConfiguration: Sendable, Equatable {
 struct IMNodeDispatchConfiguration: Sendable, Equatable {
     enum Mode: String, Sendable {
         case redis
+        case valkeyStream = "valkey-stream"
         case http
     }
 
@@ -640,11 +641,13 @@ struct IMStreamConsumerConfiguration: Sendable {
     let domainDeliveryRelayBatchSize: Int
     let domainDeliveryOwnerRecordBatchMaxRequests: Int
     let domainDeliveryReplayRecordsEnabled: Bool
+    let realtimeDeliveryReplayRecordsEnabled: Bool
     let domainDeliveryRelayAfterRecord: Bool
     let domainDeliveryExternalRealtimeDeliveryEnabled: Bool
     let domainDeliverySkipsMessageCreatedOwnerDelivery: Bool
     let domainDeliveryMessageCreatedLargeGroupMode: MessageCreatedLargeGroupDeliveryMode
     let domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold: Int
+    let domainDeliveryLargeMembershipOwnerDeliverySkipRecipientThreshold: Int
     let notificationSkipsMessageCreatedOwnerNotifications: Bool
     let notificationMessageCreatedOwnerNotificationSkipRecipientThreshold: Int
     let realtimeDeliveryAsyncRelayEnabled: Bool
@@ -686,6 +689,11 @@ struct IMStreamConsumerConfiguration: Sendable {
                 rawValue: $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             )
         } ?? (domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold > 0 ? .timelinePull : .ownerDelivery)
+        let domainDeliveryLargeMembershipOwnerDeliverySkipRecipientThreshold = max(
+            0,
+            Environment.get("IM_DOMAIN_DELIVERY_LARGE_MEMBERSHIP_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD")
+                .flatMap(Int.init(_:)) ?? domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold
+        )
         return IMStreamConsumerConfiguration(
             enabledGroups: Set(configured.isEmpty ? defaultGroups : configured),
             preservesGroupedDeploymentsInProduction: Environment.get("IM_STREAM_CONSUMER_ALLOW_MULTI_GROUP")
@@ -717,6 +725,10 @@ struct IMStreamConsumerConfiguration: Sendable {
                 "IM_DOMAIN_DELIVERY_REPLAY_RECORDS_ENABLED",
                 defaultValue: false
             ),
+            realtimeDeliveryReplayRecordsEnabled: parseBooleanEnvironment(
+                "IM_REALTIME_DELIVERY_REPLAY_RECORDS_ENABLED",
+                defaultValue: false
+            ),
             domainDeliveryRelayAfterRecord: parseBooleanEnvironment(
                 "IM_DOMAIN_DELIVERY_RELAY_AFTER_RECORD",
                 defaultValue: !Set(configured.isEmpty ? defaultGroups : configured).contains("realtime-delivery-consumer")
@@ -731,6 +743,7 @@ struct IMStreamConsumerConfiguration: Sendable {
             ),
             domainDeliveryMessageCreatedLargeGroupMode: domainDeliveryMessageCreatedLargeGroupMode,
             domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold: domainDeliveryMessageCreatedOwnerDeliverySkipRecipientThreshold,
+            domainDeliveryLargeMembershipOwnerDeliverySkipRecipientThreshold: domainDeliveryLargeMembershipOwnerDeliverySkipRecipientThreshold,
             notificationSkipsMessageCreatedOwnerNotifications: parseBooleanEnvironment(
                 "IM_NOTIFICATION_SKIP_MESSAGE_CREATED_OWNER_NOTIFICATIONS",
                 defaultValue: false

@@ -63,6 +63,8 @@ final class RedisConnectionRoutingBackend: ConnectionRoutingBackend, @unchecked 
                 cellID: cellID,
                 logger: logger
             )
+        case .valkeyStream:
+            throw RedisRoutingError.valkeyStreamDispatchRequiresCluster
         case .http:
             self.dispatchService = HTTPNodeMessageDispatchService(
                 configuration: nodeDispatchConfiguration

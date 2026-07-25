@@ -23,6 +23,10 @@ private struct RoutingMetricsStorageKey: StorageKey {
     typealias Value = RoutingMetrics
 }
 
+private struct IMTCPConnectionCloseBatcherStorageKey: StorageKey {
+    typealias Value = IMTCPConnectionCloseBatcher
+}
+
 private struct IMRedisRoutingConfigurationStorageKey: StorageKey {
     typealias Value = IMRedisRoutingConfiguration
 }
@@ -80,6 +84,20 @@ extension Application {
         }
     }
 
+    var imTCPConnectionCloseBatcher: IMTCPConnectionCloseBatcher {
+        get {
+            if let batcher = storage[IMTCPConnectionCloseBatcherStorageKey.self] {
+                return batcher
+            }
+            let batcher = IMTCPConnectionCloseBatcher(application: self)
+            storage[IMTCPConnectionCloseBatcherStorageKey.self] = batcher
+            return batcher
+        }
+        set {
+            storage[IMTCPConnectionCloseBatcherStorageKey.self] = newValue
+        }
+    }
+
     var connectionRoutingService: ConnectionRoutingService {
         get {
             if let service = storage[ConnectionRoutingServiceStorageKey.self] {
@@ -129,8 +147,8 @@ extension Application {
                     cellID: imRealtimeCellID,
                     logger: logger
                 )
-                try await clusterBackend.start(app: self)
                 connectionRoutingService = ConnectionRoutingService(app: self, backend: clusterBackend)
+                try await clusterBackend.start(app: self)
                 return
             }
             if environment == .production {
@@ -142,8 +160,8 @@ extension Application {
                     logger: logger,
                     eventLoop: eventLoopGroup.next()
                 )
-                try await redisBackend.start(app: self)
                 connectionRoutingService = ConnectionRoutingService(app: self, backend: redisBackend)
+                try await redisBackend.start(app: self)
                 return
             }
 
@@ -156,8 +174,8 @@ extension Application {
                     logger: logger,
                     eventLoop: eventLoopGroup.next()
                 )
-                try await redisBackend.start(app: self)
                 connectionRoutingService = ConnectionRoutingService(app: self, backend: redisBackend)
+                try await redisBackend.start(app: self)
                 return
             } catch {
                 let metadata: Logger.Metadata = [

@@ -232,7 +232,7 @@ export default function () {
 
   if (!expectRejected(
     () => http.get(
-      `${baseURL}/api/im/conversations/${conversation.id}/messages/since?afterSequence=0&limit=20`,
+      `${baseURL}/api/im/conversations/${conversation.id}/timeline/since?afterSequence=0&limit=20`,
       jsonHeaders(outsiderAuth.accessToken)
     ),
     'outsider timeline read'
@@ -279,7 +279,7 @@ export default function () {
 
   if (!expectRejected(
     () => http.get(
-      `${baseURL}/api/im/conversations/${conversation.id}/messages/since?afterSequence=0&limit=20`,
+      `${baseURL}/api/im/conversations/${conversation.id}/timeline/since?afterSequence=0&limit=20`,
       jsonHeaders(memberAuth.accessToken)
     ),
     'removed member timeline read'

@@ -97,7 +97,7 @@ struct GatewayRelayController: RouteCollection {
         let payload = try IMTCPProtobufCodec.decodeDomainEvent(payloadData)
         let payloadDecodeMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: payloadDecodeStartedAt)
         let localSendStartedAt = Date()
-        await req.application.gatewaySessionService.sendDomainEventPayloadBatches(
+        try await relayDomainEventPayloadBatches(
             [
                 IMGatewayDomainEventPayloadBatch(
                     payload: payload,
@@ -105,7 +105,8 @@ struct GatewayRelayController: RouteCollection {
                     fanoutIntent: body.fanoutIntent ?? .unspecified
                 )
             ],
-            requestID: body.requestID ?? payload.eventID
+            requestID: body.requestID ?? payload.eventID,
+            req: req
         )
         let localSendMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: localSendStartedAt)
         let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
@@ -145,7 +146,7 @@ struct GatewayRelayController: RouteCollection {
         let payloadDecodeMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: payloadDecodeStartedAt)
 
         let localSendStartedAt = Date()
-        await req.application.gatewaySessionService.sendDomainEventPayloadBatches(
+        try await relayDomainEventPayloadBatches(
             [
                 IMGatewayDomainEventPayloadBatch(
                     payload: payload,
@@ -153,7 +154,8 @@ struct GatewayRelayController: RouteCollection {
                     fanoutIntent: fanoutIntent(from: req)
                 )
             ],
-            requestID: packet.requestID ?? payload.eventID
+            requestID: packet.requestID ?? payload.eventID,
+            req: req
         )
         let localSendMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: localSendStartedAt)
         let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
@@ -200,9 +202,10 @@ struct GatewayRelayController: RouteCollection {
         let payloadDecodeMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: payloadDecodeStartedAt)
 
         let localSendStartedAt = Date()
-        await req.application.gatewaySessionService.sendDomainEventPayloadBatches(
+        try await relayDomainEventPayloadBatches(
             batches,
-            requestID: packetBatch.requestID ?? batches.first?.payload.eventID
+            requestID: packetBatch.requestID ?? batches.first?.payload.eventID,
+            req: req
         )
         let localSendMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: localSendStartedAt)
         let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
@@ -250,10 +253,23 @@ struct GatewayRelayController: RouteCollection {
         }
         let payloadDecodeMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: payloadDecodeStartedAt)
         let localSendStartedAt = Date()
-        await req.application.gatewaySessionService.sendDomainEventPayloads(
-            deliveries,
-            requestID: body.requestID ?? deliveries.first?.eventID
-        )
+        let requestID = body.requestID ?? deliveries.first?.eventID
+        if req.headers.first(name: IMGatewayRelayHeader.reliableDelivery) == IMGatewayRelayHeader.reliableDeliveryValue {
+            try await req.application.gatewaySessionService.sendDomainEventPayloadBatchesReliably(
+                deliveries.map {
+                    IMGatewayDomainEventPayloadBatch(
+                        payload: $0.payload,
+                        recipientUserIDs: [$0.ownerUserID]
+                    )
+                },
+                requestID: requestID
+            )
+        } else {
+            await req.application.gatewaySessionService.sendDomainEventPayloads(
+                deliveries,
+                requestID: requestID
+            )
+        }
         let localSendMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: localSendStartedAt)
         let totalMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
         let slowLogMilliseconds = req.application.streamConsumerConfiguration.realtimeDeliverySlowLogMilliseconds
@@ -309,6 +325,24 @@ struct GatewayRelayController: RouteCollection {
             return try IMTCPProtobufCodec.decode(data)
         } catch {
             throw Abort(.badRequest, reason: "Invalid realtime packet.")
+        }
+    }
+
+    private func relayDomainEventPayloadBatches(
+        _ batches: [IMGatewayDomainEventPayloadBatch],
+        requestID: UUID?,
+        req: Request
+    ) async throws {
+        if req.headers.first(name: IMGatewayRelayHeader.reliableDelivery) == IMGatewayRelayHeader.reliableDeliveryValue {
+            try await req.application.gatewaySessionService.sendDomainEventPayloadBatchesReliably(
+                batches,
+                requestID: requestID
+            )
+        } else {
+            await req.application.gatewaySessionService.sendDomainEventPayloadBatches(
+                batches,
+                requestID: requestID
+            )
         }
     }
 

@@ -318,6 +318,13 @@ struct IMStreamConsumerCommand: AsyncCommand {
                         consumerFactory: { shardID in
                             let sourceDB = app.conversationShardRouter.commandDatabase(forShardID: shardID)
                             return [
+                                // Owner deliveries with structural timeline notices must observe the
+                                // notice projection first. Keeping both in this consumer group avoids
+                                // a cross-group race that can otherwise stall a Kafka partition.
+                                ConversationTimelineNoticeProjectionConsumer(
+                                    db: sourceDB,
+                                    app: app
+                                ),
                                 OwnerDomainEventDeliveryConsumer(
                                     app: app,
                                     sourceDB: sourceDB,
@@ -337,7 +344,9 @@ struct IMStreamConsumerCommand: AsyncCommand {
                         groupID: "realtime-delivery-consumer",
                         clientSuffix: "realtime-delivery-consumer",
                         topics: [app.eventStreamConfiguration.topic],
+                        replayRecordsEnabled: consumerConfiguration.realtimeDeliveryReplayRecordsEnabled,
                         autoOffsetReset: .latest,
+                        coalesceInterleavedMessageCreatedBatches: true,
                         consumerFactory: { shardID in
                             let sourceDB = app.conversationShardRouter.commandDatabase(forShardID: shardID)
                             return [
@@ -549,7 +558,7 @@ private actor FirstStreamConsumerSupervisionResult {
     }
 }
 
-private func waitForShutdownSignal(queueLabel: String) async {
+func waitForShutdownSignal(queueLabel: String) async {
     let state = SignalContinuationResumeState()
     await withTaskCancellationHandler {
         await withCheckedContinuation { continuation in
@@ -573,7 +582,7 @@ private func waitForShutdownSignal(queueLabel: String) async {
     }
 }
 
-private final class SignalContinuationResumeState: @unchecked Sendable {
+final class SignalContinuationResumeState: @unchecked Sendable {
     private let lock = NSLock()
     private var resumed = false
     private var continuation: CheckedContinuation<Void, Never>?

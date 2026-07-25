@@ -1,0 +1,7 @@
+# Caddy creates an internal development CA and serves only localhost. Import
+# its root certificate into the simulator's trusted certificates before using
+# the native app's default https://localhost:8443 configuration.
+https://localhost:8443 {
+    tls internal
+    reverse_proxy 127.0.0.1:8444
+}

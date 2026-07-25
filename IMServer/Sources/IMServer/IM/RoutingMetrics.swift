@@ -1,3 +1,8 @@
+struct IMTCPChannelInactiveMetricEvent: Sendable {
+    let closeReason: String?
+    let state: String
+}
+
 actor RoutingMetrics {
     struct Snapshot: Sendable {
         var currentTCPConnectionCount: Int = 0
@@ -18,6 +23,7 @@ actor RoutingMetrics {
         var tcpCloseInputClosedCount: Int = 0
         var tcpCloseResetByPeerCount: Int = 0
         var tcpCloseSlowWriteCount: Int = 0
+        var tcpCloseRealtimeBackpressureCount: Int = 0
         var tcpCloseConnectionLimitCount: Int = 0
         var tcpCloseConnectionRateLimitCount: Int = 0
         var tcpCloseGatewayDrainingCount: Int = 0
@@ -49,12 +55,21 @@ actor RoutingMetrics {
         var crossNodeDispatchMaxTargetsPerPacket: Int = 0
         var crossNodeDispatchTotalLatencyMillis: Int = 0
         var crossNodeDispatchMaxLatencyMillis: Int = 0
+        var durableNodeDispatchEnqueuedCount: Int = 0
+        var durableNodeDispatchAcknowledgedCount: Int = 0
+        var durableNodeDispatchRetryCount: Int = 0
         var crossCellDispatchAttemptCount: Int = 0
         var crossCellDispatchSuccessCount: Int = 0
         var crossCellDispatchFailureCount: Int = 0
         var crossCellDispatchRecipientCount: Int = 0
         var crossCellDispatchTotalLatencyMillis: Int = 0
         var crossCellDispatchMaxLatencyMillis: Int = 0
+        var crossCellDispatchOutboxEnqueuedCount: Int = 0
+        var crossCellDispatchOutboxDeduplicatedCount: Int = 0
+        var crossCellDispatchOutboxDeliveredCount: Int = 0
+        var crossCellDispatchOutboxRetryCount: Int = 0
+        var crossCellDispatchOutboxBacklogCount: Int = 0
+        var crossCellDispatchOutboxOldestPendingAgeMillis: Int = 0
         var remoteDomainEventEncodedPacketCount: Int = 0
         var remoteDomainEventEncodeCacheHitCount: Int = 0
         var remoteDomainEventEncodedPacketBytes: Int = 0
@@ -112,6 +127,8 @@ actor RoutingMetrics {
         var realtimeActiveConversationFanoutBackpressureDowngradedRecipientCount: Int = 0
         var realtimeActiveConversationFanoutRouteSplitDropCount: Int = 0
         var realtimeActiveConversationFanoutRouteSplitDropRecipientCount: Int = 0
+        var realtimeActiveConversationFanoutRouteLookupFailureCount: Int = 0
+        var realtimeActiveConversationFanoutRouteLookupFailureRecipientCount: Int = 0
         var realtimeActiveConversationFanoutMaxActiveRecipientsPerSplit: Int = 0
         var realtimeActiveConversationFanoutMaxCompactActiveRecipientsPerSplit: Int = 0
         var realtimeActiveConversationFanoutMaxInactiveHintRecipientsPerSplit: Int = 0
@@ -146,6 +163,7 @@ actor RoutingMetrics {
         var domainRelayAfterRecordPreSplitInactiveHintRecipientCount: Int = 0
         var domainRelayAfterRecordPreSplitDowngradedActiveRecipientCount: Int = 0
         var domainRelayAfterRecordPreSplitRouteDropCount: Int = 0
+        var domainRelayAfterRecordPreSplitRouteLookupFailureCount: Int = 0
         var domainRelayAfterRecordInactiveHintSuppressedRecipientCount: Int = 0
         var domainRelayAfterRecordActiveRouteCacheHitCount: Int = 0
         var domainRelayAfterRecordActiveRouteCachePartialHitCount: Int = 0
@@ -201,6 +219,18 @@ actor RoutingMetrics {
     }
 
     func recordTCPChannelInactive(closeReason: String?, state: String) {
+        recordTCPChannelInactive(events: [
+            IMTCPChannelInactiveMetricEvent(closeReason: closeReason, state: state)
+        ])
+    }
+
+    func recordTCPChannelInactive(events: [IMTCPChannelInactiveMetricEvent]) {
+        for event in events {
+            recordTCPChannelInactiveEvent(closeReason: event.closeReason, state: event.state)
+        }
+    }
+
+    private func recordTCPChannelInactiveEvent(closeReason: String?, state: String) {
         snapshot.currentTCPChannelCount = max(0, snapshot.currentTCPChannelCount - 1)
         snapshot.tcpChannelInactiveCount += 1
 
@@ -221,6 +251,8 @@ actor RoutingMetrics {
             snapshot.tcpCloseErrorCount += 1
         case let reason? where reason == "slow_write":
             snapshot.tcpCloseSlowWriteCount += 1
+        case let reason? where reason == "realtime_backpressure":
+            snapshot.tcpCloseRealtimeBackpressureCount += 1
         case let reason? where reason == "connection_limit":
             snapshot.tcpCloseConnectionLimitCount += 1
         case let reason? where reason == "connection_rate_limit":
@@ -347,6 +379,18 @@ actor RoutingMetrics {
         )
     }
 
+    func recordDurableNodeDispatchEnqueued() {
+        snapshot.durableNodeDispatchEnqueuedCount += 1
+    }
+
+    func recordDurableNodeDispatchAcknowledged() {
+        snapshot.durableNodeDispatchAcknowledgedCount += 1
+    }
+
+    func recordDurableNodeDispatchRetry() {
+        snapshot.durableNodeDispatchRetryCount += 1
+    }
+
     private func recordCrossNodeDispatchLatency(_ latencyMilliseconds: Int) {
         let latency = max(0, latencyMilliseconds)
         snapshot.crossNodeDispatchTotalLatencyMillis += latency
@@ -366,6 +410,30 @@ actor RoutingMetrics {
     func recordCrossCellDispatchFailed(latencyMilliseconds: Int) {
         snapshot.crossCellDispatchFailureCount += 1
         recordCrossCellDispatchLatency(latencyMilliseconds)
+    }
+
+    func recordCrossCellDispatchOutboxEnqueued() {
+        snapshot.crossCellDispatchOutboxEnqueuedCount += 1
+    }
+
+    func recordCrossCellDispatchOutboxDeduplicated() {
+        snapshot.crossCellDispatchOutboxDeduplicatedCount += 1
+    }
+
+    func recordCrossCellDispatchOutboxDelivered() {
+        snapshot.crossCellDispatchOutboxDeliveredCount += 1
+    }
+
+    func recordCrossCellDispatchOutboxRetry() {
+        snapshot.crossCellDispatchOutboxRetryCount += 1
+    }
+
+    func recordCrossCellDispatchOutboxBacklog(
+        pendingCount: Int,
+        oldestPendingAgeMilliseconds: Int
+    ) {
+        snapshot.crossCellDispatchOutboxBacklogCount = max(0, pendingCount)
+        snapshot.crossCellDispatchOutboxOldestPendingAgeMillis = max(0, oldestPendingAgeMilliseconds)
     }
 
     private func recordCrossCellDispatchLatency(_ latencyMilliseconds: Int) {
@@ -583,6 +651,11 @@ actor RoutingMetrics {
         snapshot.realtimeActiveConversationFanoutRouteSplitDropRecipientCount += max(0, recipientCount)
     }
 
+    func recordActiveConversationFanoutRouteLookupFailure(recipientCount: Int) {
+        snapshot.realtimeActiveConversationFanoutRouteLookupFailureCount += 1
+        snapshot.realtimeActiveConversationFanoutRouteLookupFailureRecipientCount += max(0, recipientCount)
+    }
+
     func recordRemoteActiveConversationFanoutSplit(
         fullRecipientCount: Int,
         compactRecipientCount: Int = 0,
@@ -681,6 +754,10 @@ actor RoutingMetrics {
         snapshot.domainRelayAfterRecordPreSplitRouteDropCount += 1
     }
 
+    func recordDomainRelayAfterRecordPreSplitRouteLookupFailure() {
+        snapshot.domainRelayAfterRecordPreSplitRouteLookupFailureCount += 1
+    }
+
     func recordDomainRelayAfterRecordInactiveHintCoalescing(suppressedRecipientCount: Int) {
         snapshot.domainRelayAfterRecordInactiveHintSuppressedRecipientCount += max(0, suppressedRecipientCount)
     }
@@ -743,6 +820,10 @@ actor RoutingMetrics {
         snapshot.realtimeAsyncRelayDroppedDispatchCount += 1
         snapshot.realtimeAsyncRelayDroppedPayloadBatchCount += max(0, payloadBatchCount)
         snapshot.realtimeAsyncRelayDroppedRecipientDeliveryCount += max(0, recipientDeliveryCount)
+        snapshot.realtimeAsyncRelayQueueSaturationCount += 1
+    }
+
+    func recordRealtimeAsyncRelayQueueSaturated() {
         snapshot.realtimeAsyncRelayQueueSaturationCount += 1
     }
 

@@ -84,32 +84,6 @@ extension IMConversationSummaryProjectionService {
             )
             return
         }
-        if let fastPathResult = try await applyMessageCreatedExistingSummariesSQL(
-            conversationID: conversationID,
-            messageServerSequence: message.serverSequence,
-            messagePreview: messagePreview,
-            messageCreatedAt: message.createdAt,
-            updatedAt: updatedAt,
-            recipientUserIDs: uniqueUserIDs,
-            on: readModelDatabase
-        ) {
-            if !fastPathResult.missingUserIDs.isEmpty {
-                try await refreshConversationSummaries(
-                    conversationID: conversationID,
-                    recipientUserIDs: fastPathResult.missingUserIDs,
-                    on: database,
-                    writeChangeLog: writeChangeLog,
-                    preferredMessage: message
-                )
-            }
-            if writeChangeLog {
-                try await ConversationChangeLogBatchWriter(database: readModelDatabase).upsert(
-                    fastPathResult.changeLogRows
-                )
-            }
-            return
-        }
-
         let summaryRecordIDs = uniqueUserIDs.map {
             ConversationUserSummary.recordID(ownerUserID: $0, conversationID: conversationID)
         }
@@ -246,7 +220,16 @@ extension IMConversationSummaryProjectionService {
         }
 
         let memberUserIDs = memberships.map(\.$user.id).sorted { $0.uuidString < $1.uuidString }
-        let usersByID = try await ConversationUserDirectory(db: userDirectoryDB).usersByID(memberUserIDs)
+        let storedMemberUserIDs = memberUserIDsForSummaryStorage(
+            memberUserIDs,
+            conversationKind: conversation.conversationKind
+        )
+        let usersByID: [UUID: User]
+        if conversation.conversationKind == .direct {
+            usersByID = try await ConversationUserDirectory(db: userDirectoryDB).usersByID(memberUserIDs)
+        } else {
+            usersByID = [:]
+        }
         let membershipsByUserID = Dictionary(uniqueKeysWithValues: memberships.map { ($0.$user.id, $0) })
         let latestMessageByVisibleFrom = try await latestVisibleMessagesByThreshold(
             conversationID: conversationID,
@@ -274,11 +257,13 @@ extension IMConversationSummaryProjectionService {
                 continue
             }
 
-            let directPeer = directPeer(
-                from: memberships,
-                currentUserID: recipientUserID,
-                usersByID: usersByID
-            )
+            let directPeer = conversation.conversationKind == .direct
+                ? directPeer(
+                    from: memberships,
+                    currentUserID: recipientUserID,
+                    usersByID: usersByID
+                )
+                : nil
             let lastVisibleMessage = latestMessageByVisibleFrom[membership.visibleFromSequence] ?? nil
             let preview = try lastVisibleMessage.map(makePreview)
             let latestVisibleSequence = max(
@@ -308,7 +293,8 @@ extension IMConversationSummaryProjectionService {
                 notice: conversation.notice,
                 avatarPreset: conversation.avatarPresetEnum,
                 muteAll: conversation.muteAll,
-                memberUserIDs: memberUserIDs,
+                memberUserIDs: storedMemberUserIDs,
+                memberCount: memberUserIDs.count,
                 lastMessage: preview,
                 lastReadSequence: effectiveLastReadSequence,
                 unreadCount: max(0, latestVisibleSequence - effectiveLastReadSequence),
@@ -333,7 +319,8 @@ extension IMConversationSummaryProjectionService {
             summary.notice = conversation.notice
             summary.avatarPresetEnum = conversation.avatarPresetEnum
             summary.muteAll = conversation.muteAll
-            summary.memberUserIDs = memberUserIDs
+            summary.memberUserIDs = storedMemberUserIDs
+            summary.memberCount = memberUserIDs.count
             summary.membershipRevision = conversation.membershipRevision
             summary.lastMessage = preview
             summary.lastReadSequence = effectiveLastReadSequence
@@ -362,6 +349,19 @@ extension IMConversationSummaryProjectionService {
         }
         try await upsertMessageCreatedSummaries(summariesToUpsert, on: readModelDatabase)
         try await ConversationChangeLogBatchWriter(database: readModelDatabase).upsert(changeLogRows)
+    }
+
+    private func memberUserIDsForSummaryStorage(
+        _ memberUserIDs: [UUID],
+        conversationKind: IMConversationKind
+    ) -> [UUID] {
+        guard conversationKind == .group,
+              storedMemberUserIDsLimit > 0,
+              memberUserIDs.count > storedMemberUserIDsLimit
+        else {
+            return memberUserIDs
+        }
+        return []
     }
 
     @discardableResult

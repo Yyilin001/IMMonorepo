@@ -36,7 +36,10 @@ Cell ingress role selection and malformed-map startup rejection, durable outbox
 claim/recovery, duplicate client retries, replay idempotency for projections
 and owner delivery, plus cross-Cell same-shard-name validation, idempotent
 remote transfer-page import, and copy/verify behavior that preserves the active
-source route before cutover.
+source route before cutover. It also gates the Cross-Cell realtime handoff
+contract: source persistence before target acceptance, target failure retained
+for retry, recovery after the target returns, replay de-duplication, and an
+HTTP Gateway relay returning failure when it cannot durably record the handoff.
 
 The individual commands remain useful when diagnosing one boundary:
 
@@ -45,8 +48,8 @@ cd IMServer
 swift test --package-path . --filter IMServerTests.productionRequiresRedisRouting
 swift test --package-path . --filter IMServerTests.productionNonOpsRolesCannotEnableStartupAutoMigration
 swift test --package-path . --filter IMServerTests.connectionRoutingDropsRemoteRealtimeFanoutWhenActiveRouteLookupFailsClosed
-swift test --package-path . --filter IMServerTests.realtimeDeliveryDropsFanoutWhenRouteSplitFailsClosed
-swift test --package-path . --filter IMServerTests.domainRelayAfterRecordDropsRealtimeFanoutWhenRouteSplitFailsClosed
+swift test --package-path . --filter IMServerTests.realtimeDeliveryRetriesStreamEventWhenRouteSplitFails
+swift test --package-path . --filter IMServerTests.domainRelayAfterRecordRetriesStreamEventWhenRouteSplitFails
 swift test --package-path . --filter IMServerTests.cellIngressConfigurationSelectsPurposeEndpoints
 swift test --package-path . --filter IMServerTests.productionRuntimeRejectsMalformedCellIngressEndpointConfiguration
 swift test --package-path . --filter IMServerTests.conversationOutboxRelayMarksPublishedEvents
@@ -97,12 +100,17 @@ The relevant tests intentionally prove different boundaries:
 | --- | --- | --- |
 | Redis absent in production | `productionRequiresRedisRouting` | Startup rejects local routing. |
 | Redis route lookup fails during delivery | `connectionRoutingDropsRemoteRealtimeFanoutWhenActiveRouteLookupFailsClosed` | No remote realtime packet; route-drop counters increase. |
-| Active route split fails in consumer | `realtimeDeliveryDropsFanoutWhenRouteSplitFailsClosed` | No unbounded fanout and no fabricated inactive hint. |
+| Active route split fails in consumer | `realtimeDeliveryRetriesStreamEventWhenRouteSplitFails` | The stream record remains retryable; no unbounded fallback fanout is fabricated. |
 | Cell ingress role selection | `cellIngressConfigurationSelectsPurposeEndpoints` | Command, query, and realtime forwarding select independent endpoints with a legacy fallback only. |
 | Malformed Cell ingress map | `productionRuntimeRejectsMalformedCellIngressEndpointConfiguration` | Production startup rejects the exact malformed environment entry. |
 | Duplicate client retry | `tcpMessagePersistenceIsIdempotentByClientMessageID` | One canonical timeline message. |
 | Outbox retry | `conversationOutboxRelayMarksPublishedEvents` | An event is published once after durable claim state changes. |
+| Active route split fails in domain relay | `domainRelayAfterRecordRetriesStreamEventWhenRouteSplitFails` | The stream record remains retryable when the relay cannot construct a safe route split. |
 | Timed-out outbox claim | `conversationOutboxRelayRecoversTimedOutClaims` | A claim left by a stopped relay becomes retryable. |
+| Cross-Cell target unavailable | `crossCellRealtimeOutboxRetainsFailedDeliveryForRetry` | The source Cell keeps a pending durable handoff instead of acknowledging a transient target failure. |
+| Cross-Cell target recovery | `crossCellRealtimeOutboxDeliversRetainedDispatchAfterTargetRecovery` | The retained handoff is delivered after the target ingress accepts requests again. |
+| Cross-Cell source replay | `crossCellRealtimeOutboxDeduplicatesReplayedSourceHandoff` | Replayed source events reuse one outbox row and do not issue another initial delivery. |
+| Reliable HTTP Gateway relay | `reliableGatewayRelayReturnsFailureWhenCellHandoffCannotBeRecorded` | The caller cannot acknowledge a Kafka record when the Gateway failed to persist a cross-Cell handoff. |
 | Stream consumer replay | `messageCreatedProjectionUsesEventMessageForLargeGroups` | Summary and change-log projections remain one row per member. |
 | Owner-delivery replay | `messageCreatedRunOwnerDeliveryPreservesPerOwnerEventOrder` | Owner cursors and aggregate sequence stay deduplicated and ordered. |
 | Invalid role migration | `productionNonOpsRolesCannotEnableStartupAutoMigration` | Serving role startup is rejected. |
@@ -131,9 +139,9 @@ cd IMServer
 
 On a macOS load-generator host, run the same smoke with
 `IM_MULTICELL_SMOKE_REQUIRE_GATEWAY_TCP_RELAY=true` to require a peer connected
-to Cell B's TCP Gateway to receive a message sent through Cell A. This records
-the receiver's TCPDriver JSONL event log and proves cross-Cell recipient
-delivery, not merely HTTP forwarding.
+to Cell A's TCP Gateway to receive a message routed through Cell A and persisted
+by the migrated Cell B. This records the receiver's TCPDriver JSONL event log
+and proves Cell B to Cell A recipient delivery, not merely HTTP forwarding.
 
 The overlay deliberately shares Kafka/Redis and the primary control database,
 but it does **not** share the conversation shard database: Cell B's `shard-0`
@@ -162,6 +170,27 @@ while Kafka is stopped, then requires the durable Cell B outbox to publish
 after Kafka returns. These prove recovery of a single migrated route, not Cell
 failover, source-retention cleanup/rollback, or capacity.
 
+On a macOS host, run the source-to-target realtime handoff drill with a real
+Cell A TCP recipient presence:
+
+```bash
+cd IMServer
+IM_MULTICELL_SMOKE_REQUIRE_GATEWAY_TCP_RELAY=true \
+  ./scripts/multicell_smoke.sh failure-drill target-gateway-outage
+```
+
+The drill force-kills Cell A's Gateway, sends a post-cutover message through
+Cell A, requires a new Cell B source
+`im_cross_cell_realtime_dispatches` row to remain `pending`, then restores
+Cell A and requires that row to become
+`delivered`. This specifically proves that an unavailable target ingress does
+not create a false acknowledgement. Its receipt must include
+`sourceCrossCellOutboxRecovered=true` and
+`tcpRecipientDelivery.required=true` / `verified=true`; the verifier rejects a
+target-Gateway outage result without both source-outbox and TCP recipient
+evidence. It is intentionally unavailable on generic Linux CI because the
+TCPDriver uses Apple's Network framework.
+
 The manual GitHub Actions workflow **IMServer Multi-Cell Smoke** runs the same
 physical migration on an Ubuntu Docker runner. Its `failure_drill` input can
 select `none`, `redis-outage`, or `kafka-outage`; inspect the uploaded reports
@@ -170,6 +199,24 @@ outbox recovery. The optional TCP recipient gate still requires a macOS load
 generator, so run it separately with
 `IM_MULTICELL_SMOKE_REQUIRE_GATEWAY_TCP_RELAY=true` before making a TCP
 cross-Cell delivery claim.
+
+When the Docker stack runs on a remote Linux host, do not try to run the
+Network.framework-based TCPDriver on that host. Keep the physical migration
+smoke on the remote host, then run the TCP gate from a macOS controller through
+private SSH tunnels:
+
+```bash
+cd IMServer
+IM_MULTICELL_REMOTE_SSH_TARGET=root@your-host \
+IM_MULTICELL_REMOTE_SSH_IDENTITY_FILE=/absolute/path/to/key.pem \
+  ./scripts/multicell_remote_tcp_relay_probe.sh run
+```
+
+The probe reads the latest successful remote migration receipt, opens one real
+TCP recipient connection to Cell A, writes through Cell A's command endpoint,
+and requires both the recipient packet and a newly delivered durable
+`cell-b -> cell-a` realtime outbox record. It writes local evidence to
+`reports/latest-multicell-remote-tcp-relay.json`.
 
 Every successful run writes `reports/latest-multicell-smoke.json` and a compose
 log. A failed run overwrites that receipt with `status=failed` and records the

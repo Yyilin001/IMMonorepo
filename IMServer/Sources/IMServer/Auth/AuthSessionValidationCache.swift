@@ -196,6 +196,11 @@ struct LocalAuthSessionValidationCache: AuthSessionValidationCaching {
 }
 
 actor LocalAuthSessionPrincipalStore {
+    // A bounded sweep prevents every new session from scanning the entire
+    // cache. Lookups still validate expiry precisely, so a stale entry can
+    // never be returned between sweeps.
+    private static let expirationSweepInterval: TimeInterval = 30
+
     private struct CacheKey: Hashable, Sendable {
         let sessionID: UUID
         let userID: UUID
@@ -205,12 +210,17 @@ actor LocalAuthSessionPrincipalStore {
         let principal: AuthenticatedPrincipal
         let expiresAt: Date
         let storedAt: Date
+        let insertionOrder: UInt64
     }
 
     private let maxEntries: Int
     private var entries: [CacheKey: Entry] = [:]
     private var keysBySessionID: [UUID: Set<CacheKey>] = [:]
     private var keysByUserID: [UUID: Set<CacheKey>] = [:]
+    private var nextExpirationSweepAt = Date.distantPast
+    private var nextInsertionOrder: UInt64 = 0
+    private var insertionQueue: [(key: CacheKey, order: UInt64)] = []
+    private var insertionQueueHead = 0
 
     init(maxEntries: Int) {
         self.maxEntries = maxEntries
@@ -232,14 +242,18 @@ actor LocalAuthSessionPrincipalStore {
         guard principal.refreshExpiresAt > now else {
             return
         }
-        removeExpired(now: now)
+        sweepExpiredIfNeeded(now: now)
         let ttlExpiry = now.addingTimeInterval(TimeInterval(ttlSeconds))
         let key = CacheKey(sessionID: principal.sessionID, userID: principal.userID)
+        nextInsertionOrder &+= 1
+        let insertionOrder = nextInsertionOrder
         entries[key] = Entry(
             principal: principal,
             expiresAt: min(ttlExpiry, principal.refreshExpiresAt),
-            storedAt: now
+            storedAt: now,
+            insertionOrder: insertionOrder
         )
+        insertionQueue.append((key: key, order: insertionOrder))
         keysBySessionID[principal.sessionID, default: []].insert(key)
         keysByUserID[principal.userID, default: []].insert(key)
         trimIfNeeded()
@@ -261,27 +275,42 @@ actor LocalAuthSessionPrincipalStore {
         entries.removeAll()
         keysBySessionID.removeAll()
         keysByUserID.removeAll()
+        insertionQueue.removeAll()
+        insertionQueueHead = 0
     }
 
-    private func removeExpired(now: Date) {
+    private func sweepExpiredIfNeeded(now: Date) {
+        guard now >= nextExpirationSweepAt else {
+            return
+        }
         for (key, entry) in entries where entry.expiresAt <= now || entry.principal.refreshExpiresAt <= now {
             remove(key)
         }
+        if entries.isEmpty {
+            insertionQueue.removeAll(keepingCapacity: true)
+            insertionQueueHead = 0
+        }
+        nextExpirationSweepAt = now.addingTimeInterval(Self.expirationSweepInterval)
     }
 
     private func trimIfNeeded() {
-        guard entries.count > maxEntries else {
+        while entries.count > maxEntries, insertionQueueHead < insertionQueue.count {
+            let candidate = insertionQueue[insertionQueueHead]
+            insertionQueueHead += 1
+            guard entries[candidate.key]?.insertionOrder == candidate.order else {
+                continue
+            }
+            remove(candidate.key)
+        }
+        compactInsertionQueueIfNeeded()
+    }
+
+    private func compactInsertionQueueIfNeeded() {
+        guard insertionQueueHead >= 4_096, insertionQueueHead * 2 >= insertionQueue.count else {
             return
         }
-
-        let overflow = entries.count - maxEntries
-        let keysToRemove = entries
-            .sorted { lhs, rhs in lhs.value.storedAt < rhs.value.storedAt }
-            .prefix(overflow)
-            .map(\.key)
-        for key in keysToRemove {
-            remove(key)
-        }
+        insertionQueue.removeFirst(insertionQueueHead)
+        insertionQueueHead = 0
     }
 
     private func remove(_ key: CacheKey) {

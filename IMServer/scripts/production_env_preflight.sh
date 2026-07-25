@@ -787,10 +787,16 @@ require_gateway_command_ingress() {
 require_gateway_node_dispatch() {
   local file="$1"
   local label="$2"
-  local mode node_id endpoints node_secret internal_secret
+  local mode allow_best_effort node_id endpoints node_secret internal_secret
   mode="$(to_lower "$(env_value "${file}" "IM_NODE_DISPATCH_MODE" || printf 'redis')")"
   case "${mode}" in
     redis)
+      allow_best_effort="$(to_lower "$(env_value "${file}" "IM_ALLOW_BEST_EFFORT_NODE_DISPATCH" || true)")"
+      if [[ "${allow_best_effort}" != "true" ]]; then
+        record_failure "${label} requires IM_ALLOW_BEST_EFFORT_NODE_DISPATCH=true when IM_NODE_DISPATCH_MODE=redis because Redis Pub/Sub node dispatch is best effort"
+      fi
+      ;;
+    valkey-stream)
       return 0
       ;;
     http)
@@ -808,7 +814,7 @@ require_gateway_node_dispatch() {
       fi
       ;;
     *)
-      record_failure "${label} has unsupported IM_NODE_DISPATCH_MODE=${mode}; expected redis or http"
+      record_failure "${label} has unsupported IM_NODE_DISPATCH_MODE=${mode}; expected redis, valkey-stream, or http"
       ;;
   esac
 }
@@ -855,7 +861,7 @@ require_timeline_since_cache_invalidation() {
 require_supported_redis_topology() {
   local file="$1"
   local label="$2"
-  local redis_url dedicated_redis_url topology consumer_groups dispatch_mode endpoints dispatch_secret internal_secret
+  local redis_url dedicated_redis_url topology consumer_groups dispatch_mode
   redis_url="$(env_value "${file}" "REDIS_URL" || true)"
   dedicated_redis_url="$(env_value "${file}" "IM_TIMELINE_SINCE_CACHE_INVALIDATION_REDIS_URL" || true)"
   [[ -n "${redis_url}" || -n "${dedicated_redis_url}" ]] || return 0
@@ -870,17 +876,8 @@ require_supported_redis_topology() {
       consumer_groups="$(env_value "${file}" "IM_STREAM_CONSUMER_GROUPS" || true)"
       if [[ "${label}" == "gateway" || ",${consumer_groups}," == *",realtime-delivery-consumer,"* ]]; then
         dispatch_mode="$(to_lower "$(env_value "${file}" "IM_NODE_DISPATCH_MODE" || true)")"
-        endpoints="$(env_value "${file}" "IM_GATEWAY_NODE_DISPATCH_ENDPOINTS" || true)"
-        dispatch_secret="$(env_value "${file}" "IM_NODE_DISPATCH_SHARED_SECRET" || true)"
-        internal_secret="$(env_value "${file}" "IM_INTERNAL_SHARED_SECRET" || true)"
-        if [[ "${dispatch_mode}" != "http" ]]; then
-          record_failure "${label} requires IM_NODE_DISPATCH_MODE=http when IM_REDIS_DEPLOYMENT_TOPOLOGY=cluster"
-        fi
-        if [[ -z "${endpoints}" ]]; then
-          record_failure "${label} requires IM_GATEWAY_NODE_DISPATCH_ENDPOINTS when IM_REDIS_DEPLOYMENT_TOPOLOGY=cluster"
-        fi
-        if [[ -z "${dispatch_secret}" && -z "${internal_secret}" ]]; then
-          record_failure "${label} requires IM_NODE_DISPATCH_SHARED_SECRET or IM_INTERNAL_SHARED_SECRET when IM_REDIS_DEPLOYMENT_TOPOLOGY=cluster"
+        if [[ "${dispatch_mode}" != "valkey-stream" ]]; then
+          record_failure "${label} requires IM_NODE_DISPATCH_MODE=valkey-stream when IM_REDIS_DEPLOYMENT_TOPOLOGY=cluster"
         fi
       fi
       ;;

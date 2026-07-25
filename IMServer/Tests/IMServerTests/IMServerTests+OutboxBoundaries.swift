@@ -8,6 +8,57 @@ import VaporTesting
 import Testing
 
 extension IMServerTests {
+    @Test("Owner-scoped notification payload does not duplicate large recipient lists")
+    func ownerScopedNotificationPayloadCompactsLargeMembershipEvent() throws {
+        let ownerUserID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-000000000001")!
+        let otherUserID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-000000000002")!
+        let payload = ConversationDomainEventPayload.memberAdded(
+            memberUserIDs: [ownerUserID, otherUserID],
+            recipientUserIDs: [ownerUserID, otherUserID]
+        )
+
+        let ownerPayload = payload.scopedNotificationPayload(for: ownerUserID)
+        #expect(ownerPayload.memberUserIDs == [ownerUserID])
+        #expect(ownerPayload.recipientUserIDs == [ownerUserID])
+
+        let observerUserID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-000000000003")!
+        let observerPayload = payload.scopedNotificationPayload(for: observerUserID)
+        #expect(observerPayload.memberUserIDs.isEmpty)
+        #expect(observerPayload.recipientUserIDs == [observerUserID])
+    }
+
+    @Test("Owner-scoped TCP payload does not duplicate large membership events")
+    func ownerScopedTCPPayloadCompactsLargeMembershipEvent() throws {
+        let ownerUserID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-000000000001")!
+        let otherUserID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-000000000002")!
+        let payload = IMTCPChatDomainEventPayload(
+            eventID: UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-000000000003")!,
+            eventType: .memberAdded,
+            aggregateType: "conversation",
+            aggregateID: UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-000000000004")!,
+            aggregateSequence: 1,
+            occurredAt: Date(timeIntervalSince1970: 1_710_410_000),
+            actorUserID: ownerUserID,
+            conversation: nil,
+            body: .memberChanged(memberUserIDs: [ownerUserID, otherUserID])
+        )
+
+        let ownerPayload = payload.scopedForOwner(ownerUserID)
+        guard case .memberChanged(let ownerMemberUserIDs) = ownerPayload.body else {
+            Issue.record("expected memberChanged body")
+            return
+        }
+        #expect(ownerMemberUserIDs == [ownerUserID])
+
+        let observerUserID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-000000000005")!
+        let observerPayload = payload.scopedForOwner(observerUserID)
+        guard case .memberChanged(let observerMemberUserIDs) = observerPayload.body else {
+            Issue.record("expected memberChanged body")
+            return
+        }
+        #expect(observerMemberUserIDs.isEmpty)
+    }
+
     @Test("Kafka conversation event messages use conversation ID as partition key")
     func kafkaConversationEventMessagesUseConversationIDAsPartitionKey() throws {
         let conversationID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-000000000001")!
@@ -499,6 +550,129 @@ extension IMServerTests {
         let runs = ConversationEventStreamMessageRunGrouper.contiguousRuns(in: mixed)
         #expect(runs.map(\.count) == [2, 1, 1, 1, 1])
         #expect(!ConversationEventStreamMessageRunGrouper.isMessageCreatedRun(mixed))
+    }
+
+    @Test("Stream message run grouper coalesces contiguous membership additions")
+    func streamMessageRunGrouperCoalescesContiguousMembershipAddedEvents() throws {
+        let conversationID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let ownerID = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+        let firstMemberID = UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!
+        let secondMemberID = UUID(uuidString: "dddddddd-dddd-dddd-dddd-dddddddddddd")!
+
+        let run = [
+            streamMetadata(
+                topic: "conversation-domain-events",
+                partition: 0,
+                offset: 20,
+                conversationID: conversationID,
+                eventType: .membershipAdded,
+                payload: .memberAdded(
+                    memberUserIDs: [firstMemberID],
+                    recipientUserIDs: [ownerID, firstMemberID]
+                )
+            ),
+            streamMetadata(
+                topic: "conversation-domain-events",
+                partition: 0,
+                offset: 21,
+                conversationID: conversationID,
+                eventType: .membershipAdded,
+                payload: .memberAdded(
+                    memberUserIDs: [secondMemberID],
+                    recipientUserIDs: [ownerID, firstMemberID, secondMemberID]
+                )
+            )
+        ]
+
+        #expect(ConversationEventStreamMessageRunGrouper.isMembershipAddedRun(run))
+        #expect(ConversationEventStreamMessageRunGrouper.contiguousRuns(in: run).map(\.count) == [2])
+    }
+
+    @Test("Stream message run grouper recognizes interleaved message-created batches in one partition")
+    func streamMessageRunGrouperRecognizesInterleavedMessageCreatedBatch() throws {
+        let firstConversationID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let secondConversationID = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+        let recipientID = UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!
+        let messages = [
+            streamMetadata(topic: "conversation-domain-events", partition: 3, offset: 10, conversationID: firstConversationID, payload: .messageCreated(messageID: UUID(), recipientUserIDs: [recipientID])),
+            streamMetadata(topic: "conversation-domain-events", partition: 3, offset: 11, conversationID: secondConversationID, payload: .messageCreated(messageID: UUID(), recipientUserIDs: [recipientID])),
+            streamMetadata(topic: "conversation-domain-events", partition: 3, offset: 12, conversationID: firstConversationID, payload: .messageCreated(messageID: UUID(), recipientUserIDs: [recipientID])),
+            streamMetadata(topic: "conversation-domain-events", partition: 3, offset: 13, conversationID: secondConversationID, payload: .messageCreated(messageID: UUID(), recipientUserIDs: [recipientID]))
+        ]
+
+        #expect(ConversationEventStreamMessageRunGrouper.isInterleavedMessageCreatedBatchEligible(messages))
+        #expect(!ConversationEventStreamMessageRunGrouper.isInterleavedMessageCreatedBatchEligible(messages + [
+            streamMetadata(topic: "conversation-domain-events", partition: 3, offset: 14, conversationID: firstConversationID, eventType: .metadataUpdated, payload: .metadataUpdated(recipientUserIDs: [recipientID]))
+        ]))
+    }
+
+    @Test("Realtime route lookup failures remain transient stream failures")
+    func realtimeRouteLookupFailuresRemainTransientStreamFailures() {
+        let eventID = UUID()
+        let conversationID = UUID()
+        let error = ConversationEventTransientProcessingError.realtimeRouteLookupFailed(
+            eventID: eventID,
+            conversationID: conversationID,
+            underlyingError: "redis unavailable"
+        )
+
+        guard case .realtimeRouteLookupFailed(
+            let failedEventID,
+            let failedConversationID,
+            let underlyingError
+        ) = error else {
+            Issue.record("Expected a typed transient realtime routing error")
+            return
+        }
+        #expect(failedEventID == eventID)
+        #expect(failedConversationID == conversationID)
+        #expect(underlyingError == "redis unavailable")
+    }
+
+    @Test("Large-group summary projection stores a member count without replicated member IDs")
+    func largeGroupSummaryProjectionStoresMemberCountWithoutReplicatedMemberIDs() async throws {
+        try await withApp(configure: configure) { app in
+            let owner = try await user(email: "demo@example.com", on: app)
+            let firstMember = try await makeUser(email: "large-summary-first@example.com", on: app)
+            let secondMember = try await makeUser(email: "large-summary-second@example.com", on: app)
+            let ownerID = try owner.requireID()
+            let firstMemberID = try firstMember.requireID()
+            let secondMemberID = try secondMember.requireID()
+            let conversation = Conversation(title: "Large Summary", kind: .group, updatedAt: Date())
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+            for (userID, role) in [
+                (ownerID, IMConversationMemberRole.owner),
+                (firstMemberID, IMConversationMemberRole.member),
+                (secondMemberID, IMConversationMemberRole.member)
+            ] {
+                try await ConversationMember(
+                    conversationID: conversationID,
+                    userID: userID,
+                    role: role
+                ).create(on: app.db)
+            }
+
+            try await IMConversationSummaryProjectionService(
+                db: app.db,
+                storedMemberUserIDsLimit: 2
+            ).refreshConversationSummaries(
+                conversationID: conversationID,
+                recipientUserIDs: [ownerID, firstMemberID, secondMemberID]
+            )
+
+            let summary = try #require(
+                try await ConversationUserSummary.find(
+                    ConversationUserSummary.recordID(ownerUserID: ownerID, conversationID: conversationID),
+                    on: app.db
+                )
+            )
+            #expect(summary.memberCount == 3)
+            #expect(summary.memberUserIDs.isEmpty)
+            #expect(
+                ConversationSummaryResponseOverlay.response(from: summary).memberCount == 3
+            )
+        }
     }
 
     @Test("Async bounded queue preserves FIFO order with producer backpressure")
@@ -1912,7 +2086,8 @@ extension IMServerTests {
                     enabled: true,
                     intervalSeconds: 86_400,
                     recipientSetRetentionDays: 30,
-                    recipientSetBatchSize: 10
+                    recipientSetBatchSize: 10,
+                    crossCellRealtimeDispatchRetentionDays: 7
                 )
             )
 
@@ -1928,6 +2103,62 @@ extension IMServerTests {
             #expect(metrics.recipientSetCleanupScannedCount == 2)
             #expect(metrics.recipientSetCleanupDeletedCount == 1)
             #expect(metrics.recipientSetCleanupMaxDeletedCount == 1)
+        }
+    }
+
+    @Test("Cleanup keeps private visibility state in the primary database when conversations are sharded")
+    func cleanupDeletesOldVisibilityOverlaysFromPrimaryDatabaseOnly() async throws {
+        try await withApp(configure: configure) { app in
+            let shardID = "cleanup-private-state-shard"
+            let shardDatabaseID = DatabaseID(string: "cleanup-private-state-shard-db")
+            app.databases.use(.sqlite(.memory), as: shardDatabaseID)
+            app.migrations.add(IMMigrationRegistry.conversationShardMigrations(), to: shardDatabaseID)
+            try await app.autoMigrate()
+
+            app.conversationShardRouter = DirectoryBackedConversationShardRouter(
+                app: app,
+                shardIDs: [shardID],
+                shardDatabaseIDs: [shardID: shardDatabaseID],
+                shardReplicaDatabaseIDs: [:],
+                directory: DatabaseConversationDirectory(db: app.db)
+            )
+
+            let now = Date(timeIntervalSince1970: 1_710_500_000)
+            let oldDate = now.addingTimeInterval(-366 * 24 * 60 * 60)
+            let ownerUserID = UUID()
+            let conversationID = UUID()
+            let messageID = UUID()
+            let messageOverride = MessageVisibilityOverride(
+                ownerUserID: ownerUserID,
+                conversationID: conversationID,
+                messageID: messageID,
+                serverSequence: 1,
+                isHidden: true,
+                createdAt: oldDate
+            )
+            try await messageOverride.create(on: app.db)
+            let conversationOverride = ConversationVisibilityOverride(
+                ownerUserID: ownerUserID,
+                conversationID: conversationID,
+                hiddenBeforeSequence: 0,
+                isDeleted: false
+            )
+            conversationOverride.updatedAt = oldDate
+            try await conversationOverride.create(on: app.db)
+
+            try await IMCleanupService(app: app).runOnce(
+                now: now,
+                configuration: IMCleanupConfiguration(
+                    enabled: true,
+                    intervalSeconds: 86_400,
+                    recipientSetRetentionDays: 30,
+                    recipientSetBatchSize: 10,
+                    crossCellRealtimeDispatchRetentionDays: 7
+                )
+            )
+
+            #expect(try await MessageVisibilityOverride.find(messageOverride.id, on: app.db) == nil)
+            #expect(try await ConversationVisibilityOverride.find(conversationOverride.id, on: app.db) == nil)
         }
     }
 
@@ -3755,6 +3986,65 @@ extension IMServerTests {
 
             #expect(targetDecodeFailed)
             #expect(paramsDecodeFailed)
+        }
+    }
+
+    @Test("Domain delivery projects required timeline notices before owner delivery")
+    func domainDeliveryProjectsTimelineNoticeBeforeOwnerDelivery() async throws {
+        try await withApp(configure: configure) { app in
+            let owner = try await user(email: "demo@example.com", on: app)
+            let member = try await makeUser(email: "timeline-order-member@example.com", on: app)
+            let ownerID = try owner.requireID()
+            let memberID = try member.requireID()
+            let conversation = Conversation(
+                title: "Timeline Ordering",
+                kind: .group,
+                updatedAt: Date(timeIntervalSince1970: 1_710_420_000),
+                lastMessageSequence: 1
+            )
+            try await conversation.create(on: app.db)
+            let conversationID = try conversation.requireID()
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: ownerID,
+                role: .owner
+            ).create(on: app.db)
+            try await ConversationMember(
+                conversationID: conversationID,
+                userID: memberID
+            ).create(on: app.db)
+
+            let event = try ConversationDomainEvent(
+                id: UUID(),
+                conversationID: conversationID,
+                eventType: .membershipAdded,
+                aggregateSequence: 1,
+                actorUserID: ownerID,
+                payload: .memberAdded(
+                    memberUserIDs: [memberID],
+                    recipientUserIDs: [ownerID, memberID]
+                ),
+                createdAt: Date(timeIntervalSince1970: 1_710_420_001)
+            )
+            let eventID = try event.requireID()
+            let envelope = try ConversationEventEnvelope(
+                event: event,
+                payload: try event.decodedPayload(),
+                deliveryContext: nil
+            )
+            let registry = ConversationEventConsumerRegistry(consumers: [
+                ConversationTimelineNoticeProjectionConsumer(db: app.db, app: app),
+                OwnerDomainEventDeliveryConsumer(app: app, sourceDB: app.db)
+            ])
+
+            try await registry.consume(envelope)
+
+            let notice = try #require(try await ConversationTimelineNotice.find(eventID, on: app.db))
+            #expect(notice.eventType == ConversationDomainEventType.membershipAdded.rawValue)
+            #expect(try notice.targetUserIDs == [ownerID, memberID])
+            let deliveries = try await OwnerDomainEventDelivery.query(on: app.imSummaryDB).all()
+            #expect(deliveries.count == 2)
+            #expect(deliveries.allSatisfy { $0.sourceEventID == eventID })
         }
     }
 

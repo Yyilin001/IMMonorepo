@@ -145,26 +145,12 @@ struct ConnectionRoutingService {
     }
 
     func remove(connectionID: UUID) async {
-        guard let removed = await app.imConnectionRegistry.remove(connectionID: connectionID) else {
-            return
-        }
+        await remove(connectionIDs: [connectionID])
+    }
 
-        await app.routingMetrics.recordCurrentTCPConnectionCount(await app.imConnectionRegistry.totalConnectionCount())
-        if await app.imConnectionRegistry.localConnectionCount(forUserID: removed.connection.userID) == 0 {
-            try? await backend.presenceStore.deactivatePresence(forUserID: removed.connection.userID)
-        }
-        if await app.imConnectionRegistry.localConnectionCount(forSessionID: removed.connection.sessionID) == 0 {
-            try? await backend.presenceStore.deactivatePresence(
-                forSessionID: removed.connection.sessionID,
-                userID: removed.connection.userID
-            )
-        }
-        for conversationID in removed.deactivatedConversationIDs {
-            try? await backend.presenceStore.deactivateConversationPresence(
-                conversationID: conversationID,
-                userID: removed.connection.userID
-            )
-        }
+    func remove(connectionIDs: [UUID]) async {
+        let removals = await app.imConnectionRegistry.remove(connectionIDs: connectionIDs)
+        await cleanupPresenceAfterLocalKick(removals)
     }
 
     func updateConversationActivity(
@@ -391,6 +377,49 @@ struct ConnectionRoutingService {
         }
     }
 
+    /// Used by Kafka-backed realtime consumers. A source Cell must durably
+    /// record every cross-Cell handoff before the consumer may commit its
+    /// source event. Target delivery remains asynchronous through the outbox.
+    func sendDomainEventPayloadBatchesReliably(
+        _ batches: [IMGatewayDomainEventPayloadBatch],
+        requestID: UUID? = UUID()
+    ) async throws {
+        let nonEmptyBatches = batches.filter { !$0.recipientUserIDs.isEmpty }
+        guard !nonEmptyBatches.isEmpty else {
+            return
+        }
+
+        await app.routingMetrics.recordUserFanout(
+            targetUserCount: nonEmptyBatches.reduce(0) { $0 + Set($1.recipientUserIDs).count }
+        )
+        await app.imConnectionRegistry.sendDomainEventPayloadBatches(nonEmptyBatches, requestID: requestID)
+
+        let encodeCache = DomainEventPacketEncodeCache()
+        for batch in nonEmptyBatches {
+            let envelope = try await encodeDomainEventPacketEnvelope(
+                requestID: requestID,
+                payload: batch.payload,
+                targetUserIDs: batch.recipientUserIDs,
+                fanoutIntent: batch.fanoutIntent,
+                encodeCache: encodeCache
+            )
+            try await dispatchRemoteCellsEnsuringPersistence(
+                envelope,
+                forUserIDs: batch.recipientUserIDs,
+                trace: deliveryTrace(for: batch.payload, requestID: requestID)
+            )
+        }
+
+        // Cross-Cell work has already been persisted above. Keep intra-Cell
+        // node delivery best effort, because it is independently recovered by
+        // client timeline sync and has no source-event durable handoff.
+        await dispatchRemotePayloadBatches(
+            nonEmptyBatches,
+            requestID: requestID,
+            skipCrossCellDispatch: true
+        )
+    }
+
     func sendDomainEventPayloads(
         _ deliveries: [IMCanonicalDomainEventDelivery],
         requestID: UUID? = UUID()
@@ -519,7 +548,7 @@ struct ConnectionRoutingService {
         await dispatchRemoteEnvelopeIfNeeded(envelope, forUserIDs: [userID], includeLocalNode: false)
     }
 
-    func handleRemoteDispatch(_ envelope: NodeMessageDispatchEnvelope) async {
+    func handleRemoteDispatch(_ envelope: NodeMessageDispatchEnvelope) async throws {
         switch envelope.payload {
         case .domainEvent(let ownerUserID, let eventID):
             let deliveryService = OwnerDomainEventDeliveryService(
@@ -534,9 +563,11 @@ struct ConnectionRoutingService {
                         "eventID": .string(eventID.uuidString),
                         "requestID": .string(envelope.requestID?.uuidString ?? "")
                     ])
-                    return
+                    throw ConnectionRoutingDispatchError.missingOwnerDelivery(ownerUserID: ownerUserID, eventID: eventID)
                 }
                 canonicalDelivery = try deliveryService.canonicalDelivery(from: delivery)
+            } catch let error as ConnectionRoutingDispatchError {
+                throw error
             } catch {
                 await app.routingMetrics.recordInvalidRealtimeDeliveryPayload()
                 app.logger.warning("Remote domain-event dispatch failed to decode owner delivery payload.", metadata: [
@@ -545,7 +576,7 @@ struct ConnectionRoutingService {
                     "requestID": .string(envelope.requestID?.uuidString ?? ""),
                     "error": .string(String(describing: error))
                 ])
-                return
+                throw error
             }
             await app.imConnectionRegistry.sendDomainEventDelivery(canonicalDelivery, requestID: envelope.requestID)
         case .activeConversationDomainEventPacket(_, let conversationID, let allowedUserIDs, let fanoutIntent):
@@ -556,7 +587,7 @@ struct ConnectionRoutingService {
                     "conversationID": .string(conversationID.uuidString),
                     "targetUserIDs": .array(allowedUserIDs.map { .string($0.uuidString) })
                 ])
-                return
+                throw ConnectionRoutingDispatchError.invalidEnvelopePayload(action: envelope.action)
             }
             await app.imConnectionRegistry.sendDomainEventPayloadBatches(
                 [
@@ -575,7 +606,7 @@ struct ConnectionRoutingService {
                     "requestID": .string(envelope.requestID?.uuidString ?? ""),
                     "targetUserIDs": .array(envelope.targetUserIDs.map { .string($0.uuidString) })
                 ])
-                return
+                throw ConnectionRoutingDispatchError.invalidEnvelopePayload(action: envelope.action)
             }
             await app.imConnectionRegistry.sendDomainEventPayloadBatches(
                 [
@@ -594,7 +625,7 @@ struct ConnectionRoutingService {
                     "requestID": .string(envelope.requestID?.uuidString ?? ""),
                     "targetUserIDs": .array(envelope.targetUserIDs.map { .string($0.uuidString) })
                 ])
-                return
+                throw ConnectionRoutingDispatchError.invalidEnvelopePayload(action: envelope.action)
             }
             await app.imConnectionRegistry.sendStreamSignal(
                 payload,
@@ -605,6 +636,85 @@ struct ConnectionRoutingService {
             await kickLocalConnections(forSessionID: sessionID, reason: reason, message: message)
         case .kickUser(let userID, let reason, let message):
             await kickLocalConnections(forUserID: userID, reason: reason, message: message)
+        }
+    }
+
+    /// Handles a packet accepted at this Cell's ingress. Cell routing has
+    /// already happened at the source, so this method only resolves presence
+    /// within the target Cell and hands remote nodes to the durable node
+    /// dispatcher. Calling `dispatchRemoteEnvelopeIfNeeded` here would inspect
+    /// Cell presence again and could re-forward the packet across Cells.
+    func handleRemoteCellDispatch(_ envelope: NodeMessageDispatchEnvelope) async throws {
+        if let sessionID = envelope.sessionID {
+            let routes = try await backend.presenceStore.routeNodeIDs(forSessionIDs: [sessionID])
+            try await dispatchReceivedCellEnvelope(
+                envelope,
+                targetSessionIDsByNodeID: routes
+            )
+            return
+        }
+
+        let targetUserIDs = Array(Set(envelope.targetUserIDs))
+        guard !targetUserIDs.isEmpty else {
+            throw ConnectionRoutingDispatchError.invalidEnvelopePayload(action: envelope.action)
+        }
+        let routes = try await backend.presenceStore.routeNodeIDs(forUserIDs: targetUserIDs)
+        try await dispatchReceivedCellEnvelope(
+            envelope,
+            targetUserIDsByNodeID: routes
+        )
+    }
+
+    private func dispatchReceivedCellEnvelope(
+        _ envelope: NodeMessageDispatchEnvelope,
+        targetUserIDsByNodeID routes: [UUID: Set<String>]
+    ) async throws {
+        var localUserIDs = Set<UUID>()
+        var remoteUserIDsByNodeID: [String: Set<UUID>] = [:]
+
+        for (userID, nodeIDs) in routes {
+            for targetNodeID in nodeIDs {
+                if targetNodeID == nodeID {
+                    localUserIDs.insert(userID)
+                } else {
+                    remoteUserIDsByNodeID[targetNodeID, default: []].insert(userID)
+                }
+            }
+        }
+
+        if !localUserIDs.isEmpty {
+            try await handleRemoteDispatch(
+                envelope.withTargetUserIDs(localUserIDs.sorted { $0.uuidString < $1.uuidString })
+            )
+        }
+
+        for item in remoteDispatchWorkItems(
+            envelope: envelope,
+            targetUserIDsByNodeID: remoteUserIDsByNodeID
+        ) {
+            try await dispatchWithTimeout(item.envelope, toNodeID: item.remoteNodeID, using: backend.dispatchService)
+        }
+    }
+
+    private func dispatchReceivedCellEnvelope(
+        _ envelope: NodeMessageDispatchEnvelope,
+        targetSessionIDsByNodeID routes: [UUID: Set<String>]
+    ) async throws {
+        guard let sessionID = envelope.sessionID else {
+            throw ConnectionRoutingDispatchError.invalidEnvelopePayload(action: envelope.action)
+        }
+        let nodeIDs = routes[sessionID] ?? []
+
+        if nodeIDs.contains(nodeID) {
+            try await handleRemoteDispatch(envelope.withSessionID(sessionID))
+        }
+
+        for targetNodeID in nodeIDs.sorted() where targetNodeID != nodeID {
+            try await dispatchWithTimeout(
+                envelope.withSessionID(sessionID),
+                toNodeID: targetNodeID,
+                using: backend.dispatchService
+            )
         }
     }
 
@@ -883,6 +993,44 @@ struct ConnectionRoutingService {
         }
     }
 
+    private func dispatchRemoteCellsEnsuringPersistence(
+        _ envelope: NodeMessageDispatchEnvelope,
+        forUserIDs userIDs: [UUID],
+        trace: IMDeliveryTrace?
+    ) async throws {
+        let routes = try await backend.presenceStore.routeCellIDs(forUserIDs: userIDs)
+        var targetUserIDsByCellID: [String: Set<UUID>] = [:]
+        for (userID, cellIDs) in routes {
+            for cellID in cellIDs where cellID != app.imRealtimeCellID {
+                targetUserIDsByCellID[cellID, default: []].insert(userID)
+            }
+        }
+        let workItems = remoteCellDispatchWorkItems(
+            envelope: envelope,
+            targetUserIDsByCellID: targetUserIDsByCellID
+        )
+        for item in workItems {
+            await app.routingMetrics.recordCrossCellDispatchAttempt(recipientCount: item.targetCount)
+            let startedAt = Date()
+            do {
+                try await dispatchToRemoteCell(item)
+                await app.routingMetrics.recordCrossCellDispatchSucceeded(
+                    latencyMilliseconds: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
+                )
+            } catch {
+                await app.routingMetrics.recordCrossCellDispatchFailed(
+                    latencyMilliseconds: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: startedAt)
+                )
+                var metadata = deliveryFailureMetadata(trace: trace, error: error)
+                metadata["node_id"] = .string(nodeID)
+                metadata["target_cell_id"] = .string(item.targetCellID)
+                metadata["target_count"] = .stringConvertible(item.targetCount)
+                app.logger.error("Cross-Cell realtime handoff was not persisted.", metadata: metadata)
+                throw error
+            }
+        }
+    }
+
     private func dispatchRemoteCellsIfNeeded(
         _ envelope: NodeMessageDispatchEnvelope,
         forSessionIDs sessionIDs: [UUID]
@@ -987,33 +1135,13 @@ struct ConnectionRoutingService {
     }
 
     private func dispatchToRemoteCell(_ item: RemoteCellDispatchWorkItem) async throws {
-        guard let baseURL = try await app.cellIngressEndpointResolver.endpoint(for: item.targetCellID, purpose: .realtime) else {
-            throw Abort(.serviceUnavailable, reason: "No realtime ingress endpoint configured for Cell \(item.targetCellID).")
-        }
-        guard let sharedSecret = app.cellIngressConfiguration.sharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !sharedSecret.isEmpty
-        else {
-            throw Abort(.serviceUnavailable, reason: "Remote Cell realtime dispatch requires a Cell ingress secret.")
-        }
-        let body = IMCellRealtimeDispatchRequest(
-            originCellID: app.imRealtimeCellID,
+        // Cross-Cell dispatch is control-plane work, not conversation-shard
+        // data. Keep it on the default database where its migration lives.
+        _ = try await CrossCellRealtimeDispatchOutbox(db: app.db).enqueueAndAttempt(
             targetCellID: item.targetCellID,
-            hop: 1,
-            expiresAtEpochSeconds: Int(Date().timeIntervalSince1970) + 15,
-            envelope: item.envelope
+            envelope: item.envelope,
+            app: app
         )
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: "Content-Type", value: "application/json")
-        headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: sharedSecret)
-        let response = try await app.client.post(
-            URI(string: "\(baseURL)/internal/im/realtime/dispatch"),
-            headers: headers
-        ) { request in
-            try request.content.encode(body)
-        }
-        guard response.status == .noContent else {
-            throw Abort(.badGateway, reason: "Remote Cell \(item.targetCellID) rejected realtime dispatch with HTTP \(response.status.code).")
-        }
     }
 
     private func recordRemoteCellDispatchResult(
@@ -1035,7 +1163,8 @@ struct ConnectionRoutingService {
 
     private func dispatchRemotePayloadBatches(
         _ batches: [IMGatewayDomainEventPayloadBatch],
-        requestID: UUID?
+        requestID: UUID?,
+        skipCrossCellDispatch: Bool = false
     ) async {
         guard !batches.isEmpty else {
             return
@@ -1070,7 +1199,8 @@ struct ConnectionRoutingService {
                         batch,
                         requestID: requestID,
                         remoteNodeIDs: remoteNodeIDs,
-                        encodeCache: encodeCache
+                        encodeCache: encodeCache,
+                        skipCrossCellDispatch: skipCrossCellDispatch
                     )
                 }
             }
@@ -1088,7 +1218,8 @@ struct ConnectionRoutingService {
                         batch,
                         requestID: requestID,
                         remoteNodeIDs: remoteNodeIDs,
-                        encodeCache: encodeCache
+                        encodeCache: encodeCache,
+                        skipCrossCellDispatch: skipCrossCellDispatch
                     )
                 }
             }
@@ -1106,10 +1237,12 @@ struct ConnectionRoutingService {
         _ batch: IMGatewayDomainEventPayloadBatch,
         requestID: UUID?,
         remoteNodeIDs: Set<String>,
-        encodeCache: DomainEventPacketEncodeCache
+        encodeCache: DomainEventPacketEncodeCache,
+        skipCrossCellDispatch: Bool
     ) async {
         let trace = deliveryTrace(for: batch.payload, requestID: requestID)
-        do {
+        if !skipCrossCellDispatch {
+            do {
             let remoteCellEnvelope = try await encodeDomainEventPacketEnvelope(
                 requestID: requestID,
                 payload: batch.payload,
@@ -1128,6 +1261,7 @@ struct ConnectionRoutingService {
             metadata["target_user_count"] = .stringConvertible(Set(batch.recipientUserIDs).count)
             metadata["error_kind"] = .string("packet_encode_failed")
             app.logger.warning("Cross-Cell IM payload batch dispatch encode failed.", metadata: metadata)
+            }
         }
 
         if shouldSplitRemoteActiveConversationFanout(batch),
@@ -1518,6 +1652,8 @@ struct ConnectionRoutingService {
 
     private enum ConnectionRoutingDispatchError: Error {
         case timeout(String)
+        case missingOwnerDelivery(ownerUserID: UUID, eventID: UUID)
+        case invalidEnvelopePayload(action: NodeMessageDispatchEnvelope.Action)
     }
 
     private func encodePacketEnvelope<Payload: Sendable>(

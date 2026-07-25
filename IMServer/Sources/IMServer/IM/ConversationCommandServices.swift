@@ -509,6 +509,7 @@ struct ConversationStrongReadService {
         }
         return ConversationTimelineReadSupport(
             db: db,
+            featureDB: app.db,
             metrics: app.timelineReadMetrics,
             configuration: app.timelineReadConfiguration,
             sinceHotCache: app.timelineSinceHotCache,
@@ -625,7 +626,10 @@ struct ConversationEventualReadService {
         cursor: String?,
         limit: Int?
     ) async throws -> IMConversationMessageSearchPageResponse {
-        try await ConversationSearchReadSupport(db: database(forConversationID: conversationID))
+        try await ConversationSearchReadSupport(
+            db: database(forConversationID: conversationID),
+            featureDB: app?.db
+        )
             .searchMessages(in: conversationID, for: userID, query: query, cursor: cursor, limit: limit)
     }
 
@@ -656,6 +660,7 @@ struct ConversationEventualReadService {
         }
         return ConversationTimelineReadSupport(
             db: db,
+            featureDB: app.db,
             metrics: app.timelineReadMetrics,
             configuration: app.timelineReadConfiguration,
             sinceHotCache: app.timelineSinceHotCache,

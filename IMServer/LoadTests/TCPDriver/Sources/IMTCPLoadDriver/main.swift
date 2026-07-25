@@ -99,6 +99,7 @@ struct ConnectionResult: Sendable {
     let deliveredMessages: Int
     let duplicateDeliveredMessages: Int
     let fanoutMessages: Int
+    let activityHints: Int
     let reconnects: Int
     let serverErrors: Int
     let heartbeatSends: Int
@@ -384,6 +385,7 @@ final class MessageDeliveryTracker: @unchecked Sendable {
 
     private let lock = NSLock()
     private var records: [String: MessageDeliveryRecord] = [:]
+    private var clientMessageIDsByServerMessageID: [String: String] = [:]
 
     func register(clientMessageID: String, senderIndex: Int, receiverIndex: Int, sentAt: Date) {
         lock.lock()
@@ -392,6 +394,15 @@ final class MessageDeliveryTracker: @unchecked Sendable {
             receiverIndex: receiverIndex,
             sentAt: sentAt
         )
+        lock.unlock()
+    }
+
+    func registerServerMessageID(_ serverMessageID: String, forClientMessageID clientMessageID: String) {
+        guard !serverMessageID.isEmpty else {
+            return
+        }
+        lock.lock()
+        clientMessageIDsByServerMessageID[serverMessageID] = clientMessageID
         lock.unlock()
     }
 
@@ -406,6 +417,29 @@ final class MessageDeliveryTracker: @unchecked Sendable {
             record.deliveredTo.insert(receiverIndex)
             records[clientMessageID] = record
         }
+        return DeliveryResult(
+            accepted: !duplicate,
+            duplicate: duplicate,
+            latencyMillis: date.timeIntervalSince(record.sentAt) * 1_000,
+            senderIndex: record.senderIndex
+        )
+    }
+
+    func recordHintDelivery(serverMessageID: String, receiverIndex: Int, at date: Date = Date()) -> DeliveryResult? {
+        lock.lock()
+        guard let clientMessageID = clientMessageIDsByServerMessageID[serverMessageID],
+              var record = records[clientMessageID],
+              record.receiverIndex == receiverIndex
+        else {
+            lock.unlock()
+            return nil
+        }
+        let duplicate = record.deliveredTo.contains(receiverIndex)
+        if !duplicate {
+            record.deliveredTo.insert(receiverIndex)
+            records[clientMessageID] = record
+        }
+        lock.unlock()
         return DeliveryResult(
             accepted: !duplicate,
             duplicate: duplicate,
@@ -517,7 +551,7 @@ func parseOptions() -> Options {
         options.messageProfile = "per-connection"
     }
     options.messageCompletionMode = options.messageCompletionMode.lowercased()
-    if !["full", "ack-only"].contains(options.messageCompletionMode) {
+    if !["full", "ack-only", "hint"].contains(options.messageCompletionMode) {
         options.messageCompletionMode = "full"
     }
     options.messageSenderEvery = max(1, options.messageSenderEvery)
@@ -859,6 +893,7 @@ enum RealtimePacketType {
     case heartbeat
     case heartbeatAck
     case message
+    case activityHint
     case ack
     case kick
 }
@@ -878,6 +913,8 @@ extension RealtimePacketType {
             return "heartbeatAck"
         case .message:
             return "message"
+        case .activityHint:
+            return "activityHint"
         case .ack:
             return "ack"
         case .kick:
@@ -984,8 +1021,9 @@ enum ProtoWire {
                 type = .ack
                 payload.merge(decodeAckPayload(field.value)) { current, _ in current }
             case 40:
-                type = .message
-                payload.merge(decodeDomainEventPayload(field.value)) { current, _ in current }
+                let domainEvent = decodeDomainEventPayload(field.value)
+                type = domainEvent["eventKind"] == "activityHint" ? .activityHint : .message
+                payload.merge(domainEvent) { current, _ in current }
             case 50:
                 type = .kick
             default:
@@ -1067,6 +1105,9 @@ enum ProtoWire {
             switch field.number {
             case 10:
                 payload.merge(decodeMessageCreatedEvent(field.value)) { current, _ in current }
+            case 35:
+                payload["eventKind"] = "activityHint"
+                payload.merge(decodeConversationActivityHint(field.value)) { current, _ in current }
             default:
                 continue
             }
@@ -1080,6 +1121,21 @@ enum ProtoWire {
             switch field.number {
             case 2:
                 payload["clientMessageID"] = field.stringValue
+            default:
+                continue
+            }
+        }
+        return payload
+    }
+
+    private static func decodeConversationActivityHint(_ data: Data) -> [String: String] {
+        var payload: [String: String] = [:]
+        for field in fields(in: data) {
+            switch field.number {
+            case 1:
+                payload["messageID"] = field.stringValue
+            case 4:
+                payload["timelineSequence"] = String(field.varint ?? 0)
             default:
                 continue
             }
@@ -1190,6 +1246,7 @@ final class ConnectionState: @unchecked Sendable {
     private var canonicalLatenciesMillis: [Double] = []
     private var deliveryLatenciesMillis: [Double] = []
     private var fanoutMessages = 0
+    private var activityHints = 0
     private var serverErrors = 0
     private var reconnects = 0
     private var heartbeatSends = 0
@@ -1309,6 +1366,9 @@ final class ConnectionState: @unchecked Sendable {
             let requestID = packet.requestID
             if let requestID, let clientID = sentClientIDsByRequestID[requestID], !acknowledgedClientIDs.contains(clientID) {
                 acknowledgedClientIDs.insert(clientID)
+                if let messageID = packet.payload["messageID"] {
+                    messageDeliveryTracker?.registerServerMessageID(messageID, forClientMessageID: clientID)
+                }
                 if let sentAt = sentAtByClientID[clientID] {
                     ackLatenciesMillis.append(Date().timeIntervalSince(sentAt) * 1_000)
                 }
@@ -1344,6 +1404,29 @@ final class ConnectionState: @unchecked Sendable {
                         connectionIndex: connectionIndex,
                         fields: [
                             "clientMessageID": clientID,
+                            "senderIndex": String(delivery.senderIndex),
+                            "latencyMs": String(Int(delivery.latencyMillis))
+                        ]
+                    )
+                }
+            }
+        case .activityHint:
+            activityHints += 1
+            if let messageID = packet.payload["messageID"],
+               let delivery = messageDeliveryTracker?.recordHintDelivery(
+                serverMessageID: messageID,
+                receiverIndex: connectionIndex
+               ) {
+                if delivery.duplicate {
+                    duplicateDeliveredMessages += 1
+                } else {
+                    deliveredClientIDs.insert(messageID)
+                    deliveryLatenciesMillis.append(delivery.latencyMillis)
+                    logger.log(
+                        "activity_hint_received",
+                        connectionIndex: connectionIndex,
+                        fields: [
+                            "messageID": messageID,
                             "senderIndex": String(delivery.senderIndex),
                             "latencyMs": String(Int(delivery.latencyMillis))
                         ]
@@ -1422,6 +1505,7 @@ final class ConnectionState: @unchecked Sendable {
             deliveredMessages: deliveredClientIDs.count,
             duplicateDeliveredMessages: duplicateDeliveredMessages,
             fanoutMessages: fanoutMessages,
+            activityHints: activityHints,
             reconnects: reconnects,
             serverErrors: serverErrors,
             heartbeatSends: heartbeatSends,
@@ -1443,6 +1527,7 @@ final class ConnectionState: @unchecked Sendable {
                 "ack": String(result.acknowledgements),
                 "canonical": String(result.canonicalMessages),
                 "delivered": String(result.deliveredMessages),
+                "activityHints": String(result.activityHints),
                 "serverErrors": String(result.serverErrors),
                 "reconnects": String(result.reconnects),
                 "heartbeatSends": String(result.heartbeatSends),
@@ -1760,7 +1845,7 @@ func runConnection(
     globalHoldBarrier: GlobalHoldBarrier?
 ) async -> ConnectionResult {
     await withCheckedContinuation { continuation in
-        let expectedCanonicalMessages = options.messageCompletionMode == "ack-only" || options.messageProfile == "pair-delivery"
+        let expectedCanonicalMessages = options.messageCompletionMode != "full" || options.messageProfile == "pair-delivery"
             ? 0
             : scheduledMessages.count
         let state = ConnectionState(
@@ -2494,6 +2579,7 @@ let results = await withTaskGroup(of: ConnectionResult.self) { group in
                         deliveredMessages: 0,
                         duplicateDeliveredMessages: 0,
                         fanoutMessages: 0,
+                        activityHints: 0,
                         reconnects: 0,
                         serverErrors: 0,
                         heartbeatSends: 0,
@@ -2537,6 +2623,7 @@ let duplicateCanonicalMessages = results.reduce(0) { $0 + $1.duplicateCanonicalM
 let deliveredMessages = results.reduce(0) { $0 + $1.deliveredMessages }
 let duplicateDeliveredMessages = results.reduce(0) { $0 + $1.duplicateDeliveredMessages }
 let fanoutMessages = results.reduce(0) { $0 + $1.fanoutMessages }
+let activityHints = results.reduce(0) { $0 + $1.activityHints }
 let reconnects = results.reduce(0) { $0 + $1.reconnects }
 let serverErrors = results.reduce(0) { $0 + $1.serverErrors }
 let heartbeatSends = results.reduce(0) { $0 + $1.heartbeatSends }
@@ -2549,7 +2636,7 @@ let failureReasons = results.reduce(into: [String: Int]()) { counts, result in
     guard !result.success else { return }
     counts[result.failureReason ?? "unknown", default: 0] += 1
 }
-let expectedCanonicalMessages = options.messageCompletionMode == "ack-only" || options.messageProfile == "pair-delivery"
+let expectedCanonicalMessages = options.messageCompletionMode != "full" || options.messageProfile == "pair-delivery"
     ? 0
     : sent
 let ackSuccessRate = sent == 0 ? Double(successes) / Double(max(options.connections, 1)) : Double(acknowledgements) / Double(sent)
@@ -2560,7 +2647,7 @@ let deliverySuccessRate = expectedDeliveries == 0 ? 0 : Double(deliveredMessages
 print("profile=\(options.profile) connections=\(options.connections) accounts=\(accountCredentials.count) devicesPerUser=\(options.devicesPerUser) accountDevicesPerUser=\(options.accountDevicesPerUser) queuePoolSize=\(connectionQueuePool.size) maxReconnects=\(options.maxReconnects) successes=\(successes) elapsed=\(String(format: "%.2f", elapsed))s")
 print("loginCacheHit=\(loginCacheHit) loginCacheRecords=\(loginCacheRecords) loginCacheValidForSeconds=\(loginCacheValidForSeconds) requireLoginCache=\(options.requireLoginCache)")
 print("globalHoldBarrier=\(globalHoldBarrier != nil) globalHoldBarrierTarget=\(globalHoldBarrierTarget) globalHoldBarrierMinRatio=\(options.globalHoldBarrierMinRatio) messageProfile=\(options.messageProfile) messageCompletionMode=\(options.messageCompletionMode) messageRatePerSecond=\(options.messageRatePerSecond) activeConversationUsers=\(options.activeConversationUsers) expectedCanonical=\(expectedCanonicalMessages) expectedDeliveries=\(expectedDeliveries)")
-print("sent=\(sent) ack=\(acknowledgements) canonical=\(canonicalMessages) duplicateCanonical=\(duplicateCanonicalMessages) delivered=\(deliveredMessages) duplicateDelivered=\(duplicateDeliveredMessages) fanout=\(fanoutMessages) reconnects=\(reconnects) serverErrors=\(serverErrors)")
+print("sent=\(sent) ack=\(acknowledgements) canonical=\(canonicalMessages) duplicateCanonical=\(duplicateCanonicalMessages) delivered=\(deliveredMessages) duplicateDelivered=\(duplicateDeliveredMessages) fanout=\(fanoutMessages) activityHints=\(activityHints) reconnects=\(reconnects) serverErrors=\(serverErrors)")
 print("heartbeat sent=\(heartbeatSends) ack=\(heartbeatAcks) intervalSeconds=\(options.heartbeatIntervalSeconds)")
 print("heartbeatSendCompletionMs p50=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.50))) p95=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.95))) p99=\(String(format: "%.1f", percentile(heartbeatSendCompletionMillis, 0.99)))")
 print("ackSuccessRate=\(String(format: "%.4f", ackSuccessRate)) canonicalSuccessRate=\(String(format: "%.4f", canonicalSuccessRate)) deliverySuccessRate=\(String(format: "%.4f", deliverySuccessRate))")
@@ -2594,6 +2681,7 @@ connectionLogger.log(
         "delivered": String(deliveredMessages),
         "expectedDeliveries": String(expectedDeliveries),
         "deliverySuccessRate": String(deliverySuccessRate),
+        "activityHints": String(activityHints),
         "serverErrors": String(serverErrors),
         "reconnects": String(reconnects),
         "heartbeatSends": String(heartbeatSends),

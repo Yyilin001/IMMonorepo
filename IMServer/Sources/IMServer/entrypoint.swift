@@ -170,7 +170,11 @@ enum Entrypoint {
         case .streamConsumer:
             rewriteServeCommand(&commandInput, to: "stream-consumer")
         case .ops:
-            rewriteServeCommand(&commandInput, to: "ops")
+            // Keep explicit management commands such as `migrate` intact. The
+            // ops role still supplies the production safety policy for them.
+            if commandInput.arguments.isEmpty || commandInput.arguments.first == "serve" {
+                rewriteServeCommand(&commandInput, to: "ops")
+            }
         case .gateway, .commandAPI, .queryAPI, .combined:
             break
         }

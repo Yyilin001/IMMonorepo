@@ -38,7 +38,7 @@ run_preflight() {
     --gateway "${output_dir}/preflight/gateway.env" \
     --query-api "${output_dir}/preflight/query-api.env" \
     --outbox-relay "${output_dir}/preflight/outbox-relay.env" \
-    --ops "${output_dir}/preflight/ops.env" \
+    --ops "${output_dir}/preflight/maintenance.env" \
     --stream-consumer "${output_dir}/preflight/stream-consumer-summary_projection_consumer.env" \
     --stream-consumer "${output_dir}/preflight/stream-consumer-domain_delivery_consumer.env" \
     --stream-consumer "${output_dir}/preflight/stream-consumer-realtime_delivery_consumer.env" \
@@ -63,7 +63,7 @@ output_dir="${TMP_DIR}/rendered"
 "${RENDER}" "${INVENTORY}" "${output_dir}"
 
 for role in \
-  gateway command-api query-api outbox-relay ops \
+  gateway command-api query-api outbox-relay ops maintenance \
   stream-consumer-summary_projection_consumer \
   stream-consumer-realtime_delivery_consumer \
   stream-consumer-domain_delivery_consumer \
@@ -77,7 +77,7 @@ do
 done
 
 expect_contains "${output_dir}/preflight/gateway.env" "IM_REDIS_DEPLOYMENT_TOPOLOGY=cluster"
-expect_contains "${output_dir}/preflight/gateway.env" "IM_NODE_DISPATCH_MODE=http"
+expect_contains "${output_dir}/preflight/gateway.env" "IM_NODE_DISPATCH_MODE=valkey-stream"
 expect_contains "${output_dir}/preflight/gateway.env" "IM_NODE_ID=gateway-node-a"
 expect_contains "${output_dir}/preflight/gateway.env" "IM_TCP_MAX_CONNECTIONS=20000"
 expect_contains "${output_dir}/preflight/gateway.env" "IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND=500"
@@ -116,14 +116,6 @@ if "${VALIDATE_SET}" "${INVENTORY}" "${same_zone_inventory}" >"${TMP_DIR}/same-z
 fi
 grep -Fq "gateway_and_command_replicas_must_span_at_least_two_availability_zones" "${TMP_DIR}/same-zone.log" || fail "same_zone_replicas_reason"
 
-invalid_inventory="${TMP_DIR}/missing-local-gateway.env"
-cp "${INVENTORY}" "${invalid_inventory}"
-perl -0pi -e 's#^IM_GATEWAY_NODE_DISPATCH_ENDPOINTS=.*$#IM_GATEWAY_NODE_DISPATCH_ENDPOINTS=gateway-node-b=https://gateway-node-b.internal#m' "${invalid_inventory}"
-if "${RENDER}" "${invalid_inventory}" "${TMP_DIR}/invalid-render" >"${TMP_DIR}/invalid.log" 2>&1; then
-  fail "missing_local_gateway_accepted"
-fi
-grep -Fq "node_dispatch_missing_local_gateway" "${TMP_DIR}/invalid.log" || fail "missing_local_gateway_reason"
-
 invalid_kafka_spec_inventory="${TMP_DIR}/invalid-kafka-topic-spec.env"
 cp "${INVENTORY}" "${invalid_kafka_spec_inventory}"
 perl -0pi -e 's/^IM_KAFKA_EVENT_TOPIC_MIN_IN_SYNC_REPLICAS=2$/IM_KAFKA_EVENT_TOPIC_MIN_IN_SYNC_REPLICAS=4/m' "${invalid_kafka_spec_inventory}"
@@ -131,6 +123,22 @@ if "${RENDER}" "${invalid_kafka_spec_inventory}" "${TMP_DIR}/invalid-kafka-rende
   fail "invalid_kafka_topic_spec_accepted"
 fi
 grep -Fq "IM_KAFKA_EVENT_TOPIC_MIN_IN_SYNC_REPLICAS_exceeds_replication_factor" "${TMP_DIR}/invalid-kafka.log" || fail "invalid_kafka_topic_spec_reason"
+
+invalid_cross_cell_timeout_inventory="${TMP_DIR}/invalid-cross-cell-timeout.env"
+cp "${INVENTORY}" "${invalid_cross_cell_timeout_inventory}"
+perl -0pi -e 's/^IM_CROSS_CELL_REALTIME_OUTBOX_DELIVERY_TIMEOUT_SECONDS=5$/IM_CROSS_CELL_REALTIME_OUTBOX_DELIVERY_TIMEOUT_SECONDS=0/m' "${invalid_cross_cell_timeout_inventory}"
+if "${RENDER}" "${invalid_cross_cell_timeout_inventory}" "${TMP_DIR}/invalid-cross-cell-timeout-render" >"${TMP_DIR}/invalid-cross-cell-timeout.log" 2>&1; then
+  fail "invalid_cross_cell_timeout_accepted"
+fi
+grep -Fq "invalid_IM_CROSS_CELL_REALTIME_OUTBOX_DELIVERY_TIMEOUT_SECONDS" "${TMP_DIR}/invalid-cross-cell-timeout.log" || fail "invalid_cross_cell_timeout_reason"
+
+invalid_cross_cell_retention_inventory="${TMP_DIR}/invalid-cross-cell-retention.env"
+cp "${INVENTORY}" "${invalid_cross_cell_retention_inventory}"
+perl -0pi -e 's/^IM_CLEANUP_CROSS_CELL_REALTIME_DISPATCH_RETENTION_DAYS=7$/IM_CLEANUP_CROSS_CELL_REALTIME_DISPATCH_RETENTION_DAYS=2/m' "${invalid_cross_cell_retention_inventory}"
+if "${RENDER}" "${invalid_cross_cell_retention_inventory}" "${TMP_DIR}/invalid-cross-cell-retention-render" >"${TMP_DIR}/invalid-cross-cell-retention.log" 2>&1; then
+  fail "short_cross_cell_retention_accepted"
+fi
+grep -Fq "IM_CLEANUP_CROSS_CELL_REALTIME_DISPATCH_RETENTION_DAYS_must_cover_event_topic_retention" "${TMP_DIR}/invalid-cross-cell-retention.log" || fail "short_cross_cell_retention_reason"
 
 cell_b_inventory="${TMP_DIR}/inventory.cell-b.env"
 cp "${INVENTORY}" "${cell_b_inventory}"
@@ -140,7 +148,6 @@ perl -0pi -e '
   s/^IM_COMMAND_NODE_ID=node-a$/IM_COMMAND_NODE_ID=cell-b-node-a/m;
   s/^IM_REALTIME_CELL_ID=cell-shenzhen-a$/IM_REALTIME_CELL_ID=cell-shenzhen-b/m;
   s/^IM_AVAILABILITY_ZONE=cn-south-1a$/IM_AVAILABILITY_ZONE=cn-south-1b/m;
-  s#^IM_GATEWAY_NODE_DISPATCH_ENDPOINTS=.*$#IM_GATEWAY_NODE_DISPATCH_ENDPOINTS=gateway-cell-b-node-a=https://gateway-cell-b-node-a.internal#m;
   s#^IM_COMMAND_NODE_URLS=.*$#IM_COMMAND_NODE_URLS=cell-b-node-a=https://command-api-cell-b-node-a.internal:8081#m;
   s#^IM_CELL_INGRESS_COMMAND_ENDPOINTS=.*$#IM_CELL_INGRESS_COMMAND_ENDPOINTS=cell-shenzhen-a=https://command-api-cell-shenzhen-a.internal,cell-shenzhen-b=https://command-api-cell-shenzhen-b.internal#m;
   s#^IM_CELL_INGRESS_QUERY_ENDPOINTS=.*$#IM_CELL_INGRESS_QUERY_ENDPOINTS=cell-shenzhen-a=https://query-api-cell-shenzhen-a.internal,cell-shenzhen-b=https://query-api-cell-shenzhen-b.internal#m;
@@ -157,7 +164,6 @@ perl -0pi -e '
   s#^IM_CELL_INGRESS_COMMAND_ENDPOINTS=.*$#IM_CELL_INGRESS_COMMAND_ENDPOINTS=cell-shenzhen-a=https://command-api-cell-shenzhen-a.internal,cell-shenzhen-b=https://command-api-cell-shenzhen-b.internal#m;
   s#^IM_CELL_INGRESS_QUERY_ENDPOINTS=.*$#IM_CELL_INGRESS_QUERY_ENDPOINTS=cell-shenzhen-a=https://query-api-cell-shenzhen-a.internal,cell-shenzhen-b=https://query-api-cell-shenzhen-b.internal#m;
   s#^IM_CELL_INGRESS_REALTIME_ENDPOINTS=.*$#IM_CELL_INGRESS_REALTIME_ENDPOINTS=cell-shenzhen-a=https://gateway-cell-shenzhen-a.internal,cell-shenzhen-b=https://gateway-cell-shenzhen-b.internal#m;
-  s#^IM_GATEWAY_NODE_DISPATCH_ENDPOINTS=.*$#IM_GATEWAY_NODE_DISPATCH_ENDPOINTS=gateway-node-a=https://gateway-node-a.internal#m;
   s#^IM_COMMAND_NODE_URLS=.*$#IM_COMMAND_NODE_URLS=node-a=https://command-api-a.internal:8081#m;
 ' "${cell_a_multicell_inventory}"
 "${VALIDATE_MULTICELL_SET}" "${cell_a_multicell_inventory}" "${cell_b_inventory}"
@@ -169,10 +175,7 @@ grep -Fq "cell_requires_at_least_two_node_inventories_cell-shenzhen-a" "${TMP_DI
 
 cell_a_ha_node_a="${TMP_DIR}/inventory.cell-a-ha-node-a.env"
 cp "${cell_a_multicell_inventory}" "${cell_a_ha_node_a}"
-perl -0pi -e '
-  s#^IM_GATEWAY_NODE_DISPATCH_ENDPOINTS=.*$#IM_GATEWAY_NODE_DISPATCH_ENDPOINTS=gateway-node-a=https://gateway-node-a.internal,gateway-node-b=https://gateway-node-b.internal#m;
-  s#^IM_COMMAND_NODE_URLS=.*$#IM_COMMAND_NODE_URLS=node-a=https://command-api-a.internal:8081,node-b=https://command-api-b.internal:8081#m;
-' "${cell_a_ha_node_a}"
+perl -0pi -e 's#^IM_COMMAND_NODE_URLS=.*$#IM_COMMAND_NODE_URLS=node-a=https://command-api-a.internal:8081,node-b=https://command-api-b.internal:8081#m' "${cell_a_ha_node_a}"
 
 cell_a_ha_node_b="${TMP_DIR}/inventory.cell-a-ha-node-b.env"
 cp "${cell_a_ha_node_a}" "${cell_a_ha_node_b}"
@@ -185,10 +188,7 @@ perl -0pi -e '
 
 cell_b_ha_node_a="${TMP_DIR}/inventory.cell-b-ha-node-a.env"
 cp "${cell_b_inventory}" "${cell_b_ha_node_a}"
-perl -0pi -e '
-  s#^IM_GATEWAY_NODE_DISPATCH_ENDPOINTS=.*$#IM_GATEWAY_NODE_DISPATCH_ENDPOINTS=gateway-cell-b-node-a=https://gateway-cell-b-node-a.internal,gateway-cell-b-node-b=https://gateway-cell-b-node-b.internal#m;
-  s#^IM_COMMAND_NODE_URLS=.*$#IM_COMMAND_NODE_URLS=cell-b-node-a=https://command-api-cell-b-node-a.internal:8081,cell-b-node-b=https://command-api-cell-b-node-b.internal:8081#m;
-' "${cell_b_ha_node_a}"
+perl -0pi -e 's#^IM_COMMAND_NODE_URLS=.*$#IM_COMMAND_NODE_URLS=cell-b-node-a=https://command-api-cell-b-node-a.internal:8081,cell-b-node-b=https://command-api-cell-b-node-b.internal:8081#m' "${cell_b_ha_node_a}"
 
 cell_b_ha_node_b="${TMP_DIR}/inventory.cell-b-ha-node-b.env"
 cp "${cell_b_ha_node_a}" "${cell_b_ha_node_b}"

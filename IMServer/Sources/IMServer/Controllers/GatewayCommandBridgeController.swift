@@ -23,7 +23,7 @@ struct GatewayCommandBridgeController: RouteCollection {
 
         let querySuffix = req.url.query.map { "?\($0)" } ?? ""
         let target = URI(string: "\(baseURL)\(req.url.path)\(querySuffix)")
-        let proxied = try await req.application.client.send(req.method, headers: forwardedHeaders(from: req, sharedSecret: configuration.sharedSecret), to: target) { outgoing in
+        let proxied = try await req.application.client.send(req.method, headers: Self.forwardedHeaders(from: req, sharedSecret: configuration.sharedSecret), to: target) { outgoing in
             if let bodyData = req.body.data {
                 outgoing.body = .init(buffer: bodyData)
             }
@@ -37,13 +37,16 @@ struct GatewayCommandBridgeController: RouteCollection {
         return response
     }
 
-    private func forwardedHeaders(from req: Request, sharedSecret: String?) -> HTTPHeaders {
+    static func forwardedHeaders(from req: Request, sharedSecret: String?) -> HTTPHeaders {
         var headers = HTTPHeaders()
         if let authorization = req.headers.first(name: .authorization) {
             headers.replaceOrAdd(name: .authorization, value: authorization)
         }
         if let contentType = req.headers.first(name: .contentType) {
             headers.replaceOrAdd(name: .contentType, value: contentType)
+        }
+        if let accept = req.headers.first(name: .accept) {
+            headers.replaceOrAdd(name: .accept, value: accept)
         }
         if let sharedSecret, !sharedSecret.isEmpty {
             headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: sharedSecret)

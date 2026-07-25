@@ -386,14 +386,14 @@ extension IMServerTests {
         )
     }
 
-    @Test("Cluster topology permits Cluster-native state with HTTP node dispatch")
-    func redisClusterTopologyPermitsHTTPNodeDispatch() async throws {
+    @Test("Cluster topology permits Cluster-native state with Valkey Stream node dispatch")
+    func redisClusterTopologyPermitsValkeyStreamNodeDispatch() async throws {
         let app = try await Application.make(.testing)
         app.imRuntimeRole = .gateway
         app.nodeDispatchConfiguration = IMNodeDispatchConfiguration(
-            mode: .http,
-            endpointsByNodeID: ["gateway-1": "https://gateway-1.internal"],
-            sharedSecret: "test-node-dispatch-secret"
+            mode: .valkeyStream,
+            endpointsByNodeID: [:],
+            sharedSecret: nil
         )
         let routingConfiguration = IMRedisRoutingConfiguration(
             url: "redis://redis.internal:6379",
@@ -636,6 +636,28 @@ extension IMServerTests {
                     throw error
                 }
             }
+        }
+    }
+
+    @Test("Production gateway rejects implicit best-effort Redis node dispatch")
+    func productionGatewayRejectsImplicitBestEffortRedisNodeDispatch() async throws {
+        try await withProductionRuntimeEnvironment {
+            let key = "IM_ALLOW_BEST_EFFORT_NODE_DISPATCH"
+            let originalValue = Environment.get(key)
+            defer { restoreProductionRuntimeEnvironment(key, to: originalValue) }
+            unsetenv(key)
+
+            let app = try await productionRuntimeValidationApp(role: .gateway)
+            do {
+                try IMProductionRuntimeValidator.validate(app: app)
+                Issue.record("Expected production gateway to reject implicit Redis Pub/Sub node dispatch")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("IM_ALLOW_BEST_EFFORT_NODE_DISPATCH=true"))
+            } catch {
+                Issue.record("Unexpected node dispatch configuration error: \(error)")
+            }
+            try await app.asyncShutdown()
         }
     }
 
@@ -1172,14 +1194,14 @@ extension IMServerTests {
         }
     }
 
-    @Test("Production gateway requires realtime drop on backpressure")
-    func productionGatewayRequiresRealtimeDropOnBackpressure() async throws {
+    @Test("Production gateway requires realtime backpressure recovery")
+    func productionGatewayRequiresRealtimeBackpressureRecovery() async throws {
         try await withProductionRuntimeEnvironment {
             setenv("IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE", "false", 1)
             let app = try await productionRuntimeValidationApp(role: .gateway)
             do {
                 try IMGatewayProductionValidator.validate(app: app)
-                Issue.record("Expected gateway validation to require realtime drop on backpressure")
+                Issue.record("Expected gateway validation to require realtime backpressure recovery")
             } catch let abort as any AbortError {
                 #expect(abort.status == .internalServerError)
                 #expect(abort.reason.contains("IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE=true"))
@@ -3106,6 +3128,50 @@ extension IMServerTests {
         }
     }
 
+    @Test("IM schema validator requires Cross-Cell realtime dispatch outbox indexes")
+    func imSchemaValidatorRequiresCrossCellRealtimeDispatchOutboxIndexes() async throws {
+        try await withApp(configure: configure) { app in
+            guard let sql = app.db as? any SQLDatabase else {
+                Issue.record("Expected SQL database")
+                return
+            }
+
+            try await sql.raw("DROP INDEX IF EXISTS cross_cell_realtime_dispatch_ready_idx").run()
+
+            do {
+                try await IMSchemaValidator.validateIMSchema(app)
+                Issue.record("Expected schema validation to fail when the Cross-Cell dispatch outbox index is missing.")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("cross_cell_realtime_dispatch_ready_idx"))
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    @Test("IM schema validator requires Cross-Cell realtime dispatch outbox dedupe index")
+    func imSchemaValidatorRequiresCrossCellRealtimeDispatchOutboxDedupeIndex() async throws {
+        try await withApp(configure: configure) { app in
+            guard let sql = app.db as? any SQLDatabase else {
+                Issue.record("Expected SQL database")
+                return
+            }
+
+            try await sql.raw("DROP INDEX IF EXISTS cross_cell_realtime_dispatch_dedupe_uidx").run()
+
+            do {
+                try await IMSchemaValidator.validateIMSchema(app)
+                Issue.record("Expected schema validation to fail when the Cross-Cell dispatch dedupe index is missing.")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .internalServerError)
+                #expect(abort.reason.contains("cross_cell_realtime_dispatch_dedupe_uidx"))
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
+        }
+    }
+
     @Test("IM schema validator requires large-group summary read path indexes")
     func imSchemaValidatorRequiresLargeGroupSummaryReadPathIndexes() async throws {
         try await withApp(configure: configure) { app in
@@ -3598,6 +3664,8 @@ extension IMServerTests {
                 #expect(res.body.string.contains("im_realtime_active_conversation_fanout_backpressure_downgraded_active_recipients_total"))
                 #expect(res.body.string.contains("im_realtime_active_conversation_fanout_route_split_drops_total"))
                 #expect(res.body.string.contains("im_realtime_active_conversation_fanout_route_split_drop_recipients_total"))
+                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_route_lookup_failures_total"))
+                #expect(res.body.string.contains("im_realtime_active_conversation_fanout_route_lookup_failure_recipients_total"))
                 #expect(res.body.string.contains("im_realtime_remote_active_conversation_fanout_splits_total"))
                 #expect(res.body.string.contains("im_realtime_remote_active_conversation_fanout_full_recipients_total"))
                 #expect(res.body.string.contains("im_realtime_remote_active_conversation_fanout_route_split_drops_total"))
@@ -3632,6 +3700,7 @@ extension IMServerTests {
                 #expect(res.body.string.contains("im_domain_relay_after_record_pre_split_active_recipients_total"))
                 #expect(res.body.string.contains("im_domain_relay_after_record_pre_split_compact_active_recipients_total"))
                 #expect(res.body.string.contains("im_domain_relay_after_record_pre_split_route_drops_total"))
+                #expect(res.body.string.contains("im_domain_relay_after_record_pre_split_route_lookup_failures_total"))
                 #expect(res.body.string.contains("im_domain_relay_after_record_inactive_hint_suppressed_recipients_total"))
                 #expect(res.body.string.contains("im_domain_relay_after_record_active_route_cache_hits_total"))
                 #expect(res.body.string.contains("im_domain_relay_after_record_active_route_cache_partial_hits_total"))
@@ -4680,6 +4749,25 @@ extension IMServerTests {
         }
     }
 
+    @Test("Gateway command bridge forwards command receipt negotiation")
+    func gatewayCommandBridgeForwardsCommandReceiptAcceptHeader() async throws {
+        try await withApp(configure: configure) { app in
+            let request = Request(application: app, on: app.eventLoopGroup.next())
+            request.headers.replaceOrAdd(
+                name: .accept,
+                value: IMConversationController.commandReceiptMediaType
+            )
+
+            let forwarded = GatewayCommandBridgeController.forwardedHeaders(
+                from: request,
+                sharedSecret: "bridge-test-secret"
+            )
+
+            #expect(forwarded.first(name: .accept) == IMConversationController.commandReceiptMediaType)
+            #expect(forwarded.first(name: "X-IM-Internal-Secret") == "bridge-test-secret")
+        }
+    }
+
     @Test("Command API role registers IM mutate routes but not IM query or auth routes")
     func commandAPIRoleSeparatesRoutes() async throws {
         try await withApp(configure: { app in
@@ -4741,6 +4829,74 @@ extension IMServerTests {
         setenv(key, "true", 1)
         configuration = IMTCPConfiguration.load(from: .production)
         #expect(configuration.dropsRealtimeWhenNotWritable == true)
+    }
+
+    @Test("TCP configuration bounds Gateway shutdown drain grace")
+    func tcpConfigurationBoundsShutdownDrainGrace() {
+        let key = "IM_TCP_SHUTDOWN_DRAIN_GRACE_SECONDS"
+        let originalValue = Environment.get(key)
+        defer {
+            restoreEnvironment(key, to: originalValue)
+        }
+
+        setenv(key, "3.5", 1)
+        #expect(IMTCPConfiguration.load(from: .production).shutdownDrainGraceSeconds == 3.5)
+
+        setenv(key, "99", 1)
+        #expect(IMTCPConfiguration.load(from: .production).shutdownDrainGraceSeconds == 15)
+    }
+
+    @Test("TCP lifecycle drains admission before closing its listener")
+    func tcpLifecycleDrainsAdmissionBeforeClosingListener() async throws {
+        let values = [
+            "IM_TCP_ENABLED": "true",
+            "IM_TCP_HOST": "127.0.0.1",
+            "IM_TCP_PORT": "0",
+            "IM_TCP_SHUTDOWN_DRAIN_GRACE_SECONDS": "0"
+        ]
+        let originalValues = Dictionary(uniqueKeysWithValues: values.keys.map { ($0, Environment.get($0)) })
+        defer {
+            for (key, value) in originalValues {
+                restoreEnvironment(key, to: value)
+            }
+        }
+        for (key, value) in values {
+            setenv(key, value, 1)
+        }
+
+        let app = try await Application.make(.testing)
+        app.imTCPConfiguration = IMTCPConfiguration.load(from: .testing)
+        let lifecycle = IMTCPServerLifecycle()
+        do {
+            try await lifecycle.didBootAsync(app)
+            #expect(!app.imTCPAdmissionController.status().isDraining)
+
+            await lifecycle.shutdownAsync(app)
+
+            #expect(app.imTCPAdmissionController.status().isDraining)
+            let decision = app.imTCPAdmissionController.acquire()
+            #expect(decision.isAccepted == false)
+            #expect(decision.rejectionReason == .gatewayDraining)
+            try await app.asyncShutdown()
+        } catch {
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("Maintenance configuration is explicit and disabled by default")
+    func maintenanceConfigurationIsExplicitAndDisabledByDefault() {
+        let key = "IM_MAINTENANCE_ENABLED"
+        let originalValue = Environment.get(key)
+        defer {
+            restoreEnvironment(key, to: originalValue)
+        }
+
+        unsetenv(key)
+        #expect(IMMaintenanceConfiguration.load().enabled == false)
+
+        setenv(key, "true", 1)
+        #expect(IMMaintenanceConfiguration.load().enabled == true)
     }
 
     @Test("TCP configuration and admission controller enforce a bounded Gateway connection budget")
@@ -4844,6 +5000,7 @@ private func withProductionRuntimeEnvironment(_ body: () async throws -> Void) a
         "IM_ROUTING_MODE": "redis",
         "REDIS_URL": "redis://redis.internal:6379",
         "IM_REDIS_MAX_CONNECTIONS": "16",
+        "IM_ALLOW_BEST_EFFORT_NODE_DISPATCH": "true",
         "IM_COMMAND_API_INTERNAL_BASE_URL": "http://command.internal",
         "IM_GATEWAY_RELAY_MODE": "http",
         "IM_GATEWAY_INTERNAL_BASE_URL": "http://gateway.internal",

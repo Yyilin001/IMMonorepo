@@ -43,6 +43,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['local-convergence-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const email = __ENV.IM_EMAIL || 'demo@example.com';
 const password = __ENV.IM_PASSWORD || 'password1234';
 const memberEmails = (__ENV.IM_MEMBER_EMAILS || 'alice@example.com')
@@ -64,6 +65,12 @@ function jsonHeaders(token) {
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
+  return { headers };
+}
+
+function commandHeaders(token) {
+  const headers = jsonHeaders(token).headers;
+  headers.Accept = 'application/vnd.im.conversation-command-receipt+json';
   return { headers };
 }
 
@@ -101,13 +108,13 @@ function createConversation(token) {
       title: conversationKind === 'direct' ? null : `k6-message-convergence-${Date.now()}`,
       memberEmails,
     }),
-    jsonHeaders(token)
+    commandHeaders(token)
   );
-  check(res, { 'create convergence conversation ok': (r) => r.status === 200 });
-  if (res.status !== 200) {
+  check(res, { 'create convergence conversation accepted': (r) => r.status === 202 });
+  if (res.status !== 202) {
     fail(`create conversation failed: ${res.status} ${res.body}`);
   }
-  return res.json('id');
+  return res.json('conversationID');
 }
 
 export function setup() {
@@ -126,7 +133,7 @@ export function setup() {
 function sendInternalMessage(senderUserID, conversationID, clientMessageID) {
   const startedAt = Date.now();
   const res = http.post(
-    `${baseURL}/internal/im/messages/send`,
+    `${commandBaseURL}/internal/im/messages/send`,
     JSON.stringify({
       senderUserID,
       payload: {
@@ -148,7 +155,7 @@ function sendInternalMessage(senderUserID, conversationID, clientMessageID) {
   return res.status === 200;
 }
 
-function latestSummarySequence(token, conversationID) {
+function latestTimelineSequence(token, conversationID) {
   const res = http.get(`${baseURL}/api/im/conversations?limit=100`, jsonHeaders(token));
   if (res.status !== 200) {
     return 0;
@@ -157,12 +164,12 @@ function latestSummarySequence(token, conversationID) {
   const body = res.json();
   const items = Array.isArray(body.items) ? body.items : [];
   const summary = items.find((item) => item.id === conversationID);
-  return Number(summary && summary.lastMessage ? summary.lastMessage.serverSequence || 0 : 0);
+  return Number(summary && summary.lastMessage ? summary.lastMessage.timelineSequence || 0 : 0);
 }
 
 function findTimelineMessage(token, conversationID, clientMessageID, afterSequence) {
   const res = http.get(
-    `${baseURL}/api/im/conversations/${conversationID}/messages/since?afterSequence=${afterSequence}&limit=100`,
+    `${baseURL}/api/im/conversations/${conversationID}/timeline/since?afterSequence=${afterSequence}&limit=100`,
     jsonHeaders(token)
   );
   if (res.status !== 200) {
@@ -209,7 +216,7 @@ function pollUntil(deadline, action) {
 export default function (data) {
   const clientMessageID = `k6-convergence-${__VU}-${__ITER}-${Date.now()}`;
   const startedAt = Date.now();
-  const previousSequence = latestSummarySequence(data.token, data.conversationID);
+  const previousSequence = latestTimelineSequence(data.token, data.conversationID);
 
   if (!sendInternalMessage(data.senderUserID, data.conversationID, clientMessageID)) {
     convergenceErrors.add(true);

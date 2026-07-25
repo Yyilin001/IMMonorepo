@@ -3,8 +3,9 @@ import NIOCore
 import Vapor
 
 /// Accepts an already-authorized realtime packet from another Cell. The target
-/// only writes to its local Gateway registry; it never routes the envelope a
-/// second time.
+/// resolves the packet only within its own Cell: local connections receive it
+/// directly and remote Gateway nodes receive it through the node dispatcher.
+/// It must never use Cell routing again, otherwise an ingress loop is possible.
 struct InternalCellRealtimeDispatchController: RouteCollection {
     private static let internalSecretHeader = "X-IM-Internal-Secret"
     private let maxBodySize: ByteCount
@@ -32,7 +33,7 @@ struct InternalCellRealtimeDispatchController: RouteCollection {
     func dispatch(req: Request) async throws -> HTTPStatus {
         let body = try req.content.decode(IMCellRealtimeDispatchRequest.self)
         try validate(req: req, body: body)
-        await req.application.connectionRoutingService.handleRemoteDispatch(body.envelope)
+        try await req.application.connectionRoutingService.handleRemoteCellDispatch(body.envelope)
         return .noContent
     }
 
@@ -59,7 +60,7 @@ struct InternalCellRealtimeDispatchController: RouteCollection {
     private func dispatchToNode(req: Request) async throws -> HTTPStatus {
         let body = try req.content.decode(IMNodeRealtimeDispatchRequest.self)
         try validate(req: req, body: body)
-        await req.application.connectionRoutingService.handleRemoteDispatch(body.envelope)
+        try await req.application.connectionRoutingService.handleRemoteDispatch(body.envelope)
         return .noContent
     }
 

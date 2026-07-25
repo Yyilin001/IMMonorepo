@@ -18,6 +18,45 @@ Minimum capacity-validation topology:
 - `kafka`: 3+ brokers for production validation
 - `prometheus`: scrapes each HTTP role on `/internal/metrics`
 
+Gateway-to-Gateway realtime dispatch uses `IM_NODE_DISPATCH_MODE=valkey-stream`.
+Each target Gateway owns a hash-tagged Valkey Stream and consumer group. A
+publisher appends a pre-routed packet to the target stream; the target only ACKs
+and deletes it after accepting it for local TCP fanout. Pending entries are
+claimed after a Gateway restart, so this path must not be replaced with direct
+HTTP or Pub/Sub in a production Cluster deployment.
+
+Rolling restarts retain a Gateway stream: the replacement uses the same
+`IM_NODE_ID` and claims pending entries. For permanent node retirement, drain
+the Gateway, wait through the configured presence heartbeat interval, confirm
+that no routes target the old node, then have a Valkey administrator remove the
+empty stream/group. Deployment automation must not delete the stream during
+ordinary shutdown because an in-flight publisher can otherwise lose its
+at-least-once realtime hint.
+
+Cross-Cell realtime dispatch has a separate durable boundary. Before a source
+Cell calls the target Cell's private HTTPS ingress, it writes a row to the
+default control-plane database's `im_cross_cell_realtime_dispatches` table. A successful `204` marks the row
+`delivered`; an unavailable target or a rejected request returns it to
+`pending` with exponential retry. Each source-to-target envelope has a stable
+database dedupe key, so a Kafka replay after source persistence does not create
+a second outbox handoff. The target ingress does not deliver only on
+the load-balanced Gateway that received the request: it resolves routes inside
+the target Cell and writes other Gateway targets to their own Valkey Streams.
+The transport is at-least-once, so TCP clients must keep their existing event
+ID/sequence de-duplication and cursor-gap reconciliation behavior.
+
+Set the `IM_CROSS_CELL_REALTIME_OUTBOX_*` values in every Cell inventory. The
+source Cell's gateway and realtime-delivery-consumer processes may both claim
+work safely; PostgreSQL `SKIP LOCKED` leasing prevents concurrent processing.
+`IM_CROSS_CELL_REALTIME_OUTBOX_DELIVERY_TIMEOUT_SECONDS` bounds one target
+ingress HTTP attempt so a blackholed network path cannot permanently occupy a
+worker slot; use a small value such as `5` and let the durable retry backoff
+handle recovery.
+Set `IM_CLEANUP_CROSS_CELL_REALTIME_DISPATCH_RETENTION_DAYS` to at least the
+Kafka event topic retention window. The deployment renderer rejects a shorter
+value, preventing an old Kafka replay from outliving the outbox idempotency
+boundary. Keep additional retention when incident diagnosis requires it.
+
 Traffic routing:
 
 - Public HTTP/API load balancer:
@@ -113,6 +152,15 @@ sudo systemctl enable --now imserver-stream-consumer@realtime_delivery_consumer
 
 Enable exactly one consumer group per process.
 
+Run `imserver-maintenance` on exactly one selected host. It owns cleanup,
+consistency repair, and AI stream stale-state repair; do not enable it on
+Gateway, API, or consumer replicas:
+
+```bash
+sudo cp roles/maintenance.env /etc/imserver/roles/maintenance.env
+sudo systemctl enable --now imserver-maintenance
+```
+
 On a multi-node consumer host, configure the operational audit with the enabled
 instance suffixes, for example:
 
@@ -157,6 +205,15 @@ Each process must run exactly one group in production.
 6. Scale command-api and Kafka partitions until write target is reached.
 7. Scale query-api until conversation/history P95 is stable.
 8. Pause one `stream-consumer`, verify lag rises, resume it, verify lag recovers.
+9. Pause one Gateway while another routes active users to it, then resume it and
+   verify `im_durable_node_dispatch_enqueued_total` and
+   `im_durable_node_dispatch_acknowledged_total` converge without packet loss.
+10. Block one target Cell's realtime ingress temporarily. Verify
+    `im_cross_cell_dispatch_outbox_retries_total` increases and
+    `im_cross_cell_dispatch_outbox_backlog` becomes non-zero; restore ingress
+    and verify the backlog returns to zero. Repeat with the recipient attached
+    to a different Gateway than the ingress request target, and verify that
+    Gateway's durable node-dispatch metrics converge.
 
 Every node inventory must declare `IM_AVAILABILITY_ZONE`. A Cell rendered from
 two or more inventories must span at least two values; the inventory validator

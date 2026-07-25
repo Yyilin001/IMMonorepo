@@ -165,13 +165,13 @@ extension IMRealtimeMessageService {
     }
 
     func rejectBlockedDirectMessageIfNeeded(conversationID: UUID, senderUserID: UUID) async throws {
-        let db = try await database(forConversationID: conversationID)
-        guard let conversation = try await Conversation.find(conversationID, on: db),
+        let conversationDatabase = try await database(forConversationID: conversationID)
+        guard let conversation = try await Conversation.find(conversationID, on: conversationDatabase),
               conversation.conversationKind == .direct
         else {
             return
         }
-        let memberships = try await ConversationMember.query(on: db)
+        let memberships = try await ConversationMember.query(on: conversationDatabase)
             .filter(\.$conversation.$id == conversationID)
             .all()
         guard memberships.count == 2,
@@ -179,11 +179,18 @@ extension IMRealtimeMessageService {
         else {
             return
         }
-        let senderBlocked = try await UserBlock.find(UserBlock.recordID(ownerUserID: senderUserID, blockedUserID: peerUserID), on: db) != nil
-        let peerBlocked = try await UserBlock.find(UserBlock.recordID(ownerUserID: peerUserID, blockedUserID: senderUserID), on: db) != nil
+        // Blocks are user-directory state, not conversation-shard state. A
+        // migrated conversation therefore keeps enforcing the same policy.
+        let userDirectoryDatabase = userDirectoryDatabase(fallingBackTo: conversationDatabase)
+        let senderBlocked = try await UserBlock.find(UserBlock.recordID(ownerUserID: senderUserID, blockedUserID: peerUserID), on: userDirectoryDatabase) != nil
+        let peerBlocked = try await UserBlock.find(UserBlock.recordID(ownerUserID: peerUserID, blockedUserID: senderUserID), on: userDirectoryDatabase) != nil
         if senderBlocked || peerBlocked {
             throw Abort(.forbidden, reason: "当前无法发送私聊消息。")
         }
+    }
+
+    func userDirectoryDatabase(fallingBackTo database: any Database) -> any Database {
+        app?.db ?? database
     }
 
     func database(forConversationID conversationID: UUID) async throws -> any Database {

@@ -52,13 +52,8 @@ extension Application {
     }
 
     var gatewaySessionService: GatewaySessionService {
-        if !imRuntimeRole.servesGateway, gatewayRelayConfiguration.mode == .http {
-            return GatewaySessionService(
-                transport: HTTPGatewaySessionTransport(app: self, configuration: gatewayRelayConfiguration),
-                routingMetrics: routingMetrics
-            )
-        }
-
+        // Dedicated realtime consumers configure routing so they can persist
+        // cross-Cell handoffs; do not short-circuit them through HTTP relay.
         if hasConnectionRoutingServiceConfigured {
             return GatewaySessionService(
                 transport: LocalGatewaySessionTransport(routingService: connectionRoutingService),

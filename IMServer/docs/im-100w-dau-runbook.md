@@ -59,8 +59,8 @@ Production must not run `combined` or `projection-worker`.
 - `IM_SEQUENCE_ALLOCATION_MODE=block`
 - `IM_MESSAGE_WRITE_BATCH_ENABLED=true`
 - `IM_REDIS_MAX_CONNECTIONS=32`
-- `IM_REDIS_DEPLOYMENT_TOPOLOGY=standalone` remains a valid production posture with `REDIS_URL` resolving to a stable primary endpoint. Redis Cluster is also supported through explicit `IM_REDIS_CLUSTER_NODES`; Gateway and `realtime-delivery-consumer` must set `IM_NODE_DISPATCH_MODE=http` with a shared private node endpoint map. Connection routes use `{user}`, `{session}`, and `{conversation}` keys; hot-conversation limits, auth rate limits, and auth-session revisions are independently slot-routed. Timeline/since invalidation is a bounded, hash-tagged Redis Stream, so a temporary reader disconnect resumes from the last stream ID instead of relying on ordinary Pub/Sub delivery. Redis-mode node dispatch remains incompatible with Cluster. AI stream admission is stored as a primary-database lease and enforces user/conversation limits with PostgreSQL advisory locks.
-- Gateway node dispatch starts as `IM_NODE_DISPATCH_MODE=redis`. Before migrating a Cell off Redis Pub/Sub, provision private HTTPS ingress per Gateway node and configure the same `IM_GATEWAY_NODE_DISPATCH_ENDPOINTS` map on every Gateway in that Cell. Then set `IM_NODE_DISPATCH_MODE=http`, use a dedicated node-dispatch secret, and monitor the existing `im_cross_node_dispatch_*` metrics through a one-Cell canary before rolling out more Cells.
+- `IM_REDIS_DEPLOYMENT_TOPOLOGY=standalone` remains a valid production posture with `REDIS_URL` resolving to a stable primary endpoint. Redis Cluster is also supported through explicit `IM_REDIS_CLUSTER_NODES`; Gateway and `realtime-delivery-consumer` must set `IM_NODE_DISPATCH_MODE=valkey-stream`. Connection routes use `{user}`, `{session}`, and `{conversation}` keys; hot-conversation limits, auth rate limits, and auth-session revisions are independently slot-routed. Timeline/since invalidation is a bounded, hash-tagged Redis Stream, so a temporary reader disconnect resumes from the last stream ID instead of relying on ordinary Pub/Sub delivery. Redis-mode node dispatch remains incompatible with Cluster. AI stream admission is stored as a primary-database lease and enforces user/conversation limits with PostgreSQL advisory locks.
+- Gateway node dispatch starts as `IM_NODE_DISPATCH_MODE=redis` only for standalone compatibility and is best effort. A production Gateway must also set `IM_ALLOW_BEST_EFFORT_NODE_DISPATCH=true`; omission intentionally fails startup. For a multi-Gateway Cell, provision Valkey Cluster, set `IM_NODE_DISPATCH_MODE=valkey-stream` on every Gateway, and canary the Cell while monitoring `im_durable_node_dispatch_enqueued_total`, `im_durable_node_dispatch_acknowledged_total`, and `im_durable_node_dispatch_retries_total`. Each target Gateway consumes its own hash-tagged stream and only acknowledges an entry after local handoff.
 - `IM_REALTIME_CELL_ID=cell-shenzhen-a` (use the same value for every role in the cell)
 - multi-Cell routing: set `IM_CELL_INGRESS_COMMAND_ENDPOINTS=cell-shenzhen-a=https://command-api-cell-shenzhen-a.internal,cell-shanghai-a=https://command-api-cell-shanghai-a.internal`, plus equivalent `IM_CELL_INGRESS_QUERY_ENDPOINTS` and `IM_CELL_INGRESS_REALTIME_ENDPOINTS` maps. Use HTTPS private endpoints and optionally set a dedicated `IM_CELL_INGRESS_SHARED_SECRET`. Every non-empty entry must be `cell_id=https://host`; malformed entries make production startup fail. `IM_REALTIME_CELL_INGRESS_ENDPOINTS` is supported only as a legacy fallback for an internal L7 router that exposes all three roles.
 - To remove endpoint-map rollout coupling, set `IM_CELL_INGRESS_REGISTRY_MODE=database` on every role in a Cell and use `ops --upsert-cell-ingress` to write all three private HTTPS endpoints. Database mode deliberately does not fall back to environment endpoint maps; resolver cache TTL is controlled by `IM_CELL_INGRESS_REGISTRY_CACHE_TTL_SECONDS=1..300`.
@@ -117,6 +117,22 @@ the timeout expires, repeat with `disconnectExisting: true`; clients receive a
 `server_shutdown` packet and reconnect through the load balancer. Reset with
 `{ "draining": false, "disconnectExisting": false }` only after the instance
 is returned to service.
+
+### Retiring a Valkey Stream Gateway
+
+Do not delete a Gateway's `valkey-stream` key during an ordinary restart or a
+rolling deployment. The replacement process for the same `IM_NODE_ID` must
+claim and finish pending entries left by the previous process.
+
+For a permanent Gateway retirement, first remove the instance from TCP load
+balancing and complete the drain procedure above. Confirm that the drain status
+reports zero authenticated connections, wait at least one configured presence
+heartbeat interval, and verify no publisher still resolves users to the retired
+`IM_NODE_ID`. Only then may a Valkey administrator inspect and remove that
+node's hash-tagged stream and consumer group if they are empty. This is an
+explicit operational action, not automatic shutdown behavior: deleting a stream
+while stale presence or an in-flight publisher still targets the node would
+discard an at-least-once realtime hint before client catch-up can run.
 
 ## Repair Commands
 
@@ -221,7 +237,10 @@ No-Go if:
 - Failure drills: `cd IMServer && ./scripts/failure_drill.sh pause-stream-consumer`.
   For a migrated route, also run `./scripts/multicell_smoke.sh failure-drill redis-outage`
   and `./scripts/multicell_smoke.sh failure-drill kafka-outage`; both require
-  the Cell B outbox to recover before they pass.
+  the Cell B outbox to recover before they pass. On a macOS load-generator,
+  also run `IM_MULTICELL_SMOKE_REQUIRE_GATEWAY_TCP_RELAY=true ./scripts/multicell_smoke.sh
+  failure-drill target-gateway-outage`; it proves source Cross-Cell outbox
+  recovery through a real Cell B TCP recipient.
 - Staging baseline wrapper: `cd IMServer && ./scripts/staging_baseline.sh --profile staging-baseline --env-file LoadTests/staging-baseline.env`
 - HTTP smoke: `cd IMServer/LoadTests/k6 && k6 run -e PROFILE=local-smoke http-small-group.js`
 - HTTP staging baseline: `cd IMServer/LoadTests/k6 && k6 run -e PROFILE=staging-baseline http-small-group.js`

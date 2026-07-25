@@ -54,6 +54,8 @@ enum IMMigrationRegistry {
         app.migrations.add(AddConversationShardMigrationTransferAuthorization())
         app.migrations.add(CreateConversationWriteFences())
         app.migrations.add(CreateIMRealtimeCellRegistry())
+        app.migrations.add(CreateCrossCellRealtimeDispatchOutbox())
+        app.migrations.add(AddCrossCellRealtimeDispatchDedupeKey())
         app.migrations.add(CreateDirectConversationPairDirectory())
         app.migrations.add(CreateConversationMessageSearchIndex())
         app.migrations.add(AddConversationMessageSearchResultFields())
@@ -120,7 +122,10 @@ enum IMMigrationRegistry {
                 CreateConversationSummaryReadModelTables(),
                 AddConversationSummaryReadModelIndexes(),
                 CreateConversationActivitySummaryReadModel(),
-                AddLargeGroupSummaryReadPathIndexes()
+                AddLargeGroupSummaryReadPathIndexes(),
+                CreateSummaryShardOwnerDeliveryReadModels(),
+                CreateConversationEventAuxiliaryReadModelTables(),
+                AddConversationEventAuxiliaryReadModelIndexes()
             ], to: databaseID)
         }
     }
@@ -182,6 +187,11 @@ enum IMMigrationRegistry {
             CreateConversationDomainEventRecipientSetMembers(),
             CreateConversationDomainEventRecipientSnapshot(),
             AddConversationDomainEventRecipientSnapshotHash(),
+            // Kafka consumer idempotency is scoped to the physical source
+            // shard. Every Cell-local conversation shard must own these
+            // records instead of relying on the primary/control database.
+            CreateConversationEventAuxiliaryReadModelTables(),
+            AddConversationEventAuxiliaryReadModelIndexes(),
             CreateAIMessageStreamIndex(),
             AddTimelineReadPathIndexes(),
             EnforceConversationShardSequenceInvariants()
@@ -255,6 +265,24 @@ enum IMMigrationRegistry {
 
         for table in tablesToDrop {
             try await sql.raw("DROP TABLE IF EXISTS \(unsafeRaw: table)\(unsafeRaw: dropSuffix)").run()
+        }
+
+        // Cross-Cell dispatches belong to the default control-plane database,
+        // while `imWriteDB` can be a dedicated conversation shard.
+        if let controlPlaneSQL = app.db as? any SQLDatabase {
+            try await controlPlaneSQL.raw(
+                "DROP TABLE IF EXISTS \(unsafeRaw: CrossCellRealtimeDispatch.schema)\(unsafeRaw: dropSuffix)"
+            ).run()
+            if try await fluentMigrationTableExists(on: controlPlaneSQL) {
+                try await controlPlaneSQL.raw(
+                    """
+                    DELETE FROM \(unsafeRaw: "_fluent_migrations")
+                    WHERE \(unsafeRaw: "name") IN (\(bind: "CreateCrossCellRealtimeDispatchOutbox"), \(bind: "AddCrossCellRealtimeDispatchDedupeKey"))
+                       OR \(unsafeRaw: "name") LIKE \(bind: "%.CreateCrossCellRealtimeDispatchOutbox")
+                       OR \(unsafeRaw: "name") LIKE \(bind: "%.AddCrossCellRealtimeDispatchDedupeKey")
+                    """
+                ).run()
+            }
         }
 
         if try await fluentMigrationTableExists(on: sql) {
@@ -336,6 +364,8 @@ private let imMigrationNames: [String] = [
     "AddConversationShardMigrationTransferAuthorization",
     "CreateConversationWriteFences",
     "CreateIMRealtimeCellRegistry",
+    "CreateCrossCellRealtimeDispatchOutbox",
+    "AddCrossCellRealtimeDispatchDedupeKey",
     "CreateDirectConversationPairDirectory",
     "CreateConversationMessageSearchIndex",
     "AddConversationMessageSearchResultFields",

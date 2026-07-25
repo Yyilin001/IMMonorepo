@@ -83,10 +83,17 @@ protocol ConversationEventConsumer: Sendable {
     var supportedEventTypes: Set<ConversationDomainEventType> { get }
     func consume(_ envelope: ConversationEventEnvelope) async throws
     func consumeMessageCreatedRun(_ envelopes: [ConversationEventEnvelope]) async throws
+    func consumeMembershipAddedRun(_ envelopes: [ConversationEventEnvelope]) async throws
 }
 
 extension ConversationEventConsumer {
     func consumeMessageCreatedRun(_ envelopes: [ConversationEventEnvelope]) async throws {
+        for envelope in envelopes {
+            try await consume(envelope)
+        }
+    }
+
+    func consumeMembershipAddedRun(_ envelopes: [ConversationEventEnvelope]) async throws {
         for envelope in envelopes {
             try await consume(envelope)
         }
@@ -295,6 +302,41 @@ struct ConversationProjectionConsumer: ConversationEventConsumer {
                 on: sourceDB,
                 readModelKey: target.shardID,
                 recordMetrics: index == 0
+            )
+        }
+    }
+
+    func consumeMembershipAddedRun(_ envelopes: [ConversationEventEnvelope]) async throws {
+        guard let first = envelopes.first,
+              envelopes.allSatisfy({
+                  $0.eventType == .membershipAdded && $0.conversationID == first.conversationID
+              })
+        else {
+            for envelope in envelopes {
+                try await consume(envelope)
+            }
+            return
+        }
+
+        // Bulk membership imports publish one durable event per command batch. The
+        // final projection is identical after every event in this contiguous run,
+        // so refresh each recipient summary once instead of once per batch.
+        let recipientUserIDs = Array(
+            Set(envelopes.flatMap { $0.payload.recipientUserIDs })
+        ).sorted { $0.uuidString < $1.uuidString }
+        for target in projectionTargets(for: recipientUserIDs) {
+            try await IMConversationSummaryProjectionService(
+                sourceDB: sourceDB,
+                readModelDB: target.readModelDB,
+                userDirectoryDB: app.db,
+                streamConsumerConfiguration: app.streamConsumerConfiguration,
+                domainEventMetrics: app.conversationDomainEventMetrics,
+                activitySummaryCoalescer: app.conversationActivitySummaryCoalescer
+            ).refreshConversationSummaries(
+                conversationID: first.conversationID,
+                recipientUserIDs: target.recipientUserIDs,
+                on: sourceDB,
+                writeChangeLog: false
             )
         }
     }
@@ -818,7 +860,11 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
         )
         return batches.flatMap { batch in
             batch.recipientUserIDs.map { recipientUserID in
-                (recipientUserID, batch.payload)
+                // Owner-delivery rows are persisted once per recipient. Do not
+                // copy a large membership list into every row for one group
+                // mutation; clients use the authoritative member sync path for
+                // the complete list.
+                (recipientUserID, batch.payload.scopedForOwner(recipientUserID))
             }
         }
     }
@@ -1305,7 +1351,7 @@ struct ConversationRealtimeConsumer: ConversationEventConsumer {
                 messageIDs: envelope.payload.messageIDs
             )
         case .membershipAdded:
-            return .memberChanged(memberUserIDs: envelope.payload.recipientUserIDs)
+            return .memberChanged(memberUserIDs: envelope.payload.memberUserIDs)
         case .membershipRemoved:
             return .memberChanged(memberUserIDs: envelope.payload.affectedUserID.map { [$0] } ?? [])
         case .membershipRoleUpdated:
@@ -1379,11 +1425,6 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
         let downgradedActiveUserIDs: [UUID]
     }
 
-    private struct ActiveConversationRouteCacheKey: Hashable, Sendable {
-        let conversationID: UUID
-        let recipientUserIDs: Set<UUID>
-    }
-
     let app: Application
     let sourceDB: any Database
 
@@ -1438,7 +1479,7 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
             )
             let relayBatches = split.activeFullBatches
                 + split.activeCompactBatches
-            await app.gatewaySessionService.sendDomainEventPayloadBatches(
+            try await app.gatewaySessionService.sendDomainEventPayloadBatchesReliably(
                 relayBatches.map {
                     IMGatewayDomainEventPayloadBatch(
                         payload: $0.payload,
@@ -1506,11 +1547,9 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
             + activeCompactBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
         let dispatchStartedAt = Date()
         if !activeFullBatches.isEmpty {
-            await app.realtimeDeliveryAsyncDispatcher.dispatchPayloadBatches(
+            try await app.realtimeDeliveryAsyncDispatcher.dispatchPayloadBatchesReliably(
                 activeFullBatches,
-                requestID: requestID,
-                coalescingKey: nil,
-                coalescingWindowMilliseconds: 0
+                requestID: requestID
             )
         }
         if !activeCompactBatches.isEmpty {
@@ -1599,7 +1638,7 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
                 )
             )
         }
-        return await splitActiveConversationFanoutIfNeeded(payloadBatches)
+        return try await splitActiveConversationFanoutIfNeeded(payloadBatches)
     }
 
     private func shouldDeferMessageCreatedRunRecipientResolutionForActiveOnlyFanout(
@@ -1693,21 +1732,23 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
             return nil
         }
 
-        let routeStartedAt = Date()
         do {
-            let routeLookup = try await activeConversationRoutes(
-                app: app,
-                conversationID: first.conversationID,
-                recipientUserIDs: recipientUserIDs
-            )
-            let activeRoutes = routeLookup.routes
             var split = ActiveConversationFanoutSplit()
             split.didSplit = true
-            split.routeMilliseconds = routeLookup.cacheHit
-                ? 0
-                : IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: routeStartedAt)
 
             for envelope in envelopes {
+                // Presence can change while a large Kafka batch is being processed.
+                // Reuse the application-level TTL cache, not a whole-batch snapshot.
+                let routeStartedAt = Date()
+                let routeLookup = try await activeConversationRoutes(
+                    app: app,
+                    conversationID: envelope.conversationID,
+                    recipientUserIDs: recipientUserIDs
+                )
+                let activeRoutes = routeLookup.routes
+                if !routeLookup.cacheHit {
+                    split.routeMilliseconds += IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: routeStartedAt)
+                }
                 let aggregateSequence = try imPositiveUInt64Sequence(
                     envelope.event.aggregateSequence,
                     field: "aggregate_sequence"
@@ -1791,17 +1832,22 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
             }
             return split
         } catch {
-            await app.routingMetrics.recordActiveConversationFanoutRouteSplitDrop(
+            await app.routingMetrics.recordActiveConversationFanoutRouteLookupFailure(
                 recipientCount: recipientCount
             )
             var metadata = imConsumerDeliveryFailureMetadata(
                 trace: imConsumerDeliveryTrace(for: first, app: app),
                 app: app,
+                outcome: "retrying",
                 error: error
             )
             metadata["recipient_count"] = .stringConvertible(recipientCount)
-            app.logger.warning("Realtime delivery consumer pre-split failed; dropping realtime fanout.", metadata: metadata)
-            return ActiveConversationFanoutSplit(didSplit: true)
+            app.logger.warning("Realtime delivery consumer pre-split failed; retrying stream event.", metadata: metadata)
+            throw ConversationEventTransientProcessingError.realtimeRouteLookupFailed(
+                eventID: first.eventID,
+                conversationID: first.conversationID,
+                underlyingError: String(describing: error)
+            )
         }
     }
 
@@ -1824,41 +1870,60 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
             return nil
         }
 
-        let routeStartedAt = Date()
         do {
-            let routeLookup = try await activeConversationRoutes(
-                app: app,
-                conversationID: first.conversationID,
-                recipientUserIDs: nil
-            )
-            let activeCandidateUserIDs = Array(routeLookup.routes.keys)
-            let resolvedActiveRecipients = try await ConversationDomainEventRecipientResolver(db: sourceDB, app: app)
-                .filterRecipients(for: first, candidateUserIDs: activeCandidateUserIDs)
-            let activeRecipientUserIDs = resolvedActiveRecipients.userIDs
-            let activeRecipientSet = Set(activeRecipientUserIDs)
-            let activeRoutes = routeLookup.routes.filter { activeRecipientSet.contains($0.key) }
-            if routeLookup.routes.isEmpty || activeRecipientUserIDs.isEmpty {
-                app.logger.info("Realtime delivery consumer active-only pre-split has no active recipients.", metadata: [
-                    "conversation_id": .string(first.conversationID.uuidString),
-                    "route_count": .stringConvertible(routeLookup.routes.count),
-                    "active_candidate_count": .stringConvertible(activeCandidateUserIDs.count),
-                    "filtered_active_recipient_count": .stringConvertible(activeRecipientUserIDs.count),
-                    "route_cache_hit": .stringConvertible(routeLookup.cacheHit),
-                    "route_cache_partial_hit": .stringConvertible(routeLookup.cachePartialHit),
-                    "route_cached_user_count": .stringConvertible(routeLookup.cachedUserCount),
-                    "route_missed_user_count": .stringConvertible(routeLookup.missedUserCount),
-                    "route_joined_in_flight": .stringConvertible(routeLookup.joinedInFlight),
-                    "resolved_source": .string(resolvedActiveRecipients.source.rawValue),
-                    "recipient_count_hint": .stringConvertible(recipientCount)
-                ])
-            }
             var split = ActiveConversationFanoutSplit()
             split.didSplit = true
-            split.routeMilliseconds = routeLookup.cacheHit
-                ? 0
-                : IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: routeStartedAt)
+            var activeRoutes: [UUID: Set<String>] = [:]
+            var activeRecipientUserIDs: [UUID] = []
+            var resolvedRecipientSource: ConversationDomainEventResolvedRecipients.Source = .inline
+            var shouldRefreshActiveRecipients = true
+            let activeCompactCoalescingWindowMilliseconds = app.streamConsumerConfiguration
+                .realtimeActiveCompactHintCoalesceWindowMilliseconds
+            let relayEnvelopes: ArraySlice<ConversationEventEnvelope>
+            if activeCompactCoalescingWindowMilliseconds > 0,
+               let latestEnvelope = envelopes.last {
+                // Active compact hints are cursor-based. Preserve only the
+                // newest event in a Kafka run before doing route resolution.
+                relayEnvelopes = ArraySlice([latestEnvelope])
+            } else {
+                relayEnvelopes = envelopes[...]
+            }
 
-            for envelope in envelopes {
+            for envelope in relayEnvelopes {
+                let routeStartedAt = Date()
+                let routeLookup = try await activeConversationRoutes(
+                    app: app,
+                    conversationID: envelope.conversationID,
+                    recipientUserIDs: nil
+                )
+                if !routeLookup.cacheHit {
+                    split.routeMilliseconds += IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: routeStartedAt)
+                }
+                if shouldRefreshActiveRecipients || !routeLookup.cacheHit {
+                    let activeCandidateUserIDs = Array(routeLookup.routes.keys)
+                    let resolvedActiveRecipients = try await ConversationDomainEventRecipientResolver(db: sourceDB, app: app)
+                        .filterRecipients(for: envelope, candidateUserIDs: activeCandidateUserIDs)
+                    activeRecipientUserIDs = resolvedActiveRecipients.userIDs
+                    resolvedRecipientSource = resolvedActiveRecipients.source
+                    let activeRecipientSet = Set(activeRecipientUserIDs)
+                    activeRoutes = routeLookup.routes.filter { activeRecipientSet.contains($0.key) }
+                    shouldRefreshActiveRecipients = false
+                    if routeLookup.routes.isEmpty || activeRecipientUserIDs.isEmpty {
+                        app.logger.info("Realtime delivery consumer active-only pre-split has no active recipients.", metadata: [
+                            "conversation_id": .string(envelope.conversationID.uuidString),
+                            "route_count": .stringConvertible(routeLookup.routes.count),
+                            "active_candidate_count": .stringConvertible(activeCandidateUserIDs.count),
+                            "filtered_active_recipient_count": .stringConvertible(activeRecipientUserIDs.count),
+                            "route_cache_hit": .stringConvertible(routeLookup.cacheHit),
+                            "route_cache_partial_hit": .stringConvertible(routeLookup.cachePartialHit),
+                            "route_cached_user_count": .stringConvertible(routeLookup.cachedUserCount),
+                            "route_missed_user_count": .stringConvertible(routeLookup.missedUserCount),
+                            "route_joined_in_flight": .stringConvertible(routeLookup.joinedInFlight),
+                            "resolved_source": .string(resolvedRecipientSource.rawValue),
+                            "recipient_count_hint": .stringConvertible(recipientCount)
+                        ])
+                    }
+                }
                 let aggregateSequence = try imPositiveUInt64Sequence(
                     envelope.event.aggregateSequence,
                     field: "aggregate_sequence"
@@ -1873,7 +1938,7 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
                 if !plan.fullActiveUserIDs.isEmpty {
                     let resolvedRecipients = ConversationDomainEventResolvedRecipients(
                         userIDs: activeRecipientUserIDs,
-                        source: resolvedActiveRecipients.source
+                        source: resolvedRecipientSource
                     )
                     fullBatches = try await realtimeConsumer.domainEventPayloadBatches(
                         for: envelope,
@@ -1929,7 +1994,7 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
                     if !plan.compactActiveUserIDs.isEmpty {
                         let resolvedRecipients = ConversationDomainEventResolvedRecipients(
                             userIDs: activeRecipientUserIDs,
-                            source: resolvedActiveRecipients.source
+                            source: resolvedRecipientSource
                         )
                         let compactBatches = try await realtimeConsumer.domainEventPayloadBatches(
                             for: envelope,
@@ -1950,17 +2015,22 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
             }
             return split
         } catch {
-            await app.routingMetrics.recordActiveConversationFanoutRouteSplitDrop(
+            await app.routingMetrics.recordActiveConversationFanoutRouteLookupFailure(
                 recipientCount: recipientCount
             )
             var metadata = imConsumerDeliveryFailureMetadata(
                 trace: imConsumerDeliveryTrace(for: first, app: app),
                 app: app,
+                outcome: "retrying",
                 error: error
             )
             metadata["recipient_count"] = .stringConvertible(recipientCount)
-            app.logger.warning("Realtime delivery consumer pull-only pre-split failed; dropping realtime fanout.", metadata: metadata)
-            return ActiveConversationFanoutSplit(didSplit: true)
+            app.logger.warning("Realtime delivery consumer pull-only pre-split failed; retrying stream event.", metadata: metadata)
+            throw ConversationEventTransientProcessingError.realtimeRouteLookupFailed(
+                eventID: first.eventID,
+                conversationID: first.conversationID,
+                underlyingError: String(describing: error)
+            )
         }
     }
 
@@ -2029,7 +2099,7 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
 
     private func splitActiveConversationFanoutIfNeeded(
         _ payloadBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch]
-    ) async -> ActiveConversationFanoutSplit {
+    ) async throws -> ActiveConversationFanoutSplit {
         var split = ActiveConversationFanoutSplit()
         guard app.gatewayLocalFanoutConfiguration.activeConversationFanoutEnabled,
               app.hasConnectionRoutingServiceConfigured
@@ -2038,7 +2108,6 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
             return split
         }
 
-        var activeRouteCache: [ActiveConversationRouteCacheKey: [UUID: Set<String>]] = [:]
         for batch in payloadBatches {
             guard shouldSplitActiveConversationFanout(batch) else {
                 split.activeFullBatches.append(batch)
@@ -2046,23 +2115,17 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
             }
 
             do {
-                let cacheKey = activeConversationRouteCacheKey(for: batch)
-                let activeRoutes: [UUID: Set<String>]
-                if let cachedRoutes = activeRouteCache[cacheKey] {
-                    activeRoutes = cachedRoutes
-                } else {
-                    let routeStartedAt = Date()
-                    let routeLookup = try await activeConversationRoutes(
-                        app: app,
-                        conversationID: batch.payload.aggregateID,
-                        recipientUserIDs: batch.recipientUserIDs
-                    )
-                    let fetchedRoutes = routeLookup.routes
-                    if !routeLookup.cacheHit {
-                        split.routeMilliseconds += IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: routeStartedAt)
-                    }
-                    activeRouteCache[cacheKey] = fetchedRoutes
-                    activeRoutes = fetchedRoutes
+                // Do not retain a route snapshot for an entire stream batch: users
+                // may become active after the batch has started processing.
+                let routeStartedAt = Date()
+                let routeLookup = try await activeConversationRoutes(
+                    app: app,
+                    conversationID: batch.payload.aggregateID,
+                    recipientUserIDs: batch.recipientUserIDs
+                )
+                let activeRoutes = routeLookup.routes
+                if !routeLookup.cacheHit {
+                    split.routeMilliseconds += IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: routeStartedAt)
                 }
                 let plan = activeConversationFanoutPlan(for: batch, activeRoutes: activeRoutes)
                 split.didSplit = true
@@ -2095,28 +2158,25 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
                     )
                 }
             } catch {
-                await app.routingMetrics.recordActiveConversationFanoutRouteSplitDrop(
+                await app.routingMetrics.recordActiveConversationFanoutRouteLookupFailure(
                     recipientCount: batch.recipientUserIDs.count
                 )
                 var metadata = imConsumerDeliveryFailureMetadata(
                     trace: imConsumerDeliveryTrace(for: batch.payload, app: app),
                     app: app,
+                    outcome: "retrying",
                     error: error
                 )
                 metadata["recipient_count"] = .stringConvertible(batch.recipientUserIDs.count)
-                app.logger.warning("Realtime delivery consumer active conversation split failed; dropping realtime fanout.", metadata: metadata)
+                app.logger.warning("Realtime delivery consumer active conversation split failed; retrying stream event.", metadata: metadata)
+                throw ConversationEventTransientProcessingError.realtimeRouteLookupFailed(
+                    eventID: batch.payload.eventID,
+                    conversationID: batch.payload.aggregateID,
+                    underlyingError: String(describing: error)
+                )
             }
         }
         return split
-    }
-
-    private func activeConversationRouteCacheKey(
-        for batch: ConversationRealtimeConsumer.DomainEventPayloadBatch
-    ) -> ActiveConversationRouteCacheKey {
-        return ActiveConversationRouteCacheKey(
-            conversationID: batch.payload.aggregateID,
-            recipientUserIDs: Set(batch.recipientUserIDs)
-        )
     }
 
     private func shouldSplitActiveConversationFanout(
@@ -2176,11 +2236,6 @@ struct ConversationRealtimeDeliveryConsumer: ConversationEventConsumer {
 }
 
 struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
-    private struct RelayAfterRecordActiveRouteCacheKey: Hashable, Sendable {
-        let conversationID: UUID
-        let recipientUserIDs: [UUID]
-    }
-
     private struct OwnerDeliveryRecordEntry: Sendable {
         let ownerUserID: UUID
         let payload: IMTCPChatDomainEventPayload
@@ -2281,7 +2336,6 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
         var expectedPayloadCount = 0
         var relayRequestID: UUID?
         var relayAfterRecordBatches: [IMGatewayDomainEventPayloadBatch] = []
-        var relayAfterRecordActiveRouteCache: [RelayAfterRecordActiveRouteCacheKey: [UUID: Set<String>]] = [:]
         let sharedResolvedRecipients = try await sharedMessageCreatedRunRecipients(for: envelopes)
 
         for envelope in envelopes {
@@ -2296,6 +2350,19 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
                     .resolveRecipients(for: envelope)
             }
             let recipientUserIDs = resolvedRecipients.userIDs
+            if let skipReason = largeMembershipOwnerDeliverySkipReason(
+                for: envelope,
+                recipientCount: recipientUserIDs.count
+            ) {
+                app.logger.info("Domain delivery skipped large membership owner delivery.", metadata: [
+                    "event_id": .string(sourceEventID.uuidString),
+                    "conversation_id": .string(envelope.conversationID.uuidString),
+                    "event_type": .string(envelope.eventType.rawValue),
+                    "recipient_count": .stringConvertible(recipientUserIDs.count),
+                    "skip_reason": .string(skipReason)
+                ])
+                continue
+            }
             if let skipReason = messageCreatedOwnerDeliverySkipReason(
                 for: envelope,
                 recipientCount: recipientUserIDs.count
@@ -2321,8 +2388,7 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
                     relayAfterRecordBatches.append(
                         contentsOf: try await realtimeRelayBatchesWithoutOwnerDelivery(
                             for: envelope,
-                            resolvedRecipients: resolvedRecipients,
-                            activeRouteCache: &relayAfterRecordActiveRouteCache
+                            resolvedRecipients: resolvedRecipients
                         )
                     )
                 }
@@ -2356,7 +2422,7 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
         }
 
         if !relayAfterRecordBatches.isEmpty {
-            await dispatchRelayAfterRecordBatches(
+            try await dispatchRelayAfterRecordBatches(
                 relayAfterRecordBatches,
                 requestID: relayRequestID
             )
@@ -2451,24 +2517,20 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
         for envelope: ConversationEventEnvelope,
         resolvedRecipients: ConversationDomainEventResolvedRecipients
     ) async throws {
-        var activeRouteCache: [RelayAfterRecordActiveRouteCacheKey: [UUID: Set<String>]] = [:]
         let batches = try await realtimeRelayBatchesWithoutOwnerDelivery(
             for: envelope,
-            resolvedRecipients: resolvedRecipients,
-            activeRouteCache: &activeRouteCache
+            resolvedRecipients: resolvedRecipients
         )
-        await app.gatewaySessionService.sendDomainEventPayloadBatches(batches, requestID: envelope.eventID)
+        try await app.gatewaySessionService.sendDomainEventPayloadBatchesReliably(batches, requestID: envelope.eventID)
     }
 
     private func realtimeRelayBatchesWithoutOwnerDelivery(
         for envelope: ConversationEventEnvelope,
-        resolvedRecipients: ConversationDomainEventResolvedRecipients,
-        activeRouteCache: inout [RelayAfterRecordActiveRouteCacheKey: [UUID: Set<String>]]
+        resolvedRecipients: ConversationDomainEventResolvedRecipients
     ) async throws -> [IMGatewayDomainEventPayloadBatch] {
         if let preSplitBatches = try await preSplitRelayRealtimeWithoutOwnerDelivery(
             for: envelope,
-            resolvedRecipients: resolvedRecipients,
-            activeRouteCache: &activeRouteCache
+            resolvedRecipients: resolvedRecipients
         ) {
             return preSplitBatches
         }
@@ -2490,9 +2552,9 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
     private func dispatchRelayAfterRecordBatches(
         _ batches: [IMGatewayDomainEventPayloadBatch],
         requestID: UUID?
-    ) async {
+    ) async throws {
         guard app.streamConsumerConfiguration.realtimeDeliveryAsyncRelayEnabled else {
-            await app.gatewaySessionService.sendDomainEventPayloadBatches(
+            try await app.gatewaySessionService.sendDomainEventPayloadBatchesReliably(
                 batches,
                 requestID: requestID
             )
@@ -2509,7 +2571,7 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
         }
 
         if !immediatePassthroughBatches.isEmpty {
-            await app.realtimeDeliveryAsyncDispatcher.dispatchPayloadBatches(
+            try await app.realtimeDeliveryAsyncDispatcher.dispatchPayloadBatchesReliably(
                 immediatePassthroughBatches.map {
                     ConversationRealtimeConsumer.DomainEventPayloadBatch(
                         payload: $0.payload,
@@ -2517,9 +2579,7 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
                         fanoutIntent: $0.fanoutIntent
                     )
                 },
-                requestID: requestID,
-                coalescingKey: nil,
-                coalescingWindowMilliseconds: 0
+                requestID: requestID
             )
         }
 
@@ -2591,8 +2651,7 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
 
     private func preSplitRelayRealtimeWithoutOwnerDelivery(
         for envelope: ConversationEventEnvelope,
-        resolvedRecipients: ConversationDomainEventResolvedRecipients,
-        activeRouteCache: inout [RelayAfterRecordActiveRouteCacheKey: [UUID: Set<String>]]
+        resolvedRecipients: ConversationDomainEventResolvedRecipients
     ) async throws -> [IMGatewayDomainEventPayloadBatch]? {
         guard app.gatewayLocalFanoutConfiguration.activeConversationFanoutEnabled,
               app.hasConnectionRoutingServiceConfigured,
@@ -2617,38 +2676,21 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
         do {
             var seenUserIDs = Set<UUID>()
             let orderedUserIDs = recipientUserIDs.filter { seenUserIDs.insert($0).inserted }
-            let cacheKey = RelayAfterRecordActiveRouteCacheKey(
-                conversationID: envelope.conversationID,
-                recipientUserIDs: orderedUserIDs.sorted { $0.uuidString < $1.uuidString }
-            )
+            // A Kafka batch can span the entire connection ramp. Refresh through
+            // the bounded application TTL cache for every event instead of
+            // retaining the first partial active-route snapshot for the batch.
             let routeStartedAt = Date()
-            let activeRoutes: [UUID: Set<String>]
-            let routeCacheHit: Bool
-            let routeCachePartialHit: Bool
-            let routeCachedUserCount: Int
-            let routeMissedUserCount: Int
-            let routeJoinedInFlight: Bool
-            if let cachedRoutes = activeRouteCache[cacheKey] {
-                activeRoutes = cachedRoutes
-                routeCacheHit = true
-                routeCachePartialHit = false
-                routeCachedUserCount = orderedUserIDs.count
-                routeMissedUserCount = 0
-                routeJoinedInFlight = false
-            } else {
-                let routeLookup = try await activeConversationRoutes(
-                    app: app,
-                    conversationID: envelope.conversationID,
-                    recipientUserIDs: recipientUserIDs
-                )
-                activeRoutes = routeLookup.routes
-                activeRouteCache[cacheKey] = activeRoutes
-                routeCacheHit = routeLookup.cacheHit
-                routeCachePartialHit = routeLookup.cachePartialHit
-                routeCachedUserCount = routeLookup.cachedUserCount
-                routeMissedUserCount = routeLookup.missedUserCount
-                routeJoinedInFlight = routeLookup.joinedInFlight
-            }
+            let routeLookup = try await activeConversationRoutes(
+                app: app,
+                conversationID: envelope.conversationID,
+                recipientUserIDs: recipientUserIDs
+            )
+            let activeRoutes = routeLookup.routes
+            let routeCacheHit = routeLookup.cacheHit
+            let routeCachePartialHit = routeLookup.cachePartialHit
+            let routeCachedUserCount = routeLookup.cachedUserCount
+            let routeMissedUserCount = routeLookup.missedUserCount
+            let routeJoinedInFlight = routeLookup.joinedInFlight
             let routeMilliseconds = routeCacheHit
                 ? 0
                 : IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: routeStartedAt)
@@ -2711,18 +2753,23 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
             }
             return relayBatches
         } catch {
-            await app.routingMetrics.recordDomainRelayAfterRecordPreSplitRouteDrop()
-            await app.routingMetrics.recordActiveConversationFanoutRouteSplitDrop(
+            await app.routingMetrics.recordDomainRelayAfterRecordPreSplitRouteLookupFailure()
+            await app.routingMetrics.recordActiveConversationFanoutRouteLookupFailure(
                 recipientCount: recipientCount
             )
             var metadata = imConsumerDeliveryFailureMetadata(
                 trace: imConsumerDeliveryTrace(for: envelope, app: app),
                 app: app,
+                outcome: "retrying",
                 error: error
             )
             metadata["recipient_count"] = .stringConvertible(recipientCount)
-            app.logger.warning("Domain delivery relay-after-record pre-split failed; dropping unsplit realtime relay.", metadata: metadata)
-            return []
+            app.logger.warning("Domain delivery relay-after-record pre-split failed; retrying stream event.", metadata: metadata)
+            throw ConversationEventTransientProcessingError.realtimeRouteLookupFailed(
+                eventID: envelope.eventID,
+                conversationID: envelope.conversationID,
+                underlyingError: String(describing: error)
+            )
         }
     }
 
@@ -2748,6 +2795,21 @@ struct OwnerDomainEventDeliveryConsumer: ConversationEventConsumer {
             return nil
         }
         return "timeline_pull_recipient_threshold_\(threshold)"
+    }
+
+    private func largeMembershipOwnerDeliverySkipReason(
+        for envelope: ConversationEventEnvelope,
+        recipientCount: Int
+    ) -> String? {
+        guard envelope.eventType == .membershipAdded || envelope.eventType == .membershipRemoved else {
+            return nil
+        }
+        let threshold = app.streamConsumerConfiguration
+            .domainDeliveryLargeMembershipOwnerDeliverySkipRecipientThreshold
+        guard threshold > 0, recipientCount >= threshold else {
+            return nil
+        }
+        return "summary_notification_sync_recipient_threshold_\(threshold)"
     }
 
     private func messageCreatedRecipientCountHint(for envelope: ConversationEventEnvelope) async throws -> Int {
@@ -3137,6 +3199,20 @@ struct ConversationEventConsumerRegistry: Sendable {
         }
     }
 
+    func consumeMembershipAddedRun(_ envelopes: [ConversationEventEnvelope]) async throws {
+        guard !envelopes.isEmpty,
+              envelopes.allSatisfy({ $0.eventType == .membershipAdded })
+        else {
+            for envelope in envelopes {
+                try await consume(envelope)
+            }
+            return
+        }
+        for consumer in consumers where consumer.supportedEventTypes.contains(.membershipAdded) {
+            try await consumer.consumeMembershipAddedRun(envelopes)
+        }
+    }
+
     func consumeBestEffort(
         _ envelope: ConversationEventEnvelope,
         onError: @Sendable (String, any Error) async -> Void
@@ -3188,6 +3264,7 @@ private struct ConversationEventConsumerTimeoutError: Error {}
 enum ConversationEventTransientProcessingError: Error, CustomStringConvertible {
     case timelineNoticeMissing(eventID: UUID, waitedMilliseconds: Int)
     case messageCreatedRecipientSnapshotMissing(eventID: UUID?, conversationID: UUID)
+    case realtimeRouteLookupFailed(eventID: UUID?, conversationID: UUID, underlyingError: String)
 
     var description: String {
         switch self {
@@ -3195,6 +3272,8 @@ enum ConversationEventTransientProcessingError: Error, CustomStringConvertible {
             return "Transient timeline notice missing after \(waitedMilliseconds)ms for event \(eventID.uuidString)."
         case .messageCreatedRecipientSnapshotMissing(let eventID, let conversationID):
             return "Transient message_created recipient snapshot missing for event \(eventID?.uuidString ?? "unknown") conversation \(conversationID.uuidString)."
+        case .realtimeRouteLookupFailed(let eventID, let conversationID, let underlyingError):
+            return "Transient realtime route lookup failed for event \(eventID?.uuidString ?? "unknown") conversation \(conversationID.uuidString): \(underlyingError)"
         }
     }
 }

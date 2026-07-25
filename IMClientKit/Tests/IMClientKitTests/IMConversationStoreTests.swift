@@ -221,6 +221,56 @@ struct IMConversationStoreTests {
         #expect(conversation.notices.first?.fallbackText == "Conversation updated")
     }
 
+    @Test func duplicateTCPDomainEventIsAppliedOnce() async throws {
+        let store = IMConversationStore()
+        let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!
+        let noticeID = UUID(uuidString: "bbbbbbbb-1111-2222-3333-cccccccccccc")!
+        let eventID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!
+        let occurredAt = Date(timeIntervalSince1970: 1_700_300_001)
+        let payload = IMTCPChatDomainEventPayload(
+            eventID: eventID,
+            eventType: .conversationUpdated,
+            aggregateType: "conversation",
+            aggregateID: conversationID,
+            aggregateSequence: 3,
+            occurredAt: occurredAt,
+            actorUserID: Self.peerUserID,
+            conversation: IMConversationSummaryResponseBody(
+                id: conversationID,
+                title: "Async Group",
+                kind: IMConversationKind.group.rawValue,
+                memberCount: 2,
+                memberUserIDs: [Self.currentUserID, Self.peerUserID],
+                lastMessage: nil,
+                lastReadSequence: 5,
+                unreadCount: 2,
+                createdAt: Date(timeIntervalSince1970: 1_700_200_000),
+                updatedAt: occurredAt
+            ),
+            timelineNotice: IMTimelineNoticeResponseBody(
+                id: noticeID,
+                conversationID: conversationID,
+                timelineSequence: 4,
+                eventType: "conversation.updated",
+                actorUserID: Self.peerUserID,
+                targetUserIDs: [],
+                noticeKind: "conversation_updated",
+                params: [:],
+                fallbackText: "Conversation updated",
+                createdAt: occurredAt
+            ),
+            body: .conversationChanged
+        )
+
+        _ = await store.applyDomainEventAsync(payload, currentUserID: Self.currentUserID)
+        _ = await store.applyDomainEventAsync(payload, currentUserID: Self.currentUserID)
+
+        let conversation = try #require(store.selectedConversation)
+        let snapshot = store.makeCacheSnapshot(lastSummaryRefreshAt: nil)
+        #expect(conversation.notices.map(\.id) == [noticeID.uuidString])
+        #expect(snapshot.domainEventState.appliedEventIDs == [eventID])
+    }
+
     @Test func lightweightConversationUpdateRequestsSummaryRefresh() async {
         let store = IMConversationStore()
         let conversationID = UUID(uuidString: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb")!

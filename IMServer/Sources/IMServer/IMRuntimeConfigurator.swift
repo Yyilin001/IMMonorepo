@@ -46,6 +46,7 @@ enum IMRuntimeConfigurator {
             app.lifecycle.use(IMTCPServerLifecycle())
             app.lifecycle.use(ConnectionRoutingLifecycle())
         }
+        app.lifecycle.use(CrossCellRealtimeDispatchOutboxLifecycle())
         try await IMDevelopmentSeed.seedUserIfNeeded(in: app)
     }
 
@@ -95,6 +96,9 @@ enum IMRuntimeConfigurator {
            !app.hasConnectionRoutingServiceConfigured {
             try await app.configureConnectionRoutingServiceIfNeeded()
             app.lifecycle.use(ConnectionRoutingLifecycle())
+        }
+        if app.streamConsumerConfiguration.isEnabled("realtime-delivery-consumer") {
+            app.lifecycle.use(CrossCellRealtimeDispatchOutboxLifecycle())
         }
     }
 

@@ -41,7 +41,11 @@ struct ConversationSummaryReadSupport {
                let summaryRevision = summary.membershipRevision,
                conversationRevision == summaryRevision,
                summary.groupLifecycleStateEnum == conversation.groupLifecycleStateEnum,
-               summary.memberUserIDs.contains(userID)
+               summaryRepresentsCurrentMembership(
+                    summary: summary,
+                    conversation: conversation,
+                    userID: userID
+               )
             {
                 return try await ConversationSummaryResponseOverlay.responseLoadingActivity(
                     from: summary,
@@ -62,6 +66,23 @@ struct ConversationSummaryReadSupport {
             writeChangeLog: true
         )
         return response
+    }
+
+    private func summaryRepresentsCurrentMembership(
+        summary: ConversationUserSummary,
+        conversation: Conversation,
+        userID: UUID
+    ) -> Bool {
+        if summary.memberUserIDs.contains(userID) {
+            return true
+        }
+        // Large-group summaries intentionally omit the replicated member list.
+        // A matching membership revision and a non-removed owner summary remain
+        // authoritative; a removal leaves the old revision behind until it is
+        // rejected by the check above.
+        return conversation.conversationKind == .group
+            && summary.memberCount > 0
+            && summary.memberUserIDs.isEmpty
     }
 
     func listConversations(
@@ -142,7 +163,10 @@ struct ConversationSummaryReadSupport {
             .sort(\.$serverSequence, .descending)
             .limit(50)
             .all()
-        let visibleLastMessageRows = try await IMCommonFeatureService(db: database)
+        let visibleLastMessageRows = try await IMCommonFeatureService(
+            db: database,
+            featureDB: userDirectoryDB
+        )
             .filterVisible(lastMessageRows, for: userID)
         let lastVisibleMessage = visibleLastMessageRows.first
         let lastMessage = try lastVisibleMessage.map(messageService.makePreview)
@@ -188,6 +212,7 @@ struct ConversationSummaryReadSupport {
 
 struct ConversationTimelineReadSupport {
     let db: any Database
+    let featureDB: any Database
     let metrics: IMTimelineReadMetrics?
     let configuration: IMTimelineReadConfiguration
     let sinceHotCache: IMTimelineSinceHotCache?
@@ -197,6 +222,7 @@ struct ConversationTimelineReadSupport {
 
     init(
         db: any Database,
+        featureDB: (any Database)? = nil,
         metrics: IMTimelineReadMetrics? = nil,
         configuration: IMTimelineReadConfiguration = IMTimelineReadConfiguration(),
         sinceHotCache: IMTimelineSinceHotCache? = nil,
@@ -205,6 +231,7 @@ struct ConversationTimelineReadSupport {
         sinceResponseCoalescer: IMTimelineSinceResponseCoalescer? = nil
     ) {
         self.db = db
+        self.featureDB = featureDB ?? db
         self.metrics = metrics
         self.configuration = configuration
         self.sinceHotCache = sinceHotCache
@@ -543,7 +570,7 @@ struct ConversationTimelineReadSupport {
             for: key,
             ttlMilliseconds: configuration.sinceHotCacheTTLMilliseconds,
             loader: {
-                try await MessageVisibilityOverride.query(on: db)
+                try await MessageVisibilityOverride.query(on: featureDB)
                     .filter(\.$conversationID == conversationID)
                     .filter(\.$serverSequence > lowerTimelineBound)
                     .filter(\.$isHidden == true)
@@ -850,7 +877,7 @@ struct ConversationTimelineReadSupport {
     ) async throws -> ConversationVisibilityOverride? {
         try await ConversationVisibilityOverride.find(
             ConversationVisibilityOverride.recordID(ownerUserID: userID, conversationID: conversationID),
-            on: db
+            on: featureDB
         )
     }
 
@@ -984,7 +1011,7 @@ struct ConversationTimelineReadSupport {
         if messageIDs.isEmpty {
             messageOverridesByMessageID = [:]
         } else {
-            let messageOverrides = try await MessageVisibilityOverride.query(on: db)
+            let messageOverrides = try await MessageVisibilityOverride.query(on: featureDB)
                 .filter(\.$ownerUserID == userID)
                 .filter(\.$messageID ~~ messageIDs)
                 .all()
@@ -1209,6 +1236,12 @@ private struct TimelineVisibilityScanLimitExceeded: Error {
 
 struct ConversationSearchReadSupport {
     let db: any Database
+    let featureDB: any Database
+
+    init(db: any Database, featureDB: (any Database)? = nil) {
+        self.db = db
+        self.featureDB = featureDB ?? db
+    }
 
     private var membershipService: ConversationMembershipService {
         ConversationMembershipService(db: db)
@@ -1237,7 +1270,7 @@ struct ConversationSearchReadSupport {
             limit: requestedLimit
         )
         var visibleItems: [IMConversationMessageSearchHitResponse] = []
-        let featureService = IMCommonFeatureService(db: db)
+        let featureService = IMCommonFeatureService(db: db, featureDB: featureDB)
         for item in page.items {
             guard let message = try await ConversationMessage.find(item.messageID, on: db),
                   try await !featureService.isHidden(message: message, for: userID)
@@ -1268,11 +1301,11 @@ struct ConversationReadSupport {
     }
 
     private var timelineReadSupport: ConversationTimelineReadSupport {
-        ConversationTimelineReadSupport(db: db)
+        ConversationTimelineReadSupport(db: db, featureDB: userDirectoryDB)
     }
 
     private var searchReadSupport: ConversationSearchReadSupport {
-        ConversationSearchReadSupport(db: db)
+        ConversationSearchReadSupport(db: db, featureDB: userDirectoryDB)
     }
 
     func latestMessage(in conversationID: UUID) async throws -> IMMessageResponse? {

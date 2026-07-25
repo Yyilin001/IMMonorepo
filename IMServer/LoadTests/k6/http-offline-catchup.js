@@ -43,6 +43,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['offline-catchup-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const accountFile = __ENV.ACCOUNT_FILE || __ENV.IM_ACCOUNT_FILE || '';
 const defaultEmail = __ENV.IM_EMAIL || 'demo@example.com';
 const defaultPassword = __ENV.IM_PASSWORD || 'password1234';
@@ -55,7 +56,7 @@ const conversationID = __ENV.IM_CONVERSATION_ID || '';
 const internalSecret = __ENV.IM_INTERNAL_SECRET || __ENV.IM_INTERNAL_SHARED_SECRET || '';
 const messagesPerCatchup = Math.max(1, Number.parseInt(__ENV.IM_OFFLINE_CATCHUP_MESSAGES || '3', 10));
 const timelineLimit = Number.parseInt(__ENV.IM_OFFLINE_CATCHUP_TIMELINE_LIMIT || '50', 10);
-const changesToken = __ENV.IM_OFFLINE_CATCHUP_AFTER_TOKEN || '1970-01-01T00:00:00.000Z:';
+const changesTokenOverride = __ENV.IM_OFFLINE_CATCHUP_AFTER_TOKEN || '';
 const domainEventCursor = Number.parseInt(__ENV.IM_OFFLINE_CATCHUP_DOMAIN_CURSOR || '0', 10);
 const sleepMillis = Number.parseInt(__ENV.IM_OFFLINE_CATCHUP_SLEEP_MS || '500', 10);
 
@@ -162,7 +163,7 @@ function sendOfflineMessages(state) {
     const startedAt = Date.now();
     const clientMessageID = `k6-offline-${__VU}-${__ITER}-${index}-${Date.now()}`;
     const res = http.post(
-      `${baseURL}/internal/im/messages/send`,
+      `${commandBaseURL}/internal/im/messages/send`,
       JSON.stringify({
         senderUserID: state.senderUserID,
         payload: {
@@ -193,11 +194,29 @@ function timedGet(url, token, label) {
   return res.status === 200;
 }
 
-function catchUp(state) {
+function fetchConversationList(state) {
+  const startedAt = Date.now();
+  const res = http.get(`${baseURL}/api/im/conversations?limit=100`, jsonHeaders(state.token));
+  readLatency.add(Date.now() - startedAt);
+  check(res, { 'conversation list baseline ok': (r) => r.status === 200 });
+  if (res.status !== 200) {
+    return null;
+  }
+
+  const body = res.json();
+  return typeof body.snapshotToken === 'string' && body.snapshotToken.length > 0
+    ? body.snapshotToken
+    : null;
+}
+
+function catchUp(state, baselineSnapshotToken) {
   let ok = true;
-  ok = timedGet(`${baseURL}/api/im/conversations?limit=100`, state.token, 'conversation list') && ok;
+  const afterToken = changesTokenOverride || baselineSnapshotToken;
+  if (!afterToken) {
+    return false;
+  }
   ok = timedGet(
-    `${baseURL}/api/im/conversations/changes?afterToken=${encodeURIComponent(changesToken)}&limit=100`,
+    `${baseURL}/api/im/conversations/changes?afterToken=${encodeURIComponent(afterToken)}&limit=100`,
     state.token,
     'conversation changes'
   ) && ok;
@@ -207,7 +226,7 @@ function catchUp(state) {
     'timeline latest'
   ) && ok;
   ok = timedGet(
-    `${baseURL}/api/im/conversations/${conversationID}/messages/since?afterSequence=0&limit=${timelineLimit}`,
+    `${baseURL}/api/im/conversations/${conversationID}/timeline/since?afterSequence=0&limit=${timelineLimit}`,
     state.token,
     'messages since'
   ) && ok;
@@ -222,8 +241,10 @@ function catchUp(state) {
 export default function () {
   const startedAt = Date.now();
   const state = ensureState();
-  let ok = sendOfflineMessages(state);
-  ok = catchUp(state) && ok;
+  const baselineSnapshotToken = fetchConversationList(state);
+  let ok = baselineSnapshotToken !== null;
+  ok = sendOfflineMessages(state) && ok;
+  ok = catchUp(state, baselineSnapshotToken) && ok;
   catchupErrors.add(!ok);
   if (ok) {
     catchupOK.add(1);

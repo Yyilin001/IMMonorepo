@@ -368,6 +368,36 @@ private let imSchemaRequirements: [IMTableSchemaRequirement] = [
         ]
     ),
     IMTableSchemaRequirement(
+        table: IMRealtimeCellRegistryEntry.schema,
+        requiredColumns: [
+            "cell_id",
+            "status",
+            "command_endpoint",
+            "query_endpoint",
+            "realtime_endpoint",
+            "created_at",
+            "updated_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
+        table: CrossCellRealtimeDispatch.schema,
+        requiredColumns: [
+            "id",
+            "origin_cell_id",
+            "target_cell_id",
+            "dedupe_key",
+            "envelope_json",
+            "status",
+            "retry_count",
+            "next_attempt_at",
+            "processing_started_at",
+            "delivered_at",
+            "error_message",
+            "created_at",
+            "updated_at"
+        ]
+    ),
+    IMTableSchemaRequirement(
         table: AIStreamLease.schema,
         requiredColumns: [
             "stream_id", "conversation_id", "user_id", "node_id", "state",
@@ -548,6 +578,19 @@ private let imSchemaRequirements: [IMTableSchemaRequirement] = [
 
 private let imIndexRequirements: [IMTableIndexRequirement] = [
     IMTableIndexRequirement(
+        table: IMRealtimeCellRegistryEntry.schema,
+        requiredIndexes: [
+            "im_realtime_cell_registry_status_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: CrossCellRealtimeDispatch.schema,
+        requiredIndexes: [
+            "cross_cell_realtime_dispatch_ready_idx",
+            "cross_cell_realtime_dispatch_dedupe_uidx"
+        ]
+    ),
+    IMTableIndexRequirement(
         table: AIStreamLease.schema,
         requiredIndexes: [
             "im_ai_stream_leases_user_expires_idx",
@@ -679,6 +722,7 @@ private let imConversationShardSchemaRequirements: [IMTableSchemaRequirement] = 
         ConversationDomainEvent.schema,
         ConversationMessageSearchIndex.schema,
         ConversationMediaAssetReference.schema,
+        ConversationReplayRecord.schema,
         ConversationDomainEventRecipientSet.schema,
         ConversationDomainEventRecipientSetMember.schema,
         ConversationDomainEventRecipientSnapshot.schema
@@ -727,6 +771,13 @@ private let imConversationShardIndexRequirements: [IMTableIndexRequirement] = im
         requiredIndexes: [
             "conversation_message_search_index_lookup_idx",
             "conversation_message_search_index_message_idx"
+        ]
+    ),
+    IMTableIndexRequirement(
+        table: ConversationReplayRecord.schema,
+        requiredIndexes: [
+            "conversation_event_replay_records_status_updated_idx",
+            "conversation_event_replay_records_group_event_idx"
         ]
     ),
     IMTableIndexRequirement(

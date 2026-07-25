@@ -52,6 +52,7 @@ struct IMConversationSummaryProjectionService {
     let summaryReadMetrics: IMSummaryReadMetrics?
     let activitySummaryCoalescer: ConversationActivitySummaryCoalescer?
     let responseMemberUserIDsLimit: Int
+    let storedMemberUserIDsLimit: Int
 
     init(
         db: any Database,
@@ -60,7 +61,8 @@ struct IMConversationSummaryProjectionService {
         domainEventMetrics: ConversationDomainEventMetrics? = nil,
         summaryReadMetrics: IMSummaryReadMetrics? = nil,
         activitySummaryCoalescer: ConversationActivitySummaryCoalescer? = nil,
-        responseMemberUserIDsLimit: Int = 0
+        responseMemberUserIDsLimit: Int = 0,
+        storedMemberUserIDsLimit: Int? = nil
     ) {
         self.init(
             sourceDB: db,
@@ -70,7 +72,8 @@ struct IMConversationSummaryProjectionService {
             domainEventMetrics: domainEventMetrics,
             summaryReadMetrics: summaryReadMetrics,
             activitySummaryCoalescer: activitySummaryCoalescer,
-            responseMemberUserIDsLimit: responseMemberUserIDsLimit
+            responseMemberUserIDsLimit: responseMemberUserIDsLimit,
+            storedMemberUserIDsLimit: storedMemberUserIDsLimit
         )
     }
 
@@ -82,7 +85,8 @@ struct IMConversationSummaryProjectionService {
         domainEventMetrics: ConversationDomainEventMetrics? = nil,
         summaryReadMetrics: IMSummaryReadMetrics? = nil,
         activitySummaryCoalescer: ConversationActivitySummaryCoalescer? = nil,
-        responseMemberUserIDsLimit: Int = 0
+        responseMemberUserIDsLimit: Int = 0,
+        storedMemberUserIDsLimit: Int? = nil
     ) {
         self.sourceDB = sourceDB
         self.readModelDB = readModelDB
@@ -91,7 +95,15 @@ struct IMConversationSummaryProjectionService {
         self.domainEventMetrics = domainEventMetrics
         self.summaryReadMetrics = summaryReadMetrics
         self.activitySummaryCoalescer = activitySummaryCoalescer
-        self.responseMemberUserIDsLimit = max(0, responseMemberUserIDsLimit)
+        let environmentResponseLimit = Environment.get("IM_SUMMARY_RESPONSE_MEMBER_USER_IDS_LIMIT")
+            .flatMap(Int.init(_:)) ?? 0
+        self.responseMemberUserIDsLimit = max(0, max(responseMemberUserIDsLimit, environmentResponseLimit))
+        let environmentStorageLimit = Environment.get("IM_SUMMARY_STORED_MEMBER_USER_IDS_LIMIT")
+            .flatMap(Int.init(_:))
+        self.storedMemberUserIDsLimit = max(
+            0,
+            storedMemberUserIDsLimit ?? environmentStorageLimit ?? self.responseMemberUserIDsLimit
+        )
     }
 
     func listConversations(

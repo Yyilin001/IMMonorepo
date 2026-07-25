@@ -11,8 +11,8 @@ declare -a CONTRACT_NAMES=(
   "production-requires-redis-routing"
   "non-ops-role-cannot-auto-migrate"
   "gateway-route-lookup-fails-closed"
-  "consumer-route-split-fails-closed"
-  "domain-relay-route-split-fails-closed"
+  "consumer-route-split-retries-stream-event"
+  "domain-relay-route-split-retries-stream-event"
   "cell-ingress-role-routing"
   "malformed-cell-ingress-fails-startup"
   "outbox-publishes-durable-claim"
@@ -23,14 +23,19 @@ declare -a CONTRACT_NAMES=(
   "cross-cell-same-shard-name-is-valid"
   "cross-cell-transfer-page-is-idempotent"
   "migration-copy-verification-keeps-source-route"
+  "cross-cell-outbox-persists-before-target-acceptance"
+  "cross-cell-outbox-retains-target-failure-for-retry"
+  "cross-cell-outbox-recovers-after-target-availability"
+  "cross-cell-outbox-replay-is-deduplicated"
+  "reliable-gateway-relay-fails-when-handoff-is-not-durable"
 )
 
 declare -a CONTRACT_FILTERS=(
   "IMServerTests.IMServerTests/productionRequiresRedisRouting()"
   "IMServerTests.IMServerTests/productionNonOpsRolesCannotEnableStartupAutoMigration()"
   "IMServerTests.IMServerTests/connectionRoutingDropsRemoteRealtimeFanoutWhenActiveRouteLookupFailsClosed()"
-  "IMServerTests.IMServerTests/realtimeDeliveryDropsFanoutWhenRouteSplitFailsClosed()"
-  "IMServerTests.IMServerTests/domainRelayAfterRecordDropsRealtimeFanoutWhenRouteSplitFailsClosed()"
+  "IMServerTests.IMServerTests/realtimeDeliveryRetriesStreamEventWhenRouteSplitFails()"
+  "IMServerTests.IMServerTests/domainRelayAfterRecordRetriesStreamEventWhenRouteSplitFails()"
   "IMServerTests.IMServerTests/cellIngressConfigurationSelectsPurposeEndpoints()"
   "IMServerTests.IMServerTests/productionRuntimeRejectsMalformedCellIngressEndpointConfiguration()"
   "IMServerTests.IMServerTests/conversationOutboxRelayMarksPublishedEvents()"
@@ -41,6 +46,11 @@ declare -a CONTRACT_FILTERS=(
   "IMServerTests.IMServerTests/crossCellMigrationAllowsSameShardName()"
   "IMServerTests.IMServerTests/remoteCellMigrationTransferPage()"
   "IMServerTests.IMServerTests/conversationShardMigrationCopyAndVerifyKeepsSourceRouteActive()"
+  "IMServerTests.IMServerTests/crossCellRealtimeOutboxPersistsAndCompletesAfterTargetAcceptance()"
+  "IMServerTests.IMServerTests/crossCellRealtimeOutboxRetainsFailedDeliveryForRetry()"
+  "IMServerTests.IMServerTests/crossCellRealtimeOutboxDeliversRetainedDispatchAfterTargetRecovery()"
+  "IMServerTests.IMServerTests/crossCellRealtimeOutboxDeduplicatesReplayedSourceHandoff()"
+  "IMServerTests.IMServerTests/reliableGatewayRelayReturnsFailureWhenCellHandoffCannotBeRecorded()"
 )
 
 usage() {
@@ -103,7 +113,8 @@ run() {
   test_filter="$(IFS='|'; printf '%s' "${CONTRACT_FILTERS[*]}")"
 
   set +e
-  "${SWIFT_BIN}" test --skip-build --package-path "${SERVER_DIR}" --filter "${test_filter}" >"${test_log}" 2>&1
+  "${SWIFT_BIN}" test --skip-build --package-path "${SERVER_DIR}" --filter "${test_filter}" \
+    --enable-swift-testing --disable-xctest --no-parallel >"${test_log}" 2>&1
   exit_code=$?
   set -e
 
@@ -130,7 +141,7 @@ run() {
 self_test() {
   local output
   output="$(LOCAL_MULTINODE_FAULT_CONTRACTS_SWIFT_BIN=printf bash "${BASH_SOURCE[0]}" check)"
-  [[ "${output}" == *"result=pass mode=check contracts=15 productionEvidence=false localOnly=true"* ]] || {
+  [[ "${output}" == *"result=pass mode=check contracts=20 productionEvidence=false localOnly=true"* ]] || {
     printf 'local_multinode_fault_contracts_self_test result=fail reason=check_contract_invalid\n' >&2
     return 1
   }

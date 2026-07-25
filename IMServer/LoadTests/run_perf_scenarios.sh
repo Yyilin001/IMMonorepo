@@ -39,6 +39,7 @@ fi
 PERF_PRODUCTION_ACCEPTANCE_JSON="${PERF_PRODUCTION_ACCEPTANCE_JSON:-${PRODUCTION_ACCEPTANCE_RECEIPT_JSON:-${RESULT_ROOT}/production-acceptance/production-acceptance.json}}"
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:8080}"
+IM_COMMAND_BASE_URL="${IM_COMMAND_BASE_URL:-${BASE_URL}}"
 TCP_HOST="${TCP_HOST:-}"
 TCP_PORT="${TCP_PORT:-9000}"
 IM_EMAIL="${IM_EMAIL:-demo@example.com}"
@@ -339,7 +340,7 @@ scenario_group_items() {
       printf '%s\n' "$(scenario_group_items product-breadth-capacity)"
       ;;
     large-group)
-      printf '%s\n' "large-group-1000-10 large-group-1000-50 large-group-5000-50 large-group-10000-200"
+      printf '%s\n' "large-group-1000-10 large-group-1000-50 large-group-5000-50 large-group-10000-5 large-group-10000-10 large-group-10000-200"
       ;;
     all-smoke)
       printf '%s\n' "$(scenario_group_items http-smoke) $(scenario_group_items tcp-smoke)"
@@ -630,6 +631,8 @@ Available scenarios:
   large-group-1000-10
   large-group-1000-50
   large-group-5000-50
+  large-group-10000-5
+  large-group-10000-10
   large-group-10000-200
 EOF
 }
@@ -1423,6 +1426,7 @@ run_k6() {
   run_command "${name}" "${category}" "${target}" \
     env \
       "BASE_URL=${BASE_URL}" \
+      "IM_COMMAND_BASE_URL=${IM_COMMAND_BASE_URL}" \
       "IM_EMAIL=${IM_EMAIL}" \
       "IM_PASSWORD=${IM_PASSWORD}" \
       "PROFILE=${profile}" \
@@ -2098,6 +2102,12 @@ for scenario in ${SCENARIOS}; do
       ;;
     large-group-5000-50)
       run_large_group "${scenario}" "5000" "50"
+      ;;
+    large-group-10000-5)
+      run_large_group "${scenario}" "10000" "5"
+      ;;
+    large-group-10000-10)
+      run_large_group "${scenario}" "10000" "10"
       ;;
     large-group-10000-200)
       run_large_group "${scenario}" "10000" "200"

@@ -31,7 +31,14 @@ extension IMConversationController {
         } else {
             db = req.application.imWriteDB
         }
-        return try await IMCommonFeatureService(db: db).listFavorites(
+        let app = req.application
+        return try await IMCommonFeatureService(
+            db: db,
+            featureDB: app.db,
+            messageDatabaseForConversation: { conversationID in
+                try await app.conversationShardRouter.strongReadDatabase(forConversationID: conversationID)
+            }
+        ).listFavorites(
             userID: userID,
             conversationID: query.conversationID,
             cursor: query.cursor,

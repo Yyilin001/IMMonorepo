@@ -5,7 +5,9 @@ final class IMAIStreamRepairLifecycle: LifecycleHandler, @unchecked Sendable {
     private var sweeperTask: Task<Void, Never>?
 
     func didBootAsync(_ application: Application) async throws {
-        guard application.imRuntimeRole.servesGateway || application.imRuntimeRole.servesCommandAPI else {
+        guard application.imRuntimeRole == .ops,
+              IMMaintenanceConfiguration.load().enabled
+        else {
             return
         }
         do {

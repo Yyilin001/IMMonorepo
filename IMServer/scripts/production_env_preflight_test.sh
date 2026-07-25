@@ -138,6 +138,11 @@ bash -n "${RELEASE_GATE}"
 
 run_should_pass "default templates pass" "${PREFLIGHT}"
 
+gateway_implicit_redis_dispatch_dir="$(copy_templates gateway-implicit-redis-dispatch)"
+delete_env_key "${gateway_implicit_redis_dispatch_dir}/gateway.env" "IM_ALLOW_BEST_EFFORT_NODE_DISPATCH"
+run_should_fail "gateway implicit best-effort Redis dispatch fails" "gateway requires IM_ALLOW_BEST_EFFORT_NODE_DISPATCH=true when IM_NODE_DISPATCH_MODE=redis" \
+  run_preflight "${gateway_implicit_redis_dispatch_dir}"
+
 run_should_fail "strict secrets rejects template placeholders" "strict secrets requires JWT_SECRETS to not use placeholder value" \
   "${PREFLIGHT}" --strict-secrets
 
@@ -168,9 +173,16 @@ run_should_fail "Redis Cluster topology requires seeds" "gateway requires IM_RED
   run_preflight "${redis_cluster_dir}"
 
 replace_env_value "${redis_cluster_dir}/gateway.env" "IM_REDIS_CLUSTER_NODES" "cache-1.internal:6379,cache-2.internal:6379,cache-3.internal:6379"
-replace_env_value "${redis_cluster_dir}/gateway.env" "IM_NODE_DISPATCH_MODE" "http"
-replace_env_value "${redis_cluster_dir}/gateway.env" "IM_GATEWAY_NODE_DISPATCH_ENDPOINTS" "gateway-1=https://gateway-1.internal"
+replace_env_value "${redis_cluster_dir}/gateway.env" "IM_NODE_DISPATCH_MODE" "valkey-stream"
 run_should_pass "Redis Cluster gateway topology passes" run_preflight "${redis_cluster_dir}"
+
+redis_cluster_http_dispatch_dir="$(copy_templates redis-cluster-http-dispatch)"
+replace_env_value "${redis_cluster_http_dispatch_dir}/gateway.env" "IM_REDIS_DEPLOYMENT_TOPOLOGY" "cluster"
+replace_env_value "${redis_cluster_http_dispatch_dir}/gateway.env" "IM_REDIS_CLUSTER_NODES" "cache-1.internal:6379,cache-2.internal:6379,cache-3.internal:6379"
+replace_env_value "${redis_cluster_http_dispatch_dir}/gateway.env" "IM_NODE_DISPATCH_MODE" "http"
+replace_env_value "${redis_cluster_http_dispatch_dir}/gateway.env" "IM_GATEWAY_NODE_DISPATCH_ENDPOINTS" "gateway-1=https://gateway-1.internal"
+run_should_fail "Redis Cluster rejects HTTP node dispatch" "gateway requires IM_NODE_DISPATCH_MODE=valkey-stream when IM_REDIS_DEPLOYMENT_TOPOLOGY=cluster" \
+  run_preflight "${redis_cluster_http_dispatch_dir}"
 
 http_node_dispatch_dir="$(copy_templates http-node-dispatch)"
 replace_env_value "${http_node_dispatch_dir}/gateway.env" "IM_NODE_DISPATCH_MODE" "http"

@@ -300,6 +300,21 @@ final class ConversationDomainEventRecipientSnapshot: Model, Content, @unchecked
         self.createdAt = createdAt
     }
 
+    /// Keeps the stored representation unchanged during a physical shard copy.
+    /// In particular, an inline snapshot may deliberately have no shared-set
+    /// hash. Reconstructing it from recipient IDs would change canonical data.
+    func migrationCopy(on database: any Database) async throws -> ConversationDomainEventRecipientSnapshot {
+        let stored = try await resolvedRecipientSnapshot(on: database)
+        let copy = ConversationDomainEventRecipientSnapshot()
+        copy.id = id
+        copy.conversationID = conversationID
+        copy.recipientUserIDsJSON = stored.recipientUserIDsJSON
+        copy.recipientCount = stored.recipientCount
+        copy.recipientHash = stored.recipientHash
+        copy.createdAt = createdAt
+        return copy
+    }
+
     func recipientUserIDs() throws -> [UUID] {
         guard let json = $recipientUserIDsJSON.value else {
             throw ConversationProjectionCodingError.recipientUserIDsNotFetched

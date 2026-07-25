@@ -96,7 +96,7 @@ PY
 
 wait_for_gap_fill() {
   for _ in $(seq 1 60); do
-    if request_json GET "${QUERY_URL}/api/im/conversations/${DIRECT_CONVERSATION_ID}/messages/since?afterSequence=0&limit=50" "" "${OWNER_TOKEN}" >/dev/null; then
+    if request_json GET "${QUERY_URL}/api/im/conversations/${DIRECT_CONVERSATION_ID}/timeline/since?afterSequence=0&limit=50" "" "${OWNER_TOKEN}" >/dev/null; then
       return 0
     fi
     sleep 2

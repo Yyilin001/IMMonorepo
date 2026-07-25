@@ -161,6 +161,24 @@ TCP:  127.0.0.1:9000
 - Android Emulator：`http://10.0.2.2:8080` / `10.0.2.2:9000`
 - 真机同 Wi-Fi：使用 Mac 局域网 IP 覆盖 Debug 配置，例如 `http://192.168.x.x:8080` / `192.168.x.x:9000`
 
+### 5. 本机构建并上传 ARM64 镜像
+
+不能将 macOS 上的 `swift build` 二进制直接上传到 Ubuntu。需要使用 Docker
+Buildx 构建 `linux/arm64` 镜像，再将镜像 archive 加载到目标 ARM64 主机。目标
+主机不再执行 Swift 编译：
+
+```bash
+cd IMServer
+IMSERVER_REMOTE_HOST=120.77.236.2 \
+IMSERVER_REMOTE_KEY="$HOME/Downloads/test01.pem" \
+./scripts/build_upload_arm64_image.sh smoke-run
+```
+
+该命令在本机执行 `docker buildx build --platform linux/arm64`，校验并上传带
+SHA-256 的镜像 archive；远端验证 `linux/arm64`、`docker load` 后，以
+`IM_SMOKE_SKIP_IMAGE_BUILD=true` 运行既有烟测。需要本机 Docker Desktop（或
+Colima）处于运行状态，以及远端 checkout 已包含同一版本的 Compose 和脚本。
+
 ## 开发命令
 
 构建：

@@ -178,38 +178,58 @@ enum IMProductionRuntimeValidationSupport {
         if let invalidModeValue = configuration.invalidModeValue {
             throw Abort(
                 .internalServerError,
-                reason: "IM_NODE_DISPATCH_MODE must be redis or http; got \(invalidModeValue)."
+                reason: "IM_NODE_DISPATCH_MODE must be redis, valkey-stream, or http; got \(invalidModeValue)."
             )
         }
-        guard configuration.mode == .http else {
+        switch configuration.mode {
+        case .redis:
+            guard app.imRuntimeRole != .gateway || parseBooleanEnvironment(
+                "IM_ALLOW_BEST_EFFORT_NODE_DISPATCH",
+                defaultValue: false
+            ) else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production Redis Pub/Sub node dispatch is best effort. Set IM_ALLOW_BEST_EFFORT_NODE_DISPATCH=true only for a deliberate standalone compatibility deployment, or use IM_NODE_DISPATCH_MODE=valkey-stream."
+                )
+            }
             return
-        }
-        guard !configuration.endpointsByNodeID.isEmpty,
-              let sharedSecret = configuration.sharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
-              sharedSecret.count >= 32
-        else {
-            throw Abort(
-                .internalServerError,
-                reason: "IM_NODE_DISPATCH_MODE=http requires IM_GATEWAY_NODE_DISPATCH_ENDPOINTS and IM_NODE_DISPATCH_SHARED_SECRET (or a Cell/internal fallback) with at least 32 characters."
-            )
-        }
-        if app.imRuntimeRole == .gateway,
-           configuration.endpoint(for: app.imNodeID) == nil {
-            throw Abort(
-                .internalServerError,
-                reason: "Production HTTP node dispatch requires IM_GATEWAY_NODE_DISPATCH_ENDPOINTS to include this gateway IM_NODE_ID."
-            )
-        }
-        for (nodeID, endpoint) in configuration.endpointsByNodeID {
-            guard let components = URLComponents(string: endpoint),
-                  components.scheme?.lowercased() == "https",
-                  let host = components.host,
-                  !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .valkeyStream:
+            let routingConfiguration = app.imRedisRoutingConfigurationOverride
+                ?? IMRedisRoutingConfiguration.load(from: app.environment)
+            guard routingConfiguration.deploymentTopology == .cluster else {
+                throw Abort(
+                    .internalServerError,
+                    reason: "IM_NODE_DISPATCH_MODE=valkey-stream requires IM_REDIS_DEPLOYMENT_TOPOLOGY=cluster."
+                )
+            }
+        case .http:
+            guard !configuration.endpointsByNodeID.isEmpty,
+                  let sharedSecret = configuration.sharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  sharedSecret.count >= 32
             else {
                 throw Abort(
                     .internalServerError,
-                    reason: "Production node dispatch endpoint for \(nodeID) must use https and include a host."
+                    reason: "IM_NODE_DISPATCH_MODE=http requires IM_GATEWAY_NODE_DISPATCH_ENDPOINTS and IM_NODE_DISPATCH_SHARED_SECRET (or a Cell/internal fallback) with at least 32 characters."
                 )
+            }
+            if app.imRuntimeRole == .gateway,
+               configuration.endpoint(for: app.imNodeID) == nil {
+                throw Abort(
+                    .internalServerError,
+                    reason: "Production HTTP node dispatch requires IM_GATEWAY_NODE_DISPATCH_ENDPOINTS to include this gateway IM_NODE_ID."
+                )
+            }
+            for (nodeID, endpoint) in configuration.endpointsByNodeID {
+                guard let components = URLComponents(string: endpoint),
+                      components.scheme?.lowercased() == "https",
+                      let host = components.host,
+                      !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else {
+                    throw Abort(
+                        .internalServerError,
+                        reason: "Production node dispatch endpoint for \(nodeID) must use https and include a host."
+                    )
+                }
             }
         }
     }
@@ -218,7 +238,7 @@ enum IMProductionRuntimeValidationSupport {
         guard app.imTCPConfiguration.dropsRealtimeWhenNotWritable else {
             throw Abort(
                 .internalServerError,
-                reason: "Production gateway requires IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE=true so slow clients cannot retain unbounded best-effort realtime writes."
+                reason: "Production gateway requires IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE=true so a non-writable realtime connection is disconnected and reconciles through client catch-up instead of retaining unbounded writes."
             )
         }
 
@@ -526,7 +546,14 @@ enum IMProductionRuntimeValidationSupport {
 
     static func validateSummaryShardDatabasesConfigured(_ app: Application) throws {
         let configuredShardIDs = app.summaryStoreConfiguration.shardIDs
-        let missingShardIDs = configuredShardIDs.filter { app.summaryShardDatabaseIDs[$0] == nil }
+        // A single logical summary shard can be backed by the generic
+        // DATABASE_SUMMARY_* connection. Requiring a second
+        // DATABASE_SUMMARY_<SHARD>_* alias for that same physical database
+        // makes Fluent migrate it concurrently through two database IDs.
+        let genericSummaryCoversSingleShard = configuredShardIDs.count == 1 && app.imSummaryDatabaseEnabled
+        let missingShardIDs = configuredShardIDs.filter {
+            app.summaryShardDatabaseIDs[$0] == nil && !genericSummaryCoversSingleShard
+        }
         guard missingShardIDs.isEmpty else {
             let missing = missingShardIDs.joined(separator: ", ")
             throw Abort(

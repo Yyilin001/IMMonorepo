@@ -3,6 +3,7 @@ import Vapor
 
 actor RealtimeDeliveryAsyncDispatcher {
     typealias RelayHandler = @Sendable ([ConversationRealtimeConsumer.DomainEventPayloadBatch], UUID?) async -> Void
+    typealias ReliableRelayHandler = @Sendable ([ConversationRealtimeConsumer.DomainEventPayloadBatch], UUID?) async throws -> Void
 
     enum CoalescingScope: Hashable, Sendable {
         case defaultScope
@@ -51,6 +52,7 @@ actor RealtimeDeliveryAsyncDispatcher {
     private let maxInFlight: Int
     private let maxQueued: Int
     private let relayHandler: RelayHandler
+    private let reliableRelayHandler: ReliableRelayHandler
     private var inFlight = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var coalescedDispatches: [CoalescingKey: CoalescedDispatch] = [:]
@@ -59,13 +61,26 @@ actor RealtimeDeliveryAsyncDispatcher {
         app: Application,
         maxInFlight: Int,
         maxQueued: Int = 1024,
-        relayHandler: RelayHandler? = nil
+        relayHandler: RelayHandler? = nil,
+        reliableRelayHandler: ReliableRelayHandler? = nil
     ) {
         self.app = app
         self.maxInFlight = max(1, maxInFlight)
         self.maxQueued = max(0, maxQueued)
         self.relayHandler = relayHandler ?? { batches, requestID in
             await app.gatewaySessionService.sendDomainEventPayloadBatches(
+                batches.map { payloadBatch in
+                    IMGatewayDomainEventPayloadBatch(
+                        payload: payloadBatch.payload,
+                        recipientUserIDs: payloadBatch.recipientUserIDs,
+                        fanoutIntent: payloadBatch.fanoutIntent
+                    )
+                },
+                requestID: requestID
+            )
+        }
+        self.reliableRelayHandler = reliableRelayHandler ?? { batches, requestID in
+            try await app.gatewaySessionService.sendDomainEventPayloadBatchesReliably(
                 batches.map { payloadBatch in
                     IMGatewayDomainEventPayloadBatch(
                         payload: payloadBatch.payload,
@@ -121,6 +136,17 @@ actor RealtimeDeliveryAsyncDispatcher {
         await dispatchNow(payloadBatches, requestID: requestID)
     }
 
+    /// Delivers non-coalesced realtime payloads from a durable source stream.
+    /// A failure means the gateway handoff was not persisted and lets the
+    /// caller retain its Kafka offset for retry.
+    func dispatchPayloadBatchesReliably(
+        _ payloadBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch],
+        requestID: UUID?
+    ) async throws {
+        guard !payloadBatches.isEmpty else { return }
+        try await dispatchNowReliably(payloadBatches, requestID: requestID)
+    }
+
     private func coalesce(
         _ payloadBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch],
         requestID: UUID?,
@@ -161,8 +187,19 @@ actor RealtimeDeliveryAsyncDispatcher {
             }
         } else {
             wasScheduled = false
+            let initialPayloadBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch]
+            if key.scope.keepsLatestPayloadPerRecipient {
+                // A Kafka run can already contain dozens of message-created
+                // events. Coalesce the first run before scheduling it too.
+                initialPayloadBatches = mergeLatestPayloadPerRecipient(
+                    pending: [],
+                    replacement: payloadBatches
+                ).payloadBatches
+            } else {
+                initialPayloadBatches = payloadBatches
+            }
             coalescedDispatches[key] = CoalescedDispatch(
-                payloadBatches: payloadBatches,
+                payloadBatches: initialPayloadBatches,
                 requestID: requestID,
                 scheduled: true
             )
@@ -276,22 +313,7 @@ actor RealtimeDeliveryAsyncDispatcher {
         let recipientCount = payloadBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
         let slowLogMilliseconds = app.streamConsumerConfiguration.realtimeDeliverySlowLogMilliseconds
         let slotRequestedAt = Date()
-        guard let slotStats = await acquireSlot(requestedAt: slotRequestedAt) else {
-            await app.routingMetrics.recordRealtimeAsyncRelayDropped(
-                payloadBatchCount: payloadBatches.count,
-                recipientDeliveryCount: recipientCount
-            )
-            app.logger.warning("Realtime async dispatcher queue saturated; dropping best-effort relay.", metadata: [
-                "request_id": .string(requestID?.uuidString ?? ""),
-                "delivery_count": .stringConvertible(recipientCount),
-                "payload_batch_count": .stringConvertible(payloadBatches.count),
-                "in_flight": .stringConvertible(inFlight),
-                "queued_waiters": .stringConvertible(waiters.count),
-                "max_in_flight": .stringConvertible(maxInFlight),
-                "max_queued": .stringConvertible(maxQueued)
-            ])
-            return
-        }
+        let slotStats = await acquireSlot(requestedAt: slotRequestedAt)
         if IMRealtimeDeliveryDiagnostics.shouldLog(
             durationMilliseconds: slotStats.waitMilliseconds,
             thresholdMilliseconds: slowLogMilliseconds
@@ -308,43 +330,69 @@ actor RealtimeDeliveryAsyncDispatcher {
             ])
         }
 
-        let taskQueuedAt = Date()
-        let maxInFlightValue = maxInFlight
-        let maxQueuedValue = maxQueued
-        let relayHandler = relayHandler
-        Task {
-            let relayStartedAt = Date()
-            let taskStartLagMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(from: taskQueuedAt, to: relayStartedAt)
-            await app.routingMetrics.recordRealtimeAsyncRelayTaskStarted(
-                taskStartLagMilliseconds: taskStartLagMilliseconds,
-                inFlight: slotStats.inFlight
-            )
-            await relayHandler(payloadBatches, requestID)
-            let relayMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: relayStartedAt)
-            if IMRealtimeDeliveryDiagnostics.shouldLogAny(
-                [taskStartLagMilliseconds, relayMilliseconds],
-                thresholdMilliseconds: slowLogMilliseconds
-            ) {
-                app.logger.info("Realtime async dispatcher slow relay task.", metadata: [
-                    "request_id": .string(requestID?.uuidString ?? ""),
-                    "delivery_count": .stringConvertible(recipientCount),
-                    "payload_batch_count": .stringConvertible(payloadBatches.count),
-                    "task_start_lag_ms": .stringConvertible(taskStartLagMilliseconds),
-                    "relay_ms": .stringConvertible(relayMilliseconds),
-                    "slot_wait_ms": .stringConvertible(slotStats.waitMilliseconds),
-                    "max_in_flight": .stringConvertible(maxInFlightValue),
-                    "max_queued": .stringConvertible(maxQueuedValue)
-                ])
-            }
-            let currentInFlight = await self.releaseSlot()
-            await app.routingMetrics.recordRealtimeAsyncRelayTaskCompleted(
-                relayMilliseconds: relayMilliseconds,
-                inFlight: currentInFlight
-            )
+        let relayStartedAt = Date()
+        await app.routingMetrics.recordRealtimeAsyncRelayTaskStarted(
+            taskStartLagMilliseconds: 0,
+            inFlight: slotStats.inFlight
+        )
+        await relayHandler(payloadBatches, requestID)
+        let relayMilliseconds = IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: relayStartedAt)
+        if IMRealtimeDeliveryDiagnostics.shouldLogAny(
+            [relayMilliseconds],
+            thresholdMilliseconds: slowLogMilliseconds
+        ) {
+            app.logger.info("Realtime async dispatcher slow relay task.", metadata: [
+                "request_id": .string(requestID?.uuidString ?? ""),
+                "delivery_count": .stringConvertible(recipientCount),
+                "payload_batch_count": .stringConvertible(payloadBatches.count),
+                "relay_ms": .stringConvertible(relayMilliseconds),
+                "slot_wait_ms": .stringConvertible(slotStats.waitMilliseconds),
+                "max_in_flight": .stringConvertible(maxInFlight),
+                "max_queued": .stringConvertible(maxQueued)
+            ])
         }
+        let currentInFlight = await releaseSlot()
+        await app.routingMetrics.recordRealtimeAsyncRelayTaskCompleted(
+            relayMilliseconds: relayMilliseconds,
+            inFlight: currentInFlight
+        )
     }
 
-    private func acquireSlot(requestedAt: Date) async -> SlotStats? {
+    private func dispatchNowReliably(
+        _ payloadBatches: [ConversationRealtimeConsumer.DomainEventPayloadBatch],
+        requestID: UUID?
+    ) async throws {
+        let recipientCount = payloadBatches.reduce(0) { $0 + $1.recipientUserIDs.count }
+        let slotStats = await acquireSlot(requestedAt: Date())
+        await app.routingMetrics.recordRealtimeAsyncRelayTaskStarted(
+            taskStartLagMilliseconds: 0,
+            inFlight: slotStats.inFlight
+        )
+        let relayStartedAt = Date()
+        do {
+            try await reliableRelayHandler(payloadBatches, requestID)
+        } catch {
+            let currentInFlight = await releaseSlot()
+            await app.routingMetrics.recordRealtimeAsyncRelayTaskCompleted(
+                relayMilliseconds: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: relayStartedAt),
+                inFlight: currentInFlight
+            )
+            app.logger.warning("Reliable realtime relay failed; source event will retry.", metadata: [
+                "request_id": .string(requestID?.uuidString ?? ""),
+                "delivery_count": .stringConvertible(recipientCount),
+                "payload_batch_count": .stringConvertible(payloadBatches.count),
+                "error": .string(String(describing: error))
+            ])
+            throw error
+        }
+        let currentInFlight = await releaseSlot()
+        await app.routingMetrics.recordRealtimeAsyncRelayTaskCompleted(
+            relayMilliseconds: IMRealtimeDeliveryDiagnostics.elapsedMilliseconds(since: relayStartedAt),
+            inFlight: currentInFlight
+        )
+    }
+
+    private func acquireSlot(requestedAt: Date) async -> SlotStats {
         if inFlight < maxInFlight {
             inFlight += 1
             return SlotStats(
@@ -354,8 +402,8 @@ actor RealtimeDeliveryAsyncDispatcher {
             )
         }
 
-        guard waiters.count < maxQueued else {
-            return nil
+        if waiters.count >= maxQueued {
+            await app.routingMetrics.recordRealtimeAsyncRelayQueueSaturated()
         }
 
         let metrics = app.routingMetrics

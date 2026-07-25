@@ -1,0 +1,510 @@
+syntax = "proto3";
+
+package im.realtime.v2;
+
+option swift_prefix = "IMV2";
+option java_package = "com.xmtx.imclientkit.generated.im.realtime.v2";
+option java_multiple_files = true;
+
+// V2 is an independent protocol. It intentionally has no V1 compatibility
+// fields or fallback messages.
+message Envelope {
+  uint64 request_id = 1;
+  uint32 protocol_version = 2;
+
+  oneof body {
+    ClientHello client_hello = 10;
+    ServerHello server_hello = 11;
+    Authenticate authenticate = 12;
+    Authenticated authenticated = 13;
+    Heartbeat heartbeat = 14;
+    HeartbeatAck heartbeat_ack = 15;
+    SendMessage send_message = 20;
+    MessageAccepted message_accepted = 21;
+    ChangeRoomMembership change_room_membership = 22;
+    MembershipChanged membership_changed = 23;
+    WithdrawMessage withdraw_message = 24;
+    MessageWithdrawn message_withdrawn = 25;
+    ChangeMessageReaction change_message_reaction = 26;
+    MessageReactionChanged message_reaction_changed = 27;
+    EditMessage edit_message = 28;
+    MessageEdited message_edited = 29;
+    SyncPull sync_pull = 30;
+    SyncBatch sync_batch = 31;
+    SyncAck sync_ack = 32;
+    ResetRequired reset_required = 33;
+    SnapshotAck snapshot_ack = 34;
+    Acknowledged acknowledged = 35;
+    SyncSnapshot sync_snapshot = 36;
+    SnapshotManifest snapshot_manifest = 37;
+    SnapshotPagePull snapshot_page_pull = 38;
+    SnapshotPage snapshot_page = 39;
+    SyncAvailable sync_available = 40;
+    RecordReadReceipt record_read_receipt = 41;
+    ReadReceiptRecorded read_receipt_recorded = 42;
+    OpenDirectRoom open_direct_room = 43;
+    DirectRoomOpened direct_room_opened = 44;
+    SetStrangerMessagePermission set_stranger_message_permission = 45;
+    StrangerMessagePermissionSet stranger_message_permission_set = 46;
+    ChangeRelationship change_relationship = 47;
+    RelationshipChanged relationship_changed = 48;
+    ChangeUserBlock change_user_block = 49;
+    UserBlockChanged user_block_changed = 50;
+    ModerateMessage moderate_message = 51;
+    MessageRedacted message_redacted = 52;
+    MuteMember mute_member = 53;
+    MemberMuted member_muted = 54;
+    ModerateMemberRemoval moderate_member_removal = 55;
+    MemberRemovedByModerator member_removed_by_moderator = 56;
+    CreateGroupRoom create_group_room = 57;
+    GroupRoomCreated group_room_created = 58;
+    ListRoomMembers list_room_members = 59;
+    RoomMembersPage room_members_page = 60;
+    Error error = 90;
+  }
+}
+
+message Acknowledged {}
+
+message ClientHello {
+  repeated uint32 supported_protocol_versions = 1;
+  repeated string supported_capability_profiles = 2;
+  string device_id = 3;
+}
+
+message ServerHello {
+  uint32 selected_protocol_version = 1;
+  string selected_capability_profile = 2;
+  int64 server_time_ms = 3;
+}
+
+message Authenticate {
+  string access_token = 1;
+  string device_id = 2;
+}
+
+message Authenticated {
+  string user_id = 1;
+  string device_id = 2;
+  string selected_capability_profile = 3;
+}
+
+// Heartbeats carry no delivery or cursor semantics. They only keep a live
+// foreground transport eligible for low-latency availability hints.
+message Heartbeat {
+  uint64 client_time_ms = 1;
+}
+
+message HeartbeatAck {
+  int64 server_time_ms = 1;
+}
+
+message SendMessage {
+  string room_id = 1;
+  string client_message_id = 2;
+  MessageContent content = 3;
+}
+
+message MessageContent {
+  oneof body {
+    string text = 1;
+  }
+  // Opaque, upload-authorized media identifiers. Object locations, names and
+  // bearer URLs are deliberately absent from the realtime protocol.
+  repeated string media_ids = 2;
+  repeated string mentioned_user_ids = 3;
+  bool mention_everyone = 4;
+}
+
+// Acceptance proves only the atomic room-shard write. It does not prove that a
+// recipient is online, synchronized, or has displayed the message.
+message MessageAccepted {
+  string message_id = 1;
+  string room_id = 2;
+  uint64 room_sequence = 3;
+  int64 server_created_at_ms = 4;
+  repeated string media_ids = 5;
+  repeated string mentioned_user_ids = 6;
+  bool mentions_everyone = 7;
+}
+
+// The initial gateway-exposed moderation action is explicit message redaction.
+// It is separate from author withdrawal and carries only a bounded policy code,
+// never report text or message content.
+message ModerateMessage {
+  string room_id = 1;
+  string operation_id = 2;
+  string message_id = 3;
+  string reason_code = 4;
+}
+
+message MessageRedacted {
+  string room_id = 1;
+  string message_id = 2;
+  uint64 room_sequence = 3;
+  uint64 message_revision = 4;
+  int64 server_created_at_ms = 5;
+}
+
+// Owner/admin moderation command. The authenticated gateway identity is the
+// actor; reason_code is an opaque bounded policy label, not report text.
+message MuteMember {
+  string room_id = 1;
+  string operation_id = 2;
+  string target_user_id = 3;
+  int64 mute_until_ms = 4;
+  string reason_code = 5;
+}
+
+message MemberMuted {
+  string room_id = 1;
+  string target_user_id = 2;
+  int64 mute_until_ms = 3;
+  uint64 room_sequence = 4;
+  int64 server_created_at_ms = 5;
+}
+
+// This is deliberately not ChangeRoomMembership(action=REMOVE). It records a
+// bounded moderation reason and is replayed from the moderation operation
+// ledger, while still producing the canonical membership_changed room event.
+message ModerateMemberRemoval {
+  string room_id = 1;
+  string operation_id = 2;
+  string target_user_id = 3;
+  string reason_code = 4;
+}
+
+message MemberRemovedByModerator {
+  string room_id = 1;
+  string target_user_id = 2;
+  uint64 membership_revision = 3;
+  uint64 room_sequence = 4;
+  int64 server_created_at_ms = 5;
+}
+
+enum MembershipChangeAction {
+  MEMBERSHIP_CHANGE_ACTION_UNSPECIFIED = 0;
+  MEMBERSHIP_CHANGE_ACTION_ADD = 1;
+  MEMBERSHIP_CHANGE_ACTION_REMOVE = 2;
+}
+
+// `operation_id` is durable client intent and remains stable across reconnects.
+// `expected_membership_revision` fences stale administrative actions.
+message ChangeRoomMembership {
+  string room_id = 1;
+  string operation_id = 2;
+  string target_user_id = 3;
+  MembershipChangeAction action = 4;
+  uint64 expected_membership_revision = 5;
+}
+
+message MembershipChanged {
+  string room_id = 1;
+  string target_user_id = 2;
+  MembershipChangeAction action = 3;
+  uint64 membership_revision = 4;
+  uint64 room_sequence = 5;
+  int64 server_created_at_ms = 6;
+}
+
+// A withdrawal preserves the immutable message identity and room ordering,
+// while turning its visible state into a revision-fenced tombstone.
+message WithdrawMessage {
+  string room_id = 1;
+  string operation_id = 2;
+  string message_id = 3;
+  uint64 expected_message_revision = 4;
+}
+
+message MessageWithdrawn {
+  string room_id = 1;
+  string message_id = 2;
+  uint64 message_revision = 3;
+  uint64 room_sequence = 4;
+  int64 server_created_at_ms = 5;
+}
+
+enum MessageReactionAction {
+  MESSAGE_REACTION_ACTION_UNSPECIFIED = 0;
+  MESSAGE_REACTION_ACTION_ADD = 1;
+  MESSAGE_REACTION_ACTION_REMOVE = 2;
+}
+
+// Reaction operations are stable client intent.  Reactions are a set keyed by
+// message, actor, and normalized reaction value; they do not mutate text.
+message ChangeMessageReaction {
+  string room_id = 1;
+  string operation_id = 2;
+  string message_id = 3;
+  string reaction = 4;
+  MessageReactionAction action = 5;
+}
+
+message MessageReactionChanged {
+  string room_id = 1;
+  string message_id = 2;
+  string actor_user_id = 3;
+  string reaction = 4;
+  MessageReactionAction action = 5;
+  uint64 room_sequence = 6;
+  int64 server_created_at_ms = 7;
+}
+
+// Edits are author-only, revision-fenced mutations. `operation_id` is stable
+// across retries and a concurrent withdrawal rejects the edit.
+message EditMessage {
+  string room_id = 1;
+  string operation_id = 2;
+  string message_id = 3;
+  uint64 expected_message_revision = 4;
+  MessageContent content = 5;
+}
+
+message MessageEdited {
+  string room_id = 1;
+  string message_id = 2;
+  string text = 3;
+  uint64 message_revision = 4;
+  uint64 room_sequence = 5;
+  int64 server_created_at_ms = 6;
+}
+
+// Human-viewing state. This does not acknowledge sync delivery and may only
+// move the caller's room watermark forward.
+message RecordReadReceipt {
+  string room_id = 1;
+  string operation_id = 2;
+  uint64 read_through_room_sequence = 3;
+}
+
+message ReadReceiptRecorded {
+  string room_id = 1;
+  string user_id = 2;
+  uint64 read_through_room_sequence = 3;
+  int64 recorded_at_ms = 4;
+}
+
+// Opens the unique two-user room. Opening a room does not bypass the
+// recipient's stranger-message setting; that policy is enforced when a new
+// message is accepted.
+message OpenDirectRoom {
+  string operation_id = 1;
+  string target_user_id = 2;
+}
+
+message DirectRoomOpened {
+  string room_id = 1;
+  string target_user_id = 2;
+  int64 created_at_ms = 3;
+}
+
+// `operation_id` is durable client intent. Group bootstrap is a single atomic
+// command: the room and all initial memberships either exist together or not
+// at all. Later additions/removals use ChangeRoomMembership.
+message CreateGroupRoom {
+  string operation_id = 1;
+  string title = 2;
+  repeated string initial_member_user_ids = 3;
+}
+
+message GroupRoomCreated {
+  string room_id = 1;
+  string title = 2;
+  repeated string member_user_ids = 3;
+  int64 created_at_ms = 4;
+}
+
+// A read-only, seek-paginated directory.  Member lists are never attached to
+// room-created or membership fan-out events, because a large roster would be
+// replicated once per recipient.  The authenticated caller must be an active
+// member; clients treat `next_cursor` as opaque.
+message ListRoomMembers {
+  string room_id = 1;
+  string cursor = 2;
+  uint32 page_size = 3;
+}
+
+enum RoomMembershipRole {
+  ROOM_MEMBERSHIP_ROLE_UNSPECIFIED = 0;
+  ROOM_MEMBERSHIP_ROLE_OWNER = 1;
+  ROOM_MEMBERSHIP_ROLE_ADMIN = 2;
+  ROOM_MEMBERSHIP_ROLE_MEMBER = 3;
+}
+
+message RoomMember {
+  string user_id = 1;
+  RoomMembershipRole role = 2;
+}
+
+message RoomMembersPage {
+  string room_id = 1;
+  uint64 membership_revision = 2;
+  repeated RoomMember members = 3;
+  string next_cursor = 4;
+  RoomMembershipRole actor_role = 5;
+}
+
+enum StrangerMessagePermission {
+  STRANGER_MESSAGE_PERMISSION_UNSPECIFIED = 0;
+  STRANGER_MESSAGE_PERMISSION_ALLOW = 1;
+  STRANGER_MESSAGE_PERMISSION_DENY = 2;
+}
+
+// Device-independent recipient privacy preference. It controls only new
+// messages from non-friends before the recipient has replied in the direct
+// room; block policy always takes precedence.
+message SetStrangerMessagePermission {
+  string operation_id = 1;
+  StrangerMessagePermission permission = 2;
+}
+
+message StrangerMessagePermissionSet {
+  StrangerMessagePermission permission = 1;
+  int64 updated_at_ms = 2;
+}
+
+enum RelationshipAction {
+  RELATIONSHIP_ACTION_UNSPECIFIED = 0;
+  RELATIONSHIP_ACTION_REQUEST = 1;
+  RELATIONSHIP_ACTION_ACCEPT = 2;
+  RELATIONSHIP_ACTION_REJECT = 3;
+  RELATIONSHIP_ACTION_REMOVE = 4;
+}
+
+enum RelationshipState {
+  RELATIONSHIP_STATE_UNSPECIFIED = 0;
+  RELATIONSHIP_STATE_NONE = 1;
+  RELATIONSHIP_STATE_PENDING = 2;
+  RELATIONSHIP_STATE_ACCEPTED = 3;
+}
+
+// The authenticated user is the actor. While a request is pending only its
+// recipient may accept or reject it; either participant may remove it.
+message ChangeRelationship {
+  string operation_id = 1;
+  string target_user_id = 2;
+  RelationshipAction action = 3;
+}
+
+message RelationshipChanged {
+  string target_user_id = 1;
+  RelationshipAction action = 2;
+  RelationshipState resulting_state = 3;
+  int64 updated_at_ms = 4;
+}
+
+enum UserBlockAction {
+  USER_BLOCK_ACTION_UNSPECIFIED = 0;
+  USER_BLOCK_ACTION_BLOCK = 1;
+  USER_BLOCK_ACTION_UNBLOCK = 2;
+}
+
+// Block state is private to the authenticated user. The server does not send
+// a target-side block event or reveal whether a relationship failure is due to
+// a block held by either user.
+message ChangeUserBlock {
+  string operation_id = 1;
+  string target_user_id = 2;
+  UserBlockAction action = 3;
+}
+
+message UserBlockChanged {
+  string target_user_id = 1;
+  UserBlockAction action = 2;
+  bool is_blocked = 3;
+  int64 updated_at_ms = 4;
+}
+
+message SyncPull {
+  string sync_token = 1;
+  uint32 max_records = 2;
+}
+
+message SyncRecord {
+  uint64 user_sync_sequence = 1;
+  string source_event_id = 2;
+  string projection_kind = 3;
+  bytes payload = 4;
+}
+
+message SyncBatch {
+  uint64 generation = 1;
+  repeated SyncRecord records = 2;
+  string next_sync_token = 3;
+  string sync_receipt = 4;
+  bool has_more = 5;
+  string capability_profile = 6;
+}
+
+message SyncAck {
+  uint64 generation = 1;
+  uint64 highest_contiguous_sequence = 2;
+  string sync_receipt = 3;
+}
+
+message ResetRequired {
+  string snapshot_id = 1;
+  uint64 generation = 2;
+  uint64 base_user_sync_sequence = 3;
+  string manifest_digest = 4;
+  int64 expires_at_ms = 5;
+}
+
+message SnapshotAck {
+  string snapshot_id = 1;
+  uint64 generation = 2;
+  uint64 base_user_sync_sequence = 3;
+  string snapshot_receipt = 4;
+}
+
+// The reset fence is established before any page is exposed. A manifest and
+// each page request are bound to the authenticated device and its immutable
+// snapshot generation.
+message SyncSnapshot {
+  string snapshot_id = 1;
+  uint64 generation = 2;
+}
+
+message SnapshotManifest {
+  string snapshot_id = 1;
+  uint64 generation = 2;
+  uint64 base_user_sync_sequence = 3;
+  string manifest_digest = 4;
+  uint32 schema_version = 5;
+  string capability_profile = 6;
+  repeated string page_digests = 7;
+  string next_sync_token = 8;
+  string sync_receipt = 9;
+  int64 expires_at_ms = 10;
+}
+
+message SnapshotPagePull {
+  string snapshot_id = 1;
+  uint64 generation = 2;
+  string manifest_digest = 3;
+  uint32 page_index = 4;
+}
+
+message SnapshotPage {
+  string snapshot_id = 1;
+  uint64 generation = 2;
+  string manifest_digest = 3;
+  uint32 page_index = 4;
+  string page_digest = 5;
+  bytes payload = 6;
+}
+
+// An asynchronous availability hint always uses request_id = 0. It contains
+// no message payload and never advances a client cursor.
+message SyncAvailable {
+  uint64 event_id = 1;
+  uint64 high_watermark = 2;
+}
+
+message Error {
+  string code = 1;
+  bool retryable = 2;
+  uint32 retry_after_seconds = 3;
+  // Present for stale entity mutations such as membership changes.
+  uint64 current_revision = 4;
+}

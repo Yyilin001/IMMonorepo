@@ -66,16 +66,16 @@ expected_cell_endpoints=""
 expected_cell_command_endpoints=""
 expected_cell_query_endpoints=""
 expected_cell_realtime_endpoints=""
-expected_gateway_endpoints=""
 expected_command_endpoints=""
 expected_redis_topology=""
 expected_redis_seeds=""
 expected_redis_url=""
 expected_kafka_brokers=""
 expected_kafka_topic_spec=""
+expected_cross_cell_delivery_timeout_seconds=""
+expected_cross_cell_dispatch_retention_days=""
 expected_node_dispatch_mode=""
 expected_internal_secret=""
-expected_node_dispatch_secret=""
 expected_cell_ingress_secret=""
 expected_command_secret=""
 seen_suffixes=""
@@ -103,16 +103,16 @@ for inventory in "$@"; do
     expected_cell_command_endpoints="${IM_CELL_INGRESS_COMMAND_ENDPOINTS}"
     expected_cell_query_endpoints="${IM_CELL_INGRESS_QUERY_ENDPOINTS}"
     expected_cell_realtime_endpoints="${IM_CELL_INGRESS_REALTIME_ENDPOINTS}"
-    expected_gateway_endpoints="${IM_GATEWAY_NODE_DISPATCH_ENDPOINTS}"
     expected_command_endpoints="${IM_COMMAND_NODE_URLS}"
     expected_redis_topology="${IM_REDIS_DEPLOYMENT_TOPOLOGY}"
     expected_redis_seeds="${IM_REDIS_CLUSTER_NODES}"
     expected_redis_url="${REDIS_URL}"
     expected_kafka_brokers="${IM_KAFKA_BROKERS}"
     expected_kafka_topic_spec="${IM_KAFKA_TOPIC}|${IM_KAFKA_DEAD_LETTER_TOPIC}|${IM_KAFKA_EVENT_TOPIC_PARTITIONS}|${IM_KAFKA_EVENT_TOPIC_REPLICATION_FACTOR}|${IM_KAFKA_EVENT_TOPIC_MIN_IN_SYNC_REPLICAS}|${IM_KAFKA_EVENT_TOPIC_RETENTION_HOURS}|${IM_KAFKA_DEAD_LETTER_TOPIC_PARTITIONS}|${IM_KAFKA_DEAD_LETTER_TOPIC_REPLICATION_FACTOR}|${IM_KAFKA_DEAD_LETTER_TOPIC_MIN_IN_SYNC_REPLICAS}|${IM_KAFKA_DEAD_LETTER_TOPIC_RETENTION_HOURS}"
+    expected_cross_cell_delivery_timeout_seconds="${IM_CROSS_CELL_REALTIME_OUTBOX_DELIVERY_TIMEOUT_SECONDS}"
+    expected_cross_cell_dispatch_retention_days="${IM_CLEANUP_CROSS_CELL_REALTIME_DISPATCH_RETENTION_DAYS}"
     expected_node_dispatch_mode="${IM_NODE_DISPATCH_MODE}"
     expected_internal_secret="${IM_INTERNAL_SHARED_SECRET}"
-    expected_node_dispatch_secret="${IM_NODE_DISPATCH_SHARED_SECRET}"
     expected_cell_ingress_secret="${IM_CELL_INGRESS_SHARED_SECRET}"
     expected_command_secret="${IM_COMMAND_INTERNAL_SHARED_SECRET}"
   else
@@ -121,16 +121,16 @@ for inventory in "$@"; do
     require_shared_value IM_CELL_INGRESS_COMMAND_ENDPOINTS "${IM_CELL_INGRESS_COMMAND_ENDPOINTS}" "${expected_cell_command_endpoints}"
     require_shared_value IM_CELL_INGRESS_QUERY_ENDPOINTS "${IM_CELL_INGRESS_QUERY_ENDPOINTS}" "${expected_cell_query_endpoints}"
     require_shared_value IM_CELL_INGRESS_REALTIME_ENDPOINTS "${IM_CELL_INGRESS_REALTIME_ENDPOINTS}" "${expected_cell_realtime_endpoints}"
-    require_shared_value IM_GATEWAY_NODE_DISPATCH_ENDPOINTS "${IM_GATEWAY_NODE_DISPATCH_ENDPOINTS}" "${expected_gateway_endpoints}"
     require_shared_value IM_COMMAND_NODE_URLS "${IM_COMMAND_NODE_URLS}" "${expected_command_endpoints}"
     require_shared_value IM_REDIS_DEPLOYMENT_TOPOLOGY "${IM_REDIS_DEPLOYMENT_TOPOLOGY}" "${expected_redis_topology}"
     require_shared_value IM_REDIS_CLUSTER_NODES "${IM_REDIS_CLUSTER_NODES}" "${expected_redis_seeds}"
     require_shared_value REDIS_URL "${REDIS_URL}" "${expected_redis_url}"
     require_shared_value IM_KAFKA_BROKERS "${IM_KAFKA_BROKERS}" "${expected_kafka_brokers}"
     require_shared_value IM_KAFKA_TOPIC_SPEC "${IM_KAFKA_TOPIC}|${IM_KAFKA_DEAD_LETTER_TOPIC}|${IM_KAFKA_EVENT_TOPIC_PARTITIONS}|${IM_KAFKA_EVENT_TOPIC_REPLICATION_FACTOR}|${IM_KAFKA_EVENT_TOPIC_MIN_IN_SYNC_REPLICAS}|${IM_KAFKA_EVENT_TOPIC_RETENTION_HOURS}|${IM_KAFKA_DEAD_LETTER_TOPIC_PARTITIONS}|${IM_KAFKA_DEAD_LETTER_TOPIC_REPLICATION_FACTOR}|${IM_KAFKA_DEAD_LETTER_TOPIC_MIN_IN_SYNC_REPLICAS}|${IM_KAFKA_DEAD_LETTER_TOPIC_RETENTION_HOURS}" "${expected_kafka_topic_spec}"
+    require_shared_value IM_CROSS_CELL_REALTIME_OUTBOX_DELIVERY_TIMEOUT_SECONDS "${IM_CROSS_CELL_REALTIME_OUTBOX_DELIVERY_TIMEOUT_SECONDS}" "${expected_cross_cell_delivery_timeout_seconds}"
+    require_shared_value IM_CLEANUP_CROSS_CELL_REALTIME_DISPATCH_RETENTION_DAYS "${IM_CLEANUP_CROSS_CELL_REALTIME_DISPATCH_RETENTION_DAYS}" "${expected_cross_cell_dispatch_retention_days}"
     require_shared_value IM_NODE_DISPATCH_MODE "${IM_NODE_DISPATCH_MODE}" "${expected_node_dispatch_mode}"
     require_shared_value IM_INTERNAL_SHARED_SECRET "${IM_INTERNAL_SHARED_SECRET}" "${expected_internal_secret}"
-    require_shared_value IM_NODE_DISPATCH_SHARED_SECRET "${IM_NODE_DISPATCH_SHARED_SECRET}" "${expected_node_dispatch_secret}"
     require_shared_value IM_CELL_INGRESS_SHARED_SECRET "${IM_CELL_INGRESS_SHARED_SECRET}" "${expected_cell_ingress_secret}"
     require_shared_value IM_COMMAND_INTERNAL_SHARED_SECRET "${IM_COMMAND_INTERNAL_SHARED_SECRET}" "${expected_command_secret}"
   fi
@@ -148,17 +148,12 @@ for inventory in "$@"; do
 done
 
 inventory_count="$#"
-[[ "$(pair_value_count "${expected_gateway_endpoints}")" == "${inventory_count}" ]] || fail "gateway_endpoint_count_must_match_inventory_count"
 [[ "$(pair_value_count "${expected_command_endpoints}")" == "${inventory_count}" ]] || fail "command_endpoint_count_must_match_inventory_count"
 if (( inventory_count >= 2 )); then
   IFS=',' read -r -a availability_zones <<< "${seen_availability_zones}"
   (( ${#availability_zones[@]} >= 2 )) || fail "gateway_and_command_replicas_must_span_at_least_two_availability_zones"
 fi
 
-IFS=',' read -r -a gateway_ids <<< "${seen_gateways}"
-for gateway_id in "${gateway_ids[@]}"; do
-  pair_has_key "${expected_gateway_endpoints}" "${gateway_id}" || fail "gateway_endpoint_missing_${gateway_id}"
-done
 IFS=',' read -r -a command_ids <<< "${seen_commands}"
 for command_id in "${command_ids[@]}"; do
   pair_has_key "${expected_command_endpoints}" "${command_id}" || fail "command_endpoint_missing_${command_id}"
@@ -166,6 +161,6 @@ done
 
 printf 'multinode-inventory-set result=pass cell=%s inventories=%s gateway_nodes=%s command_nodes=%s availability_zones=%s\n' \
   "${expected_cell_id}" "${inventory_count}" \
-  "$(pair_value_count "${expected_gateway_endpoints}")" \
+  "${inventory_count}" \
   "$(pair_value_count "${expected_command_endpoints}")" \
   "$(wc -w <<<"${seen_availability_zones//,/ }" | tr -d ' ')"

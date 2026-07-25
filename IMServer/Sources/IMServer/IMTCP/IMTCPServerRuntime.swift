@@ -14,7 +14,8 @@ enum IMTCPChannelWriter {
         channelIsWritable: Bool? = nil,
         slowWriteThresholdMilliseconds: Int = 1000,
         slowWriteHandler: (@Sendable (Int) -> Void)? = nil,
-        writeCompletionHandler: (@Sendable (Bool) -> Void)? = nil
+        writeCompletionHandler: (@Sendable (Bool) -> Void)? = nil,
+        notWritableHandler: (@Sendable () -> Void)? = nil
     ) {
         let isWritable = channelIsWritable ?? channel.isWritable
         if dropWhenNotWritable, !isWritable {
@@ -24,6 +25,7 @@ enum IMTCPChannelWriter {
                     await metrics.recordTCPWriteDroppedBackpressure()
                 }
             }
+            notWritableHandler?()
             return
         }
         do {
@@ -39,7 +41,8 @@ enum IMTCPChannelWriter {
                 channelIsWritable: isWritable,
                 slowWriteThresholdMilliseconds: slowWriteThresholdMilliseconds,
                 slowWriteHandler: slowWriteHandler,
-                writeCompletionHandler: writeCompletionHandler
+                writeCompletionHandler: writeCompletionHandler,
+                notWritableHandler: notWritableHandler
             )
         } catch {
             channel.close(promise: nil)
@@ -54,7 +57,8 @@ enum IMTCPChannelWriter {
         channelIsWritable: Bool? = nil,
         slowWriteThresholdMilliseconds: Int = 1000,
         slowWriteHandler: (@Sendable (Int) -> Void)? = nil,
-        writeCompletionHandler: (@Sendable (Bool) -> Void)? = nil
+        writeCompletionHandler: (@Sendable (Bool) -> Void)? = nil,
+        notWritableHandler: (@Sendable () -> Void)? = nil
     ) {
         let isWritable = channelIsWritable ?? channel.isWritable
         if dropWhenNotWritable, !isWritable {
@@ -64,6 +68,7 @@ enum IMTCPChannelWriter {
                     await metrics.recordTCPWriteDroppedBackpressure()
                 }
             }
+            notWritableHandler?()
             return
         }
         var buffer = channel.allocator.buffer(capacity: data.count + 4)
@@ -77,7 +82,8 @@ enum IMTCPChannelWriter {
             channelIsWritable: isWritable,
             slowWriteThresholdMilliseconds: slowWriteThresholdMilliseconds,
             slowWriteHandler: slowWriteHandler,
-            writeCompletionHandler: writeCompletionHandler
+            writeCompletionHandler: writeCompletionHandler,
+            notWritableHandler: notWritableHandler
         )
     }
 
@@ -105,7 +111,8 @@ enum IMTCPChannelWriter {
         channelIsWritable: Bool? = nil,
         slowWriteThresholdMilliseconds: Int = 1000,
         slowWriteHandler: (@Sendable (Int) -> Void)? = nil,
-        writeCompletionHandler: (@Sendable (Bool) -> Void)? = nil
+        writeCompletionHandler: (@Sendable (Bool) -> Void)? = nil,
+        notWritableHandler: (@Sendable () -> Void)? = nil
     ) {
         let isWritable = channelIsWritable ?? channel.isWritable
         if let metrics, !isWritable {
@@ -116,6 +123,7 @@ enum IMTCPChannelWriter {
                 }
             }
             if dropWhenNotWritable {
+                notWritableHandler?()
                 return
             }
         }
@@ -279,18 +287,23 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
             holdsAdmissionSlot = false
         }
 
+        let inactiveConnectionID: UUID?
         if case .authenticated(let connection) = state {
-            Task {
-                await self.application.connectionRoutingService.remove(connectionID: connection.connectionID)
-            }
+            inactiveConnectionID = connection.connectionID
+        } else {
+            inactiveConnectionID = nil
         }
+        let inactiveState = stateName
+        // Authentication runs outside the event loop. Mark the handler closed
+        // before its completion hops back so a late completion cannot bind a
+        // route for a channel that has already gone away.
+        state = .closing
 
-        Task {
-            await self.application.routingMetrics.recordTCPChannelInactive(
-                closeReason: self.closeReason,
-                state: self.stateName
-            )
-        }
+        application.imTCPConnectionCloseBatcher.enqueue(
+            connectionID: inactiveConnectionID,
+            closeReason: closeReason,
+            state: inactiveState
+        )
         application.logger.debug(
             "IM TCP channel inactive",
             metadata: logMetadata(channel: context.channel, extra: [
@@ -499,6 +512,23 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                     appVersion: payload.appVersion
                 )
 
+                // Do not begin the relatively expensive route/presence bind if
+                // the peer disconnected while authentication was in flight.
+                // Checking only after bind lets a load spike retain stale routes
+                // behind the presence registration work.
+                let mayBindRoute = try await channel.eventLoop.submit { [weak self] in
+                    guard let self, channel.isActive else {
+                        return false
+                    }
+                    guard case .authenticating = self.state else {
+                        return false
+                    }
+                    return true
+                }.get()
+                guard mayBindRoute else {
+                    return
+                }
+
                 let control = IMConnectionControl(
                     connectionID: connection.connectionID,
                     channel: channel,
@@ -510,6 +540,15 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
                 try await application.connectionRoutingService.bind(connection, control: control)
 
                 channel.eventLoop.execute {
+                    guard channel.isActive, case .authenticating = self.state else {
+                        // The socket closed while database/session validation was
+                        // in flight. The route was bound just above, so remove it
+                        // here instead of retaining a stale authenticated entry.
+                        Task {
+                            await self.application.connectionRoutingService.remove(connectionID: connection.connectionID)
+                        }
+                        return
+                    }
                     self.authTimeoutTask?.cancel()
                     self.authTimeoutTask = nil
                     self.state = .authenticated(connection)
@@ -565,13 +604,6 @@ final class IMTCPConnectionHandler: ChannelInboundHandler, @unchecked Sendable {
         switch packet.type {
         case .heartbeat:
             let payload = (try? packet.payload.decodePayload(IMTCPHeartbeatPayload.self)) ?? IMTCPHeartbeatPayload(sequence: 0)
-            if case .authenticated(let connection) = state {
-                Task {
-                    await self.application.connectionRoutingService.refreshActiveConversationPresence(
-                        connectionID: connection.connectionID
-                    )
-                }
-            }
             writePacket(
                 type: .heartbeatAck,
                 requestID: packet.requestID,

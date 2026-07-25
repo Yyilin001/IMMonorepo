@@ -1,5 +1,7 @@
 x-imserver-build: &imserver_build
-  image: imserver:production-smoke
+  # A prebuilt Linux/ARM64 image can be loaded on the target host before the
+  # smoke starts. Keep the normal tag as the default for local Docker builds.
+  image: ${IMSERVER_IMAGE:-imserver:production-smoke}
   build:
     context: .
 
@@ -11,8 +13,13 @@ x-imserver-env: &imserver_env
   IM_HTTP_MAX_BODY_SIZE_BYTES: "1048576"
   IM_GROUP_MEMBER_LIMIT: "10000"
   IM_METRICS_ENABLED: "true"
-  AUTH_SESSION_CACHE_TTL_SECONDS: "600"
-  AUTH_SESSION_CACHE_MAX_TTL_SECONDS: "600"
+  # The capacity campaign prewarms tens of thousands of distinct sessions
+  # before a long TCP ramp. Keep its shared validation cache alive for the
+  # token lifetime so the online-capacity run does not silently fall back to
+  # per-session database validation part-way through the ramp.
+  AUTH_SESSION_CACHE_TTL_SECONDS: "7200"
+  AUTH_SESSION_CACHE_MAX_TTL_SECONDS: "7200"
+  AUTH_ACCESS_TOKEN_TTL_SECONDS: "7200"
   AUTH_SESSION_CACHE_REDIS_MAX_CONNECTIONS: "16"
   AUTH_LOGIN_IP_MAX_ATTEMPTS: "2000"
   IM_AUTO_MIGRATE_ON_START: "false"
@@ -27,16 +34,14 @@ x-imserver-env: &imserver_env
   DATABASE_PRIMARY_NAME: imserver_smoke
   DATABASE_PRIMARY_USERNAME: imserver
   DATABASE_PRIMARY_PASSWORD: imserver_password
-  DATABASE_CONVERSATION_SHARD_0_HOST: postgres
-  DATABASE_CONVERSATION_SHARD_0_PORT: "5432"
-  DATABASE_CONVERSATION_SHARD_0_NAME: imserver_smoke
-  DATABASE_CONVERSATION_SHARD_0_USERNAME: imserver
-  DATABASE_CONVERSATION_SHARD_0_PASSWORD: imserver_password
-  DATABASE_SUMMARY_SUMMARY_0_HOST: postgres
-  DATABASE_SUMMARY_SUMMARY_0_PORT: "5432"
-  DATABASE_SUMMARY_SUMMARY_0_NAME: imserver_summary
-  DATABASE_SUMMARY_SUMMARY_0_USERNAME: imserver
-  DATABASE_SUMMARY_SUMMARY_0_PASSWORD: imserver_password
+  # Keep control-plane summaries in their own database. The single logical
+  # summary shard uses this generic summary connection, avoiding duplicate
+  # Fluent migration registrations for two aliases of the same database.
+  DATABASE_SUMMARY_HOST: postgres
+  DATABASE_SUMMARY_PORT: "5432"
+  DATABASE_SUMMARY_NAME: imserver_smoke_summary
+  DATABASE_SUMMARY_USERNAME: imserver
+  DATABASE_SUMMARY_PASSWORD: imserver_password
   IM_CONVERSATION_SHARD_IDS: shard-0
   IM_SUMMARY_SHARD_IDS: summary-0
   IM_SUMMARY_PROJECTION_WRITE_MODE: sharded
@@ -49,10 +54,18 @@ x-imserver-env: &imserver_env
   IM_KAFKA_SECURITY_PROTOCOL: plaintext
   IM_KAFKA_COMPRESSION: none
   IM_KAFKA_AUTO_CREATE_TOPICS: "true"
+  # Keep enough partition parallelism for concurrent hot conversations. This
+  # smoke topology can override the value, while a new environment defaults
+  # to the 12-partition capacity-test baseline.
+  IM_KAFKA_TOPIC_PARTITIONS: "${IM_KAFKA_TOPIC_PARTITIONS:-12}"
   IM_KAFKA_POLL_INTERVAL_MS: "10"
   REDIS_URL: redis://redis:6379
   IM_ROUTING_MODE: redis
   IM_REDIS_MAX_CONNECTIONS: "32"
+  # Connection presence is registered on auth and removed on close. Do not
+  # rewrite one Redis lease per TCP heartbeat; the longer node lease covers
+  # abrupt process loss without putting the heartbeat path on Redis.
+  IM_REDIS_PRESENCE_HEARTBEAT_TIMEOUT_SECONDS: "600"
   IM_GATEWAY_LOCAL_FANOUT_BATCH_SIZE: "512"
   IM_GATEWAY_LOCAL_FANOUT_EVENT_LOOP_YIELD_CHUNKS: "32"
   DATABASE_GATEWAY_MAX_CONNECTIONS_PER_EVENT_LOOP: "2"
@@ -74,6 +87,7 @@ x-imserver-env: &imserver_env
   IM_STREAM_CONSUMER_BATCH_FILL_WAIT_MS: "10"
   IM_DOMAIN_DELIVERY_MESSAGE_CREATED_LARGE_GROUP_MODE: timeline-pull
   IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD: "500"
+  IM_DOMAIN_DELIVERY_LARGE_MEMBERSHIP_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD: "500"
   IM_DOMAIN_DELIVERY_OWNER_RECORD_BATCH_MAX_REQUESTS: "128"
   IM_NOTIFICATION_MESSAGE_CREATED_OWNER_NOTIFICATION_SKIP_RECIPIENT_THRESHOLD: "500"
   IM_SUMMARY_PROJECTION_MESSAGE_CREATED_ACTIVITY_ONLY_RECIPIENT_THRESHOLD: "500"
@@ -84,6 +98,9 @@ x-imserver-env: &imserver_env
   IM_REALTIME_MESSAGE_CREATED_LIGHTWEIGHT_RECIPIENT_THRESHOLD: "500"
   IM_REALTIME_MESSAGE_CREATED_PREVIEW_LOOKUP_ENABLED: "false"
   IM_REALTIME_DELIVERY_ASYNC_RELAY_ENABLED: "true"
+  # Realtime hints are at-least-once and clients dedupe by event/sequence. Keep
+  # durable replay records on domain delivery, not on this hot fanout path.
+  IM_REALTIME_DELIVERY_REPLAY_RECORDS_ENABLED: "false"
   IM_REALTIME_DELIVERY_ASYNC_MAX_IN_FLIGHT: "32"
   IM_REALTIME_DELIVERY_ASYNC_MAX_QUEUED: "4096"
   IM_REALTIME_MESSAGE_CREATED_COALESCE_WINDOW_MS: "100"
@@ -96,6 +113,10 @@ x-imserver-env: &imserver_env
   IM_TIMELINE_SINCE_RECENT_CACHE_MAX_ITEMS_PER_CONVERSATION: "256"
   IM_TIMELINE_SINCE_TARGET_SEQUENCE_COALESCE_WINDOW_MS: "25"
   IM_TIMELINE_SINCE_CACHE_INVALIDATION_MODE: redis
+  # A full multi-Cell smoke topology runs many short-lived roles on the same
+  # PostgreSQL instance. Keep each pool deliberately small; the test verifies
+  # routing and migration, not database pool saturation.
+  DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: "1"
   IM_HOT_CONVERSATION_MSG_PER_SECOND_LIMIT: "1000"
   IM_SEARCH_DRIVER: database
   MEDIA_STORAGE_PROVIDER: s3compatible
@@ -110,8 +131,8 @@ x-imserver-env: &imserver_env
   FILE_STORAGE_DIRECTORY: /app/Storage/files
 
 x-imserver-depends: &imserver_depends
-  postgres:
-    condition: service_healthy
+  postgres-init:
+    condition: service_completed_successfully
   redpanda:
     condition: service_healthy
   redis:
@@ -121,6 +142,11 @@ x-imserver-depends: &imserver_depends
   redpanda-init:
     condition: service_completed_successfully
   minio-init:
+    condition: service_completed_successfully
+
+x-imserver-runtime-depends: &imserver_runtime_depends
+  <<: *imserver_depends
+  ops:
     condition: service_completed_successfully
 
 x-imserver-worker-healthcheck: &imserver_worker_healthcheck
@@ -133,6 +159,7 @@ x-imserver-worker-healthcheck: &imserver_worker_healthcheck
 services:
   postgres:
     image: postgres:16-alpine
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_DB: imserver_smoke
       POSTGRES_USER: imserver
@@ -144,6 +171,18 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
+  postgres-init:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: imserver_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        if ! psql -h postgres -U imserver -d imserver_smoke -tAc "SELECT 1 FROM pg_database WHERE datname = 'imserver_smoke_summary'" | grep -qx 1; then psql -h postgres -U imserver -d imserver_smoke -c "CREATE DATABASE imserver_smoke_summary"; fi
 
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v24.3.1
@@ -168,25 +207,27 @@ services:
       - "19092:19092"
       - "19644:9644"
     healthcheck:
-      test: ["CMD-SHELL", "rpk cluster health --brokers=127.0.0.1:9092 --exit-when-healthy --timeout=10s >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "timeout 10 rpk cluster health --exit-when-healthy >/dev/null 2>&1"]
       interval: 5s
       timeout: 15s
       retries: 30
 
   redpanda-init:
     image: docker.redpanda.com/redpandadata/redpanda:v24.3.1
+    environment:
+      IM_KAFKA_TOPIC_PARTITIONS: "${IM_KAFKA_TOPIC_PARTITIONS:-12}"
     depends_on:
       redpanda:
         condition: service_healthy
     entrypoint: ["/bin/sh", "-c"]
     command: >
-      "rpk topic create conversation-domain-events --brokers redpanda:9092 --partitions 3 --replicas 1 || true;
-       rpk topic create conversation-domain-events-dead-letter --brokers redpanda:9092 --partitions 3 --replicas 1 || true"
+      "rpk topic create conversation-domain-events --brokers redpanda:9092 --partitions $${IM_KAFKA_TOPIC_PARTITIONS} --replicas 1 || true;
+       rpk topic create conversation-domain-events-dead-letter --brokers redpanda:9092 --partitions $${IM_KAFKA_TOPIC_PARTITIONS} --replicas 1 || true;
+       rpk topic create conversation-domain-events-cell-b --brokers redpanda:9092 --partitions $${IM_KAFKA_TOPIC_PARTITIONS} --replicas 1 || true;
+       rpk topic create conversation-domain-events-cell-b-dead-letter --brokers redpanda:9092 --partitions $${IM_KAFKA_TOPIC_PARTITIONS} --replicas 1 || true"
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -200,8 +241,8 @@ services:
       MINIO_ROOT_USER: imserver-smoke-minio
       MINIO_ROOT_PASSWORD: smoke-minio-secret-012345
     ports:
-      - "9002:9000"
-      - "9003:9001"
+      - "19000:9000"
+      - "19001:9001"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 5s
@@ -225,7 +266,32 @@ services:
       IM_NODE_ID: ops-a
       IM_AUTO_MIGRATE_ON_START: "true"
     depends_on: *imserver_depends
-    command: ["ops", "--env", "production-smoke"]
+    # The CLI completes the verification but can retain an idle runtime task
+    # during shutdown. This smoke-only wrapper converts that verified state
+    # into the Compose completion signal consumed by serving roles.
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        ./IMServer --verify-conversation-summaries --env production-smoke >/tmp/ops.log 2>&1 &
+        child=$$!;
+        for attempt in $(seq 1 240); do
+          if grep -Fq "Conversation summary verification completed" /tmp/ops.log; then
+            kill "$$child" 2>/dev/null || true;
+            wait "$$child" 2>/dev/null || true;
+            cat /tmp/ops.log;
+            exit 0;
+          fi;
+          if ! kill -0 "$$child" 2>/dev/null; then
+            cat /tmp/ops.log;
+            wait "$$child";
+            exit $$?;
+          fi;
+          sleep 1;
+        done;
+        cat /tmp/ops.log;
+        kill "$$child" 2>/dev/null || true;
+        wait "$$child" 2>/dev/null || true;
+        exit 1
 
   gateway:
     <<: *imserver_build
@@ -234,20 +300,20 @@ services:
       IM_NODE_ID: gateway-a
       IM_TCP_ENABLED: "true"
       IM_TCP_HOST: "0.0.0.0"
-      IM_TCP_PORT: "9001"
+      IM_TCP_PORT: "9000"
       IM_TCP_AUTH_TIMEOUT: "30"
       IM_TCP_IDLE_TIMEOUT: "300"
       IM_TCP_LISTEN_BACKLOG: "8192"
-      IM_TCP_MAX_CONNECTIONS: "20000"
-      IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND: "500"
-    depends_on: *imserver_depends
+      IM_TCP_MAX_CONNECTIONS: "${IM_TCP_MAX_CONNECTIONS:-300000}"
+      IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND: "${IM_TCP_MAX_NEW_CONNECTIONS_PER_SECOND:-2000}"
+    depends_on: *imserver_runtime_depends
     ulimits:
       nofile:
         soft: 1048576
         hard: 1048576
     ports:
       - "8080:8080"
-      - "9001:9001"
+      - "9000:9000"
     command: ["serve", "--env", "production-smoke", "--hostname", "0.0.0.0", "--port", "8080", "--role", "gateway"]
 
   command-api:
@@ -257,7 +323,7 @@ services:
       IM_NODE_ID: command-a
       IM_COMMAND_NODE_ID: command-a
       IM_TCP_ENABLED: "false"
-    depends_on: *imserver_depends
+    depends_on: *imserver_runtime_depends
     ports:
       - "8081:8080"
     command: ["serve", "--env", "production-smoke", "--hostname", "0.0.0.0", "--port", "8080", "--role", "command-api"]
@@ -269,7 +335,7 @@ services:
       IM_NODE_ID: query-a
       IM_RUNTIME_ROLE: query-api
       IM_TCP_ENABLED: "false"
-    depends_on: *imserver_depends
+    depends_on: *imserver_runtime_depends
     ports:
       - "8082:8080"
     command: ["serve", "--env", "production-smoke", "--hostname", "0.0.0.0", "--port", "8080"]
@@ -280,7 +346,7 @@ services:
       <<: *imserver_env
       IM_NODE_ID: outbox-relay-a
       IM_TCP_ENABLED: "false"
-    depends_on: *imserver_depends
+    depends_on: *imserver_runtime_depends
     healthcheck: *imserver_worker_healthcheck
     command: ["outbox-relay", "--env", "production-smoke"]
 
@@ -291,7 +357,7 @@ services:
       IM_NODE_ID: stream-summary-a
       IM_TCP_ENABLED: "false"
       IM_STREAM_CONSUMER_GROUPS: summary-projection-consumer
-    depends_on: *imserver_depends
+    depends_on: *imserver_runtime_depends
     healthcheck: *imserver_worker_healthcheck
     command: ["stream-consumer", "--env", "production-smoke"]
 
@@ -302,7 +368,7 @@ services:
       IM_NODE_ID: stream-changes-a
       IM_TCP_ENABLED: "false"
       IM_STREAM_CONSUMER_GROUPS: changes-log-consumer
-    depends_on: *imserver_depends
+    depends_on: *imserver_runtime_depends
     healthcheck: *imserver_worker_healthcheck
     command: ["stream-consumer", "--env", "production-smoke"]
 
@@ -313,7 +379,7 @@ services:
       IM_NODE_ID: stream-search-a
       IM_TCP_ENABLED: "false"
       IM_STREAM_CONSUMER_GROUPS: search-index-consumer
-    depends_on: *imserver_depends
+    depends_on: *imserver_runtime_depends
     healthcheck: *imserver_worker_healthcheck
     command: ["stream-consumer", "--env", "production-smoke"]
 
@@ -324,7 +390,7 @@ services:
       IM_NODE_ID: stream-notification-a
       IM_TCP_ENABLED: "false"
       IM_STREAM_CONSUMER_GROUPS: notification-consumer
-    depends_on: *imserver_depends
+    depends_on: *imserver_runtime_depends
     healthcheck: *imserver_worker_healthcheck
     command: ["stream-consumer", "--env", "production-smoke"]
 
@@ -335,7 +401,7 @@ services:
       IM_NODE_ID: stream-repair-a
       IM_TCP_ENABLED: "false"
       IM_STREAM_CONSUMER_GROUPS: repair-replay-consumer
-    depends_on: *imserver_depends
+    depends_on: *imserver_runtime_depends
     healthcheck: *imserver_worker_healthcheck
     command: ["stream-consumer", "--env", "production-smoke"]
 
@@ -350,7 +416,7 @@ services:
       IM_DOMAIN_DELIVERY_EXTERNAL_REALTIME_DELIVERY_ENABLED: "true"
       IM_GATEWAY_RELAY_MODE: http
       IM_GATEWAY_INTERNAL_BASE_URL: http://gateway:8080
-    depends_on: *imserver_depends
+    depends_on: *imserver_runtime_depends
     healthcheck: *imserver_worker_healthcheck
     command: ["stream-consumer", "--env", "production-smoke"]
 
@@ -361,6 +427,6 @@ services:
       IM_NODE_ID: stream-realtime-a
       IM_TCP_ENABLED: "false"
       IM_STREAM_CONSUMER_GROUPS: realtime-delivery-consumer
-    depends_on: *imserver_depends
+    depends_on: *imserver_runtime_depends
     healthcheck: *imserver_worker_healthcheck
     command: ["stream-consumer", "--env", "production-smoke"]

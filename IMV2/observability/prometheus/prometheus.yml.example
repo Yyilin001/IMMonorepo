@@ -1,0 +1,16 @@
+# Template only: replace the target with the private loopback metrics endpoint
+# in the same host/pod network namespace. Never publish that endpoint through
+# an ingress or the public realtime/media listeners.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - imv2-alerts.yml
+
+scrape_configs:
+  - job_name: im-v2-gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 127.0.0.1:9464

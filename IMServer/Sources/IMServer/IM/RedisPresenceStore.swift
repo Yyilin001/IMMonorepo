@@ -16,7 +16,6 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
     private let activeConversationRouteCache: RedisActiveConversationRouteCache
     private let activeNodeCache = RedisPresenceActiveNodeCache(ttl: 2)
     private let heartbeatThrottle = RedisPresenceHeartbeatThrottle(minimumInterval: 1)
-    private let globalCellLeaseRefreshThrottle: RedisPresenceHeartbeatThrottle
     private var metrics: RoutingMetrics?
 
     init(
@@ -37,9 +36,6 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         self.activeConversationRouteTTLSeconds = max(heartbeatTimeoutSeconds, activeConversationRouteTTLSeconds)
         self.activeConversationRouteCache = RedisActiveConversationRouteCache(
             ttl: TimeInterval(max(0, activeConversationRouteCacheTTLSeconds))
-        )
-        self.globalCellLeaseRefreshThrottle = RedisPresenceHeartbeatThrottle(
-            minimumInterval: TimeInterval(max(5, heartbeatTimeoutSeconds / 3))
         )
     }
 
@@ -541,27 +537,6 @@ final class RedisPresenceStore: PresenceStore, @unchecked Sendable {
         }
         let timestamp = String(Int(Date().timeIntervalSince1970))
         _ = try await pool.set(heartbeatKey(for: nodeID), to: timestamp).get()
-        try await refreshGlobalCellPresenceLeasesIfNeeded()
-    }
-
-    private func refreshGlobalCellPresenceLeasesIfNeeded() async throws {
-        guard await globalCellLeaseRefreshThrottle.shouldRefresh() else {
-            return
-        }
-        let rawUserIDs = try await pool.smembers(of: nodeUsersKey(for: nodeID), as: String.self).get()
-            .compactMap { $0 }
-        let rawSessionIDs = try await pool.smembers(of: nodeSessionsKey(for: nodeID), as: String.self).get()
-            .compactMap { $0 }
-        let userIDs = rawUserIDs.compactMap(UUID.init(uuidString:))
-        let sessionIDs = rawSessionIDs.compactMap(UUID.init(uuidString:))
-        try await refreshGlobalCellPresenceLeases(
-            identities: userIDs,
-            keyForIdentity: globalUserCellPresenceKey
-        )
-        try await refreshGlobalCellPresenceLeases(
-            identities: sessionIDs,
-            keyForIdentity: globalSessionCellPresenceKey
-        )
     }
 
     private func refreshGlobalCellPresenceLease(forUserID userID: UUID) async throws {

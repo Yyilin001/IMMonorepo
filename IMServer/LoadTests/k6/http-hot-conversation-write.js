@@ -38,6 +38,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['local-hot-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const email = __ENV.IM_EMAIL || 'demo@example.com';
 const password = __ENV.IM_PASSWORD || 'password1234';
 const memberEmails = (__ENV.IM_MEMBER_EMAILS || 'alice@example.com')
@@ -123,7 +124,7 @@ export function setup() {
 function sendInternalMessage(senderUserID, conversationID) {
   const startedAt = Date.now();
   const res = http.post(
-    `${baseURL}/internal/im/messages/send`,
+    `${commandBaseURL}/internal/im/messages/send`,
     JSON.stringify({
       senderUserID,
       payload: {

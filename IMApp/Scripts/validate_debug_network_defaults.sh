@@ -7,10 +7,10 @@ PROJECT_FILE="${PROJECT_FILE:-${PROJECT_DIR}/IMApp.xcodeproj}"
 SCHEME="${SCHEME:-IMApp}"
 CONFIGURATION="${CONFIGURATION:-Debug}"
 DESTINATION="${DESTINATION:-generic/platform=iOS Simulator}"
-
-EXPECTED_API_BASE_URL="${EXPECTED_DEBUG_API_BASE_URL:-http://127.0.0.1:8080}"
-EXPECTED_TCP_HOST="${EXPECTED_DEBUG_TCP_HOST:-127.0.0.1}"
-EXPECTED_TCP_PORT="${EXPECTED_DEBUG_TCP_PORT:-9000}"
+EXPECTED_ACCOUNT_URL="${EXPECTED_DEBUG_V2_ACCOUNT_BASE_URL:-https://localhost:8443}"
+EXPECTED_GATEWAY_HOST="${EXPECTED_DEBUG_V2_GATEWAY_HOST:-localhost}"
+EXPECTED_GATEWAY_PORT="${EXPECTED_DEBUG_V2_GATEWAY_PORT:-7443}"
+EXPECTED_RP_ID="${EXPECTED_DEBUG_V2_PASSKEY_RP_ID:-localhost}"
 
 if [[ "${IMAPP_DEBUG_NETWORK_DEFAULTS_SELF_TEST:-false}" == "true" ]]; then
   tmpdir="$(mktemp -d)"
@@ -18,134 +18,73 @@ if [[ "${IMAPP_DEBUG_NETWORK_DEFAULTS_SELF_TEST:-false}" == "true" ]]; then
   fake_xcodebuild="${tmpdir}/xcodebuild"
   cat >"${fake_xcodebuild}" <<'EOF'
 #!/usr/bin/env bash
-set -euo pipefail
-
 case "${FAKE_XCODEBUILD_CASE:-local}" in
-  local)
-    cat <<'SETTINGS'
-Build settings for action build and target IMApp:
-    IM_API_BASE_URL = http://127.0.0.1:8080
-    IM_TCP_HOST = 127.0.0.1
-    IM_TCP_PORT = 9000
-SETTINGS
-    ;;
-  public)
-    cat <<'SETTINGS'
-Build settings for action build and target IMApp:
-    IM_API_BASE_URL = https://im.example.com
-    IM_TCP_HOST = im.example.com
-    IM_TCP_PORT = 9000
-SETTINGS
-    ;;
-  unresolved)
-    cat <<'SETTINGS'
-Build settings for action build and target IMApp:
-    IM_API_BASE_URL = $(IM_API_BASE_URL)
-    IM_TCP_HOST = $(IM_TCP_HOST)
-    IM_TCP_PORT = $(IM_TCP_PORT)
-SETTINGS
-    ;;
-  *)
-    printf 'unknown fake case: %s\n' "${FAKE_XCODEBUILD_CASE}" >&2
-    exit 2
-    ;;
+  local) printf '%s\n' '    IM_V2_ACCOUNT_BASE_URL = https://localhost:8443' '    IM_V2_GATEWAY_HOST = localhost' '    IM_V2_GATEWAY_PORT = 7443' '    IM_V2_PASSKEY_RP_ID = localhost' ;;
+  public) printf '%s\n' '    IM_V2_ACCOUNT_BASE_URL = https://im.example.com' '    IM_V2_GATEWAY_HOST = gateway.im.example.com' '    IM_V2_GATEWAY_PORT = 7443' '    IM_V2_PASSKEY_RP_ID = im.example.com' ;;
+  unresolved) printf '%s\n' '    IM_V2_ACCOUNT_BASE_URL = $(IM_V2_ACCOUNT_BASE_URL)' '    IM_V2_GATEWAY_HOST = $(IM_V2_GATEWAY_HOST)' '    IM_V2_GATEWAY_PORT = $(IM_V2_GATEWAY_PORT)' '    IM_V2_PASSKEY_RP_ID = $(IM_V2_PASSKEY_RP_ID)' ;;
+  *) exit 2 ;;
 esac
 EOF
   chmod +x "${fake_xcodebuild}"
-
-  PATH="${tmpdir}:${PATH}" IMAPP_DEBUG_NETWORK_DEFAULTS_SELF_TEST=false "${BASH_SOURCE[0]}" >/dev/null
-
-  public_log="${tmpdir}/public.log"
-  if PATH="${tmpdir}:${PATH}" FAKE_XCODEBUILD_CASE=public IMAPP_DEBUG_NETWORK_DEFAULTS_SELF_TEST=false "${BASH_SOURCE[0]}" >"${public_log}" 2>&1; then
-    printf 'debug-network-defaults-self-test result=fail reason=public_debug_defaults_not_rejected\n' >&2
-    exit 1
-  fi
-  if ! grep -q "debug_api_must_be_local_http" "${public_log}"; then
-    printf 'debug-network-defaults-self-test result=fail reason=public_debug_failure_reason_missing\n' >&2
-    sed -n '1,20p' "${public_log}" >&2 || true
-    exit 1
-  fi
-
-  unresolved_log="${tmpdir}/unresolved.log"
-  if PATH="${tmpdir}:${PATH}" FAKE_XCODEBUILD_CASE=unresolved IMAPP_DEBUG_NETWORK_DEFAULTS_SELF_TEST=false "${BASH_SOURCE[0]}" >"${unresolved_log}" 2>&1; then
-    printf 'debug-network-defaults-self-test result=fail reason=unresolved_debug_defaults_not_rejected\n' >&2
-    exit 1
-  fi
-  if ! grep -q "unresolved_IM_API_BASE_URL" "${unresolved_log}"; then
-    printf 'debug-network-defaults-self-test result=fail reason=unresolved_debug_failure_reason_missing\n' >&2
-    sed -n '1,20p' "${unresolved_log}" >&2 || true
-    exit 1
-  fi
-
+  PATH="${tmpdir}:${PATH}" IMAPP_DEBUG_NETWORK_DEFAULTS_SELF_TEST=false bash "${BASH_SOURCE[0]}" >/dev/null
+  for test_case in public unresolved; do
+    if PATH="${tmpdir}:${PATH}" FAKE_XCODEBUILD_CASE="${test_case}" IMAPP_DEBUG_NETWORK_DEFAULTS_SELF_TEST=false bash "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
+      printf 'debug-network-defaults-self-test result=fail reason=%s_not_rejected\n' "${test_case}" >&2
+      exit 1
+    fi
+  done
   printf 'debug-network-defaults-self-test result=pass\n'
-  exit 0
-fi
-
-if ! command -v xcodebuild >/dev/null 2>&1; then
-  printf 'debug-network-defaults result=skip reason=xcodebuild_not_found\n' >&2
   exit 0
 fi
 
 build_settings_file="$(mktemp)"
 trap 'rm -f "${build_settings_file}"' EXIT
+xcodebuild -project "${PROJECT_FILE}" -scheme "${SCHEME}" -configuration "${CONFIGURATION}" -destination "${DESTINATION}" -showBuildSettings >"${build_settings_file}"
 
-xcodebuild \
-  -project "${PROJECT_FILE}" \
-  -scheme "${SCHEME}" \
-  -configuration "${CONFIGURATION}" \
-  -destination "${DESTINATION}" \
-  -showBuildSettings >"${build_settings_file}"
-
-python3 - "${build_settings_file}" "${EXPECTED_API_BASE_URL}" "${EXPECTED_TCP_HOST}" "${EXPECTED_TCP_PORT}" <<'PY'
+python3 - "${build_settings_file}" "${EXPECTED_ACCOUNT_URL}" "${EXPECTED_GATEWAY_HOST}" "${EXPECTED_GATEWAY_PORT}" "${EXPECTED_RP_ID}" <<'PY'
 import re
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-settings_file, expected_api, expected_host, expected_port = sys.argv[1:5]
-text = Path(settings_file).read_text(encoding="utf-8")
+settings_file, expected_url, expected_gateway_host, expected_gateway_port, expected_rp = sys.argv[1:]
 settings = {}
-for line in text.splitlines():
-    match = re.match(r"\s*(IM_API_BASE_URL|IM_TCP_HOST|IM_TCP_PORT)\s*=\s*(.*?)\s*$", line)
+for line in Path(settings_file).read_text(encoding="utf-8").splitlines():
+    match = re.match(r"\s*(IM_V2_ACCOUNT_BASE_URL|IM_V2_GATEWAY_HOST|IM_V2_GATEWAY_PORT|IM_V2_PASSKEY_RP_ID)\s*=\s*(.*?)\s*$", line)
     if match:
         settings[match.group(1)] = match.group(2)
 
 errors = []
-for key in ("IM_API_BASE_URL", "IM_TCP_HOST", "IM_TCP_PORT"):
-    if key not in settings:
+for key in ("IM_V2_ACCOUNT_BASE_URL", "IM_V2_GATEWAY_HOST", "IM_V2_GATEWAY_PORT", "IM_V2_PASSKEY_RP_ID"):
+    value = settings.get(key, "")
+    if not value:
         errors.append(f"missing_{key}")
-    elif "$(" in settings[key] or ")" in settings[key]:
-        errors.append(f"unresolved_{key}:{settings[key]}")
+    elif "$(" in value or ")" in value:
+        errors.append(f"unresolved_{key}:{value}")
 
-api = settings.get("IM_API_BASE_URL", "")
-host = settings.get("IM_TCP_HOST", "")
-port = settings.get("IM_TCP_PORT", "")
-
-if api and api != expected_api:
-    errors.append(f"unexpected_IM_API_BASE_URL:{api}:expected_{expected_api}")
-if host and host != expected_host:
-    errors.append(f"unexpected_IM_TCP_HOST:{host}:expected_{expected_host}")
-if port and port != expected_port:
-    errors.append(f"unexpected_IM_TCP_PORT:{port}:expected_{expected_port}")
-
-if api:
-    parsed = urlsplit(api)
-    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
-        errors.append(f"debug_api_must_be_local_http:{api}")
-
-if host and host not in {"127.0.0.1", "localhost", "::1"}:
-    errors.append(f"debug_tcp_host_must_be_local:{host}")
-
+url = settings.get("IM_V2_ACCOUNT_BASE_URL", "")
+rp_id = settings.get("IM_V2_PASSKEY_RP_ID", "")
+gateway_host = settings.get("IM_V2_GATEWAY_HOST", "")
+gateway_port = settings.get("IM_V2_GATEWAY_PORT", "")
+if url and url != expected_url:
+    errors.append(f"unexpected_IM_V2_ACCOUNT_BASE_URL:{url}:expected_{expected_url}")
+if rp_id and rp_id != expected_rp:
+    errors.append(f"unexpected_IM_V2_PASSKEY_RP_ID:{rp_id}:expected_{expected_rp}")
+if gateway_host and gateway_host != expected_gateway_host:
+    errors.append(f"unexpected_IM_V2_GATEWAY_HOST:{gateway_host}:expected_{expected_gateway_host}")
+if gateway_port and gateway_port != expected_gateway_port:
+    errors.append(f"unexpected_IM_V2_GATEWAY_PORT:{gateway_port}:expected_{expected_gateway_port}")
+parsed = urlsplit(url) if url else None
+if parsed and (parsed.scheme != "https" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}):
+    errors.append(f"debug_v2_account_must_be_local_https:{url}")
+if rp_id not in {"localhost", "127.0.0.1"}:
+    errors.append(f"debug_v2_passkey_rp_must_be_local:{rp_id}")
+if gateway_host not in {"localhost", "127.0.0.1", "::1"}:
+    errors.append(f"debug_v2_gateway_must_be_local:{gateway_host}")
+if gateway_port != "7443":
+    errors.append(f"debug_v2_gateway_port_unexpected:{gateway_port}")
 if errors:
-    print(
-        "debug-network-defaults result=fail "
-        f"configuration={settings!r} errors={','.join(errors)}",
-        file=sys.stderr,
-    )
+    print(f"debug-network-defaults result=fail configuration={settings!r} errors={','.join(errors)}", file=sys.stderr)
     raise SystemExit(1)
-
-print(
-    "debug-network-defaults result=pass "
-    f"apiBaseURL={api} tcpHost={host} tcpPort={port}"
-)
+print(f"debug-network-defaults result=pass v2AccountBaseURL={url} v2GatewayHost={gateway_host} v2GatewayPort={gateway_port} v2PasskeyRelyingPartyID={rp_id}")
 PY

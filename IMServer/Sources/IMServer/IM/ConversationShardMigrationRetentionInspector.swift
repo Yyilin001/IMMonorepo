@@ -40,6 +40,10 @@ struct ConversationShardMigrationRetentionInspector {
             conversationID: conversationID,
             database: sourceDatabase
         )
+        let sequenceProgress = try await ConversationShardMigrationSequenceProgressStore.load(
+            conversationID: conversationID,
+            on: app.db
+        )
         var blockers: [String] = []
 
         guard migration.statusEnum == .cutover, let cutoverAt = migration.cutoverAt else {
@@ -90,7 +94,7 @@ struct ConversationShardMigrationRetentionInspector {
             memberCount: migration.sourceMemberCount,
             messageCount: migration.sourceMessageCount,
             domainEventCount: migration.sourceDomainEventCount,
-            domainEventSequenceCount: migration.sourceDomainEventSequenceCount,
+            domainEventSequenceCount: sequenceProgress.sourceCount,
             timelineNoticeCount: migration.sourceTimelineNoticeCount,
             mediaReferenceCount: migration.sourceMediaReferenceCount,
             recipientSnapshotCount: migration.sourceRecipientSnapshotCount

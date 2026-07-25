@@ -1,0 +1,127 @@
+# Local V2 account-factor stack. It intentionally publishes only the Caddy
+# HTTPS listener to macOS loopback. PostgreSQL and the account service remain
+# on this Compose network and are never reachable from the LAN.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: im_v2
+      POSTGRES_USER: im_v2
+      POSTGRES_PASSWORD: ${IM_V2_LOCAL_POSTGRES_PASSWORD:?run IMV2/scripts/run_v2_local_account_stack.sh first}
+    volumes:
+      - v2-local-account-postgres:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U im_v2 -d im_v2"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    mem_limit: 1g
+    pids_limit: 128
+
+  account:
+    image: imv2localaccount-v2server
+    env_file:
+      - .env.local
+    environment:
+      IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
+      IM_V2_ACCOUNT_LISTEN_HOST: 127.0.0.1
+      IM_V2_ACCOUNT_LISTEN_PORT: 8444
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # The account listener must be accepting connections before Caddy is
+      # considered usable; a merely running process can still be initializing
+      # its database and route graph.
+      test: ["CMD-SHELL", "bash -c ': > /dev/tcp/127.0.0.1/8444'"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    # Caddy joins this container's network namespace. The only host-published
+    # port therefore belongs to Caddy, while the account listener stays loopback.
+    ports:
+      - "127.0.0.1:8443:8443"
+    mem_limit: 2g
+    pids_limit: 256
+
+  gateway:
+    image: imv2localaccount-v2server
+    command: ["/workspace/IMV2Server/.build/release/IMV2ServerApp"]
+    env_file:
+      - .env.local
+    environment:
+      IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
+      IM_V2_TLS_HOST: 0.0.0.0
+      IM_V2_TLS_PORT: 7443
+      IM_V2_TLS_CERTIFICATE_CHAIN_PATH: /caddy/caddy/certificates/local/localhost/localhost.crt
+      IM_V2_TLS_PRIVATE_KEY_PATH: /caddy/caddy/certificates/local/localhost/localhost.key
+      IM_V2_CAPABILITY_PROFILE: base
+      IM_V2_MAX_MESSAGE_UTF8_BYTES: 4096
+      IM_V2_MAX_FRAME_BYTES: 65536
+      IM_V2_MAX_PROTOBUF_MESSAGE_DEPTH: 32
+      IM_V2_MAX_IN_FLIGHT_REQUESTS: 32
+      IM_V2_MAX_QUEUED_INBOUND_BYTES: 262144
+      IM_V2_IDLE_TIMEOUT_MS: 60000
+      IM_V2_WORKER_BATCH_SIZE: 256
+      IM_V2_WORKER_POLL_INTERVAL_MS: 100
+      IM_V2_DURABLE_RETRY_INITIAL_DELAY_MS: 1000
+      IM_V2_DURABLE_RETRY_MAX_DELAY_MS: 60000
+      IM_V2_DURABLE_RETRY_MAX_ATTEMPTS: 10
+      IM_V2_DURABLE_RETRY_JITTER_PERCENT: 20
+      IM_V2_MAINTENANCE_POLL_INTERVAL_MS: 60000
+      IM_V2_MEDIA_WITHDRAWN_RETENTION_SECONDS: 2592000
+      IM_V2_METRICS_HOST: 127.0.0.1
+      IM_V2_METRICS_PORT: 9464
+      IM_V2_GATEWAY_NODE_ID: local-gateway-1
+      IM_V2_USER_SHARD_BUCKET: users-primary
+      IM_V2_USER_SHARD_ROUTER_EPOCH: 1
+      IM_V2_DIRECT_ROOM_SHARD_ID: rooms-primary
+      IM_V2_GROUP_ROOM_SHARD_ID: rooms-primary
+      IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW: 3
+      IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS: 86400
+      IM_V2_CAPACITY_PROFILE_ID: standard
+      IM_V2_MAX_ELIGIBLE_MEMBERS: 100000
+      IM_V2_MAX_COMMANDS_PER_WINDOW: 1000
+      IM_V2_MAX_FANOUT_UNITS_PER_WINDOW: 100000
+      IM_V2_MAX_OUTSTANDING_FANOUT_UNITS: 1000000
+      IM_V2_MAX_OUTSTANDING_PLANS: 10000
+      IM_V2_MAX_ENUMERATION_PAGE_SIZE: 1000
+      IM_V2_MAX_PLANNER_CONCURRENCY: 8
+      IM_V2_MAX_DELIVERY_CONCURRENCY: 16
+      IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      caddy:
+        condition: service_started
+    healthcheck:
+      # The public TLS port is the gateway readiness boundary. It is checked
+      # from inside the service container and is never exposed beyond loopback
+      # on the macOS host.
+      test: ["CMD-SHELL", "bash -c ': > /dev/tcp/127.0.0.1/7443'"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:7443:7443"
+    volumes:
+      - v2-local-caddy-data:/caddy:ro
+    restart: on-failure:5
+    mem_limit: 2g
+    pids_limit: 256
+
+  caddy:
+    image: caddy:2.8-alpine
+    network_mode: service:account
+    volumes:
+      - ./local/Caddyfile:/etc/caddy/Caddyfile:ro
+      - v2-local-caddy-data:/data
+      - v2-local-caddy-config:/config
+    mem_limit: 256m
+    pids_limit: 64
+
+volumes:
+  v2-local-account-postgres:
+  v2-local-caddy-data:
+  v2-local-caddy-config:

@@ -37,6 +37,7 @@ struct InternalMetricsController: RouteCollection {
         let nodeDispatchConfiguration = req.application.nodeDispatchConfiguration
         let tcpConfiguration = req.application.imTCPConfiguration
         let tcpAdmissionStatus = req.application.imTCPAdmissionController.status()
+        let liveTCPConnectionCount = await req.application.imConnectionRegistry.totalConnectionCount()
         let liveLag = await collectLiveLagSnapshot(app: req.application)
 
         var lines: [String] = []
@@ -44,7 +45,7 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_http_request_failures_total", value: http.failedRequestCount, to: &lines)
         appendGauge("im_http_request_latency_avg_millis", value: http.averageLatencyMillis, to: &lines)
         appendGauge("im_http_request_latency_max_millis", value: http.maxLatencyMillis, to: &lines)
-        appendGauge("im_tcp_connections", value: routing.currentTCPConnectionCount, to: &lines)
+        appendGauge("im_tcp_connections", value: liveTCPConnectionCount, to: &lines)
         appendGauge("im_tcp_channels", value: routing.currentTCPChannelCount, to: &lines)
         appendGauge("im_gateway_draining", value: tcpAdmissionStatus.isDraining ? 1 : 0, to: &lines)
         appendGauge("im_tcp_admission_active_channels", value: tcpAdmissionStatus.activeConnectionCount, to: &lines)
@@ -77,6 +78,11 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_tcp_close_input_closed_total", value: routing.tcpCloseInputClosedCount, to: &lines)
         appendCounter("im_tcp_close_reset_by_peer_total", value: routing.tcpCloseResetByPeerCount, to: &lines)
         appendCounter("im_tcp_close_slow_write_total", value: routing.tcpCloseSlowWriteCount, to: &lines)
+        appendCounter(
+            "im_tcp_close_realtime_backpressure_total",
+            value: routing.tcpCloseRealtimeBackpressureCount,
+            to: &lines
+        )
         appendCounter("im_tcp_close_connection_limit_total", value: routing.tcpCloseConnectionLimitCount, to: &lines)
         appendCounter("im_tcp_close_connection_rate_limit_total", value: routing.tcpCloseConnectionRateLimitCount, to: &lines)
         appendCounter("im_tcp_close_gateway_draining_total", value: routing.tcpCloseGatewayDrainingCount, to: &lines)
@@ -192,6 +198,9 @@ struct InternalMetricsController: RouteCollection {
         appendCounter("im_cross_node_dispatch_failures_total", value: routing.crossNodeDispatchFailureCount, to: &lines)
         appendCounter("im_cross_node_dispatch_attempts_total", value: routing.crossNodeDispatchAttemptCount, to: &lines)
         appendCounter("im_cross_node_dispatch_targets_total", value: routing.crossNodeDispatchTargetCount, to: &lines)
+        appendCounter("im_durable_node_dispatch_enqueued_total", value: routing.durableNodeDispatchEnqueuedCount, to: &lines)
+        appendCounter("im_durable_node_dispatch_acknowledged_total", value: routing.durableNodeDispatchAcknowledgedCount, to: &lines)
+        appendCounter("im_durable_node_dispatch_retries_total", value: routing.durableNodeDispatchRetryCount, to: &lines)
         lines.append("im_node_dispatch_transport{transport=\"\(nodeDispatchConfiguration.mode.rawValue)\"} 1")
         appendGauge(
             "im_cross_node_dispatch_max_targets_per_packet",
@@ -226,6 +235,36 @@ struct InternalMetricsController: RouteCollection {
         appendGauge(
             "im_cross_cell_dispatch_latency_max_millis",
             value: routing.crossCellDispatchMaxLatencyMillis,
+            to: &lines
+        )
+        appendCounter(
+            "im_cross_cell_dispatch_outbox_enqueued_total",
+            value: routing.crossCellDispatchOutboxEnqueuedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_cross_cell_dispatch_outbox_deduplicated_total",
+            value: routing.crossCellDispatchOutboxDeduplicatedCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_cross_cell_dispatch_outbox_delivered_total",
+            value: routing.crossCellDispatchOutboxDeliveredCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_cross_cell_dispatch_outbox_retries_total",
+            value: routing.crossCellDispatchOutboxRetryCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_cross_cell_dispatch_outbox_backlog",
+            value: routing.crossCellDispatchOutboxBacklogCount,
+            to: &lines
+        )
+        appendGauge(
+            "im_cross_cell_dispatch_outbox_oldest_pending_age_millis",
+            value: routing.crossCellDispatchOutboxOldestPendingAgeMillis,
             to: &lines
         )
         appendGauge(
@@ -534,6 +573,16 @@ struct InternalMetricsController: RouteCollection {
             value: routing.realtimeActiveConversationFanoutRouteSplitDropRecipientCount,
             to: &lines
         )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_route_lookup_failures_total",
+            value: routing.realtimeActiveConversationFanoutRouteLookupFailureCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_realtime_active_conversation_fanout_route_lookup_failure_recipients_total",
+            value: routing.realtimeActiveConversationFanoutRouteLookupFailureRecipientCount,
+            to: &lines
+        )
         appendGauge(
             "im_realtime_active_conversation_fanout_max_active_recipients_per_split",
             value: routing.realtimeActiveConversationFanoutMaxActiveRecipientsPerSplit,
@@ -702,6 +751,11 @@ struct InternalMetricsController: RouteCollection {
         appendCounter(
             "im_domain_relay_after_record_pre_split_route_drops_total",
             value: routing.domainRelayAfterRecordPreSplitRouteDropCount,
+            to: &lines
+        )
+        appendCounter(
+            "im_domain_relay_after_record_pre_split_route_lookup_failures_total",
+            value: routing.domainRelayAfterRecordPreSplitRouteLookupFailureCount,
             to: &lines
         )
         appendCounter(

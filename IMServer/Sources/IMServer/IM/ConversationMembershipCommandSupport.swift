@@ -226,6 +226,7 @@ struct ConversationMembershipCommandSupport {
                 conversationID: conversationID,
                 actorUserID: requesterUserID,
                 recipientUserIDs: recipientUserIDs,
+                memberUserIDs: addedUserIDs,
                 on: database
             )
             return commandReceipt(
@@ -300,6 +301,7 @@ struct ConversationMembershipCommandSupport {
                 conversationID: conversationID,
                 actorUserID: requesterUserID,
                 recipientUserIDs: remainingUserIDs,
+                memberUserIDs: [memberUserID],
                 on: database
             )
             return commandReceipt(
@@ -446,6 +448,7 @@ struct ConversationMembershipCommandSupport {
                 conversationID: conversationID,
                 actorUserID: requesterUserID,
                 recipientUserIDs: remainingUserIDs,
+                memberUserIDs: [requesterUserID],
                 on: database
             )
             return commandReceipt(

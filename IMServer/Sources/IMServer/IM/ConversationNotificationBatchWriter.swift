@@ -3,6 +3,10 @@ import Foundation
 import SQLKit
 
 struct ConversationNotificationBatchWriter {
+    // Eight bound values per row. Keep statements far below PostgreSQL's
+    // 65,535 bind-parameter ceiling and bound temporary SQL/payload memory.
+    private static let maxRowsPerStatement = 500
+
     struct Row {
         let ownerUserID: UUID
         let eventID: UUID
@@ -49,8 +53,15 @@ struct ConversationNotificationBatchWriter {
             return
         }
 
+        for start in stride(from: 0, to: rows.count, by: Self.maxRowsPerStatement) {
+            let end = min(start + Self.maxRowsPerStatement, rows.count)
+            try await upsertSQLRows(Array(rows[start..<end]), on: sql)
+        }
+    }
+
+    private func upsertSQLRows(_ rows: [Row], on sql: any SQLDatabase) async throws {
         let values = try rows.map { row -> SQLQueryString in
-            let payloadJSON = try Self.encode(row.payload)
+            let payloadJSON = try Self.encode(row.payload.scopedNotificationPayload(for: row.ownerUserID))
             return """
             (
                 \(bind: row.id),

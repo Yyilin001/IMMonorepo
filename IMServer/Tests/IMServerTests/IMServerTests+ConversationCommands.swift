@@ -795,10 +795,19 @@ extension IMServerTests {
                 sideEffectKey: sideEffectKey,
                 eventID: eventID
             ).create(on: sourceDatabase)
-            try await ConversationDomainEventRecipientSnapshot(
+            let sourceRecipientSnapshot = try ConversationDomainEventRecipientSnapshot(
                 eventID: eventID,
                 conversationID: conversationID,
                 recipientUserIDs: [memberUserID]
+            )
+            try await sourceRecipientSnapshot.create(on: sourceDatabase)
+            // Inline snapshots from older rows may not carry a shared-set hash.
+            // Physical migration must preserve that exact representation.
+            sourceRecipientSnapshot.recipientHash = nil
+            try await sourceRecipientSnapshot.update(on: sourceDatabase)
+            try await ConversationDomainEventSequence(
+                conversationID: conversationID,
+                lastSequence: 1
             ).create(on: sourceDatabase)
             try await app.conversationDirectory.registerConversation(
                 conversationID: conversationID,
@@ -812,6 +821,7 @@ extension IMServerTests {
             )
             #expect(prepared.sourceMemberCount == 1)
             #expect(prepared.sourceDomainEventCount == 1)
+            #expect(prepared.sourceDomainEventSequenceCount == 1)
             #expect(prepared.sourceRecipientSnapshotCount == 1)
             let preparedFence = try #require(await ConversationWriteFence.find(conversationID, on: sourceDatabase))
             #expect(preparedFence.stateEnum == .writable)
@@ -822,6 +832,7 @@ extension IMServerTests {
             #expect(copied.copyConversationWatermark == 1)
             #expect(copied.copyMemberWatermark == 1)
             #expect(copied.copyDomainEventWatermark == 1)
+            #expect(copied.copyDomainEventSequenceWatermark == 1)
             #expect(copied.copyRecipientSnapshotWatermark == 1)
             #expect(try await Conversation.find(conversationID, on: app.db(targetDatabaseID)) != nil)
             #expect(
@@ -832,6 +843,12 @@ extension IMServerTests {
             #expect(try await ConversationDomainEvent.find(eventID, on: app.db(targetDatabaseID)) != nil)
             #expect(try await ConversationDomainEventSideEffect.find(sideEffectKey, on: app.db(targetDatabaseID)) != nil)
             #expect(try await ConversationDomainEventRecipientSnapshot.find(eventID, on: app.db(targetDatabaseID)) != nil)
+            #expect(
+                try await ConversationDomainEventRecipientSnapshot.find(eventID, on: app.db(targetDatabaseID))?.recipientHash == nil
+            )
+            #expect(
+                try await ConversationDomainEventSequence.find(conversationID, on: app.db(targetDatabaseID))?.lastSequence == 1
+            )
             let copiedConversation = try #require(await Conversation.find(conversationID, on: app.db(targetDatabaseID)))
             let sourceConversation = try #require(await Conversation.find(conversationID, on: sourceDatabase))
             #expect(copiedConversation.createdAt == sourceConversation.createdAt)

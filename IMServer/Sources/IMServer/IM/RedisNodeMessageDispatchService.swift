@@ -33,7 +33,7 @@ final class RedisNodeMessageDispatchService: NodeMessageDispatchService, @unchec
                 Task {
                     do {
                         let envelope = try JSONDecoder().decode(NodeMessageDispatchEnvelope.self, from: Data(rawEnvelope.utf8))
-                        await app.connectionRoutingService.handleRemoteDispatch(envelope)
+                        try await app.connectionRoutingService.handleRemoteDispatch(envelope)
                     } catch {
                         app.logger.warning(
                             "Failed to decode remote IM dispatch envelope",

@@ -8,7 +8,7 @@ struct ConversationCommonFeatureCommandService {
         let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
         return try await db.transaction { database in
             try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
-            let message = try await IMCommonFeatureService(db: database).favoriteMessage(
+            let message = try await IMCommonFeatureService(db: database, featureDB: app.db).favoriteMessage(
                 conversationID: conversationID,
                 messageID: messageID,
                 userID: userID
@@ -28,7 +28,7 @@ struct ConversationCommonFeatureCommandService {
         let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
         try await db.transaction { database in
             try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
-            try await IMCommonFeatureService(db: database).unfavoriteMessage(messageID: messageID, userID: userID)
+            try await IMCommonFeatureService(db: database, featureDB: app.db).unfavoriteMessage(messageID: messageID, userID: userID)
             try await ConversationOutboxService(db: database).enqueue(
                 type: .messageFavoriteChanged,
                 conversationID: conversationID,
@@ -43,7 +43,7 @@ struct ConversationCommonFeatureCommandService {
         let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
         try await db.transaction { database in
             try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
-            try await IMCommonFeatureService(db: database).hideMessages(
+            try await IMCommonFeatureService(db: database, featureDB: app.db).hideMessages(
                 conversationID: conversationID,
                 messageIDs: messageIDs,
                 userID: userID
@@ -67,7 +67,7 @@ struct ConversationCommonFeatureCommandService {
         let db = try await app.conversationShardRouter.commandDatabase(forConversationID: conversationID)
         try await db.transaction { database in
             try await ConversationWriteFenceService.requireWritesAllowed(conversationID: conversationID, on: database)
-            try await IMCommonFeatureService(db: database).clearConversation(
+            try await IMCommonFeatureService(db: database, featureDB: app.db).clearConversation(
                 conversationID: conversationID,
                 userID: userID,
                 deleteFromList: deleteFromList
@@ -92,7 +92,7 @@ struct ConversationCommonFeatureCommandService {
         targetConversationIDs: [UUID]
     ) async throws -> [IMMessageResponse] {
         let sourceDB = try await app.conversationShardRouter.strongReadDatabase(forConversationID: sourceConversationID)
-        let sourceFeatureService = IMCommonFeatureService(db: sourceDB)
+        let sourceFeatureService = IMCommonFeatureService(db: sourceDB, featureDB: app.db)
         var sourceMessages: [ConversationMessage] = []
         for messageID in messageIDs {
             let message = try await sourceFeatureService.requireVisibleMessage(

@@ -22,6 +22,7 @@ PEER_B_EMAIL="${IM_SMOKE_PEER_B_EMAIL:-smoke-peer-b@example.com}"
 SMOKE_PASSWORD="${IM_SMOKE_PASSWORD:-Password1234!}"
 SMOKE_REQUIRE_DELIVERY_TRACE="${IM_SMOKE_REQUIRE_DELIVERY_TRACE:-false}"
 SMOKE_REQUIRE_GATEWAY_TCP_RELAY="${IM_SMOKE_REQUIRE_GATEWAY_TCP_RELAY:-false}"
+SMOKE_SKIP_IMAGE_BUILD="${IM_SMOKE_SKIP_IMAGE_BUILD:-false}"
 
 compose() {
   local args=(docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}")
@@ -36,6 +37,13 @@ require_command() {
     echo "Missing required command: $1" >&2
     exit 127
   fi
+}
+
+is_enabled() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 usage() {
@@ -54,7 +62,7 @@ USAGE
 
 json_get() {
   local path="$1"
-  python3 - "$path" <<'PY'
+  python3 -c '
 import json
 import sys
 
@@ -65,11 +73,21 @@ for part in path:
         data = data[int(part)]
     else:
         data = data[part]
-if data is None:
-    print("")
-else:
-    print(data)
-PY
+print("" if data is None else data)
+' "$path"
+}
+
+conversation_id_from_response() {
+  python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+conversation_id = payload.get("conversationID") or payload.get("id")
+if not conversation_id:
+    raise SystemExit("conversation_response_missing_conversation_id")
+print(conversation_id)
+'
 }
 
 json_quote() {
@@ -105,7 +123,9 @@ request_json() {
   local secret="${5:-}"
   local tmp
   tmp="$(mktemp)"
-  local args=(-sS -X "${method}" -H "Content-Type: application/json" -o "${tmp}" -w "%{http_code}")
+  # This topology has a dedicated conversation-summary database. Command
+  # endpoints require callers to opt into the asynchronous summary receipt.
+  local args=(-sS -X "${method}" -H "Content-Type: application/json" -H "Accept: application/vnd.im.conversation-command-receipt+json" -o "${tmp}" -w "%{http_code}")
   if [[ -n "${token}" ]]; then
     args+=(-H "Authorization: Bearer ${token}")
   fi
@@ -296,7 +316,12 @@ print(json.dumps({
         "serverSequence": None,
         "serverTimestamp": None,
         "content": {"type": "rich_text", "body": {"text": sys.argv[4], "entities": []}},
-        "derivedState": {"recallState": "active", "edits": [], "reactions": []}
+        "derivedState": {
+            "recallState": {"active": {}},
+            "edits": [],
+            "reactions": [],
+            "streamState": None
+        }
     }
 }))
 PY
@@ -306,30 +331,32 @@ PY
 
 conversation_has_last_message() {
   local conversation_id="$1"
-  python3 - "$conversation_id" <<'PY'
+  python3 -c '
 import json
 import sys
+
 conversation_id = sys.argv[1]
 data = json.load(sys.stdin)
 for item in data.get("items", []):
     if item.get("id") == conversation_id and item.get("lastMessage"):
         sys.exit(0)
 sys.exit(1)
-PY
+' "$conversation_id"
 }
 
 changes_include_conversation() {
   local conversation_id="$1"
-  python3 - "$conversation_id" <<'PY'
+  python3 -c '
 import json
 import sys
+
 conversation_id = sys.argv[1]
 data = json.load(sys.stdin)
 for item in data.get("upserts", []):
     if item.get("id") == conversation_id:
         sys.exit(0)
 sys.exit(1)
-PY
+' "$conversation_id"
 }
 
 wait_for_summary() {
@@ -689,9 +716,15 @@ up_stack() {
   require_command python3
 
   mkdir -p "${REPORT_DIR}"
-  compose build gateway
+  if is_enabled "${SMOKE_SKIP_IMAGE_BUILD}"; then
+    local image_name="${IMSERVER_IMAGE:-imserver:production-smoke}"
+    echo "Using prebuilt image without a remote build: ${image_name}"
+    docker image inspect "${image_name}" >/dev/null
+  else
+    compose build gateway
+  fi
   compose up -d postgres redpanda redis minio redpanda-init minio-init
-  compose run --rm ops
+  compose run --rm -T ops
   compose up -d \
     gateway \
     command-api \
@@ -902,16 +935,16 @@ run_smoke() {
   peer_b_response="$(register_or_login_user "${PEER_B_EMAIL}" "smoke-peer-b")"
 
   local owner_token owner_user_id
-  owner_token="$(printf '%s' "${owner_response}" | json_get accessToken)"
-  owner_user_id="$(printf '%s' "${owner_response}" | json_get user.id)"
+  owner_token="$(printf '%s' "${owner_response}" | json_get auth.accessToken)"
+  owner_user_id="$(printf '%s' "${owner_response}" | json_get auth.user.id)"
   : "${peer_a_response:?}"
   : "${peer_b_response:?}"
 
   local direct_response group_response direct_id group_id
   direct_response="$(create_conversation_via_gateway "${owner_token}" direct "" "${PEER_A_EMAIL}")"
   group_response="$(create_conversation "${owner_token}" group "Smoke Group" "${PEER_A_EMAIL}" "${PEER_B_EMAIL}")"
-  direct_id="$(printf '%s' "${direct_response}" | json_get id)"
-  group_id="$(printf '%s' "${group_response}" | json_get id)"
+  direct_id="$(printf '%s' "${direct_response}" | conversation_id_from_response)"
+  group_id="$(printf '%s' "${group_response}" | conversation_id_from_response)"
 
   local before_changes
   before_changes="$(request_json GET "${QUERY_URL}/api/im/conversations?limit=20" "" "${owner_token}" | json_get snapshotToken)"
@@ -924,7 +957,7 @@ run_smoke() {
 
   wait_for_summary "${owner_token}" "${direct_id}"
   wait_for_changes "${owner_token}" "${direct_id}" "${before_changes}"
-  request_json GET "${QUERY_URL}/api/im/conversations/${direct_id}/messages/since?afterSequence=0&limit=10" "" "${owner_token}" >/dev/null
+  request_json GET "${QUERY_URL}/api/im/conversations/${direct_id}/timeline/since?afterSequence=0&limit=10" "" "${owner_token}" >/dev/null
   assert_metrics_protected
   wait_for_outbox_recovery >/tmp/imserver-production-smoke-outbox.txt
   compose run --rm ops ops --env production-smoke --inspect-conversation-outbox > "${REPORT_DIR}/production-smoke-outbox-inspect.txt"

@@ -105,10 +105,19 @@ def verify(
         fail("tcp_delivery_not_verified")
 
     fault_drill = payload.get("faultDrill")
-    if fault_drill is not None and fault_drill not in {"redis-outage", "kafka-outage"}:
+    if fault_drill is not None and fault_drill not in {"redis-outage", "kafka-outage", "target-gateway-outage"}:
         fail("fault_drill_invalid", value=fault_drill)
     if require_fault_drill is not None and fault_drill != require_fault_drill:
         fail("required_fault_drill_missing", expected=require_fault_drill, actual=fault_drill)
+    source_outbox_recovered = payload.get("sourceCrossCellOutboxRecovered")
+    if source_outbox_recovered is not None and not isinstance(source_outbox_recovered, bool):
+        fail("source_cross_cell_outbox_recovery_invalid", value=source_outbox_recovered)
+    if fault_drill == "target-gateway-outage" and source_outbox_recovered is not True:
+        fail("source_cross_cell_outbox_recovery_missing")
+    if fault_drill == "target-gateway-outage" and (
+        tcp["required"] is not True or tcp["verified"] is not True
+    ):
+        fail("target_gateway_outage_tcp_delivery_missing")
 
     source = payload.get("source")
     if not isinstance(source, dict):
@@ -139,6 +148,7 @@ def valid_payload(log: Path) -> dict[str, Any]:
         "conversationID": "conversation-1",
         "physicalMigration": True,
         "targetOutboxRecovered": True,
+        "sourceCrossCellOutboxRecovered": False,
         "faultDrill": "kafka-outage",
         "tcpRecipientDelivery": {"required": True, "verified": True},
         "remoteCellForwardSuccesses": {"command": 1, "query": 1},
@@ -179,6 +189,42 @@ def self_test() -> None:
                 raise
         else:
             fail("invalid_forward_metric_accepted")
+        invalid = valid_payload(log)
+        invalid["faultDrill"] = "target-gateway-outage"
+        receipt.write_text(json.dumps(invalid), encoding="utf-8")
+        try:
+            verify(
+                receipt,
+                require_pass=True,
+                require_artifacts_exist=True,
+                require_tcp=False,
+                require_fault_drill="target-gateway-outage",
+                max_age_seconds=60,
+            )
+        except SystemExit as exc:
+            if "source_cross_cell_outbox_recovery_missing" not in str(exc):
+                raise
+        else:
+            fail("missing_source_outbox_recovery_accepted")
+        invalid = valid_payload(log)
+        invalid["faultDrill"] = "target-gateway-outage"
+        invalid["sourceCrossCellOutboxRecovered"] = True
+        invalid["tcpRecipientDelivery"] = {"required": False, "verified": False}
+        receipt.write_text(json.dumps(invalid), encoding="utf-8")
+        try:
+            verify(
+                receipt,
+                require_pass=True,
+                require_artifacts_exist=True,
+                require_tcp=False,
+                require_fault_drill="target-gateway-outage",
+                max_age_seconds=60,
+            )
+        except SystemExit as exc:
+            if "target_gateway_outage_tcp_delivery_missing" not in str(exc):
+                raise
+        else:
+            fail("target_gateway_outage_without_tcp_accepted")
     print("multicell_smoke_verify_self_test result=pass")
 
 
@@ -188,7 +234,7 @@ def main() -> None:
     parser.add_argument("--require-pass", action="store_true")
     parser.add_argument("--require-artifacts-exist", action="store_true")
     parser.add_argument("--require-tcp", action="store_true")
-    parser.add_argument("--require-fault-drill", choices=("redis-outage", "kafka-outage"))
+    parser.add_argument("--require-fault-drill", choices=("redis-outage", "kafka-outage", "target-gateway-outage"))
     parser.add_argument("--max-age-seconds", type=int, default=86_400)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()

@@ -3,6 +3,9 @@ import Vapor
 
 struct IMOpsCommand: AsyncCommand {
     struct Signature: CommandSignature {
+        @Flag(name: "run-maintenance", help: "Run the dedicated maintenance role until a shutdown signal is received.")
+        var runMaintenance: Bool
+
         @Flag(name: "relay-conversation-outbox", help: "Relay pending conversation outbox events to the configured event stream.")
         var relayConversationOutbox: Bool
 
@@ -97,6 +100,25 @@ struct IMOpsCommand: AsyncCommand {
     let help = "Runs IM maintenance operations without starting HTTP or TCP runtimes."
 
     func run(using context: CommandContext, signature: Signature) async throws {
+        if signature.runMaintenance {
+            guard IMMaintenanceConfiguration.load().enabled else {
+                throw Abort(
+                    .badRequest,
+                    reason: "--run-maintenance requires IM_MAINTENANCE_ENABLED=true."
+                )
+            }
+            context.application.logger.notice(
+                "IM maintenance role started",
+                metadata: ["node_id": .string(context.application.imNodeID)]
+            )
+            await waitForShutdownSignal(queueLabel: "imserver.maintenance.signal")
+            context.application.logger.notice(
+                "IM maintenance role stopping",
+                metadata: ["node_id": .string(context.application.imNodeID)]
+            )
+            return
+        }
+
         if signature.relayConversationOutbox {
             let relayedCount = try await ConversationOutboxRelay(app: context.application)
                 .relayPendingEvents(limit: max(1, signature.limit ?? 200))
@@ -232,7 +254,7 @@ struct IMOpsCommand: AsyncCommand {
                 pageSize: signature.pageSize ?? 200
             )
             context.console.print(
-                "conversation_shard_migration_copied conversation_id=\(conversationID.uuidString) status=\(migration.status) conversation_watermark=\(migration.copyConversationWatermark) member_watermark=\(migration.copyMemberWatermark) message_watermark=\(migration.copyMessageWatermark) event_watermark=\(migration.copyDomainEventWatermark) sequence_watermark=\(migration.copyDomainEventSequenceWatermark) recipient_snapshot_watermark=\(migration.copyRecipientSnapshotWatermark) notice_watermark=\(migration.copyTimelineNoticeWatermark) media_watermark=\(migration.copyMediaReferenceWatermark)"
+                "conversation_shard_migration_copied conversation_id=\(conversationID.uuidString) status=\(migration.status) conversation_watermark=\(migration.copyConversationWatermark) member_watermark=\(migration.copyMemberWatermark) message_watermark=\(migration.copyMessageWatermark) event_watermark=\(migration.copyDomainEventWatermark) sequence_watermark=stored recipient_snapshot_watermark=\(migration.copyRecipientSnapshotWatermark) notice_watermark=\(migration.copyTimelineNoticeWatermark) media_watermark=\(migration.copyMediaReferenceWatermark)"
             )
             return
         }

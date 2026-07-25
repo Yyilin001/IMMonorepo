@@ -27,7 +27,7 @@ if bool_enabled "${SYSTEMD_UNIT_VERIFY_SELF_TEST}"; then
 SH
   chmod +x "${fake_bin}/systemd-analyze"
   printf 'APP_ENV=production\n' >"${self_test_dir}/etc/common.env"
-  for unit in imserver-gateway imserver-command-api imserver-query-api imserver-outbox-relay imserver-stream-consumer imserver-domain-delivery-consumer; do
+  for unit in imserver-gateway imserver-command-api imserver-query-api imserver-outbox-relay imserver-stream-consumer imserver-domain-delivery-consumer imserver-maintenance; do
     role="${unit#imserver-}"
     printf 'IM_NODE_ID=%s\n' "${role}" >"${self_test_dir}/etc/roles/${role}.env"
     cat >"${self_test_dir}/systemd/${unit}.service" <<EOF
@@ -200,6 +200,7 @@ unit_names=(
   imserver-outbox-relay
   imserver-stream-consumer
   imserver-domain-delivery-consumer
+  imserver-maintenance
 )
 template_unit_names=(
   imserver-stream-consumer@

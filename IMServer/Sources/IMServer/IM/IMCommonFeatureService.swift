@@ -3,6 +3,18 @@ import Vapor
 
 struct IMCommonFeatureService {
     let db: any Database
+    let featureDB: any Database
+    private let messageDatabaseForConversation: (UUID) async throws -> any Database
+
+    init(
+        db: any Database,
+        featureDB: (any Database)? = nil,
+        messageDatabaseForConversation: ((UUID) async throws -> any Database)? = nil
+    ) {
+        self.db = db
+        self.featureDB = featureDB ?? db
+        self.messageDatabaseForConversation = messageDatabaseForConversation ?? { _ in db }
+    }
 
     private var membershipService: ConversationMembershipService { ConversationMembershipService(db: db) }
     private var messageService: ConversationMessageService { ConversationMessageService(db: db) }
@@ -27,7 +39,7 @@ struct IMCommonFeatureService {
         let conversationID = message.$conversation.id
         if let override = try await ConversationVisibilityOverride.find(
             ConversationVisibilityOverride.recordID(ownerUserID: userID, conversationID: conversationID),
-            on: db
+            on: featureDB
         ) {
             if override.isDeleted {
                 return true
@@ -41,7 +53,7 @@ struct IMCommonFeatureService {
         if let messageID = message.id,
            let row = try await MessageVisibilityOverride.find(
             MessageVisibilityOverride.recordID(ownerUserID: userID, messageID: messageID),
-            on: db
+            on: featureDB
            ) {
             return row.isHidden
         }
@@ -54,7 +66,7 @@ struct IMCommonFeatureService {
         }
 
         let conversationIDs = Array(Set(messages.map { $0.$conversation.id }))
-        let conversationOverrides = try await ConversationVisibilityOverride.query(on: db)
+        let conversationOverrides = try await ConversationVisibilityOverride.query(on: featureDB)
             .filter(\.$ownerUserID == userID)
             .filter(\.$conversationID ~~ conversationIDs)
             .all()
@@ -67,7 +79,7 @@ struct IMCommonFeatureService {
         if messageIDs.isEmpty {
             messageOverridesByMessageID = [:]
         } else {
-            let messageOverrides = try await MessageVisibilityOverride.query(on: db)
+            let messageOverrides = try await MessageVisibilityOverride.query(on: featureDB)
                 .filter(\.$ownerUserID == userID)
                 .filter(\.$messageID ~~ messageIDs)
                 .all()
@@ -105,11 +117,11 @@ struct IMCommonFeatureService {
             messageID: try message.requireID(),
             serverSequence: message.serverSequence
         )
-        if let existing = try await MessageFavorite.find(favorite.id, on: db) {
+        if let existing = try await MessageFavorite.find(favorite.id, on: featureDB) {
             existing.serverSequence = message.serverSequence
-            try await existing.update(on: db)
+            try await existing.update(on: featureDB)
         } else {
-            try await favorite.create(on: db)
+            try await favorite.create(on: featureDB)
         }
         return try messageService.messageResponse(from: message, conversationID: conversationID)
     }
@@ -117,16 +129,16 @@ struct IMCommonFeatureService {
     func unfavoriteMessage(messageID: UUID, userID: UUID) async throws {
         if let favorite = try await MessageFavorite.find(
             MessageFavorite.recordID(ownerUserID: userID, messageID: messageID),
-            on: db
+            on: featureDB
         ) {
-            try await favorite.delete(on: db)
+            try await favorite.delete(on: featureDB)
         }
     }
 
     func listFavorites(userID: UUID, conversationID: UUID?, cursor: String?, limit requestedLimit: Int?) async throws -> IMFavoritePageResponse {
         let limit = min(max(requestedLimit ?? 30, 1), 100)
         let beforeDate = cursor.flatMap(TimeInterval.init).map(Date.init(timeIntervalSince1970:))
-        let query = MessageFavorite.query(on: db)
+        let query = MessageFavorite.query(on: featureDB)
             .filter(\.$ownerUserID == userID)
         if let conversationID {
             query.filter(\.$conversationID == conversationID)
@@ -146,12 +158,17 @@ struct IMCommonFeatureService {
 
         var items: [IMMessageResponse] = []
         for favorite in rows {
-            guard let message = try await ConversationMessage.find(favorite.messageID, on: db),
-                  try await !isHidden(message: message, for: userID)
+            let messageDB = try await messageDatabaseForConversation(favorite.conversationID)
+            let messageFeatureService = IMCommonFeatureService(db: messageDB, featureDB: featureDB)
+            guard let message = try await ConversationMessage.find(favorite.messageID, on: messageDB),
+                  try await !messageFeatureService.isHidden(message: message, for: userID)
             else {
                 continue
             }
-            items.append(try messageService.messageResponse(from: message, conversationID: favorite.conversationID))
+            items.append(
+                try ConversationMessageService(db: messageDB)
+                    .messageResponse(from: message, conversationID: favorite.conversationID)
+            )
         }
 
         return IMFavoritePageResponse(
@@ -181,11 +198,11 @@ struct IMCommonFeatureService {
                 messageID: try message.requireID(),
                 serverSequence: message.serverSequence
             )
-            if let existing = try await MessageVisibilityOverride.find(row.id, on: db) {
+            if let existing = try await MessageVisibilityOverride.find(row.id, on: featureDB) {
                 existing.isHidden = true
-                try await existing.update(on: db)
+                try await existing.update(on: featureDB)
             } else {
-                try await row.create(on: db)
+                try await row.create(on: featureDB)
             }
         }
     }
@@ -194,18 +211,18 @@ struct IMCommonFeatureService {
         _ = try await membershipService.requireMembershipRecord(conversationID: conversationID, userID: userID)
         let lastSequence = try await Conversation.find(conversationID, on: db)?.lastMessageSequence ?? 0
         let id = ConversationVisibilityOverride.recordID(ownerUserID: userID, conversationID: conversationID)
-        if let existing = try await ConversationVisibilityOverride.find(id, on: db) {
+        if let existing = try await ConversationVisibilityOverride.find(id, on: featureDB) {
             existing.hiddenBeforeSequence = max(existing.hiddenBeforeSequence ?? 0, lastSequence)
             existing.isDeleted = deleteFromList
             existing.updatedAt = Date()
-            try await existing.update(on: db)
+            try await existing.update(on: featureDB)
         } else {
             try await ConversationVisibilityOverride(
                 ownerUserID: userID,
                 conversationID: conversationID,
                 hiddenBeforeSequence: lastSequence,
                 isDeleted: deleteFromList
-            ).create(on: db)
+            ).create(on: featureDB)
         }
         if deleteFromList,
            let summary = try await ConversationUserSummary.find(

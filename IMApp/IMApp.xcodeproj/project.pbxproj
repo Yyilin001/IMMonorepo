@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		1BADBC382F73859E00E89B24 /* IMClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC3A2F73859E00E89B24 /* IMClientKit */; };
 		1BADBC392F73859E00E89B24 /* IMClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC3B2F73859E00E89B24 /* IMClientKit */; };
+		1BADBC402F73859E00E89B24 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC422F73859E00E89B24 /* IMV2ClientKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -58,6 +59,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1BADBC382F73859E00E89B24 /* IMClientKit in Frameworks */,
+				1BADBC402F73859E00E89B24 /* IMV2ClientKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -121,6 +123,7 @@
 			name = IMApp;
 			packageProductDependencies = (
 				1BADBC3A2F73859E00E89B24 /* IMClientKit */,
+				1BADBC422F73859E00E89B24 /* IMV2ClientKit */,
 			);
 			productName = IMApp;
 			productReference = 1BADBC0E2F73859D00E89B24 /* IMApp.app */;
@@ -208,6 +211,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				1BADBC3C2F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMClientKit" */,
+				1BADBC412F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2ClientKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1BADBC0F2F73859D00E89B24 /* Products */;
@@ -433,7 +437,9 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				APS_ENVIRONMENT = development;
 				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = Config/IMApp.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = T79S2V9A32;
 				ENABLE_PREVIEWS = YES;
@@ -445,9 +451,11 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IM_API_BASE_URL = "http://127.0.0.1:8080";
-				IM_TCP_HOST = "127.0.0.1";
-				IM_TCP_PORT = 9000;
+				IM_V2_ACCOUNT_BASE_URL = "https://localhost:8443";
+				IM_V2_GATEWAY_HOST = localhost;
+				IM_V2_GATEWAY_PORT = 7443;
+				IM_V2_PASSKEY_RP_ID = localhost;
+				IM_V2_PUSH_ENVIRONMENT = development;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -470,7 +478,9 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				APS_ENVIRONMENT = production;
 				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = Config/IMApp.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = T79S2V9A32;
 				ENABLE_PREVIEWS = YES;
@@ -482,9 +492,11 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IM_API_BASE_URL = "https://im.example.com";
-				IM_TCP_HOST = im.example.com;
-				IM_TCP_PORT = 9000;
+				IM_V2_ACCOUNT_BASE_URL = "https://im.example.com";
+				IM_V2_GATEWAY_HOST = gateway.im.example.com;
+				IM_V2_GATEWAY_PORT = 7443;
+				IM_V2_PASSKEY_RP_ID = im.example.com;
+				IM_V2_PUSH_ENVIRONMENT = production;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -628,6 +640,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../IMClientKit;
 		};
+		1BADBC412F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2ClientKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../IMV2ClientKit;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -640,6 +656,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 1BADBC3C2F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMClientKit" */;
 			productName = IMClientKit;
+		};
+		1BADBC422F73859E00E89B24 /* IMV2ClientKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1BADBC412F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2ClientKit" */;
+			productName = IMV2ClientKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

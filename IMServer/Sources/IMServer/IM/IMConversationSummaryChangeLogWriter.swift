@@ -57,6 +57,8 @@ extension IMConversationSummaryProjectionService {
 }
 
 struct ConversationChangeLogBatchWriter {
+    private static let maxRowsPerStatement = 500
+
     struct Row: Sendable {
         let ownerUserID: UUID
         let conversationID: UUID
@@ -83,6 +85,14 @@ struct ConversationChangeLogBatchWriter {
 
     func upsert(_ rows: [Row]) async throws {
         guard !rows.isEmpty else {
+            return
+        }
+
+        if rows.count > Self.maxRowsPerStatement {
+            for start in stride(from: 0, to: rows.count, by: Self.maxRowsPerStatement) {
+                let end = min(start + Self.maxRowsPerStatement, rows.count)
+                try await upsert(Array(rows[start..<end]))
+            }
             return
         }
 

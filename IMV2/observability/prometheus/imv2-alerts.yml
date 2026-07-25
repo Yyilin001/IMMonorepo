@@ -1,0 +1,55 @@
+# V2 metrics are exposed only on a loopback listener. Prometheus must scrape
+# from the same pod/network namespace (or an authenticated local collector),
+# and Alertmanager must route owner=im-v2-platform-oncall to the approved V2
+# platform rotation. Do not put user-, room-, device-, or shard identifiers in
+# labels or annotations.
+groups:
+  - name: im-v2-durable-work
+    rules:
+      - alert: IMV2DurableWorkMetricsUnavailable
+        expr: absent(im_v2_durable_work_metrics_available) or max by (job, instance) (im_v2_durable_work_metrics_available) == 0
+        for: 5m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 durable-work metrics are unavailable
+          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
+
+      # A paused row has exhausted its retry budget. It is deliberately never
+      # terminally skipped, so any non-zero value must create an incident.
+      # Use max rather than sum because multiple gateway replicas can scrape
+      # the same authoritative PostgreSQL aggregate.
+      - alert: IMV2PausedRoomOutbox
+        expr: max(im_v2_room_outbox_backlog{state="paused"}) > 0
+        for: 2m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 room-outbox work is paused pending operator replay
+          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
+
+      - alert: IMV2PausedFanoutDelivery
+        expr: max(im_v2_fanout_delivery_backlog{state="paused"}) > 0
+        for: 2m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 fan-out delivery work is paused pending operator replay
+          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
+
+      - alert: IMV2FanoutFailureRate
+        expr: sum(rate(im_v2_fanout_failures_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 durable fan-out failures are continuing
+          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md

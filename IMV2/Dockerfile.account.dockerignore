@@ -1,0 +1,17 @@
+# The account image needs only these two packages. Keep V1, Xcode products,
+# Docker test artifacts, and V2 client sources out of the build context.
+.git
+.github
+IMApp
+IMClientKit
+IMServer
+Protocol
+deploy
+scripts
+IMV2
+IMV2ClientKit
+**/.build
+**/.swiftpm
+**/.DS_Store
+**/*.xcworkspace
+**/*.xcodeproj

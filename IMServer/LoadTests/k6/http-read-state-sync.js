@@ -52,6 +52,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['read-state-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const accountFile = __ENV.ACCOUNT_FILE || __ENV.IM_ACCOUNT_FILE || '';
 const defaultReaderEmail = __ENV.IM_READER_EMAIL || __ENV.IM_EMAIL || 'demo@example.com';
 const defaultReaderPassword = __ENV.IM_READER_PASSWORD || __ENV.IM_PASSWORD || 'password1234';
@@ -193,7 +194,7 @@ function listSummary(token, conversationID) {
 
 function sendInternalMessage(senderUserID, conversationID, clientMessageID) {
   const res = http.post(
-    `${baseURL}/internal/im/messages/send`,
+    `${commandBaseURL}/internal/im/messages/send`,
     JSON.stringify({
       senderUserID,
       payload: {
@@ -218,7 +219,7 @@ function sendInternalMessage(senderUserID, conversationID, clientMessageID) {
 
 function findTimelineMessage(token, conversationID, clientMessageID, afterSequence) {
   const res = http.get(
-    `${baseURL}/api/im/conversations/${conversationID}/messages/since?afterSequence=${afterSequence}&limit=100`,
+    `${baseURL}/api/im/conversations/${conversationID}/timeline/since?afterSequence=${afterSequence}&limit=100`,
     jsonHeaders(token)
   );
   if (res.status !== 200) {
@@ -283,7 +284,7 @@ export default function () {
   const startedAt = Date.now();
   const baseline = listSummary(state.readerToken, state.conversationID);
   const previousSequence = Number(
-    baseline.summary && baseline.summary.lastMessage ? baseline.summary.lastMessage.serverSequence || 0 : 0
+    baseline.summary && baseline.summary.lastMessage ? baseline.summary.lastMessage.timelineSequence || 0 : 0
   );
   const clientMessageID = `k6-read-state-${__VU}-${__ITER}-${Date.now()}`;
   const message = sendInternalMessage(state.senderUserID, state.conversationID, clientMessageID);

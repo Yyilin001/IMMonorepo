@@ -174,6 +174,7 @@ enum RedisRoutingError: Error {
     case redisClusterTopologyUnsupported
     case redisClusterTopologyUnsupportedByComponents([String])
     case invalidRedisDeploymentTopology(String)
+    case valkeyStreamDispatchRequiresCluster
 }
 
 enum IMRoutingMode: String, Sendable {
@@ -182,7 +183,8 @@ enum IMRoutingMode: String, Sendable {
 }
 
 /// Chooses the routing transport. Standalone keeps the legacy RediStack backend;
-/// Cluster selects the Valkey-aware route backend and requires HTTP node dispatch.
+/// Cluster selects the Valkey-aware route backend and durable Valkey Stream
+/// node dispatch.
 enum IMRedisDeploymentTopology: Sendable, Equatable {
     case standalone
     case cluster

@@ -49,6 +49,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['message-forward-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const accountFile = __ENV.ACCOUNT_FILE || __ENV.IM_ACCOUNT_FILE || '';
 const defaultOwnerEmail = __ENV.IM_EMAIL || 'demo@example.com';
 const defaultOwnerPassword = __ENV.IM_PASSWORD || 'password1234';
@@ -177,13 +178,13 @@ function latestSummarySequence(token, conversationID) {
   const body = res.json();
   const items = Array.isArray(body.items) ? body.items : [];
   const summary = items.find((item) => item.id === conversationID);
-  return Number(summary && summary.lastMessage ? summary.lastMessage.serverSequence || 0 : 0);
+  return Number(summary && summary.lastMessage ? summary.lastMessage.timelineSequence || 0 : 0);
 }
 
 function sendInternalMessage(senderUserID, conversationID, clientMessageID) {
   const startedAt = Date.now();
   const res = http.post(
-    `${baseURL}/internal/im/messages/send`,
+    `${commandBaseURL}/internal/im/messages/send`,
     JSON.stringify({
       senderUserID,
       payload: {
@@ -225,7 +226,7 @@ function forwardMessage(token, sourceConversationID, targetConversationID, messa
 
 function findForwardedTimelineMessage(token, conversationID, forwardedMessageID, afterSequence) {
   const res = http.get(
-    `${baseURL}/api/im/conversations/${conversationID}/messages/since?afterSequence=${afterSequence}&limit=100`,
+    `${baseURL}/api/im/conversations/${conversationID}/timeline/since?afterSequence=${afterSequence}&limit=100`,
     jsonHeaders(token)
   );
   if (res.status !== 200) {

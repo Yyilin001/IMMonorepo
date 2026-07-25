@@ -23,6 +23,7 @@ struct IMTCPConfiguration: Sendable {
     let slowWriteCloseConsecutiveCount: Int
     let dropsRealtimeWhenNotWritable: Bool
     let requiresTLSTermination: Bool
+    let shutdownDrainGraceSeconds: TimeInterval
 
     static func load(from environment: Environment) -> IMTCPConfiguration {
         let enabled = Environment.get("IM_TCP_ENABLED").flatMap(Bool.init(_:)) ?? (environment != .testing)
@@ -64,7 +65,11 @@ struct IMTCPConfiguration: Sendable {
                 "IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE",
                 defaultValue: true
             ),
-            requiresTLSTermination: parseBooleanEnvironment("IM_TCP_REQUIRES_TLS_TERMINATION", defaultValue: false)
+            requiresTLSTermination: parseBooleanEnvironment("IM_TCP_REQUIRES_TLS_TERMINATION", defaultValue: false),
+            shutdownDrainGraceSeconds: min(
+                15,
+                max(0, Environment.get("IM_TCP_SHUTDOWN_DRAIN_GRACE_SECONDS").flatMap(TimeInterval.init(_:)) ?? 2)
+            )
         )
     }
 }
@@ -252,6 +257,7 @@ struct IMTCPConnectionCloseReasonEvent: Sendable {
     let reason: String
 
     static let slowWrite = IMTCPConnectionCloseReasonEvent(reason: "slow_write")
+    static let realtimeBackpressure = IMTCPConnectionCloseReasonEvent(reason: "realtime_backpressure")
 }
 
 final class IMConnectionControl: @unchecked Sendable {
@@ -313,6 +319,9 @@ final class IMConnectionControl: @unchecked Sendable {
                 },
                 writeCompletionHandler: { [weak self] didWriteSlow in
                     self?.handleWriteCompletionOnEventLoop(didWriteSlow: didWriteSlow)
+                },
+                notWritableHandler: { [weak self] in
+                    self?.handleRealtimeBackpressureOnEventLoop()
                 }
             )
         }
@@ -335,6 +344,9 @@ final class IMConnectionControl: @unchecked Sendable {
                 },
                 writeCompletionHandler: { [weak self] didWriteSlow in
                     self?.handleWriteCompletionOnEventLoop(didWriteSlow: didWriteSlow)
+                },
+                notWritableHandler: { [weak self] in
+                    self?.handleRealtimeBackpressureOnEventLoop()
                 }
             )
         }
@@ -355,8 +367,22 @@ final class IMConnectionControl: @unchecked Sendable {
             },
             writeCompletionHandler: { [weak self] didWriteSlow in
                 self?.handleWriteCompletionOnEventLoop(didWriteSlow: didWriteSlow)
+            },
+            notWritableHandler: { [weak self] in
+                self?.handleRealtimeBackpressureOnEventLoop()
             }
         )
+    }
+
+    // A realtime packet cannot be retained indefinitely for a slow client.
+    // Closing forces the client through its existing reconnect and cursor-gap
+    // reconciliation path instead of silently leaving it permanently stale.
+    func handleRealtimeBackpressureOnEventLoop() {
+        guard channel.isActive else {
+            return
+        }
+        channel.pipeline.fireUserInboundEventTriggered(IMTCPConnectionCloseReasonEvent.realtimeBackpressure)
+        channel.close(promise: nil)
     }
 
     func handleSlowWriteOnEventLoop(latencyMilliseconds: Int) {
@@ -658,6 +684,21 @@ actor IMConnectionRegistry {
             connection: removed.connection,
             deactivatedConversationIDs: deactivatedConversationIDs
         )
+    }
+
+    func remove(connectionIDs: [UUID]) -> [IMConnectionRemoval] {
+        guard !connectionIDs.isEmpty else {
+            return []
+        }
+
+        var removals: [IMConnectionRemoval] = []
+        removals.reserveCapacity(connectionIDs.count)
+        for connectionID in connectionIDs {
+            if let removal = remove(connectionID: connectionID) {
+                removals.append(removal)
+            }
+        }
+        return removals
     }
 
     func updateConversationActivity(
@@ -1666,6 +1707,7 @@ struct IMTCPAuthenticator {
 
 final class IMTCPServerLifecycle: LifecycleHandler, @unchecked Sendable {
     private let serverChannel = NIOLockedValueBox<(any Channel)?>(nil)
+    private let childChannels = NIOLockedValueBox<[ObjectIdentifier: any Channel]>([:])
 
     func didBootAsync(_ application: Application) async throws {
         let configuration = application.imTCPConfiguration
@@ -1698,6 +1740,7 @@ final class IMTCPServerLifecycle: LifecycleHandler, @unchecked Sendable {
                         ),
                         IMTCPConnectionHandler(application: application)
                     )
+                    self.trackChildChannel(channel)
                     return channel.eventLoop.makeSucceededFuture(())
                 } catch {
                     return channel.eventLoop.makeFailedFuture(error)
@@ -1718,25 +1761,76 @@ final class IMTCPServerLifecycle: LifecycleHandler, @unchecked Sendable {
     }
 
     func shutdownAsync(_ application: Application) async {
+        let admissionStatus = application.imTCPAdmissionController.setDraining(true)
         let channel = self.serverChannel.withLockedValue { value in
             let channel = value
             value = nil
             return channel
         }
 
-        guard let channel else {
-            return
+        if let channel {
+            do {
+                try await channel.close().get()
+            } catch {
+                application.logger.warning(
+                    "Failed to stop IM TCP listener cleanly",
+                    metadata: ["error": .string(String(describing: error))]
+                )
+            }
         }
 
-        do {
-            try await channel.close().get()
-            application.logger.info("IM TCP server stopped")
-        } catch {
-            application.logger.warning(
-                "Failed to stop IM TCP server cleanly",
-                metadata: ["error": .string(String(describing: error))]
-            )
+        let disconnectedConnectionCount: Int
+        if application.hasConnectionRoutingServiceConfigured {
+            disconnectedConnectionCount = await application.connectionRoutingService
+                .disconnectAllLocalConnectionsForGatewayDrain()
+        } else {
+            disconnectedConnectionCount = 0
         }
+
+        let trackedChildCount = trackedChildChannelCount()
+        let graceSeconds = application.imTCPConfiguration.shutdownDrainGraceSeconds
+        if trackedChildCount > 0, graceSeconds > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(graceSeconds * 1_000_000_000))
+        }
+        let forceClosedChildCount = closeTrackedChildChannels()
+        application.logger.notice(
+            "IM TCP server drained",
+            metadata: [
+                "active_connection_count": .stringConvertible(admissionStatus.activeConnectionCount),
+                "disconnected_authenticated_connection_count": .stringConvertible(disconnectedConnectionCount),
+                "tracked_child_channel_count": .stringConvertible(trackedChildCount),
+                "force_closed_child_channel_count": .stringConvertible(forceClosedChildCount),
+                "drain_grace_seconds": .stringConvertible(graceSeconds)
+            ]
+        )
+    }
+
+    private func trackChildChannel(_ channel: any Channel) {
+        let identifier = ObjectIdentifier(channel)
+        childChannels.withLockedValue { channels in
+            channels[identifier] = channel
+        }
+        channel.closeFuture.whenComplete { [weak self] _ in
+            _ = self?.childChannels.withLockedValue { channels in
+                channels.removeValue(forKey: identifier)
+            }
+        }
+    }
+
+    private func trackedChildChannelCount() -> Int {
+        childChannels.withLockedValue(\.count)
+    }
+
+    private func closeTrackedChildChannels() -> Int {
+        let channels = childChannels.withLockedValue { channels in
+            let snapshot = Array(channels.values)
+            channels.removeAll(keepingCapacity: false)
+            return snapshot
+        }
+        for channel in channels where channel.isActive {
+            channel.close(promise: nil)
+        }
+        return channels.count
     }
 }
 

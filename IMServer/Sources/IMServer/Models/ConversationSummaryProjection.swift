@@ -99,6 +99,7 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
         avatarPreset: IMConversationAvatarPreset? = nil,
         muteAll: Bool = false,
         memberUserIDs: [UUID],
+        memberCount: Int? = nil,
         lastMessage: IMMessagePreviewResponse?,
         lastReadSequence: Int,
         unreadCount: Int,
@@ -124,7 +125,7 @@ final class ConversationUserSummary: Model, @unchecked Sendable {
         self.notice = notice
         self.avatarPreset = avatarPreset?.rawValue
         self.muteAll = muteAll
-        memberCount = memberUserIDs.count
+        self.memberCount = max(0, memberCount ?? memberUserIDs.count)
         self.membershipRevision = membershipRevision
         memberUserIDsJSON = try Self.encodeUUIDs(memberUserIDs)
         lastMessageJSON = try lastMessage.map(Self.encodeLastMessage)

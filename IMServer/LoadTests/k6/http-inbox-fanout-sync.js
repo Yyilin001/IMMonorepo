@@ -49,6 +49,7 @@ const profiles = {
 export const options = profiles[profile] || profiles['inbox-fanout-smoke'];
 
 const baseURL = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const commandBaseURL = (__ENV.IM_COMMAND_BASE_URL || baseURL).replace(/\/$/, '');
 const email = __ENV.IM_EMAIL || 'demo@example.com';
 const password = __ENV.IM_PASSWORD || 'password1234';
 const memberEmails = (__ENV.IM_MEMBER_EMAILS || 'alice@example.com')
@@ -61,7 +62,7 @@ const writesPerIteration = Math.max(1, Number.parseInt(__ENV.IM_INBOX_WRITES_PER
 const readSampleSize = Math.max(1, Number.parseInt(__ENV.IM_INBOX_READ_SAMPLE_SIZE || '5', 10));
 const listLimit = Math.max(1, Number.parseInt(__ENV.IM_INBOX_LIST_LIMIT || '100', 10));
 const sinceLimit = Math.max(1, Number.parseInt(__ENV.IM_INBOX_SINCE_LIMIT || '20', 10));
-const changesToken = __ENV.IM_INBOX_CHANGES_AFTER_TOKEN || '1970-01-01T00:00:00.000Z:';
+const changesTokenOverride = __ENV.IM_INBOX_CHANGES_AFTER_TOKEN || '';
 const sleepMillis = Number.parseInt(__ENV.IM_INBOX_SLEEP_MS || '250', 10);
 
 export const inboxErrors = new Rate('im_inbox_fanout_errors');
@@ -76,6 +77,12 @@ function jsonHeaders(token) {
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
+  return { headers };
+}
+
+function commandHeaders(token) {
+  const headers = jsonHeaders(token).headers;
+  headers.Accept = 'application/vnd.im.conversation-command-receipt+json';
   return { headers };
 }
 
@@ -109,19 +116,19 @@ function createConversation(token, index) {
       title: `k6-inbox-${Date.now()}-${index}`,
       memberEmails,
     }),
-    jsonHeaders(token)
+    commandHeaders(token)
   );
-  check(res, { 'inbox create conversation ok': (r) => r.status === 200 });
-  if (res.status !== 200) {
+  check(res, { 'inbox create conversation accepted': (r) => r.status === 202 });
+  if (res.status !== 202) {
     fail(`create conversation failed: ${res.status} ${res.body}`);
   }
-  return res.json('id');
+  return res.json('conversationID');
 }
 
 function sendInternalMessage(senderUserID, conversationID, clientMessageID) {
   const startedAt = Date.now();
   const res = http.post(
-    `${baseURL}/internal/im/messages/send`,
+    `${commandBaseURL}/internal/im/messages/send`,
     JSON.stringify({
       senderUserID,
       payload: {
@@ -195,12 +202,32 @@ export default function (data) {
   const written = [];
   let failed = false;
 
+  // Capture the cursor before writes so conversation changes measures the
+  // actual delta produced by this iteration, not a synthetic stale cursor.
+  const baselineListRes = timedGet(
+    `${baseURL}/api/im/conversations?limit=${listLimit}`,
+    data.token,
+    listLatency,
+    'inbox baseline list'
+  );
+  const baselineBody = baselineListRes.status === 200 ? baselineListRes.json() : null;
+  const baselineToken = changesTokenOverride || (baselineBody && baselineBody.snapshotToken);
+  const baselineSequences = new Map(
+    ((baselineBody && Array.isArray(baselineBody.items)) ? baselineBody.items : [])
+      .map((item) => [item.id, Number(item.lastMessage && item.lastMessage.timelineSequence || 0)])
+  );
+  failed = !baselineToken || failed;
+
   for (let index = 0; index < writesPerIteration; index += 1) {
     const conversationIndex = ((__VU - 1) + __ITER + index) % conversationIDs.length;
     const conversationID = conversationIDs[conversationIndex];
     const clientMessageID = `k6-inbox-${__VU}-${__ITER}-${index}-${Date.now()}`;
     if (sendInternalMessage(data.senderUserID, conversationID, clientMessageID)) {
-      written.push({ conversationID, clientMessageID });
+      written.push({
+        conversationID,
+        clientMessageID,
+        afterSequence: baselineSequences.get(conversationID) || 0,
+      });
     } else {
       failed = true;
     }
@@ -210,7 +237,7 @@ export default function (data) {
   failed = !listContainsAnyUpdatedConversation(listRes, written.map((item) => item.conversationID)) || failed;
 
   const changesRes = timedGet(
-    `${baseURL}/api/im/conversations/changes?afterToken=${encodeURIComponent(changesToken)}&limit=${listLimit}`,
+    `${baseURL}/api/im/conversations/changes?afterToken=${encodeURIComponent(baselineToken || '')}&limit=${listLimit}`,
     data.token,
     changesLatency,
     'inbox changes'
@@ -221,7 +248,7 @@ export default function (data) {
   for (let index = 0; index < reads; index += 1) {
     const item = written[index];
     const sinceRes = timedGet(
-      `${baseURL}/api/im/conversations/${item.conversationID}/messages/since?afterSequence=0&limit=${sinceLimit}`,
+      `${baseURL}/api/im/conversations/${item.conversationID}/timeline/since?afterSequence=${item.afterSequence}&limit=${sinceLimit}`,
       data.token,
       sinceLatency,
       'inbox messages since'

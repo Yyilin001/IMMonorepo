@@ -438,7 +438,7 @@ if login_status >= 400 or not token:
     print("messagesSinceStatus=0 duplicateClientMessages=1 success=0")
     sys.exit(0)
 
-status, body = request_json("GET", f"{base_url}/api/im/conversations/{conversation_id}/messages/since?afterSequence=0&limit=500", None, token)
+status, body = request_json("GET", f"{base_url}/api/im/conversations/{conversation_id}/timeline/since?afterSequence=0&limit=500", None, token)
 messages = body.get("messages", []) if isinstance(body, dict) else []
 seen = set()
 duplicates = 0

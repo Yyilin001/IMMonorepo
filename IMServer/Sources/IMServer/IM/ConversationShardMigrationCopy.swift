@@ -16,7 +16,7 @@ struct ConversationShardMigrationCopyCoordinator {
     func copy(conversationID: UUID, pageSize requestedPageSize: Int = 200) async throws -> ConversationShardMigration {
         let pageSize = min(max(requestedPageSize, 1), 1_000)
         await app.conversationShardMigrationMetrics.recordCopyAttempt()
-        guard let migration = try await ConversationShardMigration.find(conversationID, on: app.db) else {
+        guard let migration = try await loadMigration(conversationID: conversationID) else {
             throw Abort(.notFound, reason: "No prepared conversation shard migration exists for \(conversationID.uuidString).")
         }
         guard [.prepared, .copying, .copied, .failed].contains(migration.statusEnum) else {
@@ -72,7 +72,7 @@ struct ConversationShardMigrationCopyCoordinator {
     func verify(conversationID: UUID, pageSize requestedPageSize: Int = 500) async throws -> ConversationShardMigration {
         let pageSize = min(max(requestedPageSize, 1), 1_000)
         await app.conversationShardMigrationMetrics.recordVerifyAttempt()
-        guard let migration = try await ConversationShardMigration.find(conversationID, on: app.db) else {
+        guard let migration = try await loadMigration(conversationID: conversationID) else {
             throw Abort(.notFound, reason: "No prepared conversation shard migration exists for \(conversationID.uuidString).")
         }
         guard [.copied, .verifying, .readyToCutover].contains(migration.statusEnum) else {
@@ -118,7 +118,7 @@ struct ConversationShardMigrationCopyCoordinator {
             conversationID: conversationID,
             database: source
         )
-        let expected = expectedSnapshot(for: migration)
+            let expected = try await expectedSnapshot(for: migration)
         guard sourceSnapshot == expected else {
             throw Abort(.conflict, reason: "Source canonical row counts changed after migration prepare; restart from a fresh preflight.")
         }
@@ -182,6 +182,60 @@ struct ConversationShardMigrationCopyCoordinator {
         return app.conversationShardRouter.commandDatabase(forShardID: migration.sourceShardID)
     }
 
+    /// Copy progress updates may touch any of the durable watermarks. Keep the
+    /// control record projection explicit and hydrate the two PostgreSQL
+    /// sequence fields through the narrow SQL projection below.
+    private func loadMigration(conversationID: UUID) async throws -> ConversationShardMigration? {
+        guard let migration = try await ConversationShardMigration.query(on: app.db)
+            .filter(\.$id == conversationID)
+            .field(\.$id)
+            .field(\.$sourceCellID)
+            .field(\.$sourceShardID)
+            .field(\.$sourceRouteVersion)
+            .field(\.$targetCellID)
+            .field(\.$targetShardID)
+            .field(\.$status)
+            .field(\.$sourceMemberCount)
+            .field(\.$sourceMessageCount)
+            .field(\.$sourceDomainEventCount)
+            .field(\.$sourceDomainEventSequenceCount)
+            .field(\.$sourceTimelineNoticeCount)
+            .field(\.$sourceMediaReferenceCount)
+            .field(\.$sourceRecipientSnapshotCount)
+            .field(\.$copyConversationWatermark)
+            .field(\.$copyMemberWatermark)
+            .field(\.$copyMessageWatermark)
+            .field(\.$copyDomainEventWatermark)
+            .field(\.$copyDomainEventSequenceWatermark)
+            .field(\.$copyTimelineNoticeWatermark)
+            .field(\.$copyMediaReferenceWatermark)
+            .field(\.$copyRecipientSnapshotWatermark)
+            .field(\.$sourceFingerprint)
+            .field(\.$targetFingerprint)
+            .field(\.$lastErrorCode)
+            .field(\.$preparedAt)
+            .field(\.$updatedAt)
+            .field(\.$copyStartedAt)
+            .field(\.$copiedAt)
+            .field(\.$verifiedAt)
+            .field(\.$cutoverAt)
+            .field(\.$cutoverLeaseToken)
+            .field(\.$cutoverLeaseExpiresAt)
+            .field(\.$transferToken)
+            .field(\.$transferTokenExpiresAt)
+            .first()
+        else {
+            return nil
+        }
+        let sequenceProgress = try await ConversationShardMigrationSequenceProgressStore.load(
+            conversationID: conversationID,
+            on: app.db
+        )
+        migration.sourceDomainEventSequenceCount = sequenceProgress.sourceCount
+        migration.copyDomainEventSequenceWatermark = sequenceProgress.copyWatermark
+        return migration
+    }
+
     private func validatedLocalTargetDatabase(
         for migration: ConversationShardMigration
     ) throws -> any Database {
@@ -196,13 +250,17 @@ struct ConversationShardMigrationCopyCoordinator {
 
     private func expectedSnapshot(
         for migration: ConversationShardMigration
-    ) -> ConversationShardMigrationPreflight.CanonicalDataSnapshot {
-        .init(
+    ) async throws -> ConversationShardMigrationPreflight.CanonicalDataSnapshot {
+        let sequenceProgress = try await ConversationShardMigrationSequenceProgressStore.load(
+            conversationID: migration.requireID(),
+            on: app.db
+        )
+        return .init(
             conversationCount: 1,
             memberCount: migration.sourceMemberCount,
             messageCount: migration.sourceMessageCount,
             domainEventCount: migration.sourceDomainEventCount,
-            domainEventSequenceCount: migration.sourceDomainEventSequenceCount,
+            domainEventSequenceCount: sequenceProgress.sourceCount,
             timelineNoticeCount: migration.sourceTimelineNoticeCount,
             mediaReferenceCount: migration.sourceMediaReferenceCount,
             recipientSnapshotCount: migration.sourceRecipientSnapshotCount
@@ -354,22 +412,17 @@ struct ConversationShardMigrationCopyCoordinator {
                 .sort(\.$id, .ascending)
                 .range(migration.copyRecipientSnapshotWatermark..<(migration.copyRecipientSnapshotWatermark + pageSize))
                 .all()
-            var copies: [(ConversationDomainEventRecipientSnapshot, [UUID])] = []
-            copies.reserveCapacity(records.count)
+            var copyItems: [ConversationDomainEventRecipientSnapshot] = []
+            copyItems.reserveCapacity(records.count)
             for record in records {
-                copies.append((record, try await record.recipientUserIDs(on: source)))
+                copyItems.append(try await record.migrationCopy(on: source))
             }
-            let copyItems = copies
+            let copiedSnapshots = copyItems
             try await target.transaction { database in
-                for (record, recipients) in copyItems {
+                for record in copiedSnapshots {
                     let eventID = try record.requireID()
                     if try await ConversationDomainEventRecipientSnapshot.find(eventID, on: database) == nil {
-                        try await ConversationDomainEventRecipientSnapshot(
-                            eventID: eventID,
-                            conversationID: conversationID,
-                            recipientUserIDs: recipients,
-                            createdAt: record.createdAt
-                        ).create(on: database)
+                        try await record.create(on: database)
                     }
                 }
             }
@@ -387,8 +440,12 @@ struct ConversationShardMigrationCopyCoordinator {
         source: any Database,
         target: any Database
     ) async throws {
-        guard migration.copyDomainEventSequenceWatermark < migration.sourceDomainEventSequenceCount else { return }
         let conversationID = try migration.requireID()
+        let progress = try await ConversationShardMigrationSequenceProgressStore.load(
+            conversationID: conversationID,
+            on: app.db
+        )
+        guard progress.copyWatermark < progress.sourceCount else { return }
         guard let record = try await ConversationDomainEventSequence.find(conversationID, on: source) else {
             throw Abort(.conflict, reason: "Prepared source event sequence no longer exists.")
         }
@@ -397,8 +454,12 @@ struct ConversationShardMigrationCopyCoordinator {
                 try await record.migrationCopy().create(on: database)
             }
         }
+        try await ConversationShardMigrationSequenceProgressStore.persistCopyWatermark(
+            conversationID: conversationID,
+            watermark: 1,
+            on: app.db
+        )
         migration.copyDomainEventSequenceWatermark = 1
-        try await persistProgress(migration)
     }
 
     private func copyTimelineNotices(
@@ -530,14 +591,22 @@ struct ConversationShardMigrationCopyCoordinator {
         source: any Database,
         transfer: ConversationShardMigrationRemoteTransfer
     ) async throws {
-        guard migration.copyDomainEventSequenceWatermark < migration.sourceDomainEventSequenceCount else { return }
         let conversationID = try migration.requireID()
+        let progress = try await ConversationShardMigrationSequenceProgressStore.load(
+            conversationID: conversationID,
+            on: app.db
+        )
+        guard progress.copyWatermark < progress.sourceCount else { return }
         guard let record = try await ConversationDomainEventSequence.find(conversationID, on: source) else {
             throw Abort(.conflict, reason: "Prepared source event sequence no longer exists.")
         }
         try await transfer.upload(kind: .domainEventSequence, records: [record])
+        try await ConversationShardMigrationSequenceProgressStore.persistCopyWatermark(
+            conversationID: conversationID,
+            watermark: 1,
+            on: app.db
+        )
         migration.copyDomainEventSequenceWatermark = 1
-        try await persistProgress(migration)
     }
 
     private func copyRecipientSnapshots(
@@ -556,14 +625,7 @@ struct ConversationShardMigrationCopyCoordinator {
             var portableSnapshots: [ConversationDomainEventRecipientSnapshot] = []
             portableSnapshots.reserveCapacity(records.count)
             for record in records {
-                portableSnapshots.append(
-                    try ConversationDomainEventRecipientSnapshot(
-                        eventID: try record.requireID(),
-                        conversationID: conversationID,
-                        recipientUserIDs: try await record.recipientUserIDs(on: source),
-                        createdAt: record.createdAt
-                    )
-                )
+                portableSnapshots.append(try await record.migrationCopy(on: source))
             }
             try await transfer.upload(kind: .recipientSnapshots, records: portableSnapshots)
             try await advance(

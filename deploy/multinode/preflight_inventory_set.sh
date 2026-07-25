@@ -52,7 +52,7 @@ run_role_preflight() {
     --gateway "${output_dir}/preflight/gateway.env"
     --query-api "${output_dir}/preflight/query-api.env"
     --outbox-relay "${output_dir}/preflight/outbox-relay.env"
-    --ops "${output_dir}/preflight/ops.env"
+    --ops "${output_dir}/preflight/maintenance.env"
     --stream-consumer "${output_dir}/preflight/stream-consumer-summary_projection_consumer.env"
     --stream-consumer "${output_dir}/preflight/stream-consumer-domain_delivery_consumer.env"
     --stream-consumer "${output_dir}/preflight/stream-consumer-realtime_delivery_consumer.env"

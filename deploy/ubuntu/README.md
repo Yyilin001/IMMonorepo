@@ -18,6 +18,29 @@ It installs and runs:
   - `query-api` on `127.0.0.1:8082`
   - `outbox-relay`
   - `stream-consumer`
+
+The default bind addresses are loopback for a single-node install. For a
+split-role test topology, set the bind address and internal endpoint explicitly
+before installing units. Do not expose these ports through the public security
+group:
+
+```bash
+# Gateway host
+IM_GATEWAY_BIND_HOST=172.17.22.47 \
+IM_COMMAND_API_INTERNAL_BASE_URL=http://172.17.22.49:8081 \
+IM_GATEWAY_STARTS_LOCAL_COMMAND_API=false \
+sudo bash deploy/ubuntu/50_install_systemd_units.sh
+
+# Command/query/consumer host
+IM_COMMAND_API_BIND_HOST=172.17.22.49 \
+IM_GATEWAY_INTERNAL_BASE_URL=http://172.17.22.47:18080 \
+sudo bash deploy/ubuntu/50_install_systemd_units.sh
+```
+
+The installer also creates `imserver-maintenance.service`. Enable it on exactly
+one host per deployment; it is the sole owner of cleanup, consistency repair,
+and AI stream stale-state repair. Gateway, API, and stream-consumer services do
+not run those database scans.
 - Nginx public HTTP port is controlled by `IM_PUBLIC_HTTP_PORT` and defaults to
   `80` when `APP_ENV=production`, otherwise `8080`.
 
@@ -1590,7 +1613,13 @@ The generated systemd units are intended to fail closed:
   command-api `8081`, query-api `8082`, gateway HTTP `18080`.
 - gateway TCP port defaults to `9000`, TCP listen backlog defaults to `8192`,
   and `IM_TCP_DROP_REALTIME_WHEN_NOT_WRITABLE=true` protects the gateway from
-  retaining unbounded realtime writes for slow clients.
+  retaining unbounded realtime writes by disconnecting a non-writable realtime
+  client so it reconnects and runs cursor-gap reconciliation.
+- multi-Cell deployments persist each outbound realtime ingress packet before
+  attempting HTTPS delivery. Configure the
+  `IM_CROSS_CELL_REALTIME_OUTBOX_*` settings from the multi-node inventory and
+  scrape the `im_cross_cell_dispatch_outbox_*` metrics. A non-zero backlog is a
+  delivery incident until it drains after the target Cell ingress recovers.
 - `LimitNOFILE` defaults to `1048576`; override with
   `IMSERVER_LIMIT_NOFILE=...` before installing units if the host policy uses a
   lower target.

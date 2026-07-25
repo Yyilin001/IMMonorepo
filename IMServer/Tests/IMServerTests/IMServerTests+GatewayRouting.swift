@@ -4,6 +4,7 @@ import Foundation
 import NIOCore
 import NIOEmbedded
 import NIOPosix
+import SQLKit
 import Testing
 import Vapor
 import VaporTesting
@@ -156,6 +157,276 @@ extension IMServerTests {
         }
     }
 
+    @Test("Remote Cell realtime ingress continues routing to target Cell gateway nodes")
+    func remoteCellRealtimeIngressRoutesWithinTargetCell() async throws {
+        try await withApp(configure: configure) { app in
+            app.imNodeID = "gateway-a"
+            app.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-b")
+            app.cellIngressConfiguration = IMCellIngressConfiguration(
+                endpointsByCellID: ["cell-b": "https://cell-b.internal"],
+                sharedSecret: "cell-realtime-ingress-test-secret"
+            )
+            let recipientUserID = UUID()
+            let presenceStore = FakePresenceStore()
+            await presenceStore.setUserRoutes([recipientUserID: ["gateway-b"]])
+            let dispatchService = FakeNodeMessageDispatchService()
+            app.connectionRoutingService = ConnectionRoutingService(
+                app: app,
+                backend: FakeConnectionRoutingBackend(
+                    presenceStore: presenceStore,
+                    dispatchService: dispatchService
+                )
+            )
+            let envelope = NodeMessageDispatchEnvelope(
+                requestID: UUID(),
+                payload: .kickUser(
+                    userID: recipientUserID,
+                    reason: .duplicateConnection,
+                    message: "test"
+                )
+            )
+
+            var status: HTTPStatus = .internalServerError
+            try await app.testing().test(.POST, "internal/im/realtime/dispatch", beforeRequest: { request in
+                request.headers.replaceOrAdd(name: "X-IM-Internal-Secret", value: "cell-realtime-ingress-test-secret")
+                try request.content.encode(
+                    IMCellRealtimeDispatchRequest(
+                        originCellID: "cell-a",
+                        targetCellID: "cell-b",
+                        hop: 1,
+                        expiresAtEpochSeconds: Int(Date().timeIntervalSince1970) + 30,
+                        envelope: envelope
+                    )
+                )
+            }, afterResponse: { response async in
+                status = response.status
+            })
+
+            #expect(status == .noContent)
+            let dispatches = await dispatchService.dispatches()
+            #expect(dispatches.count == 1)
+            #expect(dispatches.first?.nodeID == "gateway-b")
+            #expect(dispatches.first?.envelope.targetUserIDs == [recipientUserID])
+        }
+    }
+
+    @Test("Cross-Cell realtime outbox persists before delivery and completes after target acceptance")
+    func crossCellRealtimeOutboxPersistsAndCompletesAfterTargetAcceptance() async throws {
+        let app = try await Application.make(.testing)
+        try await configure(app)
+        app.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-a")
+        app.cellIngressConfiguration = IMCellIngressConfiguration(
+            endpointsByCellID: ["cell-b": "https://cell-b.internal"],
+            sharedSecret: "cross-cell-outbox-test-secret"
+        )
+        let client = RecordingHTTPClient(eventLoop: app.eventLoopGroup.next())
+        app.clients.use { _ in client }
+        let envelope = NodeMessageDispatchEnvelope(
+            requestID: UUID(),
+            payload: .kickUser(userID: UUID(), reason: .duplicateConnection, message: "test")
+        )
+
+        let record = try await CrossCellRealtimeDispatchOutbox(db: app.db).enqueueAndAttempt(
+            targetCellID: "cell-b",
+            envelope: envelope,
+            app: app
+        )
+
+        #expect(record.statusEnum == .delivered)
+        #expect(record.retryCount == 0)
+        #expect(record.deliveredAt != nil)
+        let stored = try #require(try await CrossCellRealtimeDispatch.find(record.id, on: app.db))
+        #expect(stored.statusEnum == .delivered)
+        let requests = client.requests()
+        #expect(requests.count == 1)
+        let request = try #require(requests.first)
+        #expect(request.timeout == .seconds(5))
+        let forwarded = try request.content.decode(IMCellRealtimeDispatchRequest.self)
+        #expect(forwarded.originCellID == "cell-a")
+        #expect(forwarded.targetCellID == "cell-b")
+        #expect(forwarded.envelope.requestID == envelope.requestID)
+        let metrics = await app.routingMetrics.currentSnapshot()
+        #expect(metrics.crossCellDispatchOutboxEnqueuedCount == 1)
+        #expect(metrics.crossCellDispatchOutboxDeliveredCount == 1)
+
+        try await app.asyncShutdown()
+    }
+
+    @Test("Cross-Cell realtime outbox retains a failed delivery for retry")
+    func crossCellRealtimeOutboxRetainsFailedDeliveryForRetry() async throws {
+        let app = try await Application.make(.testing)
+        try await configure(app)
+        app.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-a")
+        app.cellIngressConfiguration = IMCellIngressConfiguration(
+            endpointsByCellID: ["cell-b": "https://cell-b.internal"],
+            sharedSecret: "cross-cell-outbox-test-secret"
+        )
+        let client = RecordingHTTPClient(eventLoop: app.eventLoopGroup.next(), responseStatus: .serviceUnavailable)
+        app.clients.use { _ in client }
+        let envelope = NodeMessageDispatchEnvelope(
+            requestID: UUID(),
+            payload: .kickUser(userID: UUID(), reason: .duplicateConnection, message: "test")
+        )
+
+        let retained = try await CrossCellRealtimeDispatchOutbox(db: app.db).enqueueAndAttempt(
+            targetCellID: "cell-b",
+            envelope: envelope,
+            app: app
+        )
+        #expect(retained.statusEnum == .pending)
+
+        let row = try #require(try await CrossCellRealtimeDispatch.query(on: app.db).first())
+        #expect(row.statusEnum == .pending)
+        #expect(row.retryCount == 1)
+        #expect(row.nextAttemptAt > Date())
+        #expect(row.errorMessage?.contains("Remote Cell cell-b rejected") == true)
+        let metrics = await app.routingMetrics.currentSnapshot()
+        #expect(metrics.crossCellDispatchOutboxEnqueuedCount == 1)
+        #expect(metrics.crossCellDispatchOutboxDeliveredCount == 0)
+        #expect(metrics.crossCellDispatchOutboxRetryCount == 1)
+
+        try await app.asyncShutdown()
+    }
+
+    @Test("Cross-Cell realtime outbox deduplicates a replayed source handoff")
+    func crossCellRealtimeOutboxDeduplicatesReplayedSourceHandoff() async throws {
+        let app = try await Application.make(.testing)
+        try await configure(app)
+        app.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-a")
+        app.cellIngressConfiguration = IMCellIngressConfiguration(
+            endpointsByCellID: ["cell-b": "https://cell-b.internal"],
+            sharedSecret: "cross-cell-outbox-test-secret"
+        )
+        let client = RecordingHTTPClient(eventLoop: app.eventLoopGroup.next(), responseStatus: .serviceUnavailable)
+        app.clients.use { _ in client }
+        let envelope = NodeMessageDispatchEnvelope(
+            requestID: UUID(),
+            payload: .kickUser(userID: UUID(), reason: .duplicateConnection, message: "test")
+        )
+        let outbox = CrossCellRealtimeDispatchOutbox(db: app.db)
+
+        let first = try await outbox.enqueueAndAttempt(targetCellID: "cell-b", envelope: envelope, app: app)
+        let replay = try await outbox.enqueueAndAttempt(targetCellID: "cell-b", envelope: envelope, app: app)
+
+        #expect(first.id == replay.id)
+        #expect(try await CrossCellRealtimeDispatch.query(on: app.db).count() == 1)
+        #expect(client.requests().count == 1)
+        let metrics = await app.routingMetrics.currentSnapshot()
+        #expect(metrics.crossCellDispatchOutboxDeduplicatedCount == 1)
+
+        try await app.asyncShutdown()
+    }
+
+    @Test("Cross-Cell outbox dedupe migration folds historical duplicate handoffs")
+    func crossCellRealtimeOutboxDedupeMigrationFoldsHistoricalDuplicates() async throws {
+        let app = try await Application.make(.testing)
+        try await configure(app)
+        guard let sql = app.db as? any SQLDatabase else {
+            Issue.record("Expected SQL database")
+            try await app.asyncShutdown()
+            return
+        }
+        let envelope = NodeMessageDispatchEnvelope(
+            requestID: UUID(),
+            payload: .kickUser(userID: UUID(), reason: .duplicateConnection, message: "test")
+        )
+        let pending = try CrossCellRealtimeDispatch(
+            originCellID: "cell-a",
+            targetCellID: "cell-b",
+            envelope: envelope
+        )
+        let delivered = try CrossCellRealtimeDispatch(
+            originCellID: "cell-a",
+            targetCellID: "cell-b",
+            envelope: envelope
+        )
+        delivered.statusEnum = .delivered
+        delivered.deliveredAt = Date()
+
+        // Historical records were written before canonical JSON was enforced.
+        // Whitespace is semantically irrelevant but produces a distinct raw
+        // string, which must still map to the same database idempotency key.
+        pending.envelopeJSON = pending.envelopeJSON.replacingOccurrences(of: "{", with: "{ ")
+        delivered.envelopeJSON = delivered.envelopeJSON.replacingOccurrences(of: "}", with: " }")
+
+        try await sql.raw("DROP INDEX IF EXISTS cross_cell_realtime_dispatch_dedupe_uidx").run()
+        try await pending.save(on: app.db)
+        try await delivered.save(on: app.db)
+
+        try await AddCrossCellRealtimeDispatchDedupeKey().prepare(on: app.db)
+
+        let rows = try await CrossCellRealtimeDispatch.query(on: app.db).all()
+        #expect(rows.count == 1)
+        #expect(rows.first?.statusEnum == .delivered)
+        let duplicate = try CrossCellRealtimeDispatch(
+            originCellID: "cell-a",
+            targetCellID: "cell-b",
+            envelope: envelope
+        )
+        do {
+            try await duplicate.save(on: app.db)
+            Issue.record("Expected unique dedupe index to reject a duplicate handoff")
+        } catch {
+        }
+
+        try await app.asyncShutdown()
+    }
+
+    @Test("Cross-Cell realtime outbox delivers a retained dispatch after target recovery")
+    func crossCellRealtimeOutboxDeliversRetainedDispatchAfterTargetRecovery() async throws {
+        let app = try await Application.make(.testing)
+        try await configure(app)
+        app.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-a")
+        app.cellIngressConfiguration = IMCellIngressConfiguration(
+            endpointsByCellID: ["cell-b": "https://cell-b.internal"],
+            sharedSecret: "cross-cell-outbox-test-secret"
+        )
+        let unavailableClient = RecordingHTTPClient(
+            eventLoop: app.eventLoopGroup.next(),
+            responseStatus: .serviceUnavailable
+        )
+        app.clients.use { _ in unavailableClient }
+        let envelope = NodeMessageDispatchEnvelope(
+            requestID: UUID(),
+            payload: .kickUser(userID: UUID(), reason: .duplicateConnection, message: "test")
+        )
+        let outbox = CrossCellRealtimeDispatchOutbox(db: app.db)
+
+        let queued = try await outbox.enqueueAndAttempt(
+            targetCellID: "cell-b",
+            envelope: envelope,
+            app: app
+        )
+        #expect(queued.statusEnum == .pending)
+
+        let retained = try #require(try await CrossCellRealtimeDispatch.query(on: app.db).first())
+        retained.nextAttemptAt = Date().addingTimeInterval(-1)
+        try await retained.save(on: app.db)
+
+        let recoveredClient = RecordingHTTPClient(eventLoop: app.eventLoopGroup.next())
+        app.clients.use { _ in recoveredClient }
+        let deliveredCount = try await outbox.processPendingBatch(
+            app: app,
+            configuration: CrossCellRealtimeDispatchOutboxConfiguration(
+                batchSize: 10,
+                pollIntervalNanoseconds: 50_000_000,
+                claimTimeout: 60,
+                retryBaseDelay: 0.1,
+                retryMaximumDelay: 1,
+                deliveryTimeoutSeconds: 1,
+                maxConcurrentDeliveries: 1,
+                metricsSnapshotInterval: 5
+            )
+        )
+
+        #expect(deliveredCount == 1)
+        let delivered = try #require(try await CrossCellRealtimeDispatch.find(retained.id, on: app.db))
+        #expect(delivered.statusEnum == .delivered)
+        #expect(recoveredClient.requests().count == 1)
+
+        try await app.asyncShutdown()
+    }
+
     @Test("Connection routing plans remote Cell delivery even without remote local nodes")
     func connectionRoutingPlansRemoteCellDeliveryWithoutRemoteNode() async throws {
         let app = try await Application.make(.testing)
@@ -212,6 +483,58 @@ extension IMServerTests {
         try await app.asyncShutdown()
     }
 
+    @Test("Cross-Cell dispatch outbox stays on the control-plane database when conversation shards are configured")
+    func crossCellDispatchOutboxUsesControlPlaneDatabaseWithConversationShards() async throws {
+        let app = try await Application.make(.testing)
+        try await configure(app)
+        app.imNodeID = "gateway-a"
+        app.imRealtimeCellConfiguration = IMRealtimeCellConfiguration(cellID: "cell-a")
+        app.cellIngressConfiguration = IMCellIngressConfiguration(
+            endpointsByCellID: ["cell-b": "https://cell-b.internal"],
+            sharedSecret: "cross-cell-control-plane-test-secret"
+        )
+        let shardDatabaseID = DatabaseID(string: "cross-cell-outbox-test-shard")
+        app.databases.use(.sqlite(.memory), as: shardDatabaseID)
+        app.conversationShardRouter = DirectoryBackedConversationShardRouter(
+            app: app,
+            shardIDs: ["shard-test"],
+            shardDatabaseIDs: ["shard-test": shardDatabaseID],
+            shardReplicaDatabaseIDs: [:],
+            directory: app.conversationDirectory
+        )
+
+        let recipientUserID = UUID()
+        let presenceStore = FakePresenceStore()
+        await presenceStore.setUserCellRoutes([recipientUserID: ["cell-b"]])
+        let dispatchService = FakeNodeMessageDispatchService()
+        app.connectionRoutingService = ConnectionRoutingService(
+            app: app,
+            backend: FakeConnectionRoutingBackend(
+                presenceStore: presenceStore,
+                dispatchService: dispatchService
+            )
+        )
+        let client = RecordingHTTPClient(eventLoop: app.eventLoopGroup.next())
+        app.clients.use { _ in client }
+        let payload = imTestDomainEventPayload(
+            eventID: UUID(),
+            conversationID: UUID(),
+            senderUserID: recipientUserID,
+            sequence: 1,
+            text: "control plane outbox"
+        )
+
+        await app.connectionRoutingService.sendDomainEventPayload(
+            payload,
+            toUserIDs: [recipientUserID],
+            requestID: payload.eventID
+        )
+
+        #expect(try await CrossCellRealtimeDispatch.query(on: app.db).count() == 1)
+        #expect(client.requests().count == 1)
+        try await app.asyncShutdown()
+    }
+
     @Test("Two TCP devices receive canonical message echo when one device sends")
     func twoTCPDevicesReceiveCanonicalMessageEchoFromSender() async throws {
         try await withApp(configure: { app in
@@ -233,7 +556,8 @@ extension IMServerTests {
                 slowWriteThresholdMilliseconds: 1000,
                 slowWriteCloseConsecutiveCount: 3,
                 dropsRealtimeWhenNotWritable: true,
-                requiresTLSTermination: false
+                requiresTLSTermination: false,
+                shutdownDrainGraceSeconds: 0
             )
         }) { app in
             try await withTestIMTCPServer(app: app) { tcpServer in
@@ -339,7 +663,8 @@ extension IMServerTests {
                 slowWriteThresholdMilliseconds: 1000,
                 slowWriteCloseConsecutiveCount: 3,
                 dropsRealtimeWhenNotWritable: true,
-                requiresTLSTermination: false
+                requiresTLSTermination: false,
+                shutdownDrainGraceSeconds: 0
             )
         }) { app in
             try await withTestIMTCPServer(app: app) { tcpServer in
@@ -449,7 +774,8 @@ extension IMServerTests {
                 slowWriteThresholdMilliseconds: 1000,
                 slowWriteCloseConsecutiveCount: 3,
                 dropsRealtimeWhenNotWritable: true,
-                requiresTLSTermination: false
+                requiresTLSTermination: false,
+                shutdownDrainGraceSeconds: 0
             )
         }) { app in
             try await withTestIMTCPServer(app: app) { tcpServer in
@@ -576,7 +902,8 @@ extension IMServerTests {
                 slowWriteThresholdMilliseconds: 1000,
                 slowWriteCloseConsecutiveCount: 3,
                 dropsRealtimeWhenNotWritable: true,
-                requiresTLSTermination: false
+                requiresTLSTermination: false,
+                shutdownDrainGraceSeconds: 0
             )
         }) { app in
             try await withTestIMTCPServer(app: app) { tcpServer in
@@ -655,7 +982,8 @@ extension IMServerTests {
                 slowWriteThresholdMilliseconds: 1000,
                 slowWriteCloseConsecutiveCount: 3,
                 dropsRealtimeWhenNotWritable: true,
-                requiresTLSTermination: false
+                requiresTLSTermination: false,
+                shutdownDrainGraceSeconds: 0
             )
         }) { app in
             try await withTestIMTCPServer(app: app) { tcpServer in
@@ -1590,7 +1918,7 @@ extension IMServerTests {
                 )
             )
 
-            await app.connectionRoutingService.handleRemoteDispatch(envelope)
+            try await app.connectionRoutingService.handleRemoteDispatch(envelope)
             allowedActiveChannel.embeddedEventLoop.run()
             allowedInactiveChannel.embeddedEventLoop.run()
             notAllowedActiveChannel.embeddedEventLoop.run()
@@ -2067,19 +2395,24 @@ extension IMServerTests {
         }
     }
 
-    @Test("TCP realtime writes drop when channel is non-writable")
-    func tcpRealtimeWritesDropWhenChannelIsNonWritable() async throws {
+    @Test("TCP non-writable realtime writes invoke the recovery handler")
+    func tcpRealtimeWritesInvokeRecoveryHandlerWhenChannelIsNonWritable() async throws {
         try await withApp(configure: configure) { app in
             let channel = EmbeddedChannel()
             let address = try SocketAddress(ipAddress: "127.0.0.1", port: 12345)
             try await channel.connect(to: address).get()
 
+            let recoveryCalls = LockedCounter()
+            let recoveryHandler: @Sendable () -> Void = {
+                recoveryCalls.increment()
+            }
             IMTCPChannelWriter.writeEncodedPacket(
                 Data([0x02, 0x03, 0x04]),
                 on: channel,
                 metrics: app.routingMetrics,
                 dropWhenNotWritable: true,
-                channelIsWritable: false
+                channelIsWritable: false,
+                notWritableHandler: recoveryHandler
             )
             IMTCPChannelWriter.writePacket(
                 type: .heartbeat,
@@ -2088,7 +2421,8 @@ extension IMServerTests {
                 on: channel,
                 metrics: app.routingMetrics,
                 dropWhenNotWritable: true,
-                channelIsWritable: false
+                channelIsWritable: false,
+                notWritableHandler: recoveryHandler
             )
             try await Task.sleep(nanoseconds: 50_000_000)
 
@@ -2096,6 +2430,7 @@ extension IMServerTests {
             #expect(metrics.tcpWriteBackpressureCount == 2)
             #expect(metrics.tcpWriteDroppedBackpressureCount == 2)
             #expect(metrics.tcpWriteCompletionCount == 0)
+            #expect(recoveryCalls.value == 2)
         }
     }
 
@@ -2354,8 +2689,70 @@ extension IMServerTests {
         }
     }
 
-    @Test("Realtime async dispatcher drops relay when queue is saturated")
-    func realtimeAsyncDispatcherDropsRelayWhenQueueIsSaturated() async throws {
+    @Test("Realtime hint coalescing collapses the first Kafka run per recipient")
+    func realtimeHintCoalescingCollapsesInitialKafkaRunPerRecipient() async throws {
+        try await withApp(configure: configure) { app in
+            let probe = RecordingRealtimeRelayProbe()
+            let dispatcher = RealtimeDeliveryAsyncDispatcher(
+                app: app,
+                maxInFlight: 4,
+                relayHandler: { batches, requestID in
+                    await probe.relay(batches, requestID: requestID)
+                }
+            )
+            let conversationID = UUID()
+            let senderUserID = UUID()
+            let recipientA = UUID()
+            let recipientB = UUID()
+            let recipientC = UUID()
+            let firstEventID = UUID()
+            let secondEventID = UUID()
+            let firstPayload = imTestConversationActivityHintPayload(
+                eventID: firstEventID,
+                conversationID: conversationID,
+                senderUserID: senderUserID,
+                sequence: 1,
+                previewText: "first"
+            )
+            let secondPayload = imTestConversationActivityHintPayload(
+                eventID: secondEventID,
+                conversationID: conversationID,
+                senderUserID: senderUserID,
+                sequence: 2,
+                previewText: "second"
+            )
+
+            await dispatcher.dispatchPayloadBatches(
+                [
+                    ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                        payload: firstPayload,
+                        recipientUserIDs: [recipientA, recipientB],
+                        fanoutIntent: .preSplitActiveCompact
+                    ),
+                    ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                        payload: secondPayload,
+                        recipientUserIDs: [recipientB, recipientC],
+                        fanoutIntent: .preSplitActiveCompact
+                    )
+                ],
+                requestID: secondEventID,
+                coalescingKey: conversationID,
+                coalescingScope: .activeCompactHint,
+                coalescingWindowMilliseconds: 50
+            )
+
+            try await Task.sleep(nanoseconds: 150_000_000)
+
+            let sequenceByRecipient = await probe.activityHintSequenceByRecipient()
+            #expect(sequenceByRecipient[recipientA] == 1)
+            #expect(sequenceByRecipient[recipientB] == 2)
+            #expect(sequenceByRecipient[recipientC] == 2)
+            #expect(sequenceByRecipient.count == 3)
+        }
+    }
+
+    @Test("Realtime async dispatcher backpressures relay when queue is saturated")
+    func realtimeAsyncDispatcherBackpressuresRelayWhenQueueIsSaturated() async throws {
         try await withApp(configure: configure) { app in
             let probe = BlockingRealtimeRelayProbe()
             let dispatcher = RealtimeDeliveryAsyncDispatcher(
@@ -2386,15 +2783,17 @@ extension IMServerTests {
             )
             let secondRecipients = [UUID(), UUID(), UUID()]
 
-            await dispatcher.dispatchPayloadBatches(
-                [
-                    ConversationRealtimeConsumer.DomainEventPayloadBatch(
-                        payload: firstPayload,
-                        recipientUserIDs: [UUID()]
-                    )
-                ],
-                requestID: firstEventID
-            )
+            let firstTask = Task {
+                await dispatcher.dispatchPayloadBatches(
+                    [
+                        ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                            payload: firstPayload,
+                            recipientUserIDs: [UUID()]
+                        )
+                    ],
+                    requestID: firstEventID
+                )
+            }
             await probe.waitUntilStarted()
             var metrics = await app.routingMetrics.currentSnapshot()
             #expect(metrics.realtimeAsyncRelayTaskStartedCount == 1)
@@ -2402,26 +2801,71 @@ extension IMServerTests {
             #expect(metrics.realtimeAsyncRelayCurrentInFlightCount == 1)
             #expect(metrics.realtimeAsyncRelayMaxInFlightCount == 1)
 
-            await dispatcher.dispatchPayloadBatches(
-                [
-                    ConversationRealtimeConsumer.DomainEventPayloadBatch(
-                        payload: secondPayload,
-                        recipientUserIDs: secondRecipients
-                    )
-                ],
-                requestID: secondEventID
-            )
+            let secondTask = Task {
+                await dispatcher.dispatchPayloadBatches(
+                    [
+                        ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                            payload: secondPayload,
+                            recipientUserIDs: secondRecipients
+                        )
+                    ],
+                    requestID: secondEventID
+                )
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
 
             metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeAsyncRelayDroppedDispatchCount == 1)
-            #expect(metrics.realtimeAsyncRelayDroppedPayloadBatchCount == 1)
-            #expect(metrics.realtimeAsyncRelayDroppedRecipientDeliveryCount == secondRecipients.count)
+            #expect(metrics.realtimeAsyncRelayDroppedDispatchCount == 0)
+            #expect(metrics.realtimeAsyncRelayDroppedPayloadBatchCount == 0)
+            #expect(metrics.realtimeAsyncRelayDroppedRecipientDeliveryCount == 0)
             #expect(metrics.realtimeAsyncRelayQueueSaturationCount == 1)
             #expect(await probe.callCount() == 1)
 
             await probe.release()
-            try await Task.sleep(nanoseconds: 50_000_000)
+            await firstTask.value
+            await secondTask.value
             metrics = await app.routingMetrics.currentSnapshot()
+            #expect(metrics.realtimeAsyncRelayTaskCompletedCount == 2)
+            #expect(metrics.realtimeAsyncRelayCurrentInFlightCount == 0)
+            #expect(await probe.callCount() == 2)
+        }
+    }
+
+    @Test("Reliable realtime relay propagates an unpersisted handoff failure")
+    func reliableRealtimeRelayPropagatesUnpersistedHandoffFailure() async throws {
+        try await withApp(configure: configure) { app in
+            let dispatcher = RealtimeDeliveryAsyncDispatcher(
+                app: app,
+                maxInFlight: 1,
+                reliableRelayHandler: { _, _ in
+                    throw Abort(.serviceUnavailable, reason: "handoff persistence unavailable")
+                }
+            )
+            let payload = imTestDomainEventPayload(
+                eventID: UUID(),
+                conversationID: UUID(),
+                senderUserID: UUID(),
+                sequence: 1,
+                text: "reliable relay"
+            )
+
+            do {
+                try await dispatcher.dispatchPayloadBatchesReliably(
+                    [
+                        ConversationRealtimeConsumer.DomainEventPayloadBatch(
+                            payload: payload,
+                            recipientUserIDs: [UUID()]
+                        )
+                    ],
+                    requestID: payload.eventID
+                )
+                Issue.record("Expected reliable relay to propagate the handoff failure")
+            } catch {
+                #expect((error as? Abort)?.status == .serviceUnavailable)
+            }
+
+            let metrics = await app.routingMetrics.currentSnapshot()
+            #expect(metrics.realtimeAsyncRelayTaskStartedCount == 1)
             #expect(metrics.realtimeAsyncRelayTaskCompletedCount == 1)
             #expect(metrics.realtimeAsyncRelayCurrentInFlightCount == 0)
         }
@@ -2524,6 +2968,44 @@ extension IMServerTests {
         try await app.asyncShutdown()
     }
 
+    @Test("Reliable HTTP gateway relay marks the gateway handoff as durable")
+    func reliableHTTPGatewayRelayMarksGatewayHandoffAsDurable() async throws {
+        let app = try await Application.make(.testing)
+        try await configure(app)
+        let client = RecordingHTTPClient(
+            eventLoop: app.eventLoopGroup.next(),
+            responseStatus: .ok
+        )
+        app.clients.use { _ in client }
+        let userID = UUID()
+        let payload = imTestDomainEventPayload(
+            eventID: UUID(),
+            conversationID: UUID(),
+            senderUserID: userID,
+            sequence: 1,
+            text: "reliable gateway handoff"
+        )
+        let transport = HTTPGatewaySessionTransport(
+            app: app,
+            configuration: IMGatewayRelayConfiguration(
+                mode: .http,
+                baseURL: "https://gateway.internal",
+                sharedSecret: "relay-secret"
+            )
+        )
+
+        try await transport.sendDomainEventPayloadBatchesReliably(
+            [IMGatewayDomainEventPayloadBatch(payload: payload, recipientUserIDs: [userID])],
+            requestID: payload.eventID
+        )
+
+        let request = try #require(client.requests().first)
+        #expect(request.headers.first(name: IMGatewayRelayHeader.reliableDelivery) == IMGatewayRelayHeader.reliableDeliveryValue)
+        #expect(request.headers.first(name: "X-IM-Internal-Secret") == "relay-secret")
+
+        try await app.asyncShutdown()
+    }
+
     @Test("Gateway relay binary packet batch codec round trips entries")
     func gatewayRelayBinaryPacketBatchCodecRoundTripsEntries() async throws {
         let requestID = UUID()
@@ -2614,6 +3096,77 @@ extension IMServerTests {
             #expect(metrics.gatewayHTTPRelayInboundRequestCount == 1)
             #expect(metrics.gatewayHTTPRelayInboundSuccessCount == 1)
             #expect(metrics.gatewayHTTPRelayInboundBodyBytes == body.count)
+        }
+    }
+
+    @Test("Reliable gateway relay returns failure when durable Cell handoff cannot be recorded")
+    func reliableGatewayRelayReturnsFailureWhenCellHandoffCannotBeRecorded() async throws {
+        try await withApp(configure: configure) { app in
+            let presenceStore = FakePresenceStore()
+            await presenceStore.setFailsCellRouteLookups(true)
+            app.connectionRoutingService = ConnectionRoutingService(
+                app: app,
+                backend: FakeConnectionRoutingBackend(
+                    presenceStore: presenceStore,
+                    dispatchService: FakeNodeMessageDispatchService()
+                )
+            )
+            let userID = UUID()
+            let payload = imTestDomainEventPayload(
+                eventID: UUID(),
+                conversationID: UUID(),
+                senderUserID: userID,
+                sequence: 1,
+                text: "reliable gateway failure"
+            )
+            let body = try IMGatewayRelayBinaryCodec.encodeDomainEventPacket(
+                payloadData: try IMTCPProtobufCodec.encodeDomainEvent(
+                    payload,
+                    requireDeliveryMetadata: false
+                ),
+                recipientUserIDs: [userID],
+                requestID: payload.eventID
+            )
+
+            try await app.testing().test(.POST, "internal/gateway/realtime/domain-event-packet-bin", beforeRequest: { req in
+                req.headers.contentType = HTTPMediaType(type: "application", subType: "octet-stream")
+                req.headers.replaceOrAdd(
+                    name: IMGatewayRelayHeader.reliableDelivery,
+                    value: IMGatewayRelayHeader.reliableDeliveryValue
+                )
+                req.body = .init(data: body)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .internalServerError)
+            })
+
+            try await app.testing().test(.POST, "internal/gateway/realtime/domain-event-packet-bin", beforeRequest: { req in
+                req.headers.contentType = HTTPMediaType(type: "application", subType: "octet-stream")
+                req.body = .init(data: body)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .ok)
+            })
+
+            let batchRequest = GatewayRelayDomainEventPayloadBatchRequest(
+                deliveries: [
+                    GatewayRelayDomainEventPayloadBatchEntry(
+                        ownerUserID: userID,
+                        payloadBase64: try IMTCPProtobufCodec.encodeDomainEvent(
+                            payload,
+                            requireDeliveryMetadata: false
+                        ).base64EncodedString()
+                    )
+                ],
+                requestID: payload.eventID
+            )
+            try await app.testing().test(.POST, "internal/gateway/realtime/domain-event-packets", beforeRequest: { req in
+                req.headers.replaceOrAdd(
+                    name: IMGatewayRelayHeader.reliableDelivery,
+                    value: IMGatewayRelayHeader.reliableDeliveryValue
+                )
+                try req.content.encode(batchRequest)
+            }, afterResponse: { res async throws in
+                #expect(res.status == .internalServerError)
+            })
         }
     }
 
@@ -3394,6 +3947,60 @@ extension IMServerTests {
 
         await routingService.remove(connectionID: secondConnectionID)
         #expect(await presenceStore.activeConversationDeactivationCount(conversationID: conversationID, userID: userID) == 1)
+
+        try await app.asyncShutdown()
+    }
+
+    @Test("Connection routing batch cleanup preserves active conversation presence semantics")
+    func connectionRoutingBatchCleanupPreservesActiveConversationPresenceSemantics() async throws {
+        let app = try await Application.make(.testing)
+        try await configure(app)
+        app.imNodeID = "node-a"
+
+        let userID = UUID()
+        let conversationID = UUID()
+        let firstConnectionID = UUID()
+        let secondConnectionID = UUID()
+        let presenceStore = FakePresenceStore()
+        let routingService = ConnectionRoutingService(
+            app: app,
+            backend: FakeConnectionRoutingBackend(
+                presenceStore: presenceStore,
+                dispatchService: FakeNodeMessageDispatchService()
+            )
+        )
+
+        for (connectionID, deviceID) in [(firstConnectionID, "device-a"), (secondConnectionID, "device-b")] {
+            try await routingService.bind(
+                IMAuthenticatedConnection(
+                    connectionID: connectionID,
+                    userID: userID,
+                    sessionID: UUID(),
+                    authenticatedAt: Date(),
+                    remoteIPAddress: "127.0.0.1",
+                    deviceID: deviceID,
+                    deviceName: "Device",
+                    platform: "ios",
+                    appVersion: "1.0"
+                ),
+                control: IMConnectionControl(connectionID: connectionID, channel: EmbeddedChannel())
+            )
+            #expect(await routingService.updateConversationActivity(
+                connectionID: connectionID,
+                conversationID: conversationID,
+                isActive: true
+            ))
+        }
+
+        await routingService.remove(connectionIDs: [firstConnectionID, secondConnectionID])
+
+        #expect(await app.imConnectionRegistry.totalConnectionCount() == 0)
+        #expect(await presenceStore.activeConversationDeactivationCount(
+            conversationID: conversationID,
+            userID: userID
+        ) == 1)
+        let metrics = await app.routingMetrics.currentSnapshot()
+        #expect(metrics.currentTCPConnectionCount == 0)
 
         try await app.asyncShutdown()
     }
@@ -4180,8 +4787,8 @@ extension IMServerTests {
         }
     }
 
-    @Test("Realtime delivery drops fanout when route split fails closed")
-    func realtimeDeliveryDropsFanoutWhenRouteSplitFailsClosed() async throws {
+    @Test("Realtime delivery retries stream event when route split fails")
+    func realtimeDeliveryRetriesStreamEventWhenRouteSplitFails() async throws {
         let values = [
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_RECIPIENT_THRESHOLD": "3",
@@ -4239,8 +4846,9 @@ extension IMServerTests {
                 content: .richText(.plain("consumer pull only route failure"))
             )
             try await message.create(on: app.db)
+            let eventID = UUID()
             let event = try ConversationDomainEvent(
-                id: UUID(),
+                id: eventID,
                 conversationID: conversationID,
                 eventType: .messageCreated,
                 aggregateSequence: 1,
@@ -4258,25 +4866,39 @@ extension IMServerTests {
                 createdAt: Date(timeIntervalSince1970: 1_710_500_181)
             )
 
-            try await ConversationRealtimeDeliveryConsumer(app: app, sourceDB: app.db)
-                .consume(
-                    try ConversationEventEnvelope(
-                        event: event,
-                        payload: try event.decodedPayload(),
-                        deliveryContext: nil
+            do {
+                try await ConversationRealtimeDeliveryConsumer(app: app, sourceDB: app.db)
+                    .consume(
+                        try ConversationEventEnvelope(
+                            event: event,
+                            payload: try event.decodedPayload(),
+                            deliveryContext: nil
+                        )
                     )
-            )
+                Issue.record("Expected route lookup failure to keep the stream event retryable")
+            } catch let error as ConversationEventTransientProcessingError {
+                guard case .realtimeRouteLookupFailed(
+                    let failedEventID,
+                    let failedConversationID,
+                    _
+                ) = error else {
+                    Issue.record("Expected a typed realtime route lookup failure")
+                    return
+                }
+                #expect(failedEventID == eventID)
+                #expect(failedConversationID == conversationID)
+            }
 
             #expect(await dispatchService.dispatches().isEmpty)
             let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.realtimeActiveConversationFanoutRouteSplitDropCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutRouteSplitDropRecipientCount == recipientUserIDs.count)
+            #expect(metrics.realtimeActiveConversationFanoutRouteLookupFailureCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutRouteLookupFailureRecipientCount == recipientUserIDs.count)
             #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 0)
         }
     }
 
-    @Test("Domain relay-after-record drops realtime fanout when route split fails closed")
-    func domainRelayAfterRecordDropsRealtimeFanoutWhenRouteSplitFailsClosed() async throws {
+    @Test("Domain relay-after-record retries stream event when route split fails")
+    func domainRelayAfterRecordRetriesStreamEventWhenRouteSplitFails() async throws {
         let values = [
             "IM_DOMAIN_DELIVERY_MESSAGE_CREATED_OWNER_DELIVERY_SKIP_RECIPIENT_THRESHOLD": "3",
             "IM_REALTIME_ACTIVE_CONVERSATION_FANOUT_ENABLED": "true",
@@ -4329,8 +4951,9 @@ extension IMServerTests {
                 content: .richText(.plain("relay route failure"))
             )
             try await message.create(on: app.db)
+            let eventID = UUID()
             let event = try ConversationDomainEvent(
-                id: UUID(),
+                id: eventID,
                 conversationID: conversationID,
                 eventType: .messageCreated,
                 aggregateSequence: 1,
@@ -4348,25 +4971,39 @@ extension IMServerTests {
                 createdAt: Date(timeIntervalSince1970: 1_710_500_191)
             )
 
-            try await OwnerDomainEventDeliveryConsumer(
-                app: app,
-                sourceDB: app.db,
-                relayRealtimeAfterRecord: true
-            ).consume(
-                try ConversationEventEnvelope(
-                    event: event,
-                    payload: try event.decodedPayload(),
-                    deliveryContext: nil
+            do {
+                try await OwnerDomainEventDeliveryConsumer(
+                    app: app,
+                    sourceDB: app.db,
+                    relayRealtimeAfterRecord: true
+                ).consume(
+                    try ConversationEventEnvelope(
+                        event: event,
+                        payload: try event.decodedPayload(),
+                        deliveryContext: nil
+                    )
                 )
-            )
+                Issue.record("Expected route lookup failure to keep the stream event retryable")
+            } catch let error as ConversationEventTransientProcessingError {
+                guard case .realtimeRouteLookupFailed(
+                    let failedEventID,
+                    let failedConversationID,
+                    _
+                ) = error else {
+                    Issue.record("Expected a typed realtime route lookup failure")
+                    return
+                }
+                #expect(failedEventID == eventID)
+                #expect(failedConversationID == conversationID)
+            }
 
             #expect(try await OwnerDomainEventDelivery.query(on: app.imSummaryDB).count() == 0)
             #expect(await dispatchService.dispatches().isEmpty)
 
             let metrics = await app.routingMetrics.currentSnapshot()
-            #expect(metrics.domainRelayAfterRecordPreSplitRouteDropCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutRouteSplitDropCount == 1)
-            #expect(metrics.realtimeActiveConversationFanoutRouteSplitDropRecipientCount == recipientUserIDs.count)
+            #expect(metrics.domainRelayAfterRecordPreSplitRouteLookupFailureCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutRouteLookupFailureCount == 1)
+            #expect(metrics.realtimeActiveConversationFanoutRouteLookupFailureRecipientCount == recipientUserIDs.count)
             #expect(metrics.realtimeActiveConversationFanoutInactiveHintRecipientCount == 0)
         }
     }
@@ -4863,6 +5500,7 @@ private actor FakePresenceStore: PresenceStore {
     private var userRouteLookupCount = 0
     private var sessionRouteLookupCount = 0
     private var failsActiveConversationRouteLookups = false
+    private var failsCellRouteLookups = false
 
     func setUserRoutes(_ routes: [UUID: Set<String>]) {
         userRoutes = routes
@@ -4886,6 +5524,10 @@ private actor FakePresenceStore: PresenceStore {
 
     func setFailsActiveConversationRouteLookups(_ shouldFail: Bool) {
         failsActiveConversationRouteLookups = shouldFail
+    }
+
+    func setFailsCellRouteLookups(_ shouldFail: Bool) {
+        failsCellRouteLookups = shouldFail
     }
 
     func activeConversationActivationCount(conversationID: UUID, userID: UUID) -> Int {
@@ -4961,11 +5603,17 @@ private actor FakePresenceStore: PresenceStore {
     }
 
     func routeCellIDs(forUserIDs userIDs: [UUID]) async throws -> [UUID: Set<String>] {
-        Dictionary(uniqueKeysWithValues: userIDs.map { ($0, userCellRoutes[$0] ?? []) })
+        if failsCellRouteLookups {
+            throw FakePresenceStoreError.cellRouteLookupFailed
+        }
+        return Dictionary(uniqueKeysWithValues: userIDs.map { ($0, userCellRoutes[$0] ?? []) })
     }
 
     func routeCellIDs(forSessionIDs sessionIDs: [UUID]) async throws -> [UUID: Set<String>] {
-        Dictionary(uniqueKeysWithValues: sessionIDs.map { ($0, sessionCellRoutes[$0] ?? []) })
+        if failsCellRouteLookups {
+            throw FakePresenceStoreError.cellRouteLookupFailed
+        }
+        return Dictionary(uniqueKeysWithValues: sessionIDs.map { ($0, sessionCellRoutes[$0] ?? []) })
     }
 
     func activeNodeIDs() async throws -> Set<String> {
@@ -4977,15 +5625,35 @@ private actor FakePresenceStore: PresenceStore {
 
 private enum FakePresenceStoreError: Error {
     case activeConversationRouteLookupFailed
+    case cellRouteLookupFailed
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func increment() {
+        lock.lock()
+        storage += 1
+        lock.unlock()
+    }
 }
 
 private final class RecordingHTTPClient: Client, @unchecked Sendable {
     let eventLoop: any EventLoop
     private let lock = NSLock()
     private var recordedRequests: [ClientRequest] = []
+    private let responseStatus: HTTPResponseStatus
 
-    init(eventLoop: any EventLoop) {
+    init(eventLoop: any EventLoop, responseStatus: HTTPResponseStatus = .noContent) {
         self.eventLoop = eventLoop
+        self.responseStatus = responseStatus
     }
 
     func delegating(to eventLoop: any EventLoop) -> any Client {
@@ -4996,7 +5664,7 @@ private final class RecordingHTTPClient: Client, @unchecked Sendable {
         lock.lock()
         recordedRequests.append(request)
         lock.unlock()
-        return eventLoop.makeSucceededFuture(ClientResponse(status: .noContent))
+        return eventLoop.makeSucceededFuture(ClientResponse(status: responseStatus))
     }
 
     func requests() -> [ClientRequest] {

@@ -1,0 +1,14 @@
+# The test runner is intentionally Linux-only and disposable. Source is
+# mounted read-only by compose; SwiftPM artifacts are written under /tmp.
+FROM swift:6.3-jammy
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates \
+        coreutils \
+        libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+ENTRYPOINT ["bash", "IMV2/scripts/run_v2_isolated_tests.sh"]

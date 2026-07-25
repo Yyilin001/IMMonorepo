@@ -2,11 +2,22 @@ import Fluent
 import Foundation
 import Vapor
 
+struct IMMaintenanceConfiguration: Sendable {
+    let enabled: Bool
+
+    static func load() -> IMMaintenanceConfiguration {
+        IMMaintenanceConfiguration(
+            enabled: parseBooleanEnvironment("IM_MAINTENANCE_ENABLED", defaultValue: false)
+        )
+    }
+}
+
 struct IMCleanupConfiguration: Sendable {
     let enabled: Bool
     let intervalSeconds: Int
     let recipientSetRetentionDays: Int
     let recipientSetBatchSize: Int
+    let crossCellRealtimeDispatchRetentionDays: Int
 
     static func load() -> IMCleanupConfiguration {
         let enabled = (Environment.get("IM_CLEANUP_ENABLED") ?? "false").lowercased() == "true"
@@ -19,11 +30,16 @@ struct IMCleanupConfiguration: Sendable {
             1,
             Environment.get("IM_CLEANUP_RECIPIENT_SET_BATCH_SIZE").flatMap(Int.init(_:)) ?? 1_000
         )
+        let crossCellRealtimeDispatchRetentionDays = max(
+            1,
+            Environment.get("IM_CLEANUP_CROSS_CELL_REALTIME_DISPATCH_RETENTION_DAYS").flatMap(Int.init(_:)) ?? 7
+        )
         return IMCleanupConfiguration(
             enabled: enabled,
             intervalSeconds: intervalSeconds,
             recipientSetRetentionDays: recipientSetRetentionDays,
-            recipientSetBatchSize: recipientSetBatchSize
+            recipientSetBatchSize: recipientSetBatchSize,
+            crossCellRealtimeDispatchRetentionDays: crossCellRealtimeDispatchRetentionDays
         )
     }
 }
@@ -70,15 +86,17 @@ struct IMCleanupService {
         async let pushTokenCount = deleteInactivePushTokens(now: now)
         async let visibilityCount = deleteOldVisibilityOverlays(now: now)
         async let recipientSetCount = deleteUnreferencedRecipientSets(now: now, configuration: configuration)
+        async let crossCellDispatchCount = deleteDeliveredCrossCellRealtimeDispatches(now: now, configuration: configuration)
 
-        let counts = try await (inviteCount, pushTokenCount, visibilityCount, recipientSetCount)
+        let counts = try await (inviteCount, pushTokenCount, visibilityCount, recipientSetCount, crossCellDispatchCount)
         app.logger.info(
             "IM cleanup completed",
             metadata: [
                 "expired_invites": .stringConvertible(counts.0),
                 "inactive_push_tokens": .stringConvertible(counts.1),
                 "visibility_overlays": .stringConvertible(counts.2),
-                "recipient_sets": .stringConvertible(counts.3)
+                "recipient_sets": .stringConvertible(counts.3),
+                "cross_cell_realtime_dispatches": .stringConvertible(counts.4)
             ]
         )
     }
@@ -105,19 +123,28 @@ struct IMCleanupService {
 
     private func deleteOldVisibilityOverlays(now: Date) async throws -> Int {
         let cutoff = now.addingTimeInterval(-365 * 24 * 60 * 60)
-        var deletedCount = 0
-        for shard in app.conversationShardRouter.allCommandDatabases() {
-            let messageRows = try await MessageVisibilityOverride.query(on: shard.database)
-                .filter(\.$createdAt < cutoff)
-                .all()
-            let conversationRows = try await ConversationVisibilityOverride.query(on: shard.database)
-                .filter(\.$updatedAt < cutoff)
-                .all()
-            try await messageRows.delete(on: shard.database)
-            try await conversationRows.delete(on: shard.database)
-            deletedCount += messageRows.count + conversationRows.count
-        }
-        return deletedCount
+        let messageRows = try await MessageVisibilityOverride.query(on: app.db)
+            .filter(\.$createdAt < cutoff)
+            .all()
+        let conversationRows = try await ConversationVisibilityOverride.query(on: app.db)
+            .filter(\.$updatedAt < cutoff)
+            .all()
+        try await messageRows.delete(on: app.db)
+        try await conversationRows.delete(on: app.db)
+        return messageRows.count + conversationRows.count
+    }
+
+    private func deleteDeliveredCrossCellRealtimeDispatches(
+        now: Date,
+        configuration: IMCleanupConfiguration
+    ) async throws -> Int {
+        let cutoff = now.addingTimeInterval(-Double(configuration.crossCellRealtimeDispatchRetentionDays) * 24 * 60 * 60)
+        let rows = try await CrossCellRealtimeDispatch.query(on: app.db)
+            .filter(\.$status == CrossCellRealtimeDispatchStatus.delivered.rawValue)
+            .filter(\.$deliveredAt < cutoff)
+            .all()
+        try await rows.delete(on: app.db)
+        return rows.count
     }
 
     private func deleteUnreferencedRecipientSets(
