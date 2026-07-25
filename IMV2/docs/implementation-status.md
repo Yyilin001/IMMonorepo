@@ -26,8 +26,10 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   evidence only; the opt-in full-drain soak and a topology-specific concurrent
   load report remain required for a 100k production claim.
 - 2026-07-25: the local account/gateway smoke verification passed account
-  HTTPS, device credential issuance, no-store Push endpoint registration and
-  deletion, TLS 1.3, and private loopback-only metrics.
+  HTTPS, password failure lockout (five `401` responses followed by no-store
+  `429` with a positive `Retry-After`), device credential issuance, no-store
+  Push endpoint registration and deletion, TLS 1.3, and private loopback-only
+  metrics.
 - 2026-07-25: a booted iPhone 17 / iOS 26.5 arm64 Simulator passed all **31**
   focused `V2ConversationStoreTests` and `V2PushWakeSettingsTests` tests, with
   zero failures or skips.
@@ -96,7 +98,7 @@ files remain untouched. The macOS CI configuration first performs the generic
 Simulator `build-for-testing`, then dynamically selects and boots an available
 iPhone simulator to run both `V2ConversationStoreTests` and
 `V2PushWakeSettingsTests` with `test-without-building`. The clean-environment
-record is [IMApp Production Config Gate #30149614470](https://github.com/Yyilin001/IMMonorepo/actions/runs/30149614470), which passed at commit `014f706` on 2026-07-25.
+record is [IMApp Production Config Gate #30150647120](https://github.com/Yyilin001/IMMonorepo/actions/runs/30150647120), which passed at commit `c02af08` on 2026-07-25.
 
 The same baseline audit found that the old macOS workflow called removed
 `Makefile` targets and that the Release build phase directly executed a
@@ -108,8 +110,8 @@ derived-data build. A local production-valued Release build passed after
 reading its processed Info.plist; changing its account URL to HTTP failed the
 build with `production_v2_account_requires_https`. The Linux V2 workflow now
 uses Swift 6.2, satisfying ClientKit's Swift-tools 6.2 manifest; the local
-account/gateway image independently builds with Swift 6.3. At commit `014f706`,
-[IM V2 Tests #30149614481](https://github.com/Yyilin001/IMMonorepo/actions/runs/30149614481)
+account/gateway image independently builds with Swift 6.3. At commit `c02af08`,
+[IM V2 Tests #30150647156](https://github.com/Yyilin001/IMMonorepo/actions/runs/30150647156)
 passed Core, ClientKit, Server/PostgreSQL, migration ledger, logical restore,
 protobuf/SQL/Prometheus/environment contracts, plus a cold local account-stack
 start and smoke run. These CI records prove reproducibility only; they are not
@@ -129,9 +131,11 @@ The local account stack is separate from those test runners: on 2026-07-25,
 the loopback account issuer, Caddy HTTPS edge, and the V2 TLS gateway became
 healthy. Its companion `verify_v2_local_account_stack.sh` then verified an
 HTTPS invalid-input rejection, password registration to device-credential
-issuance hand-off, authenticated Push endpoint register/remove with `204` and
-`no-store` (without printing either token), a local-CA-verified TLS 1.3
-gateway handshake, and the gateway container's private metrics endpoint. The latter asserts HTTP 200,
+issuance hand-off, five rejected password assertions followed by a no-store
+`429` with a positive `Retry-After`, authenticated Push endpoint
+register/remove with `204` and `no-store` (without printing either token), a
+local-CA-verified TLS 1.3 gateway handshake, and the gateway container's
+private metrics endpoint. The latter asserts HTTP 200,
 `no-store`, no host-published metrics port, the complete durable-work
 ready/leased/scheduled/paused metric vocabulary, and Push-wake
 ready/leased/suppressed metrics; it therefore catches a stale

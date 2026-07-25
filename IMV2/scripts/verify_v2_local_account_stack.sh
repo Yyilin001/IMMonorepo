@@ -63,6 +63,66 @@ assertion="$(curl --silent --show-error --fail \
   --data "{\"accountHandle\":\"${account_handle}\",\"password\":\"v2-local-smoke-password\",\"deviceID\":\"${device_id}\"}" \
   https://localhost:8443/v2/account-auth/password/register | jq -er '.accountAssertion')"
 
+# Exercise the real HTTPS route, PostgreSQL migration and configured policy as
+# one path. The rate-limited account is separate from the credential smoke
+# account so the subsequent trusted-device flow remains independent.
+rate_limit_handle="rate-${suffix:0:20}"
+rate_limit_device_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+rate_limit_password="v2-local-rate-limit-password"
+wrong_rate_limit_password="v2-local-wrong-password"
+
+phase="password rate-limit registration"
+rate_limit_registration_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  --cacert "${ca_path}" \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data "{\"accountHandle\":\"${rate_limit_handle}\",\"password\":\"${rate_limit_password}\",\"deviceID\":\"${rate_limit_device_id}\"}" \
+  https://localhost:8443/v2/account-auth/password/register)"
+test "${rate_limit_registration_status}" = '200' || {
+  printf 'unexpected password rate-limit registration status: %s\n' "${rate_limit_registration_status}" >&2
+  exit 1
+}
+
+for _ in {1..5}; do
+  phase="password rate-limit rejection"
+  rejected_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    --cacert "${ca_path}" \
+    --request POST \
+    --header 'Content-Type: application/json' \
+    --data "{\"accountHandle\":\"${rate_limit_handle}\",\"password\":\"${wrong_rate_limit_password}\",\"deviceID\":\"${rate_limit_device_id}\"}" \
+    https://localhost:8443/v2/account-auth/password/assertion)"
+  test "${rejected_status}" = '401' || {
+    printf 'unexpected password rejection status before lockout: %s\n' "${rejected_status}" >&2
+    exit 1
+  }
+done
+
+rate_limit_headers="$(mktemp)"
+trap 'rm -f -- "${rate_limit_headers}"' EXIT
+phase="password rate-limit lockout"
+rate_limit_status="$(curl --silent --show-error --output /dev/null --dump-header "${rate_limit_headers}" --write-out '%{http_code}' \
+  --cacert "${ca_path}" \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data "{\"accountHandle\":\"${rate_limit_handle}\",\"password\":\"${wrong_rate_limit_password}\",\"deviceID\":\"${rate_limit_device_id}\"}" \
+  https://localhost:8443/v2/account-auth/password/assertion)"
+test "${rate_limit_status}" = '429' || {
+  printf 'unexpected password rate-limit status: %s\n' "${rate_limit_status}" >&2
+  exit 1
+}
+grep -Eiq '^cache-control:.*no-store' "${rate_limit_headers}" || {
+  printf 'password rate-limit response omitted no-store cache control\n' >&2
+  exit 1
+}
+grep -Eiq '^pragma:.*no-cache' "${rate_limit_headers}" || {
+  printf 'password rate-limit response omitted no-cache pragma\n' >&2
+  exit 1
+}
+grep -Eiq '^retry-after:[[:space:]]*[1-9][0-9]*' "${rate_limit_headers}" || {
+  printf 'password rate-limit response omitted a positive Retry-After value\n' >&2
+  exit 1
+}
+
 phase="device credential issuance"
 issued_credentials="$(curl --silent --show-error --fail \
   --cacert "${ca_path}" \
@@ -76,7 +136,7 @@ access_token="$(printf '%s' "${issued_credentials}" | jq -er '.accessToken')"
 # persisting either credential. The opaque smoke token is deliberately not a
 # real APNs token and is removed immediately after the no-store response.
 push_headers="$(mktemp)"
-trap 'rm -f -- "${push_headers}"' EXIT
+trap 'rm -f -- "${push_headers}" "${rate_limit_headers}"' EXIT
 phase="Push endpoint registration"
 push_status="$(curl --silent --show-error --output /dev/null --dump-header "${push_headers}" --write-out '%{http_code}' \
   --cacert "${ca_path}" \
@@ -172,6 +232,7 @@ done
 
 printf 'local account HTTPS validation: 400\n'
 printf 'local password registration and device credential issuance: 200\n'
+printf 'local password failure limit: 5 x 401, then 429 no-store with Retry-After\n'
 printf 'local Push endpoint register/remove: 204, no-store\n'
 printf 'local V2 TLS gateway: TLS 1.3 verified\n'
 printf 'local V2 private metrics: HTTP 200, no-store, durable-work metric vocabulary verified\n'

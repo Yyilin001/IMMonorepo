@@ -1,7 +1,7 @@
 # IM V2 实现审计与实施路线图
 
 审计日期：2026-07-25  
-审计基线：`main` 分支、提交 `014f706` 的 V2-only 工作树。
+审计基线：`main` 分支、提交 `c02af08` 的 V2-only 工作树。
 结论：**架构方向可行，核心正确性边界已有较好实现；当前不具备生产发布条件。**
 
 本文是实施优先级与验收计划，不替代 [implementation status](implementation-status.md) 的逐项证据登记。
@@ -66,7 +66,7 @@
 ### 阶段 0：恢复可验证基线（P0，先完成）
 
 1. [已完成，本机 2026-07-25] 显式链接 `IMV2Core` 到 IMApp/IMAppTests，修复 V2-only 清理后的链接缺失；iPhone 17 / iOS 26.5 arm64 已通过 `V2ConversationStoreTests`、`V2PushWakeSettingsTests`，通用 Simulator 双架构 `build-for-testing` 已通过。
-2. [已完成，GitHub Actions，`014f706`] [macOS iOS configuration gate](https://github.com/Yyilin001/IMMonorepo/actions/runs/30149614470) 通过 generic Simulator build 与聚焦运行时测试；[Linux V2 gate](https://github.com/Yyilin001/IMMonorepo/actions/runs/30149614481) 通过 Core、ClientKit、Server/PostgreSQL、迁移账本、逻辑恢复、protobuf/SQL manifest、Prometheus 环境契约及本地账号栈冷启动冒烟。
+2. [已完成，GitHub Actions，`c02af08`] [macOS iOS configuration gate](https://github.com/Yyilin001/IMMonorepo/actions/runs/30150647120) 通过 generic Simulator build 与聚焦运行时测试；[Linux V2 gate](https://github.com/Yyilin001/IMMonorepo/actions/runs/30150647156) 通过 Core、ClientKit、Server/PostgreSQL、迁移账本、逻辑恢复、protobuf/SQL manifest、Prometheus 环境契约及本地账号栈冷启动冒烟。
 3. [已完成，2026-07-25] `implementation-status.md` 记录本地与远程验证的 commit、环境、命令、结果和限制；证据仍不是生产发布批准。
 
 **完成条件**：干净 checkout 上，CI 与本机指定模拟器都能重复得到相同成功结果。
