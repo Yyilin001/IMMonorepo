@@ -3234,6 +3234,39 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("schema readiness fails before serving without password failure state")
+    func schemaReadinessRequiresPasswordLoginRateLimitTable() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2SchemaReadinessError.unsupportedDatabase
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            try await sql.raw("DROP TABLE im_v2.account_password_login_rate_limits").run()
+
+            await #expect(throws: V2SchemaReadinessError.unavailableTable("im_v2.account_password_login_rate_limits")) {
+                try await V2SchemaReadiness.verify(database: app.db(.psql))
+            }
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("display-name updates fan out to direct peers in bounded, idempotent pages")
     func propagatesDisplayNameToExistingDirectPeers() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),

@@ -17,7 +17,7 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
-- 2026-07-25: isolated PostgreSQL Server regression passed **175 tests / 49
+- 2026-07-25: isolated PostgreSQL Server regression passed **176 tests / 49
   suites** after adding password-factor audit facts. Registration, rejected
   bcrypt verification and successful assertion each commit their minimal audit
   record atomically with the relevant account/rate-limit state; the record has
