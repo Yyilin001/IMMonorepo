@@ -23,7 +23,7 @@ and the [V2 document entry](../IMV2/docs/README.md).
    gateway never accepts a user ID from a client payload. Mount
    `V2VaporDeviceCredentialRoutes` only on that account-service listener after
    injecting its production `V2AccountAssertionVerifier`, TLS/rate-limit
-   policy, and secret provisioning; do not register those routes on the
+   policy, edge-authorization secret, and secret provisioning; do not register those routes on the
    realtime gateway listener.
    The selected primary factor is a production WebAuthn verifier. The provided
    `V2HMACAccountAssertionIssuer` makes a 90-second, device-bound hand-off to
@@ -90,6 +90,12 @@ The client-side passkey flow has a complete challenge/assertion transport
 boundary, but this executable does not yet mount public WebAuthn endpoints:
 doing so requires an audited server verifier plus one-time challenge storage.
 Password fallback is the presently deployable initial-account path.
+
+Every account request must carry the base64 edge-authorization secret injected
+by that same HTTPS proxy. The account process rejects direct loopback requests
+without it, so do not route around the proxy for probes or tooling. Caddy's
+default reverse-proxy behavior discards client-supplied `X-Forwarded-*` values;
+the proxy is still responsible for its separate trusted-client/IP rate policy.
 
 ### Local native-client workflow
 

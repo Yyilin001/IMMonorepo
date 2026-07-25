@@ -119,6 +119,8 @@ services:
   caddy:
     image: caddy:2.8-alpine
     network_mode: service:account
+    environment:
+      IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64: ${IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64:?run IMV2/scripts/run_v2_local_account_stack.sh first}
     volumes:
       - ./local/Caddyfile:/etc/caddy/Caddyfile:ro
       - v2-local-caddy-data:/data

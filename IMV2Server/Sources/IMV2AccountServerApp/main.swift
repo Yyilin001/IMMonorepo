@@ -24,6 +24,7 @@ enum IMV2AccountServerApp {
             try await V2SchemaReadiness.verify(database: database)
             app.http.server.configuration.hostname = configuration.listener.host
             app.http.server.configuration.port = configuration.listener.port
+            app.middleware.use(V2AccountEdgeAuthenticationMiddleware(secret: configuration.edgeAuthorizationSecret))
 
             let assertionIssuer = try V2HMACAccountAssertionIssuer(rawKey: configuration.accountAssertionKey)
             let credentials = try V2PostgresDeviceCredentialService(

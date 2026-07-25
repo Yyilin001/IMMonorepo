@@ -3,5 +3,9 @@
 # the native app's default https://localhost:8443 configuration.
 https://localhost:8443 {
     tls internal
-    reverse_proxy 127.0.0.1:8444
+    # Caddy discards caller-supplied X-Forwarded-* values by default, then
+    # injects this process-local proof for the loopback account listener.
+    reverse_proxy 127.0.0.1:8444 {
+        header_up X-IM-V2-Account-Edge-Authorization "{$IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64}"
+    }
 }

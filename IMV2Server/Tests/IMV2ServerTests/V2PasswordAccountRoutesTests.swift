@@ -9,6 +9,26 @@ import VaporTesting
 
 @Suite("V2 password fallback routes")
 struct V2PasswordAccountRoutesTests {
+    @Test("account routes reject a direct caller without the edge proof")
+    func accountEdgeProofIsRequired() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let proof = Data(repeating: 9, count: 32).base64EncodedString()
+        let secret = try V2AccountEdgeAuthorizationSecret(base64Encoded: proof)
+        app.middleware.use(V2AccountEdgeAuthenticationMiddleware(secret: secret))
+        app.get("ready") { _ in "ok" }
+
+        try await app.testing().test(.GET, "ready") { response async in
+            #expect(response.status == .forbidden)
+        }
+        try await app.testing().test(.GET, "ready", beforeRequest: { request in
+            request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.headerName, value: proof)
+        }) { response async in
+            #expect(response.status == .ok)
+            #expect(response.body.string == "ok")
+        }
+    }
+
     @Test("locked password fallback responses are no-store and expose the durable retry interval")
     func lockedPasswordAttemptReturnsNoStoreRetryAfter() async throws {
         let app = try await Application.make(.testing)

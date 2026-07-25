@@ -33,6 +33,21 @@ struct V2AccountRuntimeConfigurationTests {
         }
     }
 
+    @Test("account service rejects a missing or undersized edge authorization secret")
+    func rejectsInvalidEdgeAuthorizationSecret() {
+        var missingValues = values
+        missingValues.removeValue(forKey: "IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64")
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64")) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missingValues))
+        }
+
+        var undersizedValues = values
+        undersizedValues["IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64"] = Data(repeating: 5, count: 31).base64EncodedString()
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64")) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(undersizedValues))
+        }
+    }
+
     private var values: [String: String] {
         [
             "IM_V2_DATABASE_URL": "postgres://v2:password@db/im_v2",
@@ -41,6 +56,7 @@ struct V2AccountRuntimeConfigurationTests {
             "IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64": Data(repeating: 1, count: 32).base64EncodedString(),
             "IM_V2_CREDENTIAL_REPLAY_ENVELOPE_KEY_BASE64": Data(repeating: 2, count: 32).base64EncodedString(),
             "IM_V2_PUSH_ENDPOINT_ENVELOPE_KEY_BASE64": Data(repeating: 4, count: 32).base64EncodedString(),
+            "IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64": Data(repeating: 5, count: 32).base64EncodedString(),
             "IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64": Data(repeating: 3, count: 32).base64EncodedString(),
             "IM_V2_PASSWORD_DUMMY_BCRYPT_HASH": "$2b$12$123456789012345678901u12345678901234567890123456789012",
             "IM_V2_PASSWORD_LOGIN_MAX_FAILURES": "5",
