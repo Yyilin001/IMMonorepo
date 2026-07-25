@@ -1,6 +1,9 @@
-# Local-only account service image. Source is copied at build time; the V2
-# client stays native on macOS and never needs to enter this container.
-FROM swift:6.3-jammy
+# Local-only account service image. Source is compiled in a disposable build
+# stage; the final image contains only the three release executables and their
+# bundled SwiftPM runtime artifacts. Keeping `.build` and source out of the
+# runtime stage prevents repeated local verification from retaining several
+# gigabytes of compiler products per image.
+FROM swift:6.3-jammy AS build
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
@@ -19,5 +22,18 @@ COPY IMV2Server ./IMV2Server
 RUN swift build -c release --package-path IMV2Server --product IMV2AccountServerApp \
     && swift build -c release --package-path IMV2Server --product IMV2ServerApp \
     && swift build -c release --package-path IMV2Server --product IMV2OperatorServerApp
+
+FROM swift:6.3-jammy
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+# The Compose services intentionally retain these paths as their command
+# contract. Copying only `release` also includes SwiftPM's dynamically-linked
+# support artifacts without carrying debug objects, dependency checkouts, or
+# the compiler cache into the runnable image.
+COPY --from=build /workspace/IMV2Server/.build/release ./IMV2Server/.build/release
 
 CMD ["/workspace/IMV2Server/.build/release/IMV2AccountServerApp"]
