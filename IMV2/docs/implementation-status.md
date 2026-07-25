@@ -24,6 +24,15 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   no account handle, password, verifier, assertion or forwarded client IP.
   This is implementation evidence only: audit-reader authorization, retention,
   account recovery and human disable policy remain release blockers.
+- 2026-07-25: a retained local account-stack PostgreSQL volume was migrated
+  through the new `0017_public_profile_update_outbox.sql` repair migration.
+  The account service and TLS gateway then passed the real HTTPS smoke path:
+  invalid input, two password registrations, five rejected assertions and
+  no-store lockout, device credentials, Push endpoint register/remove, TLS
+  1.3 and private metrics. The aggregate audit table contained two registration
+  facts and five rejection facts, without inspecting or printing identities or
+  credentials. This remains local deployment evidence, not a production
+  migration or security approval.
 - 2026-07-25: isolated PostgreSQL Server regression passed **173 tests / 49
   suites**, including the cross-replica password-failure limiter, a
   two-database target TCP connection-refused recovery drill, and all standard
