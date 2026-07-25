@@ -64,7 +64,31 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
                 FROM im_v2.user_stranger_message_preferences
                 WHERE user_id = \(bind: userUUID)
                 """).first(decoding: SnapshotProjectionPreferenceRow.self)
-            return (watermark, log, relationships, blocks, preference)
+            // Direct rooms have exactly one counterpart. Their public profile
+            // is therefore constant-size per active room and may be rebuilt
+            // from authority during a reset; group rosters deliberately do
+            // not take this path.
+            let directRoomProfiles = try await sql.raw("""
+                SELECT pair.room_id,
+                       CASE WHEN pair.lower_user_id = \(bind: userUUID)
+                            THEN pair.higher_user_id ELSE pair.lower_user_id END AS target_user_id,
+                       profile.public_handle, profile.display_name,
+                       profile.revision, profile.updated_at
+                FROM im_v2.direct_room_pairs AS pair
+                INNER JOIN im_v2.rooms AS room
+                    ON room.room_id = pair.room_id AND room.room_kind = 'direct'
+                INNER JOIN im_v2.room_memberships AS actor_membership
+                    ON actor_membership.room_id = pair.room_id
+                   AND actor_membership.user_id = \(bind: userUUID)
+                   AND actor_membership.joined_revision <= room.membership_revision
+                   AND (actor_membership.left_revision IS NULL OR actor_membership.left_revision > room.membership_revision)
+                INNER JOIN im_v2.public_user_profiles AS profile
+                    ON profile.user_id = CASE WHEN pair.lower_user_id = \(bind: userUUID)
+                                              THEN pair.higher_user_id ELSE pair.lower_user_id END
+                WHERE pair.lower_user_id = \(bind: userUUID) OR pair.higher_user_id = \(bind: userUUID)
+                ORDER BY pair.room_id
+                """).all(decoding: SnapshotProjectionDirectRoomProfileRow.self)
+            return (watermark, log, relationships, blocks, preference, directRoomProfiles)
         }
         guard source.0 >= 0 else { throw V2SnapshotProjectionMaterializerError.corruptPersistenceState }
         let replay = try replayDeliveredHistory(source.1)
@@ -79,6 +103,21 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
             allowsStrangerMessages: source.4?.allowsStrangerMessages ?? true,
             updatedAt: source.4?.updatedAt ?? now
         )
+        let directRoomProfiles = try source.5.map { row -> V2SnapshotDirectRoomProfileProjection in
+            let publicIdentity = try V2PublicIdentity(
+                userID: .init(row.targetUserID.uuidString),
+                handle: .init(row.publicHandle),
+                displayName: row.displayName
+            )
+            guard row.revision > 0 else { throw V2SnapshotProjectionMaterializerError.corruptPersistenceState }
+            return try .init(
+                sourceEventID: .init(row.roomID.uuidString),
+                roomID: .init(row.roomID.uuidString),
+                publicIdentity: publicIdentity,
+                revision: UInt64(row.revision),
+                updatedAt: row.updatedAt
+            )
+        }
         let payloads = try makePages(
             messages: replay.messages,
             relationships: relationships,
@@ -86,6 +125,7 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
             moderationActions: replay.moderationActions,
             roomControls: replay.roomControls,
             roomProfiles: replay.roomProfiles,
+            directRoomProfiles: directRoomProfiles,
             preference: preference
         )
         return .init(baseSequence: UInt64(source.0), pages: payloads.map { .init(digest: snapshotProjectionSHA256($0), payload: $0) })
@@ -98,6 +138,7 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
         moderationActions: [V2SnapshotModerationProjection],
         roomControls: [V2SnapshotRoomControlProjection],
         roomProfiles: [V2SnapshotRoomProfileProjection],
+        directRoomProfiles: [V2SnapshotDirectRoomProfileProjection],
         preference: V2SnapshotStrangerMessagePreference
     ) throws -> [Data] {
         let items = messages.sorted { ($0.roomID.rawValue, $0.roomSequence) < ($1.roomID.rawValue, $1.roomSequence) }.map(SnapshotProjectionItem.message)
@@ -106,6 +147,7 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
             + moderationActions.sorted { ($0.roomID.rawValue, $0.roomSequence) < ($1.roomID.rawValue, $1.roomSequence) }.map(SnapshotProjectionItem.moderation)
             + roomControls.sorted { ($0.roomID.rawValue, $0.roomSequence) < ($1.roomID.rawValue, $1.roomSequence) }.map(SnapshotProjectionItem.roomControl)
             + roomProfiles.sorted { $0.roomID.rawValue < $1.roomID.rawValue }.map(SnapshotProjectionItem.roomProfile)
+            + directRoomProfiles.sorted { $0.roomID.rawValue < $1.roomID.rawValue }.map(SnapshotProjectionItem.directRoomProfile)
         var offset = 0
         var pages: [Data] = []
         repeat {
@@ -117,6 +159,7 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
             var pageModeration: [V2SnapshotModerationProjection] = []
             var pageControls: [V2SnapshotRoomControlProjection] = []
             var pageProfiles: [V2SnapshotRoomProfileProjection] = []
+            var pageDirectProfiles: [V2SnapshotDirectRoomProfileProjection] = []
             for item in slice {
                 switch item {
                 case .message(let value): pageMessages.append(value)
@@ -125,6 +168,7 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
                 case .moderation(let value): pageModeration.append(value)
                 case .roomControl(let value): pageControls.append(value)
                 case .roomProfile(let value): pageProfiles.append(value)
+                case .directRoomProfile(let value): pageDirectProfiles.append(value)
                 }
             }
             pages.append(try V2SnapshotProjectionCodec.encode(.init(
@@ -134,7 +178,8 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
                 strangerMessagePreference: pages.isEmpty ? preference : nil,
                 moderationActions: pageModeration,
                 roomControls: pageControls,
-                roomProfiles: pageProfiles
+                roomProfiles: pageProfiles,
+                directRoomProfiles: pageDirectProfiles
             )))
             offset = end
         } while offset < items.count
@@ -208,6 +253,7 @@ private enum SnapshotProjectionItem {
     case moderation(V2SnapshotModerationProjection)
     case roomControl(V2SnapshotRoomControlProjection)
     case roomProfile(V2SnapshotRoomProfileProjection)
+    case directRoomProfile(V2SnapshotDirectRoomProfileProjection)
 }
 
 private struct SnapshotProjectionReplay {
@@ -260,9 +306,12 @@ private func replayDeliveredHistory(_ rows: [SnapshotProjectionSyncLogRow]) thro
                 }
             }
             roomProfiles[profile.roomID] = profile
-        case "relationship", "user_block", "stranger_message_permission":
+        case "relationship", "user_block", "stranger_message_permission", "direct_room_profile":
             // Social state is rebuilt from its authoritative tables. ClientKit
             // intentionally stores membership records only as sync history.
+            // Direct-room public identities are similarly rebuilt from active
+            // direct pairs, rather than replaying a potentially stale profile
+            // record from history.
             continue
         default:
             throw V2SnapshotProjectionMaterializerError.invalidDeliveredHistory
@@ -471,6 +520,23 @@ private struct SnapshotProjectionBlockRow: Decodable {
 private struct SnapshotProjectionPreferenceRow: Decodable {
     let allowsStrangerMessages: Bool; let updatedAt: Date
     enum CodingKeys: String, CodingKey { case allowsStrangerMessages = "allows_stranger_messages"; case updatedAt = "updated_at" }
+}
+private struct SnapshotProjectionDirectRoomProfileRow: Decodable {
+    let roomID: UUID
+    let targetUserID: UUID
+    let publicHandle: String
+    let displayName: String
+    let revision: Int64
+    let updatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id"
+        case targetUserID = "target_user_id"
+        case publicHandle = "public_handle"
+        case displayName = "display_name"
+        case revision
+        case updatedAt = "updated_at"
+    }
 }
 
 private func snapshotProjectionUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {

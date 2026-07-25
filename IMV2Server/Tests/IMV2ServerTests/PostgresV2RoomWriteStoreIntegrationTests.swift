@@ -487,6 +487,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 100, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 100, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3))
             let leaseID = UUID(uuidString: "00000000-0000-0000-0000-000000000071")!
             try await sql.raw("INSERT INTO im_v2.shard_admission_pools (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans) VALUES ('rooms-primary', 'standard', \(bind: leaseID), 1, \(bind: now.addingTimeInterval(600)), 100, 100, 100, 100)").run()
+            try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, revision, created_at, updated_at) VALUES (\(bind: senderUUID), 'sender012', '发送者', 1, \(bind: now), \(bind: now)), (\(bind: memberTwoUUID), 'member015', '成员二', 1, \(bind: now), \(bind: now))").run()
             let directStore = PostgresV2DirectMessagingStore(database: app.db(.psql))
             let directService = try V2DirectMessagingService(store: directStore, capacityProfile: profile, roomShardID: "rooms-primary", now: { now })
             let recipient = try UserID(memberTwoUUID.uuidString)
@@ -495,6 +496,21 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let replay = try await directService.open(actorUserID: senderID, operationID: try .init("00000000-0000-0000-0000-000000000072"), targetUserID: recipient)
             guard case .idempotent(let replayed) = replay else { Issue.record("expected idempotent room"); return }
             #expect(replayed.roomID == room.roomID)
+            let directProfiles = try await sql.raw("""
+                SELECT user_id, payload->>'room_id' AS room_id, payload->>'target_user_id' AS target_user_id,
+                       payload->>'public_handle' AS public_handle, payload->>'display_name' AS display_name,
+                       (payload->>'revision')::bigint AS revision
+                FROM im_v2.user_sync_log
+                WHERE projection_kind = 'direct_room_profile'
+                ORDER BY user_id
+                """).all(decoding: DirectProfileSyncAssertionRow.self)
+            #expect(directProfiles == [
+                .init(userID: senderUUID, roomID: room.roomID.rawValue, targetUserID: memberTwoUUID, publicHandle: "member015", displayName: "成员二", revision: 1),
+                .init(userID: memberTwoUUID, roomID: room.roomID.rawValue, targetUserID: senderUUID, publicHandle: "sender012", displayName: "发送者", revision: 1),
+            ])
+            let snapshot = try await PostgresV2SnapshotProjectionMaterializer(database: app.db(.psql)).materialize(userID: senderID, now: now)
+            let snapshotDirectProfiles = try snapshot.pages.flatMap { try V2SnapshotProjectionCodec.decodePage($0.payload).directRoomProfiles }
+            #expect(snapshotDirectProfiles == [try .init(sourceEventID: .init(room.roomID.rawValue), roomID: room.roomID, publicIdentity: .init(userID: recipient, handle: .init("member015"), displayName: "成员二"), revision: 1, updatedAt: now)])
 
             _ = try await directService.setStrangerMessagePermission(actorUserID: recipient, operationID: try .init("00000000-0000-0000-0000-000000000073"), permission: .deny)
             let writer = PostgresV2RoomWriteStore(database: app.db(.psql), strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400))
@@ -2975,6 +2991,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 migrations: migrations, registry: registry
             )
             let direct = PostgresV2DirectMessagingStore(database: app.db(.psql), shadowForwarder: shadow)
+            let capacityProfile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3))
+            let forwardingLeaseID = UUID(uuidString: "00000000-0000-0000-0000-000000000f17")!
+            try await sql.raw("INSERT INTO im_v2.shard_admission_pools (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans) VALUES ('rooms-primary', 'standard', \(bind: forwardingLeaseID), 1, \(bind: now.addingTimeInterval(600)), 10, 100, 100, 10)").run()
+            try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, revision, created_at, updated_at) VALUES (\(bind: senderUUID), 'sender012', '发送者', 1, \(bind: now), \(bind: now)), (\(bind: memberTwoUUID), 'member015', '成员二', 1, \(bind: now), \(bind: now))").run()
+            let directService = try V2DirectMessagingService(store: direct, capacityProfile: capacityProfile, roomShardID: "rooms-primary", now: { now })
+            guard case .opened = try await directService.open(actorUserID: senderID, operationID: try .init("00000000-0000-0000-0000-000000000f18"), targetUserID: try .init(memberTwoUUID.uuidString)) else {
+                Issue.record("expected direct room")
+                return
+            }
             let preferenceOperation = try StrangerMessagePreferenceOperationID("00000000-0000-0000-0000-000000000f12")
             _ = try await direct.setStrangerMessagePermission(
                 command: .init(actorUserID: senderID, operationID: preferenceOperation, permission: .deny), now: now
@@ -2990,15 +3015,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 targetUserID: try .init(memberTwoUUID.uuidString), action: .request
             ), now: now.addingTimeInterval(2))
 
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: sql) == 2)
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 2)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: sql) == 3)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 3)
             let targetRows = try await secondarySQL.raw("""
                 SELECT user_sync_sequence, projection_kind
                 FROM im_v2.user_sync_log WHERE user_id = \(bind: senderUUID)
                 ORDER BY user_sync_sequence
                 """).all(decoding: SyncKindRow.self)
-            #expect(targetRows.map(\.sequence) == [1, 2])
-            #expect(targetRows.map(\.kind) == ["stranger_message_permission", "relationship"])
+            #expect(targetRows.map(\.sequence) == [1, 2, 3])
+            #expect(targetRows.map(\.kind) == ["direct_room_profile", "stranger_message_permission", "relationship"])
 
             let transfer = try PostgresV2UserShardProjectionTransfer(
                 source: app.db(.psql), target: app.db(secondaryID),
@@ -3028,12 +3053,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     actorUserID: senderID, operationID: try .init("00000000-0000-0000-0000-000000000f15"), permission: .allow
                 ), now: now.addingTimeInterval(5)
             )
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 4)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 5)
             let postCutover = try #require(try await secondarySQL.raw("""
                 SELECT user_sync_sequence, projection_kind FROM im_v2.user_sync_log
                 WHERE user_id = \(bind: senderUUID) ORDER BY user_sync_sequence DESC LIMIT 1
                 """).first(decoding: SyncKindRow.self))
-            #expect(postCutover.sequence == 4)
+            #expect(postCutover.sequence == 5)
             #expect(postCutover.kind == "stranger_message_permission")
             #expect((try await router.routes(for: [senderID])).first?.bucket == "users-target")
 
@@ -3256,6 +3281,23 @@ private struct FailsOnSecondPageRouter: V2UserShardRouter {
 
 private struct ExistsRow: Decodable { let exists: Bool }
 private struct CountRow: Decodable { let value: Int64 }
+private struct DirectProfileSyncAssertionRow: Decodable, Equatable {
+    let userID: UUID
+    let roomID: String
+    let targetUserID: UUID
+    let publicHandle: String
+    let displayName: String
+    let revision: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case roomID = "room_id"
+        case targetUserID = "target_user_id"
+        case publicHandle = "public_handle"
+        case displayName = "display_name"
+        case revision
+    }
+}
 private struct DurableRetryStateRow: Decodable {
     let state: String
     let retryCount: Int64

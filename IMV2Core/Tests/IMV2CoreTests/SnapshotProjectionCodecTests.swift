@@ -61,6 +61,17 @@ struct SnapshotProjectionCodecTests {
                 ownerUserID: .init("00000000-0000-0000-0000-000000000719"),
                 membershipRevision: 1,
                 createdAt: Date(timeIntervalSince1970: 1_750_000_006)
+            )],
+            directRoomProfiles: [try .init(
+                sourceEventID: .init("00000000-0000-0000-0000-000000000720"),
+                roomID: .init("00000000-0000-0000-0000-000000000721"),
+                publicIdentity: .init(
+                    userID: .init("00000000-0000-0000-0000-000000000722"),
+                    handle: .init("direct_user"),
+                    displayName: "私聊对象"
+                ),
+                revision: 3,
+                updatedAt: Date(timeIntervalSince1970: 1_750_000_007)
             )]
         )
         let first = try V2SnapshotProjectionCodec.encode(page)

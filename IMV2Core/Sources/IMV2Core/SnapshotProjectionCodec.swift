@@ -149,6 +149,28 @@ public struct V2SnapshotRoomProfileProjection: Equatable, Sendable {
     }
 }
 
+/// The public counterpart identity of an active direct room. Unlike a group
+/// roster, this is constant-size per room and safe to include in one user's
+/// sync baseline. It never carries an account factor or internal login name.
+public struct V2SnapshotDirectRoomProfileProjection: Equatable, Sendable {
+    public let sourceEventID: EventID
+    public let roomID: RoomID
+    public let publicIdentity: V2PublicIdentity
+    public let revision: UInt64
+    public let updatedAt: Date
+
+    public init(sourceEventID: EventID, roomID: RoomID, publicIdentity: V2PublicIdentity, revision: UInt64, updatedAt: Date) throws {
+        guard revision > 0, updatedAt.timeIntervalSince1970 >= 0 else {
+            throw V2SnapshotProjectionError.invalidPage
+        }
+        self.sourceEventID = sourceEventID
+        self.roomID = roomID
+        self.publicIdentity = publicIdentity
+        self.revision = revision
+        self.updatedAt = updatedAt
+    }
+}
+
 public struct V2SnapshotProjectionPage: Equatable, Sendable {
     public let messages: [V2SnapshotMessageProjection]
     public let relationships: [V2SnapshotRelationshipProjection]
@@ -157,20 +179,22 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
     public let moderationActions: [V2SnapshotModerationProjection]
     public let roomControls: [V2SnapshotRoomControlProjection]
     public let roomProfiles: [V2SnapshotRoomProfileProjection]
+    public let directRoomProfiles: [V2SnapshotDirectRoomProfileProjection]
     /// Compatibility overload retained for incremental build products compiled
     /// against snapshot schema v7. New callers may provide room controls.
     public init(messages: [V2SnapshotMessageProjection], relationships: [V2SnapshotRelationshipProjection] = [], userBlocks: [V2SnapshotUserBlockProjection] = [], strangerMessagePreference: V2SnapshotStrangerMessagePreference? = nil, moderationActions: [V2SnapshotModerationProjection] = []) throws {
-        try self.init(messages: messages, relationships: relationships, userBlocks: userBlocks, strangerMessagePreference: strangerMessagePreference, moderationActions: moderationActions, roomControls: [], roomProfiles: [])
+        try self.init(messages: messages, relationships: relationships, userBlocks: userBlocks, strangerMessagePreference: strangerMessagePreference, moderationActions: moderationActions, roomControls: [], roomProfiles: [], directRoomProfiles: [])
     }
 
-    public init(messages: [V2SnapshotMessageProjection], relationships: [V2SnapshotRelationshipProjection], userBlocks: [V2SnapshotUserBlockProjection], strangerMessagePreference: V2SnapshotStrangerMessagePreference?, moderationActions: [V2SnapshotModerationProjection], roomControls: [V2SnapshotRoomControlProjection], roomProfiles: [V2SnapshotRoomProfileProjection] = []) throws {
+    public init(messages: [V2SnapshotMessageProjection], relationships: [V2SnapshotRelationshipProjection], userBlocks: [V2SnapshotUserBlockProjection], strangerMessagePreference: V2SnapshotStrangerMessagePreference?, moderationActions: [V2SnapshotModerationProjection], roomControls: [V2SnapshotRoomControlProjection], roomProfiles: [V2SnapshotRoomProfileProjection] = [], directRoomProfiles: [V2SnapshotDirectRoomProfileProjection] = []) throws {
         guard Set(relationships.map(\.targetUserID)).count == relationships.count,
               Set(userBlocks.map(\.targetUserID)).count == userBlocks.count,
               Set(moderationActions.map(\.sourceEventID)).count == moderationActions.count,
               Set(roomControls.map(\.roomID)).count == roomControls.count,
-              Set(roomProfiles.map(\.roomID)).count == roomProfiles.count
+              Set(roomProfiles.map(\.roomID)).count == roomProfiles.count,
+              Set(directRoomProfiles.map(\.roomID)).count == directRoomProfiles.count
         else { throw V2SnapshotProjectionError.invalidPage }
-        self.messages = messages; self.relationships = relationships; self.userBlocks = userBlocks; self.strangerMessagePreference = strangerMessagePreference; self.moderationActions = moderationActions; self.roomControls = roomControls; self.roomProfiles = roomProfiles
+        self.messages = messages; self.relationships = relationships; self.userBlocks = userBlocks; self.strangerMessagePreference = strangerMessagePreference; self.moderationActions = moderationActions; self.roomControls = roomControls; self.roomProfiles = roomProfiles; self.directRoomProfiles = directRoomProfiles
     }
 }
 
@@ -180,14 +204,14 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
 public enum V2SnapshotProjectionCodec {
     /// V2 snapshot schema. There is deliberately no reader for the earlier
     /// draft page shape: this product has no released data to migrate.
-    public static let schemaVersion: UInt32 = 10
+    public static let schemaVersion: UInt32 = 11
 
     public static func encode(messages: [V2SnapshotMessageProjection]) throws -> Data {
         try encode(.init(messages: messages))
     }
 
     public static func encode(_ page: V2SnapshotProjectionPage) throws -> Data {
-        let wire = Page(schemaVersion: schemaVersion, messages: page.messages.map(Message.init), relationships: page.relationships.map(Relationship.init), userBlocks: page.userBlocks.map(UserBlock.init), strangerMessagePreference: page.strangerMessagePreference.map(StrangerMessagePreference.init), moderationActions: page.moderationActions.map(Moderation.init), roomControls: page.roomControls.map(RoomControl.init), roomProfiles: page.roomProfiles.map(RoomProfile.init))
+        let wire = Page(schemaVersion: schemaVersion, messages: page.messages.map(Message.init), relationships: page.relationships.map(Relationship.init), userBlocks: page.userBlocks.map(UserBlock.init), strangerMessagePreference: page.strangerMessagePreference.map(StrangerMessagePreference.init), moderationActions: page.moderationActions.map(Moderation.init), roomControls: page.roomControls.map(RoomControl.init), roomProfiles: page.roomProfiles.map(RoomProfile.init), directRoomProfiles: page.directRoomProfiles.map(DirectRoomProfile.init))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(wire)
@@ -202,7 +226,7 @@ public enum V2SnapshotProjectionCodec {
         do { page = try JSONDecoder().decode(Page.self, from: payload) }
         catch { throw V2SnapshotProjectionError.invalidPage }
         guard page.schemaVersion == schemaVersion else { throw V2SnapshotProjectionError.unsupportedSchemaVersion }
-        do { return try .init(messages: page.messages.map { try $0.projection() }, relationships: page.relationships.map { try $0.projection() }, userBlocks: page.userBlocks.map { try $0.projection() }, strangerMessagePreference: try page.strangerMessagePreference?.projection(), moderationActions: page.moderationActions.map { try $0.projection() }, roomControls: page.roomControls.map { try $0.projection() }, roomProfiles: page.roomProfiles.map { try $0.projection() }) }
+        do { return try .init(messages: page.messages.map { try $0.projection() }, relationships: page.relationships.map { try $0.projection() }, userBlocks: page.userBlocks.map { try $0.projection() }, strangerMessagePreference: try page.strangerMessagePreference?.projection(), moderationActions: page.moderationActions.map { try $0.projection() }, roomControls: page.roomControls.map { try $0.projection() }, roomProfiles: page.roomProfiles.map { try $0.projection() }, directRoomProfiles: page.directRoomProfiles.map { try $0.projection() }) }
         catch let error as V2SnapshotProjectionError { throw error }
         catch { throw V2SnapshotProjectionError.invalidPage }
     }
@@ -216,7 +240,8 @@ public enum V2SnapshotProjectionCodec {
         let moderationActions: [Moderation]
         let roomControls: [RoomControl]
         let roomProfiles: [RoomProfile]
-        enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version"; case messages; case relationships; case userBlocks = "user_blocks"; case strangerMessagePreference = "stranger_message_preference"; case moderationActions = "moderation_actions"; case roomControls = "room_controls"; case roomProfiles = "room_profiles" }
+        let directRoomProfiles: [DirectRoomProfile]
+        enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version"; case messages; case relationships; case userBlocks = "user_blocks"; case strangerMessagePreference = "stranger_message_preference"; case moderationActions = "moderation_actions"; case roomControls = "room_controls"; case roomProfiles = "room_profiles"; case directRoomProfiles = "direct_room_profiles" }
     }
 
     private struct Message: Codable {
@@ -355,6 +380,42 @@ public enum V2SnapshotProjectionCodec {
         init(_ value: V2SnapshotRoomProfileProjection) { sourceEventID = value.sourceEventID.rawValue; roomID = value.roomID.rawValue; title = value.title; ownerUserID = value.ownerUserID.rawValue; membershipRevision = value.membershipRevision; createdAtMilliseconds = Int64(value.createdAt.timeIntervalSince1970 * 1_000) }
         func projection() throws -> V2SnapshotRoomProfileProjection { guard createdAtMilliseconds >= 0 else { throw V2SnapshotProjectionError.invalidPage }; return try .init(sourceEventID: .init(sourceEventID), roomID: .init(roomID), title: title, ownerUserID: .init(ownerUserID), membershipRevision: membershipRevision, createdAt: Date(timeIntervalSince1970: TimeInterval(createdAtMilliseconds) / 1_000)) }
         enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id"; case roomID = "room_id"; case title; case ownerUserID = "owner_user_id"; case membershipRevision = "membership_revision"; case createdAtMilliseconds = "created_at_ms" }
+    }
+
+    private struct DirectRoomProfile: Codable {
+        let sourceEventID: String
+        let roomID: String
+        let targetUserID: String
+        let publicHandle: String
+        let displayName: String
+        let revision: UInt64
+        let updatedAtMilliseconds: Int64
+
+        init(_ value: V2SnapshotDirectRoomProfileProjection) {
+            sourceEventID = value.sourceEventID.rawValue
+            roomID = value.roomID.rawValue
+            targetUserID = value.publicIdentity.userID.rawValue
+            publicHandle = value.publicIdentity.handle.rawValue
+            displayName = value.publicIdentity.displayName
+            revision = value.revision
+            updatedAtMilliseconds = Int64(value.updatedAt.timeIntervalSince1970 * 1_000)
+        }
+
+        func projection() throws -> V2SnapshotDirectRoomProfileProjection {
+            guard updatedAtMilliseconds >= 0 else { throw V2SnapshotProjectionError.invalidPage }
+            let identity = try V2PublicIdentity(userID: .init(targetUserID), handle: .init(publicHandle), displayName: displayName)
+            return try .init(sourceEventID: .init(sourceEventID), roomID: .init(roomID), publicIdentity: identity, revision: revision, updatedAt: Date(timeIntervalSince1970: TimeInterval(updatedAtMilliseconds) / 1_000))
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case sourceEventID = "source_event_id"
+            case roomID = "room_id"
+            case targetUserID = "target_user_id"
+            case publicHandle = "public_handle"
+            case displayName = "display_name"
+            case revision
+            case updatedAtMilliseconds = "updated_at_ms"
+        }
     }
 }
 

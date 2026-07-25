@@ -16,7 +16,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
     }
 
     public func open(command: V2OpenDirectRoomCommand, capacityProfile: V2CapacityProfile, roomShardID: String, roomID: RoomID, now: Date) async throws -> V2OpenDirectRoomOutcome {
-        try await database.transaction { transaction in
+        let outcome: V2OpenDirectRoomOutcome = try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
             let actorID = try directUUID(command.actorUserID)
             let targetID = try directUUID(command.targetUserID)
@@ -35,6 +35,15 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             }
 
             let createdRoomID = try directUUID(roomID)
+            let profiles = try await sql.raw("""
+                SELECT user_id, public_handle, display_name, revision, updated_at
+                FROM im_v2.public_user_profiles
+                WHERE user_id = \(bind: actorID) OR user_id = \(bind: targetID)
+                """).all(decoding: DirectPublicProfileRow.self)
+            guard profiles.count == 2,
+                  let actorProfile = profiles.first(where: { $0.userID == actorID }),
+                  let targetProfile = profiles.first(where: { $0.userID == targetID })
+            else { throw V2DirectMessagingStoreError.corruptPersistenceState }
             guard let lease = try await sql.raw("SELECT lease_id, generation, valid_until FROM im_v2.shard_admission_pools WHERE room_shard_id = \(bind: roomShardID) AND capacity_profile_id = \(bind: capacityProfile.id) FOR UPDATE").first(decoding: DirectShardLeaseRow.self), lease.validUntil > now else {
                 return .unavailable
             }
@@ -43,8 +52,20 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision) VALUES (\(bind: createdRoomID), \(bind: actorID), 'member', 1), (\(bind: createdRoomID), \(bind: targetID), 'member', 1)").run()
             try await sql.raw("INSERT INTO im_v2.room_admission (room_id, eligible_member_count, command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans, shard_lease_id, shard_lease_generation) VALUES (\(bind: createdRoomID), 2, \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: capacityProfile.limits.maxFanoutUnitsPerWindow), \(bind: capacityProfile.limits.maxOutstandingFanoutUnits), \(bind: capacityProfile.limits.maxOutstandingPlans), \(bind: lease.leaseID), \(bind: lease.generation))").run()
             try await insertOperation(actorID: actorID, operationID: operationID, targetID: targetID, roomID: createdRoomID, createdAt: now, sql: sql)
+            try await appendDirectRoomProfileProjection(recipientID: actorID, roomID: createdRoomID, profile: targetProfile, sourceEventID: operationID, createdAt: now, sql: sql)
+            try await appendDirectRoomProfileProjection(recipientID: targetID, roomID: createdRoomID, profile: actorProfile, sourceEventID: operationID, createdAt: now, sql: sql)
             return .opened(.init(roomID: roomID, actorUserID: command.actorUserID, targetUserID: command.targetUserID, createdAt: now))
         }
+        switch outcome {
+        case .opened, .idempotent:
+            guard let shadowForwarder else { return outcome }
+            let sourceEventID = try EventID(command.operationID.rawValue)
+            try await shadowForwarder.shadowIfForwarding(userID: command.actorUserID, sourceEventID: sourceEventID, projectionKinds: ["direct_room_profile"])
+            try await shadowForwarder.shadowIfForwarding(userID: command.targetUserID, sourceEventID: sourceEventID, projectionKinds: ["direct_room_profile"])
+        case .idempotencyConflict, .unavailable:
+            break
+        }
+        return outcome
     }
 
     public func setStrangerMessagePermission(command: V2SetStrangerMessagePermissionCommand, now: Date) async throws -> V2SetStrangerMessagePermissionOutcome {
@@ -82,6 +103,14 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
     private func insertOperation(actorID: UUID, operationID: UUID, targetID: UUID, roomID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
         try await sql.raw("INSERT INTO im_v2.direct_room_operations (actor_user_id, operation_id, target_user_id, room_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: targetID), \(bind: roomID), \(bind: createdAt))").run()
     }
+
+    private func appendDirectRoomProfileProjection(recipientID: UUID, roomID: UUID, profile: DirectPublicProfileRow, sourceEventID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
+        guard profile.revision > 0 else { throw V2DirectMessagingStoreError.corruptPersistenceState }
+        guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: recipientID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
+            throw V2DirectMessagingStoreError.corruptPersistenceState
+        }
+        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: recipientID), \(bind: sequence.nextSequence), \(bind: sourceEventID), 'direct_room_profile', jsonb_build_object('room_id', \(bind: roomID)::text, 'target_user_id', \(bind: profile.userID)::text, 'public_handle', \(bind: profile.publicHandle), 'display_name', \(bind: profile.displayName), 'revision', \(bind: profile.revision), 'updated_at_ms', \(bind: Int64(profile.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: createdAt))").run()
+    }
 }
 
 public enum V2DirectMessagingStoreError: Error, Equatable, Sendable { case corruptPersistenceState }
@@ -104,6 +133,21 @@ private struct DirectPreferenceOperationRow: Decodable {
     let allowsStrangerMessages: Bool; let updatedAt: Date
     enum CodingKeys: String, CodingKey { case allowsStrangerMessages = "allows_stranger_messages", updatedAt = "updated_at" }
     var permission: V2StrangerMessagePermission { allowsStrangerMessages ? .allow : .deny }
+}
+private struct DirectPublicProfileRow: Decodable {
+    let userID: UUID
+    let publicHandle: String
+    let displayName: String
+    let revision: Int64
+    let updatedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case publicHandle = "public_handle"
+        case displayName = "display_name"
+        case revision
+        case updatedAt = "updated_at"
+    }
 }
 private struct DirectSyncSequenceRow: Decodable { let nextSequence: Int64; enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" } }
 private func directUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let result = UUID(uuidString: identifier.rawValue) else { throw V2DirectMessagingStoreError.corruptPersistenceState }; return result }
