@@ -100,6 +100,15 @@ iPhone simulator to run both `V2ConversationStoreTests` and
 `V2PushWakeSettingsTests` with `test-without-building`. The clean-environment
 record is [IMApp Production Config Gate #30150647120](https://github.com/Yyilin001/IMMonorepo/actions/runs/30150647120), which passed at commit `c02af08` on 2026-07-25.
 
+On 2026-07-25, this baseline was re-verified locally at `12a1948`: `xcodebuild
+build-for-testing -project IMApp/IMApp.xcodeproj -scheme IMApp -configuration
+Debug -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO`
+successfully built the App, unit-test and UI-test bundles.  The corresponding
+`test-without-building` run on the booted iPhone 17 / iOS 26.5 arm64 simulator
+also passed every selected `V2ConversationStoreTests` and
+`V2PushWakeSettingsTests` case.  This is a local simulator regression record,
+not a substitute for a signed-device or production-network E2E result.
+
 The same baseline audit found that the old macOS workflow called removed
 `Makefile` targets and that the Release build phase directly executed a
 non-executable validation script. The workflow now invokes the checked-in
