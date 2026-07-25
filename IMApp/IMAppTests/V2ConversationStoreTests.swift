@@ -471,6 +471,26 @@ struct V2ConversationStoreTests {
         #expect(await opener.targets().isEmpty)
     }
 
+    @Test func cancellingDirectConversationResolutionDoesNotOpenARoom() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let opener = V2DirectConversationOpenerFake(roomID: "room-direct")
+        let resolver = V2SuspendingConversationPublicIdentityResolver()
+        let store = V2ConversationListStore(
+            dataSource: source,
+            userID: "current-user",
+            directConversationOpener: opener,
+            publicIdentityResolver: resolver
+        )
+
+        let operation = Task { await store.openDirectConversation(handle: "@other_user") }
+        await resolver.waitUntilResolving()
+        operation.cancel()
+
+        #expect(await operation.value == nil)
+        #expect(await opener.targets().isEmpty)
+        #expect(store.directConversationFeedback == nil)
+    }
+
     @Test func groupConversationSplitsCanonicalMemberInputAndReturnsRoom() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let creator = V2GroupConversationCreatorFake(result: .created(roomID: "room-group"))
@@ -866,6 +886,24 @@ private actor V2ConversationPublicIdentityResolverFake: V2ConversationPublicIden
         let normalized = try V2PublicHandle(handle).rawValue
         guard let userID = values[normalized] else { throw V2PublicIdentityDirectoryClientError.notFound }
         return try .init(userID: .init(userID), handle: .init(normalized), displayName: normalized)
+    }
+}
+
+private actor V2SuspendingConversationPublicIdentityResolver: V2ConversationPublicIdentityResolving {
+    private var beganResolving = false
+    private var startWaiter: CheckedContinuation<Void, Never>?
+
+    func resolve(handle _: String) async throws -> V2PublicIdentity {
+        beganResolving = true
+        startWaiter?.resume()
+        startWaiter = nil
+        try await Task.sleep(for: .seconds(60))
+        return try .init(userID: .init("other-user"), handle: .init("other_user"), displayName: "Other")
+    }
+
+    func waitUntilResolving() async {
+        guard !beganResolving else { return }
+        await withCheckedContinuation { startWaiter = $0 }
     }
 }
 
