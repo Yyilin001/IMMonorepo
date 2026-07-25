@@ -21,11 +21,18 @@ public protocol V2PublicIdentityAccountManaging: V2PublicIdentityDirectoryReadin
 public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging, Sendable {
     private let database: any Database
     private let policy: V2PublicIdentityLookupRateLimitPolicy
+    private let makeUUID: @Sendable () -> UUID
     private let now: @Sendable () -> Date
 
-    public init(database: any Database, policy: V2PublicIdentityLookupRateLimitPolicy, now: @escaping @Sendable () -> Date = Date.init) {
+    public init(
+        database: any Database,
+        policy: V2PublicIdentityLookupRateLimitPolicy,
+        makeUUID: @escaping @Sendable () -> UUID = UUID.init,
+        now: @escaping @Sendable () -> Date = Date.init
+    ) {
         self.database = database
         self.policy = policy
+        self.makeUUID = makeUUID
         self.now = now
     }
 
@@ -59,8 +66,10 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
     }
 
     /// Setting an identical name is a no-op, so an HTTP retry preserves the
-    /// visible result and revision. A future optimistic-concurrency client can
-    /// add a revision precondition without changing the profile boundary.
+    /// visible result and revision. A changed name atomically writes a durable
+    /// propagation source record; the gateway later fans it out in bounded
+    /// pages to existing direct counterparts. Group roster data never enters
+    /// that fan-out path.
     public func updateDisplayName(for userID: UserID, displayName: String) async throws -> V2PublicIdentity {
         guard let userUUID = UUID(uuidString: userID.rawValue) else { throw V2PublicIdentityDirectoryError.unavailable }
         return try await database.transaction { transaction in
@@ -70,9 +79,22 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
             let validated: V2PublicIdentity
             do { validated = try .init(userID: userID, handle: current.handle, displayName: displayName) }
             catch { throw V2PublicIdentityDirectoryError.unavailable }
-            try await sql.raw("UPDATE im_v2.public_user_profiles SET display_name = \(bind: validated.displayName), revision = revision + 1, updated_at = \(bind: now()) WHERE user_id = \(bind: userUUID) AND display_name IS DISTINCT FROM \(bind: validated.displayName)").run()
-            guard let updated = try await profile(sql: sql, userID: userUUID) else { throw V2PublicIdentityDirectoryError.unavailable }
-            return updated
+            let changedAt = now()
+            guard let updated = try await sql.raw("""
+                UPDATE im_v2.public_user_profiles
+                SET display_name = \(bind: validated.displayName), revision = revision + 1, updated_at = \(bind: changedAt)
+                WHERE user_id = \(bind: userUUID) AND display_name IS DISTINCT FROM \(bind: validated.displayName)
+                RETURNING revision, updated_at
+                """).first(decoding: UpdatedPublicIdentityRow.self) else {
+                return current
+            }
+            try await sql.raw("""
+                INSERT INTO im_v2.public_profile_update_outbox
+                    (source_event_id, source_user_id, public_handle, display_name, revision, profile_updated_at, created_at)
+                VALUES (\(bind: makeUUID()), \(bind: userUUID), \(bind: validated.handle.rawValue),
+                        \(bind: validated.displayName), \(bind: updated.revision), \(bind: updated.updatedAt), \(bind: changedAt))
+                """).run()
+            return validated
         }
     }
 
@@ -194,6 +216,15 @@ private struct PublicIdentityRow: Decodable {
     let handle: String
     let displayName: String
     enum CodingKeys: String, CodingKey { case userID = "user_id"; case handle = "public_handle"; case displayName = "display_name" }
+}
+
+private struct UpdatedPublicIdentityRow: Decodable {
+    let revision: Int64
+    let updatedAt: Date
+    enum CodingKeys: String, CodingKey {
+        case revision
+        case updatedAt = "updated_at"
+    }
 }
 
 private struct LookupRateLimitRow: Decodable {

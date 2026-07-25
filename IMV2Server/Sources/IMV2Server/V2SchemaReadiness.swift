@@ -9,7 +9,7 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 public enum V2SchemaReadiness {
     private static let requiredTables = [
         "auth_devices", "device_access_tokens", "device_revocation_events", "gateway_worker_cursors", "account_password_credentials", "public_user_profiles", "public_identity_lookup_rate_limits",
-        "rooms", "direct_room_pairs", "direct_room_operations", "group_rooms", "group_room_operations", "user_relationships", "user_blocks", "user_stranger_message_preferences", "stranger_message_preference_operations", "stranger_message_windows", "room_memberships", "room_membership_operations", "message_withdrawal_operations", "message_edit_operations", "message_reactions", "message_reaction_operations", "room_read_receipts", "read_receipt_operations", "room_admission",
+        "rooms", "direct_room_pairs", "direct_room_operations", "public_profile_update_outbox", "group_rooms", "group_room_operations", "user_relationships", "user_blocks", "user_stranger_message_preferences", "stranger_message_preference_operations", "stranger_message_windows", "room_memberships", "room_membership_operations", "message_withdrawal_operations", "message_edit_operations", "message_reactions", "message_reaction_operations", "room_read_receipts", "read_receipt_operations", "room_admission",
         "shard_admission_pools", "messages", "room_events", "room_outbox", "durable_work_replay_audit",
         "fanout_plans", "fanout_plan_targets", "fanout_completion_units", "fanout_deliveries", "consumer_inbox",
         "user_sync_sequences", "user_sync_log", "device_sync_cursors", "sync_snapshots",

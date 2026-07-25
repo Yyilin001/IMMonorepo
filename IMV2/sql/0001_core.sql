@@ -82,6 +82,33 @@ CREATE TABLE im_v2.direct_room_operations (
     PRIMARY KEY (actor_user_id, operation_id)
 );
 
+-- A profile edit is committed at the account boundary, but its recipients
+-- live behind user-shard routing. The gateway consumes this durable source
+-- record in bounded pages and emits one idempotent direct-room profile
+-- projection per existing direct counterpart. It intentionally never
+-- enumerates group membership: group roster/profile reads remain on demand.
+CREATE TABLE im_v2.public_profile_update_outbox (
+    source_event_id UUID PRIMARY KEY,
+    source_user_id UUID NOT NULL,
+    public_handle TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    revision BIGINT NOT NULL CHECK (revision > 0),
+    profile_updated_at TIMESTAMPTZ NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'claimed', 'completed')),
+    claim_token UUID NULL,
+    lease_expires_at TIMESTAMPTZ NULL,
+    enumeration_checkpoint UUID NULL,
+    retry_count BIGINT NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    created_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ NULL,
+    CHECK ((state = 'claimed') = (claim_token IS NOT NULL)),
+    CHECK ((state = 'claimed') = (lease_expires_at IS NOT NULL)),
+    CHECK ((state = 'completed') = (completed_at IS NOT NULL))
+);
+CREATE INDEX public_profile_update_outbox_claim_idx
+    ON im_v2.public_profile_update_outbox (state, lease_expires_at, created_at)
+    WHERE state <> 'completed';
+
 -- Relationship and block state are authoritative input to direct-message
 -- admission. Pair mutations use durable per-actor operations so a lost reply
 -- cannot duplicate a request, acceptance, removal, block, or unblock.

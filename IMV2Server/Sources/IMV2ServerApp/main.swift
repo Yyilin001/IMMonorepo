@@ -159,6 +159,11 @@ enum IMV2ServerApp {
                     },
                 telemetry: telemetry
             )
+            let directRoomProfilePropagationWorker = V2DirectRoomProfilePropagationWorker(
+                database: database,
+                shadowForwarder: userShardShadowForwarder,
+                liveNotifier: connectionRegistry
+            )
             let deviceRevocationWorker = V2DeviceRevocationWorker(
                 store: V2PostgresDeviceRevocationEventStore(database: database),
                 registry: connectionRegistry,
@@ -241,6 +246,19 @@ enum IMV2ServerApp {
                         break
                     } catch {
                         logger.error("IM V2 fan-out pipeline failed; retrying")
+                    }
+                    do {
+                        // Profile changes are a distinct direct-contact
+                        // graph from room-event fan-out. Its work budget is
+                        // per recipient, so one very connected account never
+                        // turns a maintenance tick into an unbounded loop.
+                        _ = try await directRoomProfilePropagationWorker.runOnce(
+                            limit: configuration.workerBatchSize
+                        )
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        logger.error("IM V2 direct-profile propagation failed; retrying")
                     }
                     do {
                         _ = try await deviceRevocationWorker.runOnce(limit: configuration.workerBatchSize)

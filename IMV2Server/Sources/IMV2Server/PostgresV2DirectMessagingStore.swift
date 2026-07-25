@@ -60,8 +60,8 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
         case .opened, .idempotent:
             guard let shadowForwarder else { return outcome }
             let sourceEventID = try EventID(command.operationID.rawValue)
-            try await shadowForwarder.shadowIfForwarding(userID: command.actorUserID, sourceEventID: sourceEventID, projectionKinds: ["direct_room_profile"])
-            try await shadowForwarder.shadowIfForwarding(userID: command.targetUserID, sourceEventID: sourceEventID, projectionKinds: ["direct_room_profile"])
+            _ = try await shadowForwarder.shadowIfForwarding(userID: command.actorUserID, sourceEventID: sourceEventID, projectionKinds: ["direct_room_profile"])
+            _ = try await shadowForwarder.shadowIfForwarding(userID: command.targetUserID, sourceEventID: sourceEventID, projectionKinds: ["direct_room_profile"])
         case .idempotencyConflict, .unavailable:
             break
         }
@@ -89,7 +89,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
         switch outcome {
         case .updated, .idempotent:
             if let shadowForwarder {
-                try await shadowForwarder.shadowIfForwarding(
+                _ = try await shadowForwarder.shadowIfForwarding(
                     userID: command.actorUserID, sourceEventID: try .init(command.operationID.rawValue),
                     projectionKinds: ["stranger_message_permission"]
                 )

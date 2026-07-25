@@ -130,7 +130,7 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
         guard let shadowForwarder else { return }
         let eventID = try EventID(operationID)
         for userID in Set(users) {
-            try await shadowForwarder.shadowIfForwarding(userID: userID, sourceEventID: eventID, projectionKinds: kinds)
+            _ = try await shadowForwarder.shadowIfForwarding(userID: userID, sourceEventID: eventID, projectionKinds: kinds)
         }
     }
 }

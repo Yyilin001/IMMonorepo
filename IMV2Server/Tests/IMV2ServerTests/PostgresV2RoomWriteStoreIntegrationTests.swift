@@ -505,8 +505,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 ORDER BY user_id
                 """).all(decoding: DirectProfileSyncAssertionRow.self)
             #expect(directProfiles == [
-                .init(userID: senderUUID, roomID: room.roomID.rawValue, targetUserID: memberTwoUUID, publicHandle: "member015", displayName: "成员二", revision: 1),
-                .init(userID: memberTwoUUID, roomID: room.roomID.rawValue, targetUserID: senderUUID, publicHandle: "sender012", displayName: "发送者", revision: 1),
+                .init(userID: senderUUID, roomID: room.roomID.rawValue.lowercased(), targetUserID: memberTwoUUID, publicHandle: "member015", displayName: "成员二", revision: 1),
+                .init(userID: memberTwoUUID, roomID: room.roomID.rawValue.lowercased(), targetUserID: senderUUID, publicHandle: "sender012", displayName: "发送者", revision: 1),
             ])
             let snapshot = try await PostgresV2SnapshotProjectionMaterializer(database: app.db(.psql)).materialize(userID: senderID, now: now)
             let snapshotDirectProfiles = try snapshot.pages.flatMap { try V2SnapshotProjectionCodec.decodePage($0.payload).directRoomProfiles }
@@ -3015,15 +3015,41 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 targetUserID: try .init(memberTwoUUID.uuidString), action: .request
             ), now: now.addingTimeInterval(2))
 
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: sql) == 3)
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 3)
+            // Account-owned profile changes use a separate outbox, but must
+            // use the same migration-safe shadow write as the direct/social
+            // control records. The changed profile belongs to member two; its
+            // only direct recipient is the currently forwarding sender.
+            let profileEventID = UUID(uuidString: "00000000-0000-0000-0000-000000000f19")!
+            let directory = V2PostgresPublicIdentityDirectory(
+                database: app.db(.psql), policy: try .init(maximumQueries: 10, window: 60),
+                makeUUID: { profileEventID }, now: { now.addingTimeInterval(3) }
+            )
+            _ = try await directory.updateDisplayName(
+                for: try .init(memberTwoUUID.uuidString), displayName: "成员二新版"
+            )
+            let profileWorker = V2DirectRoomProfilePropagationWorker(
+                database: app.db(.psql), shadowForwarder: shadow, now: { now.addingTimeInterval(4) }
+            )
+            #expect(try await profileWorker.runOnce(limit: 1).projectedRecipientCount == 1)
+
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: sql) == 4)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 4)
             let targetRows = try await secondarySQL.raw("""
                 SELECT user_sync_sequence, projection_kind
                 FROM im_v2.user_sync_log WHERE user_id = \(bind: senderUUID)
                 ORDER BY user_sync_sequence
                 """).all(decoding: SyncKindRow.self)
-            #expect(targetRows.map(\.sequence) == [1, 2, 3])
-            #expect(targetRows.map(\.kind) == ["direct_room_profile", "stranger_message_permission", "relationship"])
+            #expect(targetRows.map(\.sequence) == [1, 2, 3, 4])
+            #expect(targetRows.map(\.kind) == ["direct_room_profile", "stranger_message_permission", "relationship", "direct_room_profile"])
+            let forwardedProfile = try #require(try await secondarySQL.raw("""
+                SELECT user_id, payload->>'display_name' AS display_name,
+                       (payload->>'revision')::bigint AS revision
+                FROM im_v2.user_sync_log
+                WHERE user_id = \(bind: senderUUID) AND source_event_id = \(bind: profileEventID)
+                  AND projection_kind = 'direct_room_profile'
+                """).first(decoding: ProfilePropagationProjectionRow.self))
+            #expect(forwardedProfile.displayName == "成员二新版")
+            #expect(forwardedProfile.revision == 2)
 
             let transfer = try PostgresV2UserShardProjectionTransfer(
                 source: app.db(.psql), target: app.db(secondaryID),
@@ -3053,12 +3079,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     actorUserID: senderID, operationID: try .init("00000000-0000-0000-0000-000000000f15"), permission: .allow
                 ), now: now.addingTimeInterval(5)
             )
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 5)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 6)
             let postCutover = try #require(try await secondarySQL.raw("""
                 SELECT user_sync_sequence, projection_kind FROM im_v2.user_sync_log
                 WHERE user_id = \(bind: senderUUID) ORDER BY user_sync_sequence DESC LIMIT 1
                 """).first(decoding: SyncKindRow.self))
-            #expect(postCutover.sequence == 5)
+            #expect(postCutover.sequence == 6)
             #expect(postCutover.kind == "stranger_message_permission")
             #expect((try await router.routes(for: [senderID])).first?.bucket == "users-target")
 
@@ -3104,6 +3130,129 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect((1 ... 60).contains(retryAfter))
             try await secondInstance.reset(accountHandle: "limit-test")
             #expect(try await firstInstance.blockedRetryAfterSeconds(accountHandle: "limit-test") == nil)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("display-name updates fan out to direct peers in bounded, idempotent pages")
+    func propagatesDisplayNameToExistingDirectPeers() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2DirectRoomProfilePropagationError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_001_000)
+            let sourceUUID = UUID(uuidString: "00000000-0000-0000-0000-00000000a001")!
+            let firstPeerUUID = UUID(uuidString: "00000000-0000-0000-0000-00000000a002")!
+            let secondPeerUUID = UUID(uuidString: "00000000-0000-0000-0000-00000000a003")!
+            let sourceUserID = try UserID(sourceUUID.uuidString)
+            let capacityProfile = try V2CapacityProfile(id: "standard", limits: .init(
+                maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100,
+                maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10,
+                maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3
+            ))
+            let leaseID = UUID(uuidString: "00000000-0000-0000-0000-00000000a010")!
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans)
+                VALUES ('rooms-primary', 'standard', \(bind: leaseID), 1, \(bind: now.addingTimeInterval(600)),
+                        10, 100, 100, 10)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.public_user_profiles
+                    (user_id, public_handle, display_name, revision, created_at, updated_at)
+                VALUES (\(bind: sourceUUID), 'source_a001', '旧名称', 1, \(bind: now), \(bind: now)),
+                       (\(bind: firstPeerUUID), 'peer_a002', '同伴一', 1, \(bind: now), \(bind: now)),
+                       (\(bind: secondPeerUUID), 'peer_a003', '同伴二', 1, \(bind: now), \(bind: now))
+                """).run()
+
+            let directService = try V2DirectMessagingService(
+                store: PostgresV2DirectMessagingStore(database: app.db(.psql)),
+                capacityProfile: capacityProfile, roomShardID: "rooms-primary", now: { now }
+            )
+            for peer in [firstPeerUUID, secondPeerUUID] {
+                guard case .opened = try await directService.open(
+                    actorUserID: sourceUserID, operationID: try .init(UUID().uuidString),
+                    targetUserID: try .init(peer.uuidString)
+                ) else {
+                    Issue.record("expected direct room")
+                    return
+                }
+            }
+
+            let profileEventID = UUID(uuidString: "00000000-0000-0000-0000-00000000a020")!
+            let directory = V2PostgresPublicIdentityDirectory(
+                database: app.db(.psql), policy: try .init(maximumQueries: 10, window: 60),
+                makeUUID: { profileEventID }, now: { now.addingTimeInterval(1) }
+            )
+            let updated = try await directory.updateDisplayName(for: sourceUserID, displayName: "新名称")
+            #expect(updated.displayName == "新名称")
+
+            let router = V2PostgresUserShardRouter(database: app.db(.psql))
+            try await router.bootstrap(defaultRoute: .init(bucket: "users-primary", observedRouterEpoch: 1), now: now)
+            let migrations = PostgresV2UserShardMigrationStore(database: app.db(.psql))
+            let registry = try V2StaticUserShardStorageRegistry(locations: [
+                try .init(bucket: "users-primary", database: app.db(.psql), schema: "im_v2"),
+            ])
+            let shadow = V2PostgresUserShardProjectionShadowForwarder(
+                control: app.db(.psql), router: router, migrations: migrations, registry: registry
+            )
+            let worker = V2DirectRoomProfilePropagationWorker(
+                database: app.db(.psql), shadowForwarder: shadow, now: { now.addingTimeInterval(2) }
+            )
+            let firstPage = try await worker.runOnce(limit: 1)
+            #expect(firstPage.projectedRecipientCount == 1)
+            #expect(firstPage.completedUpdateCount == 0)
+            let pending = try #require(try await sql.raw("""
+                SELECT state, enumeration_checkpoint IS NOT NULL AS checkpointed
+                FROM im_v2.public_profile_update_outbox WHERE source_event_id = \(bind: profileEventID)
+                """).first(decoding: ProfilePropagationOutboxRow.self))
+            #expect(pending.state == "pending")
+            #expect(pending.checkpointed)
+
+            let secondPage = try await worker.runOnce(limit: 1)
+            #expect(secondPage.projectedRecipientCount == 1)
+            #expect(secondPage.completedUpdateCount == 1)
+            let completed = try #require(try await sql.raw("""
+                SELECT state, completed_at IS NOT NULL AS completed
+                FROM im_v2.public_profile_update_outbox WHERE source_event_id = \(bind: profileEventID)
+                """).first(decoding: ProfilePropagationCompletedRow.self))
+            #expect(completed.state == "completed")
+            #expect(completed.completed)
+            let projections = try await sql.raw("""
+                SELECT user_id, payload->>'display_name' AS display_name,
+                       (payload->>'revision')::bigint AS revision
+                FROM im_v2.user_sync_log
+                WHERE source_event_id = \(bind: profileEventID) AND projection_kind = 'direct_room_profile'
+                ORDER BY user_id
+                """).all(decoding: ProfilePropagationProjectionRow.self)
+            #expect(projections.map(\.userID) == [firstPeerUUID, secondPeerUUID])
+            #expect(projections.allSatisfy { $0.displayName == "新名称" && $0.revision == 2 })
+
+            // A completed source event is never reprojected on a later poll.
+            let replay = try await worker.runOnce(limit: 8)
+            #expect(replay.projectedRecipientCount == 0)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: firstPeerUUID, on: sql) == 2)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: secondPeerUUID, on: sql) == 2)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -3460,6 +3609,24 @@ private struct SyncKindRow: Decodable {
     let sequence: Int64
     let kind: String
     enum CodingKeys: String, CodingKey { case sequence = "user_sync_sequence", kind = "projection_kind" }
+}
+private struct ProfilePropagationOutboxRow: Decodable {
+    let state: String
+    let checkpointed: Bool
+}
+private struct ProfilePropagationCompletedRow: Decodable {
+    let state: String
+    let completed: Bool
+}
+private struct ProfilePropagationProjectionRow: Decodable {
+    let userID: UUID
+    let displayName: String
+    let revision: Int64
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case displayName = "display_name"
+        case revision
+    }
 }
 private struct EncryptedPushEndpointRow: Decodable {
     let encryptedToken: String

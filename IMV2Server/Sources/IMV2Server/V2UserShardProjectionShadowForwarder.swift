@@ -10,7 +10,12 @@ import SQLKit
 /// durable retry key, so a lost response can safely repeat the mirror without
 /// allocating another target sequence.
 public protocol V2UserShardProjectionShadowing: Sendable {
-    func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws
+    /// Writes the existing control-plane record to the user's live write
+    /// owner, and mirrors it to an in-flight migration target when needed.
+    /// The returned sequence belongs to the live write owner and is suitable
+    /// for a best-effort live sync hint. `nil` means no requested source
+    /// projection existed in the control store.
+    func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64?
 }
 
 public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectionShadowing, Sendable {
@@ -26,16 +31,17 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
         self.registry = registry
     }
 
-    public func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws {
+    public func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? {
         guard !projectionKinds.isEmpty,
               let sql = control as? any SQLDatabase,
               let userUUID = UUID(uuidString: userID.rawValue),
               let eventUUID = UUID(uuidString: sourceEventID.rawValue)
-        else { return }
+        else { return nil }
         let routes = try await router.routes(for: [userID])
         guard routes.count == 1 else { throw V2UserShardRouterError.resultCountMismatch }
         let current = try registry.location(for: routes[0].bucket)
         let migration = try await migrations.load(userID: userID)
+        var liveSequence: UInt64?
         for kind in projectionKinds.sorted() {
             guard let row = try await sql.raw("""
                 SELECT user_sync_sequence, projection_kind, payload::text AS payload_json, created_at
@@ -49,6 +55,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                 userID: userID, sourceEventID: sourceEventID, projectionKind: row.projectionKind,
                 payloadJSON: row.payloadJSON, createdAt: row.createdAt
             )
+            if liveSequence == nil { liveSequence = sequence }
             if let migration,
                (migration.phase == .forwarding || migration.phase == .verified),
                migration.sourceBucket == routes[0].bucket {
@@ -60,6 +67,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                 ))
             }
         }
+        return liveSequence
     }
 }
 
