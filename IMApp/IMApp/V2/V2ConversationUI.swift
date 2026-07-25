@@ -775,6 +775,8 @@ struct V2ConversationListView: View {
     @State private var directTargetUserID = ""
     @State private var groupTitle = ""
     @State private var groupMemberUserIDs = ""
+    @State private var directSubmissionTask: Task<Void, Never>?
+    @State private var groupSubmissionTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -855,8 +857,10 @@ struct V2ConversationListView: View {
                         }
                         ToolbarItem(placement: .confirmationAction) {
                             Button("开始") {
-                                Task {
-                                    if let roomID = await store.openDirectConversation(handle: directTargetUserID) {
+                                directSubmissionTask?.cancel()
+                                let target = directTargetUserID
+                                directSubmissionTask = Task {
+                                    if let roomID = await store.openDirectConversation(handle: target), !Task.isCancelled {
                                         directTargetUserID = ""
                                         isPresentingDirectConversation = false
                                         navigationPath.append(roomID)
@@ -866,6 +870,7 @@ struct V2ConversationListView: View {
                             .accessibilityIdentifier("v2.conversation.direct-submit")
                         }
                     }
+                    .onDisappear { directSubmissionTask?.cancel() }
                 }
             }
             .sheet(isPresented: $isPresentingGroupConversation) {
@@ -900,8 +905,11 @@ struct V2ConversationListView: View {
                         }
                         ToolbarItem(placement: .confirmationAction) {
                             Button("创建") {
-                                Task {
-                                    if let roomID = await store.createGroupConversation(title: groupTitle, memberHandlesText: groupMemberUserIDs) {
+                                groupSubmissionTask?.cancel()
+                                let title = groupTitle
+                                let members = groupMemberUserIDs
+                                groupSubmissionTask = Task {
+                                    if let roomID = await store.createGroupConversation(title: title, memberHandlesText: members), !Task.isCancelled {
                                         groupTitle = ""
                                         groupMemberUserIDs = ""
                                         isPresentingGroupConversation = false
@@ -913,6 +921,7 @@ struct V2ConversationListView: View {
                             .accessibilityIdentifier("v2.conversation.group-submit")
                         }
                     }
+                    .onDisappear { groupSubmissionTask?.cancel() }
                 }
             }
         }
