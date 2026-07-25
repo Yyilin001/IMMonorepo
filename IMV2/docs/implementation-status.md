@@ -17,6 +17,17 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-26: current `main` rebuilt the disposable local account, TLS
+  gateway, PostgreSQL and loopback-operator stack, then passed
+  `bash IMV2/scripts/verify_v2_local_account_stack.sh`. The black-box check
+  verified invalid HTTPS input (`400`), password registration and device
+  credential issuance (`200`), shared password-failure lockout (`401` then
+  `429` with `Retry-After` and `no-store`), Push endpoint register/remove
+  (`204`), loopback operator account disable followed by access/refresh
+  rejection, TLS 1.3, and private metrics vocabulary. This is reproducible
+  local-stack evidence only; it does not establish production deployment,
+  external Push delivery, real-device passkey operation, or workload
+  capacity.
 - 2026-07-26: `main` reran the disposable PostgreSQL Server regression
   (**190 tests / 50 suites**). It includes the direct-profile propagation
   recovery: a display-name update atomically creates its source outbox row,
@@ -45,9 +56,10 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   prevent direct/group creation from continuing after a non-cooperative
   identity-directory response, plus privacy-preserving rejection feedback and
   rate-limit retry guidance for direct messages, and one-at-a-time durable
-  submission for a repeatedly tapped send control. The same simulator then passed the complete
-  `IMApp` test plan: conversation, app-store and Push-wake unit suites plus
-  the deterministic fresh-launch UI test. The earlier CoreSimulator migration
+  submission for a repeatedly tapped send control. The same simulator then
+  passed the complete `IMApp` test plan: conversation, app-store and
+  Push-wake unit suites plus the deterministic fresh-launch UI test. The
+  earlier CoreSimulator migration
   failure is therefore not the current local test blocker; this remains
   simulator evidence, not a signed-device or production-network result.
 - 2026-07-26: `main` at `31b2be1` passed the disposable PostgreSQL Server
