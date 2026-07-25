@@ -92,21 +92,25 @@ public struct V2AccountEdgeClientRateLimitMiddleware: AsyncMiddleware, Sendable 
         guard let address = request.storage[V2AccountEdgeClientAddressStorageKey.self] else {
             throw Abort(.forbidden)
         }
+        let result: V2AccountEdgeClientRateLimitResult
         do {
-            switch try await limiter.consume(address: address) {
-            case .allowed:
-                return try await next.respond(to: request)
-            case .rateLimited(let retryAfterSeconds):
-                var headers = HTTPHeaders()
-                headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-                headers.replaceOrAdd(name: "Pragma", value: "no-cache")
-                headers.replaceOrAdd(name: "Retry-After", value: String(retryAfterSeconds))
-                return .init(status: .tooManyRequests, headers: headers)
-            }
+            result = try await limiter.consume(address: address)
         } catch is V2AccountEdgeClientRateLimitError {
             throw Abort(.serviceUnavailable)
         } catch {
             throw Abort(.serviceUnavailable)
+        }
+        switch result {
+        case .allowed:
+            // Deliberately outside the persistence-error mapping: a route's
+            // public 4xx/5xx contract must retain its original status.
+            return try await next.respond(to: request)
+        case .rateLimited(let retryAfterSeconds):
+            var headers = HTTPHeaders()
+            headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+            headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+            headers.replaceOrAdd(name: "Retry-After", value: String(retryAfterSeconds))
+            return .init(status: .tooManyRequests, headers: headers)
         }
     }
 }

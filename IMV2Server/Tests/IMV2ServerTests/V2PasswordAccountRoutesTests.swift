@@ -63,6 +63,24 @@ struct V2PasswordAccountRoutesTests {
         }
     }
 
+    @Test("account-edge limiter preserves an allowed route's client status")
+    func accountEdgeClientBudgetDoesNotRewriteRouteErrors() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let proof = Data(repeating: 8, count: 32).base64EncodedString()
+        let secret = try V2AccountEdgeAuthorizationSecret(base64Encoded: proof)
+        app.middleware.use(V2AccountEdgeAuthenticationMiddleware(secret: secret))
+        app.middleware.use(V2AccountEdgeClientRateLimitMiddleware(limiter: AllowedEdgeClientLimiter()))
+        app.get("invalid") { _ throws -> Response in throw Abort(.badRequest) }
+
+        try await app.testing().test(.GET, "invalid", beforeRequest: { request in
+            request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.headerName, value: proof)
+            request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.clientAddressHeaderName, value: "192.0.2.8")
+        }) { response async in
+            #expect(response.status == .badRequest)
+        }
+    }
+
     @Test("locked password fallback responses are no-store and expose the durable retry interval")
     func lockedPasswordAttemptReturnsNoStoreRetryAfter() async throws {
         let app = try await Application.make(.testing)
@@ -137,5 +155,11 @@ private struct BlockedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {
 private struct FixedEdgeClientLimiter: V2AccountEdgeClientRateLimiting {
     func consume(address _: V2AccountEdgeClientAddress) async throws -> V2AccountEdgeClientRateLimitResult {
         .rateLimited(retryAfterSeconds: 19)
+    }
+}
+
+private struct AllowedEdgeClientLimiter: V2AccountEdgeClientRateLimiting {
+    func consume(address _: V2AccountEdgeClientAddress) async throws -> V2AccountEdgeClientRateLimitResult {
+        .allowed
     }
 }

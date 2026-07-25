@@ -31,7 +31,7 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   fact, rather than a reason to re-run historical non-idempotent SQL. This
   protects local development recovery only and is not a production migration
   runner or release approval.
-- 2026-07-25: isolated PostgreSQL Server regression passed **182 tests / 49
+- 2026-07-25: isolated PostgreSQL Server regression passed **183 tests / 49
   suites** after adding password-factor audit facts, password-registration
   transport validation, mandatory account-edge proof, and a cross-replica
   client request budget. Registration, rejected bcrypt verification and
@@ -39,19 +39,22 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   the relevant account/rate-limit state; the record has no account handle,
   password, verifier, assertion or forwarded client IP. A malformed password
   registration remains a `400` client error instead of being misreported as a
-  dependency outage. An account route rejects a direct caller unless the HTTPS
+  dependency outage; the edge-budget middleware preserves downstream route
+  statuses instead of rewriting an allowed route's `4xx` as `503`. An account
+  route rejects a direct caller unless the HTTPS
   edge supplies both its shared proof and exactly one valid edge-generated
   address; PostgreSQL retains only a keyed HMAC digest and bounded cleanup
   removes expired windows. This is implementation evidence only: production
   trusted-proxy/DDoS policy, audit-reader authorization, account recovery and
   human-disable policy remain release blockers.
 - 2026-07-25: a retained local account-stack PostgreSQL volume was migrated
-  through the new `0017_public_profile_update_outbox.sql` repair migration.
-  The account service and TLS gateway then passed the real HTTPS smoke path:
-  invalid input, two password registrations, five rejected assertions and
-  no-store lockout, device credentials, Push endpoint register/remove, TLS
-  1.3 and private metrics. The HTTPS edge injected the new account-edge proof;
-  its loopback account process would reject that public path without the proof.
+  through the new `0018_account_edge_client_rate_limit.sql` migration. A newly
+  built Linux account/gateway image then passed the real HTTPS smoke path:
+  invalid input (`400`), two password registrations, five rejected assertions
+  and no-store lockout, device credentials, Push endpoint register/remove, TLS
+  1.3 and private metrics. The HTTPS edge injected both the account-edge proof
+  and derived client address; its loopback account process would reject that
+  public path without the proof.
   The aggregate audit table contained two registration
   facts and five rejection facts, without inspecting or printing identities or
   credentials. This remains local deployment evidence, not a production
