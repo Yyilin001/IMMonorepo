@@ -28,6 +28,10 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public let readyPushWakes: Int
     public let leasedPushWakes: Int
     public let suppressedPushWakes: Int
+    /// Outstanding durable account/device revocations for the gateway node
+    /// serving this private scrape. It intentionally has no node/device/user
+    /// label, so the scrape cannot disclose topology or identity.
+    public let pendingDeviceRevocationEvents: Int
 
     public init(
         isAvailable: Bool,
@@ -46,7 +50,8 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         resetPendingDevices: Int = 0,
         readyPushWakes: Int = 0,
         leasedPushWakes: Int = 0,
-        suppressedPushWakes: Int = 0
+        suppressedPushWakes: Int = 0,
+        pendingDeviceRevocationEvents: Int = 0
     ) {
         self.isAvailable = isAvailable
         self.readyRoomOutboxRows = max(0, readyRoomOutboxRows)
@@ -65,6 +70,7 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.readyPushWakes = max(0, readyPushWakes)
         self.leasedPushWakes = max(0, leasedPushWakes)
         self.suppressedPushWakes = max(0, suppressedPushWakes)
+        self.pendingDeviceRevocationEvents = max(0, pendingDeviceRevocationEvents)
     }
 
     public static let unavailable = Self(isAvailable: false)
@@ -76,12 +82,14 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
 public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
     private let database: any Database
     private let deliveryBucket: String?
+    private let gatewayNodeID: String?
 
     /// `nil` is the runtime's all-configured-buckets view. The bucket-scoped
     /// form is retained for focused tests and partitioned deployments.
-    public init(database: any Database, deliveryBucket: String? = nil) {
+    public init(database: any Database, deliveryBucket: String? = nil, gatewayNodeID: String? = nil) {
         self.database = database
         self.deliveryBucket = deliveryBucket
+        self.gatewayNodeID = gatewayNodeID
     }
 
     /// Exposes the fallible database boundary for focused integration tests.
@@ -96,6 +104,8 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
         // the bucket bind typed by its comparison to the text column.
         let includesAllDeliveryBuckets = deliveryBucket == nil
         let scopedDeliveryBucket = deliveryBucket ?? ""
+        let includesGatewayRevocationMetrics = gatewayNodeID != nil
+        let scopedGatewayNodeID = gatewayNodeID ?? ""
         guard let row = try await sql.raw("""
                 WITH snapshot_now AS (SELECT CURRENT_TIMESTAMP AS value)
                 SELECT
@@ -166,7 +176,15 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                      WHERE state = 'claimed' AND lease_expires_at > snapshot_now.value)
                         AS leased_push_wakes,
                     (SELECT COUNT(*) FROM im_v2.push_wake_outbox WHERE state = 'suppressed')
-                        AS suppressed_push_wakes
+                        AS suppressed_push_wakes,
+                    (SELECT CASE WHEN \(bind: includesGatewayRevocationMetrics) THEN COUNT(*) ELSE 0 END
+                     FROM im_v2.device_revocation_events AS event
+                     WHERE event.event_id > COALESCE((
+                        SELECT cursor.last_event_id
+                        FROM im_v2.gateway_worker_cursors AS cursor
+                        WHERE cursor.worker_name = 'device-revocation-v1'
+                          AND cursor.node_id = \(bind: scopedGatewayNodeID)
+                     ), 0)) AS pending_device_revocation_events
             """).first(decoding: DurableWorkMetricsRow.self)
         else {
             throw V2DurableWorkMetricsError.emptyResult
@@ -188,7 +206,8 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
             resetPendingDevices: v2MetricCount(row.resetPendingDevices),
             readyPushWakes: v2MetricCount(row.readyPushWakes),
             leasedPushWakes: v2MetricCount(row.leasedPushWakes),
-            suppressedPushWakes: v2MetricCount(row.suppressedPushWakes)
+            suppressedPushWakes: v2MetricCount(row.suppressedPushWakes),
+            pendingDeviceRevocationEvents: v2MetricCount(row.pendingDeviceRevocationEvents)
         )
     }
 
@@ -244,6 +263,9 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "im_v2_push_wake_backlog{state=\"ready\"} \(snapshot.readyPushWakes)",
         "im_v2_push_wake_backlog{state=\"leased\"} \(snapshot.leasedPushWakes)",
         "im_v2_push_wake_backlog{state=\"suppressed\"} \(snapshot.suppressedPushWakes)",
+        "# HELP im_v2_device_revocation_events_pending Durable device-revocation events not yet consumed by this gateway node.",
+        "# TYPE im_v2_device_revocation_events_pending gauge",
+        "im_v2_device_revocation_events_pending \(snapshot.pendingDeviceRevocationEvents)",
     ].joined(separator: "\n") + "\n"
 }
 
@@ -264,6 +286,7 @@ private struct DurableWorkMetricsRow: Decodable {
     let readyPushWakes: Int64
     let leasedPushWakes: Int64
     let suppressedPushWakes: Int64
+    let pendingDeviceRevocationEvents: Int64
 
     enum CodingKeys: String, CodingKey {
         case readyRoomOutboxRows = "ready_room_outbox_rows"
@@ -282,6 +305,7 @@ private struct DurableWorkMetricsRow: Decodable {
         case readyPushWakes = "ready_push_wakes"
         case leasedPushWakes = "leased_push_wakes"
         case suppressedPushWakes = "suppressed_push_wakes"
+        case pendingDeviceRevocationEvents = "pending_device_revocation_events"
     }
 }
 

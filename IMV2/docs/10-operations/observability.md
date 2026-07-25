@@ -56,7 +56,11 @@ EOF、协议错误和设备撤销都会走同一注销路径。它们仅描述�
 `im_v2_room_outbox_backlog`、`im_v2_fanout_plans_open`、
 `im_v2_direct_profile_update_backlog`、`im_v2_fanout_delivery_backlog`、
 `im_v2_sync_pending_records_across_devices` 与
-`im_v2_sync_reset_pending_devices`。room outbox 和投递只使用固定的
+`im_v2_sync_reset_pending_devices`。当 gateway 启动配置提供 node ID 时，快照还包含
+`im_v2_device_revocation_events_pending`：它只统计**当前 scrape 所在 gateway
+节点**尚未消费的 device-revocation event，不含 node、user 或 device 标签。其非零
+短暂出现是正常消费过程；若持续存在，可能有已撤销会话尚未断开，必须按账号禁用
+runbook 处置。room outbox 和投递只使用固定的
 `ready`/`leased`/`scheduled`/`paused` 标签；`scheduled` 表示仍处于退避等待期，
 `paused` 表示重试预算已耗尽、必须经受控
 operator replay 才会再次入队的 durable row，绝不能将它当作已投递或已终态。
@@ -93,6 +97,7 @@ loopback `/metrics`，断言 `no-store`、未发布 9464 端口及 ready/leased/
 | `IMV2DurableWorkMetricsUnavailable` | scrape 值为 `0` 或指标缺失，5 分钟 | critical | 恢复 PostgreSQL metrics source 后确认 backlog；不能据此执行 replay |
 | `IMV2PausedRoomOutbox` | paused outbox 大于 `0`，2 分钟 | critical | 按 replay runbook 先修复根因再单目标回放 |
 | `IMV2PausedFanoutDelivery` | paused delivery 大于 `0`，2 分钟 | critical | 按 replay runbook 先修复根因再单目标回放 |
+| `IMV2DeviceRevocationBacklog` | 任一 gateway 的未消费撤销事件大于 `0`，2 分钟 | critical | 按账号禁用 runbook 调查 worker、数据库与连接关闭；不得 replay 或忽略该事件 |
 | `IMV2FanoutFailureRate` | 任意 fan-out failure 持续 10 分钟 | warning | 调查依赖、路由与失败 stage，避免演变为 paused |
 
 paused 阈值刻意为零；它代表重试预算已耗尽的正确性事件，不能依靠容量基准把它

@@ -43,6 +43,21 @@ groups:
           summary: IM V2 fan-out delivery work is paused pending operator replay
           runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
 
+      # Device-revocation events close already-authenticated gateway channels
+      # after an account or device fence. A short non-zero interval is normal
+      # during consumption; persistence means a gateway may retain a revoked
+      # session, so it is a security incident rather than replayable work.
+      - alert: IMV2DeviceRevocationBacklog
+        expr: max(im_v2_device_revocation_events_pending) > 0
+        for: 2m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 gateway has unconsumed device-revocation events
+          runbook: IMV2/docs/10-operations/account-disable-runbook.md
+
       - alert: IMV2FanoutFailureRate
         expr: sum(rate(im_v2_fanout_failures_total[5m])) > 0
         for: 10m

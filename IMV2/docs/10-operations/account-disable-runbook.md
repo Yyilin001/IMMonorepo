@@ -44,9 +44,12 @@ POST /internal/v2/accounts/disable
 2. 经受控 proxy 调用上述 endpoint。网络重试必须复用原 `operationID`。
 3. 确认 `im_v2.account_disables` 中恰有该 operation 的审计事实；确认 proxy/bastion
    审计也保存了审批和调用主体。不要将结果行、UUID 或任何 bearer 输出到公开日志。
-4. 观察 gateway 每个副本消费 `device_revocation_events`，已有 socket 被关闭；再用
-   受控验证证明旧 access token、refresh credential 和已有 assertion 都不能获得
-   新 credential。若任一项失败，停止后续处置并升级安全 incident。
+4. 在每个 gateway 副本的私有 `/metrics` 观察
+   `im_v2_device_revocation_events_pending` 回到 `0`，并确认已有 socket 被关闭；该
+   指标无 node、user 或 device 标签，须由采集目标而非标签定位副本。再用受控验证
+   证明旧 access token、refresh credential 和已有 assertion 都不能获得新 credential。
+   若任一项失败，停止后续处置并升级安全 incident；不得对撤销事件执行 replay 或
+   绕过 cursor。
 
 ## 本机隔离验证边界
 

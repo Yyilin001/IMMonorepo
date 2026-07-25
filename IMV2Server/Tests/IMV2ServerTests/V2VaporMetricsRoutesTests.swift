@@ -94,7 +94,8 @@ struct V2VaporMetricsRoutesTests {
             resetPendingDevices: 11,
             readyPushWakes: 12,
             leasedPushWakes: 13,
-            suppressedPushWakes: 14
+            suppressedPushWakes: 14,
+            pendingDeviceRevocationEvents: 17
         ))
         V2VaporMetricsRoutes.register(on: app, telemetry: telemetry, durableWorkMetrics: durableWorkMetrics)
 
@@ -113,6 +114,8 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_push_wake_backlog{state=\"ready\"} 12"))
             #expect(body.contains("im_v2_push_wake_backlog{state=\"leased\"} 13"))
             #expect(body.contains("im_v2_push_wake_backlog{state=\"suppressed\"} 14"))
+            #expect(body.contains("im_v2_device_revocation_events_pending 17"))
+            #expect(!body.contains("im_v2_device_revocation_events_pending{"))
             #expect(!body.contains("target_shard_bucket"))
         }
     }

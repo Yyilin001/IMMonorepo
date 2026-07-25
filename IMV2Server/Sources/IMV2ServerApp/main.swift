@@ -43,7 +43,8 @@ enum IMV2ServerApp {
             let prometheusTelemetry = V2PrometheusTelemetrySink()
             let transportMetrics = V2GatewayTransportMetrics()
             let durableWorkMetrics = PostgresV2DurableWorkMetricsSource(
-                database: database
+                database: database,
+                gatewayNodeID: configuration.gatewayNodeID
             )
             V2VaporMetricsRoutes.register(
                 on: app,

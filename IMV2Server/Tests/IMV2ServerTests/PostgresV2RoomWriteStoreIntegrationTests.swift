@@ -2067,8 +2067,25 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await installSchema(on: sql)
             try await seedRoom(on: sql)
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let metrics = PostgresV2DurableWorkMetricsSource(database: app.db(.psql), deliveryBucket: "test-users")
+            let revocationNodeID = "metrics-revocation-gateway"
+            let metrics = PostgresV2DurableWorkMetricsSource(
+                database: app.db(.psql),
+                deliveryBucket: "test-users",
+                gatewayNodeID: revocationNodeID
+            )
             #expect(try await metrics.loadDurableWorkMetrics() == .init(isAvailable: true))
+
+            let firstRevokedUser = UUID(uuidString: "00000000-0000-0000-0000-000000000711")!
+            let firstRevokedDevice = UUID(uuidString: "00000000-0000-0000-0000-000000000712")!
+            let secondRevokedUser = UUID(uuidString: "00000000-0000-0000-0000-000000000713")!
+            let secondRevokedDevice = UUID(uuidString: "00000000-0000-0000-0000-000000000714")!
+            try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at) VALUES (\(bind: firstRevokedUser), \(bind: firstRevokedDevice), \(bind: now)), (\(bind: secondRevokedUser), \(bind: secondRevokedDevice), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.device_revocation_events (user_id, device_id, created_at) VALUES (\(bind: firstRevokedUser), \(bind: firstRevokedDevice), \(bind: now)), (\(bind: secondRevokedUser), \(bind: secondRevokedDevice), \(bind: now))").run()
+            #expect((await metrics.durableWorkMetricsSnapshot()).pendingDeviceRevocationEvents == 2)
+            let revocationStore = V2PostgresDeviceRevocationEventStore(database: app.db(.psql))
+            let firstRevocation = try #require(try await revocationStore.events(afterCursorFor: revocationNodeID, limit: 1).first)
+            try await revocationStore.markProcessed(eventID: firstRevocation.eventID, nodeID: revocationNodeID, now: now)
+            #expect((await metrics.durableWorkMetricsSnapshot()).pendingDeviceRevocationEvents == 1)
 
             let profile = try RoomCapacityProfile(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3)
             let send = V2SendMessageService(
