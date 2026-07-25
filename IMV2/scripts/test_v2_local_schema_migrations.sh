@@ -43,7 +43,8 @@ run_migrator() {
 }
 
 bootstrap_output="$(run_migrator)"
-test "$(printf '%s\n' "${bootstrap_output}" | grep -Fc 'local V2 migration recorded:')" = '14'
+expected_migration_count="$(find "${v2_dir}/sql" -maxdepth 1 -type f -name '[0-9][0-9][0-9][0-9]_*.sql' | wc -l | tr -d '[:space:]')"
+test "$(printf '%s\n' "${bootstrap_output}" | grep -Fc 'local V2 migration recorded:')" = "${expected_migration_count}"
 
 psql() {
   "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 "$@"

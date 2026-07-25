@@ -102,6 +102,12 @@ migration_marker() {
     0014_account_password_login_rate_limit.sql)
       printf "%s" "SELECT to_regclass('im_v2.account_password_login_rate_limits') IS NOT NULL"
       ;;
+    0015_public_identities.sql)
+      printf "%s" "SELECT to_regclass('im_v2.public_user_profiles') IS NOT NULL"
+      ;;
+    0016_account_password_authentication_audit.sql)
+      printf "%s" "SELECT to_regclass('im_v2.account_password_authentication_audit') IS NOT NULL"
+      ;;
     *)
       printf 'missing local migration marker for %s; add one before using a retained volume.\n' "$1" >&2
       return 1
