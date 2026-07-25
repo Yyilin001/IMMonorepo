@@ -167,6 +167,30 @@ struct V2ConversationStoreTests {
         #expect(await sender.sentMessages() == [.init(text: "离线消息", roomID: "room-a")])
     }
 
+    @Test func messageSendAllowsOnlyOneDurableSubmissionAtATime() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let sender = V2SuspendingConversationSender()
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: sender,
+            userID: "current-user",
+            roomID: "room-a"
+        )
+        store.draft = "只发送一次"
+
+        let firstSubmission = Task { await store.sendDraft() }
+        await sender.waitUntilSending()
+        await store.sendDraft()
+
+        #expect(store.isSending)
+        #expect(await sender.sentMessages() == [.init(text: "只发送一次", roomID: "room-a")])
+        await sender.complete()
+        await firstSubmission.value
+
+        #expect(!store.isSending)
+        #expect(store.draft.isEmpty)
+    }
+
     @Test func messageSendExplainsRateLimitWithoutDiscardingTheDraft() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .rejected(code: "RATE_LIMITED"))
@@ -838,6 +862,34 @@ private actor V2ConversationSenderFake: V2ConversationSending {
     func sentMessages() -> [V2SentMessage] {
         messages
     }
+}
+
+private actor V2SuspendingConversationSender: V2ConversationSending {
+    private var messages: [V2SentMessage] = []
+    private var beganSending = false
+    private var startWaiter: CheckedContinuation<Void, Never>?
+    private var completion: CheckedContinuation<Void, Never>?
+
+    func send(text: String, media: [V2MediaReference], in roomID: String) async throws -> V2ConversationSendOutcome {
+        messages.append(.init(text: text, media: media, roomID: roomID))
+        beganSending = true
+        startWaiter?.resume()
+        startWaiter = nil
+        await withCheckedContinuation { completion = $0 }
+        return .accepted
+    }
+
+    func waitUntilSending() async {
+        guard !beganSending else { return }
+        await withCheckedContinuation { startWaiter = $0 }
+    }
+
+    func complete() {
+        completion?.resume()
+        completion = nil
+    }
+
+    func sentMessages() -> [V2SentMessage] { messages }
 }
 
 private struct V2SentMessage: Equatable, Sendable {

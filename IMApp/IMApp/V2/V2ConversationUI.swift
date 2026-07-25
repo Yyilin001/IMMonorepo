@@ -377,6 +377,7 @@ final class V2ConversationDetailStore {
     private(set) var messages: [V2ConversationMessageItem] = []
     private(set) var state: State = .loading
     private(set) var sendFeedback: String?
+    private(set) var isSending = false
     private(set) var messageActionFeedback: String?
     private(set) var groupMembers: [V2GroupMemberItem] = []
     private(set) var groupMemberRevision: UInt64?
@@ -447,12 +448,15 @@ final class V2ConversationDetailStore {
     }
 
     func sendDraft() async {
+        guard !isSending else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let sender else {
             sendFeedback = "实时网关尚未可用，无法发送。"
             return
         }
+        isSending = true
+        defer { isSending = false }
         guard await uploadPendingAttachments() else { return }
         let media = attachments.compactMap { item -> V2MediaReference? in
             guard case .available(let reference) = item.state else { return nil }
@@ -501,7 +505,8 @@ final class V2ConversationDetailStore {
     }
 
     var canAddAttachment: Bool {
-        attachments.count < V2MessageCommandLimits.maxMediaAttachments
+        !isSending
+            && attachments.count < V2MessageCommandLimits.maxMediaAttachments
             && !attachments.contains(where: { $0.state == .uploading })
     }
 
@@ -530,6 +535,7 @@ final class V2ConversationDetailStore {
     }
 
     func removeAttachment(id: UUID) async {
+        guard !isSending else { return }
         guard let index = attachments.firstIndex(where: { $0.id == id }) else { return }
         let attachment = attachments.remove(at: index).attachment
         await attachmentStager?.discard(attachment)
@@ -1020,9 +1026,11 @@ private struct V2ConversationDetailView: View {
                         TextField("消息", text: $store.draft, axis: .vertical)
                             .textFieldStyle(.roundedBorder)
                             .lineLimit(1 ... 4)
+                            .disabled(store.isSending)
                             .accessibilityIdentifier("v2.message.draft")
-                        Button("发送") { Task { await store.sendDraft() } }
-                            .disabled(store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.attachments.isEmpty)
+                        Button(store.isSending ? "发送中…" : "发送") { Task { await store.sendDraft() } }
+                            .disabled(store.isSending || (store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.attachments.isEmpty))
+                            .accessibilityValue(store.isSending ? "正在保存消息" : "")
                             .accessibilityIdentifier("v2.message.send")
                     }
                     .padding()
@@ -1092,6 +1100,7 @@ private struct V2ConversationAttachmentRow: View {
             Button("移除", role: .destructive) {
                 Task { await store.removeAttachment(id: attachment.id) }
             }
+            .disabled(store.isSending)
             .accessibilityLabel(removalLabel)
             .accessibilityIdentifier(removeIdentifier)
         }
