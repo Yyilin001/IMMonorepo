@@ -50,6 +50,7 @@ final class V2PublicIdentitySettingsStore {
 
 struct V2PublicIdentitySettingsView: View {
     @Bindable var store: V2PublicIdentitySettingsStore
+    @State private var saveTask: Task<Void, Never>?
 
     var body: some View {
         Form {
@@ -64,7 +65,10 @@ struct V2PublicIdentitySettingsView: View {
             Section("显示名称") {
                 TextField("显示名称", text: $store.displayName)
                     .accessibilityIdentifier("v2.identity.display-name.edit")
-                Button("保存") { Task { await store.save() } }
+                Button("保存") {
+                    saveTask?.cancel()
+                    saveTask = Task { await store.save() }
+                }
                     .disabled(store.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isSaving)
                     .accessibilityIdentifier("v2.identity.save")
             }
@@ -74,5 +78,6 @@ struct V2PublicIdentitySettingsView: View {
         }
         .navigationTitle("我的资料")
         .task { await store.load() }
+        .onDisappear { saveTask?.cancel() }
     }
 }
