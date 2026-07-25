@@ -193,7 +193,7 @@ public struct V2PostgresUserShardRouteControl: Sendable {
                 SELECT operator_principal, user_id, write_bucket, read_fallback_bucket, resulting_router_epoch
                 FROM im_v2.user_shard_route_operations WHERE operation_id = \(bind: command.operationID)
                 """).first(decoding: V2UserShardRouteOperationRow.self) {
-                guard replay.userID.uuidString == command.userID.rawValue,
+                guard replay.userID == (try v2UUID(command.userID)),
                       replay.operatorPrincipal == operatorPrincipal,
                       replay.writeBucket == command.newWriteBucket,
                       replay.readFallbackBucket == command.readFallbackBucket
@@ -275,7 +275,7 @@ public struct V2PostgresUserShardRouteControl: Sendable {
                 SELECT operator_principal, user_id, write_bucket, read_fallback_bucket, resulting_router_epoch
                 FROM im_v2.user_shard_route_operations WHERE operation_id = \(bind: command.operationID)
                 """).first(decoding: V2UserShardRouteOperationRow.self) {
-                guard replay.userID.uuidString == command.userID.rawValue,
+                guard replay.userID == (try v2UUID(command.userID)),
                       replay.operatorPrincipal == operatorPrincipal,
                       replay.writeBucket == migration.sourceBucket,
                       replay.readFallbackBucket == migration.targetBucket

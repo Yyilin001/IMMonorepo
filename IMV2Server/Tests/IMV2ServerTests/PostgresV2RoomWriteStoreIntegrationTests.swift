@@ -2504,7 +2504,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let expectedCurrentRoute = try V2UserShardRoute(bucket: "users-new", observedRouterEpoch: 5, readFallbackBucket: "users-old")
             #expect(currentRoute == expectedCurrentRoute)
             #expect(firstCutover.wasIdempotent == false)
-            #expect(try await control.cutOver(cutover, now: now.addingTimeInterval(1)) == .init(route: currentRoute, wasIdempotent: true))
+            let caseVariantCutover = try V2UserShardRouteCutover(
+                operationID: cutover.operationID,
+                userID: try UserID(user.uuidString.lowercased()),
+                expectedRouterEpoch: cutover.expectedRouterEpoch,
+                newWriteBucket: cutover.newWriteBucket,
+                readFallbackBucket: cutover.readFallbackBucket
+            )
+            #expect(try await control.cutOver(caseVariantCutover, now: now.addingTimeInterval(1)) == .init(route: currentRoute, wasIdempotent: true))
             let retainedMigration = try await migrationStore.load(migrationID: migration.migrationID)
             #expect(retainedMigration?.phase == .retention)
             #expect(retainedMigration?.cutoverOperationID == cutover.operationID)
@@ -2579,7 +2586,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             )
             #expect(rollbackResult.route == expectedRollbackRoute)
             #expect(!rollbackResult.wasIdempotent)
-            #expect(try await control.rollBack(rollback, now: now.addingTimeInterval(3)).wasIdempotent)
+            let caseVariantRollback = try V2UserShardRouteRollback(
+                operationID: rollback.operationID,
+                userID: try UserID(user.uuidString.lowercased()),
+                expectedRouterEpoch: rollback.expectedRouterEpoch
+            )
+            #expect(try await control.rollBack(caseVariantRollback, now: now.addingTimeInterval(3)).wasIdempotent)
             #expect(try await migrationStore.load(migrationID: migration.migrationID)?.phase == .rolledBack)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
