@@ -3,8 +3,6 @@
 .git
 .github
 IMApp
-IMClientKit
-IMServer
 Protocol
 deploy
 scripts

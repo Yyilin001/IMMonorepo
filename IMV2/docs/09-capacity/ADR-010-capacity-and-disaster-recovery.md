@@ -20,8 +20,9 @@ budget、非重叠 allocation fence、Push budget、SLO、RPO/RTO、PITR 与恢�
 ## 批准后的门槛、回滚与复审
 
 在 `docs/09-capacity/` 记录 topology/workload/阈值；实现全局 worker credit、
-监控告警、PITR restore 与 replay runbook；执行 100k、gateway/worker/PG/Redis/NATS
-故障实验。报告失败时降低 profile，不以配置值继续发布。任何容量、SLO、RPO/RTO
+监控告警、PITR restore 与 replay runbook；执行 100k、gateway/worker/PG，以及启用时
+NATS hint 的故障实验。Redis 不属于当前 V2 correctness path。报告失败时降低 profile，
+不以配置值继续发布。任何容量、SLO、RPO/RTO
 或存储拓扑变化均复审。
 
 ## 当前可重复的恢复证据

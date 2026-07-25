@@ -1,8 +1,7 @@
 # IMApp V2
 
-`IMApp` 的运行入口已经切换为 V2。它不再恢复、写入或依赖 V1 的
-登录态、HTTP API 或 TCP 会话；旧源文件尚留在工程中，供后续清理，但
-不属于当前 App 的组合根。
+`IMApp` 的运行入口为 V2。它只恢复、写入和依赖 V2 的登录态、账户 HTTPS
+入口与 TLS 会话；当前组合根不包含任何兼容或迁移路径。
 
 ## 当前可运行链路
 
@@ -102,4 +101,5 @@ docker compose -f IMV2/docker-compose.isolated-tests.yml \
 
 发布前还必须完成生产 WebAuthn verifier、账户服务 HTTPS/限流部署、真实设备
 端到端回归，以及群聊、推送、媒体等 V2 产品界面。完整证据见
-[`IMV2/docs/implementation-status.md`](../IMV2/docs/implementation-status.md)。
+[`IMV2/docs/implementation-status.md`](../IMV2/docs/implementation-status.md)；组件
+边界与真实投递链路见 [`docs/current-system-map.md`](../docs/current-system-map.md)。

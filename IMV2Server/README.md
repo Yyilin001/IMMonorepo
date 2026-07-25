@@ -1,7 +1,11 @@
 # IM V2 Gateway
 
-`IMV2ServerApp` is a standalone V2-only TLS gateway. It has no V1 route,
+`IMV2ServerApp` is a standalone V2-only TLS gateway. It has no external route,
 table, wire-protocol, or migration dependency.
+
+For the cross-component data path and the distinction between implementation
+and release evidence, see [the current system map](../docs/current-system-map.md)
+and the [V2 document entry](../IMV2/docs/README.md).
 
 ## Provisioning
 
@@ -26,7 +30,9 @@ table, wire-protocol, or migration dependency.
    the device issuer; it is not a passkey verifier itself. The fallback
    `V2PasswordAccountRoutes` stores bcrypt verifiers only and requires an
    equal-cost dummy bcrypt digest for unknown-account timing resistance.
-5. Set every variable in [`.env.example`](.env.example), then run the V2 app.
+5. Set every required variable in [`.env.example`](.env.example), then run the
+   V2 app. The `IM_V2_NATS_*` variables are an all-or-nothing optional hint
+   layer, not a required broker dependency.
 
 ## Durable-work operator replay
 
@@ -112,6 +118,14 @@ it never contacts a public endpoint or writes a token to disk/output.
   application-owned heartbeats; background clients rely on reconnect and sync.
 - `IM_V2_WORKER_BATCH_SIZE` and `IM_V2_WORKER_POLL_INTERVAL_MS` schedule the
   bounded durable path from room outbox to fan-out plan to user sync log.
+- PostgreSQL durable polling is always the correctness path. When
+  `IM_V2_NATS_URL` and `IM_V2_NATS_SUBJECT` are both configured, the gateway
+  publishes a best-effort Core NATS wake hint only after durable publication.
+  Loss, duplication or publishing failure cannot release work or change user
+  state; polling recovers it. The current adapter opens a fresh connection for
+  each hint and has no NATS TLS/NKey, broker acknowledgement, consumer,
+  reconnection or broker-health implementation, so it is not production broker
+  evidence and must not be used as a delivery dependency.
 - `IM_V2_DURABLE_RETRY_*` is an explicit exponential-backoff budget for that
   path. The initial/max delays, attempt budget and 0–100% jitter are required
   deployment inputs. Exhausted work becomes alertable `paused` durable work;

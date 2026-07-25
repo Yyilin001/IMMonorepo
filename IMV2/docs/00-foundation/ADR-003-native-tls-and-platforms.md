@@ -6,7 +6,7 @@
 
 ## 背景与决定
 
-V2 已实现原生 TLS TCP framing 和独立 `IMV2ClientKit`，不复用 V1 HTTP/WS
+V2 已实现原生 TLS TCP framing 和独立 `IMV2ClientKit`，不复用既有 HTTP/WS
 协议。首个可发布客户端的平台、最低系统版本、后台能力、证书链轮换和网络
 降级策略尚未批准；因此只接受“原生 TLS TCP 是 V2 实时协议”的方向，不批准
 任何平台发布承诺。
@@ -26,7 +26,7 @@ V2 已实现原生 TLS TCP framing 和独立 `IMV2ClientKit`，不复用 V1 HTTP
   比率限制、双端 golden vectors 以及本 ADR 的复审。
 - 平台发布前必须明确 iOS/macOS 的 deployment target、后台网络行为、证书
   pinning/轮换策略、网络代理与弱网测试范围。
-- V2 绿地发布不兼容 V1，详见 ADR-000；一旦外部分发，协议演进须另行评审。
+- V2 首次发布不提供历史兼容层，详见 ADR-000；一旦外部分发，协议演进须另行评审。
 
 ## 落地、回滚与复审
 

@@ -4,6 +4,12 @@
 
 ## 已实现的边界
 
+PostgreSQL durable-work 指标是 worker 健康和积压的权威观测面。可选 NATS 只会在
+durable publication 之后发送最佳努力 wake hint；提示发布失败不会改变 outbox、plan
+或 delivery 状态，因此不会产生“broker 成功即投递成功”的指标语义。当前 adapter
+也没有 NATS connection、publish-confirmation、consumer lag、reconnect 或 broker
+availability 指标；启用 NATS 前不能把这些缺失指标误解为健康。
+
 `V2TelemetrySink` 是 Server 的可注入边界。网关命令和一次 fan-out pipeline
 进度分别写入 `V2TelemetryEvent`；生产应用使用 `V2ApplicationTelemetrySink`
 输出结构化日志，测试使用 `V2InMemoryTelemetrySink` 断言事件内容。
@@ -94,8 +100,9 @@ paused 阈值刻意为零；它代表重试预算已耗尽的正确性事件，�
 ## 仍需交付
 
 - 将结构化日志接入受控的集中采集和告警系统，并建立保留/访问策略；
-- 补齐 Push、Redis/NATS、shard lease 和容量利用率指标，并基于批准的负载报告为
-  durable-work ready/scheduled backlog 设定容量阈值；
+- 补齐 Push、NATS hint（连接、publish-confirmation、consumer lag、reconnect、broker
+  availability）、shard lease 和容量利用率指标，并基于批准的负载报告为 durable-work
+  ready/scheduled backlog 设定容量阈值；Redis 不属于当前 V2 correctness path；
 - 将角色 owner `im-v2-platform-oncall` 映射到实际 Alertmanager receiver 并保留
   一次演练证据；受认证的单目标 replay 入口、事务审计与 runbook 已见
   [`durable-work-operator-replay.md`](durable-work-operator-replay.md)；

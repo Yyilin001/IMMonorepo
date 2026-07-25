@@ -8,7 +8,7 @@ CLIENT_OUT="${V2_PROTOBUF_CLIENT_OUT:-$ROOT_DIR/IMV2ClientKit/Sources/IMV2Client
 SERVER_OUT="${V2_PROTOBUF_SERVER_OUT:-$ROOT_DIR/IMV2Server/Sources/IMV2Server/Generated/Protobuf}"
 CLIENT_VERSION="${V2_PROTOBUF_CLIENT_VERSION:-$ROOT_DIR/IMV2ClientKit/Sources/IMV2ClientKit/Generated/IMV2ProtocolVersion.swift}"
 SERVER_VERSION="${V2_PROTOBUF_SERVER_VERSION:-$ROOT_DIR/IMV2Server/Sources/IMV2Server/Generated/IMV2ProtocolVersion.swift}"
-SWIFT_PROTOBUF_CHECKOUT="$ROOT_DIR/IMServer/.build/checkouts/swift-protobuf"
+SWIFT_PROTOBUF_CHECKOUT="$ROOT_DIR/IMV2Server/.build/checkouts/swift-protobuf"
 
 fail() { echo "generate V2 protobuf failed: $1" >&2; exit 1; }
 
@@ -17,7 +17,7 @@ resolve_plugin() {
     [[ -x "$PROTOC_GEN_SWIFT" ]] || fail "PROTOC_GEN_SWIFT is not executable"
     printf '%s' "$PROTOC_GEN_SWIFT"; return
   fi
-  [[ -d "$SWIFT_PROTOBUF_CHECKOUT" ]] || swift package --package-path "$ROOT_DIR/IMServer" resolve >/dev/null
+  [[ -d "$SWIFT_PROTOBUF_CHECKOUT" ]] || swift package --package-path "$ROOT_DIR/IMV2Server" resolve >/dev/null
   swift build --package-path "$SWIFT_PROTOBUF_CHECKOUT" -c release --product protoc-gen-swift >/dev/null
   local plugin
   plugin="$(find "$SWIFT_PROTOBUF_CHECKOUT/.build" -path '*/release/protoc-gen-swift' -type f | sort | head -n 1)"

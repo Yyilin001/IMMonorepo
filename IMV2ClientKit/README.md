@@ -1,6 +1,6 @@
 # IM V2 Client Kit
 
-`IMV2ClientKit` is independent of the V1 client cache and protocol. Its
+`IMV2ClientKit` has its own local cache and protocol boundary. Its
 currently implemented durable boundaries are:
 
 - `V2AuthSession`: the sole owner of device credentials and refresh rotation.
@@ -44,7 +44,7 @@ a stale refresh cannot recreate it afterward.
 `V2ClientSessionBootstrapper` is the app-facing startup boundary: it requires
 an authenticated V2 session before opening the installation-bound local store,
 and accepts first credentials only from an injected trusted account/device
-provider. It deliberately has no V1 session or default login fallback.
+provider. It deliberately has no legacy session or default login fallback.
 
 `V2HTTPDeviceCredentialAuthTransport` is the native HTTPS refresh adapter for
 `POST /v2/device-credentials/refresh`. It sends the durable refresh operation
@@ -90,8 +90,8 @@ treated as delivery state.
 
 The app must inject concrete V2 auth and sync transports, plus a
 `V2KeychainInstallationBindingStore` into `V2LocalStoreBootstrapper` before
-opening the local database. No V1 transport, cache, credentials, or database
-tables are read by this package.
+opening the local database. No external transport, cache, credential, or
+database-table state is read by this package.
 
 ## Verify
 
