@@ -13,6 +13,7 @@ on:
       - "scripts/check_v2_protobuf_generated.sh"
       - "scripts/generate_v2_sql_migration_manifest.sh"
       - "scripts/check_v2_sql_migration_manifest.sh"
+      - "scripts/check_v2_schema_readiness_tables.sh"
       - "scripts/check_v2_prometheus_rules.sh"
       - "scripts/check_v2_runtime_env_examples.sh"
   push:
@@ -28,6 +29,7 @@ on:
       - "scripts/check_v2_protobuf_generated.sh"
       - "scripts/generate_v2_sql_migration_manifest.sh"
       - "scripts/check_v2_sql_migration_manifest.sh"
+      - "scripts/check_v2_schema_readiness_tables.sh"
       - "scripts/check_v2_prometheus_rules.sh"
       - "scripts/check_v2_runtime_env_examples.sh"
   workflow_dispatch:
@@ -90,6 +92,9 @@ jobs:
 
       - name: Verify SQL migration manifest
         run: ./scripts/check_v2_sql_migration_manifest.sh
+
+      - name: Verify schema readiness table coverage
+        run: bash ./scripts/check_v2_schema_readiness_tables.sh
 
       - name: Validate V2 Prometheus rules
         run: ./scripts/check_v2_prometheus_rules.sh
