@@ -473,13 +473,30 @@ final class V2ConversationDetailStore {
                 await discardAttachmentsAfterDurableSend()
                 draft = ""
             case .rejected(let code):
-                sendFeedback = "发送被拒绝（\(code)）。"
+                sendFeedback = Self.sendRejectionFeedback(for: code)
             }
             await refresh()
         } catch is CancellationError {
             return
         } catch {
             sendFeedback = "无法保存待发送消息。"
+        }
+    }
+
+    private static func sendRejectionFeedback(for code: String) -> String {
+        switch code {
+        case "RATE_LIMITED":
+            return "发送频率已达上限，请稍后再试。"
+        case "FORBIDDEN":
+            // Do not disclose whether the receiver disabled stranger messages,
+            // blocked the sender, or a separate room policy denied the action.
+            return "当前无法向此会话发送消息。"
+        case "MEDIA_UNAVAILABLE":
+            return "附件暂不可用，请重新上传后再试。"
+        case "NOT_FOUND":
+            return "此会话已不可用，请返回会话列表刷新后再试。"
+        default:
+            return "发送被拒绝（\(code)）。"
         }
     }
 

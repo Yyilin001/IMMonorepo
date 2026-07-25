@@ -167,6 +167,42 @@ struct V2ConversationStoreTests {
         #expect(await sender.sentMessages() == [.init(text: "离线消息", roomID: "room-a")])
     }
 
+    @Test func messageSendExplainsRateLimitWithoutDiscardingTheDraft() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let sender = V2ConversationSenderFake(result: .rejected(code: "RATE_LIMITED"))
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: sender,
+            userID: "current-user",
+            roomID: "room-a"
+        )
+        store.draft = "稍后再发"
+
+        await store.sendDraft()
+
+        #expect(store.draft == "稍后再发")
+        #expect(store.sendFeedback == "发送频率已达上限，请稍后再试。")
+        #expect(await sender.sentMessages() == [.init(text: "稍后再发", roomID: "room-a")])
+    }
+
+    @Test func messageSendKeepsPrivacyDenialReasonOpaque() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let sender = V2ConversationSenderFake(result: .rejected(code: "FORBIDDEN"))
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: sender,
+            userID: "current-user",
+            roomID: "room-a"
+        )
+        store.draft = "陌生消息"
+
+        await store.sendDraft()
+
+        #expect(store.draft == "陌生消息")
+        #expect(store.sendFeedback == "当前无法向此会话发送消息。")
+        #expect(await sender.sentMessages() == [.init(text: "陌生消息", roomID: "room-a")])
+    }
+
     @Test func attachmentOnlyMessageWaitsForUploaderThenEnqueuesOpaqueReference() async throws {
         let staged = V2StagedConversationAttachment(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000601")!,
