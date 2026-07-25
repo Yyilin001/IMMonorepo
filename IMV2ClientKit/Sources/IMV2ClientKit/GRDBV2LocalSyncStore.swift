@@ -420,6 +420,47 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
+    /// Persists an identity that the current user explicitly resolved before
+    /// opening a direct room. It deliberately survives a sync reset: the
+    /// server has not made this cache a sync projection yet, and deleting it
+    /// would regress an already-authorized, still-active direct room to a
+    /// UUID title after recovery.
+    public func cacheDirectRoomIdentity(roomID: RoomID, publicIdentity: V2PublicIdentity, updatedAt: Date = Date()) throws {
+        try databasePool.write { db in
+            if let existing = try Row.fetchOne(db, sql: "SELECT target_user_id FROM v2_direct_room_identities WHERE room_id = ?", arguments: [roomID.rawValue]) {
+                let targetUserID: String = existing["target_user_id"]
+                guard targetUserID == publicIdentity.userID.rawValue else { throw V2ClientProjectionError.invalidMessagePayload }
+            }
+            try db.execute(
+                sql: """
+                INSERT INTO v2_direct_room_identities
+                    (room_id, target_user_id, public_handle, display_name, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(room_id) DO UPDATE SET
+                    public_handle = excluded.public_handle,
+                    display_name = excluded.display_name,
+                    updated_at = excluded.updated_at
+                """,
+                arguments: [
+                    roomID.rawValue,
+                    publicIdentity.userID.rawValue,
+                    publicIdentity.handle.rawValue,
+                    publicIdentity.displayName,
+                    updatedAt.timeIntervalSince1970
+                ]
+            )
+        }
+    }
+
+    public func directRoomIdentities() throws -> [V2ClientDirectRoomIdentity] {
+        try databasePool.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT room_id, target_user_id, public_handle, display_name, updated_at FROM v2_direct_room_identities ORDER BY updated_at DESC, room_id"
+            ).map(Self.decodeDirectRoomIdentity)
+        }
+    }
+
     public func enqueue(_ command: V2PendingMessageCommand) throws {
         try databasePool.write { db in
             guard (!command.text.isEmpty || !command.media.isEmpty),
@@ -1398,6 +1439,19 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         return .init(snapshotProjection: snapshot)
     }
 
+    private static func decodeDirectRoomIdentity(_ row: Row) throws -> V2ClientDirectRoomIdentity {
+        let identity = try V2PublicIdentity(
+            userID: .init(row["target_user_id"] as String),
+            handle: .init(row["public_handle"] as String),
+            displayName: row["display_name"] as String
+        )
+        return try .init(
+            roomID: .init(row["room_id"] as String),
+            publicIdentity: identity,
+            updatedAt: Date(timeIntervalSince1970: row["updated_at"] as Double)
+        )
+    }
+
     private static func decodePendingMessageReaction(_ row: Row) throws -> V2PendingMessageReaction {
         guard let state = V2PendingMessageReaction.State(rawValue: row["state"] as String), let action = V2MessageReactionAction(rawValue: row["action"] as String) else { throw V2ClientCommandError.commandConflict }
         return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String), reaction: row["reaction"], action: action, state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init), terminalCode: row["terminal_code"])
@@ -1857,6 +1911,19 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
         migrator.registerMigration("addV2RoomProfileMembershipRevision") { db in
             try db.execute(sql: "ALTER TABLE v2_room_profile_projections ADD COLUMN membership_revision INTEGER NOT NULL DEFAULT 1 CHECK (membership_revision > 0)")
+        }
+        migrator.registerMigration("addV2DirectRoomIdentityCache") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_direct_room_identities (
+                    room_id TEXT PRIMARY KEY,
+                    target_user_id TEXT NOT NULL,
+                    public_handle TEXT NOT NULL CHECK (length(public_handle) BETWEEN 3 AND 32),
+                    display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 80),
+                    updated_at REAL NOT NULL
+                );
+                CREATE UNIQUE INDEX v2_direct_room_identities_target_idx
+                    ON v2_direct_room_identities (target_user_id);
+                """)
         }
         return migrator
     }()

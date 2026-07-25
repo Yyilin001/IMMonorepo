@@ -1385,6 +1385,14 @@ public nonisolated struct IMV2RoomMember: Sendable {
 
   public var role: IMV2RoomMembershipRole = .unspecified
 
+  /// A roster page is returned only to an active room member.  These fields
+  /// contain the member's public chat identity, never an account identifier
+  /// or authentication factor.  They are intentionally part of the bounded
+  /// directory response instead of the per-user sync stream.
+  public var publicHandle: String = String()
+
+  public var displayName: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -4025,7 +4033,7 @@ nonisolated extension IMV2ListRoomMembers: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension IMV2RoomMember: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RoomMember"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{1}role\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{1}role\0\u{3}public_handle\0\u{3}display_name\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4035,6 +4043,8 @@ nonisolated extension IMV2RoomMember: SwiftProtobuf.Message, SwiftProtobuf._Mess
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.userID) }()
       case 2: try { try decoder.decodeSingularEnumField(value: &self.role) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.publicHandle) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.displayName) }()
       default: break
       }
     }
@@ -4047,12 +4057,20 @@ nonisolated extension IMV2RoomMember: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if self.role != .unspecified {
       try visitor.visitSingularEnumField(value: self.role, fieldNumber: 2)
     }
+    if !self.publicHandle.isEmpty {
+      try visitor.visitSingularStringField(value: self.publicHandle, fieldNumber: 3)
+    }
+    if !self.displayName.isEmpty {
+      try visitor.visitSingularStringField(value: self.displayName, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: IMV2RoomMember, rhs: IMV2RoomMember) -> Bool {
     if lhs.userID != rhs.userID {return false}
     if lhs.role != rhs.role {return false}
+    if lhs.publicHandle != rhs.publicHandle {return false}
+    if lhs.displayName != rhs.displayName {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

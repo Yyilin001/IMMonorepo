@@ -500,7 +500,10 @@ struct V2ConversationStoreTests {
             nil: .init(
                 membershipRevision: 3,
                 actorRole: "成员",
-                members: [.init(id: "owner", role: "群主"), .init(id: "member-a", role: "成员")],
+                members: [
+                    .init(id: "owner", role: "群主", handle: "owner_1", displayName: "群主"),
+                    .init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")
+                ],
                 nextCursor: "member-a"
             ),
             "member-a": .init(
@@ -522,6 +525,8 @@ struct V2ConversationStoreTests {
         await store.loadGroupMembers()
 
         #expect(store.groupMembers.map(\.id) == ["owner", "member-a", "member-b"])
+        #expect(store.groupMembers.first?.displayName == "群主")
+        #expect(store.groupMembers.first?.handle == "owner_1")
         #expect(store.groupMemberRevision == 3)
         #expect(!store.canLoadMoreGroupMembers)
         #expect(store.groupMemberFeedback == nil)
@@ -827,8 +832,8 @@ private actor V2DirectConversationOpenerFake: V2DirectConversationOpening {
         self.roomID = roomID
     }
 
-    func openConversation(with targetUserID: String) async throws -> String {
-        openedTargets.append(targetUserID)
+    func openConversation(with publicIdentity: V2PublicIdentity) async throws -> String {
+        openedTargets.append(publicIdentity.userID.rawValue)
         return roomID
     }
 

@@ -36,6 +36,11 @@ flowchart LR
 - 群创建将初始成员、房间和操作结果作为一项幂等写入；成员变更由 owner 授权，移除允许 owner/admin（不得移除 owner），均携带 membership revision。
 - 每条需 fan-out 的事件在提交时固定受众规则：普通群事件按提交时成员资格枚举；成员移除等需要精确历史受众的事件保存冻结目标。随后成员变化不能扩大已经提交事件的可见范围。
 - 群成员目录不是 fan-out payload；客户端只在打开成员管理时做认证后的 seek-pagination 查询。
+- 每个群成员目录条目都只携带公开 `@handle` 与显示名，并由 active-member 授权；App
+  不显示内部 `user_id`。该资料随单个有界页面读取，不进入群 roster 的 fan-out 或 sync
+  投影。通过 `@handle` 显式打开私聊时，客户端把该次已授权解析的资料和 direct room
+  绑定到本机 SQLite，用于会话列表与详情标题；未知资料只显示“会话”。跨设备资料更新
+  的 sync projection 尚未实现。
 - 非好友可以发起私聊，但陌生人消息在服务端持久化事务中按接收方设置和窗口限额准入。默认基线为每个发送者 24 小时 3 条；接收方可关闭此类消息。
 - 撤回、编辑、reaction、read receipt、mute/freeze 与 moderation 都通过独立、幂等、可同步的命令/投影处理；UI 不以网络响应直接覆盖同步投影。
 

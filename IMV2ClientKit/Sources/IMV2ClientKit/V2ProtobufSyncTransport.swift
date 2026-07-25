@@ -59,10 +59,15 @@ public protocol V2ClientMembershipTransport: Sendable {
 public struct V2ClientRoomMember: Equatable, Sendable {
     public let userID: UserID
     public let role: V2RoomMembershipRole
+    /// Public profile authorized by the active-room roster read.  It is not a
+    /// replacement for a durable contact graph and may be absent while an
+    /// older server deployment is being rolled forward.
+    public let publicIdentity: V2PublicIdentity?
 
-    public init(userID: UserID, role: V2RoomMembershipRole) {
+    public init(userID: UserID, role: V2RoomMembershipRole, publicIdentity: V2PublicIdentity? = nil) {
         self.userID = userID
         self.role = role
+        self.publicIdentity = publicIdentity
     }
 }
 
@@ -499,8 +504,15 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
               page.nextCursor.isEmpty || UUID(uuidString: page.nextCursor) != nil
         else { throw V2RealtimeTransportError.unexpectedResponse }
         let actorRole = try Self.membershipRole(from: page.actorRole)
-        let members = try page.members.map { member in
-            try V2ClientRoomMember(userID: .init(member.userID), role: Self.membershipRole(from: member.role))
+        let members: [V2ClientRoomMember] = try page.members.map { member in
+            let userID: UserID = try .init(member.userID)
+            let publicIdentity: V2PublicIdentity?
+            switch (member.publicHandle.isEmpty, member.displayName.isEmpty) {
+            case (true, true): publicIdentity = nil
+            case (false, false): publicIdentity = try .init(userID: userID, handle: .init(member.publicHandle), displayName: member.displayName)
+            default: throw V2RealtimeTransportError.unexpectedResponse
+            }
+            return .init(userID: userID, role: try Self.membershipRole(from: member.role), publicIdentity: publicIdentity)
         }
         guard Set(members.map(\.userID)).count == members.count else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(page.roomID), membershipRevision: page.membershipRevision, actorRole: actorRole, members: members, nextCursor: page.nextCursor.isEmpty ? nil : page.nextCursor)

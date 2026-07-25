@@ -457,6 +457,10 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             case .admin: member.role = .admin
             case .member: member.role = .member
             }
+            if let publicIdentity = entry.publicIdentity {
+                member.publicHandle = publicIdentity.handle.rawValue
+                member.displayName = publicIdentity.displayName
+            }
             return member
         }
         return response

@@ -92,12 +92,14 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource {
     func conversationSummaries(for userID: String) async throws -> [V2ConversationListItem] {
         let profiles = try await localStore.roomProfiles()
         let titles = Dictionary(uniqueKeysWithValues: profiles.map { ($0.roomID, $0.title) })
+        let directIdentities = try await localStore.directRoomIdentities()
+        let directTitles = Dictionary(uniqueKeysWithValues: directIdentities.map { ($0.roomID, $0.publicIdentity.displayName) })
         let summaries = try await localStore.conversationSummaries()
         let messageItems: [V2ConversationListItem] = summaries.map { summary in
             let message = summary.lastMessage
             return V2ConversationListItem(
                 id: summary.roomID.rawValue,
-                title: titles[summary.roomID] ?? Self.roomTitle(summary.roomID.rawValue),
+                title: titles[summary.roomID] ?? directTitles[summary.roomID] ?? Self.roomTitle(summary.roomID.rawValue),
                 preview: Self.preview(for: message),
                 lastActivity: message.createdAt,
                 isOutgoing: message.senderUserID.rawValue == userID
@@ -143,7 +145,12 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource {
     }
 
     private static func roomTitle(_ roomID: String) -> String {
-        "会话 " + String(roomID.suffix(6))
+        // A room ID is an opaque routing key, never product-facing identity.
+        // Known group and direct titles are resolved above; this conservative
+        // fallback is for an in-flight sync record whose profile has not yet
+        // arrived.
+        _ = roomID
+        return "会话"
     }
 
     private static func preview(for message: V2ClientMessageProjection) -> String {
@@ -193,6 +200,7 @@ final class V2ConversationListStore {
     private(set) var state: State = .loading
     private(set) var directConversationFeedback: String?
     private(set) var groupConversationFeedback: String?
+    private var explicitRoomTitles: [String: String] = [:]
 
     init(
         dataSource: any V2ConversationDataSource,
@@ -295,7 +303,8 @@ final class V2ConversationListStore {
     }
 
     func detailStore(for roomID: String) -> V2ConversationDetailStore {
-        .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader)
+        let title = explicitRoomTitles[roomID] ?? items.first(where: { $0.id == roomID })?.title ?? "会话"
+        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader)
     }
 
     func openDirectConversation(handle: String) async -> String? {
@@ -318,7 +327,8 @@ final class V2ConversationListStore {
                 directConversationFeedback = "不能与自己创建私聊。"
                 return nil
             }
-            let roomID = try await directConversationOpener.openConversation(with: identity.userID.rawValue)
+            let roomID = try await directConversationOpener.openConversation(with: identity)
+            explicitRoomTitles[roomID] = identity.displayName
             directConversationFeedback = nil
             return roomID
         } catch is CancellationError {
@@ -353,6 +363,7 @@ final class V2ConversationDetailStore {
     private let attachmentUploader: (any V2ConversationAttachmentUploading)?
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
     let roomID: String
+    let title: String
     private(set) var messages: [V2ConversationMessageItem] = []
     private(set) var state: State = .loading
     private(set) var sendFeedback: String?
@@ -369,7 +380,7 @@ final class V2ConversationDetailStore {
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
-    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil) {
+    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil) {
         self.dataSource = dataSource
         self.sender = sender
         self.messageWithdrawer = messageWithdrawer
@@ -378,6 +389,7 @@ final class V2ConversationDetailStore {
         self.readReceiptReporter = readReceiptReporter
         self.userID = userID
         self.roomID = roomID
+        self.title = title
         self.groupMemberDirectory = groupMemberDirectory
         self.groupMembershipChanger = groupMembershipChanger
         self.publicIdentityResolver = publicIdentityResolver
@@ -991,7 +1003,7 @@ private struct V2ConversationDetailView: View {
                 }
             }
         }
-        .navigationTitle("会话 " + String(store.roomID.suffix(6)))
+        .navigationTitle(store.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             Button("成员", systemImage: "person.3") {
@@ -1298,7 +1310,14 @@ private struct V2GroupMembersSheet: View {
                 }
                 ForEach(store.groupMembers) { member in
                     HStack {
-                        Text(member.id).textSelection(.enabled)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(member.displayName ?? member.handle.map { "@\($0)" } ?? "资料暂不可用")
+                            if let handle = member.handle {
+                                Text("@\(handle)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                         Spacer()
                         Text(member.role).foregroundStyle(.secondary)
                         if store.canRemoveGroupMember(member) {

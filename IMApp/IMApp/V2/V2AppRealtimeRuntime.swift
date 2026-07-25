@@ -69,7 +69,7 @@ protocol V2ConversationReadReporting: Sendable {
 /// user. Opening is idempotent on the server, so it is safe to retry after a
 /// transport interruption; no message content is at risk at this boundary.
 protocol V2DirectConversationOpening: Sendable {
-    func openConversation(with targetUserID: String) async throws -> String
+    func openConversation(with publicIdentity: V2PublicIdentity) async throws -> String
 }
 
 /// Resolves an explicit public handle before the realtime protocol receives an
@@ -91,8 +91,19 @@ protocol V2GroupConversationCreating: Sendable {
 }
 
 struct V2GroupMemberItem: Equatable, Identifiable, Sendable {
+    /// Opaque identifier used only for subsequent authenticated membership
+    /// commands.  UI must render the public fields below instead.
     let id: String
     let role: String
+    let handle: String?
+    let displayName: String?
+
+    init(id: String, role: String, handle: String? = nil, displayName: String? = nil) {
+        self.id = id
+        self.role = role
+        self.handle = handle
+        self.displayName = displayName
+    }
 }
 
 struct V2GroupMemberPage: Equatable, Sendable {
@@ -233,20 +244,24 @@ actor V2OutboxConversationReadReporter: V2ConversationReadReporting {
 
 actor V2RealtimeDirectConversationOpener: V2DirectConversationOpening {
     private let transport: any V2ClientDirectMessagingTransport
+    private let localStore: GRDBV2LocalSyncStore
     private let makeUUID: @Sendable () -> UUID
 
     init(
         transport: any V2ClientDirectMessagingTransport,
+        localStore: GRDBV2LocalSyncStore,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init
     ) {
         self.transport = transport
+        self.localStore = localStore
         self.makeUUID = makeUUID
     }
 
-    func openConversation(with targetUserID: String) async throws -> String {
-        let target = try UserID(targetUserID.trimmingCharacters(in: .whitespacesAndNewlines))
+    func openConversation(with publicIdentity: V2PublicIdentity) async throws -> String {
         let operationID = try DirectRoomOperationID(makeUUID().uuidString)
-        return try await transport.openDirectRoom(operationID: operationID, targetUserID: target).roomID.rawValue
+        let opened = try await transport.openDirectRoom(operationID: operationID, targetUserID: publicIdentity.userID)
+        try await localStore.cacheDirectRoomIdentity(roomID: opened.roomID, publicIdentity: publicIdentity)
+        return opened.roomID.rawValue
     }
 }
 
@@ -278,7 +293,14 @@ actor V2RealtimeGroupMemberDirectory: V2GroupMemberDirectoryReading {
         return .init(
             membershipRevision: page.membershipRevision,
             actorRole: Self.displayRole(page.actorRole),
-            members: page.members.map { .init(id: $0.userID.rawValue, role: Self.displayRole($0.role)) },
+            members: page.members.map {
+                .init(
+                    id: $0.userID.rawValue,
+                    role: Self.displayRole($0.role),
+                    handle: $0.publicIdentity?.handle.rawValue,
+                    displayName: $0.publicIdentity?.displayName
+                )
+            },
             nextCursor: page.nextCursor
         )
     }
@@ -450,7 +472,7 @@ struct V2AppRealtimeRuntime {
         )
         self.mediaDownloader = foregroundMediaDownloader
         self.mediaCacheMaintenance = foregroundMediaDownloader
-        directConversationOpener = V2RealtimeDirectConversationOpener(transport: transport)
+        directConversationOpener = V2RealtimeDirectConversationOpener(transport: transport, localStore: localStore)
         groupConversationCreator = V2OutboxGroupConversationCreator(outbox: groupOutbox)
         groupMemberDirectory = V2RealtimeGroupMemberDirectory(transport: transport)
         groupMembershipChanger = V2OutboxGroupMembershipChanger(outbox: membershipOutbox)

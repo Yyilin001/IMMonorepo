@@ -182,6 +182,9 @@ struct V2ProtobufSyncTransportTests {
         #expect(page.membershipRevision == 6)
         #expect(page.actorRole == .owner)
         #expect(page.members.map(\.role) == [.owner, .member])
+        #expect(page.members.first?.publicIdentity?.handle.rawValue == "owner_1")
+        #expect(page.members.first?.publicIdentity?.displayName == "群主")
+        #expect(page.members.last?.publicIdentity?.handle.rawValue == "member_2")
         #expect(page.nextCursor == "00000000-0000-0000-0000-000000000342")
         #expect(await wire.requestedPageSize() == 100)
     }
@@ -202,8 +205,18 @@ private actor MembershipDirectoryWire: V2AuthenticatedFrameTransport {
         response.roomMembersPage.membershipRevision = 6
         response.roomMembersPage.actorRole = .owner
         response.roomMembersPage.members = [
-            .with { $0.userID = "00000000-0000-0000-0000-000000000341"; $0.role = .owner },
-            .with { $0.userID = "00000000-0000-0000-0000-000000000342"; $0.role = .member }
+            .with {
+                $0.userID = "00000000-0000-0000-0000-000000000341"
+                $0.role = .owner
+                $0.publicHandle = "owner_1"
+                $0.displayName = "群主"
+            },
+            .with {
+                $0.userID = "00000000-0000-0000-0000-000000000342"
+                $0.role = .member
+                $0.publicHandle = "member_2"
+                $0.displayName = "成员二"
+            }
         ]
         response.roomMembersPage.nextCursor = "00000000-0000-0000-0000-000000000342"
         return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)

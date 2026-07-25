@@ -334,6 +334,12 @@ enum RoomMembershipRole {
 message RoomMember {
   string user_id = 1;
   RoomMembershipRole role = 2;
+  // A roster page is returned only to an active room member.  These fields
+  // contain the member's public chat identity, never an account identifier
+  // or authentication factor.  They are intentionally part of the bounded
+  // directory response instead of the per-user sync stream.
+  string public_handle = 3;
+  string display_name = 4;
 }
 
 message RoomMembersPage {

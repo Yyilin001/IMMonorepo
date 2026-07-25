@@ -154,6 +154,8 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(response.roomMembersPage.roomID == fixture.roomID.rawValue)
         #expect(response.roomMembersPage.actorRole == .owner)
         #expect(response.roomMembersPage.members.count == 1)
+        #expect(response.roomMembersPage.members.first?.publicHandle == "owner_1")
+        #expect(response.roomMembersPage.members.first?.displayName == "群主")
         #expect(await store.actor() == fixture.userID)
     }
 
@@ -308,7 +310,13 @@ private actor GatewayMembershipDirectoryStore: V2RoomMembershipDirectoryStore {
             roomID: request.roomID,
             membershipRevision: 4,
             actorRole: .owner,
-            entries: [.init(userID: request.actorUserID, role: .owner)],
+            entries: [
+                .init(
+                    userID: request.actorUserID,
+                    role: .owner,
+                    publicIdentity: try! .init(userID: request.actorUserID, handle: .init("owner_1"), displayName: "群主")
+                )
+            ],
             nextCursor: nil
         )
     }
