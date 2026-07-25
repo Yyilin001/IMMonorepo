@@ -29,6 +29,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var authenticationMessage: String?
     private(set) var conversationStore: V2ConversationListStore?
     private(set) var privacySettingsStore: V2PrivacySettingsStore?
+    private(set) var publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     private(set) var pushWakeSettingsStore: V2PushWakeSettingsStore?
 
     init(remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)? = nil) {
@@ -53,6 +54,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             authenticationMessage = nil
             conversationStore = nil
             privacySettingsStore = nil
+            publicIdentitySettingsStore = nil
             pushWakeSettingsStore = nil
             realtimeRuntime = nil
             realtimeTask = nil
@@ -65,6 +67,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             authenticationMessage = nil
             conversationStore = nil
             privacySettingsStore = nil
+            publicIdentitySettingsStore = nil
             pushWakeSettingsStore = nil
             realtimeRuntime = nil
             realtimeTask = nil
@@ -178,6 +181,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         authenticationMessage = nil
         conversationStore = nil
         privacySettingsStore = nil
+        publicIdentitySettingsStore = nil
         pushWakeSettingsStore = nil
         route = .signedOut
     }
@@ -225,6 +229,12 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             reader: V2GRDBStrangerMessagePreferenceDataSource(localStore: localStore),
             updater: realtime.strangerMessagePreferenceUpdater
         )
+        let publicIdentitySettings = try V2PublicIdentitySettingsStore(
+            manager: V2HTTPPublicIdentityProfileClient(
+                endpoint: configuration.endpoint("v2/public-identities/me"),
+                credentials: authSession
+            )
+        )
         let pushWakeSettings: V2PushWakeSettingsStore?
         if let remoteNotificationRegistrar,
            let endpointClient = try? V2HTTPPushEndpointClient(
@@ -247,6 +257,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         realtimeRuntime = realtime.runtime
         conversationStore = conversations
         privacySettingsStore = privacySettings
+        publicIdentitySettingsStore = publicIdentitySettings
         pushWakeSettingsStore = pushWakeSettings
         route = .signedIn(userID: userID)
         await conversations.refresh()

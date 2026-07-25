@@ -85,7 +85,7 @@
 1. 完成真实对象存储、扫描 provider、provider cleanup 与媒体滥用/失败回归。
 2. 完成真实 APNs 凭据、Push-enabled profile、用户开关、失效 token 和后台 sync 真机回归。
 3. 完成两台设备的登录、离线发送、断网重连、snapshot reset、撤回/编辑/reaction/receipt、陌生人设置和群成员管理 E2E。
-4. 在 [ADR-012](00-foundation/ADR-012-public-identity-and-discovery.md) 已接受并完成第一阶段的基础上，补齐 profile 修改的幂等操作与同步投影、联系人/会话标题/群成员显示名、无障碍和人工产品验收。
+4. 在 [ADR-012](00-foundation/ADR-012-public-identity-and-discovery.md) 已接受并完成第一阶段的基础上，补齐 profile 同步投影、联系人/会话标题/群成员显示名、无障碍和人工产品验收。
 
 **完成条件**：普通私聊与中小群在预发布环境有可重复的真机 E2E 套件和故障恢复记录。
 

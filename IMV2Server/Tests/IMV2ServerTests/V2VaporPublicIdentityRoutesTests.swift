@@ -47,6 +47,27 @@ struct V2VaporPublicIdentityRoutesTests {
             #expect(response.status == .notFound)
         }
     }
+
+    @Test("the authenticated owner can update only their display name")
+    func updatesOwnDisplayName() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        V2VaporPublicIdentityRoutes(
+            authenticator: PublicIdentityRouteAuthenticator(userID: try .init("actor-user")),
+            directory: PublicIdentityDirectoryFake(identity: try .init(userID: .init("actor-user"), handle: .init("actor_user"), displayName: "Old"))
+        ).register(on: app)
+
+        try await app.testing().test(.PUT, "v2/public-identities/me", beforeRequest: { request in
+            request.headers.bearerAuthorization = .init(token: "access-token")
+            request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: "00000000-0000-0000-0000-000000000901")
+            try request.content.encode(V2PublicIdentityProfileHTTPRequest(displayName: "New"))
+        }) { response async throws in
+            #expect(response.status == .ok)
+            let body = try response.content.decode(V2PublicIdentityHTTPResponse.self)
+            #expect(body.handle == "actor_user")
+            #expect(body.displayName == "New")
+        }
+    }
 }
 
 private struct PublicIdentityRouteAuthenticator: V2GatewayAuthenticator {
@@ -57,9 +78,14 @@ private struct PublicIdentityRouteAuthenticator: V2GatewayAuthenticator {
     }
 }
 
-private struct PublicIdentityDirectoryFake: V2PublicIdentityDirectoryReading {
+private struct PublicIdentityDirectoryFake: V2PublicIdentityAccountManaging {
     let identity: V2PublicIdentity?
     func resolve(handle _: V2PublicHandle, actorUserID _: UserID) async throws -> V2PublicIdentity? { identity }
+    func profile(for _: UserID) async throws -> V2PublicIdentity? { identity }
+    func updateDisplayName(for _: UserID, displayName: String) async throws -> V2PublicIdentity {
+        guard let identity else { throw PublicIdentityRouteAuthenticationFailure.denied }
+        return try .init(userID: identity.userID, handle: identity.handle, displayName: displayName)
+    }
 }
 
 private enum PublicIdentityRouteAuthenticationFailure: Error { case denied }

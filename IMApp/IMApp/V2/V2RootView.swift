@@ -21,9 +21,10 @@ struct V2RootView: View {
             case .signedIn:
                 if let conversationStore = store.conversationStore,
                    let privacySettingsStore = store.privacySettingsStore {
-                    V2SignedInRootView(
+                   V2SignedInRootView(
                         conversationStore: conversationStore,
                         privacySettingsStore: privacySettingsStore,
+                        publicIdentitySettingsStore: store.publicIdentitySettingsStore,
                         pushWakeSettingsStore: store.pushWakeSettingsStore,
                         signOut: { await store.signOut() }
                     )
@@ -127,15 +128,23 @@ private struct V2SignInView: View {
 private struct V2SignedInRootView: View {
     let conversationStore: V2ConversationListStore
     let privacySettingsStore: V2PrivacySettingsStore
+    let publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     let pushWakeSettingsStore: V2PushWakeSettingsStore?
     let signOut: @MainActor @Sendable () async -> Void
     @State private var signOutTask: Task<Void, Never>?
     @State private var isPresentingPrivacySettings = false
+    @State private var isPresentingPublicIdentitySettings = false
 
     var body: some View {
         V2ConversationListView(store: conversationStore)
             .overlay(alignment: .bottomTrailing) {
                 Menu {
+                    if publicIdentitySettingsStore != nil {
+                        Button("我的资料") {
+                            isPresentingPublicIdentitySettings = true
+                        }
+                        .accessibilityIdentifier("v2.identity.open")
+                    }
                     Button("消息接收设置") {
                         isPresentingPrivacySettings = true
                     }
@@ -160,6 +169,18 @@ private struct V2SignedInRootView: View {
                                 Button("完成") { isPresentingPrivacySettings = false }
                             }
                         }
+                }
+            }
+            .sheet(isPresented: $isPresentingPublicIdentitySettings) {
+                if let publicIdentitySettingsStore {
+                    NavigationStack {
+                        V2PublicIdentitySettingsView(store: publicIdentitySettingsStore)
+                            .toolbar {
+                                ToolbarItem(placement: .cancellationAction) {
+                                    Button("完成") { isPresentingPublicIdentitySettings = false }
+                                }
+                            }
+                    }
                 }
             }
     }

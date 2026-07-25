@@ -18,7 +18,7 @@
 | Auth、设备撤销、本地存储、媒体授权、日志脱敏 | [ADR-009](00-foundation/ADR-009-auth-local-storage-and-redaction.md) | 部分待批准 | auth/keychain 已实现；媒体授权待 ADR-002 |
 | 容量、fenced admission、Push 预算、PITR/DR | [ADR-010](09-capacity/ADR-010-capacity-and-disaster-recovery.md) | 待批准 | admission lease 基元存在；目标、演练和报告缺失 |
 | Passkey 优先、密码兜底与设备绑定账户断言 | [ADR-011](00-foundation/ADR-011-account-factor-policy.md) | 已接受 | 客户端 AuthenticationServices / HTTP 适配与 bcrypt fallback 已实现；生产 WebAuthn RP verifier 与一次性挑战存储待接入 |
-| 公开身份、联系人发现与目录边界 | [ADR-012](00-foundation/ADR-012-public-identity-and-discovery.md) | Accepted（第一阶段已实现） | 独立公开 `@handle`、认证精确查询、账号级限流和注册原子 profile 创建已经落地；联系人、资料同步投影、会话标题和群成员显示名仍待完成 |
+| 公开身份、联系人发现与目录边界 | [ADR-012](00-foundation/ADR-012-public-identity-and-discovery.md) | Accepted（第一阶段已实现） | 独立公开 `@handle`、认证精确查询、账号级限流、注册原子 profile 创建和本人显示名修改已经落地；联系人、资料同步投影、会话标题和群成员显示名仍待完成 |
 
 额外 ADR：
 

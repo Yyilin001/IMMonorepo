@@ -11,9 +11,14 @@ public protocol V2PublicIdentityDirectoryReading: Sendable {
     func resolve(handle: V2PublicHandle, actorUserID: UserID) async throws -> V2PublicIdentity?
 }
 
+public protocol V2PublicIdentityAccountManaging: V2PublicIdentityDirectoryReading {
+    func profile(for userID: UserID) async throws -> V2PublicIdentity?
+    func updateDisplayName(for userID: UserID, displayName: String) async throws -> V2PublicIdentity
+}
+
 /// Account-edge directory backed solely by public-profile data. A mutual block
 /// resolves as nil, exactly like an absent handle.
-public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityDirectoryReading, Sendable {
+public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging, Sendable {
     private let database: any Database
     private let policy: V2PublicIdentityLookupRateLimitPolicy
     private let now: @Sendable () -> Date
@@ -46,6 +51,31 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityDirectoryReadin
         }
     }
 
+    public func profile(for userID: UserID) async throws -> V2PublicIdentity? {
+        guard let userUUID = UUID(uuidString: userID.rawValue), let sql = database as? any SQLDatabase else {
+            throw V2PublicIdentityDirectoryError.unavailable
+        }
+        return try await profile(sql: sql, userID: userUUID)
+    }
+
+    /// Setting an identical name is a no-op, so an HTTP retry preserves the
+    /// visible result and revision. A future optimistic-concurrency client can
+    /// add a revision precondition without changing the profile boundary.
+    public func updateDisplayName(for userID: UserID, displayName: String) async throws -> V2PublicIdentity {
+        guard let userUUID = UUID(uuidString: userID.rawValue) else { throw V2PublicIdentityDirectoryError.unavailable }
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase,
+                  let current = try await profile(sql: sql, userID: userUUID)
+            else { throw V2PublicIdentityDirectoryError.unavailable }
+            let validated: V2PublicIdentity
+            do { validated = try .init(userID: userID, handle: current.handle, displayName: displayName) }
+            catch { throw V2PublicIdentityDirectoryError.unavailable }
+            try await sql.raw("UPDATE im_v2.public_user_profiles SET display_name = \(bind: validated.displayName), revision = revision + 1, updated_at = \(bind: now()) WHERE user_id = \(bind: userUUID) AND display_name IS DISTINCT FROM \(bind: validated.displayName)").run()
+            guard let updated = try await profile(sql: sql, userID: userUUID) else { throw V2PublicIdentityDirectoryError.unavailable }
+            return updated
+        }
+    }
+
     private func consumeLookupBudget(sql: any SQLDatabase, actorUserID: UUID) async throws {
         let current = now()
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-public-identity-lookup:" + actorUserID.uuidString), 0))").run()
@@ -63,15 +93,23 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityDirectoryReadin
         }
         try await sql.raw("UPDATE im_v2.public_identity_lookup_rate_limits SET query_count = query_count + 1, updated_at = \(bind: current) WHERE actor_user_id = \(bind: actorUserID)").run()
     }
+
+    private func profile(sql: any SQLDatabase, userID: UUID) async throws -> V2PublicIdentity? {
+        guard let row = try await sql.raw("SELECT user_id, public_handle, display_name FROM im_v2.public_user_profiles WHERE user_id = \(bind: userID)").first(decoding: PublicIdentityRow.self),
+              let profileUserID = try? UserID(row.userID.uuidString),
+              let profile = try? V2PublicIdentity(userID: profileUserID, handle: .init(row.handle), displayName: row.displayName)
+        else { return nil }
+        return profile
+    }
 }
 
 /// Authenticated exact-handle lookup. There is deliberately no list, prefix,
 /// fuzzy, UUID, or bulk endpoint in this route family.
 public struct V2VaporPublicIdentityRoutes: Sendable {
     private let authenticator: any V2GatewayAuthenticator
-    private let directory: any V2PublicIdentityDirectoryReading
+    private let directory: any V2PublicIdentityAccountManaging
 
-    public init(authenticator: any V2GatewayAuthenticator, directory: any V2PublicIdentityDirectoryReading) {
+    public init(authenticator: any V2GatewayAuthenticator, directory: any V2PublicIdentityAccountManaging) {
         self.authenticator = authenticator
         self.directory = directory
     }
@@ -89,6 +127,24 @@ public struct V2VaporPublicIdentityRoutes: Sendable {
                 case .unavailable: throw Abort(.serviceUnavailable)
                 }
             }
+        }
+
+        routes.get("v2", "public-identities", "me") { request async throws -> Response in
+            let actor = try await authenticate(request)
+            do {
+                guard let result = try await directory.profile(for: actor.userID) else { throw Abort(.notFound) }
+                return try noStoreJSONResponse(.init(userID: result.userID.rawValue, handle: result.handle.rawValue, displayName: result.displayName))
+            } catch is Abort { throw Abort(.notFound) }
+            catch { throw Abort(.serviceUnavailable) }
+        }
+
+        routes.put("v2", "public-identities", "me") { request async throws -> Response in
+            let actor = try await authenticate(request)
+            let input = try request.content.decode(V2PublicIdentityProfileHTTPRequest.self)
+            do {
+                let result = try await directory.updateDisplayName(for: actor.userID, displayName: input.displayName)
+                return try noStoreJSONResponse(.init(userID: result.userID.rawValue, handle: result.handle.rawValue, displayName: result.displayName))
+            } catch { throw Abort(.badRequest) }
         }
     }
 
@@ -125,6 +181,12 @@ public struct V2PublicIdentityHTTPResponse: Content, Sendable {
     public let userID: String
     public let handle: String
     public let displayName: String
+}
+
+public struct V2PublicIdentityProfileHTTPRequest: Content, Sendable {
+    public let displayName: String
+
+    public init(displayName: String) { self.displayName = displayName }
 }
 
 private struct PublicIdentityRow: Decodable {

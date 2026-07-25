@@ -55,10 +55,10 @@ fallback 的 `account_handle` 仅是登录标识；它没有被定义为可公�
 需要作为完整纵向能力交付，而不是仅替换 SwiftUI 文案：
 
 1. 已实现的第一阶段：SQL profile/唯一 handle/查询额度、Core 身份类型、认证
-   目录路由、密码注册的原子 profile 创建、ClientKit HTTPS 精确解析，以及 iOS
-   私聊和建群入口的 `@handle` 解析。
-2. 后续必须完成：profile 修改的幂等操作、允许 profile 的同步投影、群成员与
-   会话列表的显示名、好友流程、删除/改名及 snapshot reset 回归。
+   目录路由、密码注册的原子 profile 创建、仅本人可读/写的显示名 API、ClientKit
+   HTTPS 客户端，以及 iOS 的资料设置、私聊、建群和拉成员 `@handle` 解析。
+2. 后续必须完成：允许 profile 的同步投影、群成员与会话列表的显示名、好友流程、
+   删除/改名及 snapshot reset 回归。
 3. 覆盖规范化冲突、重放、并发抢注、屏蔽/不可发现、目录限流、离线重试、隐私
    日志和真实账号服务 HTTPS 回归。
 
