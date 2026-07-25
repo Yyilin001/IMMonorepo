@@ -50,9 +50,11 @@ public struct V2AccountRuntimeConfiguration: Sendable {
     public let replayEnvelopeKey: V2CredentialReplayEnvelopeKey
     public let pushEndpointEnvelopeKey: V2PushEndpointEnvelopeKey
     public let edgeAuthorizationSecret: V2AccountEdgeAuthorizationSecret
+    public let edgeClientRateLimitKey: V2AccountEdgeClientRateLimitKey
     public let accountAssertionKey: Data
     public let dummyPasswordHash: String
     public let passwordLoginRateLimit: V2PasswordLoginRateLimitPolicy
+    public let edgeClientRateLimit: V2AccountEdgeClientRateLimitPolicy
     public let publicIdentityLookupRateLimit: V2PublicIdentityLookupRateLimitPolicy
 
     public init(environment: any V2RuntimeEnvironment) throws {
@@ -65,6 +67,11 @@ public struct V2AccountRuntimeConfiguration: Sendable {
         replayEnvelopeKey = try .init(base64Encoded: Self.required("IM_V2_CREDENTIAL_REPLAY_ENVELOPE_KEY_BASE64", environment: environment))
         pushEndpointEnvelopeKey = try .init(base64Encoded: Self.required("IM_V2_PUSH_ENDPOINT_ENVELOPE_KEY_BASE64", environment: environment))
         edgeAuthorizationSecret = try .init(base64Encoded: Self.required("IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64", environment: environment))
+        do {
+            edgeClientRateLimitKey = try .init(base64Encoded: Self.required("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64", environment: environment))
+        } catch V2AccountEdgeClientRateLimitError.invalidKeyMaterial {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64")
+        }
         let rawAccountAssertionKey = try Self.required("IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64", environment: environment)
         guard let accountAssertionKey = Data(base64Encoded: rawAccountAssertionKey), accountAssertionKey.count >= 32 else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64")
@@ -86,6 +93,13 @@ public struct V2AccountRuntimeConfiguration: Sendable {
             )
         } catch V2PasswordLoginRateLimitError.invalidPolicy {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_PASSWORD_LOGIN_MAX_FAILURES/IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS/IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS")
+        }
+        let edgeClientMaximumRequests = try Self.integer("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS", environment: environment)
+        let edgeClientWindowSeconds = try Self.integer("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS", environment: environment)
+        do {
+            edgeClientRateLimit = try .init(maximumRequests: edgeClientMaximumRequests, window: TimeInterval(edgeClientWindowSeconds))
+        } catch V2AccountEdgeClientRateLimitError.invalidPolicy {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS/IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS")
         }
         let publicIdentityMaximumQueries = try Self.integer("IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES", environment: environment)
         let publicIdentityWindowSeconds = try Self.integer("IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS", environment: environment)

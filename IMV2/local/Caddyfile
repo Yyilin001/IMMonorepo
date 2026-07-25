@@ -2,10 +2,13 @@
 # its root certificate into the simulator's trusted certificates before using
 # the native app's default https://localhost:8443 configuration.
 https://localhost:8443 {
-    tls internal
-    # Caddy discards caller-supplied X-Forwarded-* values by default, then
-    # injects this process-local proof for the loopback account listener.
-    reverse_proxy 127.0.0.1:8444 {
-        header_up X-IM-V2-Account-Edge-Authorization "{$IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64}"
-    }
+	tls internal
+	# Caddy discards caller-supplied X-Forwarded-* values by default, then
+	# injects this process-local proof and an address derived from the direct
+	# peer for the loopback account listener. The app stores only a keyed
+	# digest of this value and rejects a direct caller before rate limiting.
+	reverse_proxy 127.0.0.1:8444 {
+		header_up X-IM-V2-Account-Edge-Authorization "{$IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64}"
+		header_up X-IM-V2-Account-Client-Address "{remote_host}"
+	}
 }

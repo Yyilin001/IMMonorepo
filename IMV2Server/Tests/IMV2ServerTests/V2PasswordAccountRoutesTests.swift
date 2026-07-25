@@ -24,8 +24,42 @@ struct V2PasswordAccountRoutesTests {
         try await app.testing().test(.GET, "ready", beforeRequest: { request in
             request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.headerName, value: proof)
         }) { response async in
+            #expect(response.status == .forbidden)
+        }
+        try await app.testing().test(.GET, "ready", beforeRequest: { request in
+            request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.headerName, value: proof)
+            request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.clientAddressHeaderName, value: "127.0.0.1")
+        }) { response async in
             #expect(response.status == .ok)
             #expect(response.body.string == "ok")
+        }
+    }
+
+    @Test("account edge limits only an authenticated Caddy-derived client address")
+    func accountEdgeClientBudgetIsNoStoreAndFailsClosed() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let proof = Data(repeating: 7, count: 32).base64EncodedString()
+        let secret = try V2AccountEdgeAuthorizationSecret(base64Encoded: proof)
+        app.middleware.use(V2AccountEdgeAuthenticationMiddleware(secret: secret))
+        app.middleware.use(V2AccountEdgeClientRateLimitMiddleware(limiter: FixedEdgeClientLimiter()))
+        app.get("ready") { _ in "must not be reached" }
+
+        try await app.testing().test(.GET, "ready", beforeRequest: { request in
+            request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.headerName, value: proof)
+            request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.clientAddressHeaderName, value: "not-an-address")
+        }) { response async in
+            #expect(response.status == .forbidden)
+        }
+        try await app.testing().test(.GET, "ready", beforeRequest: { request in
+            request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.headerName, value: proof)
+            request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.clientAddressHeaderName, value: "2001:db8::1")
+        }) { response async in
+            #expect(response.status == .tooManyRequests)
+            #expect(response.headers.first(name: .cacheControl) == "no-store")
+            #expect(response.headers.first(name: "Pragma") == "no-cache")
+            #expect(response.headers.first(name: "Retry-After") == "19")
+            #expect(response.body.string.isEmpty)
         }
     }
 
@@ -98,4 +132,10 @@ private struct BlockedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {
     func blockedRetryAfterSeconds(accountHandle _: String) async throws -> Int? { retryAfterSeconds }
     func recordRejectedAttempt(accountHandle _: String, userID _: UserID?, deviceID _: DeviceID) async throws {}
     func recordSuccessfulAttempt(accountHandle _: String, userID _: UserID, deviceID _: DeviceID) async throws {}
+}
+
+private struct FixedEdgeClientLimiter: V2AccountEdgeClientRateLimiting {
+    func consume(address _: V2AccountEdgeClientAddress) async throws -> V2AccountEdgeClientRateLimitResult {
+        .rateLimited(retryAfterSeconds: 19)
+    }
 }

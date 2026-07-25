@@ -23,7 +23,8 @@ and the [V2 document entry](../IMV2/docs/README.md).
    gateway never accepts a user ID from a client payload. Mount
    `V2VaporDeviceCredentialRoutes` only on that account-service listener after
    injecting its production `V2AccountAssertionVerifier`, TLS/rate-limit
-   policy, edge-authorization secret, and secret provisioning; do not register those routes on the
+   policy, edge-authorization and edge-client-rate-limit secrets, and secret
+   provisioning; do not register those routes on the
    realtime gateway listener.
    The selected primary factor is a production WebAuthn verifier. The provided
    `V2HMACAccountAssertionIssuer` makes a 90-second, device-bound hand-off to
@@ -69,9 +70,12 @@ swift run --package-path IMV2Server IMV2AccountServerApp
 ```
 
 Place a managed HTTPS reverse proxy in front of this loopback listener. The
-proxy owns the public certificate and must rate-limit the password and passkey
-routes before forwarding them. The iOS app accepts only an HTTPS account base
-URL; it must never be pointed directly at the internal HTTP listener.
+proxy owns the public certificate and must overwrite the account-edge proof
+and client-address headers before forwarding. The account process applies its
+own cross-replica request budget after that authenticated boundary, so an
+expensive route cannot be reached by a direct loopback caller. The iOS app
+accepts only an HTTPS account base URL; it must never be pointed directly at
+the internal HTTP listener.
 
 The password fallback uses bcrypt cost 12. Generate
 `IM_V2_PASSWORD_DUMMY_BCRYPT_HASH` once with the same cost so an unknown
@@ -82,20 +86,29 @@ Each failed password assertion also updates the canonical-account failure
 state in PostgreSQL, shared across account-service replicas. Its maximum
 failures, window and lockout duration are required `IM_V2_PASSWORD_LOGIN_*`
 configuration values; a lockout returns no-store `429` with `Retry-After`.
-This protects an account handle only. The public proxy must separately enforce
-a trusted-client/IP policy and provide audit, recovery and account-disable
-operations.
+The service also applies the required
+`IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_*` fixed-window budget to every account
+request after validating the edge proof and exactly one edge-generated client
+address. PostgreSQL stores only a HMAC digest derived using the distinct
+`IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64`, never a clear-text address;
+expired windows are removed in bounded batches. The production ingress must
+still supply an approved trusted-proxy chain and outer DDoS/abuse controls,
+and the product still needs audit, recovery and account-disable operations.
 
 The client-side passkey flow has a complete challenge/assertion transport
 boundary, but this executable does not yet mount public WebAuthn endpoints:
 doing so requires an audited server verifier plus one-time challenge storage.
 Password fallback is the presently deployable initial-account path.
 
-Every account request must carry the base64 edge-authorization secret injected
-by that same HTTPS proxy. The account process rejects direct loopback requests
-without it, so do not route around the proxy for probes or tooling. Caddy's
-default reverse-proxy behavior discards client-supplied `X-Forwarded-*` values;
-the proxy is still responsible for its separate trusted-client/IP rate policy.
+Every account request must carry the base64 edge-authorization secret and one
+valid client address injected by that same HTTPS proxy. The account process
+rejects direct loopback requests, duplicate headers and malformed addresses
+before rate limiting, so do not route around the proxy for probes or tooling.
+The checked-in local Caddy configuration derives the address from its direct
+peer and Caddy's normal reverse-proxy behavior discards client-supplied
+`X-Forwarded-*` values. A production topology behind another L7 proxy must
+explicitly configure and validate its own trusted-proxy chain; it must not copy
+an arbitrary forwarded address into this header.
 
 ### Local native-client workflow
 

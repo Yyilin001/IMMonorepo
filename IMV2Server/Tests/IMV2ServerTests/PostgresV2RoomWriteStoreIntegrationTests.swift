@@ -3267,6 +3267,59 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("edge client request budget is shared across replicas and stores no clear-text address")
+    func enforcesPseudonymousEdgeClientRateLimit() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2AccountEdgeClientRateLimitError.unavailable
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let key = try V2AccountEdgeClientRateLimitKey(base64Encoded: Data(repeating: 8, count: 32).base64EncodedString())
+            let policy = try V2AccountEdgeClientRateLimitPolicy(maximumRequests: 2, window: 60)
+            let address = try V2AccountEdgeClientAddress("198.51.100.8")
+            let firstReplica = V2PostgresAccountEdgeClientRateLimiter(
+                database: app.db(.psql), policy: policy, key: key,
+                now: { Date(timeIntervalSince1970: 1_750_002_000) }
+            )
+
+            #expect(try await firstReplica.consume(address: address) == .allowed)
+            #expect(try await firstReplica.consume(address: address) == .allowed)
+            #expect(try await firstReplica.consume(address: address) == .rateLimited(retryAfterSeconds: 60))
+            #expect(try await firstReplica.consume(address: try V2AccountEdgeClientAddress("203.0.113.9")) == .allowed)
+
+            let secondReplica = V2PostgresAccountEdgeClientRateLimiter(
+                database: app.db(.psql), policy: policy, key: key,
+                now: { Date(timeIntervalSince1970: 1_750_002_061) }
+            )
+            #expect(try await secondReplica.consume(address: address) == .allowed)
+            #expect(try await secondReplica.consume(address: try V2AccountEdgeClientAddress("2001:db8::8")) == .allowed)
+
+            let persistedKeys = try await sql.raw("SELECT client_key FROM im_v2.account_edge_client_rate_limits ORDER BY client_key").all(decoding: EdgeClientRateLimitKeyRow.self)
+            #expect(persistedKeys.count == 2)
+            #expect(persistedKeys.allSatisfy { $0.clientKey != "198.51.100.8" && $0.clientKey != "2001:db8::8" })
+            #expect(persistedKeys.allSatisfy { $0.clientKey.count == 64 })
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("display-name updates fan out to direct peers in bounded, idempotent pages")
     func propagatesDisplayNameToExistingDirectPeers() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
@@ -3582,6 +3635,11 @@ private struct FailsOnSecondPageRouter: V2UserShardRouter {
 }
 
 private struct ExistsRow: Decodable { let exists: Bool }
+
+private struct EdgeClientRateLimitKeyRow: Decodable {
+    let clientKey: String
+    enum CodingKeys: String, CodingKey { case clientKey = "client_key" }
+}
 private struct CountRow: Decodable { let value: Int64 }
 private struct PasswordAuthenticationAuditRow: Decodable {
     let outcome: String

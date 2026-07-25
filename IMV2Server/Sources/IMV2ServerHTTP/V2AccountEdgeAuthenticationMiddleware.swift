@@ -7,6 +7,7 @@ import Vapor
 /// local request as a trusted proxy request.
 public struct V2AccountEdgeAuthenticationMiddleware: AsyncMiddleware, Sendable {
     public static let headerName = "X-IM-V2-Account-Edge-Authorization"
+    public static let clientAddressHeaderName = "X-IM-V2-Account-Client-Address"
 
     private let secret: V2AccountEdgeAuthorizationSecret
 
@@ -15,10 +16,16 @@ public struct V2AccountEdgeAuthenticationMiddleware: AsyncMiddleware, Sendable {
     }
 
     public func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
-        let values = request.headers[Self.headerName]
-        guard values.count == 1, secret.matches(base64EncodedCandidate: values[0]) else {
+        let proofValues = request.headers[Self.headerName]
+        let addressValues = request.headers[Self.clientAddressHeaderName]
+        guard proofValues.count == 1,
+              addressValues.count == 1,
+              secret.matches(base64EncodedCandidate: proofValues[0]),
+              let address = try? V2AccountEdgeClientAddress(addressValues[0])
+        else {
             throw Abort(.forbidden)
         }
+        request.storage[V2AccountEdgeClientAddressStorageKey.self] = address
         return try await next.respond(to: request)
     }
 }

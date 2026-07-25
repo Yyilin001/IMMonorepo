@@ -26,6 +26,7 @@ if [[ ! -f "${env_file}" ]]; then
   replay_key="$(openssl rand -base64 32 | tr -d '\n')"
   push_endpoint_key="$(openssl rand -base64 32 | tr -d '\n')"
   edge_authorization_secret="$(openssl rand -base64 32 | tr -d '\n')"
+  edge_client_rate_limit_key="$(openssl rand -base64 32 | tr -d '\n')"
   assertion_key="$(openssl rand -base64 32 | tr -d '\n')"
   dummy_hash="$(htpasswd -bnBC 12 '' 'v2-local-dummy-password' | tr -d ':\n')"
   # Compose interpolates `$name` even in an env file. Double each dollar so
@@ -39,6 +40,7 @@ if [[ ! -f "${env_file}" ]]; then
     printf 'IM_V2_CREDENTIAL_REPLAY_ENVELOPE_KEY_BASE64=%s\n' "${replay_key}"
     printf 'IM_V2_PUSH_ENDPOINT_ENVELOPE_KEY_BASE64=%s\n' "${push_endpoint_key}"
     printf 'IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64=%s\n' "${edge_authorization_secret}"
+    printf 'IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64=%s\n' "${edge_client_rate_limit_key}"
     printf 'IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64=%s\n' "${assertion_key}"
     printf 'IM_V2_PASSWORD_DUMMY_BCRYPT_HASH=%s\n' "${dummy_hash_for_compose}"
   } > "${env_file}"
@@ -59,6 +61,13 @@ if ! grep -q '^IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64=' "${env_file}"; t
   umask 077
   printf 'IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64=%s\n' "${edge_authorization_secret}" >> "${env_file}"
   printf 'added local-only account-edge authorization secret: %s\n' "${env_file}"
+fi
+
+if ! grep -q '^IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64=' "${env_file}"; then
+  edge_client_rate_limit_key="$(openssl rand -base64 32 | tr -d '\n')"
+  umask 077
+  printf 'IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64=%s\n' "${edge_client_rate_limit_key}" >> "${env_file}"
+  printf 'added local-only account-edge client rate-limit key: %s\n' "${env_file}"
 fi
 
 # Older local Docker installations can lack Buildx and therefore ignore a

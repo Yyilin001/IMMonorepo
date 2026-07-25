@@ -9,10 +9,12 @@ struct V2AccountRuntimeConfigurationTests {
         let expectedListener = try V2AccountListenerConfiguration(host: "127.0.0.1", port: 8444)
         let expectedRateLimit = try V2PasswordLoginRateLimitPolicy(maximumFailures: 5, window: 900, lockout: 900)
         let expectedIdentityRateLimit = try V2PublicIdentityLookupRateLimitPolicy(maximumQueries: 30, window: 60)
+        let expectedEdgeClientRateLimit = try V2AccountEdgeClientRateLimitPolicy(maximumRequests: 60, window: 60)
         #expect(configuration.listener == expectedListener)
         #expect(configuration.accountAssertionKey.count == 32)
         #expect(configuration.passwordLoginRateLimit == expectedRateLimit)
         #expect(configuration.publicIdentityLookupRateLimit == expectedIdentityRateLimit)
+        #expect(configuration.edgeClientRateLimit == expectedEdgeClientRateLimit)
     }
 
     @Test("account service rejects public binding")
@@ -48,6 +50,27 @@ struct V2AccountRuntimeConfigurationTests {
         }
     }
 
+    @Test("account service requires a distinct valid edge-client rate-limit key and policy")
+    func rejectsInvalidEdgeClientRateLimitConfiguration() {
+        var missingKey = values
+        missingKey.removeValue(forKey: "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64")
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64")) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missingKey))
+        }
+
+        var invalidKey = values
+        invalidKey["IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64"] = Data(repeating: 7, count: 31).base64EncodedString()
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64")) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(invalidKey))
+        }
+
+        var invalidPolicy = values
+        invalidPolicy["IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS"] = "0"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS/IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS")) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(invalidPolicy))
+        }
+    }
+
     private var values: [String: String] {
         [
             "IM_V2_DATABASE_URL": "postgres://v2:password@db/im_v2",
@@ -57,11 +80,14 @@ struct V2AccountRuntimeConfigurationTests {
             "IM_V2_CREDENTIAL_REPLAY_ENVELOPE_KEY_BASE64": Data(repeating: 2, count: 32).base64EncodedString(),
             "IM_V2_PUSH_ENDPOINT_ENVELOPE_KEY_BASE64": Data(repeating: 4, count: 32).base64EncodedString(),
             "IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64": Data(repeating: 5, count: 32).base64EncodedString(),
+            "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64": Data(repeating: 6, count: 32).base64EncodedString(),
             "IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64": Data(repeating: 3, count: 32).base64EncodedString(),
             "IM_V2_PASSWORD_DUMMY_BCRYPT_HASH": "$2b$12$123456789012345678901u12345678901234567890123456789012",
             "IM_V2_PASSWORD_LOGIN_MAX_FAILURES": "5",
             "IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS": "900",
             "IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS": "900",
+            "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS": "60",
+            "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS": "60",
             "IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES": "30",
             "IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS": "60",
         ]
