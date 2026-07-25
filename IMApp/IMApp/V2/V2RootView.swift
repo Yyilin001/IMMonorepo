@@ -49,6 +49,8 @@ private struct V2SignInView: View {
     let authenticationMessage: String?
     @State private var accountHandle = ""
     @State private var password = ""
+    @State private var publicHandle = ""
+    @State private var displayName = ""
     @State private var mode: V2AppStore.PasswordMode = .signIn
     @State private var actionTask: Task<Void, Never>?
 
@@ -72,7 +74,15 @@ private struct V2SignInView: View {
                     .accessibilityIdentifier("v2.password.account-handle")
                 SecureField("密码", text: $password)
                     .textContentType(mode == .register ? .newPassword : .password)
-                    .accessibilityIdentifier("v2.password.value")
+                .accessibilityIdentifier("v2.password.value")
+                if mode == .register {
+                    TextField("公开 ID（例如 @alice）", text: $publicHandle)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("v2.identity.public-handle")
+                    TextField("显示名称", text: $displayName)
+                        .accessibilityIdentifier("v2.identity.display-name")
+                }
                 Picker("操作", selection: $mode) {
                     Text("登录").tag(V2AppStore.PasswordMode.signIn)
                     Text("注册").tag(V2AppStore.PasswordMode.register)
@@ -81,9 +91,17 @@ private struct V2SignInView: View {
                 Button(mode == .register ? "创建账号" : "使用密码登录") {
                     let submittedPassword = password
                     password = ""
-                    run { await store.authenticatePassword(accountHandle: accountHandle, password: submittedPassword, mode: mode) }
+                    run {
+                        await store.authenticatePassword(
+                            accountHandle: accountHandle,
+                            password: submittedPassword,
+                            mode: mode,
+                            publicHandle: publicHandle,
+                            displayName: displayName
+                        )
+                    }
                 }
-                .disabled(accountHandle.isEmpty || password.isEmpty)
+                .disabled(accountHandle.isEmpty || password.isEmpty || (mode == .register && (publicHandle.isEmpty || displayName.isEmpty)))
                 .accessibilityIdentifier("v2.password.submit")
             }
 

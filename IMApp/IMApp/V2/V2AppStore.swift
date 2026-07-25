@@ -117,7 +117,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         }
     }
 
-    func authenticatePassword(accountHandle: String, password: String, mode: PasswordMode) async {
+    func authenticatePassword(accountHandle: String, password: String, mode: PasswordMode, publicHandle: String? = nil, displayName: String? = nil) async {
         guard let configuration, let bootstrapper, let deviceIdentityProvider else { return }
         route = .authenticating
         authenticationMessage = nil
@@ -130,6 +130,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 accountHandle: accountHandle,
                 password: password,
                 mode: mode == .register ? .register : .authenticate,
+                publicHandle: publicHandle,
+                displayName: displayName,
                 authenticator: passwordAuthenticator
             )
             let issuer = try V2HTTPAccountAssertionDeviceCredentialProvider(
@@ -148,6 +150,12 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         } catch V2AccountAuthenticationError.invalidPassword {
             route = .signedOut
             authenticationMessage = "密码须为 12–1024 个 UTF-8 字节。"
+        } catch V2AccountAuthenticationError.invalidPublicHandle {
+            route = .signedOut
+            authenticationMessage = "公开 ID 须为 3–32 位小写字母、数字或下划线。"
+        } catch V2AccountAuthenticationError.invalidDisplayName {
+            route = .signedOut
+            authenticationMessage = "显示名称须为 1–80 个 UTF-8 字节，且不能包含换行或控制字符。"
         } catch V2AccountAuthenticationError.accountAlreadyExists {
             route = .signedOut
             authenticationMessage = "该账号已存在，请改用密码登录。"
@@ -202,6 +210,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             messageEditor: realtime.messageEditor,
             readReceiptReporter: realtime.readReceiptReporter,
             directConversationOpener: realtime.directConversationOpener,
+            publicIdentityResolver: try V2HTTPPublicIdentityDirectory(
+                endpoint: configuration.endpoint("v2/public-identities/resolve"),
+                credentials: authSession
+            ),
             groupConversationCreator: realtime.groupConversationCreator,
             groupMemberDirectory: realtime.groupMemberDirectory,
             groupMembershipChanger: realtime.groupMembershipChanger,

@@ -72,6 +72,14 @@ protocol V2DirectConversationOpening: Sendable {
     func openConversation(with targetUserID: String) async throws -> String
 }
 
+/// Resolves an explicit public handle before the realtime protocol receives an
+/// opaque user ID. This keeps UUIDs out of all product-facing entry fields.
+protocol V2ConversationPublicIdentityResolving: Sendable {
+    func resolve(handle: String) async throws -> V2PublicIdentity
+}
+
+extension V2HTTPPublicIdentityDirectory: V2ConversationPublicIdentityResolving {}
+
 enum V2GroupConversationCreationOutcome: Equatable, Sendable {
     case created(roomID: String)
     case queuedForRetry

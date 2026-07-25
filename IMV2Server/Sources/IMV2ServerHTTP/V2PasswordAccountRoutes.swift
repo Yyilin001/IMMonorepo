@@ -7,7 +7,9 @@ import Vapor
 
 public enum V2PasswordAccountStoreError: Error, Equatable, Sendable {
     case invalidAccountHandle
+    case invalidPublicIdentity
     case accountAlreadyExists
+    case publicHandleAlreadyExists
     case unavailable
 }
 
@@ -23,18 +25,29 @@ public struct V2PostgresPasswordAccountStore: Sendable {
         self.now = now
     }
 
-    public func register(accountHandle: String, passwordHash: String) async throws -> UserID {
+    public func register(accountHandle: String, passwordHash: String, publicHandle: String, displayName: String) async throws -> UserID {
         let handle = try canonicalAccountHandle(accountHandle)
+        let userUUID = UUID()
+        let identity: V2PublicIdentity
+        do {
+            identity = try .init(userID: .init(userUUID.uuidString), handle: .init(publicHandle), displayName: displayName)
+        } catch {
+            throw V2PasswordAccountStoreError.invalidPublicIdentity
+        }
         guard !passwordHash.isEmpty else { throw V2PasswordAccountStoreError.unavailable }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2PasswordAccountStoreError.unavailable }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-account:" + handle), 0))").run()
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-public-handle:" + identity.handle.rawValue), 0))").run()
             guard try await sql.raw("SELECT 1 FROM im_v2.account_password_credentials WHERE account_handle = \(bind: handle)").first() == nil else {
                 throw V2PasswordAccountStoreError.accountAlreadyExists
             }
-            let userUUID = UUID()
+            guard try await sql.raw("SELECT 1 FROM im_v2.public_user_profiles WHERE public_handle = \(bind: identity.handle.rawValue)").first() == nil else {
+                throw V2PasswordAccountStoreError.publicHandleAlreadyExists
+            }
             try await sql.raw("INSERT INTO im_v2.account_password_credentials (account_handle, user_id, password_hash, created_at) VALUES (\(bind: handle), \(bind: userUUID), \(bind: passwordHash), \(bind: now()))").run()
-            return try UserID(userUUID.uuidString)
+            try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, revision, created_at, updated_at) VALUES (\(bind: userUUID), \(bind: identity.handle.rawValue), \(bind: identity.displayName), 1, \(bind: now()), \(bind: now()))").run()
+            return identity.userID
         }
     }
 
@@ -84,11 +97,16 @@ public struct V2PasswordAccountRoutes: Sendable {
             do {
                 try validatePassword(input.password)
                 let passwordHash = try await request.password.async.hash(input.password).get()
-                let userID = try await store.register(accountHandle: input.accountHandle, passwordHash: passwordHash)
+                guard let publicHandle = input.publicHandle, let displayName = input.displayName else { throw Abort(.badRequest) }
+                let userID = try await store.register(accountHandle: input.accountHandle, passwordHash: passwordHash, publicHandle: publicHandle, displayName: displayName)
                 return try noStoreJSONResponse(.init(accountAssertion: try assertionIssuer.issue(userID: userID, deviceID: deviceID)))
             } catch V2PasswordAccountStoreError.accountAlreadyExists {
                 throw Abort(.conflict)
+            } catch V2PasswordAccountStoreError.publicHandleAlreadyExists {
+                throw Abort(.conflict)
             } catch V2PasswordAccountStoreError.invalidAccountHandle {
+                throw Abort(.badRequest)
+            } catch V2PasswordAccountStoreError.invalidPublicIdentity {
                 throw Abort(.badRequest)
             } catch V2PasswordRouteError.invalidPassword {
                 throw Abort(.badRequest)
@@ -158,6 +176,16 @@ public struct V2PasswordAccountHTTPRequest: Content, Sendable {
     public let accountHandle: String
     public let password: String
     public let deviceID: String
+    public let publicHandle: String?
+    public let displayName: String?
+
+    public init(accountHandle: String, password: String, deviceID: String, publicHandle: String? = nil, displayName: String? = nil) {
+        self.accountHandle = accountHandle
+        self.password = password
+        self.deviceID = deviceID
+        self.publicHandle = publicHandle
+        self.displayName = displayName
+    }
 }
 
 public struct V2AccountAssertionHTTPResponse: Content, Sendable {

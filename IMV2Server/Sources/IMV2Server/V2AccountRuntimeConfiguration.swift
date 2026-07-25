@@ -29,6 +29,7 @@ public struct V2AccountRuntimeConfiguration: Sendable {
     public let accountAssertionKey: Data
     public let dummyPasswordHash: String
     public let passwordLoginRateLimit: V2PasswordLoginRateLimitPolicy
+    public let publicIdentityLookupRateLimit: V2PublicIdentityLookupRateLimitPolicy
 
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
@@ -60,6 +61,13 @@ public struct V2AccountRuntimeConfiguration: Sendable {
             )
         } catch V2PasswordLoginRateLimitError.invalidPolicy {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_PASSWORD_LOGIN_MAX_FAILURES/IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS/IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS")
+        }
+        let publicIdentityMaximumQueries = try Self.integer("IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES", environment: environment)
+        let publicIdentityWindowSeconds = try Self.integer("IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS", environment: environment)
+        do {
+            publicIdentityLookupRateLimit = try .init(maximumQueries: publicIdentityMaximumQueries, window: TimeInterval(publicIdentityWindowSeconds))
+        } catch V2PublicIdentityLookupRateLimitError.invalidPolicy {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES/IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS")
         }
     }
 

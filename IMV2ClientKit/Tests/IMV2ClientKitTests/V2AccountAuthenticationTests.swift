@@ -45,6 +45,27 @@ struct V2AccountAuthenticationTests {
         #expect(try await provider.accountAssertion(for: deviceID) == "passkey-assertion")
     }
 
+    @Test("password registration carries a separate public profile, never reusing the login handle")
+    func registrationCarriesPublicIdentity() async throws {
+        let registration = try #require(URL(string: "https://account.invalid/v2/account-auth/password/register"))
+        let assertion = try #require(URL(string: "https://account.invalid/v2/account-auth/password/assertion"))
+        let transport = AccountHTTPTransport(result: .success((try JSONEncoder().encode(AssertionBody(accountAssertion: "short-lived")), try response(for: registration))))
+        let authenticator = try V2HTTPPasswordAccountAuthenticator(registrationEndpoint: registration, assertionEndpoint: assertion, transport: transport)
+
+        _ = try await authenticator.register(
+            accountHandle: "private-login",
+            password: "correct horse battery staple",
+            publicHandle: "@public_user",
+            displayName: "Public User",
+            deviceID: try .init("00000000-0000-0000-0000-000000000901")
+        )
+
+        let body = try JSONDecoder().decode(PasswordBody.self, from: try #require(await transport.lastRequest()?.httpBody))
+        #expect(body.accountHandle == "private-login")
+        #expect(body.publicHandle == "@public_user")
+        #expect(body.displayName == "Public User")
+    }
+
     @Test("unsafe endpoint and weak password are rejected before transport")
     func rejectsUnsafeInput() throws {
         #expect(throws: V2AccountAuthenticationError.invalidEndpoint) {
@@ -72,7 +93,7 @@ private actor AccountHTTPTransport: V2AuthHTTPTransport {
 }
 
 private struct AssertionBody: Encodable { let accountAssertion: String }
-private struct PasswordBody: Decodable { let accountHandle: String; let password: String; let deviceID: String }
+private struct PasswordBody: Decodable { let accountHandle: String; let password: String; let deviceID: String; let publicHandle: String?; let displayName: String? }
 private struct FixedPasskeyRequestProvider: V2PasskeyAssertionRequestProviding {
     let request: V2PasskeyAssertionRequest
     func assertionRequest(accountHandle _: String?, deviceID _: DeviceID) -> V2PasskeyAssertionRequest { request }

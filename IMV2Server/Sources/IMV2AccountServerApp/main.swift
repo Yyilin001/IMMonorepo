@@ -43,6 +43,13 @@ enum IMV2AccountServerApp {
                     envelopeKey: configuration.pushEndpointEnvelopeKey
                 )
             ).register(on: app)
+            V2VaporPublicIdentityRoutes(
+                authenticator: authenticator,
+                directory: V2PostgresPublicIdentityDirectory(
+                    database: database,
+                    policy: configuration.publicIdentityLookupRateLimit
+                )
+            ).register(on: app)
             V2PasswordAccountRoutes(
                 store: .init(database: database),
                 assertionIssuer: assertionIssuer,

@@ -8,9 +8,11 @@ struct V2AccountRuntimeConfigurationTests {
         let configuration = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         let expectedListener = try V2AccountListenerConfiguration(host: "127.0.0.1", port: 8444)
         let expectedRateLimit = try V2PasswordLoginRateLimitPolicy(maximumFailures: 5, window: 900, lockout: 900)
+        let expectedIdentityRateLimit = try V2PublicIdentityLookupRateLimitPolicy(maximumQueries: 30, window: 60)
         #expect(configuration.listener == expectedListener)
         #expect(configuration.accountAssertionKey.count == 32)
         #expect(configuration.passwordLoginRateLimit == expectedRateLimit)
+        #expect(configuration.publicIdentityLookupRateLimit == expectedIdentityRateLimit)
     }
 
     @Test("account service rejects public binding")
@@ -44,6 +46,8 @@ struct V2AccountRuntimeConfigurationTests {
             "IM_V2_PASSWORD_LOGIN_MAX_FAILURES": "5",
             "IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS": "900",
             "IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS": "900",
+            "IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES": "30",
+            "IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS": "60",
         ]
     }
 }

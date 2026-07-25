@@ -182,6 +182,7 @@ final class V2ConversationListStore {
     private let messageEditor: (any V2MessageEditing)?
     private let readReceiptReporter: (any V2ConversationReadReporting)?
     private let directConversationOpener: (any V2DirectConversationOpening)?
+    private let publicIdentityResolver: (any V2ConversationPublicIdentityResolving)?
     private let groupConversationCreator: (any V2GroupConversationCreating)?
     private let groupMemberDirectory: (any V2GroupMemberDirectoryReading)?
     private let groupMembershipChanger: (any V2GroupMembershipChanging)?
@@ -202,6 +203,7 @@ final class V2ConversationListStore {
         messageEditor: (any V2MessageEditing)? = nil,
         readReceiptReporter: (any V2ConversationReadReporting)? = nil,
         directConversationOpener: (any V2DirectConversationOpening)? = nil,
+        publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil,
         groupConversationCreator: (any V2GroupConversationCreating)? = nil,
         groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil,
         groupMembershipChanger: (any V2GroupMembershipChanging)? = nil,
@@ -217,6 +219,7 @@ final class V2ConversationListStore {
         self.messageEditor = messageEditor
         self.readReceiptReporter = readReceiptReporter
         self.directConversationOpener = directConversationOpener
+        self.publicIdentityResolver = publicIdentityResolver
         self.groupConversationCreator = groupConversationCreator
         self.groupMemberDirectory = groupMemberDirectory
         self.groupMembershipChanger = groupMembershipChanger
@@ -225,8 +228,8 @@ final class V2ConversationListStore {
         self.mediaDownloader = mediaDownloader
     }
 
-    func createGroupConversation(title: String, memberUserIDsText: String) async -> String? {
-        let members = memberUserIDsText
+    func createGroupConversation(title: String, memberHandlesText: String) async -> String? {
+        let handles = memberHandlesText
             .split(whereSeparator: { $0 == "," || $0 == "\n" })
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -234,8 +237,12 @@ final class V2ConversationListStore {
             groupConversationFeedback = "请输入群名称。"
             return nil
         }
-        guard Set(members).count == members.count else {
-            groupConversationFeedback = "成员用户 ID 不能重复。"
+        guard let canonicalHandles = try? handles.map({ try V2PublicHandle($0).rawValue }) else {
+            groupConversationFeedback = "成员公开 ID 格式不正确。"
+            return nil
+        }
+        guard Set(canonicalHandles).count == canonicalHandles.count else {
+            groupConversationFeedback = "成员公开 ID 不能重复。"
             return nil
         }
         guard let groupConversationCreator else {
@@ -243,6 +250,19 @@ final class V2ConversationListStore {
             return nil
         }
         do {
+            let members: [String]
+            if handles.isEmpty {
+                members = []
+            } else if let publicIdentityResolver {
+                var resolved: [String] = []
+                for handle in handles {
+                    resolved.append(try await publicIdentityResolver.resolve(handle: handle).userID.rawValue)
+                }
+                members = resolved
+            } else {
+                groupConversationFeedback = "身份目录暂不可用，无法解析成员公开 ID。"
+                return nil
+            }
             switch try await groupConversationCreator.createConversation(title: title, initialMemberUserIDs: members) {
             case .created(let roomID):
                 groupConversationFeedback = nil
@@ -275,27 +295,36 @@ final class V2ConversationListStore {
     }
 
     func detailStore(for roomID: String) -> V2ConversationDetailStore {
-        .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader)
+        .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader)
     }
 
-    func openDirectConversation(targetUserID: String) async -> String? {
-        let target = targetUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+    func openDirectConversation(handle: String) async -> String? {
+        let target = handle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !target.isEmpty else {
-            directConversationFeedback = "请输入对方的用户 ID。"
+            directConversationFeedback = "请输入对方的公开 ID。"
             return nil
         }
         guard let directConversationOpener else {
             directConversationFeedback = "实时网关尚未可用，无法新建会话。"
             return nil
         }
+        guard let publicIdentityResolver else {
+            directConversationFeedback = "身份目录暂不可用，无法创建会话。"
+            return nil
+        }
         do {
-            let roomID = try await directConversationOpener.openConversation(with: target)
+            let identity = try await publicIdentityResolver.resolve(handle: target)
+            guard identity.userID.rawValue != userID else {
+                directConversationFeedback = "不能与自己创建私聊。"
+                return nil
+            }
+            let roomID = try await directConversationOpener.openConversation(with: identity.userID.rawValue)
             directConversationFeedback = nil
             return roomID
         } catch is CancellationError {
             return nil
         } catch {
-            directConversationFeedback = "无法创建会话，请检查用户 ID 和网络连接。"
+            directConversationFeedback = "无法创建会话，请检查公开 ID 和网络连接。"
             return nil
         }
     }
@@ -319,6 +348,7 @@ final class V2ConversationDetailStore {
     private let userID: String
     private let groupMemberDirectory: (any V2GroupMemberDirectoryReading)?
     private let groupMembershipChanger: (any V2GroupMembershipChanging)?
+    private let publicIdentityResolver: (any V2ConversationPublicIdentityResolving)?
     private let attachmentStager: (any V2ConversationAttachmentStaging)?
     private let attachmentUploader: (any V2ConversationAttachmentUploading)?
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
@@ -339,7 +369,7 @@ final class V2ConversationDetailStore {
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
-    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil) {
+    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil) {
         self.dataSource = dataSource
         self.sender = sender
         self.messageWithdrawer = messageWithdrawer
@@ -350,6 +380,7 @@ final class V2ConversationDetailStore {
         self.roomID = roomID
         self.groupMemberDirectory = groupMemberDirectory
         self.groupMembershipChanger = groupMembershipChanger
+        self.publicIdentityResolver = publicIdentityResolver
         self.attachmentStager = attachmentStager
         self.attachmentUploader = attachmentUploader
         self.mediaDownloader = mediaDownloader
@@ -678,9 +709,9 @@ final class V2ConversationDetailStore {
     }
 
     func changeGroupMembership(targetUserID: String, action: V2RoomMembershipAction) async {
-        let target = targetUserID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !target.isEmpty else {
-            groupMemberFeedback = "请输入成员用户 ID。"
+        let input = targetUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else {
+            groupMemberFeedback = action == .add ? "请输入成员公开 ID。" : "请输入成员。"
             return
         }
         guard let revision = groupMemberRevision else {
@@ -692,6 +723,16 @@ final class V2ConversationDetailStore {
             return
         }
         do {
+            let target: String
+            if action == .add {
+                guard let publicIdentityResolver else {
+                    groupMemberFeedback = "身份目录暂不可用，无法解析成员公开 ID。"
+                    return
+                }
+                target = try await publicIdentityResolver.resolve(handle: input).userID.rawValue
+            } else {
+                target = input
+            }
             switch try await groupMembershipChanger.changeMembership(
                 roomID: roomID,
                 targetUserID: target,
@@ -784,8 +825,8 @@ struct V2ConversationListView: View {
             .sheet(isPresented: $isPresentingDirectConversation) {
                 NavigationStack {
                     Form {
-                        Section("对方用户 ID") {
-                            TextField("用户 ID", text: $directTargetUserID)
+                        Section("对方公开 ID") {
+                            TextField("@handle", text: $directTargetUserID)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .accessibilityIdentifier("v2.conversation.direct-target")
@@ -803,7 +844,7 @@ struct V2ConversationListView: View {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("开始") {
                                 Task {
-                                    if let roomID = await store.openDirectConversation(targetUserID: directTargetUserID) {
+                                    if let roomID = await store.openDirectConversation(handle: directTargetUserID) {
                                         directTargetUserID = ""
                                         isPresentingDirectConversation = false
                                         navigationPath.append(roomID)
@@ -827,10 +868,10 @@ struct V2ConversationListView: View {
                                 .frame(minHeight: 110)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
-                                .accessibilityLabel("初始成员用户 ID")
-                                .accessibilityHint("用逗号或换行分隔；可留空创建仅自己的群聊")
+                                .accessibilityLabel("初始成员公开 ID")
+                                .accessibilityHint("输入 @handle，用逗号或换行分隔；可留空创建仅自己的群聊")
                                 .accessibilityIdentifier("v2.conversation.group-members")
-                            Text("用逗号或换行分隔用户 ID。")
+                            Text("用逗号或换行分隔公开 ID，例如 @alice。")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
@@ -848,7 +889,7 @@ struct V2ConversationListView: View {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("创建") {
                                 Task {
-                                    if let roomID = await store.createGroupConversation(title: groupTitle, memberUserIDsText: groupMemberUserIDs) {
+                                    if let roomID = await store.createGroupConversation(title: groupTitle, memberHandlesText: groupMemberUserIDs) {
                                         groupTitle = ""
                                         groupMemberUserIDs = ""
                                         isPresentingGroupConversation = false
@@ -1242,7 +1283,7 @@ private struct V2GroupMembersSheet: View {
                 }
                 if store.canAddGroupMembers {
                     Section("添加成员") {
-                        TextField("成员用户 ID", text: $newMemberUserID)
+                        TextField("成员公开 ID（@handle）", text: $newMemberUserID)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .accessibilityIdentifier("v2.group.members.add-input")

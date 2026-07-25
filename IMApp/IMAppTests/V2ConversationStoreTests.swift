@@ -440,13 +440,15 @@ struct V2ConversationStoreTests {
     @Test func directConversationTrimsInputAndReturnsOpenedRoom() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let opener = V2DirectConversationOpenerFake(roomID: "room-direct")
+        let resolver = V2ConversationPublicIdentityResolverFake(values: ["other_user": "other-user"])
         let store = V2ConversationListStore(
             dataSource: source,
             userID: "current-user",
-            directConversationOpener: opener
+            directConversationOpener: opener,
+            publicIdentityResolver: resolver
         )
 
-        let roomID = await store.openDirectConversation(targetUserID: "  other-user  ")
+        let roomID = await store.openDirectConversation(handle: "  @other_user  ")
 
         #expect(roomID == "room-direct")
         #expect(await opener.targets() == ["other-user"])
@@ -462,19 +464,20 @@ struct V2ConversationStoreTests {
             directConversationOpener: opener
         )
 
-        let roomID = await store.openDirectConversation(targetUserID: " \n ")
+        let roomID = await store.openDirectConversation(handle: " \n ")
 
         #expect(roomID == nil)
-        #expect(store.directConversationFeedback == "请输入对方的用户 ID。")
+        #expect(store.directConversationFeedback == "请输入对方的公开 ID。")
         #expect(await opener.targets().isEmpty)
     }
 
     @Test func groupConversationSplitsCanonicalMemberInputAndReturnsRoom() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let creator = V2GroupConversationCreatorFake(result: .created(roomID: "room-group"))
-        let store = V2ConversationListStore(dataSource: source, userID: "current-user", groupConversationCreator: creator)
+        let resolver = V2ConversationPublicIdentityResolverFake(values: ["user_a": "user-a", "user_b": "user-b"])
+        let store = V2ConversationListStore(dataSource: source, userID: "current-user", publicIdentityResolver: resolver, groupConversationCreator: creator)
 
-        let roomID = await store.createGroupConversation(title: " 项目群 ", memberUserIDsText: " user-a,\nuser-b ")
+        let roomID = await store.createGroupConversation(title: " 项目群 ", memberHandlesText: " @user_a,\n@user_b ")
 
         #expect(roomID == "room-group")
         #expect(await creator.requests() == [.init(title: " 项目群 ", memberUserIDs: ["user-a", "user-b"])])
@@ -485,7 +488,7 @@ struct V2ConversationStoreTests {
         let creator = V2GroupConversationCreatorFake(result: .queuedForRetry)
         let store = V2ConversationListStore(dataSource: source, userID: "current-user", groupConversationCreator: creator)
 
-        let roomID = await store.createGroupConversation(title: "项目群", memberUserIDsText: "")
+        let roomID = await store.createGroupConversation(title: "项目群", memberHandlesText: "")
 
         #expect(roomID == nil)
         #expect(store.groupConversationFeedback == "建群请求已安全保存，连接恢复后会继续。")
@@ -535,17 +538,19 @@ struct V2ConversationStoreTests {
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
         let changer = V2GroupMembershipChangerFake(result: .accepted)
+        let resolver = V2ConversationPublicIdentityResolverFake(values: ["member_b": "member-b"])
         let store = V2ConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
             groupMemberDirectory: reader,
-            groupMembershipChanger: changer
+            groupMembershipChanger: changer,
+            publicIdentityResolver: resolver
         )
 
         await store.loadGroupMembers(reset: true)
-        await store.changeGroupMembership(targetUserID: "member-b", action: .add)
+        await store.changeGroupMembership(targetUserID: "@member_b", action: .add)
 
         #expect(store.canAddGroupMembers)
         #expect(await changer.requests() == [.init(roomID: "room-group", targetUserID: "member-b", action: .add, expectedMembershipRevision: 8)])
@@ -829,6 +834,18 @@ private actor V2DirectConversationOpenerFake: V2DirectConversationOpening {
 
     func targets() -> [String] {
         openedTargets
+    }
+}
+
+private actor V2ConversationPublicIdentityResolverFake: V2ConversationPublicIdentityResolving {
+    private let values: [String: String]
+
+    init(values: [String: String]) { self.values = values }
+
+    func resolve(handle: String) async throws -> V2PublicIdentity {
+        let normalized = try V2PublicHandle(handle).rawValue
+        guard let userID = values[normalized] else { throw V2PublicIdentityDirectoryClientError.notFound }
+        return try .init(userID: .init(userID), handle: .init(normalized), displayName: normalized)
     }
 }
 

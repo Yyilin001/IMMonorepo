@@ -21,6 +21,8 @@ public struct V2AccountAssertion: Equatable, Sendable {
 public enum V2AccountAuthenticationError: Error, Equatable, Sendable {
     case invalidEndpoint
     case invalidAccountHandle
+    case invalidPublicHandle
+    case invalidDisplayName
     case invalidPassword
     case invalidAssertion
     case invalidResponse
@@ -34,7 +36,7 @@ public enum V2AccountAuthenticationError: Error, Equatable, Sendable {
 /// Callers must not retain it in observable state, UserDefaults, logs, or any
 /// Keychain item.
 public protocol V2PasswordAccountAuthenticating: Sendable {
-    func register(accountHandle: String, password: String, deviceID: DeviceID) async throws -> V2AccountAssertion
+    func register(accountHandle: String, password: String, publicHandle: String, displayName: String, deviceID: DeviceID) async throws -> V2AccountAssertion
     func authenticate(accountHandle: String, password: String, deviceID: DeviceID) async throws -> V2AccountAssertion
 }
 
@@ -49,17 +51,23 @@ public actor V2OneTimePasswordAccountAssertionProvider: V2DeviceBoundAccountAsse
     private let accountHandle: String
     private let authenticator: any V2PasswordAccountAuthenticating
     private let mode: Mode
+    private let publicHandle: String?
+    private let displayName: String?
     private var password: String?
 
     public init(
         accountHandle: String,
         password: String,
         mode: Mode = .authenticate,
+        publicHandle: String? = nil,
+        displayName: String? = nil,
         authenticator: any V2PasswordAccountAuthenticating
     ) {
         self.accountHandle = accountHandle
         self.password = password
         self.mode = mode
+        self.publicHandle = publicHandle
+        self.displayName = displayName
         self.authenticator = authenticator
     }
 
@@ -72,7 +80,8 @@ public actor V2OneTimePasswordAccountAssertionProvider: V2DeviceBoundAccountAsse
         self.password = nil
         switch mode {
         case .register:
-            return try await authenticator.register(accountHandle: accountHandle, password: password, deviceID: deviceID).value
+            guard let publicHandle, let displayName else { throw V2AccountAuthenticationError.invalidPublicHandle }
+            return try await authenticator.register(accountHandle: accountHandle, password: password, publicHandle: publicHandle, displayName: displayName, deviceID: deviceID).value
         case .authenticate:
             return try await authenticator.authenticate(accountHandle: accountHandle, password: password, deviceID: deviceID).value
         }
@@ -99,15 +108,17 @@ public struct V2HTTPPasswordAccountAuthenticator: V2PasswordAccountAuthenticatin
         self.transport = transport
     }
 
-    public func register(accountHandle: String, password: String, deviceID: DeviceID) async throws -> V2AccountAssertion {
-        try await send(accountHandle: accountHandle, password: password, deviceID: deviceID, to: registrationEndpoint)
+    public func register(accountHandle: String, password: String, publicHandle: String, displayName: String, deviceID: DeviceID) async throws -> V2AccountAssertion {
+        guard (try? V2PublicHandle(publicHandle)) != nil else { throw V2AccountAuthenticationError.invalidPublicHandle }
+        guard (try? V2PublicIdentity(userID: try .init(deviceID.rawValue), handle: .init(publicHandle), displayName: displayName)) != nil else { throw V2AccountAuthenticationError.invalidDisplayName }
+        return try await send(accountHandle: accountHandle, password: password, deviceID: deviceID, publicHandle: publicHandle, displayName: displayName, to: registrationEndpoint)
     }
 
     public func authenticate(accountHandle: String, password: String, deviceID: DeviceID) async throws -> V2AccountAssertion {
-        try await send(accountHandle: accountHandle, password: password, deviceID: deviceID, to: assertionEndpoint)
+        try await send(accountHandle: accountHandle, password: password, deviceID: deviceID, publicHandle: nil, displayName: nil, to: assertionEndpoint)
     }
 
-    private func send(accountHandle: String, password: String, deviceID: DeviceID, to endpoint: URL) async throws -> V2AccountAssertion {
+    private func send(accountHandle: String, password: String, deviceID: DeviceID, publicHandle: String?, displayName: String?, to endpoint: URL) async throws -> V2AccountAssertion {
         guard Self.isValidAccountHandle(accountHandle) else { throw V2AccountAuthenticationError.invalidAccountHandle }
         guard password.utf8.count >= 12, password.utf8.count <= 1_024 else { throw V2AccountAuthenticationError.invalidPassword }
         var request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 15)
@@ -116,7 +127,7 @@ public struct V2HTTPPasswordAccountAuthenticator: V2PasswordAccountAuthenticatin
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
-        request.httpBody = try JSONEncoder().encode(PasswordRequest(accountHandle: accountHandle, password: password, deviceID: deviceID.rawValue))
+        request.httpBody = try JSONEncoder().encode(PasswordRequest(accountHandle: accountHandle, password: password, deviceID: deviceID.rawValue, publicHandle: publicHandle, displayName: displayName))
         let data: Data
         let response: HTTPURLResponse
         do {
@@ -157,6 +168,8 @@ private struct PasswordRequest: Encodable {
     let accountHandle: String
     let password: String
     let deviceID: String
+    let publicHandle: String?
+    let displayName: String?
 }
 
 private struct AssertionResponse: Decodable {
