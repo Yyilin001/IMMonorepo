@@ -53,6 +53,26 @@ struct V2ClientRuntimeTests {
         await runtime.stop()
     }
 
+    @Test("a runtime stopped for backgrounding establishes a fresh foreground session")
+    func restartAfterStopReconnects() async throws {
+        let session = try authenticatedSession()
+        let connection = RuntimeConnection(result: .success(session))
+        let activity = BlockingRuntimeActivity()
+        let runtime = V2ClientRuntime(connection: connection, activity: activity)
+
+        _ = try await runtime.start()
+        await runtime.stop()
+        _ = try await runtime.start()
+
+        #expect(await connection.connectCount() == 2)
+        #expect(await activity.syncCount() == 2)
+        #expect(await activity.commandFlushCount() == 2)
+        #expect(await runtime.currentState() == .running(session))
+
+        await runtime.stop()
+        #expect(await connection.disconnectCount() == 2)
+    }
+
     @Test("concurrent start callers share one in-flight handshake and initial sync")
     func concurrentStartsShareAttempt() async throws {
         let session = try authenticatedSession()

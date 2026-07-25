@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct V2RootView: View {
+    @Environment(\.scenePhase) private var scenePhase
     private let appPushDelegate: V2AppPushDelegate
     @State private var store: V2AppStore
 
@@ -49,6 +50,18 @@ struct V2RootView: View {
             appPushDelegate.wakeHandler = store
         }
         .task { await store.restore() }
+        .task(id: scenePhase) {
+            switch scenePhase {
+            case .active:
+                await store.applicationDidBecomeActive()
+            case .background:
+                await store.applicationDidEnterBackground()
+            case .inactive:
+                break
+            @unknown default:
+                break
+            }
+        }
     }
 }
 

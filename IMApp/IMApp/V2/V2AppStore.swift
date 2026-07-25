@@ -29,6 +29,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private weak var remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)?
     @ObservationIgnored private var realtimeRuntime: V2ClientRuntime?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
+    @ObservationIgnored private var realtimeGeneration: UInt64 = 0
+    @ObservationIgnored private var isApplicationActive = true
 
     private(set) var route: Route
     private(set) var authenticationMessage: String?
@@ -197,9 +199,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     func signOut() async {
         await pushWakeSettingsStore?.deactivateForSignOut()
         try? await authSession?.handleTerminalRejection()
-        realtimeTask?.cancel()
-        realtimeTask = nil
-        await realtimeRuntime?.stop()
+        await stopRealtime()
         realtimeRuntime = nil
         authenticationMessage = nil
         conversationStore = nil
@@ -275,8 +275,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         } else {
             pushWakeSettings = nil
         }
-        realtimeTask?.cancel()
-        await realtimeRuntime?.stop()
+        await stopRealtime()
         realtimeRuntime = realtime.runtime
         conversationStore = conversations
         privacySettingsStore = privacySettings
@@ -285,19 +284,61 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         route = .signedIn(userID: userID)
         await conversations.refresh()
         await pushWakeSettings?.activate()
-        realtimeTask = Task { [weak self, runtime = realtime.runtime, conversations] in
+        startRealtimeIfApplicationActive(runtime: realtime.runtime, conversations: conversations)
+    }
+
+    /// Stops the foreground realtime connection only after iOS has actually
+    /// backgrounded the scene. `inactive` is intentionally not treated as a
+    /// background transition because it also occurs while passkey and system
+    /// permission UI is presented over the app.
+    func applicationDidEnterBackground() async {
+        isApplicationActive = false
+        await stopRealtime()
+    }
+
+    /// Reuses the signed-in local projection and makes one explicit new
+    /// realtime attempt after the app returns to the foreground.
+    func applicationDidBecomeActive() async {
+        isApplicationActive = true
+        guard case .signedIn = route,
+              let realtimeRuntime,
+              let conversationStore
+        else { return }
+        startRealtimeIfApplicationActive(runtime: realtimeRuntime, conversations: conversationStore)
+    }
+
+    private func startRealtimeIfApplicationActive(
+        runtime: V2ClientRuntime,
+        conversations: V2ConversationListStore
+    ) {
+        guard isApplicationActive, realtimeTask == nil else { return }
+        realtimeGeneration &+= 1
+        let taskGeneration = realtimeGeneration
+        realtimeTask = Task { [weak self, runtime, conversations] in
             do {
                 _ = try await runtime.start()
                 await conversations.refresh()
             } catch is CancellationError {
                 return
             } catch V2RealtimeSessionCoordinatorError.authenticationRequired {
-                await self?.signOut()
+                await self?.signOutIfCurrentRealtimeAttempt(taskGeneration)
             } catch {
                 // Local projections remain readable while offline. The next
                 // foreground activation deliberately creates a new attempt.
             }
         }
+    }
+
+    private func stopRealtime() async {
+        realtimeGeneration &+= 1
+        realtimeTask?.cancel()
+        realtimeTask = nil
+        await realtimeRuntime?.stop()
+    }
+
+    private func signOutIfCurrentRealtimeAttempt(_ taskGeneration: UInt64) async {
+        guard realtimeGeneration == taskGeneration else { return }
+        await signOut()
     }
 
     func receiveAPNSToken(_ token: String) async {
