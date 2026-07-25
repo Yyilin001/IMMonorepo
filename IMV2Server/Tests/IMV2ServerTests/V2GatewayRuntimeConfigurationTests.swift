@@ -83,6 +83,21 @@ struct V2GatewayRuntimeConfigurationTests {
         }
     }
 
+    @Test("runtime bounds the durable gateway node identifier")
+    func rejectsInvalidGatewayNodeID() {
+        var invalidCharacter = runtimeValues
+        invalidCharacter["IM_V2_GATEWAY_NODE_ID"] = "gateway/a"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_GATEWAY_NODE_ID")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(invalidCharacter))
+        }
+
+        var overlong = runtimeValues
+        overlong["IM_V2_GATEWAY_NODE_ID"] = String(repeating: "a", count: 129)
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_GATEWAY_NODE_ID")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(overlong))
+        }
+    }
+
     @Test("runtime validates an explicit logical-bucket storage registry")
     func parsesAndRejectsInvalidUserShardStorageRegistry() throws {
         var values = runtimeValues

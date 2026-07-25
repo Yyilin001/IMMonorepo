@@ -60,7 +60,11 @@ EOF、协议错误和设备撤销都会走同一注销路径。它们仅描述�
 `im_v2_device_revocation_events_pending`：它只统计**当前 scrape 所在 gateway
 节点**尚未消费的 device-revocation event，不含 node、user 或 device 标签。其非零
 短暂出现是正常消费过程；若持续存在，可能有已撤销会话尚未断开，必须按账号禁用
-runbook 处置。room outbox 和投递只使用固定的
+runbook 处置。Gateway 在绑定 TLS listener 前只为此前未见过的 node ID 原子创建
+cursor，并把它设为当时的 event watermark：新副本没有存活 socket，无需扫描历史；
+已存在 cursor 绝不在启动时推进，以保留崩溃恢复和防止重复 node ID 跳过工作。
+部署必须为同时运行的 gateway 使用不同、受限且稳定的 node ID；以 scrape target
+而非指标标签区分副本。room outbox 和投递只使用固定的
 `ready`/`leased`/`scheduled`/`paused` 标签；`scheduled` 表示仍处于退避等待期，
 `paused` 表示重试预算已耗尽、必须经受控
 operator replay 才会再次入队的 durable row，绝不能将它当作已投递或已终态。

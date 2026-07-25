@@ -28,6 +28,33 @@ struct V2DeviceRevocationWorkerTests {
         #expect(await store.processedEventIDs(for: "gateway-test") == [8, 9])
     }
 
+    @Test("a newly named gateway starts at the pre-listener revocation watermark")
+    func initializesOnlyAnAbsentCursorAtCurrentWatermark() async throws {
+        let firstUser = try UserID("00000000-0000-0000-0000-000000000721")
+        let firstDevice = try DeviceID("00000000-0000-0000-0000-000000000722")
+        let secondUser = try UserID("00000000-0000-0000-0000-000000000723")
+        let secondDevice = try DeviceID("00000000-0000-0000-0000-000000000724")
+        let store = InMemoryDeviceRevocationEventStore(events: [
+            .init(eventID: 12, userID: firstUser, deviceID: firstDevice),
+            .init(eventID: 13, userID: secondUser, deviceID: secondDevice),
+        ])
+        let worker = V2DeviceRevocationWorker(
+            store: store,
+            registry: V2DeviceConnectionRegistry(),
+            nodeID: "new-gateway-test",
+            now: { Date(timeIntervalSince1970: 1_750_000_000) }
+        )
+
+        try await worker.initializeForStartup()
+        #expect(try await worker.runOnce(limit: 8) == 0)
+
+        await store.append(.init(eventID: 14, userID: firstUser, deviceID: firstDevice))
+        #expect(try await worker.runOnce(limit: 8) == 1)
+        #expect(await store.processedEventIDs(for: "new-gateway-test") == [14])
+        try await worker.initializeForStartup()
+        #expect(await store.cursor(for: "new-gateway-test") == 14)
+    }
+
     @Test("a revocation event closes its registered live stream before advancing the node cursor")
     func revokesRegisteredLiveStreamBeforeAcknowledgingEvent() async throws {
         let user = try UserID("00000000-0000-0000-0000-000000000711")
@@ -74,8 +101,9 @@ struct V2DeviceRevocationWorkerTests {
 }
 
 private actor InMemoryDeviceRevocationEventStore: V2DeviceRevocationEventStore {
-    private let events: [V2DeviceRevocationEvent]
     private let didCloseBeforeMarking: (@Sendable () async -> Bool)?
+    private var events: [V2DeviceRevocationEvent]
+    private var cursors: [String: Int64] = [:]
     private var processed: [String: [Int64]] = [:]
     private var closeObservations: [String: [Bool]] = [:]
 
@@ -87,8 +115,13 @@ private actor InMemoryDeviceRevocationEventStore: V2DeviceRevocationEventStore {
         self.didCloseBeforeMarking = didCloseBeforeMarking
     }
 
+    func initializeCursorIfNeeded(nodeID: String, now _: Date) {
+        guard cursors[nodeID] == nil else { return }
+        cursors[nodeID] = events.map(\.eventID).max() ?? 0
+    }
+
     func events(afterCursorFor nodeID: String, limit: Int) -> [V2DeviceRevocationEvent] {
-        let cursor = processed[nodeID]?.last ?? 0
+        let cursor = cursors[nodeID] ?? 0
         return Array(events.filter { $0.eventID > cursor }.prefix(limit))
     }
 
@@ -97,8 +130,11 @@ private actor InMemoryDeviceRevocationEventStore: V2DeviceRevocationEventStore {
             closeObservations[nodeID, default: []].append(await didCloseBeforeMarking())
         }
         processed[nodeID, default: []].append(eventID)
+        cursors[nodeID] = max(cursors[nodeID] ?? 0, eventID)
     }
 
+    func append(_ event: V2DeviceRevocationEvent) { events.append(event) }
+    func cursor(for nodeID: String) -> Int64? { cursors[nodeID] }
     func processedEventIDs(for nodeID: String) -> [Int64] { processed[nodeID] ?? [] }
     func closeObservationsWhenMarked(for nodeID: String) -> [Bool] { closeObservations[nodeID] ?? [] }
 }

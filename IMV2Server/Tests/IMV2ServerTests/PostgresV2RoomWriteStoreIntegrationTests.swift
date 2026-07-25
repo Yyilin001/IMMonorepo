@@ -2435,7 +2435,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("PostgreSQL device-revocation cursor decodes events and advances per gateway node")
+    @Test("PostgreSQL device-revocation cursor initializes new nodes and advances existing nodes")
     func deviceRevocationCursorReadsAndAcknowledgesEvents() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
@@ -2468,6 +2468,21 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(secondPage.map(\.eventID) == [firstPage[1].eventID])
             try await store.markProcessed(eventID: secondPage[0].eventID, nodeID: nodeID, now: occurredAt)
             #expect(try await store.events(afterCursorFor: nodeID, limit: 8).isEmpty)
+
+            let freshNodeID = "gateway-revocation-fresh-node"
+            try await store.initializeCursorIfNeeded(nodeID: freshNodeID, now: occurredAt)
+            #expect(try await store.events(afterCursorFor: freshNodeID, limit: 8).isEmpty)
+
+            let laterUser = UUID(uuidString: "00000000-0000-0000-0000-000000000985")!
+            let laterDevice = UUID(uuidString: "00000000-0000-0000-0000-000000000986")!
+            try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at) VALUES (\(bind: laterUser), \(bind: laterDevice), \(bind: occurredAt))").run()
+            try await sql.raw("INSERT INTO im_v2.device_revocation_events (user_id, device_id, created_at) VALUES (\(bind: laterUser), \(bind: laterDevice), \(bind: occurredAt))").run()
+            let laterPage = try await store.events(afterCursorFor: freshNodeID, limit: 8)
+            #expect(laterPage.map(\.deviceID) == [try DeviceID(laterDevice.uuidString)])
+            // Startup initialization must not advance an already-created
+            // cursor, otherwise a duplicate node ID could skip live work.
+            try await store.initializeCursorIfNeeded(nodeID: freshNodeID, now: occurredAt)
+            #expect(try await store.events(afterCursorFor: freshNodeID, limit: 8).map(\.eventID) == laterPage.map(\.eventID))
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()

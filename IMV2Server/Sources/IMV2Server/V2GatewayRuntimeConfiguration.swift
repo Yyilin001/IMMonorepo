@@ -172,7 +172,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             host: Self.required("IM_V2_METRICS_HOST", environment: environment),
             port: Self.integer("IM_V2_METRICS_PORT", environment: environment)
         )
-        gatewayNodeID = try Self.required("IM_V2_GATEWAY_NODE_ID", environment: environment)
+        gatewayNodeID = try Self.gatewayNodeID(environment: environment)
         userShardRoute = try .init(
             bucket: Self.required("IM_V2_USER_SHARD_BUCKET", environment: environment),
             observedRouterEpoch: try Self.nonNegative("IM_V2_USER_SHARD_ROUTER_EPOCH", environment: environment)
@@ -265,6 +265,17 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         let result = try integer(key, environment: environment)
         guard result >= 0 else { throw V2GatewayRuntimeConfigurationError.invalid(key) }
         return Int64(result)
+    }
+
+    /// The durable revocation cursor is keyed by this value. Restrict it to a
+    /// bounded deployment identifier so it cannot turn an environment typo
+    /// into unbounded cursor-table growth or unsafe SQL/log metadata.
+    private static func gatewayNodeID(environment: any V2RuntimeEnvironment) throws -> String {
+        let value = try required("IM_V2_GATEWAY_NODE_ID", environment: environment)
+        guard value.range(of: "^[A-Za-z0-9._:-]{1,128}$", options: .regularExpression) != nil else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GATEWAY_NODE_ID")
+        }
+        return value
     }
 
     private static func percentage(_ key: String, environment: any V2RuntimeEnvironment) throws -> Double {

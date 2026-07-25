@@ -16,6 +16,11 @@ public struct V2DeviceRevocationEvent: Equatable, Sendable {
 }
 
 public protocol V2DeviceRevocationEventStore: Sendable {
+    /// A new gateway process has no live sockets before its TLS listener is
+    /// bound, so historical revocations do not need replaying there. Existing
+    /// node cursors must remain untouched: they represent a restarted node's
+    /// durable recovery position.
+    func initializeCursorIfNeeded(nodeID: String, now: Date) async throws
     func events(afterCursorFor nodeID: String, limit: Int) async throws -> [V2DeviceRevocationEvent]
     func markProcessed(eventID: Int64, nodeID: String, now: Date) async throws
 }
@@ -36,6 +41,13 @@ public struct V2DeviceRevocationWorker: Sendable {
         self.now = now
     }
 
+    /// Must complete before this process accepts realtime connections. It
+    /// prevents a newly named replica from scanning the append-only history,
+    /// while preserving any existing cursor for crash recovery.
+    public func initializeForStartup() async throws {
+        try await store.initializeCursorIfNeeded(nodeID: nodeID, now: now())
+    }
+
     @discardableResult
     public func runOnce(limit: Int) async throws -> Int {
         precondition(limit > 0)
@@ -53,6 +65,24 @@ public struct V2PostgresDeviceRevocationEventStore: V2DeviceRevocationEventStore
     private let workerName = "device-revocation-v1"
 
     public init(database: any Database) { self.database = database }
+
+    public func initializeCursorIfNeeded(nodeID: String, now: Date) async throws {
+        guard !nodeID.isEmpty, let sql = database as? any SQLDatabase else {
+            throw V2GatewayAuthenticationError.corruptPersistenceState
+        }
+        // `ON CONFLICT DO NOTHING` is intentional. Replacing an existing
+        // cursor here could make two accidentally duplicated node IDs skip a
+        // revocation which only the older process still needs to close.
+        // PostgreSQL evaluates this insert from one statement snapshot: an
+        // event committed after that snapshot remains above the watermark and
+        // is consumed normally once the listener is bound.
+        try await sql.raw("""
+            INSERT INTO im_v2.gateway_worker_cursors (worker_name, node_id, last_event_id, updated_at)
+            SELECT \(bind: workerName), \(bind: nodeID), COALESCE(MAX(event_id), 0), \(bind: now)
+            FROM im_v2.device_revocation_events
+            ON CONFLICT (worker_name, node_id) DO NOTHING
+            """).run()
+    }
 
     public func events(afterCursorFor nodeID: String, limit: Int) async throws -> [V2DeviceRevocationEvent] {
         guard limit > 0, let sql = database as? any SQLDatabase else {

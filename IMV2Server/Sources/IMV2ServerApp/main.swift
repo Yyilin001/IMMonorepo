@@ -221,6 +221,11 @@ enum IMV2ServerApp {
                 idleTimeoutMilliseconds: configuration.idleTimeoutMilliseconds,
                 transportMetrics: transportMetrics
             )
+            // A newly named replica has no live sockets yet. Record its
+            // current revocation watermark before any client can authenticate
+            // so it never rescans the append-only history on scale-out. An
+            // existing cursor is deliberately preserved for crash recovery.
+            try await deviceRevocationWorker.initializeForStartup()
             try await server.bind()
             app.logger.notice("IM V2 TLS gateway bound", metadata: ["host": "\(configuration.tls.host)", "port": "\(configuration.tls.port)"])
             do {
