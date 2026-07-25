@@ -3234,8 +3234,36 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let shadow = V2PostgresUserShardProjectionShadowForwarder(
                 control: app.db(.psql), router: router, migrations: migrations, registry: registry
             )
+            // Simulate a process loss after the control-plane sync record was
+            // committed but before it reached the current user shard. The
+            // expired lease must retry that exact source event rather than
+            // append a second control record or skip the first recipient.
+            let interruptedWorker = V2DirectRoomProfilePropagationWorker(
+                database: app.db(.psql), shadowForwarder: ProfilePropagationFailingShadowForwarder(),
+                now: { now.addingTimeInterval(2) }
+            )
+            await #expect(throws: ProfilePropagationShadowFailure.interrupted) {
+                try await interruptedWorker.runOnce(limit: 1)
+            }
+            let interruptedControlCount = try #require(try await sql.raw("""
+                SELECT COUNT(*)::bigint AS value FROM im_v2.user_sync_log
+                WHERE source_event_id = \(bind: profileEventID) AND projection_kind = 'direct_room_profile'
+                """).first(decoding: CountRow.self))
+            #expect(interruptedControlCount.value == 1)
+            let interruptedOutbox = try #require(try await sql.raw("""
+                SELECT state, enumeration_checkpoint IS NOT NULL AS checkpointed
+                FROM im_v2.public_profile_update_outbox WHERE source_event_id = \(bind: profileEventID)
+                """).first(decoding: ProfilePropagationOutboxRow.self))
+            #expect(interruptedOutbox.state == "claimed")
+            #expect(!interruptedOutbox.checkpointed)
+            try await sql.raw("""
+                UPDATE im_v2.public_profile_update_outbox
+                SET lease_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+                WHERE source_event_id = \(bind: profileEventID)
+                """).run()
+            let recoveryNow = Date()
             let worker = V2DirectRoomProfilePropagationWorker(
-                database: app.db(.psql), shadowForwarder: shadow, now: { now.addingTimeInterval(2) }
+                database: app.db(.psql), shadowForwarder: shadow, now: { recoveryNow }
             )
             let firstPage = try await worker.runOnce(limit: 1)
             #expect(firstPage.projectedRecipientCount == 1)
@@ -3646,6 +3674,16 @@ private struct ProfilePropagationProjectionRow: Decodable {
         case revision
     }
 }
+private struct ProfilePropagationFailingShadowForwarder: V2UserShardProjectionShadowing {
+    func shadowIfForwarding(
+        userID _: UserID,
+        sourceEventID _: EventID,
+        projectionKinds _: Set<String>
+    ) async throws -> UInt64? {
+        throw ProfilePropagationShadowFailure.interrupted
+    }
+}
+private enum ProfilePropagationShadowFailure: Error, Equatable, Sendable { case interrupted }
 private struct EncryptedPushEndpointRow: Decodable {
     let encryptedToken: String
     enum CodingKeys: String, CodingKey { case encryptedToken = "encrypted_token" }

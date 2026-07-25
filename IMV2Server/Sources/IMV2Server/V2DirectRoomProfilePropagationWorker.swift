@@ -295,8 +295,14 @@ private struct ExistingDirectProfileProjectionRow: Decodable {
     }
 
     func matches(target: DirectProfileTarget, lease: ProfileUpdateLease) -> Bool {
-        roomID == target.roomID.uuidString && targetUserID == lease.sourceUserID.uuidString &&
-            publicHandle == lease.publicHandle && displayName == lease.displayName &&
+        guard let persistedRoomID = UUID(uuidString: roomID),
+              let persistedTargetUserID = UUID(uuidString: targetUserID),
+              persistedRoomID == target.roomID,
+              persistedTargetUserID == lease.sourceUserID
+        else {
+            return false
+        }
+        return publicHandle == lease.publicHandle && displayName == lease.displayName &&
             revision == lease.revision && updatedAtMilliseconds == lease.updatedAtMilliseconds
     }
 }
