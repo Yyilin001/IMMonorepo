@@ -1,5 +1,6 @@
 import Foundation
 import FluentPostgresDriver
+import IMV2Core
 import IMV2Server
 @testable import IMV2ServerHTTP
 import Testing
@@ -46,6 +47,6 @@ private struct BlockedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {
     let retryAfterSeconds: Int
 
     func blockedRetryAfterSeconds(accountHandle _: String) async throws -> Int? { retryAfterSeconds }
-    func recordFailure(accountHandle _: String) async throws {}
-    func reset(accountHandle _: String) async throws {}
+    func recordRejectedAttempt(accountHandle _: String, userID _: UserID?, deviceID _: DeviceID) async throws {}
+    func recordSuccessfulAttempt(accountHandle _: String, userID _: UserID, deviceID _: DeviceID) async throws {}
 }

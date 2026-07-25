@@ -25,7 +25,13 @@ public struct V2PostgresPasswordAccountStore: Sendable {
         self.now = now
     }
 
-    public func register(accountHandle: String, passwordHash: String, publicHandle: String, displayName: String) async throws -> UserID {
+    public func register(
+        accountHandle: String,
+        passwordHash: String,
+        publicHandle: String,
+        displayName: String,
+        deviceID: DeviceID
+    ) async throws -> UserID {
         let handle = try canonicalAccountHandle(accountHandle)
         let userUUID = UUID()
         let identity: V2PublicIdentity
@@ -37,6 +43,7 @@ public struct V2PostgresPasswordAccountStore: Sendable {
         guard !passwordHash.isEmpty else { throw V2PasswordAccountStoreError.unavailable }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2PasswordAccountStoreError.unavailable }
+            let current = now()
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-account:" + handle), 0))").run()
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-public-handle:" + identity.handle.rawValue), 0))").run()
             guard try await sql.raw("SELECT 1 FROM im_v2.account_password_credentials WHERE account_handle = \(bind: handle)").first() == nil else {
@@ -45,8 +52,15 @@ public struct V2PostgresPasswordAccountStore: Sendable {
             guard try await sql.raw("SELECT 1 FROM im_v2.public_user_profiles WHERE public_handle = \(bind: identity.handle.rawValue)").first() == nil else {
                 throw V2PasswordAccountStoreError.publicHandleAlreadyExists
             }
-            try await sql.raw("INSERT INTO im_v2.account_password_credentials (account_handle, user_id, password_hash, created_at) VALUES (\(bind: handle), \(bind: userUUID), \(bind: passwordHash), \(bind: now()))").run()
-            try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, revision, created_at, updated_at) VALUES (\(bind: userUUID), \(bind: identity.handle.rawValue), \(bind: identity.displayName), 1, \(bind: now()), \(bind: now()))").run()
+            try await sql.raw("INSERT INTO im_v2.account_password_credentials (account_handle, user_id, password_hash, created_at) VALUES (\(bind: handle), \(bind: userUUID), \(bind: passwordHash), \(bind: current))").run()
+            try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, revision, created_at, updated_at) VALUES (\(bind: userUUID), \(bind: identity.handle.rawValue), \(bind: identity.displayName), 1, \(bind: current), \(bind: current))").run()
+            try await recordPasswordAuthenticationAudit(
+                outcome: .registrationSucceeded,
+                userID: identity.userID,
+                deviceID: deviceID,
+                occurredAt: current,
+                on: sql
+            )
             return identity.userID
         }
     }
@@ -98,7 +112,13 @@ public struct V2PasswordAccountRoutes: Sendable {
                 try validatePassword(input.password)
                 let passwordHash = try await request.password.async.hash(input.password).get()
                 guard let publicHandle = input.publicHandle, let displayName = input.displayName else { throw Abort(.badRequest) }
-                let userID = try await store.register(accountHandle: input.accountHandle, passwordHash: passwordHash, publicHandle: publicHandle, displayName: displayName)
+                let userID = try await store.register(
+                    accountHandle: input.accountHandle,
+                    passwordHash: passwordHash,
+                    publicHandle: publicHandle,
+                    displayName: displayName,
+                    deviceID: deviceID
+                )
                 return try noStoreJSONResponse(.init(accountAssertion: try assertionIssuer.issue(userID: userID, deviceID: deviceID)))
             } catch V2PasswordAccountStoreError.accountAlreadyExists {
                 throw Abort(.conflict)
@@ -128,10 +148,18 @@ public struct V2PasswordAccountRoutes: Sendable {
                 let candidateHash = credential?.passwordHash ?? dummyPasswordHash
                 let matches = try await request.password.async.verify(input.password, created: candidateHash).get()
                 guard let credential, matches else {
-                    try await loginAttemptLimiter.recordFailure(accountHandle: input.accountHandle)
+                    try await loginAttemptLimiter.recordRejectedAttempt(
+                        accountHandle: input.accountHandle,
+                        userID: credential?.userID,
+                        deviceID: deviceID
+                    )
                     throw V2PasswordRouteError.rejected
                 }
-                try await loginAttemptLimiter.reset(accountHandle: input.accountHandle)
+                try await loginAttemptLimiter.recordSuccessfulAttempt(
+                    accountHandle: input.accountHandle,
+                    userID: credential.userID,
+                    deviceID: deviceID
+                )
                 return try noStoreJSONResponse(.init(accountAssertion: try assertionIssuer.issue(userID: credential.userID, deviceID: deviceID)))
             } catch V2PasswordRouteError.rejected {
                 throw Abort(.unauthorized)

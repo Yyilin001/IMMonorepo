@@ -1,5 +1,6 @@
 import Fluent
 import Foundation
+import IMV2Core
 import IMV2Server
 import SQLKit
 
@@ -9,8 +10,13 @@ public protocol V2PasswordLoginAttemptLimiting: Sendable {
     /// Returns the number of whole seconds for which the account handle must
     /// remain blocked, or `nil` when an attempt may proceed.
     func blockedRetryAfterSeconds(accountHandle: String) async throws -> Int?
-    func recordFailure(accountHandle: String) async throws
-    func reset(accountHandle: String) async throws
+    /// Atomically records a rejected factor result and its rate-limit state.
+    /// `userID` remains nil for unknown handles so the audit trail cannot
+    /// become a second account-discovery index.
+    func recordRejectedAttempt(accountHandle: String, userID: UserID?, deviceID: DeviceID) async throws
+    /// Atomically clears a prior failure window and records a successful
+    /// factor result.
+    func recordSuccessfulAttempt(accountHandle: String, userID: UserID, deviceID: DeviceID) async throws
 }
 
 /// PostgreSQL-backed limiter.  Failure accounting is serialized per canonical
@@ -38,7 +44,7 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
         return max(1, Int(ceil(blockedUntil.timeIntervalSince(current))))
     }
 
-    public func recordFailure(accountHandle: String) async throws {
+    public func recordRejectedAttempt(accountHandle: String, userID: UserID?, deviceID: DeviceID) async throws {
         let handle = try canonicalAccountHandle(accountHandle)
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
@@ -63,15 +69,32 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
             } else {
                 try await sql.raw("UPDATE im_v2.account_password_login_rate_limits SET window_started_at = \(bind: windowStartedAt), failure_count = \(bind: nextFailureCount), blocked_until = \(bind: blockedUntil), updated_at = \(bind: current) WHERE account_handle = \(bind: handle)").run()
             }
+            try await recordPasswordAuthenticationAudit(
+                outcome: .assertionRejected,
+                userID: userID,
+                deviceID: deviceID,
+                occurredAt: current,
+                on: sql
+            )
         }
     }
 
-    public func reset(accountHandle: String) async throws {
+    public func recordSuccessfulAttempt(accountHandle: String, userID: UserID, deviceID: DeviceID) async throws {
         let handle = try canonicalAccountHandle(accountHandle)
-        guard let sql = database as? any SQLDatabase else {
-            throw V2PasswordLoginRateLimitError.unavailable
+        try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2PasswordLoginRateLimitError.unavailable
+            }
+            let current = try await databaseNow(on: sql)
+            try await sql.raw("DELETE FROM im_v2.account_password_login_rate_limits WHERE account_handle = \(bind: handle)").run()
+            try await recordPasswordAuthenticationAudit(
+                outcome: .assertionSucceeded,
+                userID: userID,
+                deviceID: deviceID,
+                occurredAt: current,
+                on: sql
+            )
         }
-        try await sql.raw("DELETE FROM im_v2.account_password_login_rate_limits WHERE account_handle = \(bind: handle)").run()
     }
 }
 

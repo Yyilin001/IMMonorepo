@@ -3152,14 +3152,76 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let policy = try V2PasswordLoginRateLimitPolicy(maximumFailures: 2, window: 60, lockout: 60)
             let firstInstance = V2PostgresPasswordLoginAttemptLimiter(database: app.db(.psql), policy: policy)
             let secondInstance = V2PostgresPasswordLoginAttemptLimiter(database: app.db(.psql), policy: policy)
+            let userID = try UserID("00000000-0000-0000-0000-000000000901")
+            let deviceID = try DeviceID("00000000-0000-0000-0000-000000000902")
             #expect(try await firstInstance.blockedRetryAfterSeconds(accountHandle: "limit-test") == nil)
-            try await firstInstance.recordFailure(accountHandle: "limit-test")
+            try await firstInstance.recordRejectedAttempt(accountHandle: "limit-test", userID: userID, deviceID: deviceID)
             #expect(try await secondInstance.blockedRetryAfterSeconds(accountHandle: "limit-test") == nil)
-            try await secondInstance.recordFailure(accountHandle: "limit-test")
+            try await secondInstance.recordRejectedAttempt(accountHandle: "limit-test", userID: userID, deviceID: deviceID)
             let retryAfter = try #require(try await firstInstance.blockedRetryAfterSeconds(accountHandle: "limit-test"))
             #expect((1 ... 60).contains(retryAfter))
-            try await secondInstance.reset(accountHandle: "limit-test")
+            try await secondInstance.recordSuccessfulAttempt(accountHandle: "limit-test", userID: userID, deviceID: deviceID)
             #expect(try await firstInstance.blockedRetryAfterSeconds(accountHandle: "limit-test") == nil)
+            try await firstInstance.recordRejectedAttempt(accountHandle: "unknown-audit", userID: nil, deviceID: deviceID)
+
+            let audits = try await sql.raw("""
+                SELECT outcome, user_id, device_id, occurred_at
+                FROM im_v2.account_password_authentication_audit
+                ORDER BY occurred_at, event_id
+                """).all(decoding: PasswordAuthenticationAuditRow.self)
+            #expect(audits.map(\.outcome) == ["assertion_rejected", "assertion_rejected", "assertion_succeeded", "assertion_rejected"])
+            #expect(audits.dropLast().allSatisfy { $0.userID == UUID(uuidString: userID.rawValue) && $0.deviceID == UUID(uuidString: deviceID.rawValue) })
+            #expect(audits.last?.userID == nil)
+            #expect(audits.last?.deviceID == UUID(uuidString: deviceID.rawValue))
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("password registration writes a privacy-minimized audit fact atomically")
+    func recordsPasswordRegistrationAudit() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2PasswordAccountStoreError.unavailable
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let deviceID = try DeviceID("00000000-0000-0000-0000-000000000903")
+            let userID = try await V2PostgresPasswordAccountStore(
+                database: app.db(.psql),
+                now: { Date(timeIntervalSince1970: 1_750_001_001) }
+            ).register(
+                accountHandle: "audit-registration",
+                passwordHash: String(repeating: "x", count: 60),
+                publicHandle: "audit_registration",
+                displayName: "审计注册",
+                deviceID: deviceID
+            )
+
+            let audit = try #require(try await sql.raw("""
+                SELECT outcome, user_id, device_id, occurred_at
+                FROM im_v2.account_password_authentication_audit
+                """).first(decoding: PasswordAuthenticationAuditRow.self))
+            #expect(audit.outcome == "registration_succeeded")
+            #expect(audit.userID == UUID(uuidString: userID.rawValue))
+            #expect(audit.deviceID == UUID(uuidString: deviceID.rawValue))
+            #expect(audit.occurredAt == Date(timeIntervalSince1970: 1_750_001_001))
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -3488,6 +3550,19 @@ private struct FailsOnSecondPageRouter: V2UserShardRouter {
 
 private struct ExistsRow: Decodable { let exists: Bool }
 private struct CountRow: Decodable { let value: Int64 }
+private struct PasswordAuthenticationAuditRow: Decodable {
+    let outcome: String
+    let userID: UUID?
+    let deviceID: UUID
+    let occurredAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case outcome
+        case userID = "user_id"
+        case deviceID = "device_id"
+        case occurredAt = "occurred_at"
+    }
+}
 private struct DirectProfileSyncAssertionRow: Decodable, Equatable {
     let userID: UUID
     let roomID: String

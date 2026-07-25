@@ -52,6 +52,7 @@ test "${invalid_status}" = '400' || {
 
 suffix="$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-')"
 account_handle="smoke-${suffix:0:20}"
+public_handle="smoke${suffix:0:20}"
 device_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 
@@ -60,13 +61,14 @@ assertion="$(curl --silent --show-error --fail \
   --cacert "${ca_path}" \
   --request POST \
   --header 'Content-Type: application/json' \
-  --data "{\"accountHandle\":\"${account_handle}\",\"password\":\"v2-local-smoke-password\",\"deviceID\":\"${device_id}\"}" \
+  --data "{\"accountHandle\":\"${account_handle}\",\"password\":\"v2-local-smoke-password\",\"deviceID\":\"${device_id}\",\"publicHandle\":\"${public_handle}\",\"displayName\":\"Local Smoke\"}" \
   https://localhost:8443/v2/account-auth/password/register | jq -er '.accountAssertion')"
 
 # Exercise the real HTTPS route, PostgreSQL migration and configured policy as
 # one path. The rate-limited account is separate from the credential smoke
 # account so the subsequent trusted-device flow remains independent.
 rate_limit_handle="rate-${suffix:0:20}"
+rate_limit_public_handle="rate${suffix:0:20}"
 rate_limit_device_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 rate_limit_password="v2-local-rate-limit-password"
 wrong_rate_limit_password="v2-local-wrong-password"
@@ -76,7 +78,7 @@ rate_limit_registration_status="$(curl --silent --show-error --output /dev/null 
   --cacert "${ca_path}" \
   --request POST \
   --header 'Content-Type: application/json' \
-  --data "{\"accountHandle\":\"${rate_limit_handle}\",\"password\":\"${rate_limit_password}\",\"deviceID\":\"${rate_limit_device_id}\"}" \
+  --data "{\"accountHandle\":\"${rate_limit_handle}\",\"password\":\"${rate_limit_password}\",\"deviceID\":\"${rate_limit_device_id}\",\"publicHandle\":\"${rate_limit_public_handle}\",\"displayName\":\"Local Rate Limit\"}" \
   https://localhost:8443/v2/account-auth/password/register)"
 test "${rate_limit_registration_status}" = '200' || {
   printf 'unexpected password rate-limit registration status: %s\n' "${rate_limit_registration_status}" >&2
