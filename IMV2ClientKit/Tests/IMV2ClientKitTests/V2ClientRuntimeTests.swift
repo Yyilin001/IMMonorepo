@@ -73,6 +73,36 @@ struct V2ClientRuntimeTests {
         #expect(await connection.disconnectCount() == 2)
     }
 
+    @Test("backgrounding during a handshake prevents initial sync and outbox work")
+    func stopDuringHandshakeCancelsPostHandshakeWork() async throws {
+        let connection = BlockingRuntimeConnection(session: try authenticatedSession())
+        let activity = BlockingRuntimeActivity()
+        let runtime = V2ClientRuntime(connection: connection, activity: activity)
+
+        let start = Task { try await runtime.start() }
+        await connection.waitForConnect()
+        await runtime.stop()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await start.value
+        }
+        #expect(await activity.syncCount() == 0)
+        #expect(await activity.commandFlushCount() == 0)
+        #expect(await runtime.currentState() == .stopped)
+    }
+
+    @Test("repeated stops do not repeatedly close an already stopped connection")
+    func repeatedStopIsIdempotent() async throws {
+        let connection = RuntimeConnection(result: .success(try authenticatedSession()))
+        let runtime = V2ClientRuntime(connection: connection, activity: BlockingRuntimeActivity())
+
+        _ = try await runtime.start()
+        await runtime.stop()
+        await runtime.stop()
+
+        #expect(await connection.disconnectCount() == 1)
+    }
+
     @Test("concurrent start callers share one in-flight handshake and initial sync")
     func concurrentStartsShareAttempt() async throws {
         let session = try authenticatedSession()

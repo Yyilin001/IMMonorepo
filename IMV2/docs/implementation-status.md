@@ -24,9 +24,13 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   `inactive` transitions are deliberately ignored because passkey and system
   permission UI can produce them while the app remains foregrounded. A
   generation fence prevents a stale connection's terminal-authentication
-  result from signing out a newer session. ClientKit's full local package suite
-  passed (**117 tests / 26 suites**) including the stop-then-reconnect
-  regression, and the generic iOS Simulator app/test-bundle build passed with
+  result from signing out a newer session. Cancellation is also checked after
+  the handshake and before each initial sync/outbox stage, so a background
+  transition cannot continue initial durable work through a non-cooperative
+  connection completion; repeated stops do not repeatedly close an already
+  stopped connection. ClientKit's full local package suite passed (**119 tests
+  / 26 suites**) including stop-then-reconnect and handshake-cancellation
+  regressions, and the generic iOS Simulator app/test-bundle build passed with
   Xcode 26.6. A subsequent simulator execution could not start because the
   local CoreSimulator service reported `Data Migration Failed` and a debugger
   version-store error before tests launched; this is recorded as host tooling

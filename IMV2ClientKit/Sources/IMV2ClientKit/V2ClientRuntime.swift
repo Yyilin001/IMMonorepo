@@ -140,8 +140,11 @@ public actor V2ClientRuntime {
             state = .starting
             let task = Task { [connection, activity] in
                 let session = try await connection.connect()
+                try Task.checkCancellation()
                 try await activity.synchronizeAfterConnection()
+                try Task.checkCancellation()
                 try await activity.flushDurableCommands()
+                try Task.checkCancellation()
                 return session
             }
             attempt = .init(id: id, generation: attemptGeneration, task: task)
@@ -172,6 +175,9 @@ public actor V2ClientRuntime {
     /// The app calls this on backgrounding or logout. It is idempotent and
     /// fences late completion of a previously suspended start attempt.
     public func stop() async {
+        guard state != .stopped || startAttempt != nil || availabilityTask != nil || heartbeatTask != nil else {
+            return
+        }
         generation &+= 1
         startAttempt?.task.cancel()
         startAttempt = nil
