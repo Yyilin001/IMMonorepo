@@ -8,6 +8,7 @@ final class IMAppLaunchUITests: XCTestCase {
     @MainActor
     func testFreshLaunchShowsPasswordSignInControls() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["-v2-ui-testing-signed-out"]
         app.launch()
 
         let accountHandle = app.textFields["v2.password.account-handle"]

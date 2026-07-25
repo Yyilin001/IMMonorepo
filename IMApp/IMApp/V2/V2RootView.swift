@@ -6,7 +6,14 @@ struct V2RootView: View {
 
     init(appPushDelegate: V2AppPushDelegate) {
         self.appPushDelegate = appPushDelegate
-        _store = State(initialValue: V2AppStore(remoteNotificationRegistrar: appPushDelegate))
+        #if DEBUG
+        let startupMode: V2AppStore.StartupMode = ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-signed-out")
+            ? .uiTestingSignedOut
+            : .production
+        #else
+        let startupMode: V2AppStore.StartupMode = .production
+        #endif
+        _store = State(initialValue: V2AppStore(startupMode: startupMode, remoteNotificationRegistrar: appPushDelegate))
     }
 
     var body: some View {

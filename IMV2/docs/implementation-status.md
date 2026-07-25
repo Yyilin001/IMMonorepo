@@ -109,6 +109,14 @@ also passed every selected `V2ConversationStoreTests` and
 `V2PushWakeSettingsTests` case.  This is a local simulator regression record,
 not a substitute for a signed-device or production-network E2E result.
 
+At `d0fcae9`, the previously empty `IMAppUITests` target gained a deterministic
+fresh-launch check.  It passes `-v2-ui-testing-signed-out` only as a process
+argument, so the production route still performs its normal Keychain-backed
+restore while the UI test does not depend on historical simulator credentials
+or a live account service.  The iPhone 17 / iOS 26.5 arm64 run passed the
+password-sign-in control assertions, and the macOS gate now includes that UI
+test alongside the focused unit suites.
+
 The same baseline audit found that the old macOS workflow called removed
 `Makefile` targets and that the Release build phase directly executed a
 non-executable validation script. The workflow now invokes the checked-in

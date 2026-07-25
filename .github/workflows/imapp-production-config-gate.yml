@@ -111,6 +111,7 @@ jobs:
             -destination "platform=iOS Simulator,id=${simulator_id},arch=${simulator_arch}" \
             -only-testing:IMAppTests/V2ConversationStoreTests \
             -only-testing:IMAppTests/V2PushWakeSettingsTests \
+            -only-testing:IMAppUITests/IMAppLaunchUITests \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Validate production config

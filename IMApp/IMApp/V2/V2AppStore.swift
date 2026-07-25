@@ -7,6 +7,11 @@ import UIKit
 @MainActor
 @Observable
 final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
+    enum StartupMode: Sendable, Equatable {
+        case production
+        case uiTestingSignedOut
+    }
+
     enum Route: Equatable {
         case launching
         case signedOut
@@ -32,8 +37,26 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     private(set) var pushWakeSettingsStore: V2PushWakeSettingsStore?
 
-    init(remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)? = nil) {
+    init(
+        startupMode: StartupMode = .production,
+        remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)? = nil
+    ) {
         self.remoteNotificationRegistrar = remoteNotificationRegistrar
+        guard startupMode == .production else {
+            configuration = nil
+            authSession = nil
+            bootstrapper = nil
+            deviceIdentityProvider = nil
+            route = .signedOut
+            authenticationMessage = nil
+            conversationStore = nil
+            privacySettingsStore = nil
+            publicIdentitySettingsStore = nil
+            pushWakeSettingsStore = nil
+            realtimeRuntime = nil
+            realtimeTask = nil
+            return
+        }
         do {
             let configuration = try V2AppConfiguration()
             let refreshTransport = try V2HTTPDeviceCredentialAuthTransport(
