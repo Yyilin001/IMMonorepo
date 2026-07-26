@@ -895,6 +895,25 @@ struct V2ConversationStoreTests {
         #expect(await updater.requestedValues() == [true])
     }
 
+    @Test func strangerMessagePreferenceRefreshIgnoresAFailureSupersededByANewerRefresh() async {
+        let reader = V2SequencedStrangerMessagePreferenceReader()
+        let updater = V2StrangerMessagePreferenceUpdaterFake(result: .accepted)
+        let store = V2PrivacySettingsStore(reader: reader, updater: updater)
+
+        let firstRefresh = Task { await store.refresh() }
+        await reader.waitUntilRequestCount(1)
+        let secondRefresh = Task { await store.refresh() }
+        await reader.waitUntilRequestCount(2)
+
+        await reader.completeRequest(at: 1, with: false)
+        await secondRefresh.value
+        await reader.failRequest(at: 0)
+        await firstRefresh.value
+
+        #expect(store.state == .loaded)
+        #expect(!store.allowsStrangerMessages)
+    }
+
     @Test func strangerMessagePreferenceDoesNotChangeOnTerminalRejection() async {
         let reader = V2StrangerMessagePreferenceReaderFake(value: true)
         let updater = V2StrangerMessagePreferenceUpdaterFake(result: .rejected(code: "FORBIDDEN"))
@@ -1457,6 +1476,44 @@ private actor V2StrangerMessagePreferenceReaderFake: V2StrangerMessagePreference
     func strangerMessagePreference() async throws -> Bool? {
         value
     }
+}
+
+private actor V2SequencedStrangerMessagePreferenceReader: V2StrangerMessagePreferenceReading {
+    private var requestCount = 0
+    private var requestWaiters: [CheckedContinuation<Void, Never>] = []
+    private var continuations: [CheckedContinuation<Result<Bool?, V2SequencedStrangerMessagePreferenceReaderFailure>, Never>?] = []
+
+    func strangerMessagePreference() async throws -> Bool? {
+        requestCount += 1
+        let waiters = requestWaiters
+        requestWaiters = []
+        waiters.forEach { $0.resume() }
+        return try await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }.get()
+    }
+
+    func waitUntilRequestCount(_ expectedCount: Int) async {
+        while requestCount < expectedCount {
+            await withCheckedContinuation { requestWaiters.append($0) }
+        }
+    }
+
+    func completeRequest(at index: Int, with value: Bool?) {
+        guard continuations.indices.contains(index), let continuation = continuations[index] else { return }
+        continuations[index] = nil
+        continuation.resume(returning: .success(value))
+    }
+
+    func failRequest(at index: Int) {
+        guard continuations.indices.contains(index), let continuation = continuations[index] else { return }
+        continuations[index] = nil
+        continuation.resume(returning: .failure(.failed))
+    }
+}
+
+private enum V2SequencedStrangerMessagePreferenceReaderFailure: Error, Sendable {
+    case failed
 }
 
 private actor V2StrangerMessagePreferenceUpdaterFake: V2StrangerMessagePreferenceUpdating {

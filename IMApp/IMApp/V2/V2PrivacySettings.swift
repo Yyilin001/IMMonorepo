@@ -34,6 +34,7 @@ final class V2PrivacySettingsStore {
     private(set) var allowsStrangerMessages = true
     private(set) var isSaving = false
     private(set) var feedback: String?
+    private var refreshGeneration = 0
 
     init(
         reader: any V2StrangerMessagePreferenceReading,
@@ -44,16 +45,21 @@ final class V2PrivacySettingsStore {
     }
 
     func refresh() async {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
         state = .loading
         do {
             // The server defaults to allow. Absence only means this device has
             // not yet received a projection, not that the preference is deny.
-            allowsStrangerMessages = try await reader.strangerMessagePreference() ?? true
+            let refreshedPreference = try await reader.strangerMessagePreference() ?? true
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
+            allowsStrangerMessages = refreshedPreference
             state = .loaded
         } catch is CancellationError {
-            isSaving = false
             return
         } catch {
+            guard generation == refreshGeneration else { return }
             state = .failed
         }
     }
