@@ -1,13 +1,19 @@
+# Keep only the static Go `promtool` binary from the same pinned image used by
+# the host fallback checker; installing Ubuntu's full Prometheus package pulls
+# its web assets and service dependencies into every disposable Swift runner.
+FROM prom/prometheus:v2.54.1 AS promtool
+
 # The test runner is intentionally Linux-only and disposable. Source is
 # mounted read-only by compose; SwiftPM artifacts are written under /tmp.
 FROM swift:6.3-jammy
+
+COPY --from=promtool /bin/promtool /usr/local/bin/promtool
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
         coreutils \
         libsqlite3-dev \
-        prometheus \
         protobuf-compiler \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
