@@ -1163,6 +1163,7 @@ private struct V2ConversationAttachmentRow: View {
         HStack(spacing: 8) {
             Image(systemName: attachmentIcon(for: attachment.state))
                 .foregroundStyle(attachmentColor(for: attachment.state))
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(attachment.displayName)
                     .lineLimit(1)
@@ -1170,6 +1171,9 @@ private struct V2ConversationAttachmentRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("附件 " + attachment.displayName)
+            .accessibilityValue(attachmentStatusText(for: attachment.state))
             Spacer()
             Button("移除", role: .destructive) {
                 Task { await store.removeAttachment(id: attachment.id) }
@@ -1178,8 +1182,6 @@ private struct V2ConversationAttachmentRow: View {
             .accessibilityLabel(removalLabel)
             .accessibilityIdentifier(removeIdentifier)
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityValue(attachmentStatusText(for: attachment.state))
     }
 
     private func attachmentIcon(for state: V2ConversationAttachmentItem.State) -> String {
@@ -1387,6 +1389,9 @@ private struct V2ConversationReactionControls: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(reaction.includesCurrentUser ? .accentColor : .secondary)
+                .accessibilityLabel(reaction.reaction + " 表情反应")
+                .accessibilityValue(reactionAccessibilityValue(reaction))
+                .accessibilityHint(reaction.includesCurrentUser ? "双击移除反应" : "双击添加反应")
                 .accessibilityIdentifier("v2.message.reaction.\(message.id).\(reaction.reaction)")
             }
             Menu {
@@ -1402,6 +1407,13 @@ private struct V2ConversationReactionControls: View {
             .accessibilityLabel("添加反应")
             .accessibilityIdentifier("v2.message.reaction-picker.\(message.id)")
         }
+    }
+
+    private func reactionAccessibilityValue(_ reaction: V2ConversationMessageReaction) -> String {
+        if reaction.includesCurrentUser {
+            return "\(reaction.count) 人已添加，包括你"
+        }
+        return "\(reaction.count) 人已添加，不包括你"
     }
 }
 
