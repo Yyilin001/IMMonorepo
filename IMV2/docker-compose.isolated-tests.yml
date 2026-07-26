@@ -50,6 +50,10 @@ services:
       # A cold SwiftPM dependency mirror can take several minutes. This is a
       # wall-clock watchdog, not a relaxation of the CPU/memory/PID limits.
       V2_TEST_TIMEOUT_SECONDS: "1200"
+      # Keep the compiler below the constrained test container's memory
+      # envelope. The script validates this value and permits an explicit
+      # override for a differently provisioned isolated runner.
+      V2_SWIFTPM_JOBS: "4"
       HOME: /tmp/home
       XDG_CACHE_HOME: /tmp/cache
       CLANG_MODULE_CACHE_PATH: /tmp/clang-module-cache

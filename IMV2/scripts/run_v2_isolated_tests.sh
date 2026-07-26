@@ -3,6 +3,14 @@ set -Eeuo pipefail
 
 repo_root=/workspace
 timeout_seconds="${V2_TEST_TIMEOUT_SECONDS:-1200}"
+# The test container is intentionally capped at two CPUs and 4 GiB. SwiftPM
+# otherwise derives a much larger host-dependent default, which can OOM while
+# compiling the Server test target before any regression executes.
+swiftpm_jobs="${V2_SWIFTPM_JOBS:-4}"
+if ! [[ "${swiftpm_jobs}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'V2_SWIFTPM_JOBS must be a positive integer: %s\n' "${swiftpm_jobs}" >&2
+  exit 2
+fi
 
 # SwiftPM and Clang compile package manifests before `--scratch-path` applies.
 # Keep those implementation caches writable without making the image or source
@@ -23,7 +31,7 @@ for package in "${package_list[@]}"; do
   # The source tree is mounted read-only.  Automatic resolution would try to
   # rewrite Package.resolved inside that mount, making a test depend on an
   # accidental writable checkout instead of the repository's lock file.
-  test_command=(swift test --disable-automatic-resolution --package-path "${repo_root}/${package}" --scratch-path "$scratch_path")
+  test_command=(swift test --disable-automatic-resolution --jobs "$swiftpm_jobs" --package-path "${repo_root}/${package}" --scratch-path "$scratch_path")
   if [[ "${package}" == "IMV2Server" && -n "${V2_SERVER_TEST_FILTER:-}" ]]; then
     test_command+=(--filter "${V2_SERVER_TEST_FILTER}")
     filtered_output="${scratch_path}/filtered-test-output.log"
