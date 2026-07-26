@@ -29,13 +29,16 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   gateway, PostgreSQL and loopback-operator stack, then passed
   `bash IMV2/scripts/verify_v2_local_account_stack.sh`. The black-box check
   verified invalid HTTPS input (`400`), password registration and device
-  credential issuance (`200`), shared password-failure lockout (`401` then
-  `429` with `Retry-After` and `no-store`), Push endpoint register/remove
-  (`204`), loopback operator account disable followed by access/refresh
-  rejection, TLS 1.3, and private metrics vocabulary. This is reproducible
+  credential issuance (`200`), then a real local-CA-verified TLS 1.3 framed
+  Protobuf `ClientHello → Authenticate` session using that issued device
+  credential, shared password-failure lockout (`401` then `429` with
+  `Retry-After` and `no-store`), Push endpoint register/remove (`204`),
+  loopback operator account disable followed by access/refresh rejection, and
+  private metrics vocabulary. The protocol probe runs only in the local gateway
+  container and prints no credential or identity. This is reproducible
   local-stack evidence only; it does not establish production deployment,
-  external Push delivery, real-device passkey operation, or workload
-  capacity.
+  external Push delivery, real-device passkey operation, message-delivery
+  end-to-end behavior, or workload capacity.
 - 2026-07-26: the local release-stack launcher now performs its narrowly
   labelled dangling-build-stage cleanup both after a successful Docker build
   and from its exit trap when that build fails. A controlled failed-build
@@ -306,7 +309,9 @@ completed only after PostgreSQL,
 the loopback account issuer, the un-published loopback-only operator, Caddy
 HTTPS edge, and the V2 TLS gateway became healthy. Its companion
 `verify_v2_local_account_stack.sh` then verified an HTTPS invalid-input
-rejection, password registration to device-credential issuance hand-off, five
+rejection, password registration to device-credential issuance hand-off, an
+issued device credential completing a local-CA-verified TLS 1.3 framed
+Protobuf `ClientHello → Authenticate` gateway session, five
 rejected password assertions followed by a no-store `429` with a positive
 `Retry-After`, authenticated Push endpoint register/remove with `204` and
 `no-store` (without printing either token), a local-only operator disable with

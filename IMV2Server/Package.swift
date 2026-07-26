@@ -10,6 +10,7 @@ let package = Package(
         .executable(name: "IMV2ServerApp", targets: ["IMV2ServerApp"]),
         .executable(name: "IMV2AccountServerApp", targets: ["IMV2AccountServerApp"]),
         .executable(name: "IMV2OperatorServerApp", targets: ["IMV2OperatorServerApp"]),
+        .executable(name: "IMV2LocalGatewayProbe", targets: ["IMV2LocalGatewayProbe"]),
     ],
     dependencies: [
         .package(path: "../IMV2Core"),
@@ -70,6 +71,19 @@ let package = Package(
                 "IMV2ServerHTTP",
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
+            ]
+        ),
+        // This executable belongs only to the local Compose verification
+        // image. It gives the shell smoke test a real TLS/protobuf client
+        // without adding a debug route or weakening the gateway itself.
+        .executableTarget(
+            name: "IMV2LocalGatewayProbe",
+            dependencies: [
+                "IMV2Core",
+                "IMV2Server",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
             ]
         ),
         .testTarget(

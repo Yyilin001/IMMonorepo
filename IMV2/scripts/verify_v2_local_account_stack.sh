@@ -136,6 +136,21 @@ access_token="$(printf '%s' "${issued_credentials}" | jq -er '.accessToken')"
 refresh_credential="$(printf '%s' "${issued_credentials}" | jq -er '.refreshCredential')"
 user_id="$(printf '%s' "${issued_credentials}" | jq -er '.userID')"
 
+# Exercise the real framed gateway protocol after the HTTPS account issuer has
+# produced an access credential. The probe runs in the gateway container so it
+# trusts only the same local Caddy root mounted for the gateway leaf; it prints
+# no credential or account identity and is not a gateway debug endpoint.
+phase="authenticated V2 TLS session"
+gateway_probe_output="$(docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
+  exec -T \
+  --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=${access_token}" \
+  --env "IM_V2_GATEWAY_PROBE_DEVICE_ID=${device_id}" \
+  gateway /workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe)"
+test "${gateway_probe_output}" = 'local V2 gateway authentication: protocol v1 verified' || {
+  printf 'local V2 gateway protocol probe returned an unexpected result\n' >&2
+  exit 1
+}
+
 # Capture a second, short-lived device-bound assertion before disabling the
 # account. It remains intentionally unexchanged until after the operator
 # action, where the credential issuer must fence it even though its HMAC is
@@ -328,6 +343,7 @@ fi
 
 printf 'local account HTTPS validation: 400\n'
 printf 'local password registration and device credential issuance: 200\n'
+printf 'local V2 gateway authenticated protocol session: verified\n'
 printf 'local password failure limit: 5 x 401, then 429 no-store with Retry-After\n'
 printf 'local Push endpoint register/remove: 204, no-store\n'
 printf 'local loopback operator account disable: 200 no-store, then access/refresh 401 and prior assertion 403\n'

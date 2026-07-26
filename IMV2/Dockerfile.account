@@ -26,7 +26,8 @@ COPY IMV2Server ./IMV2Server
 # published, producing a misleading short-lived 502/connection-refused state.
 RUN swift build -c release --package-path IMV2Server --product IMV2AccountServerApp \
     && swift build -c release --package-path IMV2Server --product IMV2ServerApp \
-    && swift build -c release --package-path IMV2Server --product IMV2OperatorServerApp
+    && swift build -c release --package-path IMV2Server --product IMV2OperatorServerApp \
+    && swift build -c release --package-path IMV2Server --product IMV2LocalGatewayProbe
 
 FROM swift:6.3-jammy
 
