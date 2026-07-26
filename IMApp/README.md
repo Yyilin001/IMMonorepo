@@ -69,8 +69,9 @@ IM_V2_PASSKEY_RP_ID=localhost
 停止本地栈时使用脚本输出的 `docker compose ... down` 命令。数据库卷会被
 保留，便于重复运行；如需清空本地账户数据，请明确执行 Compose 的
 `down --volumes`，不要把该操作用于任何非本地环境。
-本地启动脚本只会清理带 V2 本地构建阶段标签且未被引用的 Docker 镜像，以防
-classic builder 的临时编译层耗尽 Docker 磁盘；它不会删除已标记镜像、容器或卷。
+本地启动脚本会在开始前、成功构建后以及构建失败退出时，清理带 V2 本地构建阶段
+标签且未被引用的 Docker 镜像，以防 classic builder 的临时编译层耗尽 Docker
+磁盘；它不会删除已标记镜像、容器或卷，也不会掩盖原始构建失败。
 
 ## 发布配置
 

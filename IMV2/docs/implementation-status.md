@@ -36,6 +36,14 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   local-stack evidence only; it does not establish production deployment,
   external Push delivery, real-device passkey operation, or workload
   capacity.
+- 2026-07-26: the local release-stack launcher now performs its narrowly
+  labelled dangling-build-stage cleanup both after a successful Docker build
+  and from its exit trap when that build fails. A controlled failed-build
+  regression preserved the original failure status while making the second
+  label-filtered prune call; a real cold release rebuild then passed the full
+  account-stack black-box verification with no labelled dangling stage left.
+  The cleanup cannot select tagged images, containers or volumes, and remains
+  local-development hygiene rather than production image-retention policy.
 - 2026-07-26: `main` reran the disposable PostgreSQL Server regression
   (**190 tests / 50 suites**). It includes the direct-profile propagation
   recovery: a display-name update atomically creates its source outbox row,

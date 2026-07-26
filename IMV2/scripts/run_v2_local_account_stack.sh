@@ -103,8 +103,17 @@ fi
 # Dockerfile-specific .dockerignore. Build from a temporary, allow-listed
 # context so V1 sources and host compiler artifacts never enter the image.
 build_context="$(mktemp -d)"
-cleanup_build_context() { rm -rf "${build_context}"; }
-trap cleanup_build_context EXIT
+# A failed Docker build can leave the same dangling compiler stage as a
+# successful one.  The exit trap makes that failure recoverable immediately,
+# rather than requiring a second invocation to reclaim local Docker space.
+# Cleanup is deliberately best-effort so it never hides the original failure.
+cleanup_local_build() {
+  local exit_status="$?"
+  rm -rf -- "${build_context}"
+  prune_unreferenced_local_build_stages || true
+  return "${exit_status}"
+}
+trap cleanup_local_build EXIT
 mkdir -p "${build_context}/IMV2" "${build_context}/IMV2Core" "${build_context}/IMV2Server"
 rsync -a --exclude '.build' --exclude '.swiftpm' --exclude '.DS_Store' \
   "${repo_root}/IMV2Core/" "${build_context}/IMV2Core/"
