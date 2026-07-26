@@ -50,9 +50,10 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   stopped connection. ClientKit's full local package suite passed (**119 tests
   / 26 suites**) including stop-then-reconnect and handshake-cancellation
   regressions, and the generic iOS Simulator app/test-bundle build passed with
-  Xcode 26.6. On current `main`, all **40** focused
+  Xcode 26.6. On current `main`, all **41** focused
   `V2ConversationStoreTests` passed on an iPhone 17 / iOS 26.2 arm64
-  Simulator, including stale-refresh suppression and cancellation checks that
+  Simulator, including stale-refresh suppression for both delayed successes
+  and delayed failures, plus cancellation checks that
   prevent direct/group creation from continuing after a non-cooperative
   identity-directory response, plus privacy-preserving rejection feedback and
   rate-limit retry guidance for direct messages, one-at-a-time durable
@@ -66,7 +67,7 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   group-members sheet owns and cancels its mutation task on dismissal, with a
   post-directory cancellation fence that prevents a late identity lookup from
   creating a new membership command. The same simulator then passed all
-  **46** `IMAppTests` cases and the deterministic fresh-launch
+  **47** `IMAppTests` cases and the deterministic fresh-launch
   `IMAppUITests` case (zero failures or skips), covering the complete current
   scheme test inventory. The earlier CoreSimulator migration
   failure is therefore not the current local test blocker; this remains

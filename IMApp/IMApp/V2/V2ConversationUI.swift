@@ -491,6 +491,7 @@ final class V2ConversationDetailStore {
         } catch is CancellationError {
             return
         } catch {
+            guard generation == refreshGeneration else { return }
             state = .failed
         }
     }

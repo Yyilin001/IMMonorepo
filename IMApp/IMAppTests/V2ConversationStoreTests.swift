@@ -98,6 +98,25 @@ struct V2ConversationStoreTests {
         #expect(store.messages == [currentMessage])
     }
 
+    @Test func messageRefreshIgnoresAFailureSupersededByANewerRefresh() async {
+        let source = V2SequencedConversationDataSource()
+        let store = V2ConversationDetailStore(dataSource: source, sender: nil, userID: "current-user", roomID: "room-a")
+        let currentMessage = V2ConversationMessageItem(id: "message-current", revision: 1, text: "新消息", createdAt: .now, isOutgoing: false, isWithdrawn: false)
+
+        let firstRefresh = Task { await store.refresh() }
+        await source.waitUntilMessageRequestCount(1)
+        let secondRefresh = Task { await store.refresh() }
+        await source.waitUntilMessageRequestCount(2)
+
+        await source.completeMessageRequest(at: 1, with: [currentMessage])
+        await secondRefresh.value
+        await source.failMessageRequest(at: 0)
+        await firstRefresh.value
+
+        #expect(store.state == .loaded)
+        #expect(store.messages == [currentMessage])
+    }
+
     @Test func messageRefreshPreservesOnlyOpaqueAttachmentReferences() async throws {
         let reference = V2MediaReference(mediaID: try .init("00000000-0000-0000-0000-000000000501"))
         let message = V2ConversationMessageItem(
@@ -932,7 +951,7 @@ private actor V2SequencedConversationDataSource: V2ConversationDataSource {
     private var summaryContinuations: [CheckedContinuation<[V2ConversationListItem], Never>?] = []
     private var messageRequestCount = 0
     private var messageRequestWaiters: [CheckedContinuation<Void, Never>] = []
-    private var messageContinuations: [CheckedContinuation<[V2ConversationMessageItem], Never>?] = []
+    private var messageContinuations: [CheckedContinuation<Result<[V2ConversationMessageItem], V2SequencedConversationDataSourceFailure>, Never>?] = []
 
     func conversationSummaries(for _: String) async throws -> [V2ConversationListItem] {
         summaryRequestCount += 1
@@ -949,9 +968,9 @@ private actor V2SequencedConversationDataSource: V2ConversationDataSource {
         let waiters = messageRequestWaiters
         messageRequestWaiters = []
         waiters.forEach { $0.resume() }
-        return await withCheckedContinuation { continuation in
+        return try await withCheckedContinuation { continuation in
             messageContinuations.append(continuation)
-        }
+        }.get()
     }
 
     func waitUntilSummaryRequestCount(_ expectedCount: Int) async {
@@ -979,8 +998,20 @@ private actor V2SequencedConversationDataSource: V2ConversationDataSource {
             return
         }
         messageContinuations[index] = nil
-        continuation.resume(returning: messages)
+        continuation.resume(returning: .success(messages))
     }
+
+    func failMessageRequest(at index: Int) {
+        guard messageContinuations.indices.contains(index), let continuation = messageContinuations[index] else {
+            return
+        }
+        messageContinuations[index] = nil
+        continuation.resume(returning: .failure(.failed))
+    }
+}
+
+private enum V2SequencedConversationDataSourceFailure: Error, Sendable {
+    case failed
 }
 
 private actor V2ConversationSenderFake: V2ConversationSending {
