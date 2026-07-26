@@ -10,6 +10,11 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sql_dir="${root_dir}/IMV2/sql"
 readiness_source="${root_dir}/IMV2Server/Sources/IMV2Server/V2SchemaReadiness.swift"
 
+command -v rg >/dev/null 2>&1 || {
+  printf 'ripgrep (rg) is required to validate V2 schema-readiness coverage.\n' >&2
+  exit 1
+}
+
 sql_tables() {
   rg -No --glob '*.sql' 'CREATE TABLE(?: IF NOT EXISTS)? im_v2\.([a-z0-9_]+)' "${sql_dir}" \
     | sed -E 's/.*im_v2\.([a-z0-9_]+)/\1/' \

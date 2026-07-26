@@ -7,6 +7,9 @@ RUN apt-get update \
         ca-certificates \
         coreutils \
         libsqlite3-dev \
+        prometheus \
+        protobuf-compiler \
+        ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

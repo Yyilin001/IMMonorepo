@@ -215,20 +215,23 @@ environment, with disposable PostgreSQL, through
 test container is deliberately capped at two CPUs and 4 GiB; the entrypoint
 therefore validates `V2_SWIFTPM_JOBS` and defaults it to four rather than using
 SwiftPM's host-dependent parallelism. On 2026-07-26, the full command passed
-42 Core tests, 190 Server tests in 50 suites, and the SQL migration-manifest
-check. The ClientKit is intentionally native:
+42 Core tests, 190 Server tests in 50 suites, the SQL migration manifest,
+protobuf generated-source comparison, schema-marker/readiness coverage,
+Prometheus-rule validation and runtime-example validation. The ClientKit is
+intentionally native:
 `swift build --build-tests --package-path IMV2ClientKit` succeeds on this Mac.
 Native ClientKit tests run successfully when each invocation uses a disposable
 SwiftPM scratch directory via
 `scripts/run_v2_clientkit_native_tests.sh`; this avoids stale shared-build
 signing/load state while preserving the real macOS runtime. The script defaults
 to four compiler jobs so the local run does not monopolize the Mac. On
-2026-07-25, the complete native ClientKit suite passed 115 tests in 26 suites,
+2026-07-26, the complete native ClientKit suite passed 119 tests in 26 suites,
 including the receipt high-water restart regression and media authorization
-transfer tests. Its backup-policy test writes only a uniquely named Application
-Support child and removes it afterward. The project does not currently use
-GitHub Actions as a verification gate; a checked-in workflow and historical
-remote results are not current evidence.
+transfer tests. Both disposable PostgreSQL drills—retained local-schema ledger
+and logical restore—also passed on 2026-07-26. Its backup-policy test writes
+only a uniquely named Application Support child and removes it afterward. No
+GitHub Actions workflow is enabled; historical remote results are not current
+evidence.
 
 On 2026-07-25, the IMApp Debug simulator baseline was repaired by declaring
 `IMV2Core` as a direct local package product of both IMApp and IMAppTests. The
@@ -351,14 +354,15 @@ at that scale only; no throughput/SLO claim follows from them.
 The executable-contract gate also regenerates V2 protobuf bindings in a
 temporary directory and checks them against committed sources, then regenerates
 `IMV2/sql/migration-manifest.sha256` from the numbered SQL migrations and checks
-that manifest. Both checks run in the GitHub workflow; the SQL manifest check
-also runs in the isolated Core/Server regression. The native ClientKit run
-remains local to macOS.
+that manifest. The isolated Core/Server regression executes both checks, along
+with local-schema-marker coverage, schema-readiness coverage, Prometheus-rule
+validation and runtime-example validation. The native ClientKit run remains
+local to macOS.
 
 ## Completion rule
 
 The V2 refactor is not complete until every “Missing” and “Partial” row is
 implemented or explicitly removed from the approved specification, every
-decision-pending ADR is approved, and the stated CI/integration/capacity/DR
+decision-pending ADR is approved, and the stated local/integration/capacity/DR
 evidence exists. In particular, a 100k group is not a release claim without a
 dated successful load report.

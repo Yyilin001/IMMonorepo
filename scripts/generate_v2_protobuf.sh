@@ -9,6 +9,7 @@ SERVER_OUT="${V2_PROTOBUF_SERVER_OUT:-$ROOT_DIR/IMV2Server/Sources/IMV2Server/Ge
 CLIENT_VERSION="${V2_PROTOBUF_CLIENT_VERSION:-$ROOT_DIR/IMV2ClientKit/Sources/IMV2ClientKit/Generated/IMV2ProtocolVersion.swift}"
 SERVER_VERSION="${V2_PROTOBUF_SERVER_VERSION:-$ROOT_DIR/IMV2Server/Sources/IMV2Server/Generated/IMV2ProtocolVersion.swift}"
 SWIFT_PROTOBUF_CHECKOUT="$ROOT_DIR/IMV2Server/.build/checkouts/swift-protobuf"
+SWIFT_PROTOBUF_PLUGIN_SCRATCH_PATH="${V2_PROTOBUF_PLUGIN_SCRATCH_PATH:-}"
 
 fail() { echo "generate V2 protobuf failed: $1" >&2; exit 1; }
 
@@ -18,9 +19,15 @@ resolve_plugin() {
     printf '%s' "$PROTOC_GEN_SWIFT"; return
   fi
   [[ -d "$SWIFT_PROTOBUF_CHECKOUT" ]] || swift package --package-path "$ROOT_DIR/IMV2Server" resolve >/dev/null
-  swift build --package-path "$SWIFT_PROTOBUF_CHECKOUT" -c release --product protoc-gen-swift >/dev/null
+  local build_arguments=(swift build --package-path "$SWIFT_PROTOBUF_CHECKOUT" -c release --product protoc-gen-swift)
+  if [[ -n "$SWIFT_PROTOBUF_PLUGIN_SCRATCH_PATH" ]]; then
+    mkdir -p "$SWIFT_PROTOBUF_PLUGIN_SCRATCH_PATH"
+    build_arguments+=(--scratch-path "$SWIFT_PROTOBUF_PLUGIN_SCRATCH_PATH")
+  fi
+  "${build_arguments[@]}" >/dev/null
   local plugin
-  plugin="$(find "$SWIFT_PROTOBUF_CHECKOUT/.build" -path '*/release/protoc-gen-swift' -type f | sort | head -n 1)"
+  local build_root="${SWIFT_PROTOBUF_PLUGIN_SCRATCH_PATH:-$SWIFT_PROTOBUF_CHECKOUT/.build}"
+  plugin="$(find "$build_root" -path '*/release/protoc-gen-swift' -type f | sort | head -n 1)"
   [[ -x "$plugin" ]] || fail "unable to locate protoc-gen-swift"
   printf '%s' "$plugin"
 }

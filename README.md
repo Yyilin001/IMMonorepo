@@ -50,7 +50,13 @@ xcrun --toolchain XcodeDefault swift build --build-tests \
 # Core + Server + disposable PostgreSQL regression
 docker compose -f IMV2/docker-compose.isolated-tests.yml \
   run --rm --build swift-tests
+
+# Disposable local-schema ledger and logical-restore drills
+bash IMV2/scripts/test_v2_local_schema_migrations.sh
+bash IMV2/scripts/test_v2_postgres_logical_restore.sh
 ```
 
-Current release evidence, including limits of local, CI and capacity checks, is
-maintained in [implementation status](IMV2/docs/implementation-status.md).
+The isolated regression also validates protobuf generated sources, the SQL
+migration manifest, schema-readiness coverage, Prometheus rules and runtime
+environment examples. Current local evidence and capacity limits are maintained
+in [implementation status](IMV2/docs/implementation-status.md).

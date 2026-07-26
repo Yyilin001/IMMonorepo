@@ -66,10 +66,10 @@
 ### 阶段 0：恢复可验证基线（P0，先完成）
 
 1. [已完成，本机 2026-07-25] 显式链接 `IMV2Core` 到 IMApp/IMAppTests，修复 V2-only 清理后的链接缺失；iPhone 17 / iOS 26.5 arm64 已通过 `V2ConversationStoreTests`、`V2PushWakeSettingsTests`，通用 Simulator 双架构 `build-for-testing` 已通过。
-2. [历史记录，GitHub Actions，`c02af08`] [macOS iOS configuration gate](https://github.com/Yyilin001/IMMonorepo/actions/runs/30150647120) 曾通过 generic Simulator build 与聚焦运行时测试；[Linux V2 gate](https://github.com/Yyilin001/IMMonorepo/actions/runs/30150647156) 曾通过 Core、ClientKit、Server/PostgreSQL、迁移账本、逻辑恢复、protobuf/SQL manifest、Prometheus 环境契约及本地账号栈冷启动冒烟。当前 GitHub 托管 runner 因账户账单/支出状态未获分配，不能把这些历史成功当作当前 CI 绿灯；本机回归是现阶段有效门禁。
-3. [已完成，2026-07-25] `implementation-status.md` 记录本地与远程验证的 commit、环境、命令、结果和限制；证据仍不是生产发布批准。
+2. [历史记录，远端执行，`c02af08`] 曾通过 generic Simulator build、聚焦运行时测试、Core、ClientKit、Server/PostgreSQL、迁移账本、逻辑恢复、protobuf/SQL manifest、Prometheus 环境契约及本地账号栈冷启动冒烟。项目当前不启用 GitHub Actions；这些历史结果不是当前门禁，本机回归才是现阶段有效门禁。
+3. [已完成，2026-07-26] `implementation-status.md` 记录本机验证的 commit、环境、命令、结果和限制；证据仍不是生产发布批准。
 
-**完成条件**：干净 checkout 上，本机指定模拟器、隔离 PostgreSQL 与本地账号栈可重复成功；若恢复 GitHub-hosted CI 或批准自托管 runner，远端也必须得到相同结果。
+**完成条件**：干净 checkout 上，本机指定模拟器、隔离 PostgreSQL 与本地账号栈可重复成功。GitHub Actions 不属于当前门禁。
 
 ### 阶段 1：首发安全与最小部署（P0）
 

@@ -15,6 +15,7 @@ V2_PROTOBUF_CLIENT_OUT="$TMP_DIR/client/Protobuf" \
 V2_PROTOBUF_SERVER_OUT="$TMP_DIR/server/Protobuf" \
 V2_PROTOBUF_CLIENT_VERSION="$TMP_DIR/client/IMV2ProtocolVersion.swift" \
 V2_PROTOBUF_SERVER_VERSION="$TMP_DIR/server/IMV2ProtocolVersion.swift" \
+V2_PROTOBUF_PLUGIN_SCRATCH_PATH="$TMP_DIR/protoc-gen-swift-build" \
 "$ROOT_DIR/scripts/generate_v2_protobuf.sh"
 diff -ru "$TMP_DIR/client" "$CLIENT_DIR"
 diff -ru "$TMP_DIR/server" "$SERVER_DIR"
