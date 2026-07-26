@@ -7,6 +7,7 @@ repo_root="$(cd "${v2_dir}/.." && pwd)"
 compose_file="${v2_dir}/docker-compose.local-account.yml"
 env_file="${v2_dir}/.env.local"
 compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
+local_account_build_stage_label="com.imv2.local-account-build-stage=true"
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -19,6 +20,16 @@ require_command docker
 require_command openssl
 require_command htpasswd
 require_command rsync
+
+# `docker image prune` only removes dangling images. Narrow it further to this
+# Dockerfile's build stage, so a repeated local rebuild cannot fill Docker's
+# VM disk with compiler layers and it never deletes a tagged image, container,
+# or volume owned by another project.
+prune_unreferenced_local_build_stages() {
+  docker image prune --force --filter "label=${local_account_build_stage_label}" >/dev/null
+}
+
+prune_unreferenced_local_build_stages
 
 if [[ ! -f "${env_file}" ]]; then
   postgres_password="$(openssl rand -base64 24 | tr -d '\n' | tr '+/' '-_')"
@@ -101,6 +112,7 @@ rsync -a --exclude '.build' --exclude '.swiftpm' --exclude '.DS_Store' \
   "${repo_root}/IMV2Server/" "${build_context}/IMV2Server/"
 cp "${v2_dir}/Dockerfile.account" "${build_context}/IMV2/Dockerfile.account"
 docker build --tag imv2localaccount-v2server --file "${build_context}/IMV2/Dockerfile.account" "${build_context}"
+prune_unreferenced_local_build_stages
 
 # Recreate the PostgreSQL *container* so its read-only SQL bind mount is
 # refreshed as well. The named data volume is retained, so this never drops

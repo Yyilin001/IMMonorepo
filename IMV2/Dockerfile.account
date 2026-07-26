@@ -5,6 +5,11 @@
 # gigabytes of compiler products per image.
 FROM swift:6.3-jammy AS build
 
+# The classic Docker builder keeps completed multi-stage build images as
+# dangling layers. This label lets the local-stack script reclaim only these
+# unreferenced, source-compilation layers without touching user images/volumes.
+LABEL com.imv2.local-account-build-stage=true
+
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
