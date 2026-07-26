@@ -97,6 +97,9 @@ IMAPP_NETWORK_CONFIG_SELF_TEST=true \
 xcrun --toolchain XcodeDefault swift build --build-tests \
   --package-path IMV2ClientKit --jobs 4
 
+# 不启动模拟器，只构建 App、单元测试与 UI 测试 bundle
+bash IMApp/Scripts/verify_generic_simulator_build.sh
+
 # Core + Server + disposable PostgreSQL 的隔离回归
 docker compose -f IMV2/docker-compose.isolated-tests.yml \
   run --rm --build swift-tests
