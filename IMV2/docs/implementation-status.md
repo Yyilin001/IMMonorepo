@@ -29,16 +29,18 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   gateway, PostgreSQL and loopback-operator stack, then passed
   `bash IMV2/scripts/verify_v2_local_account_stack.sh`. The black-box check
   verified invalid HTTPS input (`400`), password registration and device
-  credential issuance (`200`), then a real local-CA-verified TLS 1.3 framed
-  Protobuf `ClientHello → Authenticate` session using that issued device
-  credential, shared password-failure lockout (`401` then `429` with
+  credential issuance (`200`), then two independently issued credentials
+  completed real local-CA-verified TLS 1.3 framed Protobuf sessions. One user
+  opened a direct room and had a message accepted; the other observed that
+  exact message through `SyncPull`. The same run also verified shared
+  password-failure lockout (`401` then `429` with
   `Retry-After` and `no-store`), Push endpoint register/remove (`204`),
   loopback operator account disable followed by access/refresh rejection, and
   private metrics vocabulary. The protocol probe runs only in the local gateway
   container and prints no credential or identity. This is reproducible
   local-stack evidence only; it does not establish production deployment,
-  external Push delivery, real-device passkey operation, message-delivery
-  end-to-end behavior, or workload capacity.
+  external Push delivery, real-device passkey operation, iOS UI or multi-device
+  behavior, or workload capacity.
 - 2026-07-26: the local release-stack launcher now performs its narrowly
   labelled dangling-build-stage cleanup both after a successful Docker build
   and from its exit trap when that build fails. A controlled failed-build
@@ -187,11 +189,12 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   **4.942 s** in the local two-CPU Docker test container. This is correctness
   evidence only; the opt-in full-drain soak and a topology-specific concurrent
   load report remain required for a 100k production claim.
-- 2026-07-25: the local account/gateway smoke verification passed account
+- 2026-07-26: the local account/gateway smoke verification passed account
   HTTPS, password failure lockout (five `401` responses followed by no-store
   `429` with a positive `Retry-After`), device credential issuance, no-store
   Push endpoint registration and deletion, TLS 1.3, and private loopback-only
-  metrics.
+  metrics. It also proved a two-account direct message was accepted and then
+  observed by the recipient through `SyncPull`.
 - 2026-07-25: a booted iPhone 17 / iOS 26.5 arm64 Simulator passed all **31**
   focused `V2ConversationStoreTests` and `V2PushWakeSettingsTests` tests, with
   zero failures or skips.
@@ -309,9 +312,11 @@ completed only after PostgreSQL,
 the loopback account issuer, the un-published loopback-only operator, Caddy
 HTTPS edge, and the V2 TLS gateway became healthy. Its companion
 `verify_v2_local_account_stack.sh` then verified an HTTPS invalid-input
-rejection, password registration to device-credential issuance hand-off, an
-issued device credential completing a local-CA-verified TLS 1.3 framed
-Protobuf `ClientHello → Authenticate` gateway session, five
+rejection, password registration to device-credential issuance hand-off, and
+two independently issued credentials completing local-CA-verified TLS 1.3
+framed Protobuf sessions. The sender opened a direct room and accepted one
+message; the recipient observed that exact message through `SyncPull`. The
+same run also verified five
 rejected password assertions followed by a no-store `429` with a positive
 `Retry-After`, authenticated Push endpoint register/remove with `204` and
 `no-store` (without printing either token), a local-only operator disable with

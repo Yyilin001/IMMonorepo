@@ -136,18 +136,63 @@ access_token="$(printf '%s' "${issued_credentials}" | jq -er '.accessToken')"
 refresh_credential="$(printf '%s' "${issued_credentials}" | jq -er '.refreshCredential')"
 user_id="$(printf '%s' "${issued_credentials}" | jq -er '.userID')"
 
+# Register an independent recipient. It gives the gateway probe a real direct
+# room target and keeps the later account-disable assertions scoped to the
+# original smoke account.
+peer_account_handle="peer-${suffix:0:20}"
+peer_public_handle="peer${suffix:0:20}"
+peer_device_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+peer_operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+
+phase="peer password registration"
+peer_assertion="$(curl --silent --show-error --fail \
+  --cacert "${ca_path}" \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data "{\"accountHandle\":\"${peer_account_handle}\",\"password\":\"v2-local-peer-password\",\"deviceID\":\"${peer_device_id}\",\"publicHandle\":\"${peer_public_handle}\",\"displayName\":\"Local Peer\"}" \
+  https://localhost:8443/v2/account-auth/password/register | jq -er '.accountAssertion')"
+
+phase="peer device credential issuance"
+peer_issued_credentials="$(curl --silent --show-error --fail \
+  --cacert "${ca_path}" \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data "{\"accountAssertion\":\"${peer_assertion}\",\"deviceID\":\"${peer_device_id}\",\"operationID\":\"${peer_operation_id}\"}" \
+  https://localhost:8443/v2/device-credentials)"
+peer_access_token="$(printf '%s' "${peer_issued_credentials}" | jq -er '.accessToken')"
+peer_user_id="$(printf '%s' "${peer_issued_credentials}" | jq -er '.userID')"
+
 # Exercise the real framed gateway protocol after the HTTPS account issuer has
-# produced an access credential. The probe runs in the gateway container so it
-# trusts only the same local Caddy root mounted for the gateway leaf; it prints
-# no credential or account identity and is not a gateway debug endpoint.
-phase="authenticated V2 TLS session"
-gateway_probe_output="$(docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
+# produced two independent device credentials. The sender-side probe opens the
+# unique direct room and accepts a message; the recipient-side probe observes
+# that same message through its own SyncPull. Both run in the gateway container
+# so they trust only the local Caddy root, and neither prints credentials or
+# identities or becomes a gateway debug endpoint.
+phase="authenticated V2 direct-message send"
+gateway_send_result="$(docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
   exec -T \
+  --env 'IM_V2_GATEWAY_PROBE_MODE=sendDirectMessage' \
   --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=${access_token}" \
   --env "IM_V2_GATEWAY_PROBE_DEVICE_ID=${device_id}" \
+  --env "IM_V2_GATEWAY_PROBE_TARGET_USER_ID=${peer_user_id}" \
   gateway /workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe)"
-test "${gateway_probe_output}" = 'local V2 gateway authentication: protocol v1 verified' || {
-  printf 'local V2 gateway protocol probe returned an unexpected result\n' >&2
+read -r gateway_room_id gateway_message_id gateway_send_extra <<<"${gateway_send_result}"
+test -n "${gateway_room_id}" && test -n "${gateway_message_id}" && test -z "${gateway_send_extra}" || {
+  printf 'local V2 gateway send probe returned an unexpected result\n' >&2
+  exit 1
+}
+
+phase="authenticated V2 recipient sync"
+gateway_receive_output="$(docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
+  exec -T \
+  --env 'IM_V2_GATEWAY_PROBE_MODE=receiveDirectMessage' \
+  --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=${peer_access_token}" \
+  --env "IM_V2_GATEWAY_PROBE_DEVICE_ID=${peer_device_id}" \
+  --env "IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID=${gateway_room_id}" \
+  --env "IM_V2_GATEWAY_PROBE_EXPECTED_MESSAGE_ID=${gateway_message_id}" \
+  gateway /workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe)"
+test "${gateway_receive_output}" = 'local V2 gateway direct message sync: verified' || {
+  printf 'local V2 gateway recipient sync probe returned an unexpected result\n' >&2
   exit 1
 }
 
@@ -343,7 +388,7 @@ fi
 
 printf 'local account HTTPS validation: 400\n'
 printf 'local password registration and device credential issuance: 200\n'
-printf 'local V2 gateway authenticated protocol session: verified\n'
+printf 'local V2 gateway direct chat: auth, open, accept, recipient sync verified\n'
 printf 'local password failure limit: 5 x 401, then 429 no-store with Retry-After\n'
 printf 'local Push endpoint register/remove: 204, no-store\n'
 printf 'local loopback operator account disable: 200 no-store, then access/refresh 401 and prior assertion 403\n'

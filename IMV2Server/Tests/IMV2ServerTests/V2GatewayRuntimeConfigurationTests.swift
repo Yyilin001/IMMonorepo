@@ -19,10 +19,20 @@ struct V2GatewayRuntimeConfigurationTests {
         }
     }
 
+    @Test("runtime requires an explicit PostgreSQL pool ceiling")
+    func rejectsMissingDatabasePoolCeiling() {
+        var values = runtimeValues
+        values.removeValue(forKey: "IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP")
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+    }
+
     @Test("runtime parses a complete explicit deployment configuration")
     func parsesCompleteConfiguration() throws {
         let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(runtimeValues))
         #expect(configuration.tls.port == 7443)
+        #expect(configuration.databaseMaxConnectionsPerEventLoop == 8)
         #expect(configuration.frameLimits.maximumPayloadBytes == 65_536)
         #expect(configuration.maximumProtobufMessageDepth == 32)
         #expect(configuration.capacityProfile.id == "standard")
@@ -172,6 +182,7 @@ struct V2GatewayRuntimeConfigurationTests {
     private var runtimeValues: [String: String] {
         [
             "IM_V2_DATABASE_URL": "postgres://v2:password@db/im_v2",
+            "IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP": "8",
             "IM_V2_TLS_HOST": "0.0.0.0",
             "IM_V2_TLS_PORT": "7443",
             "IM_V2_TLS_CERTIFICATE_CHAIN_PATH": "/run/secrets/tls-chain.pem",

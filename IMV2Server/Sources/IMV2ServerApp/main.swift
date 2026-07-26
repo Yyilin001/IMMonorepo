@@ -16,7 +16,13 @@ enum IMV2ServerApp {
         let configuration = try V2GatewayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let app = try await Application.make(.production)
         do {
-            app.databases.use(try .postgres(url: configuration.databaseURL), as: .psql)
+            app.databases.use(
+                try .postgres(
+                    url: configuration.databaseURL,
+                    maxConnectionsPerEventLoop: configuration.databaseMaxConnectionsPerEventLoop
+                ),
+                as: .psql
+            )
             let database = app.db(.psql)
             var shardLocations: [V2UserShardStorageLocation] = []
             for storage in configuration.userShardStorage {
@@ -25,7 +31,13 @@ enum IMV2ServerApp {
                     shardDatabase = database
                 } else {
                     let identifier = DatabaseID(string: "user-shard-\(storage.bucket)")
-                    app.databases.use(try .postgres(url: storage.databaseURL), as: identifier)
+                    app.databases.use(
+                        try .postgres(
+                            url: storage.databaseURL,
+                            maxConnectionsPerEventLoop: configuration.databaseMaxConnectionsPerEventLoop
+                        ),
+                        as: identifier
+                    )
                     shardDatabase = app.db(identifier)
                 }
                 try await V2SchemaReadiness.verify(database: shardDatabase, schema: storage.schema)

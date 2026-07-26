@@ -111,6 +111,11 @@ public struct V2APNSRuntimeConfiguration: Sendable {
 /// policy: an incomplete deployment must fail before opening a public port.
 public struct V2GatewayRuntimeConfiguration: Sendable {
     public let databaseURL: String
+    /// Fluent defaults to a single PostgreSQL connection per event loop. The
+    /// gateway runs foreground commands and durable fan-out in the same
+    /// process, so deployment must size this explicitly rather than allowing a
+    /// fan-out transaction to starve sync or command work on one event loop.
+    public let databaseMaxConnectionsPerEventLoop: Int
     public let tls: V2TLSListenerConfiguration
     public let accessTokenKey: V2AccessTokenHMACKey
     public let capacityProfile: V2CapacityProfile
@@ -138,6 +143,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
 
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
+        databaseMaxConnectionsPerEventLoop = try Self.positive("IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP", environment: environment)
         tls = try .init(
             host: try Self.required("IM_V2_TLS_HOST", environment: environment),
             port: try Self.integer("IM_V2_TLS_PORT", environment: environment),

@@ -18,6 +18,7 @@ The profile is deployed through the required `IM_V2_*` variables in
 | `IM_V2_WORKER_BATCH_SIZE` | bounds one planner or delivery worker progression; it is not a throughput promise |
 | `IM_V2_DURABLE_RETRY_*` | explicitly bounds transient worker retry delay/attempts; exhausted work is paused for alerting and controlled replay, not dropped |
 | `IM_V2_MAX_PLANNER_CONCURRENCY` / `...DELIVERY_CONCURRENCY` | bounds independent per-process planner and delivery claim workers; PostgreSQL leases remain the cross-replica fence |
+| `IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP` | explicit per-event-loop PostgreSQL pool ceiling; it must cover concurrent foreground command/sync work and durable workers, while remaining within the database connection budget across all replicas |
 
 The source transaction reserves room and shard admission capacity. It must not
 accept a message and defer quota enforcement to a fan-out worker. Delivery is

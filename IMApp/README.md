@@ -46,7 +46,7 @@ provisioning profile 与真实 APNs 凭据、以及媒体供应商接入仍未�
 ```sh
 bash IMV2/scripts/run_v2_local_account_stack.sh
 
-# 对本地 HTTPS、账户、网关认证和运维边界运行黑盒回归
+# 对本地 HTTPS、账户、私聊投递和运维边界运行黑盒回归
 bash IMV2/scripts/verify_v2_local_account_stack.sh
 ```
 
@@ -59,8 +59,9 @@ bash IMV2/scripts/verify_v2_local_account_stack.sh
   内部 HTTP 端口；
 - 输出 `IMV2/local-ca/root.crt`。首次使用时，将该证书导入所选模拟器并
   启用完全信任，否则 URLSession 会正确拒绝本地 HTTPS 证书。
-- 回归脚本会让一个临时账号经 HTTPS 取得设备凭据，并在网关容器内完成真实
-  TLS 1.3 / Protobuf `ClientHello → Authenticate`；它不会打印或持久化该凭据。
+- 回归脚本会让两个独立临时账号经 HTTPS 取得设备凭据，并在网关容器内完成真实
+  TLS 1.3 / Protobuf 认证：发送端打开私聊并接受一条消息，接收端通过 `SyncPull`
+  观察到同一消息。它不会打印或持久化凭据或身份。
 
 Debug 默认配置已经是：
 

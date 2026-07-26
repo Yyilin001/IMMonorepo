@@ -59,6 +59,9 @@ services:
       - .env.local
     environment:
       IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
+      # The gateway has foreground command/sync work plus durable fan-out in
+      # one process. One connection per event loop can deadlock that mix.
+      IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 8
       IM_V2_TLS_HOST: 0.0.0.0
       IM_V2_TLS_PORT: 7443
       IM_V2_TLS_CERTIFICATE_CHAIN_PATH: /caddy/caddy/certificates/local/localhost/localhost.crt
