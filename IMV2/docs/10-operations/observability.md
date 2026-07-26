@@ -88,7 +88,7 @@ ID、access/refresh token、正文、原始 frame、附件 URL、对象 key、�
 [`observability/prometheus/imv2-alerts.yml`](../../observability/prometheus/imv2-alerts.yml)，
 配置模板位于
 [`observability/prometheus/prometheus.yml.example`](../../observability/prometheus/prometheus.yml.example)。
-CI 通过 `scripts/check_v2_prometheus_rules.sh` 用 `promtool` 校验二者。
+本机隔离验证通过 `scripts/check_v2_prometheus_rules.sh` 用 `promtool` 校验二者。
 本地账号栈的 `verify_v2_local_account_stack.sh` 还从 gateway 容器内部探测
 loopback `/metrics`，断言 `no-store`、未发布 9464 端口及 ready/leased/scheduled/paused
 完整状态词汇；它由此拒绝使用旧镜像的“健康但缺指标”状态。

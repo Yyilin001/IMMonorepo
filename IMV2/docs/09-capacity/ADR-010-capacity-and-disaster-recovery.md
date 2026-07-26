@@ -32,6 +32,6 @@ NATS hint 的故障实验。Redis 不属于当前 V2 correctness path。报告�
 logical dump，删除 schema 后恢复该 dump，并验证 retry-pause column 与审计行。
 该回归也在本机 V2 隔离验证入口中执行。
 
-这是开发/CI 的**逻辑恢复**证据，不是 PITR 证明：它不覆盖 WAL archive、时间点
+这是开发环境的**本机逻辑恢复**证据，不是 PITR 证明：它不覆盖 WAL archive、时间点
 选择、跨区域副本、密钥恢复、生产数据规模、批准的 RPO/RTO 或故障期间持续写入。
 这些仍是 ADR 批准前的发布阻断项。

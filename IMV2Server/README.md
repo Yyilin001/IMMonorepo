@@ -144,9 +144,8 @@ bash IMV2/scripts/verify_v2_local_account_stack.sh
 
 The smoke check creates one uniquely named account in the local Docker volume;
 it never contacts a public endpoint or writes a token to disk/output.
-The same stack is exercised on Linux CI under an isolated Compose project;
-that CI evidence remains local-stack coverage, not a production deployment
-approval.
+The same stack is exercised locally under an isolated Compose project; that
+evidence remains local-stack coverage, not a production deployment approval.
 
 ## Operational notes
 
