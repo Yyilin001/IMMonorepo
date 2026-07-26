@@ -129,6 +129,13 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   target, preventing a host with older installed runtimes from selecting an
   incompatible simulator. This remains simulator evidence, not real-device
   Push, passkey or production-network evidence.
+- 2026-07-26: on an iPhone 17 / iOS 26.2 arm64 Simulator, the current
+  `IMAppLaunchUITests` passed both signed-out entry paths: password sign-in
+  controls and password registration. The registration regression proves the
+  public ID and display-name fields are present and that submit stays disabled
+  until all four required password-registration values are supplied. It uses
+  stable accessibility identifiers and a DEBUG-only launch argument; it does
+  not contact the account service or change Release behavior.
 - 2026-07-25: isolated PostgreSQL Server regression passed **186 tests / 50
   suites** after adding the `0019_account_disable.sql` release artifact. The
   new regression proves a dedicated operator principal can make exactly one
@@ -274,13 +281,15 @@ also passed every selected `V2ConversationStoreTests` and
 `V2PushWakeSettingsTests` case.  This is a local simulator regression record,
 not a substitute for a signed-device or production-network E2E result.
 
-At `d0fcae9`, the previously empty `IMAppUITests` target gained a deterministic
-fresh-launch check.  It passes `-v2-ui-testing-signed-out` only as a process
+At `d0fcae9`, the previously empty `IMAppUITests` target gained deterministic
+signed-out entry checks. It passes `-v2-ui-testing-signed-out` only as a process
 argument, so the production route still performs its normal Keychain-backed
 restore while the UI test does not depend on historical simulator credentials
-or a live account service.  The iPhone 17 / iOS 26.5 arm64 run passed the
-password-sign-in control assertions; the same test remains part of the local
-simulator verification scope.
+or a live account service. A DEBUG-only `-v2-ui-testing-password-register`
+argument adds the registration-specific check without changing Release
+behavior: stable identifiers prove the public ID/display-name fields appear,
+and the submit control remains disabled until all registration values exist.
+The same test target remains part of the local simulator verification scope.
 
 The same baseline audit found that the retired macOS automation called removed
 `Makefile` targets and that the Release build phase directly executed a

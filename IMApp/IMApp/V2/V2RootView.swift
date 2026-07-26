@@ -3,16 +3,20 @@ import SwiftUI
 struct V2RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     private let appPushDelegate: V2AppPushDelegate
+    private let initialPasswordMode: V2AppStore.PasswordMode
     @State private var store: V2AppStore
 
     init(appPushDelegate: V2AppPushDelegate) {
         self.appPushDelegate = appPushDelegate
         #if DEBUG
-        let startupMode: V2AppStore.StartupMode = ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-signed-out")
+        let arguments = ProcessInfo.processInfo.arguments
+        let startupMode: V2AppStore.StartupMode = arguments.contains("-v2-ui-testing-signed-out")
             ? .uiTestingSignedOut
             : .production
+        initialPasswordMode = arguments.contains("-v2-ui-testing-password-register") ? .register : .signIn
         #else
         let startupMode: V2AppStore.StartupMode = .production
+        initialPasswordMode = .signIn
         #endif
         _store = State(initialValue: V2AppStore(startupMode: startupMode, remoteNotificationRegistrar: appPushDelegate))
     }
@@ -23,7 +27,11 @@ struct V2RootView: View {
             case .launching:
                 ProgressView("正在恢复 V2 会话…")
             case .signedOut:
-                V2SignInView(store: store, authenticationMessage: store.authenticationMessage)
+                V2SignInView(
+                    store: store,
+                    authenticationMessage: store.authenticationMessage,
+                    initialPasswordMode: initialPasswordMode
+                )
             case .authenticating:
                 ProgressView("正在验证身份…")
             case .signedIn:
@@ -75,6 +83,16 @@ private struct V2SignInView: View {
     @State private var mode: V2AppStore.PasswordMode = .signIn
     @State private var actionTask: Task<Void, Never>?
 
+    init(
+        store: V2AppStore,
+        authenticationMessage: String?,
+        initialPasswordMode: V2AppStore.PasswordMode = .signIn
+    ) {
+        self.store = store
+        self.authenticationMessage = authenticationMessage
+        _mode = State(initialValue: initialPasswordMode)
+    }
+
     var body: some View {
         Form {
             Section {
@@ -109,6 +127,7 @@ private struct V2SignInView: View {
                     Text("注册").tag(V2AppStore.PasswordMode.register)
                 }
                 .pickerStyle(.segmented)
+                .accessibilityIdentifier("v2.password.mode")
                 Button(mode == .register ? "创建账号" : "使用密码登录") {
                     let submittedPassword = password
                     password = ""
