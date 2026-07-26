@@ -65,10 +65,10 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   single-flight, so two actions cannot race on one membership revision. The
   group-members sheet owns and cancels its mutation task on dismissal, with a
   post-directory cancellation fence that prevents a late identity lookup from
-  creating a new membership command. The same simulator
-  then passed the complete `IMApp` test plan: conversation, app-store and
-  Push-wake unit suites plus the deterministic fresh-launch UI test. The
-  earlier CoreSimulator migration
+  creating a new membership command. The same simulator then passed all
+  **46** `IMAppTests` cases and the deterministic fresh-launch
+  `IMAppUITests` case (zero failures or skips), covering the complete current
+  scheme test inventory. The earlier CoreSimulator migration
   failure is therefore not the current local test blocker; this remains
   simulator evidence, not a signed-device or production-network result.
 - 2026-07-26: `main` at `31b2be1` passed the disposable PostgreSQL Server
