@@ -50,7 +50,7 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   stopped connection. ClientKit's full local package suite passed (**119 tests
   / 26 suites**) including stop-then-reconnect and handshake-cancellation
   regressions, and the generic iOS Simulator app/test-bundle build passed with
-  Xcode 26.6. On current `main`, all **42** focused
+  Xcode 26.6. On `main` at `45739a6`, all **42** focused
   `V2ConversationStoreTests` passed on an iPhone 17 / iOS 26.2 arm64
   Simulator, including stale-refresh suppression for both delayed successes
   and delayed failures, plus cancellation checks that
@@ -68,10 +68,17 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   post-directory cancellation fence that prevents a late identity lookup from
   creating a new membership command. The same simulator then passed all
   **48** `IMAppTests` cases and the deterministic fresh-launch
-  `IMAppUITests` case (zero failures or skips), covering the complete current
-  scheme test inventory. The earlier CoreSimulator migration
-  failure is therefore not the current local test blocker; this remains
-  simulator evidence, not a signed-device or production-network result.
+  `IMAppUITests` case (zero failures or skips), covering that revision's
+  complete scheme test inventory. `461d0f2` subsequently changed only the
+  SwiftUI VoiceOver structure of attachment/removal and reaction controls.
+  Its test rerun is currently blocked on this workstation: the default
+  CoreSimulator service reports invalid host-death ports and temporary-device
+  creation-state errors, shuts down an otherwise booted Xcode destination,
+  and never finalizes the result bundle. A separately created, deleted
+  device-set destination remained booted but Xcode never entered test
+  execution. This is a local host verification blocker, not passing evidence
+  or a production conclusion; restore the simulator service before citing a
+  post-`461d0f2` iOS green run.
 - 2026-07-26: `main` at `31b2be1` passed the disposable PostgreSQL Server
   regression (**190 tests / 50 suites**) after adding the gateway
   device-revocation startup cursor test. A gateway node ID seen for the first
