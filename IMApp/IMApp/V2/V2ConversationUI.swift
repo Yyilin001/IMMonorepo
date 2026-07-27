@@ -1800,6 +1800,7 @@ private struct V2MessageEditSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
+                        .accessibilityIdentifier("v2.message.edit-cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {

@@ -187,6 +187,24 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         )
         XCTAssertTrue(actionFeedback.label.contains("反应已提交") || actionFeedback.label.contains("反应已安全保存"))
         messageRow.press(forDuration: 1)
+        let edit = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == %@", "v2.message.edit.\(messageID)")
+        ).firstMatch
+        XCTAssertTrue(
+            edit.waitForExistence(timeout: 5) && edit.isHittable,
+            "发送端长按自己的消息后必须能打开可定位的编辑操作。"
+        )
+        edit.tap()
+        let editText = app.textViews["v2.message.edit-text"]
+        XCTAssertTrue(
+            editText.waitForExistence(timeout: 10) && editText.isHittable,
+            "编辑页必须提供可由辅助技术定位并输入的消息编辑器。"
+        )
+        let cancelEdit = app.buttons["v2.message.edit-cancel"]
+        XCTAssertTrue(cancelEdit.isHittable)
+        cancelEdit.tap()
+        XCTAssertTrue(messageRow.waitForExistence(timeout: 5))
+        messageRow.press(forDuration: 1)
         let withdraw = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier == %@", "v2.message.withdraw.\(messageID)")
         ).firstMatch
