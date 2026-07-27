@@ -546,6 +546,42 @@ struct V2ConversationStoreTests {
         #expect(store.messageActionFeedback == "撤回已提交，正在同步。")
     }
 
+    @Test func messageWithdrawalAllowsOnlyOneInFlightActionPerMessage() async {
+        let message = V2ConversationMessageItem(
+            id: "message-a",
+            revision: 4,
+            text: "需要撤回",
+            createdAt: .now,
+            isOutgoing: true,
+            isWithdrawn: false
+        )
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
+        let withdrawer = V2SuspendingMessageWithdrawer(result: .accepted)
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            messageWithdrawer: withdrawer,
+            userID: "current-user",
+            roomID: "room-a"
+        )
+
+        let firstWithdrawal = Task { await store.withdrawMessage(message) }
+        await withdrawer.waitUntilRequested()
+        await store.withdrawMessage(message)
+
+        #expect(store.isMessageActionInFlight(message))
+        #expect(!store.canWithdrawMessage(message))
+        #expect(!store.canEditMessage(message))
+        #expect(!store.canReactToMessage(message))
+        #expect(await withdrawer.requests().count == 1)
+
+        await withdrawer.complete()
+        await firstWithdrawal.value
+
+        #expect(!store.isMessageActionInFlight(message))
+        #expect(await withdrawer.requests().count == 1)
+    }
+
     @Test func messageWithdrawalIsNotAvailableForIncomingOrWithdrawnMessages() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let withdrawer = V2MessageWithdrawerFake(result: .accepted)
@@ -1509,6 +1545,37 @@ private actor V2MessageWithdrawerFake: V2MessageWithdrawing {
     }
 
     func requests() -> [Request] { requestsValue }
+}
+
+private actor V2SuspendingMessageWithdrawer: V2MessageWithdrawing {
+    private let result: V2MessageWithdrawalOutcome
+    private var requestsValue: [V2MessageWithdrawerFake.Request] = []
+    private var requestWaiter: CheckedContinuation<Void, Never>?
+    private var completion: CheckedContinuation<Void, Never>?
+
+    init(result: V2MessageWithdrawalOutcome) {
+        self.result = result
+    }
+
+    func withdraw(messageID: String, in roomID: String, expectedMessageRevision: UInt64) async throws -> V2MessageWithdrawalOutcome {
+        requestsValue.append(.init(messageID: messageID, roomID: roomID, expectedMessageRevision: expectedMessageRevision))
+        requestWaiter?.resume()
+        requestWaiter = nil
+        await withCheckedContinuation { completion = $0 }
+        return result
+    }
+
+    func waitUntilRequested() async {
+        guard requestsValue.isEmpty else { return }
+        await withCheckedContinuation { requestWaiter = $0 }
+    }
+
+    func complete() {
+        completion?.resume()
+        completion = nil
+    }
+
+    func requests() -> [V2MessageWithdrawerFake.Request] { requestsValue }
 }
 
 private actor V2MessageReactionChangerFake: V2MessageReactionChanging {

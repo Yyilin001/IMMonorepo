@@ -466,6 +466,7 @@ final class V2ConversationDetailStore {
     private(set) var mediaDownloadStates: [MediaID: V2ConversationMediaDownloadState] = [:]
     private var nextGroupMemberCursor: String?
     private var refreshGeneration = 0
+    private var inFlightMessageActionIDs: Set<String> = []
     var draft = ""
     var mentionHandlesText = ""
 
@@ -754,11 +755,17 @@ final class V2ConversationDetailStore {
     }
 
     func canWithdrawMessage(_ message: V2ConversationMessageItem) -> Bool {
-        message.isOutgoing && !message.isWithdrawn && message.revision > 0
+        message.isOutgoing && !message.isWithdrawn && message.revision > 0 && !isMessageActionInFlight(message)
+    }
+
+    func isMessageActionInFlight(_ message: V2ConversationMessageItem) -> Bool {
+        inFlightMessageActionIDs.contains(message.id)
     }
 
     func withdrawMessage(_ message: V2ConversationMessageItem) async {
         guard canWithdrawMessage(message) else { return }
+        guard beginMessageAction(for: message) else { return }
+        defer { finishMessageAction(for: message) }
         guard let messageWithdrawer else {
             messageActionFeedback = "撤回暂不可用。"
             return
@@ -787,11 +794,11 @@ final class V2ConversationDetailStore {
     }
 
     func canReactToMessage(_ message: V2ConversationMessageItem) -> Bool {
-        !message.isWithdrawn
+        !message.isWithdrawn && !isMessageActionInFlight(message)
     }
 
     func canEditMessage(_ message: V2ConversationMessageItem) -> Bool {
-        message.isOutgoing && !message.isWithdrawn && message.revision > 0
+        message.isOutgoing && !message.isWithdrawn && message.revision > 0 && !isMessageActionInFlight(message)
     }
 
     /// Returns whether it is safe for the editor to close. Rejected commands
@@ -799,6 +806,8 @@ final class V2ConversationDetailStore {
     func editMessage(_ message: V2ConversationMessageItem, text: String) async -> Bool {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canEditMessage(message), !trimmedText.isEmpty else { return false }
+        guard beginMessageAction(for: message) else { return false }
+        defer { finishMessageAction(for: message) }
         guard let messageEditor else {
             messageActionFeedback = "编辑暂不可用。"
             return false
@@ -833,6 +842,8 @@ final class V2ConversationDetailStore {
 
     func changeReaction(_ reaction: String, on message: V2ConversationMessageItem) async {
         guard canReactToMessage(message) else { return }
+        guard beginMessageAction(for: message) else { return }
+        defer { finishMessageAction(for: message) }
         guard let messageReactionChanger else {
             messageActionFeedback = "反应暂不可用。"
             return
@@ -860,6 +871,14 @@ final class V2ConversationDetailStore {
         } catch {
             messageActionFeedback = "无法保存反应。"
         }
+    }
+
+    private func beginMessageAction(for message: V2ConversationMessageItem) -> Bool {
+        inFlightMessageActionIDs.insert(message.id).inserted
+    }
+
+    private func finishMessageAction(for message: V2ConversationMessageItem) {
+        inFlightMessageActionIDs.remove(message.id)
     }
 
     func loadGroupMembers(reset: Bool = false) async {
@@ -1447,6 +1466,8 @@ private struct V2ConversationMessageBubble: View {
                 Button("撤回", role: .destructive) {
                     Task { await store.withdrawMessage(message) }
                 }
+                .disabled(!store.canWithdrawMessage(message))
+                .accessibilityValue(store.isMessageActionInFlight(message) ? "正在保存消息操作" : "")
                 .accessibilityIdentifier("v2.message.withdraw.\(message.id)")
             }
         }
@@ -1508,7 +1529,12 @@ private struct V2MessageEditSheet: View {
                             }
                         }
                     }
-                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || text == message.text)
+                    .disabled(
+                        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || text == message.text
+                            || !store.canEditMessage(message)
+                    )
+                    .accessibilityValue(store.isMessageActionInFlight(message) ? "正在保存消息操作" : "")
                     .accessibilityIdentifier("v2.message.edit-save")
                 }
             }
@@ -1574,6 +1600,7 @@ private struct V2ConversationReactionControls: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(reaction.includesCurrentUser ? .accentColor : .secondary)
+                .disabled(!store.canReactToMessage(message))
                 .accessibilityLabel(reaction.reaction + " 表情反应")
                 .accessibilityValue(reactionAccessibilityValue(reaction))
                 .accessibilityHint(reaction.includesCurrentUser ? "双击移除反应" : "双击添加反应")
@@ -1589,7 +1616,9 @@ private struct V2ConversationReactionControls: View {
             } label: {
                 Image(systemName: "face.smiling")
             }
+            .disabled(!store.canReactToMessage(message))
             .accessibilityLabel("添加反应")
+            .accessibilityValue(store.isMessageActionInFlight(message) ? "正在保存消息操作" : "")
             .accessibilityIdentifier("v2.message.reaction-picker.\(message.id)")
         }
     }
