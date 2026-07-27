@@ -75,9 +75,9 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   code signing disabled. It compiled the `IMApp`, `IMAppTests`, and
   `IMAppUITests` bundles for both simulator architectures without creating or
   booting a device. `IMApp/Scripts/verify_generic_simulator_build.sh` records
-  this repeatable compile-only baseline. It does not execute tests and does not
-  remove the separate CoreSimulator runtime blocker for the post-`461d0f2`
-  accessibility regression.
+  this repeatable compile-only baseline. It does not execute tests; the
+  separately recorded selected-Simulator runtime baseline is the evidence for
+  UI execution and accessibility semantics.
 - 2026-07-26: current `main` rebuilt the disposable local account, TLS
   gateway, PostgreSQL and loopback-operator stack, then passed
   `bash IMV2/scripts/verify_v2_local_account_stack.sh`. The black-box check
