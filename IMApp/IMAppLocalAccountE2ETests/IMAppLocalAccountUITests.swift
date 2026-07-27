@@ -359,6 +359,58 @@ final class IMAppLocalAccountUITests: XCTestCase {
         await receiverConnection.disconnect()
     }
 
+    /// A friendship is server-authoritative: both sides complete the private
+    /// request/accept exchange before the resulting direct room is used.
+    func testTwoLocalClientsCanRequestAndAcceptRelationshipBeforeMessaging() async throws {
+        let requester = try await registerLocalAccount(displayName: "Relationship requester")
+        let recipient = try await registerLocalAccount(displayName: "Relationship recipient")
+        let frameLimits = try V2FrameLimits(maximumPayloadBytes: 65_536, acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)])
+        let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
+        let requesterConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let recipientConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+
+        do {
+            let requesterSession = try await requesterConnection.connectAndAuthenticate(accessToken: requester.accessToken, deviceID: requester.deviceID, supportedCapabilityProfiles: ["base"])
+            let recipientSession = try await recipientConnection.connectAndAuthenticate(accessToken: recipient.accessToken, deviceID: recipient.deviceID, supportedCapabilityProfiles: ["base"])
+            XCTAssertEqual(requesterSession.userID, requester.userID)
+            XCTAssertEqual(recipientSession.userID, recipient.userID)
+
+            let requesterTransport = V2ProtobufSyncTransport(wire: requesterConnection, protocolVersion: requesterSession.protocolVersion)
+            let recipientTransport = V2ProtobufSyncTransport(wire: recipientConnection, protocolVersion: recipientSession.protocolVersion)
+            let requested = try await requesterTransport.changeRelationship(
+                operationID: try RelationshipOperationID(UUID().uuidString.lowercased()),
+                targetUserID: recipient.userID,
+                action: .request
+            )
+            XCTAssertEqual(requested.resultingState, .pending)
+            let accepted = try await recipientTransport.changeRelationship(
+                operationID: try RelationshipOperationID(UUID().uuidString.lowercased()),
+                targetUserID: requester.userID,
+                action: .accept
+            )
+            XCTAssertEqual(accepted.resultingState, .accepted)
+            let directRoom = try await requesterTransport.openDirectRoom(
+                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
+                targetUserID: recipient.userID
+            )
+            let message = try await requesterTransport.sendMessage(
+                roomID: directRoom.roomID,
+                clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
+                text: "accepted-relationship-message",
+                media: [],
+                mentions: []
+            )
+            XCTAssertEqual(message.roomID, directRoom.roomID)
+        } catch {
+            await requesterConnection.disconnect()
+            await recipientConnection.disconnect()
+            throw error
+        }
+
+        await requesterConnection.disconnect()
+        await recipientConnection.disconnect()
+    }
+
     /// The local stack's stranger policy permits three initial messages in a
     /// 24-hour window. The limit is enforced at the authenticated gateway,
     /// rather than being a sender-side UI convention, and the fourth request
