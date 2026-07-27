@@ -1158,6 +1158,9 @@ struct V2ConversationListView: View {
         _groupTitle = State(
             initialValue: localE2EConversationLaunchFixture?.initialGroupTitle ?? ""
         )
+        _groupMemberUserIDs = State(
+            initialValue: localE2EConversationLaunchFixture?.initialGroupMemberHandles ?? ""
+        )
     }
 
     var body: some View {
@@ -1326,6 +1329,10 @@ struct V2ConversationListView: View {
                                         groupSubmissionTask = nil
                                         groupTitle = ""
                                         groupMemberUserIDs = ""
+                                        // The local E2E fixture only supplies a draft to the
+                                        // room created by this real UI action. Keep the same
+                                        // state handoff as the direct-conversation path.
+                                        localE2EFixtureRoomID = roomID
                                         newConversationSheet = nil
                                         navigationPath.append(roomID)
                                     } else if !Task.isCancelled {

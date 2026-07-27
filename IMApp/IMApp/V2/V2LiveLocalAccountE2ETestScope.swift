@@ -33,15 +33,18 @@ struct V2LiveLocalAccountE2EConversationLaunchFixture: Sendable, Equatable {
     let directTargetHandle: String?
     let initialMessage: String?
     let initialGroupTitle: String?
+    let initialGroupMemberHandles: String?
 
     init(
         directTargetHandle: String?,
         initialMessage: String?,
-        initialGroupTitle: String?
+        initialGroupTitle: String?,
+        initialGroupMemberHandles: String?
     ) {
         self.directTargetHandle = Self.nonEmptyValue(directTargetHandle)
         self.initialMessage = Self.nonEmptyValue(initialMessage)
         self.initialGroupTitle = Self.nonEmptyValue(initialGroupTitle)
+        self.initialGroupMemberHandles = Self.nonEmptyValue(initialGroupMemberHandles)
     }
 
     private static func nonEmptyValue(_ value: String?) -> String? {

@@ -245,7 +245,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     }
 
     @MainActor
-    func testReceiverRestoresScopedInstallationAndProjectsOfflineMessage() throws {
+    func testReceiverRestoresScopedInstallationAndProjectsOfflineMessageThenSendsGroupMessage() throws {
         let app = XCUIApplication()
         app.activate()
 
@@ -278,6 +278,73 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         // sender's draft-only detail state. Keep contrast gated here too so
         // restored message content and the composer stay legible together.
         try app.performAccessibilityAudit(for: [.contrast])
+        let backToConversationList = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(backToConversationList.isHittable)
+        backToConversationList.tap()
+        let newGroup = app.buttons["v2.conversation.new-group"]
+        XCTAssertTrue(newGroup.waitForExistence(timeout: 5))
+        newGroup.tap()
+        let groupTitle = app.textFields["v2.conversation.group-title"]
+        let groupMembers = app.textViews["v2.conversation.group-members"]
+        XCTAssertTrue(
+            groupTitle.waitForExistence(timeout: 10) && groupTitle.isHittable,
+            "恢复后的建群入口必须仍提供可访问的群名称输入。"
+        )
+        XCTAssertTrue(
+            groupMembers.exists && !(groupMembers.value as? String ?? "").isEmpty,
+            "本机夹具只能预填已注册发送端的公开 ID；实际建群仍须走已认证目录解析。"
+        )
+        let createGroup = app.buttons["v2.conversation.group-submit"]
+        XCTAssertTrue(createGroup.isEnabled)
+        createGroup.tap()
+        XCTAssertTrue(
+            app.buttons["v2.group.members"].waitForExistence(timeout: 30),
+            "接收端必须使用已注册的独立发送端账号创建真实群聊。"
+        )
+        let groupDraft = app.textViews["v2.message.draft"]
+        XCTAssertTrue(groupDraft.exists)
+        let groupDraftValue = groupDraft.value as? String ?? ""
+        XCTAssertTrue(
+            groupDraftValue.hasPrefix("two-install-group-"),
+            "跨安装群消息只能由 Debug 夹具预填，仍须由普通消息发送 UI 提交；实际值：\(groupDraftValue.debugDescription)"
+        )
+        let send = app.buttons["v2.message.send"]
+        XCTAssertTrue(send.isEnabled)
+        send.tap()
+        let sendFeedback = app.staticTexts["v2.message.send-feedback"]
+        XCTAssertTrue(
+            sendFeedback.waitForExistence(timeout: 30),
+            "群消息必须先经真实持久化命令被网关接受或安全保存。"
+        )
+        XCTAssertTrue(sendFeedback.label.contains("已发送") || sendFeedback.label.contains("已安全保存"))
+        app.terminate()
+    }
+
+    @MainActor
+    func testSenderRestoresIndependentGroupAndProjectsMessage() throws {
+        let app = XCUIApplication()
+        app.activate()
+
+        let refresh = app.buttons["v2.conversation.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
+        refresh.tap()
+        let groupTitle = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "跨装群")
+        ).firstMatch
+        XCTAssertTrue(
+            groupTitle.waitForExistence(timeout: 30) && groupTitle.isHittable,
+            "作为初始成员的独立安装必须在自身同步投影中看到接收端创建的群聊。"
+        )
+        groupTitle.tap()
+        XCTAssertTrue(app.textViews["v2.message.draft"].waitForExistence(timeout: 15))
+        let groupMessage = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "two-install-group-")
+        ).firstMatch
+        XCTAssertTrue(
+            groupMessage.waitForExistence(timeout: 30),
+            "群成员恢复后必须只凭自身 SQLite 同步投影看到群主离线期间投递的群消息。"
+        )
+        try auditOrdinaryChatSurface(in: app)
         app.terminate()
     }
 

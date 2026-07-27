@@ -46,7 +46,8 @@ struct V2RootView: View {
             ? .init(
                 directTargetHandle: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-direct-target"),
                 initialMessage: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-message"),
-                initialGroupTitle: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-group-title")
+                initialGroupTitle: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-group-title"),
+                initialGroupMemberHandles: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-group-members")
             )
             : nil
         let liveLocalAccountE2ETestScope = startupMode.usesLiveLocalAccountE2ETestScope

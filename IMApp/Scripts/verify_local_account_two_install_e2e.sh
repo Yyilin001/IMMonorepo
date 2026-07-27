@@ -82,7 +82,9 @@ receiver_public_handle="twor${scenario_suffix:0:20}"
 sender_account_handle="twos_${scenario_suffix:0:20}"
 sender_public_handle="twos${scenario_suffix:0:20}"
 message="two-install-${scenario_suffix:0:16}"
-receiver_group_title="群聊${scenario_suffix:0:6}"
+receiver_self_group_title="自测群${scenario_suffix:0:6}"
+receiver_group_title="跨装群${scenario_suffix:0:6}"
+group_message="two-install-group-${scenario_suffix:0:16}"
 
 result_directory="$(mktemp -d "${TMPDIR:-/tmp}/im-v2-local-two-install-e2e.XXXXXX")"
 build_products_directory="$(xcodebuild -showBuildSettings -json \
@@ -180,7 +182,7 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-account-handle "${receiver_account_handle}" \
   -v2-ui-testing-public-handle "${receiver_public_handle}" \
   -v2-ui-testing-display-name 'Two install receiver' \
-  -v2-ui-testing-group-title "${receiver_group_title}"
+  -v2-ui-testing-group-title "${receiver_self_group_title}"
 run_stage "${receiver_simulator_id}" testReceiverRegistersIndependentInstallation
 
 launch_fixture "${sender_simulator_id}" \
@@ -198,8 +200,17 @@ run_stage "${sender_simulator_id}" testSenderOpensDirectConversationAndSendsFrom
 launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-live-local-account \
   -v2-ui-testing-restore-local-account \
-  -v2-ui-testing-e2e-scope "${receiver_scope}"
-run_stage "${receiver_simulator_id}" testReceiverRestoresScopedInstallationAndProjectsOfflineMessage
+  -v2-ui-testing-e2e-scope "${receiver_scope}" \
+  -v2-ui-testing-group-title "${receiver_group_title}" \
+  -v2-ui-testing-group-members "@${sender_public_handle}" \
+  -v2-ui-testing-message "${group_message}"
+run_stage "${receiver_simulator_id}" testReceiverRestoresScopedInstallationAndProjectsOfflineMessageThenSendsGroupMessage
 
-printf '%s\n' 'local two-install direct-message E2E: pass'
-printf '%s\n' 'scope: two different booted simulators independently register real App installations; the receiver is terminated before the sender opens a direct room and sends through the ordinary UI, then the receiver restores only its random Keychain/SQLite scope and projects the message after authenticated realtime catch-up. This does not cover APNs, production deployment, or capacity.'
+launch_fixture "${sender_simulator_id}" \
+  -v2-ui-testing-live-local-account \
+  -v2-ui-testing-restore-local-account \
+  -v2-ui-testing-e2e-scope "${sender_scope}"
+run_stage "${sender_simulator_id}" testSenderRestoresIndependentGroupAndProjectsMessage
+
+printf '%s\n' 'local two-install direct-and-group-message E2E: pass'
+printf '%s\n' 'scope: two different booted simulators independently register real App installations; the receiver is terminated before the sender opens a direct room and sends through the ordinary UI, then restores its scoped Keychain/SQLite state to create a group containing the sender and send a normal group message. The sender finally restores only its own scope and projects that group message after authenticated realtime catch-up. This does not cover APNs, production deployment, or capacity.'
