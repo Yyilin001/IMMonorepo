@@ -1651,6 +1651,10 @@ private struct V2ConversationMessageRow: View {
             V2ConversationMessageBubble(store: store, message: message, beginEditing: beginEditing)
             if !message.isOutgoing { Spacer(minLength: 44) }
         }
+        // Keep the row queryable without letting its identifier overwrite the
+        // independently actionable message controls (reaction, edit and
+        // withdrawal) in SwiftUI's accessibility bridge.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("v2.message.row.\(message.id)")
     }
 }

@@ -147,6 +147,45 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             XCTFail("发送端必须在真实 App 会话中收到普通消息已被网关接受或持久化重试的反馈。")
         }
         XCTAssertTrue(feedback.label.contains("已发送") || feedback.label.contains("已安全保存"))
+        let messageRow = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.row.")
+        ).firstMatch
+        XCTAssertTrue(
+            messageRow.waitForExistence(timeout: 15),
+            "发送端同步投影必须实际渲染刚发送的消息，才能继续执行消息操作。"
+        )
+        let messageID = messageRow.identifier.replacingOccurrences(of: "v2.message.row.", with: "")
+        XCTAssertFalse(messageID.isEmpty)
+        let reactionPicker = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == %@", "v2.message.reaction-picker.\(messageID)")
+        ).firstMatch
+        let reactionPickerIsHittable = reactionPicker.waitForExistence(timeout: 5) && reactionPicker.isHittable
+        if !reactionPickerIsHittable {
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "two-install-reaction-picker-not-hittable"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "two-install-reaction-picker-ui-hierarchy"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+            XCTFail("反应入口必须在发送消息后可见并可点击。")
+        }
+        reactionPicker.tap()
+        let thumbsUp = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == %@", "v2.message.reaction-picker.\(messageID).👍")
+        ).firstMatch
+        XCTAssertTrue(
+            thumbsUp.waitForExistence(timeout: 5),
+            "反应菜单必须暴露带稳定 identifier 的反应选项。"
+        )
+        thumbsUp.tap()
+        let actionFeedback = app.staticTexts["v2.message.action-feedback"]
+        XCTAssertTrue(
+            actionFeedback.waitForExistence(timeout: 30),
+            "反应必须经真实持久化命令提交，并反馈正在同步的状态。"
+        )
+        XCTAssertTrue(actionFeedback.label.contains("反应已提交") || actionFeedback.label.contains("反应已安全保存"))
         app.terminate()
     }
 
