@@ -307,6 +307,16 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   is unchanged. This prevents accidental cross-project terminal state from
   silently splitting account, gateway and edge secrets; it is not a production
   secret-manager substitute.
+- 2026-07-27: the current local account stack again passed
+  `bash IMV2/scripts/verify_v2_local_account_stack.sh`: HTTPS input validation,
+  password registration/device credential issuance, TLS 1.3 direct-message
+  delivery and `SyncPull`, password failure limits, Push endpoint contract,
+  account disable and loopback metrics all succeeded. The same working tree
+  passed `docker compose -f IMV2/docker-compose.isolated-tests.yml run --rm
+  --build swift-tests`: **42 Core tests**, **193 Server tests in 51 suites**,
+  SQL/protobuf/schema readiness checks and Prometheus rule/config validation.
+  This is repeatable local correctness evidence, not a deployment, APNs, or
+  throughput/capacity claim.
 - 2026-07-26: the current V2 sources passed the generic iOS Simulator
   `build-for-testing` command under Xcode 26.6 with isolated DerivedData and
   code signing disabled. It compiled the `IMApp`, `IMAppTests`, and
