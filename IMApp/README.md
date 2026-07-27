@@ -44,8 +44,9 @@ provisioning profile 与真实 APNs 凭据、以及媒体供应商接入仍未�
 已经可用：私聊列表和详情会使用服务端投影的对端显示名，群成员页只通过已授权、按需的
 成员目录显示公开 ID 与显示名，不会把群成员资料扩散为 roster 同步。仍缺的是这条体验在
 两台真机离线/重连场景下的端到端及无障碍人工验收。普通群聊的创建、成员分页、角色受限
-成员增删和 @ 提及已接入 V2 的持久化命令与同步投影；群禁言及带审计原因的管理员移除虽
-已有 ClientKit/服务端 durable outbox，尚未接入 iOS runtime 和产品界面。
+成员增删、@ 提及、1 小时禁言和带审计原因的管理员移除均已接入 V2 的持久化命令与同步
+投影。禁言/审计移除与普通成员变更使用各自独立 outbox，网络中断会保留相同操作并在连接
+恢复后重放；服务端仍是角色和目标资格的最终授权方。
 
 ## 本地开发
 
@@ -162,6 +163,6 @@ docker compose -f IMV2/docker-compose.isolated-tests.yml \
 ```
 
 发布前还必须完成生产 WebAuthn verifier、账户服务 HTTPS/限流部署、真实设备
-端到端回归，以及群禁言/管理员审计移除、推送、媒体等 V2 产品界面。完整证据见
+端到端回归，以及推送、媒体等 V2 产品界面。完整证据见
 [`IMV2/docs/implementation-status.md`](../IMV2/docs/implementation-status.md)；组件
 边界与真实投递链路见 [`docs/current-system-map.md`](../docs/current-system-map.md)。

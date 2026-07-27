@@ -928,6 +928,93 @@ struct V2ConversationStoreTests {
         #expect(store.groupMemberFeedback == nil)
     }
 
+    @Test func groupMuteUsesItsOwnDurableModerationBoundary() async throws {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let page = V2GroupMemberPage(
+            membershipRevision: 8,
+            actorRole: "管理员",
+            members: [.init(id: "member-a", role: "成员")],
+            nextCursor: nil
+        )
+        let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
+        let muter = V2GroupMemberMuterFake(result: .accepted)
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            groupMemberDirectory: reader,
+            groupMemberMuter: muter
+        )
+
+        await store.loadGroupMembers(reset: true)
+        await store.muteGroupMember(try #require(store.groupMembers.first))
+
+        let request = try #require(await muter.requests().first)
+        #expect(request.roomID == "room-group")
+        #expect(request.targetUserID == "member-a")
+        #expect(request.reasonCode == "ADMIN_ACTION")
+        #expect(request.muteUntil.timeIntervalSinceNow > 3_500)
+        #expect(store.groupMemberFeedback == "禁言已提交，正在同步。")
+        #expect(!store.isApplyingGroupModeration)
+    }
+
+    @Test func moderatedRemovalUsesItsOwnAuditedBoundaryAndRefreshesTheRoster() async throws {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let page = V2GroupMemberPage(
+            membershipRevision: 8,
+            actorRole: "群主",
+            members: [.init(id: "member-a", role: "成员")],
+            nextCursor: nil
+        )
+        let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
+        let remover = V2ModeratedGroupMemberRemoverFake(result: .accepted)
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            groupMemberDirectory: reader,
+            moderatedGroupMemberRemover: remover
+        )
+
+        await store.loadGroupMembers(reset: true)
+        await store.removeGroupMemberByModerator(try #require(store.groupMembers.first))
+
+        #expect(await remover.requests() == [.init(roomID: "room-group", targetUserID: "member-a", reasonCode: "ADMIN_ACTION")])
+        #expect(await reader.requestedCursors() == [nil, nil])
+        #expect(store.groupMemberFeedback == nil)
+        #expect(!store.isApplyingGroupModeration)
+    }
+
+    @Test func rejectedGroupModerationKeepsTheServerReasonOpaque() async throws {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let page = V2GroupMemberPage(
+            membershipRevision: 8,
+            actorRole: "管理员",
+            members: [.init(id: "member-a", role: "成员")],
+            nextCursor: nil
+        )
+        let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
+        let muter = V2GroupMemberMuterFake(result: .rejected(code: "TARGET_POLICY"))
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            groupMemberDirectory: reader,
+            groupMemberMuter: muter
+        )
+
+        await store.loadGroupMembers(reset: true)
+        await store.muteGroupMember(try #require(store.groupMembers.first))
+
+        #expect(store.groupMemberFeedback == "无法完成群管理操作。")
+    }
+
     @Test func strangerMessagePreferenceKeepsDurableQueuedIntentVisible() async {
         let reader = V2StrangerMessagePreferenceReaderFake(value: false)
         let updater = V2StrangerMessagePreferenceUpdaterFake(result: .queuedForRetry)
@@ -1522,6 +1609,47 @@ private actor V2GroupMembershipChangerFake: V2GroupMembershipChanging {
 
     func changeMembership(roomID: String, targetUserID: String, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2GroupMembershipChangeOutcome {
         requestsValue.append(.init(roomID: roomID, targetUserID: targetUserID, action: action, expectedMembershipRevision: expectedMembershipRevision))
+        return result
+    }
+
+    func requests() -> [Request] { requestsValue }
+}
+
+private actor V2GroupMemberMuterFake: V2GroupMemberMuting {
+    struct Request: Sendable {
+        let roomID: String
+        let targetUserID: String
+        let muteUntil: Date
+        let reasonCode: String
+    }
+
+    private let result: V2GroupModerationOutcome
+    private var requestsValue: [Request] = []
+
+    init(result: V2GroupModerationOutcome) { self.result = result }
+
+    func muteMember(roomID: String, targetUserID: String, muteUntil: Date, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome {
+        requestsValue.append(.init(roomID: roomID, targetUserID: targetUserID, muteUntil: muteUntil, reasonCode: reasonCode.rawValue))
+        return result
+    }
+
+    func requests() -> [Request] { requestsValue }
+}
+
+private actor V2ModeratedGroupMemberRemoverFake: V2ModeratedGroupMemberRemoving {
+    struct Request: Equatable, Sendable {
+        let roomID: String
+        let targetUserID: String
+        let reasonCode: String
+    }
+
+    private let result: V2GroupModerationOutcome
+    private var requestsValue: [Request] = []
+
+    init(result: V2GroupModerationOutcome) { self.result = result }
+
+    func removeMemberByModerator(roomID: String, targetUserID: String, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome {
+        requestsValue.append(.init(roomID: roomID, targetUserID: targetUserID, reasonCode: reasonCode.rawValue))
         return result
     }
 

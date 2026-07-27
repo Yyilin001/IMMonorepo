@@ -159,6 +159,22 @@ protocol V2UserBlockChanging: Sendable {
     func changeBlock(targetUserID: String, action: V2UserBlockAction) async throws -> V2UserBlockChangeOutcome
 }
 
+enum V2GroupModerationOutcome: Equatable, Sendable {
+    case accepted
+    case queuedForRetry
+    case rejected(code: String)
+}
+
+/// Both moderation actions have an independent durable operation and audit
+/// record. They must never be routed through ordinary membership mutation.
+protocol V2GroupMemberMuting: Sendable {
+    func muteMember(roomID: String, targetUserID: String, muteUntil: Date, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome
+}
+
+protocol V2ModeratedGroupMemberRemoving: Sendable {
+    func removeMemberByModerator(roomID: String, targetUserID: String, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome
+}
+
 /// UI-facing sender. It persists a command before attempting transport, so a
 /// foreground connection failure becomes a durable retry rather than lost UI
 /// intent.
@@ -363,6 +379,45 @@ actor V2OutboxGroupMembershipChanger: V2GroupMembershipChanging {
     }
 }
 
+actor V2OutboxGroupMemberMuter: V2GroupMemberMuting {
+    private let outbox: V2MemberMuteOutboxEngine
+
+    init(outbox: V2MemberMuteOutboxEngine) { self.outbox = outbox }
+
+    func muteMember(roomID: String, targetUserID: String, muteUntil: Date, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome {
+        _ = try await outbox.enqueueMute(
+            roomID: .init(roomID),
+            targetUserID: .init(targetUserID),
+            muteUntil: muteUntil,
+            reasonCode: reasonCode
+        )
+        switch try await outbox.flushOnce() {
+        case .acknowledged: return .accepted
+        case .retryScheduled, .idle: return .queuedForRetry
+        case .rejected(_, let code): return .rejected(code: code)
+        }
+    }
+}
+
+actor V2OutboxModeratedGroupMemberRemover: V2ModeratedGroupMemberRemoving {
+    private let outbox: V2ModeratedMemberRemovalOutboxEngine
+
+    init(outbox: V2ModeratedMemberRemovalOutboxEngine) { self.outbox = outbox }
+
+    func removeMemberByModerator(roomID: String, targetUserID: String, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome {
+        _ = try await outbox.enqueueRemoval(
+            roomID: .init(roomID),
+            targetUserID: .init(targetUserID),
+            reasonCode: reasonCode
+        )
+        switch try await outbox.flushOnce() {
+        case .acknowledged: return .accepted
+        case .retryScheduled, .idle: return .queuedForRetry
+        case .rejected(_, let code): return .rejected(code: code)
+        }
+    }
+}
+
 /// Keeps the user's receive preference in the durable social-command outbox.
 /// The remote sync projection remains authoritative after another device
 /// changes the setting, while this actor preserves local intent across loss.
@@ -443,6 +498,8 @@ struct V2AppRealtimeRuntime {
         )
         let groupOutbox = V2GroupRoomCommandOutboxEngine(store: localStore, transport: transport)
         let membershipOutbox = V2MembershipCommandOutboxEngine(store: localStore, transport: transport)
+        let memberMuteOutbox = V2MemberMuteOutboxEngine(store: localStore, transport: transport)
+        let moderatedMemberRemovalOutbox = V2ModeratedMemberRemovalOutboxEngine(store: localStore, transport: transport)
         let withdrawalOutbox = V2MessageWithdrawalOutboxEngine(store: localStore, transport: transport)
         let reactionOutbox = V2MessageReactionOutboxEngine(store: localStore, transport: transport)
         let editOutbox = V2MessageEditOutboxEngine(store: localStore, transport: transport)
@@ -492,6 +549,14 @@ struct V2AppRealtimeRuntime {
                 }
                 for _ in 0 ..< 256 {
                     try Task.checkCancellation()
+                    if case .idle = try await memberMuteOutbox.flushOnce() { break }
+                }
+                for _ in 0 ..< 256 {
+                    try Task.checkCancellation()
+                    if case .idle = try await moderatedMemberRemovalOutbox.flushOnce() { break }
+                }
+                for _ in 0 ..< 256 {
+                    try Task.checkCancellation()
                     if case .idle = try await withdrawalOutbox.flushOnce() { break }
                 }
                 for _ in 0 ..< 256 {
@@ -525,6 +590,8 @@ struct V2AppRealtimeRuntime {
         groupConversationCreator = V2OutboxGroupConversationCreator(outbox: groupOutbox)
         groupMemberDirectory = V2RealtimeGroupMemberDirectory(transport: transport)
         groupMembershipChanger = V2OutboxGroupMembershipChanger(outbox: membershipOutbox)
+        groupMemberMuter = V2OutboxGroupMemberMuter(outbox: memberMuteOutbox)
+        moderatedGroupMemberRemover = V2OutboxModeratedGroupMemberRemover(outbox: moderatedMemberRemovalOutbox)
         strangerMessagePreferenceUpdater = V2OutboxStrangerMessagePreferenceUpdater(outbox: socialOutbox)
         userBlockChanger = V2OutboxUserBlockChanger(outbox: socialOutbox)
     }
@@ -533,6 +600,8 @@ struct V2AppRealtimeRuntime {
     let groupConversationCreator: any V2GroupConversationCreating
     let groupMemberDirectory: any V2GroupMemberDirectoryReading
     let groupMembershipChanger: any V2GroupMembershipChanging
+    let groupMemberMuter: any V2GroupMemberMuting
+    let moderatedGroupMemberRemover: any V2ModeratedGroupMemberRemoving
     let strangerMessagePreferenceUpdater: any V2StrangerMessagePreferenceUpdating
     let userBlockChanger: any V2UserBlockChanging
 }

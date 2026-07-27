@@ -17,6 +17,16 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: the same iPhone 17 / iOS 26.2 Simulator passed the full shared
+  `IMApp` scheme with **60 Swift tests** and **2 UI tests**, zero failures.
+  iOS now constructs independent member-mute and audited-member-removal
+  outboxes, replays both in bounded availability-driven runtime passes, and
+  exposes owner/admin controls with task cancellation and a destructive-action
+  confirmation. Store tests prove that mute carries the bounded
+  `ADMIN_ACTION` audit reason and future expiry, audited removal uses its own
+  boundary then refreshes the roster, and terminal moderation codes remain
+  opaque. This is local single-device evidence only, not multi-device product
+  E2E or an authorization bypass of the server.
 - 2026-07-27: the caller-selected, manually booted iPhone 17 / iOS 26.2
   Simulator passed `xcodebuild test -project IMApp/IMApp.xcodeproj -scheme
   IMApp -configuration Debug -destination 'platform=iOS Simulator,id=…'` with

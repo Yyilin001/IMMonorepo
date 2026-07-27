@@ -408,6 +408,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             groupConversationCreator: realtime.groupConversationCreator,
             groupMemberDirectory: realtime.groupMemberDirectory,
             groupMembershipChanger: realtime.groupMembershipChanger,
+            groupMemberMuter: realtime.groupMemberMuter,
+            moderatedGroupMemberRemover: realtime.moderatedGroupMemberRemover,
             attachmentStager: attachmentStager,
             attachmentUploader: realtime.attachmentUploader,
             mediaDownloader: realtime.mediaDownloader

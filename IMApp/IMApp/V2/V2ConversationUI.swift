@@ -250,6 +250,8 @@ final class V2ConversationListStore {
     private let groupConversationCreator: (any V2GroupConversationCreating)?
     private let groupMemberDirectory: (any V2GroupMemberDirectoryReading)?
     private let groupMembershipChanger: (any V2GroupMembershipChanging)?
+    private let groupMemberMuter: (any V2GroupMemberMuting)?
+    private let moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)?
     private let attachmentStager: (any V2ConversationAttachmentStaging)?
     private let attachmentUploader: (any V2ConversationAttachmentUploading)?
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
@@ -274,6 +276,8 @@ final class V2ConversationListStore {
         groupConversationCreator: (any V2GroupConversationCreating)? = nil,
         groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil,
         groupMembershipChanger: (any V2GroupMembershipChanging)? = nil,
+        groupMemberMuter: (any V2GroupMemberMuting)? = nil,
+        moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil,
         attachmentStager: (any V2ConversationAttachmentStaging)? = nil,
         attachmentUploader: (any V2ConversationAttachmentUploading)? = nil,
         mediaDownloader: (any V2ConversationMediaDownloading)? = nil
@@ -290,6 +294,8 @@ final class V2ConversationListStore {
         self.groupConversationCreator = groupConversationCreator
         self.groupMemberDirectory = groupMemberDirectory
         self.groupMembershipChanger = groupMembershipChanger
+        self.groupMemberMuter = groupMemberMuter
+        self.moderatedGroupMemberRemover = moderatedGroupMemberRemover
         self.attachmentStager = attachmentStager
         self.attachmentUploader = attachmentUploader
         self.mediaDownloader = mediaDownloader
@@ -375,7 +381,7 @@ final class V2ConversationListStore {
         let item = items.first(where: { $0.id == roomID })
         let title = explicitRoomTitles[roomID] ?? item?.title ?? "会话"
         let kind = explicitRoomKinds[roomID] ?? item?.kind ?? .unknown
-        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader)
+        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader)
     }
 
     func openDirectConversation(handle: String) async -> String? {
@@ -431,6 +437,8 @@ final class V2ConversationDetailStore {
     private let userID: String
     private let groupMemberDirectory: (any V2GroupMemberDirectoryReading)?
     private let groupMembershipChanger: (any V2GroupMembershipChanging)?
+    private let groupMemberMuter: (any V2GroupMemberMuting)?
+    private let moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)?
     private let publicIdentityResolver: (any V2ConversationPublicIdentityResolving)?
     private let attachmentStager: (any V2ConversationAttachmentStaging)?
     private let attachmentUploader: (any V2ConversationAttachmentUploading)?
@@ -450,6 +458,7 @@ final class V2ConversationDetailStore {
     private(set) var groupMemberFeedback: String?
     private(set) var isLoadingGroupMembers = false
     private(set) var isChangingGroupMembership = false
+    private(set) var isApplyingGroupModeration = false
     private(set) var attachments: [V2ConversationAttachmentItem] = []
     private(set) var mediaDownloadStates: [MediaID: V2ConversationMediaDownloadState] = [:]
     private var nextGroupMemberCursor: String?
@@ -459,7 +468,7 @@ final class V2ConversationDetailStore {
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
-    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil) {
+    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil) {
         self.dataSource = dataSource
         self.sender = sender
         self.messageWithdrawer = messageWithdrawer
@@ -472,6 +481,8 @@ final class V2ConversationDetailStore {
         self.isGroupConversation = isGroupConversation
         self.groupMemberDirectory = groupMemberDirectory
         self.groupMembershipChanger = groupMembershipChanger
+        self.groupMemberMuter = groupMemberMuter
+        self.moderatedGroupMemberRemover = moderatedGroupMemberRemover
         self.publicIdentityResolver = publicIdentityResolver
         self.attachmentStager = attachmentStager
         self.attachmentUploader = attachmentUploader
@@ -880,6 +891,73 @@ final class V2ConversationDetailStore {
     func canRemoveGroupMember(_ member: V2GroupMemberItem) -> Bool {
         guard member.id != userID, member.role != "群主" else { return false }
         return groupActorRole == "群主" || groupActorRole == "管理员"
+    }
+
+    /// Moderation retains its own durable command/audit trail rather than
+    /// reusing normal member removal. The server still decides authority and
+    /// target eligibility at command acceptance time.
+    func muteGroupMember(_ member: V2GroupMemberItem, for duration: TimeInterval = 60 * 60) async {
+        guard !isLoadingGroupMembers, !isChangingGroupMembership, !isApplyingGroupModeration,
+              canRemoveGroupMember(member)
+        else { return }
+        guard duration > 0, let groupMemberMuter else {
+            groupMemberFeedback = "禁言暂不可用。"
+            return
+        }
+        isApplyingGroupModeration = true
+        defer { isApplyingGroupModeration = false }
+        do {
+            let outcome = try await groupMemberMuter.muteMember(
+                roomID: roomID,
+                targetUserID: member.id,
+                muteUntil: Date().addingTimeInterval(duration),
+                reasonCode: try .init("ADMIN_ACTION")
+            )
+            switch outcome {
+            case .accepted:
+                groupMemberFeedback = "禁言已提交，正在同步。"
+            case .queuedForRetry:
+                groupMemberFeedback = "禁言请求已安全保存，连接恢复后会继续。"
+            case .rejected:
+                groupMemberFeedback = "无法完成群管理操作。"
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            groupMemberFeedback = "无法保存禁言请求。"
+        }
+    }
+
+    func removeGroupMemberByModerator(_ member: V2GroupMemberItem) async {
+        guard !isLoadingGroupMembers, !isChangingGroupMembership, !isApplyingGroupModeration,
+              canRemoveGroupMember(member)
+        else { return }
+        guard let moderatedGroupMemberRemover else {
+            groupMemberFeedback = "管理员移除暂不可用。"
+            return
+        }
+        isApplyingGroupModeration = true
+        defer { isApplyingGroupModeration = false }
+        do {
+            let outcome = try await moderatedGroupMemberRemover.removeMemberByModerator(
+                roomID: roomID,
+                targetUserID: member.id,
+                reasonCode: try .init("ADMIN_ACTION")
+            )
+            switch outcome {
+            case .accepted:
+                groupMemberFeedback = "管理员移除已提交，正在同步。"
+                await loadGroupMembers(reset: true)
+            case .queuedForRetry:
+                groupMemberFeedback = "管理员移除已安全保存，连接恢复后会继续。"
+            case .rejected:
+                groupMemberFeedback = "无法完成群管理操作。"
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            groupMemberFeedback = "无法保存管理员移除请求。"
+        }
     }
 
     func changeGroupMembership(targetUserID: String, action: V2RoomMembershipAction) async {
@@ -1511,6 +1589,8 @@ private struct V2GroupMembersSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var newMemberUserID = ""
     @State private var membershipChangeTask: Task<Void, Never>?
+    @State private var moderationTask: Task<Void, Never>?
+    @State private var pendingModeratedRemoval: V2GroupMemberItem?
 
     var body: some View {
         NavigationStack {
@@ -1537,6 +1617,13 @@ private struct V2GroupMembersSheet: View {
                         .accessibilityIdentifier("v2.group.members.add")
                     }
                 }
+                if store.groupActorRole == "群主" || store.groupActorRole == "管理员" {
+                    Section {
+                        Text("禁言和管理员移除会以独立的可审计命令保存；网络中断时会自动重试。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 ForEach(store.groupMembers) { member in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
@@ -1550,11 +1637,27 @@ private struct V2GroupMembersSheet: View {
                         Spacer()
                         Text(member.role).foregroundStyle(.secondary)
                         if store.canRemoveGroupMember(member) {
+                            Menu {
+                                Button("禁言 1 小时") {
+                                    runMute(member)
+                                }
+                                .accessibilityIdentifier("v2.group.member.mute.\(member.id)")
+                                Button("管理员移除", role: .destructive) {
+                                    pendingModeratedRemoval = member
+                                }
+                                .accessibilityIdentifier("v2.group.member.moderated-remove.\(member.id)")
+                            } label: {
+                                Image(systemName: "shield")
+                            }
+                            .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || store.isApplyingGroupModeration)
+                            .accessibilityLabel("群管理 \(member.displayName ?? member.handle ?? "成员")")
+                            .accessibilityHint("可禁言一小时或执行带审计记录的管理员移除")
+                            .accessibilityIdentifier("v2.group.member.moderation.\(member.id)")
                             Button("移除", role: .destructive) {
                                 runMembershipChange(target: member.id, action: .remove)
                             }
-                            .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership)
-                            .accessibilityValue(store.isChangingGroupMembership ? "正在保存成员变更" : "")
+                            .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || store.isApplyingGroupModeration)
+                            .accessibilityValue(store.isChangingGroupMembership || store.isApplyingGroupModeration ? "正在保存成员变更" : "")
                             .accessibilityIdentifier("v2.group.member.remove.\(member.id)")
                         }
                     }
@@ -1576,7 +1679,10 @@ private struct V2GroupMembersSheet: View {
                 }
             }
             .navigationTitle("群成员")
-            .onDisappear { membershipChangeTask?.cancel() }
+            .onDisappear {
+                membershipChangeTask?.cancel()
+                moderationTask?.cancel()
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
                 ToolbarItem(placement: .primaryAction) {
@@ -1586,12 +1692,42 @@ private struct V2GroupMembersSheet: View {
                 }
             }
             .task { await store.loadGroupMembers(reset: true) }
+            .confirmationDialog(
+                "确认管理员移除？",
+                isPresented: Binding(
+                    get: { pendingModeratedRemoval != nil },
+                    set: { if !$0 { pendingModeratedRemoval = nil } }
+                ),
+                presenting: pendingModeratedRemoval
+            ) { member in
+                Button("管理员移除", role: .destructive) {
+                    pendingModeratedRemoval = nil
+                    runModeratedRemoval(member)
+                }
+            } message: { member in
+                Text("将移除 \(member.displayName ?? member.handle ?? "该成员")，并写入管理员审计记录。")
+            }
         }
     }
 
     private func runMembershipChange(target: String, action: V2RoomMembershipAction) {
+        membershipChangeTask?.cancel()
         membershipChangeTask = Task {
             await store.changeGroupMembership(targetUserID: target, action: action)
+        }
+    }
+
+    private func runMute(_ member: V2GroupMemberItem) {
+        moderationTask?.cancel()
+        moderationTask = Task {
+            await store.muteGroupMember(member)
+        }
+    }
+
+    private func runModeratedRemoval(_ member: V2GroupMemberItem) {
+        moderationTask?.cancel()
+        moderationTask = Task {
+            await store.removeGroupMemberByModerator(member)
         }
     }
 }
