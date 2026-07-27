@@ -17,6 +17,18 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: live availability-driven synchronization now completes a
+  `resetRequired` snapshot before it notifies projection observers or replays
+  durable commands. Previously only the initial connection path materialized
+  a reset, so a reset arriving on an established realtime connection could
+  leave the local cursor fenced at `resetPending`. The new regression injects
+  that ordering and proves the snapshot is acknowledged, the cursor returns
+  to `ready`, and post-sync work runs exactly once. The complete native
+  `IMV2ClientKit` suite passed **124 tests in 26 suites**, and the selected
+  iPhone 17 / iOS 26.2 Simulator again passed the shared `IMApp` scheme with
+  **73 Swift tests** and **2 UI tests**, zero failures. This is local
+  synchronization-state evidence only, not multi-device or deployment
+  evidence.
 - 2026-07-27: the selected iPhone 17 / iOS 26.2 Simulator passed the full
   shared `IMApp` scheme with **73 Swift tests** and **2 UI tests**, zero
   failures; the dedicated local-account UI suite also passed **3 tests**.

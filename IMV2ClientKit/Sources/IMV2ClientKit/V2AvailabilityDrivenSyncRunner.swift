@@ -29,7 +29,13 @@ public struct V2AvailabilityDrivenSyncRunner: Sendable {
     public func run() async throws {
         while !Task.isCancelled {
             _ = try await source.nextAvailabilityHint()
-            _ = try await syncEngine.synchronizeUntilCaughtUp()
+            if case .resetPending = try await syncEngine.synchronizeUntilCaughtUp() {
+                // A reset can be requested at any time, not only during the
+                // initial connection catch-up. Do not run post-sync effects
+                // against the fenced pre-reset projection.
+                try await syncEngine.completePendingReset()
+            }
+            try Task.checkCancellation()
             try await afterSynchronization()
         }
     }

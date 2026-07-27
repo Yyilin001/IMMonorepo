@@ -554,6 +554,37 @@ struct V2SyncEngineTests {
         #expect(try await store.events() == [record])
         #expect(await flushRecorder.count() == 1)
     }
+
+    @Test("availability runner completes a reset before post-sync effects")
+    func availabilityRunnerCompletesReset() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: temporaryDatabaseURL(),
+            installationBinding: testInstallationBinding
+        )
+        let reset = try V2ClientResetRequired(
+            snapshotID: .init("00000000-0000-0000-0000-000000000210"),
+            generation: 2,
+            baseSequence: 7,
+            manifestDigest: "availability-reset",
+            expiresAt: .distantFuture
+        )
+        let transport = FakeTransport(pullResult: .resetRequired(reset))
+        let engine = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base")
+        let recorder = AvailabilityFlushRecorder()
+        let runner = V2AvailabilityDrivenSyncRunner(
+            source: OneHintThenStopSource(),
+            syncEngine: engine,
+            afterSynchronization: { await recorder.record() }
+        )
+
+        await #expect(throws: AvailabilityStop.finished) {
+            try await runner.run()
+        }
+
+        #expect(try await store.cursor()?.state == .ready)
+        #expect(await transport.snapshotAcknowledgementCount() == 1)
+        #expect(await recorder.count() == 1)
+    }
 }
 
 private actor FakeTransport: V2ClientSyncTransport {
