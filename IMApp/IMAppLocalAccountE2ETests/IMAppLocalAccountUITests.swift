@@ -17,6 +17,23 @@ final class IMAppLocalAccountUITests: XCTestCase {
         let e2eScope = UUID().uuidString.lowercased()
 
         let app = XCUIApplication()
+        defer {
+            // This only terminates the app-under-test so the next DEBUG-only
+            // launch can release its scoped SQLite handle. It never changes
+            // the simulator lifecycle or its ordinary account data.
+            app.terminate()
+            app.launchArguments = [
+                "-v2-ui-testing-live-local-account",
+                "-v2-ui-testing-cleanup-local-account",
+                "-v2-ui-testing-e2e-scope",
+                e2eScope,
+            ]
+            app.launch()
+            XCTAssertTrue(
+                app.staticTexts["v2.local-e2e.cleanup.completed"].waitForExistence(timeout: 10),
+                "本地 E2E 回归结束后必须删除其随机 scope 的 Keychain 和 SQLite 测试工件。"
+            )
+        }
         app.launchArguments = [
             "-v2-ui-testing-live-local-account",
             "-v2-ui-testing-e2e-scope",

@@ -18,7 +18,12 @@ struct V2AppStoreTests {
         #expect(V2AppStore.StartupMode.production.restoresPersistedSession)
         #expect(!V2AppStore.StartupMode.uiTestingSignedOut.restoresPersistedSession)
         #expect(!V2AppStore.StartupMode.uiTestingLiveLocalAccount.restoresPersistedSession)
+        #expect(!V2AppStore.StartupMode.uiTestingLiveLocalAccountCleanup.restoresPersistedSession)
         #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccount.needsRuntimeConfiguration)
+        #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccountCleanup.needsRuntimeConfiguration)
         #expect(!V2AppStore.StartupMode.uiTestingSignedOut.needsRuntimeConfiguration)
+        #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccount.usesLiveLocalAccountE2ETestScope)
+        #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccountCleanup.usesLiveLocalAccountE2ETestScope)
+        #expect(!V2AppStore.StartupMode.production.usesLiveLocalAccountE2ETestScope)
     }
 }

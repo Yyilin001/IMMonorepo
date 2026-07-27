@@ -100,8 +100,10 @@ Docker 或本地 CA，仍保持离线确定性。与不启动设备的通用编�
 在部分 iOS 26.2 Simulator/XCTest 组合中，`typeText` 会把 SwiftUI 表单输入截断为首字
 符；因此专用 E2E target 仅在 DEBUG 的 `uiTestingLiveLocalAccount` 模式下，通过启动参数
 预填随机账号、公开 ID、显示名、一次性的本地测试密码和一次性测试存储域。它仍由 UI 点击
-提交，并完整经过真实账户 HTTPS、设备凭证、Keychain 与本地会话；测试存储域不会覆盖该
-模拟器的常规 V2 Keychain 身份、会话或数据库，因此同一台已解锁模拟器可重复运行。Release
+提交，并完整经过真实账户 HTTPS、设备凭证、Keychain 与本地会话；测试结束时会以相同随机
+scope 再启动一次 DEBUG-only 清理路径，删除该 scope 的设备凭证、注册操作、安装绑定及对应
+SQLite/WAL/SHM 工件。它不会覆盖该模拟器的常规 V2 Keychain 身份、会话或数据库，因此同一台
+已解锁模拟器可重复运行。Release
 和默认离线 UI 测试均不能使用这些参数。
 
 停止本地栈时使用脚本输出的 `docker compose ... down` 命令。数据库卷会被

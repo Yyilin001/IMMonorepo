@@ -16,6 +16,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         /// the opt-in local-account integration test; it is never reachable
         /// from a Release build.
         case uiTestingLiveLocalAccount
+        /// Performs the opt-in local-account test scope cleanup. Like the
+        /// registration mode, this is reachable only from a DEBUG launch
+        /// argument and requires a valid random test scope.
+        case uiTestingLiveLocalAccountCleanup
 
         var restoresPersistedSession: Bool {
             self == .production
@@ -24,6 +28,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         var needsRuntimeConfiguration: Bool {
             self != .uiTestingSignedOut
         }
+
+        var usesLiveLocalAccountE2ETestScope: Bool {
+            self == .uiTestingLiveLocalAccount || self == .uiTestingLiveLocalAccountCleanup
+        }
     }
 
     enum Route: Equatable {
@@ -31,6 +39,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         case signedOut
         case authenticating
         case signedIn(userID: String)
+        case uiTestingLiveLocalAccountCleanupCompleted
         case unavailable(message: String)
     }
 
@@ -43,6 +52,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private let deviceIdentityProvider: (any V2DeviceIdentityProvider)?
     @ObservationIgnored private let localKeychainService: String?
     @ObservationIgnored private let localDatabaseURL: URL?
+    @ObservationIgnored private let liveLocalAccountE2ETestScope: V2LiveLocalAccountE2ETestScope?
     @ObservationIgnored private weak var remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)?
     @ObservationIgnored private var realtimeRuntime: V2ClientRuntime?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
@@ -70,6 +80,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             deviceIdentityProvider = nil
             localKeychainService = nil
             localDatabaseURL = nil
+            self.liveLocalAccountE2ETestScope = nil
             route = .signedOut
             authenticationMessage = nil
             conversationStore = nil
@@ -83,7 +94,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         do {
             let configuration = try V2AppConfiguration()
             #if DEBUG
-            let liveLocalAccountE2ETestScope = startupMode == .uiTestingLiveLocalAccount
+            let liveLocalAccountE2ETestScope = startupMode.usesLiveLocalAccountE2ETestScope
                 ? liveLocalAccountE2ETestScope
                 : nil
             #else
@@ -104,6 +115,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             self.authSession = authSession
             localKeychainService = keychainService
             localDatabaseURL = databaseURL
+            self.liveLocalAccountE2ETestScope = liveLocalAccountE2ETestScope
             self.bootstrapper = V2ClientSessionBootstrapper(
                 authSession: authSession,
                 localStoreBootstrapper: .init(bindingStore: V2KeychainInstallationBindingStore(service: keychainService)),
@@ -135,6 +147,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             deviceIdentityProvider = nil
             localKeychainService = nil
             localDatabaseURL = nil
+            self.liveLocalAccountE2ETestScope = nil
             route = .unavailable(message: "V2 账户服务配置无效。")
             authenticationMessage = nil
             conversationStore = nil
@@ -147,6 +160,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     func restore() async {
+        if startupMode == .uiTestingLiveLocalAccountCleanup {
+            await cleanupLiveLocalAccountE2ETestScope()
+            return
+        }
         guard startupMode.restoresPersistedSession else {
             route = .signedOut
             authenticationMessage = nil
@@ -168,7 +185,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     func signInWithPasskey() async {
-        guard let configuration, let bootstrapper, let deviceIdentityProvider else { return }
+        guard let configuration,
+              let bootstrapper,
+              let deviceIdentityProvider,
+              let localKeychainService
+        else { return }
         route = .authenticating
         authenticationMessage = nil
         do {
@@ -185,7 +206,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 issueEndpoint: configuration.endpoint("v2/device-credentials"),
                 assertionProvider: accountProvider,
                 deviceIdentityProvider: deviceIdentityProvider,
-                operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: configuration.keychainService)
+                operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: localKeychainService)
             )
             let localStore = try await bootstrapper.establishSession(using: issuer)
             try await activate(localStore: localStore)
@@ -198,7 +219,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     func authenticatePassword(accountHandle: String, password: String, mode: PasswordMode, publicHandle: String? = nil, displayName: String? = nil) async {
-        guard let configuration, let bootstrapper, let deviceIdentityProvider else { return }
+        guard let configuration,
+              let bootstrapper,
+              let deviceIdentityProvider,
+              let localKeychainService
+        else { return }
         route = .authenticating
         authenticationMessage = nil
         do {
@@ -218,7 +243,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 issueEndpoint: configuration.endpoint("v2/device-credentials"),
                 assertionProvider: accountProvider,
                 deviceIdentityProvider: deviceIdentityProvider,
-                operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: configuration.keychainService)
+                operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: localKeychainService)
             )
             let localStore = try await bootstrapper.establishSession(using: issuer)
             try await activate(localStore: localStore)
@@ -428,6 +453,33 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         }
     }
 
+    private func cleanupLiveLocalAccountE2ETestScope() async {
+        guard let configuration,
+              let liveLocalAccountE2ETestScope,
+              let localKeychainService,
+              let localDatabaseURL,
+              localKeychainService == liveLocalAccountE2ETestScope.keychainService(
+                  basedOn: configuration.keychainService
+              ),
+              localDatabaseURL.lastPathComponent == liveLocalAccountE2ETestScope.databaseFileName
+        else {
+            route = .unavailable(message: "本地 E2E 测试存储域无效。")
+            return
+        }
+
+        do {
+            try await V2KeychainCredentialStore(service: localKeychainService).delete()
+            try await V2KeychainDeviceCredentialRegistrationOperationStore(
+                service: localKeychainService
+            ).delete()
+            try await V2KeychainInstallationBindingStore(service: localKeychainService).delete()
+            try Self.eraseDatabaseArtifacts(at: localDatabaseURL)
+            route = .uiTestingLiveLocalAccountCleanupCompleted
+        } catch {
+            route = .unavailable(message: "无法清理本地 E2E 测试数据。")
+        }
+    }
+
     private static func databaseURL(fileName: String? = nil, fileManager: FileManager = .default) throws -> URL {
         let base = try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let directory = base.appending(path: "IMAppV2", directoryHint: .isDirectory)
@@ -459,6 +511,16 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             URL(fileURLWithPath: database.path + "-shm", isDirectory: false)
         ] where fileManager.fileExists(atPath: url.path) {
             try V2DeviceLocalStoragePolicy.applyToManagedFile(url, fileManager: fileManager)
+        }
+    }
+
+    private static func eraseDatabaseArtifacts(at databaseURL: URL, fileManager: FileManager = .default) throws {
+        for artifact in [
+            databaseURL,
+            URL(fileURLWithPath: databaseURL.path + "-wal", isDirectory: false),
+            URL(fileURLWithPath: databaseURL.path + "-shm", isDirectory: false)
+        ] where fileManager.fileExists(atPath: artifact.path) {
+            try fileManager.removeItem(at: artifact)
         }
     }
 }

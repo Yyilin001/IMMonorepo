@@ -16,7 +16,9 @@ struct V2RootView: View {
         let arguments = ProcessInfo.processInfo.arguments
         let startupMode: V2AppStore.StartupMode
         if arguments.contains("-v2-ui-testing-live-local-account") {
-            startupMode = .uiTestingLiveLocalAccount
+            startupMode = arguments.contains("-v2-ui-testing-cleanup-local-account")
+                ? .uiTestingLiveLocalAccountCleanup
+                : .uiTestingLiveLocalAccount
         } else if arguments.contains("-v2-ui-testing-signed-out") {
             startupMode = .uiTestingSignedOut
         } else {
@@ -35,7 +37,7 @@ struct V2RootView: View {
         initialLocalE2ETestDisplayName = startupMode == .uiTestingLiveLocalAccount
             ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-display-name")
             : nil
-        let liveLocalAccountE2ETestScope = startupMode == .uiTestingLiveLocalAccount
+        let liveLocalAccountE2ETestScope = startupMode.usesLiveLocalAccountE2ETestScope
             ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-e2e-scope").flatMap(V2LiveLocalAccountE2ETestScope.init(rawValue:))
             : nil
         #else
@@ -84,6 +86,9 @@ struct V2RootView: View {
                 } else {
                     ProgressView("正在打开本地会话…")
                 }
+            case .uiTestingLiveLocalAccountCleanupCompleted:
+                Text("本地 E2E 测试数据已清理")
+                    .accessibilityIdentifier("v2.local-e2e.cleanup.completed")
             case .unavailable(let message):
                 ContentUnavailableView("V2 暂不可用", systemImage: "exclamationmark.triangle", description: Text(message))
             }
