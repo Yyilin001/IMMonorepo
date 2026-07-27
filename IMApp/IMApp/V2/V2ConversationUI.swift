@@ -1423,6 +1423,7 @@ private struct V2ConversationDetailView: View {
                             isPresentingAttachmentImporter = true
                         }
                         .disabled(!store.canAddAttachment)
+                        .tint(.primary)
                         .accessibilityHint("从文件中选择要发送的附件")
                         .accessibilityIdentifier("v2.message.attachment.add")
                         TextField("消息", text: $store.draft, axis: .vertical)
@@ -1432,6 +1433,7 @@ private struct V2ConversationDetailView: View {
                             .accessibilityIdentifier("v2.message.draft")
                         Button(store.isSending ? "发送中…" : "发送") { Task { await store.sendDraft() } }
                             .disabled(store.isSending || (store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.attachments.isEmpty))
+                            .tint(.primary)
                             .accessibilityValue(store.isSending ? "正在保存消息" : "")
                             .accessibilityIdentifier("v2.message.send")
                     }

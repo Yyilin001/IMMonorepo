@@ -15,6 +15,7 @@ app_bundle_id="com.stskcxfz.imapp"
 receiver_simulator_id="${IMAPP_LOCAL_TWO_INSTALL_RECEIVER_SIMULATOR_ID:-}"
 sender_simulator_id="${IMAPP_LOCAL_TWO_INSTALL_SENDER_SIMULATOR_ID:-}"
 test_class="IMAppLocalTwoInstallE2ETests/IMAppLocalTwoInstallE2ETests"
+keep_result_bundle="${IMAPP_LOCAL_TWO_INSTALL_E2E_KEEP_RESULTS:-false}"
 
 source "${repo_root}/IMV2/scripts/local_compose.sh"
 
@@ -161,7 +162,11 @@ cleanup() {
       -v2-ui-testing-e2e-scope "${sender_scope}"
     run_stage "${sender_simulator_id}" testCleansOnlyRequestedIndependentInstallationScope || true
   fi
-  rm -rf -- "${result_directory}"
+  if [[ "${keep_result_bundle}" == true ]]; then
+    printf 'preserving local two-install result bundles: %s\n' "${result_directory}" >&2
+  else
+    rm -rf -- "${result_directory}"
+  fi
   exit "${original_status}"
 }
 trap cleanup EXIT

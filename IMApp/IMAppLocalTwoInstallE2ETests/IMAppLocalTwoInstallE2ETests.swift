@@ -62,6 +62,9 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "账户菜单不能遗留在会话详情页并遮挡消息输入与发送操作。"
         )
         try auditOrdinaryChatSurface(in: app)
+        // The conversation detail is app-rendered rather than UIKit Form
+        // chrome, so its visible message/composer state can also gate contrast.
+        try app.performAccessibilityAudit(for: [.contrast])
         let send = app.buttons["v2.message.send"]
         XCTAssertTrue(send.isEnabled)
         send.tap()
