@@ -212,6 +212,77 @@ final class IMAppLocalAccountUITests: XCTestCase {
         await reconnectingReceiverConnection.disconnect()
     }
 
+    /// The stranger-message preference is recipient-owned. A sender can open
+    /// the deterministic direct room, but a denied recipient must receive no
+    /// message until the recipient explicitly restores the permission.
+    func testReceiverCanDenyAndRestoreStrangerMessageDelivery() async throws {
+        let sender = try await registerLocalAccount(displayName: "Stranger sender")
+        let receiver = try await registerLocalAccount(displayName: "Stranger receiver")
+        let frameLimits = try V2FrameLimits(
+            maximumPayloadBytes: 65_536,
+            acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
+        )
+        let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
+        let senderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let receiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+
+        do {
+            let senderSession = try await senderConnection.connectAndAuthenticate(
+                accessToken: sender.accessToken,
+                deviceID: sender.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            let receiverSession = try await receiverConnection.connectAndAuthenticate(
+                accessToken: receiver.accessToken,
+                deviceID: receiver.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            XCTAssertEqual(senderSession.userID, sender.userID)
+            XCTAssertEqual(receiverSession.userID, receiver.userID)
+
+            let senderTransport = V2ProtobufSyncTransport(
+                wire: senderConnection,
+                protocolVersion: senderSession.protocolVersion
+            )
+            let receiverTransport = V2ProtobufSyncTransport(
+                wire: receiverConnection,
+                protocolVersion: receiverSession.protocolVersion
+            )
+            _ = try await receiverTransport.setStrangerMessagePermission(
+                operationID: try StrangerMessagePreferenceOperationID(UUID().uuidString.lowercased()),
+                permission: .deny
+            )
+            let directRoom = try await senderTransport.openDirectRoom(
+                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
+                targetUserID: receiver.userID
+            )
+            await assertStrangerMessageIsForbidden(
+                senderTransport: senderTransport,
+                roomID: directRoom.roomID
+            )
+
+            _ = try await receiverTransport.setStrangerMessagePermission(
+                operationID: try StrangerMessagePreferenceOperationID(UUID().uuidString.lowercased()),
+                permission: .allow
+            )
+            let accepted = try await senderTransport.sendMessage(
+                roomID: directRoom.roomID,
+                clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
+                text: "allowed-after-explicit-restore",
+                media: [],
+                mentions: []
+            )
+            XCTAssertEqual(accepted.roomID, directRoom.roomID)
+        } catch {
+            await senderConnection.disconnect()
+            await receiverConnection.disconnect()
+            throw error
+        }
+
+        await senderConnection.disconnect()
+        await receiverConnection.disconnect()
+    }
+
     @MainActor
     func testPasswordRegistrationEstablishesLocalSession() throws {
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
@@ -377,6 +448,31 @@ private func awaitSenderOutboxReplay(
         }
     }
     throw LocalE2EDeliveryError.senderOutboxReplayTimedOut
+}
+
+private func assertStrangerMessageIsForbidden(
+    senderTransport: V2ProtobufSyncTransport,
+    roomID: RoomID
+) async {
+    do {
+        _ = try await senderTransport.sendMessage(
+            roomID: roomID,
+            clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
+            text: "must-not-deliver",
+            media: [],
+            mentions: []
+        )
+        XCTFail("接收方关闭陌生人消息后，发送端不应获得消息接受结果。")
+    } catch let error as V2RealtimeTransportError {
+        guard case .server(let code, let retryable, _, _) = error else {
+            XCTFail("陌生人消息拒收必须返回服务端授权结果，实际错误：\(error)。")
+            return
+        }
+        XCTAssertEqual(code, "FORBIDDEN")
+        XCTAssertFalse(retryable)
+    } catch {
+        XCTFail("陌生人消息拒收应映射为不透明授权错误，实际错误：\(error)。")
+    }
 }
 
 private enum LocalE2EDeliveryError: Error, LocalizedError {
