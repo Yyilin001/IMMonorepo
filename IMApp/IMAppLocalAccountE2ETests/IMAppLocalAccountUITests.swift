@@ -283,6 +283,82 @@ final class IMAppLocalAccountUITests: XCTestCase {
         await receiverConnection.disconnect()
     }
 
+    /// A private block applies even to an already-open direct room. The
+    /// sender receives only the generic authorization result and may resume
+    /// once the recipient explicitly removes that block.
+    func testReceiverCanBlockAndRestoreExistingDirectMessageDelivery() async throws {
+        let sender = try await registerLocalAccount(displayName: "Blocked sender")
+        let receiver = try await registerLocalAccount(displayName: "Blocking receiver")
+        let frameLimits = try V2FrameLimits(
+            maximumPayloadBytes: 65_536,
+            acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
+        )
+        let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
+        let senderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let receiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+
+        do {
+            let senderSession = try await senderConnection.connectAndAuthenticate(
+                accessToken: sender.accessToken,
+                deviceID: sender.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            let receiverSession = try await receiverConnection.connectAndAuthenticate(
+                accessToken: receiver.accessToken,
+                deviceID: receiver.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            XCTAssertEqual(senderSession.userID, sender.userID)
+            XCTAssertEqual(receiverSession.userID, receiver.userID)
+
+            let senderTransport = V2ProtobufSyncTransport(
+                wire: senderConnection,
+                protocolVersion: senderSession.protocolVersion
+            )
+            let receiverTransport = V2ProtobufSyncTransport(
+                wire: receiverConnection,
+                protocolVersion: receiverSession.protocolVersion
+            )
+            let directRoom = try await senderTransport.openDirectRoom(
+                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
+                targetUserID: receiver.userID
+            )
+            let blocked = try await receiverTransport.changeUserBlock(
+                operationID: try UserBlockOperationID(UUID().uuidString.lowercased()),
+                targetUserID: sender.userID,
+                action: .block
+            )
+            XCTAssertTrue(blocked.isBlocked)
+            await assertDirectMessageIsForbidden(
+                senderTransport: senderTransport,
+                roomID: directRoom.roomID,
+                text: "must-not-deliver-while-blocked"
+            )
+
+            let unblocked = try await receiverTransport.changeUserBlock(
+                operationID: try UserBlockOperationID(UUID().uuidString.lowercased()),
+                targetUserID: sender.userID,
+                action: .unblock
+            )
+            XCTAssertFalse(unblocked.isBlocked)
+            let accepted = try await senderTransport.sendMessage(
+                roomID: directRoom.roomID,
+                clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
+                text: "allowed-after-explicit-unblock",
+                media: [],
+                mentions: []
+            )
+            XCTAssertEqual(accepted.roomID, directRoom.roomID)
+        } catch {
+            await senderConnection.disconnect()
+            await receiverConnection.disconnect()
+            throw error
+        }
+
+        await senderConnection.disconnect()
+        await receiverConnection.disconnect()
+    }
+
     /// The local stack's stranger policy permits three initial messages in a
     /// 24-hour window. The limit is enforced at the authenticated gateway,
     /// rather than being a sender-side UI convention, and the fourth request
@@ -633,24 +709,36 @@ private func assertStrangerMessageIsForbidden(
     senderTransport: V2ProtobufSyncTransport,
     roomID: RoomID
 ) async {
+    await assertDirectMessageIsForbidden(
+        senderTransport: senderTransport,
+        roomID: roomID,
+        text: "must-not-deliver"
+    )
+}
+
+private func assertDirectMessageIsForbidden(
+    senderTransport: V2ProtobufSyncTransport,
+    roomID: RoomID,
+    text: String
+) async {
     do {
         _ = try await senderTransport.sendMessage(
             roomID: roomID,
             clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
-            text: "must-not-deliver",
+            text: text,
             media: [],
             mentions: []
         )
-        XCTFail("接收方关闭陌生人消息后，发送端不应获得消息接受结果。")
+        XCTFail("接收方拒绝 direct 消息后，发送端不应获得消息接受结果。")
     } catch let error as V2RealtimeTransportError {
         guard case .server(let code, let retryable, _, _) = error else {
-            XCTFail("陌生人消息拒收必须返回服务端授权结果，实际错误：\(error)。")
+            XCTFail("direct 消息拒收必须返回服务端授权结果，实际错误：\(error)。")
             return
         }
         XCTAssertEqual(code, "FORBIDDEN")
         XCTAssertFalse(retryable)
     } catch {
-        XCTFail("陌生人消息拒收应映射为不透明授权错误，实际错误：\(error)。")
+        XCTFail("direct 消息拒收应映射为不透明授权错误，实际错误：\(error)。")
     }
 }
 

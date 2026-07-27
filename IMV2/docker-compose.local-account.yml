@@ -30,7 +30,11 @@ services:
       IM_V2_PASSWORD_LOGIN_MAX_FAILURES: 5
       IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS: 900
       IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS: 900
-      IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS: 60
+      # The local iOS E2E runner intentionally creates disposable accounts
+      # across two independently booted simulators. Keep a finite edge limit,
+      # but leave enough headroom for one complete dual-simulator run without
+      # coupling its outcome to a previous local test invocation.
+      IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS: 240
       IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS: 60
       IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES: 30
       IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS: 60
