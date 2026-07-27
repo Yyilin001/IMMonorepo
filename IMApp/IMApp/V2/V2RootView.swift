@@ -241,6 +241,7 @@ private struct V2SignInView: View {
         }
         .scrollContentBackground(.hidden)
         .navigationTitle("登录")
+        .onDisappear { actionTask?.cancel() }
     }
 
     private func run(_ operation: @escaping @MainActor @Sendable () async -> Void) {
