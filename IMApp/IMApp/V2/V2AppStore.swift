@@ -235,11 +235,14 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         authenticationMessage = nil
         do {
             let localStore = try await bootstrapper.openEstablishedSession()
+            try Task.checkCancellation()
             try await activate(localStore: localStore)
         } catch V2ClientSessionBootstrapError.authenticationRequired {
             route = .signedOut
         } catch V2ClientSessionBootstrapError.credentialsUnavailable {
             route = .protectedDataUnavailable
+        } catch is CancellationError {
+            return
         } catch {
             route = .unavailable(message: "无法打开本地 V2 数据。")
         }
@@ -282,8 +285,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: localKeychainService)
             )
             let localStore = try await bootstrapper.establishSession(using: issuer)
+            try Task.checkCancellation()
             try await activate(localStore: localStore)
         } catch is CancellationError {
+            guard !Task.isCancelled else { return }
             route = .signedOut
         } catch {
             route = .signedOut
@@ -319,8 +324,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: localKeychainService)
             )
             let localStore = try await bootstrapper.establishSession(using: issuer)
+            try Task.checkCancellation()
             try await activate(localStore: localStore)
         } catch is CancellationError {
+            guard !Task.isCancelled else { return }
             route = .signedOut
         } catch V2AccountAuthenticationError.invalidAccountHandle {
             route = .signedOut
@@ -452,6 +459,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         }
         try Self.applyDatabaseStoragePolicy(databaseURL: localDatabaseURL)
         let userID = try await currentUserID()
+        try Task.checkCancellation()
         let realtime = try V2AppRealtimeRuntime(
             configuration: configuration,
             authSession: authSession,
@@ -460,7 +468,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         )
         let attachmentStager = try? V2FileConversationAttachmentStager(directory: try Self.attachmentStagingDirectory())
         await attachmentStager?.discardOrphanedStagedFiles()
+        try Task.checkCancellation()
         await realtime.mediaCacheMaintenance.discardOrphanedTemporaryFiles()
+        try Task.checkCancellation()
         let publicIdentityDirectory = try V2HTTPPublicIdentityDirectory(
             endpoint: configuration.endpoint("v2/public-identities/resolve"),
             credentials: authSession
@@ -517,6 +527,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             pushWakeSettings = nil
         }
         await stopRealtime()
+        try Task.checkCancellation()
         realtimeRuntime = realtime.runtime
         conversationStore = conversations
         privacySettingsStore = privacySettings
@@ -566,6 +577,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             defer { self?.finishRealtimeAttempt(generation: taskGeneration) }
             do {
                 _ = try await runtime.start()
+                try Task.checkCancellation()
                 await conversations.refresh()
             } catch is CancellationError {
                 return

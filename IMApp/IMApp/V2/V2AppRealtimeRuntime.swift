@@ -302,6 +302,7 @@ actor V2RealtimeDirectConversationOpener: V2DirectConversationOpening {
     func openConversation(with publicIdentity: V2PublicIdentity) async throws -> String {
         let operationID = try DirectRoomOperationID(makeUUID().uuidString)
         let opened = try await transport.openDirectRoom(operationID: operationID, targetUserID: publicIdentity.userID)
+        try Task.checkCancellation()
         try await localStore.cacheDirectRoomIdentity(roomID: opened.roomID, publicIdentity: publicIdentity)
         return opened.roomID.rawValue
     }
