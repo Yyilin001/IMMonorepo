@@ -17,6 +17,15 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: the SQLite migration now creates partial semantic-intent
+  indexes for every durable command path that reuses an equivalent pending
+  operation. Terminal command history therefore cannot turn restart/retry
+  lookup into a full-table scan; an index-schema regression verifies all nine
+  indexes exist after migration. The native `IMV2ClientKit` suite passed
+  **134 tests**; the selected iPhone 17 / iOS 26.2 Simulator passed the full
+  shared `IMApp` scheme with **80 Swift tests** and **2 UI tests**, zero
+  failures. This is local durable-storage evidence only, not capacity or
+  deployment evidence.
 - 2026-07-27: `IMApp/Scripts/verify_local_account_registration_e2e.sh`
   passed against the selected booted iPhone 17 / iOS 26.2 Simulator and the
   isolated local account stack. Its three UI integration tests exercised the

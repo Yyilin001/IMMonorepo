@@ -2528,6 +2528,49 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 );
                 """)
         }
+        // Terminal command rows are retained locally for retry diagnostics.
+        // Keep semantic pending-intent lookups scoped to the small pending
+        // subset rather than scanning the growing terminal history.
+        migrator.registerMigration("addV2PendingIntentReuseIndexes") { db in
+            try db.execute(sql: """
+                CREATE INDEX v2_pending_membership_intent_idx
+                    ON v2_pending_membership_commands
+                    (room_id, target_user_id, action, expected_membership_revision, created_at, operation_id)
+                    WHERE state = 'pending';
+                CREATE INDEX v2_pending_message_withdrawals_intent_idx
+                    ON v2_pending_message_withdrawals
+                    (room_id, message_id, expected_message_revision, created_at, operation_id)
+                    WHERE state = 'pending';
+                CREATE INDEX v2_pending_message_redactions_intent_idx
+                    ON v2_pending_message_redactions
+                    (room_id, message_id, reason_code, created_at, operation_id)
+                    WHERE state = 'pending';
+                CREATE INDEX v2_pending_member_mutes_intent_idx
+                    ON v2_pending_member_mutes
+                    (room_id, target_user_id, mute_until, reason_code, created_at, operation_id)
+                    WHERE state = 'pending';
+                CREATE INDEX v2_pending_moderated_member_removals_intent_idx
+                    ON v2_pending_moderated_member_removals
+                    (room_id, target_user_id, reason_code, created_at, operation_id)
+                    WHERE state = 'pending';
+                CREATE INDEX v2_pending_message_edits_intent_idx
+                    ON v2_pending_message_edits
+                    (room_id, message_id, expected_message_revision, text_body, created_at, operation_id)
+                    WHERE state = 'pending';
+                CREATE INDEX v2_pending_message_reactions_intent_idx
+                    ON v2_pending_message_reactions
+                    (room_id, message_id, reaction, action, created_at, operation_id)
+                    WHERE state = 'pending';
+                CREATE INDEX v2_pending_social_commands_intent_idx
+                    ON v2_pending_social_commands
+                    (command_kind, target_user_id, relationship_action, block_action, stranger_permission, created_at, operation_id)
+                    WHERE state = 'pending';
+                CREATE INDEX v2_pending_group_room_creations_intent_idx
+                    ON v2_pending_group_room_creations
+                    (title, initial_member_user_ids, created_at, operation_id)
+                    WHERE state = 'pending';
+                """)
+        }
         return migrator
     }()
 }
