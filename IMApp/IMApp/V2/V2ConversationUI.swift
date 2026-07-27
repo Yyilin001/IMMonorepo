@@ -1830,23 +1830,29 @@ private struct V2GroupMembersSheet: View {
     }
 
     private func runMembershipChange(target: String, action: V2RoomMembershipAction) {
-        membershipChangeTask?.cancel()
+        guard membershipChangeTask == nil else { return }
         membershipChangeTask = Task {
             await store.changeGroupMembership(targetUserID: target, action: action)
+            guard !Task.isCancelled else { return }
+            membershipChangeTask = nil
         }
     }
 
     private func runMute(_ member: V2GroupMemberItem) {
-        moderationTask?.cancel()
+        guard moderationTask == nil else { return }
         moderationTask = Task {
             await store.muteGroupMember(member)
+            guard !Task.isCancelled else { return }
+            moderationTask = nil
         }
     }
 
     private func runModeratedRemoval(_ member: V2GroupMemberItem) {
-        moderationTask?.cancel()
+        guard moderationTask == nil else { return }
         moderationTask = Task {
             await store.removeGroupMemberByModerator(member)
+            guard !Task.isCancelled else { return }
+            moderationTask = nil
         }
     }
 }

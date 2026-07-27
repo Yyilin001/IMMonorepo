@@ -21,10 +21,12 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   in-flight moderated removals. The owner-only add controls expose the same
   disabled state as member-row controls, and the store independently rejects
   a concurrent membership command so it cannot be recorded against a roster
-  revision that a moderation removal is about to advance. A suspended-removal
-  regression proves no membership command reaches its durable boundary during
-  that window. The selected iPhone 17 / iOS 26.2 Simulator passed the full
-  shared `IMApp` scheme with **78 Swift tests** and **2 UI tests**, zero
+  revision that a moderation removal is about to advance. The page also keeps
+  its membership and moderation tasks single-flight while visible, rather
+  than cancelling an already-started durable command when the user taps
+  again. A suspended-removal regression proves no membership command reaches
+  its durable boundary during that window. The selected iPhone 17 / iOS 26.2
+  Simulator passed the full shared `IMApp` scheme with **78 Swift tests** and **2 UI tests**, zero
   failures. This is local concurrency evidence only, not multi-device or
   deployment evidence.
 - 2026-07-27: disabling background-sync wake now persists a token-free
