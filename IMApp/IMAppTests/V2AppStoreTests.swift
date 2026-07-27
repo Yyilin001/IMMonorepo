@@ -12,4 +12,13 @@ struct V2AppStoreTests {
         #expect(store.route == .signedOut)
         #expect(store.authenticationMessage == nil)
     }
+
+    @Test("本地账号 UI 集成模式保留配置但不恢复历史登录态")
+    func uiTestingLiveLocalAccountModeDoesNotRestorePersistedSession() {
+        #expect(V2AppStore.StartupMode.production.restoresPersistedSession)
+        #expect(!V2AppStore.StartupMode.uiTestingSignedOut.restoresPersistedSession)
+        #expect(!V2AppStore.StartupMode.uiTestingLiveLocalAccount.restoresPersistedSession)
+        #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccount.needsRuntimeConfiguration)
+        #expect(!V2AppStore.StartupMode.uiTestingSignedOut.needsRuntimeConfiguration)
+    }
 }

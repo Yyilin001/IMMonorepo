@@ -110,6 +110,10 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
                 assertion = try await assertionProvider.accountAssertion()
             }
         } catch is CancellationError { throw CancellationError() }
+        // Password/passkey factors can report actionable account errors before
+        // any device credential is requested. Preserve those errors for the
+        // app instead of presenting a misleading generic assertion failure.
+        catch let error as V2AccountAuthenticationError { throw error }
         catch { throw V2AccountAssertionCredentialProviderError.assertionUnavailable }
         guard isValidAssertion(assertion) else { throw V2AccountAssertionCredentialProviderError.invalidAssertion }
 

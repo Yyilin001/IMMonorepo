@@ -10,6 +10,20 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     enum StartupMode: Sendable, Equatable {
         case production
         case uiTestingSignedOut
+        /// Keeps the real Debug account and gateway configuration while
+        /// deliberately avoiding a restore from an existing simulator
+        /// Keychain. This mode exists only behind a DEBUG launch argument for
+        /// the opt-in local-account integration test; it is never reachable
+        /// from a Release build.
+        case uiTestingLiveLocalAccount
+
+        var restoresPersistedSession: Bool {
+            self == .production
+        }
+
+        var needsRuntimeConfiguration: Bool {
+            self != .uiTestingSignedOut
+        }
     }
 
     enum Route: Equatable {
@@ -23,6 +37,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     enum PasswordMode: Sendable { case register, signIn }
 
     private let configuration: V2AppConfiguration?
+    @ObservationIgnored private let startupMode: StartupMode
     @ObservationIgnored private let authSession: V2AuthSession?
     @ObservationIgnored private let bootstrapper: V2ClientSessionBootstrapper?
     @ObservationIgnored private let deviceIdentityProvider: (any V2DeviceIdentityProvider)?
@@ -43,8 +58,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         startupMode: StartupMode = .production,
         remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)? = nil
     ) {
+        self.startupMode = startupMode
         self.remoteNotificationRegistrar = remoteNotificationRegistrar
-        guard startupMode == .production else {
+        guard startupMode.needsRuntimeConfiguration else {
             configuration = nil
             authSession = nil
             bootstrapper = nil
@@ -100,6 +116,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     func restore() async {
+        guard startupMode.restoresPersistedSession else {
+            route = .signedOut
+            authenticationMessage = nil
+            return
+        }
         guard let bootstrapper else { return }
         route = .launching
         authenticationMessage = nil
@@ -190,6 +211,12 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         } catch V2AccountAuthenticationError.authenticationRejected {
             route = .signedOut
             authenticationMessage = "账号或密码不正确。"
+        } catch V2AccountAssertionCredentialProviderError.deviceIdentityUnavailable {
+            route = .signedOut
+            authenticationMessage = "受保护凭据暂不可用，请解锁设备后重试。"
+        } catch V2AccountAssertionCredentialProviderError.registrationOperationUnavailable {
+            route = .signedOut
+            authenticationMessage = "无法保存本次设备注册，请稍后重试。"
         } catch {
             route = .signedOut
             authenticationMessage = "账户服务暂不可用，请稍后重试。"

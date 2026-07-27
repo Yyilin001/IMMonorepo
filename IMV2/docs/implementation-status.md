@@ -4,7 +4,7 @@
 [当前系统地图](../../docs/current-system-map.md)。本文件把“实现存在”与“可作为
 发布证据”分开记录；未特别说明的本机自动化验证结果不是生产批准。
 
-Last reviewed: 2026-07-26
+Last reviewed: 2026-07-27
 
 This is an evidence register, not a release approval. “Implemented” means the
 named code path exists and its test target compiles; it does **not** mean a
@@ -17,6 +17,16 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: on the caller-selected, manually unlocked iPhone 17 / iOS 26.2
+  Simulator, `bash IMApp/Scripts/verify_local_account_registration_e2e.sh`
+  passed using the project’s `Sign to Run Locally` Debug signing. The dedicated
+  UI target created a random local password account through the real HTTPS
+  edge, exchanged its device-bound assertion for credentials, committed the
+  Keychain-backed session and displayed the signed-in conversation surface.
+  The same destination then passed both `V2AppStoreTests` cases and both
+  deterministic offline `IMAppLaunchUITests` cases. This is local Simulator
+  integration evidence only, not a signed-device, production WebAuthn, APNs,
+  multi-device or capacity approval.
 - 2026-07-26: the current V2 sources passed the generic iOS Simulator
   `build-for-testing` command under Xcode 26.6 with isolated DerivedData and
   code signing disabled. It compiled the `IMApp`, `IMAppTests`, and
@@ -290,6 +300,35 @@ argument adds the registration-specific check without changing Release
 behavior: stable identifiers prove the public ID/display-name fields appear,
 and the submit control remains disabled until all registration values exist.
 The same test target remains part of the local simulator verification scope.
+
+The opt-in `IMAppLocalAccountUITests` suite separately covers a real local
+password-registration path. Its DEBUG-only live-local-account startup mode
+keeps the ordinary Debug HTTPS/TLS configuration but intentionally skips any
+previous simulator Keychain restore, preventing historical credentials from
+changing the test's first screen. `IMApp/Scripts/verify_local_account_registration_e2e.sh`
+starts/reuses the isolated local stack, adds its generated root CA only to a
+caller-selected simulator, and runs the registration UI test with a unique
+local account. The test resides in a separate `IMAppLocalAccountE2ETests`
+target and `IMAppLocalAccountE2E` scheme, so the regular UI suite contains no
+external-service skip or network dependency. This is local integration
+evidence, not a signed-device, production WebAuthn, APNs, or capacity approval.
+Before this suite can exercise Keychain-backed registration, the explicitly
+selected simulator must have been manually unlocked once after its most recent
+boot and the host Mac must be unlocked: the production device identity and
+registration-operation items intentionally use `AfterFirstUnlockThisDeviceOnly`.
+The script now fails early for a non-booted selected simulator and documents
+this security prerequisite rather than misreporting it as an account-service
+or TLS failure. Unlike the generic compile-only baseline, this live Keychain
+test intentionally preserves the project’s default Debug signing: disabling
+code signing removes the application-identifier entitlement required for
+Keychain access and is therefore not valid E2E evidence. On the affected iOS
+26.2 Simulator/XCTest runtime, a single `typeText` call writes only the first
+character into the SwiftUI form fields. The dedicated DEBUG-only live-local
+startup mode therefore receives a disposable random registration fixture via
+test launch arguments; the test still taps the real submit control and proves
+the HTTPS registration, device credential issuance, Keychain commit and local
+session activation path. This fixture path is not compiled into Release and
+the ordinary offline UI suite continues to inspect user-editable form state.
 
 The same baseline audit found that the retired macOS automation called removed
 `Makefile` targets and that the Release build phase directly executed a

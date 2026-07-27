@@ -100,6 +100,23 @@ struct V2HTTPDeviceCredentialIssuerTests {
         #expect(await store.value() == .init(deviceID: deviceID, operationID: operationID))
     }
 
+    @Test("account-factor validation errors remain actionable to the app")
+    func preservesAccountAuthenticationError() async throws {
+        let endpoint = try #require(URL(string: "https://account.invalid/v2/device-credentials"))
+        let deviceID = try DeviceID("00000000-0000-0000-0000-000000000931")
+        let provider = try V2HTTPAccountAssertionDeviceCredentialProvider(
+            issueEndpoint: endpoint,
+            assertionProvider: ThrowingDeviceBoundAssertionProvider(error: .invalidPassword),
+            deviceIdentityProvider: FixedDeviceIdentityProvider(deviceID: deviceID),
+            operationStore: RegistrationOperationStore(),
+            transport: IssuerHTTPTransport(result: .failure(URLError(.badServerResponse)))
+        )
+
+        await #expect(throws: V2AccountAuthenticationError.invalidPassword) {
+            _ = try await provider.issueDeviceCredentials()
+        }
+    }
+
     private func credentials(deviceID: DeviceID) throws -> V2AuthCredentials {
         try .init(
             userID: .init("00000000-0000-0000-0000-000000000900"),
@@ -136,6 +153,12 @@ private actor RegistrationOperationStore: V2DeviceCredentialRegistrationOperatio
 private struct FixedAssertionProvider: V2AccountAssertionProvider {
     let value: String
     func accountAssertion() -> String { value }
+}
+
+private struct ThrowingDeviceBoundAssertionProvider: V2DeviceBoundAccountAssertionProvider {
+    let error: V2AccountAuthenticationError
+    func accountAssertion() throws -> String { throw error }
+    func accountAssertion(for _: DeviceID) async throws -> String { throw error }
 }
 
 private struct FixedDeviceIdentityProvider: V2DeviceIdentityProvider {

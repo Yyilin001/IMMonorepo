@@ -72,6 +72,31 @@ IM_V2_GATEWAY_PORT=7443
 IM_V2_PASSKEY_RP_ID=localhost
 ```
 
+若要在指定模拟器上实际走一次“密码注册 → 设备凭证 → 本地 SQLite 会话”的
+iOS UI 回归，显式指定一个 iOS 26.2 或更高版本的模拟器 UDID：
+
+```sh
+IMAPP_LOCAL_ACCOUNT_E2E_SIMULATOR_ID='<SIMULATOR_UDID>' \
+  bash IMApp/Scripts/verify_local_account_registration_e2e.sh
+```
+
+先启动并**手动解锁**该指定模拟器一次；每次模拟器重新启动后都需要重复这个动作，并保持
+Mac 已解锁。设备 ID、注册操作和会话凭据使用
+`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`，首次解锁前 iOS 会拒绝 Keychain 访问；
+这不是 TLS、Docker 或账户服务故障。脚本会启动或复用本地 Docker 栈，并仅向指定模拟器
+导入 `IMV2/local-ca/root.crt`。脚本本身不会抹掉、关闭或重启模拟器；Xcode 的测试运行器
+可能在完成后关停其专用目标机，因此请指定可用于测试的模拟器。该回归使用 DEBUG-only 启动参数跳过旧 Keychain
+会话恢复，但仍使用实际的 Debug HTTPS/TLS 配置；每次创建一个随机、仅本地使用的
+账号。它使用独立的 `IMAppLocalAccountE2E` scheme，因此默认 UI 测试不依赖
+Docker 或本地 CA，仍保持离线确定性。与不启动设备的通用编译基线不同，此 E2E
+**不能**传入 `CODE_SIGNING_ALLOWED=NO`：模拟器上的设备 ID、注册操作与会话均需要
+带应用标识 entitlement 的本地签名，脚本会使用工程的默认 Debug 签名设置。
+在部分 iOS 26.2 Simulator/XCTest 组合中，`typeText` 会把 SwiftUI 表单输入截断为首字
+符；因此专用 E2E target 仅在 DEBUG 的 `uiTestingLiveLocalAccount` 模式下，通过启动参数
+预填随机账号、公开 ID、显示名和一次性的本地测试密码。它仍由 UI 点击提交，并完整经过
+真实账户 HTTPS、设备凭证、Keychain 与本地会话；Release 和默认离线 UI 测试均不能使用
+这些参数。
+
 停止本地栈时使用脚本输出的 `docker compose ... down` 命令。数据库卷会被
 保留，便于重复运行；如需清空本地账户数据，请明确执行 Compose 的
 `down --volumes`，不要把该操作用于任何非本地环境。

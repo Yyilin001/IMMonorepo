@@ -4,19 +4,44 @@ struct V2RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     private let appPushDelegate: V2AppPushDelegate
     private let initialPasswordMode: V2AppStore.PasswordMode
+    private let initialLocalE2ETestAccountHandle: String?
+    private let initialLocalE2ETestPassword: String?
+    private let initialLocalE2ETestPublicHandle: String?
+    private let initialLocalE2ETestDisplayName: String?
     @State private var store: V2AppStore
 
     init(appPushDelegate: V2AppPushDelegate) {
         self.appPushDelegate = appPushDelegate
         #if DEBUG
         let arguments = ProcessInfo.processInfo.arguments
-        let startupMode: V2AppStore.StartupMode = arguments.contains("-v2-ui-testing-signed-out")
-            ? .uiTestingSignedOut
-            : .production
+        let startupMode: V2AppStore.StartupMode
+        if arguments.contains("-v2-ui-testing-live-local-account") {
+            startupMode = .uiTestingLiveLocalAccount
+        } else if arguments.contains("-v2-ui-testing-signed-out") {
+            startupMode = .uiTestingSignedOut
+        } else {
+            startupMode = .production
+        }
         initialPasswordMode = arguments.contains("-v2-ui-testing-password-register") ? .register : .signIn
+        initialLocalE2ETestAccountHandle = startupMode == .uiTestingLiveLocalAccount
+            ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-account-handle")
+            : nil
+        initialLocalE2ETestPassword = startupMode == .uiTestingLiveLocalAccount
+            ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-local-password")
+            : nil
+        initialLocalE2ETestPublicHandle = startupMode == .uiTestingLiveLocalAccount
+            ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-public-handle")
+            : nil
+        initialLocalE2ETestDisplayName = startupMode == .uiTestingLiveLocalAccount
+            ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-display-name")
+            : nil
         #else
         let startupMode: V2AppStore.StartupMode = .production
         initialPasswordMode = .signIn
+        initialLocalE2ETestAccountHandle = nil
+        initialLocalE2ETestPassword = nil
+        initialLocalE2ETestPublicHandle = nil
+        initialLocalE2ETestDisplayName = nil
         #endif
         _store = State(initialValue: V2AppStore(startupMode: startupMode, remoteNotificationRegistrar: appPushDelegate))
     }
@@ -30,7 +55,11 @@ struct V2RootView: View {
                 V2SignInView(
                     store: store,
                     authenticationMessage: store.authenticationMessage,
-                    initialPasswordMode: initialPasswordMode
+                    initialPasswordMode: initialPasswordMode,
+                    initialAccountHandle: initialLocalE2ETestAccountHandle,
+                    initialPassword: initialLocalE2ETestPassword,
+                    initialPublicHandle: initialLocalE2ETestPublicHandle,
+                    initialDisplayName: initialLocalE2ETestDisplayName
                 )
             case .authenticating:
                 ProgressView("正在验证身份…")
@@ -71,6 +100,14 @@ struct V2RootView: View {
             }
         }
     }
+
+    #if DEBUG
+    private static func launchArgumentValue(_ arguments: [String], named name: String) -> String? {
+        guard let argumentIndex = arguments.firstIndex(of: name) else { return nil }
+        let valueIndex = arguments.index(after: argumentIndex)
+        return valueIndex < arguments.endIndex ? arguments[valueIndex] : nil
+    }
+    #endif
 }
 
 private struct V2SignInView: View {
@@ -86,11 +123,19 @@ private struct V2SignInView: View {
     init(
         store: V2AppStore,
         authenticationMessage: String?,
-        initialPasswordMode: V2AppStore.PasswordMode = .signIn
+        initialPasswordMode: V2AppStore.PasswordMode = .signIn,
+        initialAccountHandle: String? = nil,
+        initialPassword: String? = nil,
+        initialPublicHandle: String? = nil,
+        initialDisplayName: String? = nil
     ) {
         self.store = store
         self.authenticationMessage = authenticationMessage
         _mode = State(initialValue: initialPasswordMode)
+        _accountHandle = State(initialValue: initialAccountHandle ?? "")
+        _password = State(initialValue: initialPassword ?? "")
+        _publicHandle = State(initialValue: initialPublicHandle ?? "")
+        _displayName = State(initialValue: initialDisplayName ?? "")
     }
 
     var body: some View {
@@ -155,7 +200,6 @@ private struct V2SignInView: View {
         }
         .scrollContentBackground(.hidden)
         .navigationTitle("登录")
-        .onDisappear { actionTask?.cancel() }
     }
 
     private func run(_ operation: @escaping @MainActor @Sendable () async -> Void) {
