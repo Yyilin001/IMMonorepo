@@ -934,6 +934,71 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
+    public func enqueueOrReusePendingSocialCommand(
+        _ command: V2PendingSocialCommand
+    ) throws -> V2PendingSocialCommand {
+        try databasePool.write { db in
+            if let existing = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM v2_pending_social_commands WHERE operation_id = ?",
+                arguments: [command.operationID]
+            ) {
+                let decoded = try Self.decodePendingSocialCommand(existing)
+                guard decoded.kind == command.kind,
+                      decoded.targetUserID == command.targetUserID,
+                      decoded.relationshipAction == command.relationshipAction,
+                      decoded.blockAction == command.blockAction,
+                      decoded.strangerPermission == command.strangerPermission,
+                      decoded.state == .pending
+                else { throw V2ClientCommandError.commandConflict }
+                return decoded
+            }
+            if let existing = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM v2_pending_social_commands
+                WHERE command_kind = ?
+                  AND target_user_id IS ?
+                  AND relationship_action IS ?
+                  AND block_action IS ?
+                  AND stranger_permission IS ?
+                  AND state = 'pending'
+                ORDER BY created_at, operation_id
+                LIMIT 1
+                """,
+                arguments: [
+                    command.kind.rawValue,
+                    command.targetUserID?.rawValue,
+                    command.relationshipAction?.rawValue,
+                    command.blockAction?.rawValue,
+                    command.strangerPermission?.rawValue
+                ]
+            ) {
+                return try Self.decodePendingSocialCommand(existing)
+            }
+            try db.execute(
+                sql: """
+                INSERT INTO v2_pending_social_commands
+                (operation_id, command_kind, target_user_id, relationship_action,
+                 block_action, stranger_permission, state, attempt_count,
+                 next_attempt_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                """,
+                arguments: [
+                    command.operationID,
+                    command.kind.rawValue,
+                    command.targetUserID?.rawValue,
+                    command.relationshipAction?.rawValue,
+                    command.blockAction?.rawValue,
+                    command.strangerPermission?.rawValue,
+                    command.nextAttemptAt.timeIntervalSince1970,
+                    command.nextAttemptAt.timeIntervalSince1970
+                ]
+            )
+            return command
+        }
+    }
+
     public func nextReadySocialCommand(now: Date) throws -> V2PendingSocialCommand? {
         try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_social_commands WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingSocialCommand(row) }
     }

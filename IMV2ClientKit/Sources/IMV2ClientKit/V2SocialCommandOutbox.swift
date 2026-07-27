@@ -32,6 +32,9 @@ public struct V2PendingSocialCommand: Equatable, Sendable {
 
 public protocol V2LocalSocialCommandStore: Sendable {
     func enqueue(_ command: V2PendingSocialCommand) async throws
+    /// Equivalent global preference or relationship intents retain one
+    /// operation ID while pending, including across an app restart.
+    func enqueueOrReusePendingSocialCommand(_ command: V2PendingSocialCommand) async throws -> V2PendingSocialCommand
     func nextReadySocialCommand(now: Date) async throws -> V2PendingSocialCommand?
     func markSocialCommandAcknowledged(operationID: String) async throws
     func scheduleSocialCommandRetry(operationID: String, nextAttemptAt: Date) async throws
@@ -61,7 +64,7 @@ public actor V2SocialCommandOutboxEngine {
 
     private func enqueue(kind: V2PendingSocialCommandKind, target: UserID?, relationship: V2RelationshipAction?, block: V2UserBlockAction?, permission: V2StrangerMessagePermission?) async throws -> V2PendingSocialCommand {
         let command = try V2PendingSocialCommand(operationID: makeUUID().uuidString, kind: kind, targetUserID: target, relationshipAction: relationship, blockAction: block, strangerPermission: permission, state: .pending, attemptCount: 0, nextAttemptAt: now(), terminalCode: nil)
-        try await store.enqueue(command); return command
+        return try await store.enqueueOrReusePendingSocialCommand(command)
     }
 
     public func flushOnce() async throws -> V2SocialCommandFlushResult {

@@ -31,6 +31,38 @@ struct V2SocialCommandOutboxTests {
         #expect(try await restartedStore.pendingSocialCommands().allSatisfy { $0.state == V2PendingSocialCommand.State.acknowledged })
         #expect((await transport.dispatchedKinds()).map(\.rawValue).sorted() == ["relationship", "strangerMessagePreference", "userBlock"])
     }
+
+    @Test("重启后相同待隐私意图复用原操作而新目标状态保留顺序")
+    func duplicatePendingPrivacyIntentReusesOnlyTheEquivalentOperation() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "im-v2-social-reuse-\(UUID().uuidString).sqlite")
+        let binding = V2LocalInstallationBinding(value: UUID())
+        let firstStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        let firstOperation = UUID(uuidString: "00000000-0000-0000-0000-000000000363")!
+        let transport = SocialOutboxTransport()
+        let firstEngine = V2SocialCommandOutboxEngine(
+            store: firstStore,
+            socialTransport: transport,
+            directTransport: transport,
+            makeUUID: { firstOperation }
+        )
+
+        let original = try await firstEngine.enqueueStrangerMessagePermission(.deny)
+        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        let restartedEngine = V2SocialCommandOutboxEngine(
+            store: restartedStore,
+            socialTransport: transport,
+            directTransport: transport
+        )
+        let reused = try await restartedEngine.enqueueStrangerMessagePermission(.deny)
+        let changed = try await restartedEngine.enqueueStrangerMessagePermission(.allow)
+
+        #expect(reused.operationID == original.operationID)
+        #expect(changed.operationID != original.operationID)
+        let pending = try await restartedStore.pendingSocialCommands()
+        #expect(pending.count == 2)
+        #expect(pending.map(\.strangerPermission) == [.deny, .allow])
+    }
 }
 
 private actor SocialOutboxTransport: V2ClientSocialRelationshipTransport, V2ClientDirectMessagingTransport {

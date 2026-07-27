@@ -17,6 +17,14 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: equivalent pending social commands now atomically reuse their
+  operation ID across restarts. This covers relationship, user-block, and
+  stranger-message-preference commands; a changed target or desired preference
+  remains a later, distinct durable command. The native IMV2ClientKit suite
+  passed **127 tests**; the selected iPhone 17 / iOS 26.2 Simulator passed
+  the full shared IMApp scheme with **80 Swift tests** and **2 UI tests**,
+  zero failures. This is local durable-intent evidence only, not multi-device
+  or deployment evidence.
 - 2026-07-27: durable group-membership changes now atomically reuse an
   equivalent pending room, target, action, and expected-roster-revision
   intent. A retry after a lost response or restart continues with the original
