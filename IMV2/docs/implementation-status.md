@@ -17,6 +17,14 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: sign-out is now single-flight across required Push-endpoint
+  removal and credential deletion. Repeated taps and a simultaneous
+  terminal-auth callback cannot interleave those steps or cancel an already
+  started sign-out. A focused regression proves the gate rejects duplicate
+  work and admits a later attempt after completion. The selected iPhone 17 /
+  iOS 26.2 Simulator passed the full shared `IMApp` scheme with **76 Swift
+  tests** and **2 UI tests**, zero failures. This is local sign-out-state
+  evidence only, not APNs delivery or deployment evidence.
 - 2026-07-27: sign-out now treats device Push-endpoint removal as a required
   precondition to deleting the current credential. A transient endpoint DELETE
   failure remains in the persisted pending-sign-out state; retry and next

@@ -71,6 +71,22 @@ struct V2AppStoreTests {
         ))
     }
 
+    @Test("退出登录只允许一个端点删除与凭据清理流程")
+    func signOutIsSingleFlight() {
+        var gate = V2SignOutAttemptGate()
+
+        let first = gate.begin()
+        let duplicate = gate.begin()
+        #expect(first)
+        #expect(!duplicate)
+        #expect(gate.isInFlight)
+
+        gate.finish()
+        #expect(!gate.isInFlight)
+        let afterFinish = gate.begin()
+        #expect(afterFinish)
+    }
+
     @Test("UI test startup mode bypasses device state and remains signed out")
     func uiTestingStartupModeStaysSignedOut() async {
         let store = V2AppStore(startupMode: .uiTestingSignedOut)

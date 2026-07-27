@@ -280,8 +280,12 @@ private struct V2SignedInRootView: View {
                     }
                     .accessibilityIdentifier("v2.privacy.open")
                     Button("退出登录", role: .destructive) {
-                        signOutTask?.cancel()
-                        signOutTask = Task { await signOut() }
+                        guard signOutTask == nil else { return }
+                        signOutTask = Task {
+                            await signOut()
+                            guard !Task.isCancelled else { return }
+                            signOutTask = nil
+                        }
                     }
                     .accessibilityIdentifier("v2.sign-out")
                 } label: {

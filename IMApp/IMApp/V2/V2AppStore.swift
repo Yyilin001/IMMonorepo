@@ -69,6 +69,24 @@ enum V2PushWakeRuntimeOwnership {
     }
 }
 
+/// Sign-out spans authenticated endpoint removal and protected credential
+/// deletion. It is a single-flight operation so duplicate user taps or a
+/// simultaneous terminal-auth callback cannot interleave those two steps.
+@MainActor
+struct V2SignOutAttemptGate {
+    private(set) var isInFlight = false
+
+    mutating func begin() -> Bool {
+        guard !isInFlight else { return false }
+        isInFlight = true
+        return true
+    }
+
+    mutating func finish() {
+        isInFlight = false
+    }
+}
+
 @MainActor
 @Observable
 final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
@@ -137,6 +155,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
     @ObservationIgnored private var realtimeAttemptGate = V2RealtimeAttemptGate()
     @ObservationIgnored private var authenticationAttemptGate = V2AuthenticationAttemptGate()
+    @ObservationIgnored private var signOutAttemptGate = V2SignOutAttemptGate()
     @ObservationIgnored private var isApplicationActive = true
 
     private(set) var route: Route
@@ -438,6 +457,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     func signOut() async {
+        guard signOutAttemptGate.begin() else { return }
+        defer { signOutAttemptGate.finish() }
         guard let authSession, let pendingCredentialDeletionStore else {
             await discardAuthenticatedPresentation(route: .signedOut)
             return
