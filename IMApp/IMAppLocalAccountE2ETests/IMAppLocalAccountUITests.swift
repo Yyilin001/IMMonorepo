@@ -283,6 +283,68 @@ final class IMAppLocalAccountUITests: XCTestCase {
         await receiverConnection.disconnect()
     }
 
+    /// The local stack's stranger policy permits three initial messages in a
+    /// 24-hour window. The limit is enforced at the authenticated gateway,
+    /// rather than being a sender-side UI convention, and the fourth request
+    /// remains retryable so a durable outbox can apply its own backoff before
+    /// attempting the server window again.
+    func testStrangerMessageRateLimitIsEnforcedByGateway() async throws {
+        let sender = try await registerLocalAccount(displayName: "Rate-limit sender")
+        let receiver = try await registerLocalAccount(displayName: "Rate-limit receiver")
+        let frameLimits = try V2FrameLimits(
+            maximumPayloadBytes: 65_536,
+            acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
+        )
+        let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
+        let senderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let receiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+
+        do {
+            let senderSession = try await senderConnection.connectAndAuthenticate(
+                accessToken: sender.accessToken,
+                deviceID: sender.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            let receiverSession = try await receiverConnection.connectAndAuthenticate(
+                accessToken: receiver.accessToken,
+                deviceID: receiver.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            XCTAssertEqual(senderSession.userID, sender.userID)
+            XCTAssertEqual(receiverSession.userID, receiver.userID)
+
+            let senderTransport = V2ProtobufSyncTransport(
+                wire: senderConnection,
+                protocolVersion: senderSession.protocolVersion
+            )
+            let directRoom = try await senderTransport.openDirectRoom(
+                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
+                targetUserID: receiver.userID
+            )
+            for messageIndex in 1 ... 3 {
+                let accepted = try await senderTransport.sendMessage(
+                    roomID: directRoom.roomID,
+                    clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
+                    text: "stranger-window-message-\(messageIndex)",
+                    media: [],
+                    mentions: []
+                )
+                XCTAssertEqual(accepted.roomID, directRoom.roomID)
+            }
+            await assertStrangerMessageIsRateLimited(
+                senderTransport: senderTransport,
+                roomID: directRoom.roomID
+            )
+        } catch {
+            await senderConnection.disconnect()
+            await receiverConnection.disconnect()
+            throw error
+        }
+
+        await senderConnection.disconnect()
+        await receiverConnection.disconnect()
+    }
+
     @MainActor
     func testPasswordRegistrationEstablishesLocalSession() throws {
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
@@ -472,6 +534,34 @@ private func assertStrangerMessageIsForbidden(
         XCTAssertFalse(retryable)
     } catch {
         XCTFail("陌生人消息拒收应映射为不透明授权错误，实际错误：\(error)。")
+    }
+}
+
+private func assertStrangerMessageIsRateLimited(
+    senderTransport: V2ProtobufSyncTransport,
+    roomID: RoomID
+) async {
+    do {
+        _ = try await senderTransport.sendMessage(
+            roomID: roomID,
+            clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
+            text: "must-hit-stranger-window-limit",
+            media: [],
+            mentions: []
+        )
+        XCTFail("本机陌生人消息窗口的第 4 条消息不应被接受。")
+    } catch let error as V2RealtimeTransportError {
+        guard case .server(let code, let retryable, _, _) = error else {
+            XCTFail("陌生人限额必须返回服务端限流结果，实际错误：\(error)。")
+            return
+        }
+        XCTAssertEqual(code, "RATE_LIMITED")
+        XCTAssertTrue(retryable)
+        // `retry_after_seconds` is optional in the current protobuf contract;
+        // a zero value means the client falls back to its bounded local
+        // backoff. The stable gateway guarantee here is the retryable code.
+    } catch {
+        XCTFail("陌生人限额应映射为服务端限流错误，实际错误：\(error)。")
     }
 }
 

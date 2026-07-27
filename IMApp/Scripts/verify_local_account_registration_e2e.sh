@@ -12,6 +12,7 @@ local_compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
 project_file="${app_dir}/IMApp.xcodeproj"
 scheme="${IMAPP_LOCAL_ACCOUNT_E2E_SCHEME:-IMAppLocalAccountE2E}"
 destination_id="${IMAPP_LOCAL_ACCOUNT_E2E_SIMULATOR_ID:-}"
+expected_test_count="${IMAPP_LOCAL_ACCOUNT_E2E_EXPECTED_TESTS:-6}"
 
 source "${repo_root}/IMV2/scripts/local_compose.sh"
 
@@ -30,6 +31,12 @@ require_command xcrun
 require_command xcodebuild
 require_command curl
 require_command docker
+require_command jq
+
+if ! [[ "${expected_test_count}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'IMAPP_LOCAL_ACCOUNT_E2E_EXPECTED_TESTS must be a positive integer, got: %s\n' "${expected_test_count}" >&2
+  exit 2
+fi
 
 if [[ -z "${destination_id}" ]]; then
   printf '%s\n' 'missing IMAPP_LOCAL_ACCOUNT_E2E_SIMULATOR_ID; choose an iOS 26.2+ simulator explicitly so this script never shuts down or restarts an unrelated simulator.' >&2
@@ -71,11 +78,28 @@ status="$(curl --silent --output /dev/null --write-out '%{http_code}' --cacert "
 # not reset, shut down, erase, or otherwise touch any simulator lifecycle.
 xcrun simctl keychain "${destination_id}" add-root-cert "${local_ca}"
 
+result_directory="$(mktemp -d "${TMPDIR:-/tmp}/im-v2-local-account-e2e.XXXXXX")"
+result_bundle="${result_directory}/result.xcresult"
+trap 'rm -rf -- "${result_directory}"' EXIT
+
 xcodebuild test \
   -project "${project_file}" \
   -scheme "${scheme}" \
   -configuration Debug \
   -destination "platform=iOS Simulator,id=${destination_id}" \
-  -only-testing:IMAppLocalAccountE2ETests/IMAppLocalAccountUITests
+  -only-testing:IMAppLocalAccountE2ETests/IMAppLocalAccountUITests \
+  -resultBundlePath "${result_bundle}"
 
-printf 'local iOS account-and-delivery E2E: pass simulator=%s\n' "${destination_id}"
+test_summary="$(xcrun xcresulttool get test-results summary --path "${result_bundle}" --compact)"
+test_result="$(jq --raw-output '.result' <<<"${test_summary}")"
+failed_test_count="$(jq --raw-output '.failedTests' <<<"${test_summary}")"
+passed_test_count="$(jq --raw-output '.passedTests' <<<"${test_summary}")"
+total_test_count="$(jq --raw-output '.totalTestCount' <<<"${test_summary}")"
+
+if [[ "${test_result}" != "Passed" || "${failed_test_count}" != "0" || "${passed_test_count}" != "${expected_test_count}" || "${total_test_count}" != "${expected_test_count}" ]]; then
+  printf 'local iOS account-and-delivery E2E result mismatch: result=%s passed=%s failed=%s total=%s expected=%s\n' \
+    "${test_result}" "${passed_test_count}" "${failed_test_count}" "${total_test_count}" "${expected_test_count}" >&2
+  exit 1
+fi
+
+printf 'local iOS account-and-delivery E2E: pass simulator=%s tests=%s\n' "${destination_id}" "${total_test_count}"
