@@ -63,6 +63,42 @@ struct V2MembershipCommandOutboxTests {
         #expect(rejected.terminalCurrentRevision == 9)
         #expect(try await engine.flushOnce() == .idle)
     }
+
+    @Test("重启后重复提交相同待成员变更会复用原操作")
+    func duplicatePendingMembershipChangeReusesTheOriginalOperationAfterRestart() async throws {
+        let url = temporaryMembershipOutboxDatabaseURL()
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000608")
+        let targetUserID = try UserID("00000000-0000-0000-0000-000000000609")
+        let firstStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: membershipOutboxBinding)
+        let firstOperation = UUID(uuidString: "00000000-0000-0000-0000-000000000610")!
+        let firstEngine = V2MembershipCommandOutboxEngine(
+            store: firstStore,
+            transport: ScriptedMembershipTransport(results: []),
+            makeUUID: { firstOperation }
+        )
+
+        let original = try await firstEngine.enqueueMembershipChange(
+            roomID: roomID,
+            targetUserID: targetUserID,
+            action: .add,
+            expectedMembershipRevision: 4
+        )
+        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: membershipOutboxBinding)
+        let restartedEngine = V2MembershipCommandOutboxEngine(
+            store: restartedStore,
+            transport: ScriptedMembershipTransport(results: [])
+        )
+        let reused = try await restartedEngine.enqueueMembershipChange(
+            roomID: roomID,
+            targetUserID: targetUserID,
+            action: .add,
+            expectedMembershipRevision: 4
+        )
+
+        #expect(reused.operationID == original.operationID)
+        let pending = try await restartedStore.pendingMembershipCommands()
+        #expect(pending.count == 1)
+    }
 }
 
 private actor ScriptedMembershipTransport: V2ClientMembershipTransport {

@@ -598,6 +598,71 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
+    public func enqueueOrReusePendingMembershipCommand(
+        _ command: V2PendingMembershipCommand
+    ) throws -> V2PendingMembershipCommand {
+        try databasePool.write { db in
+            guard command.state == .pending,
+                  command.attemptCount == 0,
+                  command.resultingMembershipRevision == nil,
+                  command.resultingRoomSequence == nil,
+                  command.terminalCode == nil,
+                  command.terminalCurrentRevision == nil
+            else { throw V2ClientCommandError.commandConflict }
+            let expectedRevision = try Self.commandStorageInteger(command.expectedMembershipRevision)
+            if let existing = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM v2_pending_membership_commands WHERE operation_id = ?",
+                arguments: [command.operationID.rawValue]
+            ) {
+                let decoded = try Self.decodePendingMembershipCommand(existing)
+                guard decoded.roomID == command.roomID,
+                      decoded.targetUserID == command.targetUserID,
+                      decoded.action == command.action,
+                      decoded.expectedMembershipRevision == command.expectedMembershipRevision,
+                      decoded.state == .pending
+                else { throw V2ClientCommandError.commandConflict }
+                return decoded
+            }
+            if let existing = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM v2_pending_membership_commands
+                WHERE room_id = ? AND target_user_id = ? AND action = ?
+                  AND expected_membership_revision = ? AND state = 'pending'
+                ORDER BY created_at, operation_id
+                LIMIT 1
+                """,
+                arguments: [
+                    command.roomID.rawValue,
+                    command.targetUserID.rawValue,
+                    command.action.rawValue,
+                    expectedRevision
+                ]
+            ) {
+                return try Self.decodePendingMembershipCommand(existing)
+            }
+            try db.execute(
+                sql: """
+                INSERT INTO v2_pending_membership_commands
+                    (operation_id, room_id, target_user_id, action, expected_membership_revision,
+                     state, attempt_count, next_attempt_at, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                """,
+                arguments: [
+                    command.operationID.rawValue,
+                    command.roomID.rawValue,
+                    command.targetUserID.rawValue,
+                    command.action.rawValue,
+                    expectedRevision,
+                    command.nextAttemptAt.timeIntervalSince1970,
+                    command.nextAttemptAt.timeIntervalSince1970
+                ]
+            )
+            return command
+        }
+    }
+
     public func nextReadyMembershipCommand(now: Date) throws -> V2PendingMembershipCommand? {
         try databasePool.read { db in
             guard let row = try Row.fetchOne(db, sql: """

@@ -50,6 +50,9 @@ public struct V2PendingMembershipCommand: Equatable, Sendable {
 
 public protocol V2LocalMembershipCommandStore: Sendable {
     func enqueue(_ command: V2PendingMembershipCommand) async throws
+    /// A retry of the same target/action/revision must retain its original
+    /// operation ID. The local store makes that reuse atomic across restarts.
+    func enqueueOrReusePendingMembershipCommand(_ command: V2PendingMembershipCommand) async throws -> V2PendingMembershipCommand
     func nextReadyMembershipCommand(now: Date) async throws -> V2PendingMembershipCommand?
     func markMembershipAcknowledged(operationID: MembershipOperationID, membershipRevision: UInt64, roomSequence: UInt64) async throws
     func scheduleMembershipRetry(operationID: MembershipOperationID, nextAttemptAt: Date) async throws
@@ -110,8 +113,7 @@ public actor V2MembershipCommandOutboxEngine {
             terminalCode: nil,
             terminalCurrentRevision: nil
         )
-        try await store.enqueue(command)
-        return command
+        return try await store.enqueueOrReusePendingMembershipCommand(command)
     }
 
     public func flushOnce() async throws -> V2MembershipCommandFlushResult {
