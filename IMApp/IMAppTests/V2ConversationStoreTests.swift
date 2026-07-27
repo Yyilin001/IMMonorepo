@@ -245,6 +245,28 @@ struct V2ConversationStoreTests {
         #expect(store.draft.isEmpty)
     }
 
+    @Test func messageSendIgnoresLateSuccessAfterCancellation() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let sender = V2SuspendingConversationSender()
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: sender,
+            userID: "current-user",
+            roomID: "room-a"
+        )
+        store.draft = "保留草稿"
+
+        let submission = Task { await store.sendDraft() }
+        await sender.waitUntilSending()
+        submission.cancel()
+        await sender.complete()
+        await submission.value
+
+        #expect(!store.isSending)
+        #expect(store.draft == "保留草稿")
+        #expect(store.sendFeedback == nil)
+    }
+
     @Test func messageSendExplainsRateLimitWithoutDiscardingTheDraft() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .rejected(code: "RATE_LIMITED"))
@@ -713,6 +735,26 @@ struct V2ConversationStoreTests {
         #expect(store.directConversationFeedback == nil)
     }
 
+    @Test func cancellingDirectConversationAfterLateOpenDoesNotReturnARoom() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let opener = V2SuspendingDirectConversationOpener(roomID: "room-direct")
+        let resolver = V2ConversationPublicIdentityResolverFake(values: ["other_user": "other-user"])
+        let store = V2ConversationListStore(
+            dataSource: source,
+            userID: "current-user",
+            directConversationOpener: opener,
+            publicIdentityResolver: resolver
+        )
+
+        let operation = Task { await store.openDirectConversation(handle: "@other_user") }
+        await opener.waitUntilOpening()
+        operation.cancel()
+        await opener.complete()
+
+        #expect(await operation.value == nil)
+        #expect(store.directConversationFeedback == nil)
+    }
+
     @Test func cancellingGroupCreationAfterAnUncooperativeResolutionDoesNotCreateARoom() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let creator = V2GroupConversationCreatorFake(result: .created(roomID: "room-group"))
@@ -892,6 +934,38 @@ struct V2ConversationStoreTests {
 
         #expect(!store.isChangingGroupMembership)
         #expect(store.groupMemberFeedback == "成员变更已安全保存，连接恢复后会继续。")
+    }
+
+    @Test func groupMembershipChangeIgnoresLateSuccessAfterCancellation() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let page = V2GroupMemberPage(
+            membershipRevision: 8,
+            actorRole: "群主",
+            members: [.init(id: "member-a", role: "成员")],
+            nextCursor: nil
+        )
+        let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
+        let changer = V2SuspendingGroupMembershipChanger(result: .accepted)
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            groupMemberDirectory: reader,
+            groupMembershipChanger: changer
+        )
+        await store.loadGroupMembers(reset: true)
+
+        let change = Task { await store.changeGroupMembership(targetUserID: "member-a", action: .remove) }
+        await changer.waitUntilRequested()
+        change.cancel()
+        await changer.complete()
+        await change.value
+
+        #expect(!store.isChangingGroupMembership)
+        #expect(store.groupMemberFeedback == nil)
+        #expect(await reader.requestedCursors() == [nil])
     }
 
     @Test func cancellingMemberAdditionAfterAnUncooperativeIdentityResolutionDoesNotChangeMembership() async {
@@ -1513,6 +1587,33 @@ private actor V2DirectConversationOpenerFake: V2DirectConversationOpening {
 
     func targets() -> [String] {
         openedTargets
+    }
+}
+
+private actor V2SuspendingDirectConversationOpener: V2DirectConversationOpening {
+    private let roomID: String
+    private var openingWaiter: CheckedContinuation<Void, Never>?
+    private var completion: CheckedContinuation<Void, Never>?
+
+    init(roomID: String) {
+        self.roomID = roomID
+    }
+
+    func openConversation(with _: V2PublicIdentity) async throws -> String {
+        openingWaiter?.resume()
+        openingWaiter = nil
+        await withCheckedContinuation { completion = $0 }
+        return roomID
+    }
+
+    func waitUntilOpening() async {
+        guard completion == nil else { return }
+        await withCheckedContinuation { openingWaiter = $0 }
+    }
+
+    func complete() {
+        completion?.resume()
+        completion = nil
     }
 }
 

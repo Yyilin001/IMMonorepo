@@ -18,6 +18,16 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 ## Latest local verification (not a production release approval)
 
 - 2026-07-27: the selected iPhone 17 / iOS 26.2 Simulator passed the full
+  shared `IMApp` scheme with **68 Swift tests** and **2 UI tests**, zero
+  failures. The conversation UI now also fences cancellation after every
+  remote command, attachment-stage/upload/download, or room-opening response
+  and before it updates drafts, feedback, navigation results, attachment
+  state, or member state. Focused non-cooperative fakes prove cancellation
+  preserves a draft, suppresses a late direct-room navigation result, and
+  prevents a late member mutation from triggering a refresh. This is local
+  client lifecycle evidence only, not a remote-delivery or deployment
+  guarantee.
+- 2026-07-27: the selected iPhone 17 / iOS 26.2 Simulator passed the full
   shared `IMApp` scheme with **65 Swift tests** and **2 UI tests**, zero
   failures. Privacy preferences, public-identity display-name saves, and
   user-block commands now each check cancellation after an external response

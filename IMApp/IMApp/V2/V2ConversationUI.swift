@@ -338,7 +338,9 @@ final class V2ConversationListStore {
                 return nil
             }
             try Task.checkCancellation()
-            switch try await groupConversationCreator.createConversation(title: title, initialMemberUserIDs: members) {
+            let outcome = try await groupConversationCreator.createConversation(title: title, initialMemberUserIDs: members)
+            try Task.checkCancellation()
+            switch outcome {
             case .created(let roomID):
                 explicitRoomTitles[roomID] = title.trimmingCharacters(in: .whitespacesAndNewlines)
                 explicitRoomKinds[roomID] = .group
@@ -406,6 +408,7 @@ final class V2ConversationListStore {
                 return nil
             }
             let roomID = try await directConversationOpener.openConversation(with: identity)
+            try Task.checkCancellation()
             explicitRoomTitles[roomID] = identity.displayName
             explicitRoomKinds[roomID] = .direct
             directConversationFeedback = nil
@@ -549,7 +552,9 @@ final class V2ConversationDetailStore {
         do {
             let mentions = try await resolvedMentions()
             try Task.checkCancellation()
-            switch try await sender.send(text: text, media: media, mentions: mentions, in: roomID) {
+            let outcome = try await sender.send(text: text, media: media, mentions: mentions, in: roomID)
+            try Task.checkCancellation()
+            switch outcome {
             case .accepted:
                 sendFeedback = "已发送，正在同步。"
                 await discardAttachmentsAfterDurableSend()
@@ -651,6 +656,7 @@ final class V2ConversationDetailStore {
         }
         do {
             let attachment = try await attachmentStager.stageImportedFile(at: sourceURL)
+            try Task.checkCancellation()
             attachments.append(.init(attachment: attachment, state: .staged))
             sendFeedback = nil
         } catch is CancellationError {
@@ -691,6 +697,7 @@ final class V2ConversationDetailStore {
             attachments[index].state = .uploading
             do {
                 let reference = try await attachmentUploader.upload(attachment)
+                try Task.checkCancellation()
                 guard let completedIndex = attachments.firstIndex(where: { $0.id == id }) else { continue }
                 attachments[completedIndex].state = .available(reference)
             } catch is CancellationError {
@@ -731,6 +738,7 @@ final class V2ConversationDetailStore {
         mediaDownloadStates[media.mediaID] = .downloading
         do {
             let downloaded = try await mediaDownloader.download(media)
+            try Task.checkCancellation()
             guard messages.contains(where: { !$0.isWithdrawn && $0.media.contains(media) }) else {
                 mediaDownloadStates[media.mediaID] = .notDownloaded
                 return
@@ -756,11 +764,13 @@ final class V2ConversationDetailStore {
             return
         }
         do {
-            switch try await messageWithdrawer.withdraw(
+            let outcome = try await messageWithdrawer.withdraw(
                 messageID: message.id,
                 in: roomID,
                 expectedMessageRevision: message.revision
-            ) {
+            )
+            try Task.checkCancellation()
+            switch outcome {
             case .accepted:
                 messageActionFeedback = "撤回已提交，正在同步。"
                 await refresh()
@@ -794,12 +804,14 @@ final class V2ConversationDetailStore {
             return false
         }
         do {
-            switch try await messageEditor.edit(
+            let outcome = try await messageEditor.edit(
                 messageID: message.id,
                 in: roomID,
                 expectedMessageRevision: message.revision,
                 text: trimmedText
-            ) {
+            )
+            try Task.checkCancellation()
+            switch outcome {
             case .accepted:
                 messageActionFeedback = "编辑已提交，正在同步。"
                 await refresh()
@@ -827,12 +839,14 @@ final class V2ConversationDetailStore {
         }
         let action: V2MessageReactionAction = message.reactions.first(where: { $0.reaction == reaction })?.includesCurrentUser == true ? .remove : .add
         do {
-            switch try await messageReactionChanger.changeReaction(
+            let outcome = try await messageReactionChanger.changeReaction(
                 messageID: message.id,
                 in: roomID,
                 reaction: reaction,
                 action: action
-            ) {
+            )
+            try Task.checkCancellation()
+            switch outcome {
             case .accepted:
                 messageActionFeedback = "反应已提交，正在同步。"
                 await refresh()
@@ -913,6 +927,7 @@ final class V2ConversationDetailStore {
                 muteUntil: Date().addingTimeInterval(duration),
                 reasonCode: try .init("ADMIN_ACTION")
             )
+            try Task.checkCancellation()
             switch outcome {
             case .accepted:
                 groupMemberFeedback = "禁言已提交，正在同步。"
@@ -944,6 +959,7 @@ final class V2ConversationDetailStore {
                 targetUserID: member.id,
                 reasonCode: try .init("ADMIN_ACTION")
             )
+            try Task.checkCancellation()
             switch outcome {
             case .accepted:
                 groupMemberFeedback = "管理员移除已提交，正在同步。"
@@ -989,12 +1005,14 @@ final class V2ConversationDetailStore {
             } else {
                 target = input
             }
-            switch try await groupMembershipChanger.changeMembership(
+            let outcome = try await groupMembershipChanger.changeMembership(
                 roomID: roomID,
                 targetUserID: target,
                 action: action,
                 expectedMembershipRevision: revision
-            ) {
+            )
+            try Task.checkCancellation()
+            switch outcome {
             case .accepted:
                 groupMemberFeedback = nil
                 await loadGroupMembers(reset: true)
