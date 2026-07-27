@@ -37,6 +37,39 @@ struct V2MessageRedactionOutboxTests {
         #expect(saved.terminalCode == "FORBIDDEN")
         #expect(try await engine.flushOnce() == .idle)
     }
+
+    @Test("duplicate pending redaction after restart reuses its original operation ID")
+    func duplicatePendingRedactionReusesTheOriginalOperationAfterRestart() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-redaction-\(UUID().uuidString).sqlite")
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000968")
+        let messageID = try MessageID("00000000-0000-0000-0000-000000000969")
+        let reasonCode = try V2ModerationReasonCode("policy_violation")
+        let originalStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: redactionBinding)
+        let originalEngine = V2MessageRedactionOutboxEngine(
+            store: originalStore,
+            transport: ScriptedRedactionTransport(results: []),
+            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000970")! }
+        )
+        let original = try await originalEngine.enqueueRedaction(
+            roomID: roomID,
+            messageID: messageID,
+            reasonCode: reasonCode
+        )
+
+        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: redactionBinding)
+        let restartedEngine = V2MessageRedactionOutboxEngine(
+            store: restartedStore,
+            transport: ScriptedRedactionTransport(results: [])
+        )
+        let reused = try await restartedEngine.enqueueRedaction(
+            roomID: roomID,
+            messageID: messageID,
+            reasonCode: reasonCode
+        )
+
+        #expect(reused.operationID == original.operationID)
+        #expect(try await restartedStore.pendingMessageRedactions().count == 1)
+    }
 }
 
 private actor ScriptedRedactionTransport: V2ClientMessageRedactionTransport {

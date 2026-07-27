@@ -20,6 +20,9 @@ public struct V2PendingMessageRedaction: Equatable, Sendable {
 
 public protocol V2LocalMessageRedactionStore: Sendable {
     func enqueue(_ command: V2PendingMessageRedaction) async throws
+    /// Equivalent pending moderator redactions retain one operation ID across
+    /// retries and restarts so their audit trail stays singular.
+    func enqueueOrReusePendingMessageRedaction(_ command: V2PendingMessageRedaction) async throws -> V2PendingMessageRedaction
     func nextReadyMessageRedaction(now: Date) async throws -> V2PendingMessageRedaction?
     func markMessageRedactionAcknowledged(operationID: ModerationOperationID, messageRevision: UInt64, roomSequence: UInt64) async throws
     func scheduleMessageRedactionRetry(operationID: ModerationOperationID, nextAttemptAt: Date) async throws
@@ -66,8 +69,7 @@ public actor V2MessageRedactionOutboxEngine {
             resultingRoomSequence: nil,
             terminalCode: nil
         )
-        try await store.enqueue(command)
-        return command
+        return try await store.enqueueOrReusePendingMessageRedaction(command)
     }
 
     public func flushOnce() async throws -> V2MessageRedactionFlushResult {

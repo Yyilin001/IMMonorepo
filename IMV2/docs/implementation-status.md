@@ -17,6 +17,14 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: a duplicate pending moderator message-redaction command now
+  atomically reuses the original operation ID when its room, message, and
+  bounded reason code are unchanged. This keeps one audit action across a
+  lost response or app restart; a changed reason remains a distinct action.
+  The native `IMV2ClientKit` suite passed **129 tests**; the selected iPhone
+  17 / iOS 26.2 Simulator passed the full shared `IMApp` scheme with **80
+  Swift tests** and **2 UI tests**, zero failures. This is local
+  durable-intent evidence only, not multi-device or deployment evidence.
 - 2026-07-27: a duplicate pending message withdrawal now atomically reuses
   the original operation ID when its room, message, and expected message
   revision are unchanged. A retry after a lost response or app restart no
