@@ -46,6 +46,44 @@ struct V2MemberMuteOutboxTests {
         #expect(saved.first?.state == .rejected)
         #expect(saved.first?.terminalCode == "MUTE_EXPIRED")
     }
+
+    @Test("duplicate pending mute after restart reuses its original operation ID")
+    func duplicatePendingMuteReusesTheOriginalOperationAfterRestart() async throws {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-member-mute-\(UUID().uuidString).sqlite")
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000985")
+        let targetUserID = try UserID("00000000-0000-0000-0000-000000000986")
+        let reasonCode = try V2ModerationReasonCode("policy_violation")
+        let originalStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: muteBinding)
+        let originalEngine = V2MemberMuteOutboxEngine(
+            store: originalStore,
+            transport: ScriptedMuteTransport(results: []),
+            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000987")! },
+            now: { now }
+        )
+        let original = try await originalEngine.enqueueMute(
+            roomID: roomID,
+            targetUserID: targetUserID,
+            muteUntil: now.addingTimeInterval(600),
+            reasonCode: reasonCode
+        )
+
+        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: muteBinding)
+        let restartedEngine = V2MemberMuteOutboxEngine(
+            store: restartedStore,
+            transport: ScriptedMuteTransport(results: []),
+            now: { now.addingTimeInterval(1) }
+        )
+        let reused = try await restartedEngine.enqueueMute(
+            roomID: roomID,
+            targetUserID: targetUserID,
+            muteUntil: now.addingTimeInterval(600),
+            reasonCode: reasonCode
+        )
+
+        #expect(reused.operationID == original.operationID)
+        #expect(try await restartedStore.pendingMemberMutes().count == 1)
+    }
 }
 
 private actor ScriptedMuteTransport: V2ClientMemberMuteTransport {

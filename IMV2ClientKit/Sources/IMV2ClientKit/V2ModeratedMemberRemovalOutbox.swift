@@ -20,6 +20,9 @@ public struct V2PendingModeratedMemberRemoval: Equatable, Sendable {
 
 public protocol V2LocalModeratedMemberRemovalStore: Sendable {
     func enqueue(_ command: V2PendingModeratedMemberRemoval) async throws
+    /// Equivalent pending audit removals retain their operation ID across
+    /// retries and restarts.
+    func enqueueOrReusePendingModeratedMemberRemoval(_ command: V2PendingModeratedMemberRemoval) async throws -> V2PendingModeratedMemberRemoval
     func nextReadyModeratedMemberRemoval(now: Date) async throws -> V2PendingModeratedMemberRemoval?
     func markModeratedMemberRemovalAcknowledged(operationID: ModerationOperationID, membershipRevision: UInt64, roomSequence: UInt64) async throws
     func scheduleModeratedMemberRemovalRetry(operationID: ModerationOperationID, nextAttemptAt: Date) async throws
@@ -42,8 +45,7 @@ public actor V2ModeratedMemberRemovalOutboxEngine {
 
     public func enqueueRemoval(roomID: RoomID, targetUserID: UserID, reasonCode: V2ModerationReasonCode) async throws -> V2PendingModeratedMemberRemoval {
         let command = try V2PendingModeratedMemberRemoval(roomID: roomID, operationID: .init(makeUUID().uuidString), targetUserID: targetUserID, reasonCode: reasonCode, state: .pending, attemptCount: 0, nextAttemptAt: now(), resultingMembershipRevision: nil, resultingRoomSequence: nil, terminalCode: nil)
-        try await store.enqueue(command)
-        return command
+        return try await store.enqueueOrReusePendingModeratedMemberRemoval(command)
     }
 
     public func flushOnce() async throws -> V2ModeratedMemberRemovalFlushResult {

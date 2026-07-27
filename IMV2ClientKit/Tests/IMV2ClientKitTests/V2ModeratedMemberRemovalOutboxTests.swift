@@ -24,6 +24,39 @@ struct V2ModeratedMemberRemovalOutboxTests {
         #expect(saved.resultingRoomSequence == 9)
         #expect(await transport.operationIDs() == [command.operationID, command.operationID])
     }
+
+    @Test("duplicate pending audit removal after restart reuses its original operation ID")
+    func duplicatePendingRemovalReusesTheOriginalOperationAfterRestart() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-moderated-removal-\(UUID().uuidString).sqlite")
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000985")
+        let targetUserID = try UserID("00000000-0000-0000-0000-000000000986")
+        let reasonCode = try V2ModerationReasonCode("policy_violation")
+        let originalStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: removalBinding)
+        let originalEngine = V2ModeratedMemberRemovalOutboxEngine(
+            store: originalStore,
+            transport: ScriptedRemovalTransport(results: []),
+            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000987")! }
+        )
+        let original = try await originalEngine.enqueueRemoval(
+            roomID: roomID,
+            targetUserID: targetUserID,
+            reasonCode: reasonCode
+        )
+
+        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: removalBinding)
+        let restartedEngine = V2ModeratedMemberRemovalOutboxEngine(
+            store: restartedStore,
+            transport: ScriptedRemovalTransport(results: [])
+        )
+        let reused = try await restartedEngine.enqueueRemoval(
+            roomID: roomID,
+            targetUserID: targetUserID,
+            reasonCode: reasonCode
+        )
+
+        #expect(reused.operationID == original.operationID)
+        #expect(try await restartedStore.pendingModeratedMemberRemovals().count == 1)
+    }
 }
 
 private actor ScriptedRemovalTransport: V2ClientModeratedMemberRemovalTransport {

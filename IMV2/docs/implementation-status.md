@@ -17,6 +17,15 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: equivalent pending member-mute and audit-level member-removal
+  commands now atomically reuse their original operation ID across retries
+  and restarts. A mute still requires the same target, canonical expiry, and
+  reason; an audit removal still requires the same target and reason, so a
+  changed moderation decision remains distinct. The native `IMV2ClientKit`
+  suite passed **133 tests**; the selected iPhone 17 / iOS 26.2 Simulator
+  passed the full shared `IMApp` scheme with **80 Swift tests** and **2 UI
+  tests**, zero failures. This is local durable-intent evidence only, not
+  multi-device or deployment evidence.
 - 2026-07-27: equivalent pending message edits and message reactions now
   atomically reuse their original operation ID across retries and restarts.
   An edit still requires the same revision and replacement text, while a

@@ -944,6 +944,69 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         if let row = try Row.fetchOne(db, sql: "SELECT room_id, target_user_id, mute_until, reason_code FROM v2_pending_member_mutes WHERE operation_id = ?", arguments: [command.operationID.rawValue]) { let room: String = row["room_id"], target: String = row["target_user_id"], until: Double = row["mute_until"], reason: String = row["reason_code"]; guard room == command.roomID.rawValue, target == command.targetUserID.rawValue, until == command.muteUntil.timeIntervalSince1970, reason == command.reasonCode.rawValue else { throw V2ClientCommandError.commandConflict }; return }
         try db.execute(sql: "INSERT INTO v2_pending_member_mutes (operation_id, room_id, target_user_id, mute_until, reason_code, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.targetUserID.rawValue, command.muteUntil.timeIntervalSince1970, command.reasonCode.rawValue, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
     } }
+
+    public func enqueueOrReusePendingMemberMute(
+        _ command: V2PendingMemberMute
+    ) throws -> V2PendingMemberMute {
+        try databasePool.write { db in
+            guard command.muteUntil > command.nextAttemptAt,
+                  command.state == .pending,
+                  command.attemptCount == 0,
+                  command.resultingRoomSequence == nil,
+                  command.terminalCode == nil
+            else { throw V2ClientCommandError.commandConflict }
+            if let existing = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM v2_pending_member_mutes WHERE operation_id = ?",
+                arguments: [command.operationID.rawValue]
+            ) {
+                let decoded = try Self.decodePendingMemberMute(existing)
+                guard decoded.roomID == command.roomID,
+                      decoded.targetUserID == command.targetUserID,
+                      decoded.muteUntil == command.muteUntil,
+                      decoded.reasonCode == command.reasonCode,
+                      decoded.state == .pending
+                else { throw V2ClientCommandError.commandConflict }
+                return decoded
+            }
+            if let existing = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM v2_pending_member_mutes
+                WHERE room_id = ? AND target_user_id = ? AND mute_until = ?
+                  AND reason_code = ? AND state = 'pending'
+                ORDER BY created_at, operation_id
+                LIMIT 1
+                """,
+                arguments: [
+                    command.roomID.rawValue,
+                    command.targetUserID.rawValue,
+                    command.muteUntil.timeIntervalSince1970,
+                    command.reasonCode.rawValue
+                ]
+            ) {
+                return try Self.decodePendingMemberMute(existing)
+            }
+            try db.execute(
+                sql: """
+                INSERT INTO v2_pending_member_mutes
+                    (operation_id, room_id, target_user_id, mute_until, reason_code,
+                     state, attempt_count, next_attempt_at, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                """,
+                arguments: [
+                    command.operationID.rawValue,
+                    command.roomID.rawValue,
+                    command.targetUserID.rawValue,
+                    command.muteUntil.timeIntervalSince1970,
+                    command.reasonCode.rawValue,
+                    command.nextAttemptAt.timeIntervalSince1970,
+                    command.nextAttemptAt.timeIntervalSince1970
+                ]
+            )
+            return command
+        }
+    }
     public func nextReadyMemberMute(now: Date) throws -> V2PendingMemberMute? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_member_mutes WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingMemberMute(row) } }
     public func markMemberMuteAcknowledged(operationID: ModerationOperationID, roomSequence: UInt64) throws { guard roomSequence > 0 else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingMemberMute(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_member_mutes SET state = 'acknowledged', resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(roomSequence), operationID.rawValue]) } }
     public func scheduleMemberMuteRetry(operationID: ModerationOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingMemberMute(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_member_mutes SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
@@ -960,6 +1023,66 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         if let row = try Row.fetchOne(db, sql: "SELECT room_id, target_user_id, reason_code FROM v2_pending_moderated_member_removals WHERE operation_id = ?", arguments: [command.operationID.rawValue]) { let room: String = row["room_id"], target: String = row["target_user_id"], reason: String = row["reason_code"]; guard room == command.roomID.rawValue, target == command.targetUserID.rawValue, reason == command.reasonCode.rawValue else { throw V2ClientCommandError.commandConflict }; return }
         try db.execute(sql: "INSERT INTO v2_pending_moderated_member_removals (operation_id, room_id, target_user_id, reason_code, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.targetUserID.rawValue, command.reasonCode.rawValue, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
     } }
+
+    public func enqueueOrReusePendingModeratedMemberRemoval(
+        _ command: V2PendingModeratedMemberRemoval
+    ) throws -> V2PendingModeratedMemberRemoval {
+        try databasePool.write { db in
+            guard command.state == .pending,
+                  command.attemptCount == 0,
+                  command.resultingMembershipRevision == nil,
+                  command.resultingRoomSequence == nil,
+                  command.terminalCode == nil
+            else { throw V2ClientCommandError.commandConflict }
+            if let existing = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM v2_pending_moderated_member_removals WHERE operation_id = ?",
+                arguments: [command.operationID.rawValue]
+            ) {
+                let decoded = try Self.decodePendingModeratedMemberRemoval(existing)
+                guard decoded.roomID == command.roomID,
+                      decoded.targetUserID == command.targetUserID,
+                      decoded.reasonCode == command.reasonCode,
+                      decoded.state == .pending
+                else { throw V2ClientCommandError.commandConflict }
+                return decoded
+            }
+            if let existing = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM v2_pending_moderated_member_removals
+                WHERE room_id = ? AND target_user_id = ? AND reason_code = ?
+                  AND state = 'pending'
+                ORDER BY created_at, operation_id
+                LIMIT 1
+                """,
+                arguments: [
+                    command.roomID.rawValue,
+                    command.targetUserID.rawValue,
+                    command.reasonCode.rawValue
+                ]
+            ) {
+                return try Self.decodePendingModeratedMemberRemoval(existing)
+            }
+            try db.execute(
+                sql: """
+                INSERT INTO v2_pending_moderated_member_removals
+                    (operation_id, room_id, target_user_id, reason_code,
+                     state, attempt_count, next_attempt_at, created_at)
+                VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
+                """,
+                arguments: [
+                    command.operationID.rawValue,
+                    command.roomID.rawValue,
+                    command.targetUserID.rawValue,
+                    command.reasonCode.rawValue,
+                    command.nextAttemptAt.timeIntervalSince1970,
+                    command.nextAttemptAt.timeIntervalSince1970
+                ]
+            )
+            return command
+        }
+    }
     public func nextReadyModeratedMemberRemoval(now: Date) throws -> V2PendingModeratedMemberRemoval? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_moderated_member_removals WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingModeratedMemberRemoval(row) } }
     public func markModeratedMemberRemovalAcknowledged(operationID: ModerationOperationID, membershipRevision: UInt64, roomSequence: UInt64) throws { guard membershipRevision > 0, roomSequence > 0 else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingModeratedMemberRemoval(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_moderated_member_removals SET state = 'acknowledged', resulting_membership_revision = ?, resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(membershipRevision), try Self.commandStorageInteger(roomSequence), operationID.rawValue]) } }
     public func scheduleModeratedMemberRemovalRetry(operationID: ModerationOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingModeratedMemberRemoval(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_moderated_member_removals SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }

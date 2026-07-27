@@ -17,6 +17,9 @@ public struct V2PendingMemberMute: Equatable, Sendable {
 
 public protocol V2LocalMemberMuteStore: Sendable {
     func enqueue(_ command: V2PendingMemberMute) async throws
+    /// Equivalent pending mute commands retain one operation ID across an app
+    /// restart; a changed expiry or reason remains a distinct action.
+    func enqueueOrReusePendingMemberMute(_ command: V2PendingMemberMute) async throws -> V2PendingMemberMute
     func nextReadyMemberMute(now: Date) async throws -> V2PendingMemberMute?
     func markMemberMuteAcknowledged(operationID: ModerationOperationID, roomSequence: UInt64) async throws
     func scheduleMemberMuteRetry(operationID: ModerationOperationID, nextAttemptAt: Date) async throws
@@ -45,7 +48,7 @@ public actor V2MemberMuteOutboxEngine {
         let commandTime = now()
         guard normalizedMuteUntil > commandTime else { throw V2ModerationValidationError.invalidMuteExpiry }
         let command = try V2PendingMemberMute(roomID: roomID, operationID: .init(makeUUID().uuidString), targetUserID: targetUserID, muteUntil: normalizedMuteUntil, reasonCode: reasonCode, state: .pending, attemptCount: 0, nextAttemptAt: commandTime, resultingRoomSequence: nil, terminalCode: nil)
-        try await store.enqueue(command); return command
+        return try await store.enqueueOrReusePendingMemberMute(command)
     }
 
     public func flushOnce() async throws -> V2MemberMuteFlushResult {
