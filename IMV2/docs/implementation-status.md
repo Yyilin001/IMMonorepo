@@ -683,9 +683,10 @@ TLS gateway 连接创建 direct room；随后双方断开，发送端先把消�
 消息行，最后分别清理两端 scope。该回归还发现并修复了账户菜单错误附着在根视图、进入详情页后
 遮挡输入区发送按钮的问题：菜单现在属于会话列表的导航栏，不再覆盖会话详情；它也在已登录列表和
 消息详情分别执行元素、触达区域、描述、Dynamic Type、文本裁切和 traits 审计；消息详情输入区还
-通过了普通对比度审计，低对比度的“添加附件”和“发送”文字按钮已改用高对比度系统主色调。它不覆盖
-APNs、签名真机、生产网络或容量；VoiceOver 人工阅读顺序、列表/设置页与高对比度、减少动态效果和
-RTL 仍需人工验收。
+通过了普通对比度审计，低对比度的“添加附件”和“发送”文字按钮已改用高对比度系统主色调。账户菜单
+还能实际打开陌生人消息接收设置和公开身份资料页，回归会验证其关键开关/文本框可定位、可操作及可返回
+会话列表。它不覆盖 APNs、签名真机、生产网络或容量；VoiceOver 人工阅读顺序、设置页的 Dynamic Type
+与高对比度、减少动态效果和 RTL 仍需人工验收。
 
 The same baseline audit found that the retired macOS automation called removed
 `Makefile` targets and that the Release build phase directly executed a

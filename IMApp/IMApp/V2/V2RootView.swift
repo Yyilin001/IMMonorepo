@@ -348,6 +348,7 @@ private struct V2SignedInRootView: View {
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
                                 Button("完成") { isPresentingPrivacySettings = false }
+                                    .accessibilityIdentifier("v2.privacy.done")
                             }
                         }
                 }
@@ -359,6 +360,7 @@ private struct V2SignedInRootView: View {
                             .toolbar {
                                 ToolbarItem(placement: .cancellationAction) {
                                     Button("完成") { isPresentingPublicIdentitySettings = false }
+                                        .accessibilityIdentifier("v2.identity.done")
                                 }
                             }
                     }

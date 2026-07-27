@@ -30,6 +30,38 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "账户菜单必须作为会话列表导航栏的一部分出现。"
         )
         try auditOrdinaryChatSurface(in: app)
+        app.buttons["v2.account-menu"].tap()
+        let privacySettings = app.buttons["v2.privacy.open"]
+        XCTAssertTrue(privacySettings.waitForExistence(timeout: 5))
+        privacySettings.tap()
+        XCTAssertTrue(
+            app.switches["v2.privacy.allow-stranger-messages"].waitForExistence(timeout: 15),
+            "账户菜单必须能打开已认证的陌生人消息接收设置。"
+        )
+        XCTAssertTrue(
+            app.switches["v2.privacy.allow-stranger-messages"].isHittable,
+            "陌生人消息接收开关必须可由辅助技术定位并操作。"
+        )
+        let done = app.buttons["v2.privacy.done"]
+        XCTAssertTrue(done.exists)
+        done.tap()
+        XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 5))
+        app.buttons["v2.account-menu"].tap()
+        let publicIdentity = app.buttons["v2.identity.open"]
+        XCTAssertTrue(publicIdentity.waitForExistence(timeout: 5))
+        publicIdentity.tap()
+        XCTAssertTrue(
+            app.textFields["v2.identity.display-name.edit"].waitForExistence(timeout: 15),
+            "账户菜单必须能打开已认证的公开身份资料页面。"
+        )
+        XCTAssertTrue(
+            app.textFields["v2.identity.display-name.edit"].isHittable,
+            "公开身份资料的显示名称必须可由辅助技术定位并编辑。"
+        )
+        let identityDone = app.buttons["v2.identity.done"]
+        XCTAssertTrue(identityDone.exists)
+        identityDone.tap()
+        XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 5))
         app.terminate()
     }
 
