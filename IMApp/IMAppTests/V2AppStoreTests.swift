@@ -55,6 +55,22 @@ struct V2AppStoreTests {
         #expect(gate.matchesCurrentGeneration(second))
     }
 
+    @Test("后台推送完成后只停止仍处于后台的运行时")
+    func backgroundPushWakeDoesNotStopForegroundRuntime() {
+        #expect(V2PushWakeRuntimeOwnership.shouldStopAfterFetch(
+            startedWhileApplicationInactive: true,
+            isApplicationActive: false
+        ))
+        #expect(!V2PushWakeRuntimeOwnership.shouldStopAfterFetch(
+            startedWhileApplicationInactive: true,
+            isApplicationActive: true
+        ))
+        #expect(!V2PushWakeRuntimeOwnership.shouldStopAfterFetch(
+            startedWhileApplicationInactive: false,
+            isApplicationActive: false
+        ))
+    }
+
     @Test("UI test startup mode bypasses device state and remains signed out")
     func uiTestingStartupModeStaysSignedOut() async {
         let store = V2AppStore(startupMode: .uiTestingSignedOut)

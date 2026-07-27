@@ -17,6 +17,15 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: a contentless push that wakes the app while it remains in the
+  background now owns only its bounded realtime catch-up. After sync it stops
+  the runtime and its long-lived availability/heartbeat loops; if the scene
+  becomes active during the catch-up, foreground lifecycle ownership keeps
+  that shared runtime running. A focused ownership regression covers both
+  outcomes. The selected iPhone 17 / iOS 26.2 Simulator passed the full
+  shared `IMApp` scheme with **74 Swift tests** and **2 UI tests**, zero
+  failures. This is local lifecycle evidence only, not APNs delivery or
+  deployment evidence.
 - 2026-07-27: live availability-driven synchronization now completes a
   `resetRequired` snapshot before it notifies projection observers or replays
   durable commands. Previously only the initial connection path materialized

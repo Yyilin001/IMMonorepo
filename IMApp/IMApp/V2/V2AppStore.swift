@@ -56,6 +56,19 @@ struct V2AuthenticationAttemptGate {
     }
 }
 
+/// A background push owns only the bounded catch-up it starts. If the scene
+/// returns to the foreground before that catch-up finishes, foreground
+/// lifecycle ownership takes over and the shared runtime must stay alive.
+@MainActor
+enum V2PushWakeRuntimeOwnership {
+    static func shouldStopAfterFetch(
+        startedWhileApplicationInactive: Bool,
+        isApplicationActive: Bool
+    ) -> Bool {
+        startedWhileApplicationInactive && !isApplicationActive
+    }
+}
+
 @MainActor
 @Observable
 final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
@@ -669,18 +682,27 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
               let realtimeRuntime,
               let conversationStore
         else { return .noData }
+        let startedWhileApplicationInactive = !isApplicationActive
+        let result: UIBackgroundFetchResult
         do {
             _ = try await realtimeRuntime.start()
             await conversationStore.refresh()
-            return .newData
+            result = .newData
         } catch is CancellationError {
-            return .noData
+            result = .noData
         } catch V2RealtimeSessionCoordinatorError.authenticationRequired {
             await signOut()
-            return .failed
+            result = .failed
         } catch {
-            return .failed
+            result = .failed
         }
+        if V2PushWakeRuntimeOwnership.shouldStopAfterFetch(
+            startedWhileApplicationInactive: startedWhileApplicationInactive,
+            isApplicationActive: isApplicationActive
+        ) {
+            await realtimeRuntime.stop()
+        }
+        return result
     }
 
     private func cleanupLiveLocalAccountE2ETestScope() async {
