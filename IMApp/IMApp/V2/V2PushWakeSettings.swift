@@ -10,21 +10,35 @@ import UIKit
 protocol V2PushWakePreferenceStoring: Sendable {
     func isEnabled() async -> Bool
     func setEnabled(_ enabled: Bool) async
+    /// A disabled preference may still need a remote DELETE after a previous
+    /// network failure. This marker contains no APNs token or endpoint data.
+    func hasPendingEndpointRemoval() async -> Bool
+    func setPendingEndpointRemoval(_ pending: Bool) async
 }
 
 actor V2UserDefaultsPushWakePreferenceStore: V2PushWakePreferenceStoring {
     private let defaults: UserDefaults
     private let key: String
+    private let pendingRemovalKey: String
 
     init(defaults: UserDefaults = .standard, key: String) {
         self.defaults = defaults
         self.key = key
+        pendingRemovalKey = key + ".pending-endpoint-removal"
     }
 
     func isEnabled() -> Bool { defaults.bool(forKey: key) }
 
     func setEnabled(_ enabled: Bool) {
         defaults.set(enabled, forKey: key)
+    }
+
+    func hasPendingEndpointRemoval() -> Bool {
+        defaults.bool(forKey: pendingRemovalKey)
+    }
+
+    func setPendingEndpointRemoval(_ pending: Bool) {
+        defaults.set(pending, forKey: pendingRemovalKey)
     }
 }
 
@@ -94,12 +108,23 @@ final class V2PushWakeSettingsStore {
         let persistedEnabled = await preferences.isEnabled()
         guard generation == preferenceGeneration else { return }
         isEnabled = persistedEnabled
-        guard isEnabled else {
+        if isEnabled {
+            await preferences.setPendingEndpointRemoval(false)
+            guard generation == preferenceGeneration else { return }
+            requestFreshToken()
+            return
+        }
+        let hasPendingEndpointRemoval = await preferences.hasPendingEndpointRemoval()
+        guard generation == preferenceGeneration else { return }
+        guard hasPendingEndpointRemoval else {
             state = .disabled
             feedback = nil
             return
         }
-        requestFreshToken()
+        await removePendingEndpointAfterDisable(
+            preferenceGeneration: generation,
+            endpointGeneration: endpointOperationGeneration
+        )
     }
 
     func setEnabled(_ desiredValue: Bool) async {
@@ -113,34 +138,17 @@ final class V2PushWakeSettingsStore {
         await preferences.setEnabled(desiredValue)
         guard generation == preferenceGeneration else { return }
         if desiredValue {
+            await preferences.setPendingEndpointRemoval(false)
+            guard generation == preferenceGeneration else { return }
             requestFreshToken()
             return
         }
-
-        do {
-            try await endpointClient.remove()
-            guard generation == preferenceGeneration,
-                  endpointGeneration == endpointOperationGeneration,
-                  !isEnabled
-            else { return }
-            state = .disabled
-        } catch is CancellationError {
-            guard generation == preferenceGeneration,
-                  endpointGeneration == endpointOperationGeneration,
-                  !isEnabled
-            else { return }
-            state = .retryableFailure
-            feedback = "后台同步唤醒设置尚未同步，请稍后重试。"
-        } catch {
-            // The disabled preference remains durable. A later activation or
-            // explicit retry issues DELETE again, which is safe and device scoped.
-            guard generation == preferenceGeneration,
-                  endpointGeneration == endpointOperationGeneration,
-                  !isEnabled
-            else { return }
-            state = .retryableFailure
-            feedback = "后台同步唤醒设置尚未同步，请稍后重试。"
-        }
+        await preferences.setPendingEndpointRemoval(true)
+        guard generation == preferenceGeneration else { return }
+        await removePendingEndpointAfterDisable(
+            preferenceGeneration: generation,
+            endpointGeneration: endpointGeneration
+        )
     }
 
     func receiveAPNSToken(_ token: String) async {
@@ -182,6 +190,7 @@ final class V2PushWakeSettingsStore {
         feedback = nil
         do {
             try await endpointClient.remove()
+            await preferences.setPendingEndpointRemoval(false)
         } catch is CancellationError {
             state = .retryableFailure
             feedback = "后台同步唤醒端点尚未移除，请联网后重试退出登录。"
@@ -197,6 +206,51 @@ final class V2PushWakeSettingsStore {
         guard isEnabled else { return }
         state = .waitingForToken
         remoteNotificationRegistrar?.registerForRemoteNotifications()
+    }
+
+    /// DELETE is idempotent and device scoped. Keeping a token-free durable
+    /// marker makes a failed opt-out retryable after the app is relaunched.
+    private func removePendingEndpointAfterDisable(
+        preferenceGeneration: UInt64,
+        endpointGeneration: UInt64
+    ) async {
+        state = .loading
+        feedback = nil
+        do {
+            try await endpointClient.remove()
+            guard preferenceGeneration == self.preferenceGeneration,
+                  endpointGeneration == endpointOperationGeneration,
+                  !isEnabled
+            else { return }
+            await preferences.setPendingEndpointRemoval(false)
+            guard preferenceGeneration == self.preferenceGeneration,
+                  endpointGeneration == endpointOperationGeneration,
+                  !isEnabled
+            else { return }
+            state = .disabled
+        } catch is CancellationError {
+            applyEndpointRemovalFailure(
+                preferenceGeneration: preferenceGeneration,
+                endpointGeneration: endpointGeneration
+            )
+        } catch {
+            applyEndpointRemovalFailure(
+                preferenceGeneration: preferenceGeneration,
+                endpointGeneration: endpointGeneration
+            )
+        }
+    }
+
+    private func applyEndpointRemovalFailure(
+        preferenceGeneration: UInt64,
+        endpointGeneration: UInt64
+    ) {
+        guard preferenceGeneration == self.preferenceGeneration,
+              endpointGeneration == endpointOperationGeneration,
+              !isEnabled
+        else { return }
+        state = .retryableFailure
+        feedback = "后台同步唤醒设置尚未同步，请稍后重试。"
     }
 }
 

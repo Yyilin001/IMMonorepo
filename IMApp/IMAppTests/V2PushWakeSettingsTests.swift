@@ -71,6 +71,41 @@ struct V2PushWakeSettingsTests {
         #expect(store.isEnabled == false)
         #expect(store.state == .disabled)
         #expect(await endpoint.operations() == [.remove])
+        #expect(await preferences.pendingEndpointRemoval() == false)
+    }
+
+    @Test("关闭失败的端点删除会在下次启动时重试")
+    func failedDisableRemovalRetriesOnNextActivation() async {
+        let preferences = PushWakePreferences(enabled: true)
+        let failingEndpoint = PushEndpointClientFake(removeError: PushWakeTestError.failed)
+        let remote = RemoteNotificationRegistrarFake()
+        let failingStore = V2PushWakeSettingsStore(
+            preferences: preferences,
+            endpointClient: failingEndpoint,
+            remoteNotificationRegistrar: remote,
+            environment: .development
+        )
+
+        await failingStore.activate()
+        await failingStore.setEnabled(false)
+
+        #expect(await preferences.value() == false)
+        #expect(await preferences.pendingEndpointRemoval())
+        #expect(failingStore.state == .retryableFailure)
+
+        let recoveringEndpoint = PushEndpointClientFake()
+        let recoveringStore = V2PushWakeSettingsStore(
+            preferences: preferences,
+            endpointClient: recoveringEndpoint,
+            remoteNotificationRegistrar: remote,
+            environment: .development
+        )
+        await recoveringStore.activate()
+
+        #expect(recoveringStore.isEnabled == false)
+        #expect(recoveringStore.state == .disabled)
+        #expect(await recoveringEndpoint.operations() == [.remove])
+        #expect(await preferences.pendingEndpointRemoval() == false)
     }
 
     @Test("registration failure preserves enabled intent for a later retry")
@@ -151,6 +186,7 @@ struct V2PushWakeSettingsTests {
     @Test("sign out removes the endpoint without clearing a user scoped preference")
     func signOutRemovesEndpoint() async throws {
         let preferences = PushWakePreferences(enabled: true)
+        await preferences.setPendingEndpointRemoval(true)
         let endpoint = PushEndpointClientFake()
         let remote = RemoteNotificationRegistrarFake()
         let store = V2PushWakeSettingsStore(
@@ -167,6 +203,7 @@ struct V2PushWakeSettingsTests {
         #expect(store.isEnabled == false)
         #expect(store.state == .disabled)
         #expect(await endpoint.operations() == [.remove])
+        #expect(await preferences.pendingEndpointRemoval() == false)
     }
 
     @Test("sign out retains credentials until the endpoint is removed")
@@ -196,12 +233,16 @@ struct V2PushWakeSettingsTests {
 
 private actor PushWakePreferences: V2PushWakePreferenceStoring {
     private var enabled: Bool
+    private var pendingRemoval = false
 
     init(enabled: Bool) { self.enabled = enabled }
 
     func isEnabled() -> Bool { enabled }
     func setEnabled(_ enabled: Bool) { self.enabled = enabled }
+    func hasPendingEndpointRemoval() -> Bool { pendingRemoval }
+    func setPendingEndpointRemoval(_ pending: Bool) { pendingRemoval = pending }
     func value() -> Bool { enabled }
+    func pendingEndpointRemoval() -> Bool { pendingRemoval }
 }
 
 @MainActor
