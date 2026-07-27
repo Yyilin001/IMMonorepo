@@ -97,16 +97,19 @@ struct V2AppStoreTests {
         #expect(store.authenticationMessage == nil)
     }
 
-    @Test("本地账号 UI 集成模式保留配置但不恢复历史登录态")
+    @Test("本地账号 UI 集成模式仅在显式恢复模式读取同一测试存储域")
     func uiTestingLiveLocalAccountModeDoesNotRestorePersistedSession() {
         #expect(V2AppStore.StartupMode.production.restoresPersistedSession)
         #expect(!V2AppStore.StartupMode.uiTestingSignedOut.restoresPersistedSession)
         #expect(!V2AppStore.StartupMode.uiTestingLiveLocalAccount.restoresPersistedSession)
+        #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccountRestore.restoresPersistedSession)
         #expect(!V2AppStore.StartupMode.uiTestingLiveLocalAccountCleanup.restoresPersistedSession)
         #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccount.needsRuntimeConfiguration)
+        #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccountRestore.needsRuntimeConfiguration)
         #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccountCleanup.needsRuntimeConfiguration)
         #expect(!V2AppStore.StartupMode.uiTestingSignedOut.needsRuntimeConfiguration)
         #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccount.usesLiveLocalAccountE2ETestScope)
+        #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccountRestore.usesLiveLocalAccountE2ETestScope)
         #expect(V2AppStore.StartupMode.uiTestingLiveLocalAccountCleanup.usesLiveLocalAccountE2ETestScope)
         #expect(!V2AppStore.StartupMode.production.usesLiveLocalAccountE2ETestScope)
     }

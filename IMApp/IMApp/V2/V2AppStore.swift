@@ -104,13 +104,18 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         /// the opt-in local-account integration test; it is never reachable
         /// from a Release build.
         case uiTestingLiveLocalAccount
+        /// Reopens only the explicitly scoped Keychain and SQLite state from
+        /// a preceding local-account UI-test launch. This lets two distinct
+        /// simulator installations prove an offline recipient catches up
+        /// after it is relaunched; it cannot reach a production session.
+        case uiTestingLiveLocalAccountRestore
         /// Performs the opt-in local-account test scope cleanup. Like the
         /// registration mode, this is reachable only from a DEBUG launch
         /// argument and requires a valid random test scope.
         case uiTestingLiveLocalAccountCleanup
 
         var restoresPersistedSession: Bool {
-            self == .production
+            self == .production || self == .uiTestingLiveLocalAccountRestore
         }
 
         var needsRuntimeConfiguration: Bool {
@@ -118,7 +123,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         }
 
         var usesLiveLocalAccountE2ETestScope: Bool {
-            self == .uiTestingLiveLocalAccount || self == .uiTestingLiveLocalAccountCleanup
+            self == .uiTestingLiveLocalAccount
+                || self == .uiTestingLiveLocalAccountRestore
+                || self == .uiTestingLiveLocalAccountCleanup
         }
     }
 

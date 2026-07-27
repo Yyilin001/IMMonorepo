@@ -420,11 +420,14 @@ final class V2ConversationListStore {
         }
     }
 
-    func detailStore(for roomID: String) -> V2ConversationDetailStore {
+    func detailStore(
+        for roomID: String,
+        initialDraft: String? = nil
+    ) -> V2ConversationDetailStore {
         let item = items.first(where: { $0.id == roomID })
         let title = explicitRoomTitles[roomID] ?? item?.title ?? "会话"
         let kind = explicitRoomKinds[roomID] ?? item?.kind ?? .unknown
-        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader, projectionChangeNotifier: projectionChangeNotifier)
+        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader, projectionChangeNotifier: projectionChangeNotifier, initialDraft: initialDraft)
     }
 
     func observeProjectionChanges() async {
@@ -527,7 +530,7 @@ final class V2ConversationDetailStore {
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
-    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil, projectionChangeNotifier: V2ProjectionChangeNotifier? = nil) {
+    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil, projectionChangeNotifier: V2ProjectionChangeNotifier? = nil, initialDraft: String? = nil) {
         self.dataSource = dataSource
         self.sender = sender
         self.messageWithdrawer = messageWithdrawer
@@ -547,6 +550,7 @@ final class V2ConversationDetailStore {
         self.attachmentUploader = attachmentUploader
         self.mediaDownloader = mediaDownloader
         self.projectionChangeNotifier = projectionChangeNotifier
+        draft = initialDraft ?? ""
     }
 
     func refresh() async {
@@ -1122,14 +1126,30 @@ private enum V2ConversationMentionInputError: Error, Sendable {
 
 struct V2ConversationListView: View {
     @Bindable var store: V2ConversationListStore
+    let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
+    private let accountMenu: V2ConversationAccountMenu?
     @State private var navigationPath = NavigationPath()
     @State private var isPresentingDirectConversation = false
     @State private var isPresentingGroupConversation = false
-    @State private var directTargetUserID = ""
+    @State private var directTargetUserID: String
+    @State private var localE2EFixtureRoomID: String?
     @State private var groupTitle = ""
     @State private var groupMemberUserIDs = ""
     @State private var directSubmissionTask: Task<Void, Never>?
     @State private var groupSubmissionTask: Task<Void, Never>?
+
+    init(
+        store: V2ConversationListStore,
+        localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture? = nil,
+        accountMenu: V2ConversationAccountMenu? = nil
+    ) {
+        self.store = store
+        self.localE2EConversationLaunchFixture = localE2EConversationLaunchFixture
+        self.accountMenu = accountMenu
+        _directTargetUserID = State(
+            initialValue: localE2EConversationLaunchFixture?.directTargetHandle ?? ""
+        )
+    }
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -1172,21 +1192,35 @@ struct V2ConversationListView: View {
             }
             .navigationTitle("消息")
             .toolbar {
-                Button("新建群聊", systemImage: "person.3") {
-                    isPresentingGroupConversation = true
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("新建群聊", systemImage: "person.3") {
+                        isPresentingGroupConversation = true
+                    }
+                    .accessibilityIdentifier("v2.conversation.new-group")
+                    Button("新建私聊", systemImage: "square.and.pencil") {
+                        isPresentingDirectConversation = true
+                    }
+                    .accessibilityIdentifier("v2.conversation.new-direct")
+                    Button("刷新", systemImage: "arrow.clockwise") {
+                        Task { await store.refresh() }
+                    }
+                    .accessibilityIdentifier("v2.conversation.refresh")
                 }
-                .accessibilityIdentifier("v2.conversation.new-group")
-                Button("新建私聊", systemImage: "square.and.pencil") {
-                    isPresentingDirectConversation = true
+                if let accountMenu {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        accountMenu
+                    }
                 }
-                .accessibilityIdentifier("v2.conversation.new-direct")
-                Button("刷新", systemImage: "arrow.clockwise") {
-                    Task { await store.refresh() }
-                }
-                .accessibilityIdentifier("v2.conversation.refresh")
             }
             .navigationDestination(for: String.self) { roomID in
-                V2ConversationDetailView(store: store.detailStore(for: roomID))
+                V2ConversationDetailView(
+                    store: store.detailStore(
+                        for: roomID,
+                        initialDraft: localE2EFixtureRoomID == roomID
+                            ? localE2EConversationLaunchFixture?.initialMessage
+                            : nil
+                    )
+                )
             }
             .task { await store.observeProjectionChanges() }
             .sheet(isPresented: $isPresentingDirectConversation) {
@@ -1217,6 +1251,7 @@ struct V2ConversationListView: View {
                                     if let roomID = await store.openDirectConversation(handle: target), !Task.isCancelled {
                                         directSubmissionTask = nil
                                         directTargetUserID = ""
+                                        localE2EFixtureRoomID = roomID
                                         isPresentingDirectConversation = false
                                         navigationPath.append(roomID)
                                     } else if !Task.isCancelled {
@@ -1294,6 +1329,32 @@ struct V2ConversationListView: View {
                 }
             }
         }
+    }
+}
+
+struct V2ConversationAccountMenu: View {
+    let canOpenPublicIdentity: Bool
+    let openPublicIdentity: @MainActor () -> Void
+    let openPrivacySettings: @MainActor () -> Void
+    let signOut: @MainActor () -> Void
+
+    var body: some View {
+        Menu {
+            if canOpenPublicIdentity {
+                Button("我的资料", action: openPublicIdentity)
+                    .accessibilityIdentifier("v2.identity.open")
+            }
+            Button("消息接收设置", action: openPrivacySettings)
+                .accessibilityIdentifier("v2.privacy.open")
+            Button("退出登录", role: .destructive, action: signOut)
+                .accessibilityIdentifier("v2.sign-out")
+        } label: {
+            Image(systemName: "person.crop.circle")
+                .font(.title2)
+        }
+        .accessibilityLabel("账户和设置")
+        .accessibilityHint("打开资料、消息接收设置和退出登录菜单")
+        .accessibilityIdentifier("v2.account-menu")
     }
 }
 
@@ -1501,7 +1562,7 @@ private struct V2ConversationMessageRow: View {
             V2ConversationMessageBubble(store: store, message: message, beginEditing: beginEditing)
             if !message.isOutgoing { Spacer(minLength: 44) }
         }
-        .accessibilityIdentifier("v2.message.\(message.id)")
+        .accessibilityIdentifier("v2.message.row.\(message.id)")
     }
 }
 

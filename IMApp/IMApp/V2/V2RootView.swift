@@ -9,6 +9,7 @@ struct V2RootView: View {
     private let initialLocalE2ETestPassword: String?
     private let initialLocalE2ETestPublicHandle: String?
     private let initialLocalE2ETestDisplayName: String?
+    private let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     @State private var store: V2AppStore
     @State private var protectedDataRetryTask: Task<Void, Never>?
 
@@ -20,7 +21,9 @@ struct V2RootView: View {
         if arguments.contains("-v2-ui-testing-live-local-account") {
             startupMode = arguments.contains("-v2-ui-testing-cleanup-local-account")
                 ? .uiTestingLiveLocalAccountCleanup
-                : .uiTestingLiveLocalAccount
+                : arguments.contains("-v2-ui-testing-restore-local-account")
+                    ? .uiTestingLiveLocalAccountRestore
+                    : .uiTestingLiveLocalAccount
         } else if arguments.contains("-v2-ui-testing-signed-out") {
             startupMode = .uiTestingSignedOut
         } else {
@@ -39,6 +42,12 @@ struct V2RootView: View {
         initialLocalE2ETestDisplayName = startupMode == .uiTestingLiveLocalAccount
             ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-display-name")
             : nil
+        localE2EConversationLaunchFixture = startupMode.usesLiveLocalAccountE2ETestScope
+            ? .init(
+                directTargetHandle: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-direct-target"),
+                initialMessage: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-message")
+            )
+            : nil
         let liveLocalAccountE2ETestScope = startupMode.usesLiveLocalAccountE2ETestScope
             ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-e2e-scope").flatMap(V2LiveLocalAccountE2ETestScope.init(rawValue:))
             : nil
@@ -49,6 +58,7 @@ struct V2RootView: View {
         initialLocalE2ETestPassword = nil
         initialLocalE2ETestPublicHandle = nil
         initialLocalE2ETestDisplayName = nil
+        localE2EConversationLaunchFixture = nil
         let liveLocalAccountE2ETestScope: V2LiveLocalAccountE2ETestScope? = nil
         #endif
         _store = State(initialValue: V2AppStore(
@@ -84,6 +94,7 @@ struct V2RootView: View {
                         userBlockSettingsStore: store.userBlockSettingsStore,
                         publicIdentitySettingsStore: store.publicIdentitySettingsStore,
                         pushWakeSettingsStore: store.pushWakeSettingsStore,
+                        localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
                         signOut: { await store.signOut() }
                     )
                 } else {
@@ -302,43 +313,30 @@ private struct V2SignedInRootView: View {
     let userBlockSettingsStore: V2UserBlockSettingsStore?
     let publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     let pushWakeSettingsStore: V2PushWakeSettingsStore?
+    let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     let signOut: @MainActor @Sendable () async -> Void
     @State private var signOutTask: Task<Void, Never>?
     @State private var isPresentingPrivacySettings = false
     @State private var isPresentingPublicIdentitySettings = false
 
     var body: some View {
-        V2ConversationListView(store: conversationStore)
-            .overlay(alignment: .bottomTrailing) {
-                Menu {
-                    if publicIdentitySettingsStore != nil {
-                        Button("我的资料") {
-                            isPresentingPublicIdentitySettings = true
-                        }
-                        .accessibilityIdentifier("v2.identity.open")
+        V2ConversationListView(
+            store: conversationStore,
+            localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
+            accountMenu: V2ConversationAccountMenu(
+                canOpenPublicIdentity: publicIdentitySettingsStore != nil,
+                openPublicIdentity: { isPresentingPublicIdentitySettings = true },
+                openPrivacySettings: { isPresentingPrivacySettings = true },
+                signOut: {
+                    guard signOutTask == nil else { return }
+                    signOutTask = Task {
+                        await signOut()
+                        guard !Task.isCancelled else { return }
+                        signOutTask = nil
                     }
-                    Button("消息接收设置") {
-                        isPresentingPrivacySettings = true
-                    }
-                    .accessibilityIdentifier("v2.privacy.open")
-                    Button("退出登录", role: .destructive) {
-                        guard signOutTask == nil else { return }
-                        signOutTask = Task {
-                            await signOut()
-                            guard !Task.isCancelled else { return }
-                            signOutTask = nil
-                        }
-                    }
-                    .accessibilityIdentifier("v2.sign-out")
-                } label: {
-                    Image(systemName: "person.crop.circle")
-                        .font(.title2)
-                        .padding()
                 }
-                .accessibilityLabel("账户和设置")
-                .accessibilityHint("打开资料、消息接收设置和退出登录菜单")
-                .accessibilityIdentifier("v2.account-menu")
-            }
+            )
+        )
             .onDisappear { signOutTask?.cancel() }
             .sheet(isPresented: $isPresentingPrivacySettings) {
                 NavigationStack {

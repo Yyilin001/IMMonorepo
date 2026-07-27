@@ -37,6 +37,13 @@
 			remoteGlobalIDString = 1BADBC0D2F73859D00E89B24;
 			remoteInfo = IMApp;
 		};
+		B2C3D4E5F60718293A4B5C06 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1BADBC062F73859D00E89B24 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1BADBC0D2F73859D00E89B24;
+			remoteInfo = IMApp;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
@@ -44,6 +51,7 @@
 		1BADBC1B2F73859E00E89B24 /* IMAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = IMAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1BADBC252F73859E00E89B24 /* IMAppUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = IMAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1E2E3E4F567891011121301 /* IMAppLocalAccountE2ETests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = IMAppLocalAccountE2ETests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B2C3D4E5F60718293A4B5C01 /* IMAppLocalTwoInstallE2ETests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = IMAppLocalTwoInstallE2ETests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -65,6 +73,11 @@
 		A1E2E3E4F567891011121302 /* IMAppLocalAccountE2ETests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = IMAppLocalAccountE2ETests;
+			sourceTree = "<group>";
+		};
+		B2C3D4E5F60718293A4B5C02 /* IMAppLocalTwoInstallE2ETests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = IMAppLocalTwoInstallE2ETests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -104,6 +117,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B2C3D4E5F60718293A4B5C03 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -114,6 +134,7 @@
 				1BADBC1E2F73859E00E89B24 /* IMAppTests */,
 				1BADBC282F73859E00E89B24 /* IMAppUITests */,
 				A1E2E3E4F567891011121302 /* IMAppLocalAccountE2ETests */,
+				B2C3D4E5F60718293A4B5C02 /* IMAppLocalTwoInstallE2ETests */,
 				1BADBC0F2F73859D00E89B24 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -125,6 +146,7 @@
 				1BADBC1B2F73859E00E89B24 /* IMAppTests.xctest */,
 				1BADBC252F73859E00E89B24 /* IMAppUITests.xctest */,
 				A1E2E3E4F567891011121301 /* IMAppLocalAccountE2ETests.xctest */,
+				B2C3D4E5F60718293A4B5C01 /* IMAppLocalTwoInstallE2ETests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -230,6 +252,29 @@
 			productReference = A1E2E3E4F567891011121301 /* IMAppLocalAccountE2ETests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		B2C3D4E5F60718293A4B5C11 /* IMAppLocalTwoInstallE2ETests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B2C3D4E5F60718293A4B5C08 /* Build configuration list for PBXNativeTarget "IMAppLocalTwoInstallE2ETests" */;
+			buildPhases = (
+				B2C3D4E5F60718293A4B5C04 /* Sources */,
+				B2C3D4E5F60718293A4B5C03 /* Frameworks */,
+				B2C3D4E5F60718293A4B5C05 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B2C3D4E5F60718293A4B5C07 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				B2C3D4E5F60718293A4B5C02 /* IMAppLocalTwoInstallE2ETests */,
+			);
+			name = IMAppLocalTwoInstallE2ETests;
+			packageProductDependencies = (
+			);
+			productName = IMAppLocalTwoInstallE2ETests;
+			productReference = B2C3D4E5F60718293A4B5C01 /* IMAppLocalTwoInstallE2ETests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -253,6 +298,10 @@
 					};
 				};
 				A1E2E3E4F567891011121311 = {
+					CreatedOnToolsVersion = 26.3;
+					TestTargetID = 1BADBC0D2F73859D00E89B24;
+				};
+				B2C3D4E5F60718293A4B5C11 = {
 					CreatedOnToolsVersion = 26.3;
 					TestTargetID = 1BADBC0D2F73859D00E89B24;
 				};
@@ -280,6 +329,7 @@
 				1BADBC1A2F73859E00E89B24 /* IMAppTests */,
 				1BADBC242F73859E00E89B24 /* IMAppUITests */,
 				A1E2E3E4F567891011121311 /* IMAppLocalAccountE2ETests */,
+				B2C3D4E5F60718293A4B5C11 /* IMAppLocalTwoInstallE2ETests */,
 			);
 		};
 /* End PBXProject section */
@@ -307,6 +357,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A1E2E3E4F567891011121306 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2C3D4E5F60718293A4B5C05 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -371,6 +428,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B2C3D4E5F60718293A4B5C04 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -388,6 +452,11 @@
 			isa = PBXTargetDependency;
 			target = 1BADBC0D2F73859D00E89B24 /* IMApp */;
 			targetProxy = A1E2E3E4F567891011121303 /* PBXContainerItemProxy */;
+		};
+		B2C3D4E5F60718293A4B5C07 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1BADBC0D2F73859D00E89B24 /* IMApp */;
+			targetProxy = B2C3D4E5F60718293A4B5C06 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -715,6 +784,46 @@
 			};
 			name = Release;
 		};
+		B2C3D4E5F60718293A4B5C09 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codex.imappLocalTwoInstallE2ETests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = IMApp;
+			};
+			name = Debug;
+		};
+		B2C3D4E5F60718293A4B5C10 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codex.imappLocalTwoInstallE2ETests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = IMApp;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -759,6 +868,15 @@
 			buildConfigurations = (
 				A1E2E3E4F567891011121309 /* Debug */,
 				A1E2E3E4F567891011121310 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B2C3D4E5F60718293A4B5C08 /* Build configuration list for PBXNativeTarget "IMAppLocalTwoInstallE2ETests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B2C3D4E5F60718293A4B5C09 /* Debug */,
+				B2C3D4E5F60718293A4B5C10 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
