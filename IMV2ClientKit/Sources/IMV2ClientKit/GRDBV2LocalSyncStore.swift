@@ -563,6 +563,20 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
+    /// Discards completed commands after their short local diagnostic window.
+    /// Pending records are the durable source for retries and are never
+    /// eligible for this cleanup.
+    public func pruneTerminalCommands(olderThan cutoff: Date) throws {
+        try databasePool.write { db in
+            for table in Self.terminalCommandTables {
+                try db.execute(
+                    sql: "DELETE FROM \(table) WHERE state <> 'pending' AND created_at <= ?",
+                    arguments: [cutoff.timeIntervalSince1970]
+                )
+            }
+        }
+    }
+
     public func enqueue(_ command: V2PendingMembershipCommand) throws {
         try databasePool.write { db in
             guard command.state == .pending,
@@ -2569,10 +2583,61 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     ON v2_pending_group_room_creations
                     (title, initial_member_user_ids, created_at, operation_id)
                     WHERE state = 'pending';
+            """)
+        }
+        migrator.registerMigration("addV2TerminalCommandRetentionIndexes") { db in
+            try db.execute(sql: """
+                CREATE INDEX v2_pending_message_commands_terminal_retention_idx
+                    ON v2_pending_message_commands (created_at)
+                    WHERE state <> 'pending';
+                CREATE INDEX v2_pending_membership_commands_terminal_retention_idx
+                    ON v2_pending_membership_commands (created_at)
+                    WHERE state <> 'pending';
+                CREATE INDEX v2_pending_message_withdrawals_terminal_retention_idx
+                    ON v2_pending_message_withdrawals (created_at)
+                    WHERE state <> 'pending';
+                CREATE INDEX v2_pending_message_redactions_terminal_retention_idx
+                    ON v2_pending_message_redactions (created_at)
+                    WHERE state <> 'pending';
+                CREATE INDEX v2_pending_member_mutes_terminal_retention_idx
+                    ON v2_pending_member_mutes (created_at)
+                    WHERE state <> 'pending';
+                CREATE INDEX v2_pending_moderated_member_removals_terminal_retention_idx
+                    ON v2_pending_moderated_member_removals (created_at)
+                    WHERE state <> 'pending';
+                CREATE INDEX v2_pending_message_edits_terminal_retention_idx
+                    ON v2_pending_message_edits (created_at)
+                    WHERE state <> 'pending';
+                CREATE INDEX v2_pending_read_receipts_terminal_retention_idx
+                    ON v2_pending_read_receipts (created_at)
+                    WHERE state <> 'pending';
+                CREATE INDEX v2_pending_message_reactions_terminal_retention_idx
+                    ON v2_pending_message_reactions (created_at)
+                    WHERE state <> 'pending';
+                CREATE INDEX v2_pending_social_commands_terminal_retention_idx
+                    ON v2_pending_social_commands (created_at)
+                    WHERE state <> 'pending';
+                CREATE INDEX v2_pending_group_room_creations_terminal_retention_idx
+                    ON v2_pending_group_room_creations (created_at)
+                    WHERE state <> 'pending';
                 """)
         }
         return migrator
     }()
+
+    private static let terminalCommandTables = [
+        "v2_pending_message_commands",
+        "v2_pending_membership_commands",
+        "v2_pending_message_withdrawals",
+        "v2_pending_message_redactions",
+        "v2_pending_member_mutes",
+        "v2_pending_moderated_member_removals",
+        "v2_pending_message_edits",
+        "v2_pending_read_receipts",
+        "v2_pending_message_reactions",
+        "v2_pending_social_commands",
+        "v2_pending_group_room_creations"
+    ]
 }
 
 public enum V2LocalBackupExclusion {

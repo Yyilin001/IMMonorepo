@@ -17,11 +17,24 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: terminal client-command rows now have an explicit local
+  lifecycle: after a successful durable synchronization, rows that have
+  reached any terminal state are retained for 24 hours for short-term
+  diagnostics and then purged; pending retry records are never eligible. All
+  eleven command tables have matching partial expiry indexes, and regression
+  coverage verifies both the schema and that an old terminal message is
+  removed while an old pending message remains durable. This limits local
+  accumulation of rejected edit text, group titles, identifiers, and reason
+  codes without changing server-side audit retention. The native
+  `IMV2ClientKit` suite passed **137 tests**; the selected iPhone 17 / iOS
+  26.2 Simulator passed the full shared `IMApp` scheme with **80 Swift tests**
+  and **2 UI tests**, zero failures. This is local-storage evidence only, not
+  capacity or deployment evidence.
 - 2026-07-27: the SQLite migration now creates partial semantic-intent
   indexes for every durable command path that reuses an equivalent pending
-  operation. Terminal command history therefore cannot turn restart/retry
-  lookup into a full-table scan; an index-schema regression verifies all nine
-  indexes exist after migration. The native `IMV2ClientKit` suite passed
+  operation. The lookup stays scoped to the small pending subset, and an
+  index-schema regression verifies all nine indexes exist after migration.
+  The native `IMV2ClientKit` suite passed
   **134 tests**; the selected iPhone 17 / iOS 26.2 Simulator passed the full
   shared `IMApp` scheme with **80 Swift tests** and **2 UI tests**, zero
   failures. This is local durable-storage evidence only, not capacity or

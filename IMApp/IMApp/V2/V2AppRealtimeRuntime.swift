@@ -575,6 +575,11 @@ struct V2AppRealtimeRuntime {
                     if case .idle = try await readReceiptOutbox.flushOnce() { break }
                 }
             },
+            afterDurableSynchronization: {
+                try await localStore.pruneTerminalCommands(
+                    olderThan: Date().addingTimeInterval(-86_400)
+                )
+            },
             onProjectionSynchronized: {
                 await projectionChangeNotifier.publish()
             }

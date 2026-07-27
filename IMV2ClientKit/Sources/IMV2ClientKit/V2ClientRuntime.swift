@@ -27,6 +27,7 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
     private let commandOutbox: (any V2ClientCommandFlushing)?
     private let maximumInitialCommandFlushes: Int
     private let flushAdditionalDurableCommands: @Sendable () async throws -> Void
+    private let afterDurableSynchronization: @Sendable () async throws -> Void
     private let onProjectionSynchronized: @Sendable () async -> Void
 
     public init(
@@ -37,6 +38,7 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         commandOutbox: (any V2ClientCommandFlushing)? = nil,
         maximumInitialCommandFlushes: Int = 256,
         flushAdditionalDurableCommands: @escaping @Sendable () async throws -> Void = {},
+        afterDurableSynchronization: @escaping @Sendable () async throws -> Void = {},
         onProjectionSynchronized: @escaping @Sendable () async -> Void = {}
     ) {
         precondition(maximumInitialCommandFlushes > 0)
@@ -44,7 +46,8 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         self.availabilityRunner = .init(
             source: availabilitySource,
             syncEngine: syncEngine,
-            afterSynchronization: { [commandOutbox, maximumInitialCommandFlushes, flushAdditionalDurableCommands, onProjectionSynchronized] in
+            afterSynchronization: { [commandOutbox, maximumInitialCommandFlushes, flushAdditionalDurableCommands, afterDurableSynchronization, onProjectionSynchronized] in
+                try await afterDurableSynchronization()
                 await onProjectionSynchronized()
                 try await Self.flush(
                     commandOutbox: commandOutbox,
@@ -57,6 +60,7 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         self.commandOutbox = commandOutbox
         self.maximumInitialCommandFlushes = maximumInitialCommandFlushes
         self.flushAdditionalDurableCommands = flushAdditionalDurableCommands
+        self.afterDurableSynchronization = afterDurableSynchronization
         self.onProjectionSynchronized = onProjectionSynchronized
     }
 
@@ -64,6 +68,7 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         if case .resetPending = try await syncEngine.synchronizeUntilCaughtUp() {
             try await syncEngine.completePendingReset()
         }
+        try await afterDurableSynchronization()
         await onProjectionSynchronized()
     }
 

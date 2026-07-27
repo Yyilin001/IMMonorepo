@@ -165,6 +165,27 @@ struct V2ClientRuntimeTests {
         #expect(await recorder.count() == 2)
     }
 
+    @Test("terminal command maintenance follows every successful sync")
+    func terminalCommandMaintenanceFollowsEverySuccessfulSync() async throws {
+        let sync = AvailabilitySyncDriver()
+        let recorder = ProjectionSyncRecorder()
+        let activity = V2DefaultClientRuntimeActivity(
+            syncEngine: sync,
+            availabilitySource: OneAvailabilityHintThenStop(),
+            heartbeatSender: NoopHeartbeatSender(),
+            heartbeatInterval: .seconds(30),
+            afterDurableSynchronization: { await recorder.record() }
+        )
+
+        try await activity.synchronizeAfterConnection()
+        await #expect(throws: AvailabilityLoopStop.finished) {
+            try await activity.runAvailabilityLoop()
+        }
+
+        #expect(await sync.synchronizationCount() == 2)
+        #expect(await recorder.count() == 2)
+    }
+
     private func authenticatedSession() throws -> V2AuthenticatedClientSession {
         .init(
             userID: try .init("00000000-0000-0000-0000-000000000811"),
