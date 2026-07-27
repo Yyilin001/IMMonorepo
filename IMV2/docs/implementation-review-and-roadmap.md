@@ -24,7 +24,7 @@
 | --- | --- | --- | --- |
 | P0 | 没有 V2 生产部署拓扑、secret 管理、入口暴露和回滚方案 | 无法安全部署 gateway、account、operator、metrics | 建立 IaC/部署清单、环境分层、上线/回滚 runbook |
 | P0 | Passkey 只有客户端/传输边界；未部署审计级 WebAuthn RP verifier、challenge/counter 存储 | 主认证路径不可用 | WebAuthn 端到端真机与攻击/重放测试通过 |
-| P0 | 媒体、扫描、对象存储只有协议/服务边界，缺生产 provider 与 scanner | 附件功能不能作为生产能力交付 | 真实 provider、扫描隔离、失败恢复、滥用测试通过 |
+| P0 | 本机文件系统 provider/EICAR 扫描夹具已验证媒体合同，但缺生产 provider、扫描器与对象存储 | 附件功能不能作为生产能力交付 | 真实 provider、扫描隔离、失败恢复、滥用测试通过 |
 | P0 | 100k 仅证明单 plan 的 durable 正确性；没有真实并发、SLO、拓扑或故障报告 | 不能宣称支持 10 万人群或高频群 | 经过批准的工作负载、阈值和报告 |
 | P1 | NATS 是最小 best-effort publisher，非完整事件/唤醒系统 | 高频群会退回数据库轮询，延迟与连接开销不可控 | 真实 broker 集成和负载/故障证据，或保持关闭 |
 | P1 | APNs、Alertmanager、PITR/灾备、operator bastion/mTLS 未部署验证 | 恢复与告警链不完整 | 真实凭据、演练记录和批准的 RPO/RTO |
@@ -53,7 +53,7 @@
 
 ### 2.4 媒体与 Push 不能按“接口已存在”计入产品完成度
 
-媒体上传/下载授权、scan outbox、retention 和 Push wake 的领域边界已经存在，但对象存储、恶意内容扫描、APNs 凭据、活动策略、后台重启策略均未证明。尤其是上传 provider target 只应在内存中短暂出现、扫描失败必须保持不可引用、Push 不得含内容，这些不变量需要由真实 provider 集成测试验证。
+媒体上传/下载授权、scan outbox、retention 和 Push wake 的领域边界已经存在。本机文件系统 provider 与 EICAR 无害扫描夹具已经验证上传、扫描、下载和清理合同，但它们不等同于对象存储或恶意内容防护；生产对象存储、扫描器、APNs 凭据、活动策略与后台重启策略仍未证明。尤其是上传 provider target 只应在内存中短暂出现、扫描失败必须保持不可引用、Push 不得含内容，这些不变量需要由真实 provider 集成测试验证。
 
 ### 2.5 分片迁移设计复杂，应推迟到单 store 稳定后演练
 
