@@ -1473,9 +1473,9 @@ private struct V2ConversationDetailView: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal)
                             .padding(.bottom, 8)
-                            .onAppear { announceForVoiceOver(sendFeedback) }
+                            .onAppear { announceV2AccessibilityAnnouncement(sendFeedback) }
                             .onChange(of: sendFeedback) { _, updatedFeedback in
-                                announceForVoiceOver(updatedFeedback)
+                                announceV2AccessibilityAnnouncement(updatedFeedback)
                             }
                             .accessibilityIdentifier("v2.message.send-feedback")
                     }
@@ -1485,9 +1485,9 @@ private struct V2ConversationDetailView: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal)
                             .padding(.bottom, 8)
-                            .onAppear { announceForVoiceOver(messageActionFeedback) }
+                            .onAppear { announceV2AccessibilityAnnouncement(messageActionFeedback) }
                             .onChange(of: messageActionFeedback) { _, updatedFeedback in
-                                announceForVoiceOver(updatedFeedback)
+                                announceV2AccessibilityAnnouncement(updatedFeedback)
                             }
                             .accessibilityIdentifier("v2.message.action-feedback")
                     }
@@ -1946,9 +1946,9 @@ private struct V2GroupMembersSheet: View {
                 }
                 if let feedback = store.groupMemberFeedback {
                     Text(feedback).foregroundStyle(.secondary)
-                        .onAppear { announceForVoiceOver(feedback) }
+                        .onAppear { announceV2AccessibilityAnnouncement(feedback) }
                         .onChange(of: feedback) { _, updatedFeedback in
-                            announceForVoiceOver(updatedFeedback)
+                            announceV2AccessibilityAnnouncement(updatedFeedback)
                         }
                         .accessibilityIdentifier("v2.group.members.feedback")
                 }
@@ -2019,7 +2019,7 @@ private struct V2GroupMembersSheet: View {
 }
 
 @MainActor
-private func announceForVoiceOver(_ message: String) {
+func announceV2AccessibilityAnnouncement(_ message: String) {
     guard UIAccessibility.isVoiceOverRunning else { return }
     UIAccessibility.post(notification: .announcement, argument: message)
 }

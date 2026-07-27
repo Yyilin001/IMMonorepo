@@ -75,7 +75,14 @@ struct V2PublicIdentitySettingsView: View {
                     .accessibilityIdentifier("v2.identity.save")
             }
             if let feedback = store.feedback {
-                Section { Text(feedback).foregroundStyle(.secondary) }
+                Section {
+                    Text(feedback)
+                        .foregroundStyle(.secondary)
+                        .onAppear { announceV2AccessibilityAnnouncement(feedback) }
+                        .onChange(of: feedback) { _, updatedFeedback in
+                            announceV2AccessibilityAnnouncement(updatedFeedback)
+                        }
+                }
             }
         }
         .navigationTitle("我的资料")

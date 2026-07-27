@@ -265,12 +265,12 @@ private struct V2SignInView: View {
         .navigationTitle("登录")
         .onAppear {
             if let feedbackMessage {
-                announceAuthenticationMessage(feedbackMessage)
+                announceV2AccessibilityAnnouncement(feedbackMessage)
             }
         }
         .onChange(of: feedbackMessage) { _, updatedMessage in
             if let updatedMessage {
-                announceAuthenticationMessage(updatedMessage)
+                announceV2AccessibilityAnnouncement(updatedMessage)
             }
         }
         // Submitting switches the root route to `.authenticating`, which
@@ -299,12 +299,6 @@ private struct V2SignInView: View {
         actionTask?.cancel()
         actionTask = Task { await operation() }
     }
-}
-
-@MainActor
-private func announceAuthenticationMessage(_ message: String) {
-    guard UIAccessibility.isVoiceOverRunning else { return }
-    UIAccessibility.post(notification: .announcement, argument: message)
 }
 
 private struct V2SignedInRootView: View {

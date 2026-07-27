@@ -201,6 +201,10 @@ struct V2PrivacySettingsView: View {
                     Text(feedback)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .onAppear { announceV2AccessibilityAnnouncement(feedback) }
+                        .onChange(of: feedback) { _, updatedFeedback in
+                            announceV2AccessibilityAnnouncement(updatedFeedback)
+                        }
                         .accessibilityIdentifier("v2.privacy.feedback")
                 }
             }
@@ -250,6 +254,10 @@ private struct V2UserBlockSettingsSection: View {
                 Text(feedback)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .onAppear { announceV2AccessibilityAnnouncement(feedback) }
+                    .onChange(of: feedback) { _, updatedFeedback in
+                        announceV2AccessibilityAnnouncement(updatedFeedback)
+                    }
                     .accessibilityIdentifier("v2.privacy.block.feedback")
             }
         }
@@ -293,6 +301,10 @@ private struct V2PushWakeSettingsSection: View {
                 Text(feedback)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .onAppear { announceV2AccessibilityAnnouncement(feedback) }
+                    .onChange(of: feedback) { _, updatedFeedback in
+                        announceV2AccessibilityAnnouncement(updatedFeedback)
+                    }
                     .accessibilityIdentifier("v2.push-wake.feedback")
             }
         }
