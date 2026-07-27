@@ -74,6 +74,7 @@ public actor V2MessageRedactionOutboxEngine {
         guard let command = try await store.nextReadyMessageRedaction(now: now()) else { return .idle }
         do {
             let result = try await transport.redactMessage(roomID: command.roomID, operationID: command.operationID, messageID: command.messageID, reasonCode: command.reasonCode)
+            try Task.checkCancellation()
             guard result.roomID == command.roomID, result.messageID == command.messageID,
                   result.messageRevision > 1, result.roomSequence > 0
             else { throw V2RealtimeTransportError.unexpectedResponse }

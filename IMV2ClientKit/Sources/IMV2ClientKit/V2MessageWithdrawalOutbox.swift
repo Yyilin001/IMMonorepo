@@ -48,6 +48,7 @@ public actor V2MessageWithdrawalOutboxEngine {
         guard let command = try await store.nextReadyMessageWithdrawal(now: now()) else { return .idle }
         do {
             let result = try await transport.withdrawMessage(roomID: command.roomID, operationID: command.operationID, messageID: command.messageID, expectedMessageRevision: command.expectedMessageRevision)
+            try Task.checkCancellation()
             guard result.roomID == command.roomID, result.messageID == command.messageID else { throw V2RealtimeTransportError.unexpectedResponse }
             try await store.markMessageWithdrawalAcknowledged(operationID: command.operationID, messageRevision: result.messageRevision, roomSequence: result.roomSequence)
             return .acknowledged(command.operationID)

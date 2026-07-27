@@ -50,6 +50,7 @@ public actor V2ModeratedMemberRemovalOutboxEngine {
         guard let command = try await store.nextReadyModeratedMemberRemoval(now: now()) else { return .idle }
         do {
             let result = try await transport.removeMemberByModerator(roomID: command.roomID, operationID: command.operationID, targetUserID: command.targetUserID, reasonCode: command.reasonCode)
+            try Task.checkCancellation()
             guard result.roomID == command.roomID, result.targetUserID == command.targetUserID, result.membershipRevision > 0, result.roomSequence > 0 else { throw V2RealtimeTransportError.unexpectedResponse }
             try await store.markModeratedMemberRemovalAcknowledged(operationID: command.operationID, membershipRevision: result.membershipRevision, roomSequence: result.roomSequence)
             return .acknowledged(command.operationID)

@@ -56,6 +56,7 @@ public actor V2MemberMuteOutboxEngine {
         }
         do {
             let result = try await transport.muteMember(roomID: command.roomID, operationID: command.operationID, targetUserID: command.targetUserID, muteUntil: command.muteUntil, reasonCode: command.reasonCode)
+            try Task.checkCancellation()
             guard result.roomID == command.roomID, result.targetUserID == command.targetUserID, result.muteUntil == command.muteUntil, result.roomSequence > 0 else { throw V2RealtimeTransportError.unexpectedResponse }
             try await store.markMemberMuteAcknowledged(operationID: command.operationID, roomSequence: result.roomSequence)
             return .acknowledged(command.operationID)

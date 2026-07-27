@@ -84,6 +84,7 @@ public actor V2GroupRoomCommandOutboxEngine {
         guard let command = try await store.nextReadyGroupRoomCreation(now: now()) else { return .idle }
         do {
             let created = try await transport.createGroupRoom(operationID: command.operationID, title: command.title, initialMemberUserIDs: command.initialMemberUserIDs)
+            try Task.checkCancellation()
             guard created.title == command.title,
                   Set(command.initialMemberUserIDs).isSubset(of: Set(created.memberUserIDs))
             else { throw V2RealtimeTransportError.unexpectedResponse }

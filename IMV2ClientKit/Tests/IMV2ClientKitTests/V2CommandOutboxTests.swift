@@ -116,6 +116,34 @@ struct V2CommandOutboxTests {
         #expect(await transport.receivedMedia() == [[media], [media]])
         #expect(await transport.receivedMentions() == [[mention], [mention]])
     }
+
+    @Test("取消后忽略非协作传输的迟到成功，保留同一 durable 命令")
+    func cancellationAfterLateTransportSuccessDoesNotPersistAcceptance() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: temporaryOutboxDatabaseURL(),
+            installationBinding: testInstallationBinding
+        )
+        let transport = LateSuccessMessageTransport()
+        let engine = V2CommandOutboxEngine(store: store, transport: transport)
+        let command = try await engine.enqueueMessage(
+            roomID: .init("00000000-0000-0000-0000-000000000513"),
+            text: "cancel after remote success"
+        )
+
+        let flush = Task { try await engine.flushOnce() }
+        await transport.waitUntilResponseIsPending()
+        flush.cancel()
+        await transport.resumeAccepted()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await flush.value
+        }
+        let pending = try #require(await store.pendingMessageCommands().first)
+        #expect(pending.clientMessageID == command.clientMessageID)
+        #expect(pending.state == .pending)
+        #expect(pending.attemptCount == 0)
+        #expect(pending.acceptedMessageID == nil)
+    }
 }
 
 private actor ScriptedMessageTransport: V2ClientMessageTransport {
@@ -150,6 +178,48 @@ private actor ScriptedMessageTransport: V2ClientMessageTransport {
     func remotelyAcceptedIDs() -> [ClientMessageID] { remoteAcceptedIDs }
     func receivedMedia() -> [[V2MediaReference]] { receivedAttachments }
     func receivedMentions() -> [[V2MentionTarget]] { receivedMentionTargets }
+}
+
+/// Models a transport that cannot observe cancellation until it has already
+/// received a valid remote response. The outbox must fence its local write at
+/// that boundary and preserve the original idempotency key for the next run.
+private actor LateSuccessMessageTransport: V2ClientMessageTransport {
+    private var responseWaiter: CheckedContinuation<V2ClientMessageAcceptance, Never>?
+    private var responseReadyWaiter: CheckedContinuation<Void, Never>?
+    private var pendingAcceptance: V2ClientMessageAcceptance?
+
+    func sendMessage(
+        roomID: RoomID,
+        clientMessageID _: ClientMessageID,
+        text _: String,
+        media _: [V2MediaReference],
+        mentions _: [V2MentionTarget]
+    ) async throws -> V2ClientMessageAcceptance {
+        let acceptance = try V2ClientMessageAcceptance(
+            messageID: .init("00000000-0000-0000-0000-000000000514"),
+            roomID: roomID,
+            roomSequence: 1,
+            createdAt: .distantPast
+        )
+        return await withCheckedContinuation { continuation in
+            pendingAcceptance = acceptance
+            responseWaiter = continuation
+            responseReadyWaiter?.resume()
+            responseReadyWaiter = nil
+        }
+    }
+
+    func waitUntilResponseIsPending() async {
+        guard responseWaiter == nil else { return }
+        await withCheckedContinuation { responseReadyWaiter = $0 }
+    }
+
+    func resumeAccepted() {
+        guard let acceptance = pendingAcceptance, let responseWaiter else { return }
+        pendingAcceptance = nil
+        self.responseWaiter = nil
+        responseWaiter.resume(returning: acceptance)
+    }
 }
 
 private func temporaryOutboxDatabaseURL() -> URL {

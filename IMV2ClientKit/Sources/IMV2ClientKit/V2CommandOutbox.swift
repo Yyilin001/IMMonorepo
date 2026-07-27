@@ -98,6 +98,7 @@ public actor V2CommandOutboxEngine {
         guard let command = try await store.nextReadyMessage(now: now()) else { return .idle }
         do {
             let accepted = try await transport.sendMessage(roomID: command.roomID, clientMessageID: command.clientMessageID, text: command.text, media: command.media, mentions: command.mentions)
+            try Task.checkCancellation()
             try await store.markMessageAccepted(clientMessageID: command.clientMessageID, messageID: accepted.messageID, roomSequence: accepted.roomSequence)
             return .accepted(command.clientMessageID)
         } catch is CancellationError {

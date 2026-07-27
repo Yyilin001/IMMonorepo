@@ -124,6 +124,7 @@ public actor V2MembershipCommandOutboxEngine {
                 action: command.action,
                 expectedMembershipRevision: command.expectedMembershipRevision
             )
+            try Task.checkCancellation()
             guard changed.roomID == command.roomID,
                   changed.targetUserID == command.targetUserID,
                   changed.action == command.action

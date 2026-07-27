@@ -72,6 +72,7 @@ public actor V2SocialCommandOutboxEngine {
             case .userBlock: _ = try await socialTransport.changeUserBlock(operationID: try .init(command.operationID), targetUserID: command.targetUserID!, action: command.blockAction!)
             case .strangerMessagePreference: _ = try await directTransport.setStrangerMessagePermission(operationID: try .init(command.operationID), permission: command.strangerPermission!)
             }
+            try Task.checkCancellation()
             try await store.markSocialCommandAcknowledged(operationID: command.operationID)
             return .acknowledged(command.operationID)
         } catch is CancellationError { throw CancellationError() }

@@ -33,6 +33,7 @@ public actor V2MessageEditOutboxEngine {
         guard let command = try await store.nextReadyMessageEdit(now: now()) else { return .idle }
         do {
             let result = try await transport.editMessage(roomID: command.roomID, operationID: command.operationID, messageID: command.messageID, expectedMessageRevision: command.expectedMessageRevision, text: command.text)
+            try Task.checkCancellation()
             guard result.roomID == command.roomID, result.messageID == command.messageID, result.text == command.text else { throw V2RealtimeTransportError.unexpectedResponse }
             try await store.markMessageEditAcknowledged(operationID: command.operationID, messageRevision: result.messageRevision, roomSequence: result.roomSequence)
             return .acknowledged(command.operationID)

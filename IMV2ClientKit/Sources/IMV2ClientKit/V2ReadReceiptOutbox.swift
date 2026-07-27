@@ -58,6 +58,7 @@ public actor V2ReadReceiptOutboxEngine {
         guard let command = try await store.nextReadyReadReceipt(now: now()) else { return .idle }
         do {
             let result = try await transport.recordReadReceipt(roomID: command.roomID, operationID: command.operationID, readThroughRoomSequence: command.readThroughRoomSequence)
+            try Task.checkCancellation()
             guard result.roomID == command.roomID,
                   result.readThroughRoomSequence >= command.readThroughRoomSequence,
                   result.readThroughRoomSequence <= UInt64(Int64.max)

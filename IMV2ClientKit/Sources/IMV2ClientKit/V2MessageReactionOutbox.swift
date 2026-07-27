@@ -31,6 +31,7 @@ public actor V2MessageReactionOutboxEngine {
         guard let command = try await store.nextReadyMessageReaction(now: now()) else { return .idle }
         do {
             let result = try await transport.changeMessageReaction(roomID: command.roomID, operationID: command.operationID, messageID: command.messageID, reaction: command.reaction, action: command.action)
+            try Task.checkCancellation()
             guard result.roomID == command.roomID, result.messageID == command.messageID, result.reaction == command.reaction, result.action == command.action else { throw V2RealtimeTransportError.unexpectedResponse }
             try await store.markMessageReactionAcknowledged(operationID: command.operationID, roomSequence: result.roomSequence); return .acknowledged(command.operationID)
         } catch is CancellationError { throw CancellationError() }
