@@ -186,6 +186,20 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "反应必须经真实持久化命令提交，并反馈正在同步的状态。"
         )
         XCTAssertTrue(actionFeedback.label.contains("反应已提交") || actionFeedback.label.contains("反应已安全保存"))
+        messageRow.press(forDuration: 1)
+        let withdraw = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == %@", "v2.message.withdraw.\(messageID)")
+        ).firstMatch
+        XCTAssertTrue(
+            withdraw.waitForExistence(timeout: 5) && withdraw.isHittable,
+            "发送端长按自己的消息后必须能打开可定位的撤回操作。"
+        )
+        withdraw.tap()
+        XCTAssertTrue(
+            actionFeedback.waitForExistence(timeout: 30),
+            "撤回必须经真实持久化命令提交，并反馈正在同步的状态。"
+        )
+        XCTAssertTrue(actionFeedback.label.contains("撤回已提交") || actionFeedback.label.contains("撤回请求已安全保存"))
         app.terminate()
     }
 
@@ -210,6 +224,13 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(
             deliveredMessage.waitForExistence(timeout: 15),
             "接收端会话详情必须包含发送端离线期间投递、经同步投影恢复的消息。"
+        )
+        let withdrawnBody = app.staticTexts.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.body.")
+        ).firstMatch
+        XCTAssertTrue(
+            withdrawnBody.waitForExistence(timeout: 15) && withdrawnBody.label == "消息已撤回",
+            "接收端必须通过自身同步投影看到消息撤回 tombstone，而不能继续显示原文。"
         )
         try auditOrdinaryChatSurface(in: app)
         // This is a populated, receiver-side projection rather than the

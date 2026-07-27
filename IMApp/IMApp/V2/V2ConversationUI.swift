@@ -1668,7 +1668,11 @@ private struct V2ConversationMessageBubble: View {
         VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 3) {
             if !message.text.isEmpty {
                 Text(message.text)
-                    .foregroundStyle(message.isWithdrawn ? .secondary : .primary)
+                    // A withdrawn-message bubble already has a neutral
+                    // background. Keep its tombstone readable rather than
+                    // using low-contrast secondary text on that surface.
+                    .foregroundStyle(.primary)
+                    .accessibilityIdentifier("v2.message.body.\(message.id)")
             }
             if !message.mentions.isEmpty {
                 Text(mentionSummary)
