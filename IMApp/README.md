@@ -123,6 +123,21 @@ direct room 后双方断线：发送端以自己的 SQLite outbox 保存消息�
 交互，也不覆盖 APNs 唤醒或任何上线环境。Release
 和默认离线 UI 测试均不能使用这些参数。
 
+若需验证**两份独立 App 安装**之间的普通私聊 UI 投递和接收端离线恢复，明确指定两台已经
+启动并手动解锁的不同模拟器：
+
+```sh
+IMAPP_LOCAL_TWO_INSTALL_RECEIVER_SIMULATOR_ID='<RECEIVER_SIMULATOR_UDID>' \
+IMAPP_LOCAL_TWO_INSTALL_SENDER_SIMULATOR_ID='<SENDER_SIMULATOR_UDID>' \
+  IMApp/Scripts/verify_local_account_two_install_e2e.sh
+```
+
+该独立 scheme 会给两端分别创建随机账号、Keychain/SQLite scope 和安装身份：接收端先通过真实
+注册 UI 建立会话并被终止；发送端再通过“新建私聊 → 开始 → 发送”的正常界面路径投递消息；最后
+接收端仅恢复自己的 scope，完成认证同步并确认消息行出现。它也确认账户菜单只位于会话列表导航栏，
+不会遮挡会话详情页的输入和发送按钮。脚本会清理两端本次随机 scope，且不会抹掉、重启或关闭调用方
+指定的模拟器。该验证仍仅覆盖本机 Docker 栈和 Simulator，不包含 APNs、真机签名、生产网络或容量。
+
 若用户在设备受保护数据暂不可用时退出登录，App 会持久记录**不含凭据或账号信息**的删除意图，
 阻止旧会话在下次启动时恢复；待设备解锁后切回前台或点击“重试”，才完成 Keychain 凭据删除。
 
