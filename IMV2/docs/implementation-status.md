@@ -681,8 +681,9 @@ TLS gateway 连接创建 direct room；随后双方断开，发送端先把消�
 和账户，由接收端通过真实注册 UI 建立本地会话后终止进程；发送端再通过普通“新建私聊 → 开始 →
 发送”UI 路径投递消息。接收端仅以自己的 scope 重启并完成认证同步，测试确认详情页实际出现投递的
 消息行，最后分别清理两端 scope。该回归还发现并修复了账户菜单错误附着在根视图、进入详情页后
-遮挡输入区发送按钮的问题：菜单现在属于会话列表的导航栏，不再覆盖会话详情。它不覆盖 APNs、
-签名真机、生产网络或容量。
+遮挡输入区发送按钮的问题：菜单现在属于会话列表的导航栏，不再覆盖会话详情；它也在已登录列表和
+消息详情分别执行元素、触达区域、描述、Dynamic Type、文本裁切和 traits 审计。它不覆盖 APNs、
+签名真机、生产网络或容量，VoiceOver 人工阅读顺序、对比度、减少动态效果与 RTL 仍需人工验收。
 
 The same baseline audit found that the retired macOS automation called removed
 `Makefile` targets and that the Release build phase directly executed a

@@ -29,6 +29,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             app.buttons["v2.account-menu"].exists,
             "账户菜单必须作为会话列表导航栏的一部分出现。"
         )
+        try auditOrdinaryChatSurface(in: app)
         app.terminate()
     }
 
@@ -60,6 +61,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             app.buttons["v2.account-menu"].exists,
             "账户菜单不能遗留在会话详情页并遮挡消息输入与发送操作。"
         )
+        try auditOrdinaryChatSurface(in: app)
         let send = app.buttons["v2.message.send"]
         XCTAssertTrue(send.isEnabled)
         send.tap()
@@ -110,5 +112,20 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "跨安装回归结束后必须清理仅该随机 scope 的 Keychain 和 SQLite 工件。"
         )
         app.terminate()
+    }
+
+    @MainActor
+    private func auditOrdinaryChatSurface(in app: XCUIApplication) throws {
+        // UIKit-owned navigation and form chrome is not app-controlled for
+        // contrast. The remaining categories keep the signed-in list and
+        // composer usable for Dynamic Type and VoiceOver users.
+        try app.performAccessibilityAudit(for: [
+            .elementDetection,
+            .hitRegion,
+            .sufficientElementDescription,
+            .dynamicType,
+            .textClipped,
+            .trait,
+        ])
     }
 }
