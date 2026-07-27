@@ -66,6 +66,28 @@ struct V2AuthSessionTests {
         #expect(await transport.requests().isEmpty)
     }
 
+    @Test("temporary Keychain unavailability can recover after protected data returns")
+    func retryingCredentialStoreAccessReloadsThePreservedSession() async throws {
+        let now = Date(timeIntervalSince1970: 1_750_000_250)
+        let preserved = try credentials(expiry: now.addingTimeInterval(60), refresh: "test-refresh-preserved")
+        let store = InMemoryCredentialStore(
+            record: .init(credentials: preserved),
+            loadFailure: .unavailable
+        )
+        let transport = AuthTransportStub(result: .failure(V2AuthTransportError.terminalRejection))
+        let session = V2AuthSession(credentialStore: store, transport: transport, now: { now })
+
+        await #expect(throws: V2AuthSessionError.credentialsUnavailable) {
+            _ = try await session.accessToken()
+        }
+        await store.setLoadFailure(nil)
+        await session.retryCredentialStoreAccess()
+
+        #expect(try await session.accessToken() == preserved.accessToken)
+        #expect(await session.currentState() == .authenticated(accessTokenExpiresAt: preserved.accessTokenExpiresAt))
+        #expect(await transport.requests().isEmpty)
+    }
+
     @Test("terminal refresh rejection clears the device credential")
     func terminalRejectionLogsOut() async throws {
         let now = Date(timeIntervalSince1970: 1_750_000_300)
@@ -137,7 +159,7 @@ struct V2AuthSessionTests {
 
 private actor InMemoryCredentialStore: V2CredentialStore {
     private var value: V2AuthCredentialRecord?
-    private let loadFailure: V2CredentialStoreError?
+    private var loadFailure: V2CredentialStoreError?
     private var writes = 0
 
     init(record: V2AuthCredentialRecord? = nil, loadFailure: V2CredentialStoreError? = nil) {
@@ -153,6 +175,7 @@ private actor InMemoryCredentialStore: V2CredentialStore {
     func delete() { value = nil }
     func record() -> V2AuthCredentialRecord? { value }
     func saveCount() -> Int { writes }
+    func setLoadFailure(_ failure: V2CredentialStoreError?) { loadFailure = failure }
 }
 
 private actor AuthTransportStub: V2AuthTransport {

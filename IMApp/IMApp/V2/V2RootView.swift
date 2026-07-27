@@ -9,6 +9,7 @@ struct V2RootView: View {
     private let initialLocalE2ETestPublicHandle: String?
     private let initialLocalE2ETestDisplayName: String?
     @State private var store: V2AppStore
+    @State private var protectedDataRetryTask: Task<Void, Never>?
 
     init(appPushDelegate: V2AppPushDelegate) {
         self.appPushDelegate = appPushDelegate
@@ -89,6 +90,19 @@ struct V2RootView: View {
             case .uiTestingLiveLocalAccountCleanupCompleted:
                 Text("本地 E2E 测试数据已清理")
                     .accessibilityIdentifier("v2.local-e2e.cleanup.completed")
+            case .protectedDataUnavailable:
+                VStack(spacing: 16) {
+                    ContentUnavailableView(
+                        "受保护凭据暂不可用",
+                        systemImage: "lock.trianglebadge.exclamationmark",
+                        description: Text("请解锁设备后重试。")
+                    )
+                    Button("重试") {
+                        protectedDataRetryTask?.cancel()
+                        protectedDataRetryTask = Task { await store.retryProtectedDataAccess() }
+                    }
+                    .accessibilityIdentifier("v2.protected-data.retry")
+                }
             case .unavailable(let message):
                 ContentUnavailableView("V2 暂不可用", systemImage: "exclamationmark.triangle", description: Text(message))
             }
@@ -99,6 +113,7 @@ struct V2RootView: View {
             appPushDelegate.tokenReceiver = store
             appPushDelegate.wakeHandler = store
         }
+        .onDisappear { protectedDataRetryTask?.cancel() }
         .task { await store.restore() }
         .task(id: scenePhase) {
             switch scenePhase {

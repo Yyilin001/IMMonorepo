@@ -89,7 +89,8 @@ IMAPP_LOCAL_ACCOUNT_E2E_SIMULATOR_ID='<SIMULATOR_UDID>' \
 先启动并**手动解锁**该指定模拟器一次；每次模拟器重新启动后都需要重复这个动作，并保持
 Mac 已解锁。设备 ID、注册操作和会话凭据使用
 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`，首次解锁前 iOS 会拒绝 Keychain 访问；
-这不是 TLS、Docker 或账户服务故障。脚本会启动或复用本地 Docker 栈，并仅向指定模拟器
+这不是 TLS、Docker 或账户服务故障。若 App 在首次解锁前已启动，解锁后切回前台或点击
+“重试”即可重新读取会话，不需要重启 App。脚本会启动或复用本地 Docker 栈，并仅向指定模拟器
 导入 `IMV2/local-ca/root.crt`。脚本本身不会抹掉、关闭或重启模拟器；Xcode 的测试运行器
 可能在完成后关停其专用目标机，因此请指定可用于测试的模拟器。该回归使用 DEBUG-only 启动参数跳过旧 Keychain
 会话恢复，但仍使用实际的 Debug HTTPS/TLS 配置；每次创建一个随机、仅本地使用的

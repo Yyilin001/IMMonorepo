@@ -39,6 +39,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         case signedOut
         case authenticating
         case signedIn(userID: String)
+        /// A Keychain read was temporarily denied while protected data was
+        /// unavailable. This is distinct from a terminal configuration or
+        /// local-store failure because a foreground retry may recover it.
+        case protectedDataUnavailable
         case uiTestingLiveLocalAccountCleanupCompleted
         case unavailable(message: String)
     }
@@ -178,10 +182,22 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         } catch V2ClientSessionBootstrapError.authenticationRequired {
             route = .signedOut
         } catch V2ClientSessionBootstrapError.credentialsUnavailable {
-            route = .unavailable(message: "受保护凭据暂不可用，请解锁设备后重试。")
+            route = .protectedDataUnavailable
         } catch {
             route = .unavailable(message: "无法打开本地 V2 数据。")
         }
+    }
+
+    /// Retries only the explicitly recoverable protected-data state. A normal
+    /// signed-out route never restores credentials merely because a prior
+    /// sign-out deletion encountered a temporarily locked Keychain.
+    func retryProtectedDataAccess() async {
+        guard route == .protectedDataUnavailable else { return }
+        // Claim the state before awaiting the actor. This coalesces a user
+        // tapping retry with a simultaneous scene-activation callback.
+        route = .launching
+        await authSession?.retryCredentialStoreAccess()
+        await restore()
     }
 
     func signInWithPasskey() async {
@@ -385,6 +401,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     /// realtime attempt after the app returns to the foreground.
     func applicationDidBecomeActive() async {
         isApplicationActive = true
+        if route == .protectedDataUnavailable {
+            await retryProtectedDataAccess()
+            return
+        }
         guard case .signedIn = route,
               let realtimeRuntime,
               let conversationStore
