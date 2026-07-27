@@ -23,6 +23,7 @@ final class V2PublicIdentitySettingsStore {
         defer { isLoading = false }
         do {
             let profile = try await manager.currentProfile()
+            try Task.checkCancellation()
             handle = profile.handle.description
             displayName = profile.displayName
             feedback = nil
@@ -38,6 +39,7 @@ final class V2PublicIdentitySettingsStore {
         defer { isSaving = false }
         do {
             let profile = try await manager.updateDisplayName(displayName)
+            try Task.checkCancellation()
             handle = profile.handle.description
             displayName = profile.displayName
             feedback = "已更新显示名称。"

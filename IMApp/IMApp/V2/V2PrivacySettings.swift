@@ -45,10 +45,12 @@ final class V2UserBlockSettingsStore {
                 feedback = "不能屏蔽自己。"
                 return
             }
-            switch try await changer.changeBlock(
+            let outcome = try await changer.changeBlock(
                 targetUserID: identity.userID.rawValue,
                 action: action
-            ) {
+            )
+            try Task.checkCancellation()
+            switch outcome {
             case .accepted:
                 feedback = action == .block ? "已屏蔽该用户。" : "已解除屏蔽。"
             case .queuedForRetry:
@@ -131,7 +133,9 @@ final class V2PrivacySettingsStore {
         feedback = nil
         defer { isSaving = false }
         do {
-            switch try await updater.update(allowsStrangerMessages: desiredValue) {
+            let outcome = try await updater.update(allowsStrangerMessages: desiredValue)
+            try Task.checkCancellation()
+            switch outcome {
             case .accepted:
                 allowsStrangerMessages = desiredValue
                 feedback = "已更新消息接收设置。"

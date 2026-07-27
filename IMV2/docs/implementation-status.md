@@ -17,6 +17,15 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: the selected iPhone 17 / iOS 26.2 Simulator passed the full
+  shared `IMApp` scheme with **65 Swift tests** and **2 UI tests**, zero
+  failures. Privacy preferences, public-identity display-name saves, and
+  user-block commands now each check cancellation after an external response
+  but before mutating view state. Dedicated non-cooperative fakes cancel at
+  that exact late-success boundary and prove a dismissed or superseded screen
+  neither reports a stale success nor overwrites the current value. This is
+  local client lifecycle evidence only, not a remote delivery or deployment
+  guarantee.
 - 2026-07-27: the native `IMV2ClientKit` suite passed **122 tests in 26
   suites**. Every durable command outbox now checks cancellation after a
   non-cooperative transport returns and before it writes a local acceptance,

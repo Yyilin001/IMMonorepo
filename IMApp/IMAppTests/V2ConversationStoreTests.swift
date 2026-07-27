@@ -1075,6 +1075,23 @@ struct V2ConversationStoreTests {
         #expect(await updater.requestedValues() == [false])
     }
 
+    @Test func strangerMessagePreferenceIgnoresLateSuccessAfterCancellation() async {
+        let reader = V2StrangerMessagePreferenceReaderFake(value: true)
+        let updater = V2LateStrangerMessagePreferenceUpdater()
+        let store = V2PrivacySettingsStore(reader: reader, updater: updater)
+
+        await store.refresh()
+        let update = Task { await store.setAllowsStrangerMessages(false) }
+        await updater.waitUntilResponseIsPending()
+        update.cancel()
+        await updater.resumeAccepted()
+        await update.value
+
+        #expect(store.allowsStrangerMessages)
+        #expect(!store.isSaving)
+        #expect(store.feedback == nil)
+    }
+
     @Test func userBlockResolvesAPublicHandleThenPersistsTheDurableCommand() async throws {
         let targetID = "00000000-0000-0000-0000-000000000e03"
         let resolver = V2UserBlockPublicIdentityResolverFake(values: ["blocked_user": targetID])
@@ -1119,6 +1136,27 @@ struct V2ConversationStoreTests {
 
         #expect(store.feedback == "无法完成此用户设置。")
         #expect(!store.isChanging)
+    }
+
+    @Test func userBlockIgnoresLateSuccessAfterCancellation() async {
+        let resolver = V2UserBlockPublicIdentityResolverFake(
+            values: ["blocked_user": "00000000-0000-0000-0000-000000000e03"]
+        )
+        let changer = V2LateUserBlockChanger()
+        let store = V2UserBlockSettingsStore(
+            resolver: resolver,
+            changer: changer,
+            currentUserID: "00000000-0000-0000-0000-000000000e02"
+        )
+
+        let change = Task { await store.changeBlock(handle: "@blocked_user", action: .block) }
+        await changer.waitUntilResponseIsPending()
+        change.cancel()
+        await changer.resumeAccepted()
+        await change.value
+
+        #expect(!store.isChanging)
+        #expect(store.feedback == nil)
     }
 }
 
@@ -1766,6 +1804,30 @@ private actor V2StrangerMessagePreferenceUpdaterFake: V2StrangerMessagePreferenc
     }
 }
 
+private actor V2LateStrangerMessagePreferenceUpdater: V2StrangerMessagePreferenceUpdating {
+    private var responseWaiter: CheckedContinuation<V2StrangerMessagePreferenceUpdateOutcome, Never>?
+    private var responseReadyWaiter: CheckedContinuation<Void, Never>?
+
+    func update(allowsStrangerMessages _: Bool) async throws -> V2StrangerMessagePreferenceUpdateOutcome {
+        await withCheckedContinuation { continuation in
+            responseWaiter = continuation
+            responseReadyWaiter?.resume()
+            responseReadyWaiter = nil
+        }
+    }
+
+    func waitUntilResponseIsPending() async {
+        guard responseWaiter == nil else { return }
+        await withCheckedContinuation { responseReadyWaiter = $0 }
+    }
+
+    func resumeAccepted() {
+        guard let responseWaiter else { return }
+        self.responseWaiter = nil
+        responseWaiter.resume(returning: .accepted)
+    }
+}
+
 private actor V2UserBlockPublicIdentityResolverFake: V2PublicIdentityResolving {
     private let values: [String: String]
     private var handles: [String] = []
@@ -1806,5 +1868,29 @@ private actor V2UserBlockChangerFake: V2UserBlockChanging {
 
     func requests() -> [Request] {
         requestsValue
+    }
+}
+
+private actor V2LateUserBlockChanger: V2UserBlockChanging {
+    private var responseWaiter: CheckedContinuation<V2UserBlockChangeOutcome, Never>?
+    private var responseReadyWaiter: CheckedContinuation<Void, Never>?
+
+    func changeBlock(targetUserID _: String, action _: V2UserBlockAction) async throws -> V2UserBlockChangeOutcome {
+        await withCheckedContinuation { continuation in
+            responseWaiter = continuation
+            responseReadyWaiter?.resume()
+            responseReadyWaiter = nil
+        }
+    }
+
+    func waitUntilResponseIsPending() async {
+        guard responseWaiter == nil else { return }
+        await withCheckedContinuation { responseReadyWaiter = $0 }
+    }
+
+    func resumeAccepted() {
+        guard let responseWaiter else { return }
+        self.responseWaiter = nil
+        responseWaiter.resume(returning: .accepted)
     }
 }
