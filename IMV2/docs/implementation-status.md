@@ -17,6 +17,14 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: `IMApp/Scripts/verify_local_account_registration_e2e.sh`
+  passed against the selected booted iPhone 17 / iOS 26.2 Simulator and the
+  isolated local account stack. Its three UI integration tests exercised the
+  local HTTPS edge, password registration, device-credential issuance,
+  Keychain-backed session commit, relaunch, and disposable test-scope cleanup.
+  The command uses only local Docker services and the selected simulator; it
+  does not establish two-device synchronization, physical-device, or
+  deployment evidence.
 - 2026-07-27: equivalent pending member-mute and audit-level member-removal
   commands now atomically reuse their original operation ID across retries
   and restarts. A mute still requires the same target, canonical expiry, and
