@@ -144,6 +144,27 @@ struct V2ClientRuntimeTests {
         #expect(await outbox.flushCount() == 2)
     }
 
+    @Test("projection callback runs after initial and live synchronization")
+    func projectionCallbackFollowsEverySuccessfulSync() async throws {
+        let sync = AvailabilitySyncDriver()
+        let recorder = ProjectionSyncRecorder()
+        let activity = V2DefaultClientRuntimeActivity(
+            syncEngine: sync,
+            availabilitySource: OneAvailabilityHintThenStop(),
+            heartbeatSender: NoopHeartbeatSender(),
+            heartbeatInterval: .seconds(30),
+            onProjectionSynchronized: { await recorder.record() }
+        )
+
+        try await activity.synchronizeAfterConnection()
+        await #expect(throws: AvailabilityLoopStop.finished) {
+            try await activity.runAvailabilityLoop()
+        }
+
+        #expect(await sync.synchronizationCount() == 2)
+        #expect(await recorder.count() == 2)
+    }
+
     private func authenticatedSession() throws -> V2AuthenticatedClientSession {
         .init(
             userID: try .init("00000000-0000-0000-0000-000000000811"),
@@ -287,6 +308,12 @@ private actor AvailabilityCommandFlusher: V2ClientCommandFlushing {
     }
 
     func flushCount() -> Int { count }
+}
+
+private actor ProjectionSyncRecorder {
+    private var value = 0
+    func record() { value += 1 }
+    func count() -> Int { value }
 }
 
 private actor OneAvailabilityHintThenStop: V2SyncAvailabilityHintSource {

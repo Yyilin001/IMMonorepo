@@ -18,6 +18,19 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 ## Latest local verification (not a production release approval)
 
 - 2026-07-27: the selected iPhone 17 / iOS 26.2 Simulator passed the full
+  shared `IMApp` scheme with **73 Swift tests** and **2 UI tests**, zero
+  failures; the dedicated local-account UI suite also passed **3 tests**.
+  Each completed initial or availability-driven durable synchronization now
+  emits an opaque, generation-only projection-change signal before command
+  replay. The conversation list and an open conversation subscribe to that
+  signal and re-read their local SQLite projection, so incoming synchronized
+  content becomes visible without polling, UI-owned network requests, or
+  exposing sync payloads to SwiftUI. ClientKit's **123 tests in 26 suites**
+  prove the signal follows both initial and live synchronization; a suspended
+  detail-projection regression proves an already-open conversation reflects
+  the newly persisted message. This is local client correctness evidence
+  only, not remote delivery, multi-device or deployment evidence.
+- 2026-07-27: the selected iPhone 17 / iOS 26.2 Simulator passed the full
   shared `IMApp` scheme with **72 Swift tests** and **2 UI tests**, zero
   failures. Message withdrawal, edit and reaction now share a per-message
   single-flight gate, so repeated taps cannot enqueue conflicting commands

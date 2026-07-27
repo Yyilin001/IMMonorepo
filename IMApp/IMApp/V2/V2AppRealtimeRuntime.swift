@@ -467,6 +467,7 @@ actor V2OutboxUserBlockChanger: V2UserBlockChanging {
 
 struct V2AppRealtimeRuntime {
     let runtime: V2ClientRuntime
+    let projectionChangeNotifier: V2ProjectionChangeNotifier
     let sender: any V2ConversationSending
     let messageWithdrawer: any V2MessageWithdrawing
     let messageReactionChanger: any V2MessageReactionChanging
@@ -529,6 +530,7 @@ struct V2AppRealtimeRuntime {
             connection: connection,
             supportedCapabilityProfiles: ["base"]
         )
+        let projectionChangeNotifier = V2ProjectionChangeNotifier()
         let activity = V2DefaultClientRuntimeActivity(
             syncEngine: syncEngine,
             availabilitySource: connection,
@@ -572,9 +574,13 @@ struct V2AppRealtimeRuntime {
                     try Task.checkCancellation()
                     if case .idle = try await readReceiptOutbox.flushOnce() { break }
                 }
+            },
+            onProjectionSynchronized: {
+                await projectionChangeNotifier.publish()
             }
         )
         runtime = .init(connection: coordinator, activity: activity)
+        self.projectionChangeNotifier = projectionChangeNotifier
         sender = V2OutboxConversationSender(outbox: outbox)
         messageWithdrawer = V2OutboxMessageWithdrawer(outbox: withdrawalOutbox)
         messageReactionChanger = V2OutboxMessageReactionChanger(outbox: reactionOutbox)

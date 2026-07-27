@@ -27,6 +27,7 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
     private let commandOutbox: (any V2ClientCommandFlushing)?
     private let maximumInitialCommandFlushes: Int
     private let flushAdditionalDurableCommands: @Sendable () async throws -> Void
+    private let onProjectionSynchronized: @Sendable () async -> Void
 
     public init(
         syncEngine: any V2SyncDriving,
@@ -35,14 +36,16 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         heartbeatInterval: Duration,
         commandOutbox: (any V2ClientCommandFlushing)? = nil,
         maximumInitialCommandFlushes: Int = 256,
-        flushAdditionalDurableCommands: @escaping @Sendable () async throws -> Void = {}
+        flushAdditionalDurableCommands: @escaping @Sendable () async throws -> Void = {},
+        onProjectionSynchronized: @escaping @Sendable () async -> Void = {}
     ) {
         precondition(maximumInitialCommandFlushes > 0)
         self.syncEngine = syncEngine
         self.availabilityRunner = .init(
             source: availabilitySource,
             syncEngine: syncEngine,
-            afterSynchronization: { [commandOutbox, maximumInitialCommandFlushes, flushAdditionalDurableCommands] in
+            afterSynchronization: { [commandOutbox, maximumInitialCommandFlushes, flushAdditionalDurableCommands, onProjectionSynchronized] in
+                await onProjectionSynchronized()
                 try await Self.flush(
                     commandOutbox: commandOutbox,
                     maximumFlushes: maximumInitialCommandFlushes,
@@ -54,12 +57,14 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         self.commandOutbox = commandOutbox
         self.maximumInitialCommandFlushes = maximumInitialCommandFlushes
         self.flushAdditionalDurableCommands = flushAdditionalDurableCommands
+        self.onProjectionSynchronized = onProjectionSynchronized
     }
 
     public func synchronizeAfterConnection() async throws {
         if case .resetPending = try await syncEngine.synchronizeUntilCaughtUp() {
             try await syncEngine.completePendingReset()
         }
+        await onProjectionSynchronized()
     }
 
     /// Replays at most one configured batch after the durable initial sync.

@@ -537,7 +537,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             moderatedGroupMemberRemover: realtime.moderatedGroupMemberRemover,
             attachmentStager: attachmentStager,
             attachmentUploader: realtime.attachmentUploader,
-            mediaDownloader: realtime.mediaDownloader
+            mediaDownloader: realtime.mediaDownloader,
+            projectionChangeNotifier: realtime.projectionChangeNotifier
         )
         let privacySettings = V2PrivacySettingsStore(
             reader: V2GRDBStrangerMessagePreferenceDataSource(localStore: localStore),

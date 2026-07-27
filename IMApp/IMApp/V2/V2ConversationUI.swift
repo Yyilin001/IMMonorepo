@@ -104,6 +104,38 @@ protocol V2ConversationDataSource: Sendable {
     func messages(in roomID: String, for userID: String) async throws -> [V2ConversationMessageItem]
 }
 
+/// Bridges durable sync completion to UI stores without exposing transport
+/// payloads or database rows to SwiftUI. Subscribers first receive the
+/// current generation, then each later completed sync generation.
+actor V2ProjectionChangeNotifier {
+    private var generation: UInt64 = 0
+    private var continuations: [UUID: AsyncStream<UInt64>.Continuation] = [:]
+
+    func updates() -> AsyncStream<UInt64> {
+        let identifier = UUID()
+        let (stream, continuation) = AsyncStream<UInt64>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        continuations[identifier] = continuation
+        continuation.yield(generation)
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeContinuation(identifier) }
+        }
+        return stream
+    }
+
+    func publish() {
+        generation &+= 1
+        for continuation in continuations.values {
+            continuation.yield(generation)
+        }
+    }
+
+    private func removeContinuation(_ identifier: UUID) {
+        continuations.removeValue(forKey: identifier)
+    }
+}
+
 /// Boundary from the UI feature to the V2 SQLite projection. All IDs are
 /// parsed at this boundary; invalid data can never become a navigation route.
 actor V2GRDBConversationDataSource: V2ConversationDataSource {
@@ -255,6 +287,7 @@ final class V2ConversationListStore {
     private let attachmentStager: (any V2ConversationAttachmentStaging)?
     private let attachmentUploader: (any V2ConversationAttachmentUploading)?
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
+    private let projectionChangeNotifier: V2ProjectionChangeNotifier?
     private(set) var items: [V2ConversationListItem] = []
     private(set) var state: State = .loading
     private(set) var directConversationFeedback: String?
@@ -280,7 +313,8 @@ final class V2ConversationListStore {
         moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil,
         attachmentStager: (any V2ConversationAttachmentStaging)? = nil,
         attachmentUploader: (any V2ConversationAttachmentUploading)? = nil,
-        mediaDownloader: (any V2ConversationMediaDownloading)? = nil
+        mediaDownloader: (any V2ConversationMediaDownloading)? = nil,
+        projectionChangeNotifier: V2ProjectionChangeNotifier? = nil
     ) {
         self.dataSource = dataSource
         self.userID = userID
@@ -299,6 +333,7 @@ final class V2ConversationListStore {
         self.attachmentStager = attachmentStager
         self.attachmentUploader = attachmentUploader
         self.mediaDownloader = mediaDownloader
+        self.projectionChangeNotifier = projectionChangeNotifier
     }
 
     func createGroupConversation(title: String, memberHandlesText: String) async -> String? {
@@ -383,7 +418,17 @@ final class V2ConversationListStore {
         let item = items.first(where: { $0.id == roomID })
         let title = explicitRoomTitles[roomID] ?? item?.title ?? "会话"
         let kind = explicitRoomKinds[roomID] ?? item?.kind ?? .unknown
-        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader)
+        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader, projectionChangeNotifier: projectionChangeNotifier)
+    }
+
+    func observeProjectionChanges() async {
+        guard let projectionChangeNotifier else {
+            await refresh()
+            return
+        }
+        for await _ in await projectionChangeNotifier.updates() {
+            await refresh()
+        }
     }
 
     func openDirectConversation(handle: String) async -> String? {
@@ -446,6 +491,7 @@ final class V2ConversationDetailStore {
     private let attachmentStager: (any V2ConversationAttachmentStaging)?
     private let attachmentUploader: (any V2ConversationAttachmentUploading)?
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
+    private let projectionChangeNotifier: V2ProjectionChangeNotifier?
     let roomID: String
     let title: String
     let isGroupConversation: Bool
@@ -472,7 +518,7 @@ final class V2ConversationDetailStore {
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
-    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil) {
+    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil, projectionChangeNotifier: V2ProjectionChangeNotifier? = nil) {
         self.dataSource = dataSource
         self.sender = sender
         self.messageWithdrawer = messageWithdrawer
@@ -491,6 +537,7 @@ final class V2ConversationDetailStore {
         self.attachmentStager = attachmentStager
         self.attachmentUploader = attachmentUploader
         self.mediaDownloader = mediaDownloader
+        self.projectionChangeNotifier = projectionChangeNotifier
     }
 
     func refresh() async {
@@ -514,6 +561,16 @@ final class V2ConversationDetailStore {
         } catch {
             guard generation == refreshGeneration else { return }
             state = .failed
+        }
+    }
+
+    func observeProjectionChanges() async {
+        guard let projectionChangeNotifier else {
+            await refresh()
+            return
+        }
+        for await _ in await projectionChangeNotifier.updates() {
+            await refresh()
         }
     }
 
@@ -1120,7 +1177,7 @@ struct V2ConversationListView: View {
             .navigationDestination(for: String.self) { roomID in
                 V2ConversationDetailView(store: store.detailStore(for: roomID))
             }
-            .task { await store.refresh() }
+            .task { await store.observeProjectionChanges() }
             .sheet(isPresented: $isPresentingDirectConversation) {
                 NavigationStack {
                     Form {
@@ -1335,7 +1392,7 @@ private struct V2ConversationDetailView: View {
             guard case .success(let urls) = result, let url = urls.first else { return }
             Task { await store.stageAttachment(from: url) }
         }
-        .task { await store.refresh() }
+        .task { await store.observeProjectionChanges() }
     }
 }
 

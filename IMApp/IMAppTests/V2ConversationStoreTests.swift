@@ -117,6 +117,50 @@ struct V2ConversationStoreTests {
         #expect(store.messages == [currentMessage])
     }
 
+    @Test func detailRefreshesItsLocalProjectionAfterASynchronizedUpdate() async {
+        let source = V2SequencedConversationDataSource()
+        let notifier = V2ProjectionChangeNotifier()
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-a",
+            projectionChangeNotifier: notifier
+        )
+        let initialMessage = V2ConversationMessageItem(
+            id: "message-initial",
+            revision: 1,
+            text: "同步前消息",
+            createdAt: .now,
+            isOutgoing: false,
+            isWithdrawn: false
+        )
+        let synchronizedMessage = V2ConversationMessageItem(
+            id: "message-synchronized",
+            revision: 1,
+            text: "同步后消息",
+            createdAt: .now,
+            isOutgoing: false,
+            isWithdrawn: false
+        )
+
+        let observer = Task { await store.observeProjectionChanges() }
+        await source.waitUntilMessageRequestCount(1)
+        await source.completeMessageRequest(at: 0, with: [initialMessage])
+        await notifier.publish()
+        await source.waitUntilMessageRequestCount(2)
+        await source.completeMessageRequest(at: 1, with: [initialMessage, synchronizedMessage])
+        await notifier.publish()
+        await source.waitUntilMessageRequestCount(3)
+
+        #expect(store.messages == [initialMessage, synchronizedMessage])
+
+        await source.completeMessageRequest(at: 2, with: [initialMessage, synchronizedMessage])
+        await Task.yield()
+        observer.cancel()
+        await observer.value
+    }
+
     @Test func messageRefreshPreservesOnlyOpaqueAttachmentReferences() async throws {
         let reference = V2MediaReference(mediaID: try .init("00000000-0000-0000-0000-000000000501"))
         let message = V2ConversationMessageItem(
