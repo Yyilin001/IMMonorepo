@@ -1143,6 +1143,43 @@ struct V2ConversationStoreTests {
         #expect(!store.isApplyingGroupModeration)
     }
 
+    @Test func groupMembershipChangeWaitsForInFlightModeratedRemoval() async throws {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let page = V2GroupMemberPage(
+            membershipRevision: 8,
+            actorRole: "群主",
+            members: [.init(id: "member-a", role: "成员")],
+            nextCursor: nil
+        )
+        let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
+        let remover = V2SuspendingModeratedGroupMemberRemover(result: .accepted)
+        let changer = V2GroupMembershipChangerFake(result: .accepted)
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            groupMemberDirectory: reader,
+            groupMembershipChanger: changer,
+            moderatedGroupMemberRemover: remover
+        )
+
+        await store.loadGroupMembers(reset: true)
+        let member = try #require(store.groupMembers.first)
+        let removal = Task { await store.removeGroupMemberByModerator(member) }
+        await remover.waitUntilRequested()
+
+        await store.changeGroupMembership(targetUserID: "member-b", action: .add)
+
+        #expect(store.isApplyingGroupModeration)
+        #expect(!store.isChangingGroupMembership)
+        #expect(await changer.requests().isEmpty)
+        await remover.complete()
+        await removal.value
+        #expect(!store.isApplyingGroupModeration)
+    }
+
     @Test func rejectedGroupModerationKeepsTheServerReasonOpaque() async throws {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let page = V2GroupMemberPage(
@@ -1904,6 +1941,39 @@ private actor V2ModeratedGroupMemberRemoverFake: V2ModeratedGroupMemberRemoving 
     }
 
     func requests() -> [Request] { requestsValue }
+}
+
+private actor V2SuspendingModeratedGroupMemberRemover: V2ModeratedGroupMemberRemoving {
+    private let result: V2GroupModerationOutcome
+    private var didReceiveRequest = false
+    private var requestWaiter: CheckedContinuation<Void, Never>?
+    private var completion: CheckedContinuation<Void, Never>?
+
+    init(result: V2GroupModerationOutcome) {
+        self.result = result
+    }
+
+    func removeMemberByModerator(
+        roomID _: String,
+        targetUserID _: String,
+        reasonCode _: V2ModerationReasonCode
+    ) async throws -> V2GroupModerationOutcome {
+        didReceiveRequest = true
+        requestWaiter?.resume()
+        requestWaiter = nil
+        await withCheckedContinuation { completion = $0 }
+        return result
+    }
+
+    func waitUntilRequested() async {
+        guard !didReceiveRequest else { return }
+        await withCheckedContinuation { requestWaiter = $0 }
+    }
+
+    func complete() {
+        completion?.resume()
+        completion = nil
+    }
 }
 
 private actor V2SuspendingGroupMembershipChanger: V2GroupMembershipChanging {

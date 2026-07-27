@@ -1053,7 +1053,9 @@ final class V2ConversationDetailStore {
     }
 
     func changeGroupMembership(targetUserID: String, action: V2RoomMembershipAction) async {
-        guard !isLoadingGroupMembers, !isChangingGroupMembership else { return }
+        guard !isLoadingGroupMembers, !isChangingGroupMembership, !isApplyingGroupModeration else {
+            return
+        }
         let input = targetUserID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else {
             groupMemberFeedback = action == .add ? "请输入成员公开 ID。" : "请输入成员。"
@@ -1709,15 +1711,28 @@ private struct V2GroupMembersSheet: View {
                         TextField("成员公开 ID（@handle）", text: $newMemberUserID)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership)
+                            .disabled(
+                                store.isLoadingGroupMembers
+                                    || store.isChangingGroupMembership
+                                    || store.isApplyingGroupModeration
+                            )
                             .accessibilityIdentifier("v2.group.members.add-input")
                         Button("添加") {
                             let target = newMemberUserID
                             newMemberUserID = ""
                             runMembershipChange(target: target, action: .add)
                         }
-                        .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || newMemberUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        .accessibilityValue(store.isChangingGroupMembership ? "正在保存成员变更" : "")
+                        .disabled(
+                            store.isLoadingGroupMembers
+                                || store.isChangingGroupMembership
+                                || store.isApplyingGroupModeration
+                                || newMemberUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        )
+                        .accessibilityValue(
+                            store.isChangingGroupMembership || store.isApplyingGroupModeration
+                                ? "正在保存成员变更"
+                                : ""
+                        )
                         .accessibilityIdentifier("v2.group.members.add")
                     }
                 }
