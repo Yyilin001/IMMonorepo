@@ -637,6 +637,11 @@ HTTPS 边缘的 `400` 预检、真实密码注册与设备凭证签发合同、�
 认证任务，只有后续显式提交才会取消前一个认证任务。这是本机客户端正确性记录，不涉及部署、
 生产接入或容量结论。
 
+同日，在第二台已解锁的 iPhone 17 Pro / iOS 26.2 模拟器上，同一三项本地账户 E2E 也通过。
+`IMApp/Scripts/verify_local_account_dual_simulators_registration_e2e.sh` 将两台明确指定且不同的
+模拟器串行执行这项回归，验证各自的信任根、Keychain、注册操作和本地 SQLite scope 彼此独立；
+它不声称验证两客户端之间的消息投递或离线重连，后两者仍需独立回归。
+
 The same baseline audit found that the retired macOS automation called removed
 `Makefile` targets and that the Release build phase directly executed a
 non-executable validation script. The checked-in local scripts and build phase
