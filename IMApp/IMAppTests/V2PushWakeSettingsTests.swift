@@ -94,6 +94,60 @@ struct V2PushWakeSettingsTests {
         #expect(store.feedback == "无法注册后台同步唤醒，请稍后重试。")
     }
 
+    @Test("取消的旧删除不能覆盖新的启用设置")
+    func lateRemoveDoesNotOverrideANewerEnable() async {
+        let preferences = PushWakePreferences(enabled: true)
+        let endpoint = SuspendingPushEndpointClient()
+        let remote = RemoteNotificationRegistrarFake()
+        let store = V2PushWakeSettingsStore(
+            preferences: preferences,
+            endpointClient: endpoint,
+            remoteNotificationRegistrar: remote,
+            environment: .development
+        )
+        await store.activate()
+
+        let disable = Task { await store.setEnabled(false) }
+        await endpoint.waitUntilRemoving()
+        await store.setEnabled(true)
+        disable.cancel()
+        await endpoint.completeRemove()
+        await disable.value
+
+        #expect(await preferences.value())
+        #expect(store.isEnabled)
+        #expect(store.state == .waitingForToken)
+        #expect(remote.registerRequests == 2)
+    }
+
+    @Test("迟到的 APNs 注册结果不能覆盖后续关闭")
+    func lateRegistrationDoesNotOverrideDisable() async {
+        let preferences = PushWakePreferences(enabled: false)
+        let endpoint = SuspendingPushEndpointClient()
+        let remote = RemoteNotificationRegistrarFake()
+        let store = V2PushWakeSettingsStore(
+            preferences: preferences,
+            endpointClient: endpoint,
+            remoteNotificationRegistrar: remote,
+            environment: .development
+        )
+        await store.setEnabled(true)
+
+        let registration = Task { await store.receiveAPNSToken("opaque-apns-token") }
+        await endpoint.waitUntilRegistering()
+        let disable = Task { await store.setEnabled(false) }
+        await endpoint.waitUntilRemoving()
+        await endpoint.completeRemove()
+        await disable.value
+        await endpoint.completeRegistration()
+        await registration.value
+
+        #expect(await preferences.value() == false)
+        #expect(store.isEnabled == false)
+        #expect(store.state == .disabled)
+        #expect(store.feedback == nil)
+    }
+
     @Test("sign out removes the endpoint without clearing a user scoped preference")
     func signOutRemovesEndpoint() async {
         let preferences = PushWakePreferences(enabled: true)
@@ -161,4 +215,47 @@ private actor PushEndpointClientFake: V2ClientPushEndpointRegistering {
     }
 
     func operations() -> [Operation] { values }
+}
+
+private actor SuspendingPushEndpointClient: V2ClientPushEndpointRegistering {
+    private var registerWaiter: CheckedContinuation<Void, Never>?
+    private var removeWaiter: CheckedContinuation<Void, Never>?
+    private var registrationCompletion: CheckedContinuation<Void, Never>?
+    private var removalCompletion: CheckedContinuation<Void, Never>?
+
+    func register(
+        provider _: V2ClientPushEndpointProvider,
+        environment _: V2ClientPushEndpointEnvironment,
+        token _: String
+    ) async throws {
+        registerWaiter?.resume()
+        registerWaiter = nil
+        await withCheckedContinuation { registrationCompletion = $0 }
+    }
+
+    func remove() async throws {
+        removeWaiter?.resume()
+        removeWaiter = nil
+        await withCheckedContinuation { removalCompletion = $0 }
+    }
+
+    func waitUntilRegistering() async {
+        guard registrationCompletion == nil else { return }
+        await withCheckedContinuation { registerWaiter = $0 }
+    }
+
+    func waitUntilRemoving() async {
+        guard removalCompletion == nil else { return }
+        await withCheckedContinuation { removeWaiter = $0 }
+    }
+
+    func completeRegistration() {
+        registrationCompletion?.resume()
+        registrationCompletion = nil
+    }
+
+    func completeRemove() {
+        removalCompletion?.resume()
+        removalCompletion = nil
+    }
 }

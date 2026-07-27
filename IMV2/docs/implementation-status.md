@@ -17,6 +17,13 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: the selected iPhone 17 / iOS 26.2 Simulator passed the full
+  shared `IMApp` scheme with **71 Swift tests** and **2 UI tests**, zero
+  failures. Push-wake preferences and endpoint registrations now have
+  generation fences: a cancelled late endpoint removal cannot overwrite a
+  newer enable, and a late APNs registration result cannot resurrect a later
+  disable. Focused suspended-endpoint tests prove both orderings. This is
+  local client state evidence only, not APNs delivery or deployment evidence.
 - 2026-07-27: after adding cancellation fences to session restoration,
   password/passkey session establishment, foreground realtime startup and
   direct-room identity caching, the selected iPhone 17 / iOS 26.2 Simulator

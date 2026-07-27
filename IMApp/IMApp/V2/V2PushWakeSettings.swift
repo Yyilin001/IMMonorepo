@@ -69,6 +69,8 @@ final class V2PushWakeSettingsStore {
     private(set) var state: State = .loading
     private(set) var isEnabled = false
     private(set) var feedback: String?
+    private var preferenceGeneration: UInt64 = 0
+    private var endpointOperationGeneration: UInt64 = 0
 
     init(
         preferences: any V2PushWakePreferenceStoring,
@@ -86,7 +88,12 @@ final class V2PushWakeSettingsStore {
     /// enabled setting obtains a fresh system token rather than retaining an
     /// old endpoint token across an app restart.
     func activate() async {
-        isEnabled = await preferences.isEnabled()
+        preferenceGeneration &+= 1
+        let generation = preferenceGeneration
+        endpointOperationGeneration &+= 1
+        let persistedEnabled = await preferences.isEnabled()
+        guard generation == preferenceGeneration else { return }
+        isEnabled = persistedEnabled
         guard isEnabled else {
             state = .disabled
             feedback = nil
@@ -97,9 +104,14 @@ final class V2PushWakeSettingsStore {
 
     func setEnabled(_ desiredValue: Bool) async {
         guard desiredValue != isEnabled || state == .retryableFailure else { return }
+        preferenceGeneration &+= 1
+        let generation = preferenceGeneration
+        endpointOperationGeneration &+= 1
+        let endpointGeneration = endpointOperationGeneration
         feedback = nil
         isEnabled = desiredValue
         await preferences.setEnabled(desiredValue)
+        guard generation == preferenceGeneration else { return }
         if desiredValue {
             requestFreshToken()
             return
@@ -107,13 +119,25 @@ final class V2PushWakeSettingsStore {
 
         do {
             try await endpointClient.remove()
+            guard generation == preferenceGeneration,
+                  endpointGeneration == endpointOperationGeneration,
+                  !isEnabled
+            else { return }
             state = .disabled
         } catch is CancellationError {
+            guard generation == preferenceGeneration,
+                  endpointGeneration == endpointOperationGeneration,
+                  !isEnabled
+            else { return }
             state = .retryableFailure
             feedback = "后台同步唤醒设置尚未同步，请稍后重试。"
         } catch {
             // The disabled preference remains durable. A later activation or
             // explicit retry issues DELETE again, which is safe and device scoped.
+            guard generation == preferenceGeneration,
+                  endpointGeneration == endpointOperationGeneration,
+                  !isEnabled
+            else { return }
             state = .retryableFailure
             feedback = "后台同步唤醒设置尚未同步，请稍后重试。"
         }
@@ -121,15 +145,20 @@ final class V2PushWakeSettingsStore {
 
     func receiveAPNSToken(_ token: String) async {
         guard isEnabled else { return }
+        endpointOperationGeneration &+= 1
+        let endpointGeneration = endpointOperationGeneration
         state = .registering
         feedback = nil
         do {
             try await endpointClient.register(provider: .apns, environment: environment, token: token)
+            guard endpointGeneration == endpointOperationGeneration, isEnabled else { return }
             state = .enabled
         } catch is CancellationError {
+            guard endpointGeneration == endpointOperationGeneration, isEnabled else { return }
             state = .retryableFailure
             feedback = "后台同步唤醒注册被取消，请重试。"
         } catch {
+            guard endpointGeneration == endpointOperationGeneration, isEnabled else { return }
             state = .retryableFailure
             feedback = "无法注册后台同步唤醒，请稍后重试。"
         }
@@ -146,10 +175,12 @@ final class V2PushWakeSettingsStore {
     /// scoped to that user and is not copied to a later account on this device.
     func deactivateForSignOut() async {
         guard isEnabled || state != .disabled else { return }
-        try? await endpointClient.remove()
+        preferenceGeneration &+= 1
+        endpointOperationGeneration &+= 1
         isEnabled = false
         state = .disabled
         feedback = nil
+        try? await endpointClient.remove()
     }
 
     private func requestFreshToken() {
