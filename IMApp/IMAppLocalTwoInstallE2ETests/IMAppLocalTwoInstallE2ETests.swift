@@ -25,6 +25,10 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 30),
             "接收端独立 App 安装必须通过真实密码注册、设备凭据和本地会话初始化。"
         )
+        XCTAssertTrue(
+            app.buttons["v2.account-menu"].exists,
+            "账户菜单必须作为会话列表导航栏的一部分出现。"
+        )
         app.terminate()
     }
 
@@ -52,6 +56,10 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let draft = app.textFields["v2.message.draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 30))
         XCTAssertFalse((draft.value as? String ?? "").isEmpty)
+        XCTAssertFalse(
+            app.buttons["v2.account-menu"].exists,
+            "账户菜单不能遗留在会话详情页并遮挡消息输入与发送操作。"
+        )
         let send = app.buttons["v2.message.send"]
         XCTAssertTrue(send.isEnabled)
         send.tap()
