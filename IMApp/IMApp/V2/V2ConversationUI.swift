@@ -1663,6 +1663,16 @@ private struct V2ConversationMessageRow: View {
         // withdrawal) in SwiftUI's accessibility bridge.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("v2.message.row.\(message.id)")
+        // VoiceOver message operations belong to the whole row, whose target
+        // includes the complete bubble and surrounding touch area. Attaching
+        // them to the bubble lets a one-character Text inherit actionable
+        // semantics with an unusably small hit region.
+        .modifier(V2MessageAccessibilityActions(
+            canEdit: store.canEditMessage(message),
+            canWithdraw: store.canWithdrawMessage(message),
+            edit: beginEditing,
+            withdraw: { Task { await store.withdrawMessage(message) } }
+        ))
     }
 }
 
@@ -1674,12 +1684,20 @@ private struct V2ConversationMessageBubble: View {
     var body: some View {
         VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 3) {
             if !message.text.isEmpty {
-                Text(message.text)
-                    // A withdrawn-message bubble already has a neutral
-                    // background. Keep its tombstone readable rather than
-                    // using low-contrast secondary text on that surface.
-                    .foregroundStyle(.primary)
-                    .accessibilityIdentifier("v2.message.body.\(message.id)")
+                ZStack(alignment: message.isOutgoing ? .trailing : .leading) {
+                    Text(message.text)
+                        // A withdrawn-message bubble already has a neutral
+                        // background. Keep its tombstone readable rather than
+                        // using low-contrast secondary text on that surface.
+                        .foregroundStyle(.primary)
+                        .accessibilityHidden(true)
+                }
+                // Do not let a short Text view become the accessible node:
+                // the wrapper is the message body and owns a full target.
+                .frame(minWidth: 44, minHeight: 44, alignment: message.isOutgoing ? .trailing : .leading)
+                .accessibilityElement()
+                .accessibilityLabel(message.text)
+                .accessibilityIdentifier("v2.message.body.\(message.id)")
             }
             if !message.mentions.isEmpty {
                 Text(mentionSummary)
@@ -1729,12 +1747,6 @@ private struct V2ConversationMessageBubble: View {
                 .accessibilityIdentifier("v2.message.withdraw.\(message.id)")
             }
         }
-        .modifier(V2MessageAccessibilityActions(
-            canEdit: store.canEditMessage(message),
-            canWithdraw: store.canWithdrawMessage(message),
-            edit: beginEditing,
-            withdraw: { Task { await store.withdrawMessage(message) } }
-        ))
     }
 
     private var attachmentSummary: String {

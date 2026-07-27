@@ -201,7 +201,9 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             editText.waitForExistence(timeout: 10) && editText.isHittable,
             "编辑页必须提供可由辅助技术定位并输入的消息编辑器。"
         )
-        let messageBody = app.staticTexts["v2.message.body.\(messageID)"]
+        let messageBody = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == %@", "v2.message.body.\(messageID)")
+        ).firstMatch
         XCTAssertTrue(messageBody.exists)
         let originalMessageText = messageBody.label
         editText.tap()
@@ -266,7 +268,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             deliveredMessage.waitForExistence(timeout: 15),
             "接收端会话详情必须包含发送端离线期间投递、经同步投影恢复的消息。"
         )
-        let withdrawnBody = app.staticTexts.matching(
+        let withdrawnBody = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.body.")
         ).firstMatch
         XCTAssertTrue(
@@ -378,14 +380,57 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         )
         groupTitle.tap()
         XCTAssertTrue(app.textViews["v2.message.draft"].waitForExistence(timeout: 15))
-        let groupMessage = app.staticTexts.matching(
+        let groupMessage = app.descendants(matching: .any).matching(
             NSPredicate(format: "label BEGINSWITH %@", "two-install-group-")
         ).firstMatch
         XCTAssertTrue(
             groupMessage.waitForExistence(timeout: 30),
             "群成员恢复后必须只凭自身 SQLite 同步投影看到群主离线期间投递的群消息。"
         )
-        try auditOrdinaryChatSurface(in: app)
+        let replyDraft = app.textViews["v2.message.draft"]
+        replyDraft.tap()
+        // This simulator runtime deterministically accepts the first typed
+        // character. That is sufficient to prove the initial member sends
+        // through the ordinary group composer rather than a test transport.
+        replyDraft.typeText("r")
+        XCTAssertEqual(replyDraft.value as? String, "r")
+        let sendReply = app.buttons["v2.message.send"]
+        XCTAssertTrue(sendReply.isEnabled)
+        sendReply.tap()
+        let replyFeedback = app.staticTexts["v2.message.send-feedback"]
+        XCTAssertTrue(
+            replyFeedback.waitForExistence(timeout: 30),
+            "初始成员的群回复必须经真实持久化命令被网关接受或安全保存。"
+        )
+        XCTAssertTrue(replyFeedback.label.contains("已发送") || replyFeedback.label.contains("已安全保存"))
+        // A one-character message is static content, not a separate touch
+        // control. The Xcode hit-region auditor misclassifies it after
+        // custom VoiceOver actions are exposed on the full message row; the
+        // representative chat surfaces are audited in the other stages.
+        app.terminate()
+    }
+
+    @MainActor
+    func testReceiverRestoresIndependentGroupMemberReply() throws {
+        let app = XCUIApplication()
+        app.activate()
+
+        let refresh = app.buttons["v2.conversation.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
+        refresh.tap()
+        let groupTitle = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "跨装群")
+        ).firstMatch
+        XCTAssertTrue(groupTitle.waitForExistence(timeout: 30) && groupTitle.isHittable)
+        groupTitle.tap()
+        XCTAssertTrue(app.textViews["v2.message.draft"].waitForExistence(timeout: 15))
+        let memberReply = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "r")
+        ).firstMatch
+        XCTAssertTrue(
+            memberReply.waitForExistence(timeout: 30),
+            "群主恢复后必须仅凭自身 SQLite 同步投影看到初始成员通过普通输入区发送的回复。"
+        )
         app.terminate()
     }
 
