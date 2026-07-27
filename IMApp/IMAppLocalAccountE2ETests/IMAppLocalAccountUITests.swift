@@ -40,6 +40,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
             ]
         )
         let assertion = try XCTUnwrap(registration["accountAssertion"] as? String)
+        XCTAssertFalse(assertion.isEmpty)
         let issued = try await localJSONRequest(
             endpoint: try XCTUnwrap(URL(string: "https://localhost:8443/v2/device-credentials")),
             body: [
@@ -48,8 +49,17 @@ final class IMAppLocalAccountUITests: XCTestCase {
                 "operationID": UUID().uuidString.lowercased(),
             ]
         )
+        let issuedUserID = try XCTUnwrap(issued["userID"] as? String)
+        let issuedExpiry = try XCTUnwrap(issued["accessTokenExpiresAtMilliseconds"] as? NSNumber)
         XCTAssertEqual(issued["deviceID"] as? String, deviceID)
+        XCTAssertNotNil(UUID(uuidString: issuedUserID))
         XCTAssertFalse((issued["accessToken"] as? String ?? "").isEmpty)
+        XCTAssertFalse((issued["refreshCredential"] as? String ?? "").isEmpty)
+        XCTAssertGreaterThan(
+            issuedExpiry.int64Value,
+            Int64(Date().timeIntervalSince1970 * 1_000),
+            "账户边缘返回的访问凭据必须尚未过期。"
+        )
     }
 
     @MainActor
