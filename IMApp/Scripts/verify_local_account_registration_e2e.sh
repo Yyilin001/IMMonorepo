@@ -78,4 +78,4 @@ xcodebuild test \
   -destination "platform=iOS Simulator,id=${destination_id}" \
   -only-testing:IMAppLocalAccountE2ETests/IMAppLocalAccountUITests
 
-printf 'local iOS account registration E2E: pass simulator=%s\n' "${destination_id}"
+printf 'local iOS account-and-delivery E2E: pass simulator=%s\n' "${destination_id}"

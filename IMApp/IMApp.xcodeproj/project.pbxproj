@@ -11,6 +11,8 @@
 		1BADBC432F73859E00E89B24 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC442F73859E00E89B24 /* IMV2ClientKit */; };
 		1BADBC452F73859E00E89B24 /* IMV2Core in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC482F73859E00E89B24 /* IMV2Core */; };
 		1BADBC462F73859E00E89B24 /* IMV2Core in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC492F73859E00E89B24 /* IMV2Core */; };
+		A1E2E3E4F567891011121321 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1E2E3E4F567891011121323 /* IMV2ClientKit */; };
+		A1E2E3E4F567891011121322 /* IMV2Core in Frameworks */ = {isa = PBXBuildFile; productRef = A1E2E3E4F567891011121324 /* IMV2Core */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -97,6 +99,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1E2E3E4F567891011121321 /* IMV2ClientKit in Frameworks */,
+				A1E2E3E4F567891011121322 /* IMV2Core in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -219,6 +223,8 @@
 			);
 			name = IMAppLocalAccountE2ETests;
 			packageProductDependencies = (
+				A1E2E3E4F567891011121323 /* IMV2ClientKit */,
+				A1E2E3E4F567891011121324 /* IMV2Core */,
 			);
 			productName = IMAppLocalAccountE2ETests;
 			productReference = A1E2E3E4F567891011121301 /* IMAppLocalAccountE2ETests.xctest */;
@@ -787,6 +793,16 @@
 			productName = IMV2Core;
 		};
 		1BADBC492F73859E00E89B24 /* IMV2Core */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1BADBC472F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2Core" */;
+			productName = IMV2Core;
+		};
+		A1E2E3E4F567891011121323 /* IMV2ClientKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1BADBC412F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2ClientKit" */;
+			productName = IMV2ClientKit;
+		};
+		A1E2E3E4F567891011121324 /* IMV2Core */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 1BADBC472F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2Core" */;
 			productName = IMV2Core;

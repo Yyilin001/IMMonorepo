@@ -90,8 +90,9 @@ IM_V2_GATEWAY_PORT=7443
 IM_V2_PASSKEY_RP_ID=localhost
 ```
 
-若要在指定模拟器上实际走一次“密码注册 → 设备凭证 → 本地 SQLite 会话”的
-iOS UI 回归，显式指定一个 iOS 26.2 或更高版本的模拟器 UDID：
+若要在指定模拟器上实际走一次“密码注册 → 设备凭证 → 本地 SQLite 会话”，并验证两份
+独立本地账号经 TLS gateway 的私聊投递最终写入接收端 SQLite 投影，显式指定一个 iOS 26.2
+或更高版本的模拟器 UDID：
 
 ```sh
 IMAPP_LOCAL_ACCOUNT_E2E_SIMULATOR_ID='<SIMULATOR_UDID>' \
@@ -116,7 +117,10 @@ Docker 或本地 CA，仍保持离线确定性。与不启动设备的通用编�
 提交，并完整经过真实账户 HTTPS、设备凭证、Keychain 与本地会话；测试结束时会以相同随机
 scope 再启动一次 DEBUG-only 清理路径，删除该 scope 的设备凭证、注册操作、安装绑定及对应
 SQLite/WAL/SHM 工件。它不会覆盖该模拟器的常规 V2 Keychain 身份、会话或数据库，因此同一台
-已解锁模拟器可重复运行。Release
+已解锁模拟器可重复运行。私聊投递检查创建两份随机账号和两条经认证的 TLS 连接；发送端创建
+direct room 并发消息，接收端只以自己的独立 SQLite store 轮询同步并断言最终投影。它不代表两台
+App 安装之间的 UI 交互；接收端离线期间的消息会在其重新认证后验证同步追赶，但不覆盖发送端离线
+outbox 重放、APNs 唤醒或任何上线环境。Release
 和默认离线 UI 测试均不能使用这些参数。
 
 若用户在设备受保护数据暂不可用时退出登录，App 会持久记录**不含凭据或账号信息**的删除意图，

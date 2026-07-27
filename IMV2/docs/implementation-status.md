@@ -592,7 +592,8 @@ restore while the UI test does not depend on historical simulator credentials
 or a live account service. A DEBUG-only `-v2-ui-testing-password-register`
 argument adds the registration-specific check without changing Release
 behavior: stable identifiers prove the public ID/display-name fields appear,
-and the submit control remains disabled until all registration values exist.
+and an incomplete submit stays actionable but announces the missing fields,
+so assistive technology does not lose the validation path.
 The same test target remains part of the local simulator verification scope.
 
 The opt-in `IMAppLocalAccountUITests` suite separately covers a real local
@@ -604,11 +605,17 @@ device and storage namespace, so it cannot overwrite the simulator's ordinary
 V2 Keychain identity, session or SQLite database and can be repeated without
 erasing the simulator. `IMApp/Scripts/verify_local_account_registration_e2e.sh`
 starts/reuses the isolated local stack, adds its generated root CA only to a
-caller-selected simulator, and runs the registration UI test with a unique
-local account. The test resides in a separate `IMAppLocalAccountE2ETests`
+caller-selected simulator, and runs the local account and direct-delivery
+checks with random identities. Besides the registration UI path, it creates
+two separately registered accounts, authenticates two TLS framed gateway
+connections, opens a direct room, disconnects the receiver, sends one message,
+then reconnects the receiver and polls its separate SQLite store until the
+synced projection contains the accepted message.
+The test resides in a separate `IMAppLocalAccountE2ETests`
 target and `IMAppLocalAccountE2E` scheme, so the regular UI suite contains no
 external-service skip or network dependency. This is local integration
-evidence, not a signed-device, production WebAuthn, APNs, or capacity approval.
+evidence, not a two-App-installation UI flow, signed-device, production
+WebAuthn, sender offline-outbox replay, APNs, or capacity approval.
 Before this suite can exercise Keychain-backed registration, the explicitly
 selected simulator must have been manually unlocked once after its most recent
 boot and the host Mac must be unlocked: the production device identity and
@@ -629,18 +636,24 @@ device-identity provider; the ordinary offline UI suite continues to inspect
 user-editable form state.
 
 2026-07-27 本机在 iPhone 17 / iOS 26.2 模拟器上执行
-`IMApp/Scripts/verify_local_account_registration_e2e.sh` 已通过三项检查：模拟器到本机账户
-HTTPS 边缘的 `400` 预检、真实密码注册与设备凭证签发合同、以及由 UI 点击触发的
-“注册 → Keychain → SQLite 本地会话 → 随机 scope 清理”。同次常规 `IMApp` Debug 测试与
+`IMApp/Scripts/verify_local_account_registration_e2e.sh` 已通过四项检查：模拟器到本机账户
+HTTPS 边缘的 `400` 预检、真实密码注册与设备凭证签发合同、由 UI 点击触发的
+“注册 → Keychain → SQLite 本地会话 → 随机 scope 清理”，以及两个随机本地账户通过两条
+TLS gateway 连接创建 direct room；接收端完成初始同步后断开，发送端投递消息，接收端以原设备
+凭证重新认证并由独立 SQLite 同步投影确认。投影检查以 100 ms 间隔、最多 5 秒的有界同步轮询
+等待异步 fan-out，不把首个 pull 的空批次误判成投递失败。
+同次常规 `IMApp` Debug 测试与
 `swift test --package-path IMV2ClientKit` 也通过。该回归同时修复了一个客户端生命周期缺陷：
 提交认证时根路由切换到“认证中”会使登录 View 消失；登录 View 不再因这次预期的消失而取消
 认证任务，只有后续显式提交才会取消前一个认证任务。这是本机客户端正确性记录，不涉及部署、
 生产接入或容量结论。
 
-同日，在第二台已解锁的 iPhone 17 Pro / iOS 26.2 模拟器上，同一三项本地账户 E2E 也通过。
+同日，在第二台已解锁的 iPhone 17 Pro / iOS 26.2 模拟器上，同一四项本地账户与投递 E2E 也通过。
 `IMApp/Scripts/verify_local_account_dual_simulators_registration_e2e.sh` 将两台明确指定且不同的
 模拟器串行执行这项回归，验证各自的信任根、Keychain、注册操作和本地 SQLite scope 彼此独立；
-它不声称验证两客户端之间的消息投递或离线重连，后两者仍需独立回归。
+每次执行还验证两份独立账号/TLS 连接之间的 direct-message 最终投影，以及接收端断开后的重连
+同步。该测试中的两条客户端连接仍由同一 E2E runner 创建，因此它不声称覆盖两台 App 安装之间的
+UI 交互、发送端离线 outbox 重放或 APNs 唤醒；后两类回归仍需独立完成。
 
 The same baseline audit found that the retired macOS automation called removed
 `Makefile` targets and that the Release build phase directly executed a

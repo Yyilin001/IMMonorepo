@@ -1,4 +1,6 @@
 import Foundation
+import IMV2ClientKit
+import IMV2Core
 import XCTest
 
 /// A real local-stack integration test. It has its own target and scheme so
@@ -60,6 +62,109 @@ final class IMAppLocalAccountUITests: XCTestCase {
             Int64(Date().timeIntervalSince1970 * 1_000),
             "账户边缘返回的访问凭据必须尚未过期。"
         )
+    }
+
+    /// Uses two independently registered local accounts, two authenticated
+    /// TLS connections and the receiver's own SQLite projection. The receiver
+    /// disconnects after its initial sync and reconnects before projecting the
+    /// accepted message, proving local offline catch-up without claiming APNs
+    /// wake-up or a deployed environment's delivery behavior.
+    func testTwoLocalClientsDeliverDirectMessageIntoReceiverProjection() async throws {
+        let sender = try await registerLocalAccount(displayName: "Local sender")
+        let receiver = try await registerLocalAccount(displayName: "Local receiver")
+        let frameLimits = try V2FrameLimits(
+            maximumPayloadBytes: 65_536,
+            acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
+        )
+        let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
+        let senderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let receiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let reconnectingReceiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+
+        do {
+            let senderSession = try await senderConnection.connectAndAuthenticate(
+                accessToken: sender.accessToken,
+                deviceID: sender.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            let receiverSession = try await receiverConnection.connectAndAuthenticate(
+                accessToken: receiver.accessToken,
+                deviceID: receiver.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            XCTAssertEqual(senderSession.userID, sender.userID)
+            XCTAssertEqual(receiverSession.userID, receiver.userID)
+
+            let senderTransport = V2ProtobufSyncTransport(
+                wire: senderConnection,
+                protocolVersion: senderSession.protocolVersion
+            )
+            let receiverTransport = V2ProtobufSyncTransport(
+                wire: receiverConnection,
+                protocolVersion: receiverSession.protocolVersion
+            )
+            let databaseDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("im-v2-dual-client-e2e-\(UUID().uuidString)", isDirectory: true)
+            let databaseURL = databaseDirectory.appendingPathComponent("receiver.sqlite")
+            defer { try? FileManager.default.removeItem(at: databaseDirectory) }
+            let receiverStore = try await V2LocalStoreBootstrapper(
+                bindingStore: LocalE2EInstallationBindingStore()
+            ).open(databaseURL: databaseURL)
+            let receiverSync = V2SyncEngine(
+                transport: receiverTransport,
+                store: receiverStore,
+                capabilityProfile: receiverSession.capabilityProfile
+            )
+            try await synchronizeInitialState(receiverSync)
+            await receiverConnection.disconnect()
+
+            let directRoom = try await senderTransport.openDirectRoom(
+                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
+                targetUserID: receiver.userID
+            )
+            let expectedText = "dual-client-local-\(UUID().uuidString.lowercased())"
+            let accepted = try await senderTransport.sendMessage(
+                roomID: directRoom.roomID,
+                clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
+                text: expectedText,
+                media: [],
+                mentions: []
+            )
+            XCTAssertEqual(accepted.roomID, directRoom.roomID)
+
+            let reconnectedReceiverSession = try await reconnectingReceiverConnection.connectAndAuthenticate(
+                accessToken: receiver.accessToken,
+                deviceID: receiver.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            XCTAssertEqual(reconnectedReceiverSession.userID, receiver.userID)
+            let reconnectedReceiverSync = V2SyncEngine(
+                transport: V2ProtobufSyncTransport(
+                    wire: reconnectingReceiverConnection,
+                    protocolVersion: reconnectedReceiverSession.protocolVersion
+                ),
+                store: receiverStore,
+                capabilityProfile: reconnectedReceiverSession.capabilityProfile
+            )
+            let delivered = try await awaitReceiverProjection(
+                in: receiverStore,
+                roomID: directRoom.roomID,
+                messageID: accepted.messageID,
+                syncEngine: reconnectedReceiverSync
+            )
+            XCTAssertEqual(delivered.messageID, accepted.messageID)
+            XCTAssertEqual(delivered.senderUserID, sender.userID)
+            XCTAssertEqual(delivered.text, expectedText)
+        } catch {
+            await senderConnection.disconnect()
+            await receiverConnection.disconnect()
+            await reconnectingReceiverConnection.disconnect()
+            throw error
+        }
+
+        await senderConnection.disconnect()
+        await receiverConnection.disconnect()
+        await reconnectingReceiverConnection.disconnect()
     }
 
     @MainActor
@@ -134,6 +239,89 @@ final class IMAppLocalAccountUITests: XCTestCase {
             "本地注册、设备凭证签发和 V2 本地会话打开后应显示已登录会话列表；当前安全错误：\(safeFailureMessage)"
         )
         XCTAssertFalse(authenticationMessage.exists)
+    }
+}
+
+private struct LocalE2EAccountCredentials: Sendable {
+    let accessToken: String
+    let deviceID: DeviceID
+    let userID: UserID
+}
+
+private actor LocalE2EInstallationBindingStore: V2InstallationBindingStore {
+    private var binding: V2LocalInstallationBinding?
+
+    func load() -> V2LocalInstallationBinding? { binding }
+
+    func save(_ binding: V2LocalInstallationBinding) {
+        self.binding = binding
+    }
+
+    func delete() {
+        binding = nil
+    }
+}
+
+private func registerLocalAccount(displayName: String) async throws -> LocalE2EAccountCredentials {
+    let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    let deviceID = try DeviceID(UUID().uuidString.lowercased())
+    let registration = try await localJSONRequest(
+        endpoint: try XCTUnwrap(URL(string: "https://localhost:8443/v2/account-auth/password/register")),
+        body: [
+            "accountHandle": "dual_\(suffix.prefix(20))",
+            "password": "local-clientkit-password",
+            "deviceID": deviceID.rawValue,
+            "publicHandle": "dual\(suffix.prefix(20))",
+            "displayName": displayName,
+        ]
+    )
+    let assertion = try XCTUnwrap(registration["accountAssertion"] as? String)
+    let issued = try await localJSONRequest(
+        endpoint: try XCTUnwrap(URL(string: "https://localhost:8443/v2/device-credentials")),
+        body: [
+            "accountAssertion": assertion,
+            "deviceID": deviceID.rawValue,
+            "operationID": UUID().uuidString.lowercased(),
+        ]
+    )
+    return try .init(
+        accessToken: XCTUnwrap(issued["accessToken"] as? String),
+        deviceID: deviceID,
+        userID: .init(XCTUnwrap(issued["userID"] as? String))
+    )
+}
+
+private func synchronizeInitialState(_ syncEngine: V2SyncEngine) async throws {
+    if case .resetPending = try await syncEngine.synchronizeUntilCaughtUp() {
+        try await syncEngine.completePendingReset()
+    }
+}
+
+private func awaitReceiverProjection(
+    in store: GRDBV2LocalSyncStore,
+    roomID: RoomID,
+    messageID: MessageID,
+    syncEngine: V2SyncEngine
+) async throws -> V2ClientMessageProjection {
+    for _ in 0 ..< 50 {
+        try await synchronizeInitialState(syncEngine)
+        if let message = try await store.messages(in: roomID).first(where: { $0.messageID == messageID }) {
+            return message
+        }
+        try await Task.sleep(for: .milliseconds(100))
+    }
+    let visibleMessages = try await store.messages(in: roomID)
+    throw LocalE2EDeliveryError.receiverProjectionTimedOut(visibleMessageCount: visibleMessages.count)
+}
+
+private enum LocalE2EDeliveryError: Error, LocalizedError {
+    case receiverProjectionTimedOut(visibleMessageCount: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .receiverProjectionTimedOut(let visibleMessageCount):
+            "等待接收端 SQLite 投影超时；当前房间可见消息数：\(visibleMessageCount)。"
+        }
     }
 }
 

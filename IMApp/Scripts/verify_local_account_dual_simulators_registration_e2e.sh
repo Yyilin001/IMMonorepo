@@ -21,5 +21,5 @@ for simulator_id in "${first_simulator_id}" "${second_simulator_id}"; do
   IMAPP_LOCAL_ACCOUNT_E2E_SIMULATOR_ID="${simulator_id}" "${single_simulator_script}"
 done
 
-printf '%s\n' 'dual-simulator local account registration E2E: pass'
-printf '%s\n' 'scope: two independent Keychain-backed registrations only; this does not prove cross-client message delivery or offline replay.'
+printf '%s\n' 'dual-simulator local account-and-delivery E2E: pass'
+printf '%s\n' 'scope: each simulator verifies its own Keychain-backed registration plus two independently registered TLS client identities delivering a direct message while the receiver is disconnected, then catching up into its SQLite projection after reconnect; this does not prove two App installations exchange messages, offline outbox replay, APNs wake-up, or deployment behavior.'
