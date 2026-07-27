@@ -41,6 +41,10 @@ public struct V2PendingGroupRoomCreation: Equatable, Sendable {
 
 public protocol V2LocalGroupRoomCommandStore: Sendable {
     func enqueue(_ command: V2PendingGroupRoomCreation) async throws
+    /// Reuses an equivalent pending intent atomically. A group creation must
+    /// not receive a second operation ID merely because its first response was
+    /// lost or the app restarted before reconnecting.
+    func enqueueOrReusePendingGroupRoomCreation(_ command: V2PendingGroupRoomCreation) async throws -> V2PendingGroupRoomCreation
     func nextReadyGroupRoomCreation(now: Date) async throws -> V2PendingGroupRoomCreation?
     func markGroupRoomCreationAcknowledged(operationID: GroupRoomOperationID, roomID: RoomID) async throws
     func scheduleGroupRoomCreationRetry(operationID: GroupRoomOperationID, nextAttemptAt: Date) async throws
@@ -76,8 +80,7 @@ public actor V2GroupRoomCommandOutboxEngine {
             initialMemberUserIDs: initialMemberUserIDs, state: .pending,
             attemptCount: 0, nextAttemptAt: now(), createdRoomID: nil, terminalCode: nil
         )
-        try await store.enqueue(command)
-        return command
+        return try await store.enqueueOrReusePendingGroupRoomCreation(command)
     }
 
     public func flushOnce() async throws -> V2GroupRoomCreationFlushResult {

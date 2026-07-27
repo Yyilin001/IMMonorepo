@@ -41,6 +41,32 @@ struct V2GroupRoomCommandOutboxTests {
         #expect(try await engine.flushOnce() == .rejected(command.operationID, code: "INVALID_ARGUMENT"))
         #expect(try await engine.flushOnce() == .idle)
     }
+
+    @Test("重启后重复提交相同待建群意图会复用原操作")
+    func duplicatePendingCreationReusesTheOriginalOperationAfterRestart() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "im-v2-group-reuse-\(UUID().uuidString).sqlite")
+        let binding = V2LocalInstallationBinding(value: UUID())
+        let firstStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        let firstOperation = UUID(uuidString: "00000000-0000-0000-0000-000000000707")!
+        let firstEngine = V2GroupRoomCommandOutboxEngine(
+            store: firstStore,
+            transport: ScriptedGroupTransport(results: []),
+            makeUUID: { firstOperation }
+        )
+
+        let original = try await firstEngine.enqueueCreation(title: " 项目群 ", initialMemberUserIDs: [])
+        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        let restartedEngine = V2GroupRoomCommandOutboxEngine(
+            store: restartedStore,
+            transport: ScriptedGroupTransport(results: [])
+        )
+        let reused = try await restartedEngine.enqueueCreation(title: "项目群", initialMemberUserIDs: [])
+
+        #expect(reused.operationID == original.operationID)
+        let pending = try await restartedStore.pendingGroupRoomCreations()
+        #expect(pending.count == 1)
+    }
 }
 
 private actor ScriptedGroupTransport: V2ClientGroupMessagingTransport {

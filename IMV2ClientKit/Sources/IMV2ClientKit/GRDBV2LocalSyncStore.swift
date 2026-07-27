@@ -891,6 +891,58 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
+    public func enqueueOrReusePendingGroupRoomCreation(
+        _ command: V2PendingGroupRoomCreation
+    ) throws -> V2PendingGroupRoomCreation {
+        try databasePool.write { db in
+            guard command.state == .pending,
+                  command.attemptCount == 0,
+                  command.createdRoomID == nil,
+                  command.terminalCode == nil
+            else { throw V2ClientCommandError.commandConflict }
+            let members = try Self.encodeGroupMemberUserIDs(command.initialMemberUserIDs)
+            if let existing = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM v2_pending_group_room_creations WHERE operation_id = ?",
+                arguments: [command.operationID.rawValue]
+            ) {
+                let decoded = try Self.decodePendingGroupRoomCreation(existing)
+                guard decoded.title == command.title,
+                      decoded.initialMemberUserIDs == command.initialMemberUserIDs,
+                      decoded.state == .pending
+                else { throw V2ClientCommandError.commandConflict }
+                return decoded
+            }
+            if let existing = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM v2_pending_group_room_creations
+                WHERE title = ? AND initial_member_user_ids = ? AND state = 'pending'
+                ORDER BY created_at, operation_id
+                LIMIT 1
+                """,
+                arguments: [command.title, members]
+            ) {
+                return try Self.decodePendingGroupRoomCreation(existing)
+            }
+            try db.execute(
+                sql: """
+                INSERT INTO v2_pending_group_room_creations
+                (operation_id, title, initial_member_user_ids, state, attempt_count, next_attempt_at, created_at)
+                VALUES (?, ?, ?, 'pending', 0, ?, ?)
+                """,
+                arguments: [
+                    command.operationID.rawValue,
+                    command.title,
+                    members,
+                    command.nextAttemptAt.timeIntervalSince1970,
+                    command.nextAttemptAt.timeIntervalSince1970
+                ]
+            )
+            return command
+        }
+    }
+
     public func nextReadyGroupRoomCreation(now: Date) throws -> V2PendingGroupRoomCreation? {
         try databasePool.read { db in
             guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_room_creations WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }

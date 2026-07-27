@@ -17,6 +17,14 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: durable group creation now atomically reuses an equivalent
+  pending title-and-initial-members intent in the local SQLite store. A lost
+  response, sheet retry, or app restart therefore continues with the original
+  operation ID instead of recording a duplicate group-creation command. The
+  native `IMV2ClientKit` suite passed **125 tests**; the selected iPhone 17 /
+  iOS 26.2 Simulator passed the full shared `IMApp` scheme with **80 Swift
+  tests** and **2 UI tests**, zero failures. This is local durable-intent
+  evidence only, not multi-device or deployment evidence.
 - 2026-07-27: direct-room opening and group creation now each have a Store
   single-flight gate, with matching disabled form controls and task ownership
   in the list UI. A second tap cannot resolve another identity or enqueue a
