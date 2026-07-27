@@ -1696,6 +1696,7 @@ private struct V2ConversationMessageBubble: View {
                         )
                     }
                 }
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("v2.message.attachments.\(message.id)")
             }
             Text(message.createdAt, format: .dateTime.hour().minute())
@@ -2008,6 +2009,7 @@ private struct V2GroupMembersSheet: View {
                             .accessibilityIdentifier("v2.group.member.remove.\(member.id)")
                         }
                     }
+                    .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("v2.group.member.\(member.id)")
                 }
                 if store.canLoadMoreGroupMembers {
