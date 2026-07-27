@@ -11,6 +11,8 @@ env_file="${v2_dir}/.env.local"
 project_name="imv2-local-migration-regression"
 created_env_file=false
 
+source "${script_dir}/local_compose.sh"
+
 command -v docker >/dev/null 2>&1 || {
   printf 'missing required command: docker\n' >&2
   exit 1
@@ -24,16 +26,18 @@ if [[ ! -f "${env_file}" ]]; then
   created_env_file=true
 fi
 
-compose=(docker compose --project-name "${project_name}" --env-file "${env_file}" --file "${compose_file}")
+compose() {
+  v2_local_compose "${env_file}" --project-name "${project_name}" --file "${compose_file}" "$@"
+}
 cleanup() {
-  "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  compose down -v --remove-orphans >/dev/null 2>&1 || true
   if [[ "${created_env_file}" = true ]]; then
     rm -f "${env_file}"
   fi
 }
 trap cleanup EXIT
 
-"${compose[@]}" up -d --wait postgres
+compose up -d --wait postgres
 
 run_migrator() {
   V2_LOCAL_COMPOSE_PROJECT="${project_name}" \
@@ -47,7 +51,7 @@ expected_migration_count="$(find "${v2_dir}/sql" -maxdepth 1 -type f -name '[0-9
 test "$(printf '%s\n' "${bootstrap_output}" | grep -Fc 'local V2 migration recorded:')" = "${expected_migration_count}"
 
 psql() {
-  "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 "$@"
+  compose exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 "$@"
 }
 psql -c 'DROP TABLE im_v2.user_shard_route_operations, im_v2.user_shard_route_overrides, im_v2.user_shard_router_configuration' >/dev/null
 psql -c "DELETE FROM im_v2.local_schema_migrations WHERE migration_name = '0010_user_shard_router_control.sql'" >/dev/null

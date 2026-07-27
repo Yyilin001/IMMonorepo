@@ -13,6 +13,12 @@ project_file="${app_dir}/IMApp.xcodeproj"
 scheme="${IMAPP_LOCAL_ACCOUNT_E2E_SCHEME:-IMAppLocalAccountE2E}"
 destination_id="${IMAPP_LOCAL_ACCOUNT_E2E_SIMULATOR_ID:-}"
 
+source "${repo_root}/IMV2/scripts/local_compose.sh"
+
+local_compose() {
+  v2_local_compose "${local_env_file}" --project-name "${local_compose_project}" --file "${local_compose_file}" "$@"
+}
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || {
     printf 'missing required command: %s\n' "$1" >&2
@@ -42,7 +48,7 @@ fi
 # than turning its failure into a misleading account-service diagnosis.
 printf '%s\n' 'preflight: ensure the selected simulator has been manually unlocked at least once since it was last booted, and that the Mac is unlocked.' >&2
 
-running_services="$(docker compose --project-name "${local_compose_project}" --env-file "${local_env_file}" --file "${local_compose_file}" ps --status running --services 2>/dev/null || true)"
+running_services="$(local_compose ps --status running --services 2>/dev/null || true)"
 if ! grep -qx 'account' <<<"${running_services}" || ! grep -qx 'gateway' <<<"${running_services}" || ! grep -qx 'caddy' <<<"${running_services}"; then
   "${local_stack_script}"
 fi

@@ -9,6 +9,14 @@ env_file="${v2_dir}/.env.local"
 compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
 local_account_build_stage_label="com.imv2.local-account-build-stage=true"
 
+# Keep `.env.local` authoritative even when the invoking terminal exported an
+# unrelated `IM_V2_*` value.
+source "${script_dir}/local_compose.sh"
+
+compose() {
+  v2_local_compose "${env_file}" --project-name "${compose_project}" --file "${compose_file}" "$@"
+}
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || {
     printf 'missing required command: %s\n' "$1" >&2
@@ -40,8 +48,7 @@ prune_unreferenced_local_build_stages() {
 seed_local_admission_pool() {
   local replacement_lease_id
   replacement_lease_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-  docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
-    exec -T postgres psql --quiet --set=ON_ERROR_STOP=1 --username im_v2 --dbname im_v2 <<SQL
+  compose exec -T postgres psql --quiet --set=ON_ERROR_STOP=1 --username im_v2 --dbname im_v2 <<SQL
 INSERT INTO im_v2.shard_admission_pools AS pool
     (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
      command_window_limit, fanout_window_limit,
@@ -162,7 +169,7 @@ prune_unreferenced_local_build_stages
 # stale migration mount after the repository's schema files change.
 # Start it first so the retained volume can catch up through the local-only
 # migration ledger before any V2 service runs its schema readiness gate.
-docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" up -d --wait --force-recreate postgres
+compose up -d --wait --force-recreate postgres
 "${script_dir}/apply_v2_local_schema_migrations.sh"
 seed_local_admission_pool
 # Caddy's development leaf certificate is intentionally short-lived. Recreate
@@ -172,13 +179,12 @@ seed_local_admission_pool
 # The image tag stays stable for convenient local use. Explicitly recreate all
 # binaries after each build so a successful smoke test can never exercise a
 # stale account, operator, or gateway process left behind by Compose.
-docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" up -d --wait --force-recreate account operator
-docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" up -d --force-recreate caddy
+compose up -d --wait --force-recreate account operator
+compose up -d --force-recreate caddy
 mkdir -p "${v2_dir}/local-ca"
 ca_path="${v2_dir}/local-ca/root.crt"
 for _ in {1..30}; do
-  if docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
-    cp caddy:/data/caddy/pki/authorities/local/root.crt "${ca_path}" >/dev/null 2>&1; then
+  if compose cp caddy:/data/caddy/pki/authorities/local/root.crt "${ca_path}" >/dev/null 2>&1; then
     break
   fi
   sleep 1
@@ -189,7 +195,7 @@ test -f "${ca_path}" || {
 }
 # The gateway reads Caddy's certificate files only at startup, so it must be
 # recreated after the edge writes a replacement leaf certificate.
-docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" up -d --wait --force-recreate gateway
+compose up -d --wait --force-recreate gateway
 
 printf 'V2 local account stack ready at https://localhost:8443\n'
 printf 'V2 local TLS gateway is ready at localhost:7443\n'

@@ -14,8 +14,10 @@ env_file="${v2_dir}/.env.local"
 compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
 phase="preflight"
 
+source "${script_dir}/local_compose.sh"
+
 compose() {
-  docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" "$@"
+  v2_local_compose "${env_file}" --project-name "${compose_project}" --file "${compose_file}" "$@"
 }
 
 report_failure() {
@@ -219,7 +221,7 @@ peer_user_id="$(printf '%s' "${peer_issued_credentials}" | jq -er '.userID')"
 # so they trust only the local Caddy root, and neither prints credentials or
 # identities or becomes a gateway debug endpoint.
 phase="authenticated V2 direct-message send"
-gateway_send_result="$(docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
+gateway_send_result="$(compose \
   exec -T \
   --env 'IM_V2_GATEWAY_PROBE_MODE=sendDirectMessage' \
   --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=${access_token}" \
@@ -233,7 +235,7 @@ test -n "${gateway_room_id}" && test -n "${gateway_message_id}" && test -z "${ga
 }
 
 phase="authenticated V2 recipient sync"
-gateway_receive_output="$(docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
+gateway_receive_output="$(compose \
   exec -T \
   --env 'IM_V2_GATEWAY_PROBE_MODE=receiveDirectMessage' \
   --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=${peer_access_token}" \
@@ -303,7 +305,7 @@ test "${push_delete_status}" = '204' || {
 disable_operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 disable_body="{\"operationID\":\"${disable_operation_id}\",\"userID\":\"${user_id}\",\"reason\":\"credential_compromise\"}"
 phase="operator account disable"
-operator_response="$(docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
+operator_response="$(compose \
   exec -T operator bash -c '
     body="$1"
     exec 3<>/dev/tcp/127.0.0.1/9445
@@ -386,14 +388,14 @@ printf '%s\n' "${gateway_probe}" | grep -Fq 'Verification: OK' || {
 # listener from inside the Compose service rather than publishing a second
 # host port merely for smoke testing. This also rejects a stale image that
 # predates the durable retry/pause metric vocabulary.
-if docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
+if compose \
   port gateway 9464 >/dev/null 2>&1; then
   printf 'V2 metrics listener must not publish port 9464 to the host\n' >&2
   exit 1
 fi
 
 phase="private metrics probe"
-metrics_response="$(docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" \
+metrics_response="$(compose \
   exec -T gateway bash -lc 'exec 3<>/dev/tcp/127.0.0.1/9464; printf "GET /metrics HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n" >&3; cat <&3')"
 printf '%s\n' "${metrics_response}" | grep -Fq 'HTTP/1.1 200 OK' || {
   printf 'V2 private metrics listener did not return HTTP 200\n' >&2

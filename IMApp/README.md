@@ -65,6 +65,9 @@ bash IMV2/scripts/verify_v2_local_account_stack.sh
 - 该回归先验证网关实际提供的 TLS 证书。若长驻网关仍持有 Caddy 已轮换的过期本地
   叶证书，脚本只重建 Caddy 和网关以重新加载证书；不会重建 PostgreSQL、账户服务或
   删除本地卷。
+- 本地脚本会忽略终端中意外遗留的 `IM_V2_*` 环境变量，始终以受限权限的
+  `IMV2/.env.local` 为 Compose 的唯一 V2 配置来源；可用
+  `bash IMV2/scripts/test_v2_local_compose_env_precedence.sh` 做无副作用验证。
 
 Debug 默认配置已经是：
 

@@ -39,6 +39,14 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   limit, Push, operator and metrics black-box checks. This proves local
   recovery for that certificate-lifecycle case, not production certificate
   rotation or availability behavior.
+- 2026-07-27: local Compose launch, migration, smoke and iOS-E2E helpers now
+  remove inherited `IM_V2_*` exports before invoking Docker Compose, making
+  the ignored, mode-`0600` `.env.local` file the sole local V2 configuration
+  source. The read-only precedence regression injects a conflicting edge
+  secret into the caller shell and verifies that rendered Compose configuration
+  is unchanged. This prevents accidental cross-project terminal state from
+  silently splitting account, gateway and edge secrets; it is not a production
+  secret-manager substitute.
 - 2026-07-26: the current V2 sources passed the generic iOS Simulator
   `build-for-testing` command under Xcode 26.6 with isolated DerivedData and
   code signing disabled. It compiled the `IMApp`, `IMAppTests`, and

@@ -12,6 +12,8 @@ compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
 compose_file="${V2_LOCAL_COMPOSE_FILE:-${v2_dir}/docker-compose.local-account.yml}"
 env_file="${V2_LOCAL_ENV_FILE:-${v2_dir}/.env.local}"
 
+source "${script_dir}/local_compose.sh"
+
 command -v docker >/dev/null 2>&1 || {
   printf 'missing required command: docker\n' >&2
   exit 1
@@ -21,9 +23,11 @@ test -f "${env_file}" || {
   exit 1
 }
 
-compose=(docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}")
+compose() {
+  v2_local_compose "${env_file}" --project-name "${compose_project}" --file "${compose_file}" "$@"
+}
 psql() {
-  "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 "$@"
+  compose exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 "$@"
 }
 
 # `docker compose up --wait --force-recreate` reports the healthcheck from the
@@ -33,7 +37,7 @@ psql() {
 # health transition as a schema-migration readiness guarantee.
 wait_for_postgres_sql() {
   for _ in {1..60}; do
-    if "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 -c 'SELECT 1' >/dev/null 2>&1; then
+    if compose exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 -c 'SELECT 1' >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
