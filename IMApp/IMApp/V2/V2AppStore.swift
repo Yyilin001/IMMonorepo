@@ -39,6 +39,23 @@ struct V2RealtimeAttemptGate {
     }
 }
 
+/// Gives each explicit sign-in request ownership of the authentication UI
+/// state. A transport may complete after its Task was cancelled, so Task
+/// cancellation alone cannot let an older request overwrite a newer login.
+@MainActor
+struct V2AuthenticationAttemptGate {
+    private(set) var generation: UInt64 = 0
+
+    mutating func begin() -> UInt64 {
+        generation &+= 1
+        return generation
+    }
+
+    func matchesCurrentGeneration(_ candidate: UInt64) -> Bool {
+        generation == candidate
+    }
+}
+
 @MainActor
 @Observable
 final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
@@ -106,6 +123,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private var realtimeRuntime: V2ClientRuntime?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
     @ObservationIgnored private var realtimeAttemptGate = V2RealtimeAttemptGate()
+    @ObservationIgnored private var authenticationAttemptGate = V2AuthenticationAttemptGate()
     @ObservationIgnored private var isApplicationActive = true
 
     private(set) var route: Route
@@ -266,8 +284,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
               let deviceIdentityProvider,
               let localKeychainService
         else { return }
-        route = .authenticating
-        authenticationMessage = nil
+        let attemptGeneration = beginAuthenticationAttempt()
         do {
             let passkeyService = try V2HTTPPasskeyAssertionService(
                 optionsEndpoint: configuration.endpoint("v2/account-auth/passkeys/assertion-options"),
@@ -286,11 +303,14 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             )
             let localStore = try await bootstrapper.establishSession(using: issuer)
             try Task.checkCancellation()
-            try await activate(localStore: localStore)
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            try await activate(localStore: localStore, authenticationAttemptGeneration: attemptGeneration)
         } catch is CancellationError {
             guard !Task.isCancelled else { return }
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
         } catch {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "Passkey 服务尚未启用，或身份验证未通过。"
         }
@@ -302,8 +322,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
               let deviceIdentityProvider,
               let localKeychainService
         else { return }
-        route = .authenticating
-        authenticationMessage = nil
+        let attemptGeneration = beginAuthenticationAttempt()
         do {
             let passwordAuthenticator = try V2HTTPPasswordAccountAuthenticator(
                 registrationEndpoint: configuration.endpoint("v2/account-auth/password/register"),
@@ -325,41 +344,52 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             )
             let localStore = try await bootstrapper.establishSession(using: issuer)
             try Task.checkCancellation()
-            try await activate(localStore: localStore)
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            try await activate(localStore: localStore, authenticationAttemptGeneration: attemptGeneration)
         } catch is CancellationError {
             guard !Task.isCancelled else { return }
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
         } catch V2AccountAuthenticationError.invalidAccountHandle {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "账号须为 3–64 位小写字母、数字、下划线或连字符。"
         } catch V2AccountAuthenticationError.invalidPassword {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "密码须为 12–1024 个 UTF-8 字节。"
         } catch V2AccountAuthenticationError.invalidPublicHandle {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "公开 ID 须为 3–32 位小写字母、数字或下划线。"
         } catch V2AccountAuthenticationError.invalidDisplayName {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "显示名称须为 1–80 个 UTF-8 字节，且不能包含换行或控制字符。"
         } catch V2AccountAuthenticationError.accountAlreadyExists {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "该账号已存在，请改用密码登录。"
         } catch V2AccountAuthenticationError.authenticationRejected {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "账号或密码不正确。"
         } catch let error as V2AccountAuthenticationError {
             // Every remaining case contains only a transport classification or
             // HTTP status. Keep it local to diagnostics; it is not user-facing
             // and has no account or credential material.
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             Self.authenticationLogger.error(
                 "Password account authentication failed: \(String(reflecting: error), privacy: .public)"
             )
             route = .signedOut
             authenticationMessage = "账户服务暂不可用，请稍后重试。"
         } catch V2AccountAssertionCredentialProviderError.deviceIdentityUnavailable {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "受保护凭据暂不可用，请解锁设备后重试。"
         } catch V2AccountAssertionCredentialProviderError.registrationOperationUnavailable {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "无法保存本次设备注册，请稍后重试。"
         } catch V2AuthSessionError.credentialsUnavailable {
@@ -367,20 +397,25 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             // This is normally a temporary protected-data/keychain state; never
             // discard the server-side registration or misreport it as a network
             // outage.
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .protectedDataUnavailable
         } catch V2LocalStoreBootstrapError.installationBindingUnavailable {
             // The device-only installation anchor uses the same protected
             // Keychain boundary as credentials. It can recover after unlock.
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .protectedDataUnavailable
         } catch V2ClientLocalStorageError.backupExclusionVerificationFailed {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "无法按安全策略准备本地数据存储。"
         } catch is V2DeviceLocalStorageError {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "无法按安全策略准备本地数据存储。"
         } catch {
             // Keep diagnostics useful without exposing account identifiers,
             // assertion material, credentials, or server response bodies.
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             Self.authenticationLogger.error(
                 "Password authentication failed with error type \(String(reflecting: type(of: error)), privacy: .public)"
             )
@@ -453,7 +488,17 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         return credentials.userID.rawValue
     }
 
-    private func activate(localStore: GRDBV2LocalSyncStore) async throws {
+    private func beginAuthenticationAttempt() -> UInt64 {
+        let generation = authenticationAttemptGate.begin()
+        route = .authenticating
+        authenticationMessage = nil
+        return generation
+    }
+
+    private func activate(
+        localStore: GRDBV2LocalSyncStore,
+        authenticationAttemptGeneration: UInt64? = nil
+    ) async throws {
         guard let configuration, let authSession, let localKeychainService, let localDatabaseURL else {
             throw V2AppConfigurationError.invalidRealtimeEndpoint
         }
@@ -526,8 +571,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         } else {
             pushWakeSettings = nil
         }
+        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
         await stopRealtime()
         try Task.checkCancellation()
+        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
         realtimeRuntime = realtime.runtime
         conversationStore = conversations
         privacySettingsStore = privacySettings
@@ -537,6 +584,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         route = .signedIn(userID: userID)
         await conversations.refresh()
         await pushWakeSettings?.activate()
+        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
         startRealtimeIfApplicationActive(runtime: realtime.runtime, conversations: conversations)
     }
 

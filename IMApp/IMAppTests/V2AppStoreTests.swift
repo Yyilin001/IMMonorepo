@@ -43,6 +43,18 @@ struct V2AppStoreTests {
         #expect(currentCompletionReleasedGate)
     }
 
+    @Test("旧登录尝试不能覆盖新的认证流程")
+    func staleAuthenticationAttemptCannotOwnTheCurrentRoute() {
+        var gate = V2AuthenticationAttemptGate()
+
+        let first = gate.begin()
+        let second = gate.begin()
+
+        #expect(second > first)
+        #expect(!gate.matchesCurrentGeneration(first))
+        #expect(gate.matchesCurrentGeneration(second))
+    }
+
     @Test("UI test startup mode bypasses device state and remains signed out")
     func uiTestingStartupModeStaysSignedOut() async {
         let store = V2AppStore(startupMode: .uiTestingSignedOut)

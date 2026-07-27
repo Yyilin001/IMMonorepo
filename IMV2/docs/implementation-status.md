@@ -20,12 +20,13 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 - 2026-07-27: after adding cancellation fences to session restoration,
   password/passkey session establishment, foreground realtime startup and
   direct-room identity caching, the selected iPhone 17 / iOS 26.2 Simulator
-  again passed the full shared `IMApp` scheme with **68 Swift tests** and
+  again passed the full shared `IMApp` scheme with **69 Swift tests** and
   **2 UI tests**, zero failures. The dedicated local-account UI suite also
   passed **3 tests** through real local HTTPS registration, device-credential
-  issuance, Keychain session creation and scoped cleanup. A cancelled,
-  superseded authentication attempt now leaves the newer UI route untouched
-  rather than applying stale signed-out or signed-in state. This is local
+  issuance, Keychain session creation and scoped cleanup. An authentication
+  generation gate, with a focused regression, now prevents a cancelled or
+  superseded attempt from applying stale signed-out or signed-in state over a
+  newer login route. This is local
   simulator lifecycle evidence only, not a signed-device or deployment
   guarantee.
 - 2026-07-27: the selected iPhone 17 / iOS 26.2 Simulator passed the full
