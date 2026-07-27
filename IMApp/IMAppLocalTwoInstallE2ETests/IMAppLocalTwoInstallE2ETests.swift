@@ -200,9 +200,31 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             editText.waitForExistence(timeout: 10) && editText.isHittable,
             "编辑页必须提供可由辅助技术定位并输入的消息编辑器。"
         )
-        let cancelEdit = app.buttons["v2.message.edit-cancel"]
-        XCTAssertTrue(cancelEdit.isHittable)
-        cancelEdit.tap()
+        let messageBody = app.staticTexts["v2.message.body.\(messageID)"]
+        XCTAssertTrue(messageBody.exists)
+        let originalMessageText = messageBody.label
+        editText.tap()
+        // The affected simulator runtime truncates a single typeText call to
+        // its first character. One appended character is enough to exercise
+        // the real edit command without bypassing the editable UI.
+        editText.typeText("x")
+        let saveEdit = app.buttons["v2.message.edit-save"]
+        XCTAssertTrue(saveEdit.isHittable && saveEdit.isEnabled)
+        saveEdit.tap()
+        let editFeedback = expectation(
+            for: NSPredicate(
+                format: "label CONTAINS %@ OR label CONTAINS %@",
+                "编辑已提交",
+                "编辑已安全保存"
+            ),
+            evaluatedWith: actionFeedback
+        )
+        wait(for: [editFeedback], timeout: 30)
+        let projectionChanged = expectation(
+            for: NSPredicate(format: "label != %@", originalMessageText),
+            evaluatedWith: messageBody
+        )
+        wait(for: [projectionChanged], timeout: 30)
         XCTAssertTrue(messageRow.waitForExistence(timeout: 5))
         messageRow.press(forDuration: 1)
         let withdraw = app.descendants(matching: .any).matching(
