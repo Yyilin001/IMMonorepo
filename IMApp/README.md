@@ -62,6 +62,9 @@ bash IMV2/scripts/verify_v2_local_account_stack.sh
 - 回归脚本会让两个独立临时账号经 HTTPS 取得设备凭据，并在网关容器内完成真实
   TLS 1.3 / Protobuf 认证：发送端打开私聊并接受一条消息，接收端通过 `SyncPull`
   观察到同一消息。它不会打印或持久化凭据或身份。
+- 该回归先验证网关实际提供的 TLS 证书。若长驻网关仍持有 Caddy 已轮换的过期本地
+  叶证书，脚本只重建 Caddy 和网关以重新加载证书；不会重建 PostgreSQL、账户服务或
+  删除本地卷。
 
 Debug 默认配置已经是：
 
@@ -93,9 +96,10 @@ Docker 或本地 CA，仍保持离线确定性。与不启动设备的通用编�
 带应用标识 entitlement 的本地签名，脚本会使用工程的默认 Debug 签名设置。
 在部分 iOS 26.2 Simulator/XCTest 组合中，`typeText` 会把 SwiftUI 表单输入截断为首字
 符；因此专用 E2E target 仅在 DEBUG 的 `uiTestingLiveLocalAccount` 模式下，通过启动参数
-预填随机账号、公开 ID、显示名和一次性的本地测试密码。它仍由 UI 点击提交，并完整经过
-真实账户 HTTPS、设备凭证、Keychain 与本地会话；Release 和默认离线 UI 测试均不能使用
-这些参数。
+预填随机账号、公开 ID、显示名、一次性的本地测试密码和一次性测试存储域。它仍由 UI 点击
+提交，并完整经过真实账户 HTTPS、设备凭证、Keychain 与本地会话；测试存储域不会覆盖该
+模拟器的常规 V2 Keychain 身份、会话或数据库，因此同一台已解锁模拟器可重复运行。Release
+和默认离线 UI 测试均不能使用这些参数。
 
 停止本地栈时使用脚本输出的 `docker compose ... down` 命令。数据库卷会被
 保留，便于重复运行；如需清空本地账户数据，请明确执行 Compose 的

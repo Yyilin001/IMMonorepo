@@ -14,10 +14,13 @@ final class IMAppLocalAccountUITests: XCTestCase {
         let accountHandle = "ios_\(suffix.prefix(20))"
         let publicHandle = "ios\(suffix.prefix(20))"
         let password = "localpassword"
+        let e2eScope = UUID().uuidString.lowercased()
 
         let app = XCUIApplication()
         app.launchArguments = [
             "-v2-ui-testing-live-local-account",
+            "-v2-ui-testing-e2e-scope",
+            e2eScope,
             "-v2-ui-testing-password-register",
             "-v2-ui-testing-local-password",
             password,

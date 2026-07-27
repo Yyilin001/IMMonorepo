@@ -41,6 +41,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private let authSession: V2AuthSession?
     @ObservationIgnored private let bootstrapper: V2ClientSessionBootstrapper?
     @ObservationIgnored private let deviceIdentityProvider: (any V2DeviceIdentityProvider)?
+    @ObservationIgnored private let localKeychainService: String?
+    @ObservationIgnored private let localDatabaseURL: URL?
     @ObservationIgnored private weak var remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)?
     @ObservationIgnored private var realtimeRuntime: V2ClientRuntime?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
@@ -56,6 +58,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
 
     init(
         startupMode: StartupMode = .production,
+        liveLocalAccountE2ETestScope: V2LiveLocalAccountE2ETestScope? = nil,
         remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)? = nil
     ) {
         self.startupMode = startupMode
@@ -65,6 +68,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             authSession = nil
             bootstrapper = nil
             deviceIdentityProvider = nil
+            localKeychainService = nil
+            localDatabaseURL = nil
             route = .signedOut
             authenticationMessage = nil
             conversationStore = nil
@@ -77,20 +82,44 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         }
         do {
             let configuration = try V2AppConfiguration()
+            #if DEBUG
+            let liveLocalAccountE2ETestScope = startupMode == .uiTestingLiveLocalAccount
+                ? liveLocalAccountE2ETestScope
+                : nil
+            #else
+            let liveLocalAccountE2ETestScope: V2LiveLocalAccountE2ETestScope? = nil
+            #endif
+            let keychainService = liveLocalAccountE2ETestScope?.keychainService(
+                basedOn: configuration.keychainService
+            ) ?? configuration.keychainService
             let refreshTransport = try V2HTTPDeviceCredentialAuthTransport(
                 refreshEndpoint: configuration.endpoint("v2/device-credentials/refresh")
             )
-            let credentialStore = V2KeychainCredentialStore(service: configuration.keychainService)
+            let credentialStore = V2KeychainCredentialStore(service: keychainService)
             let authSession = V2AuthSession(credentialStore: credentialStore, transport: refreshTransport)
-            let databaseURL = try Self.databaseURL()
+            let databaseURL = try Self.databaseURL(
+                fileName: liveLocalAccountE2ETestScope?.databaseFileName
+            )
             self.configuration = configuration
             self.authSession = authSession
+            localKeychainService = keychainService
+            localDatabaseURL = databaseURL
             self.bootstrapper = V2ClientSessionBootstrapper(
                 authSession: authSession,
-                localStoreBootstrapper: .init(bindingStore: V2KeychainInstallationBindingStore(service: configuration.keychainService)),
+                localStoreBootstrapper: .init(bindingStore: V2KeychainInstallationBindingStore(service: keychainService)),
                 databaseURL: databaseURL
             )
-            self.deviceIdentityProvider = V2KeychainDeviceIdentityProvider(service: configuration.keychainService)
+            #if DEBUG
+            if let liveLocalAccountE2ETestScope {
+                self.deviceIdentityProvider = V2LiveLocalAccountE2ETestDeviceIdentityProvider(
+                    deviceID: liveLocalAccountE2ETestScope.deviceID
+                )
+            } else {
+                self.deviceIdentityProvider = V2KeychainDeviceIdentityProvider(service: keychainService)
+            }
+            #else
+            self.deviceIdentityProvider = V2KeychainDeviceIdentityProvider(service: keychainService)
+            #endif
             route = .launching
             authenticationMessage = nil
             conversationStore = nil
@@ -104,6 +133,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             authSession = nil
             bootstrapper = nil
             deviceIdentityProvider = nil
+            localKeychainService = nil
+            localDatabaseURL = nil
             route = .unavailable(message: "V2 账户服务配置无效。")
             authenticationMessage = nil
             conversationStore = nil
@@ -243,8 +274,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     private func activate(localStore: GRDBV2LocalSyncStore) async throws {
-        guard let configuration, let authSession else { throw V2AppConfigurationError.invalidRealtimeEndpoint }
-        try Self.applyDatabaseStoragePolicy()
+        guard let configuration, let authSession, let localKeychainService, let localDatabaseURL else {
+            throw V2AppConfigurationError.invalidRealtimeEndpoint
+        }
+        try Self.applyDatabaseStoragePolicy(databaseURL: localDatabaseURL)
         let userID = try await currentUserID()
         let realtime = try V2AppRealtimeRuntime(
             configuration: configuration,
@@ -293,7 +326,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
            ) {
             pushWakeSettings = .init(
                 preferences: V2UserDefaultsPushWakePreferenceStore(
-                    key: configuration.keychainService + ".push-wake-enabled." + userID
+                    key: localKeychainService + ".push-wake-enabled." + userID
                 ),
                 endpointClient: endpointClient,
                 remoteNotificationRegistrar: remoteNotificationRegistrar,
@@ -395,11 +428,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         }
     }
 
-    private static func databaseURL(fileManager: FileManager = .default) throws -> URL {
+    private static func databaseURL(fileName: String? = nil, fileManager: FileManager = .default) throws -> URL {
         let base = try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let directory = base.appending(path: "IMAppV2", directoryHint: .isDirectory)
         let managedDirectory = try V2DeviceLocalStoragePolicy.prepareManagedDirectory(directory, fileManager: fileManager)
-        return managedDirectory.appending(path: "sync.sqlite", directoryHint: .notDirectory)
+        return managedDirectory.appending(path: fileName ?? "sync.sqlite", directoryHint: .notDirectory)
     }
 
     private static func attachmentStagingDirectory(fileManager: FileManager = .default) throws -> URL {
@@ -419,8 +452,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     /// SQLite may create its WAL/SHM after the main database file; re-apply and
     /// verify the policy after each open rather than assuming directory state
     /// covers every file-system implementation.
-    private static func applyDatabaseStoragePolicy(fileManager: FileManager = .default) throws {
-        let database = try databaseURL(fileManager: fileManager)
+    private static func applyDatabaseStoragePolicy(databaseURL database: URL, fileManager: FileManager = .default) throws {
         for url in [
             database,
             URL(fileURLWithPath: database.path + "-wal", isDirectory: false),

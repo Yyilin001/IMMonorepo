@@ -19,14 +19,26 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 - 2026-07-27: on the caller-selected, manually unlocked iPhone 17 / iOS 26.2
   Simulator, `bash IMApp/Scripts/verify_local_account_registration_e2e.sh`
-  passed using the project’s `Sign to Run Locally` Debug signing. The dedicated
+  passed twice consecutively using the project’s `Sign to Run Locally` Debug
+  signing, without resetting, erasing or closing that simulator. The dedicated
   UI target created a random local password account through the real HTTPS
   edge, exchanged its device-bound assertion for credentials, committed the
   Keychain-backed session and displayed the signed-in conversation surface.
-  The same destination then passed both `V2AppStoreTests` cases and both
-  deterministic offline `IMAppLaunchUITests` cases. This is local Simulator
-  integration evidence only, not a signed-device, production WebAuthn, APNs,
-  multi-device or capacity approval.
+  Each pass used a new DEBUG-only device and local-storage namespace, leaving
+  the simulator’s ordinary V2 Keychain/session/database untouched. The same
+  destination then passed the complete shared `IMApp` scheme: **53 tests**,
+  zero failures and zero skips, including all App unit tests and both
+  deterministic offline UI paths. This is local Simulator integration evidence
+  only, not a signed-device, production WebAuthn, APNs, multi-device or
+  capacity approval.
+- 2026-07-27: `bash IMV2/scripts/verify_v2_local_account_stack.sh` detected a
+  stale, in-memory gateway TLS leaf after the local Caddy edge had renewed its
+  certificate. Its preflight safely recreated only Caddy and the gateway,
+  retained the PostgreSQL/account containers and named volumes, then passed
+  the full HTTPS account, two-account TLS 1.3 direct-message/`SyncPull`, rate
+  limit, Push, operator and metrics black-box checks. This proves local
+  recovery for that certificate-lifecycle case, not production certificate
+  rotation or availability behavior.
 - 2026-07-26: the current V2 sources passed the generic iOS Simulator
   `build-for-testing` command under Xcode 26.6 with isolated DerivedData and
   code signing disabled. It compiled the `IMApp`, `IMAppTests`, and
@@ -102,14 +114,12 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
   `IMAppUITests` case (zero failures or skips), covering that revision's
   complete scheme test inventory. `461d0f2` subsequently changed only the
   SwiftUI VoiceOver structure of attachment/removal and reaction controls.
-  Its test rerun is currently blocked on this workstation: the default
-  CoreSimulator service reports invalid host-death ports and temporary-device
-  creation-state errors, shuts down an otherwise booted Xcode destination,
-  and never finalizes the result bundle. A separately created, deleted
-  device-set destination remained booted but Xcode never entered test
-  execution. This is a local host verification blocker, not passing evidence
-  or a production conclusion; restore the simulator service before citing a
-  post-`461d0f2` iOS green run.
+  A transient CoreSimulator host-death/temporary-device condition then
+  prevented that historical rerun; it is no longer a current verification
+  blocker. On 2026-07-27 the caller-selected iPhone 17 / iOS 26.2 destination
+  completed the full shared `IMApp` scheme with **51 passed**, zero failures
+  and zero skips. This resolves the local simulator baseline only; it remains
+  neither signed-device nor production-network evidence.
 - 2026-07-26: `main` at `31b2be1` passed the disposable PostgreSQL Server
   regression (**190 tests / 50 suites**) after adding the gateway
   device-revocation startup cursor test. A gateway node ID seen for the first
@@ -305,7 +315,10 @@ The opt-in `IMAppLocalAccountUITests` suite separately covers a real local
 password-registration path. Its DEBUG-only live-local-account startup mode
 keeps the ordinary Debug HTTPS/TLS configuration but intentionally skips any
 previous simulator Keychain restore, preventing historical credentials from
-changing the test's first screen. `IMApp/Scripts/verify_local_account_registration_e2e.sh`
+changing the test's first screen. Each invocation also receives a new test-only
+device and storage namespace, so it cannot overwrite the simulator's ordinary
+V2 Keychain identity, session or SQLite database and can be repeated without
+erasing the simulator. `IMApp/Scripts/verify_local_account_registration_e2e.sh`
 starts/reuses the isolated local stack, adds its generated root CA only to a
 caller-selected simulator, and runs the registration UI test with a unique
 local account. The test resides in a separate `IMAppLocalAccountE2ETests`
@@ -327,8 +340,9 @@ character into the SwiftUI form fields. The dedicated DEBUG-only live-local
 startup mode therefore receives a disposable random registration fixture via
 test launch arguments; the test still taps the real submit control and proves
 the HTTPS registration, device credential issuance, Keychain commit and local
-session activation path. This fixture path is not compiled into Release and
-the ordinary offline UI suite continues to inspect user-editable form state.
+session activation path. Release ignores this fixture input and has no test
+device-identity provider; the ordinary offline UI suite continues to inspect
+user-editable form state.
 
 The same baseline audit found that the retired macOS automation called removed
 `Makefile` targets and that the Release build phase directly executed a

@@ -35,6 +35,9 @@ struct V2RootView: View {
         initialLocalE2ETestDisplayName = startupMode == .uiTestingLiveLocalAccount
             ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-display-name")
             : nil
+        let liveLocalAccountE2ETestScope = startupMode == .uiTestingLiveLocalAccount
+            ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-e2e-scope").flatMap(V2LiveLocalAccountE2ETestScope.init(rawValue:))
+            : nil
         #else
         let startupMode: V2AppStore.StartupMode = .production
         initialPasswordMode = .signIn
@@ -42,8 +45,13 @@ struct V2RootView: View {
         initialLocalE2ETestPassword = nil
         initialLocalE2ETestPublicHandle = nil
         initialLocalE2ETestDisplayName = nil
+        let liveLocalAccountE2ETestScope: V2LiveLocalAccountE2ETestScope? = nil
         #endif
-        _store = State(initialValue: V2AppStore(startupMode: startupMode, remoteNotificationRegistrar: appPushDelegate))
+        _store = State(initialValue: V2AppStore(
+            startupMode: startupMode,
+            liveLocalAccountE2ETestScope: liveLocalAccountE2ETestScope,
+            remoteNotificationRegistrar: appPushDelegate
+        ))
     }
 
     var body: some View {

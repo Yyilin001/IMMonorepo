@@ -14,6 +14,10 @@ env_file="${v2_dir}/.env.local"
 compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
 phase="preflight"
 
+compose() {
+  docker compose --project-name "${compose_project}" --env-file "${env_file}" --file "${compose_file}" "$@"
+}
+
 report_failure() {
   local exit_status="$?"
   # Do not print BASH_COMMAND here: registration, credential exchange, and
@@ -37,6 +41,52 @@ test -f "${ca_path}" || {
   printf 'missing local CA: start the stack first with %s\n' "${script_dir}/run_v2_local_account_stack.sh" >&2
   exit 1
 }
+
+# Caddy's internal development leaves are short-lived. The long-running native
+# gateway reads its PEM files only at process startup, so Caddy can renew the
+# file while the gateway continues presenting the expired in-memory leaf.
+# Validate the actual public gateway handshake first; on this local-only
+# Compose stack, refresh only Caddy and the gateway, never PostgreSQL or the
+# account service. This keeps a long-lived developer stack usable without
+# concealing a certificate failure from the black-box probe.
+gateway_tls_is_usable() {
+  compose exec -T gateway sh -c '
+    openssl s_client \
+      -connect 127.0.0.1:7443 \
+      -servername localhost \
+      -CAfile /caddy/caddy/pki/authorities/local/root.crt \
+      -verify_return_error \
+      </dev/null >/dev/null 2>&1
+  '
+}
+
+refresh_local_gateway_tls() {
+  compose up -d --force-recreate caddy
+  for _ in {1..30}; do
+    if compose cp caddy:/data/caddy/pki/authorities/local/root.crt "${ca_path}" >/dev/null 2>&1 &&
+      compose exec -T gateway test -s /caddy/caddy/certificates/local/localhost/localhost.crt &&
+      compose exec -T gateway test -s /caddy/caddy/certificates/local/localhost/localhost.key; then
+      break
+    fi
+    sleep 1
+  done
+  test -s "${ca_path}" || {
+    printf 'local Caddy did not expose its CA while refreshing the gateway certificate\n' >&2
+    exit 1
+  }
+  compose up -d --wait --force-recreate gateway
+}
+
+phase="gateway TLS readiness"
+if ! gateway_tls_is_usable; then
+  phase="gateway TLS certificate refresh"
+  refresh_local_gateway_tls
+  phase="gateway TLS readiness after refresh"
+  gateway_tls_is_usable || {
+    printf 'local gateway TLS verification still fails after refreshing its Caddy certificate\n' >&2
+    exit 1
+  }
+fi
 
 phase="invalid-request rejection"
 invalid_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
