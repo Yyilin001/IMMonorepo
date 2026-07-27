@@ -185,7 +185,7 @@ struct V2PrivacySettingsView: View {
                     .disabled(store.isSaving)
                     .accessibilityIdentifier("v2.privacy.allow-stranger-messages")
                     Text("关闭后，非好友无法向你发起新的陌生人消息。")
-                        .font(.footnote)
+                        .font(.body)
                         .foregroundStyle(.secondary)
                 }
                 if let pushWakeSettingsStore {
@@ -233,7 +233,7 @@ private struct V2UserBlockSettingsSection: View {
                 .disabled(store.isChanging)
                 .accessibilityIdentifier("v2.privacy.block.handle")
             Text("屏蔽后，你们之间不能再发送新的私聊消息。解除屏蔽时输入同一公开 ID。")
-                .font(.footnote)
+                .font(.body)
                 .foregroundStyle(.secondary)
             HStack {
                 Button("屏蔽", role: .destructive) {
@@ -292,7 +292,9 @@ private struct V2PushWakeSettingsSection: View {
             .disabled(store.state == .loading || store.state == .registering)
             .accessibilityIdentifier("v2.push-wake.enabled")
             Text("仅发送无内容唤醒，用于提示应用拉取已授权的同步数据；不在通知中包含消息内容。")
-                .font(.footnote)
+                // This is actionable privacy information, not decorative
+                // caption text. Use a fully Dynamic-Type-scaled body style.
+                .font(.body)
                 .foregroundStyle(.secondary)
             if store.state == .waitingForToken || store.state == .registering {
                 ProgressView("正在更新后台同步唤醒…")

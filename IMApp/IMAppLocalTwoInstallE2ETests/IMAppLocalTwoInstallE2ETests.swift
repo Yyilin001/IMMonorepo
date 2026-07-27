@@ -79,6 +79,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             app.switches["v2.privacy.allow-stranger-messages"].isHittable,
             "陌生人消息接收开关必须可由辅助技术定位并操作。"
         )
+        try auditPrivacySettingsSurface(in: app)
         let done = app.buttons["v2.privacy.done"]
         XCTAssertTrue(done.exists)
         done.tap()
@@ -301,6 +302,22 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             .hitRegion,
             .sufficientElementDescription,
             .dynamicType,
+            .textClipped,
+            .trait,
+        ])
+    }
+
+    @MainActor
+    private func auditPrivacySettingsSurface(in app: XCUIApplication) throws {
+        // Form navigation chrome belongs to UIKit, and its contrast is not an
+        // app-controlled signal. These stable categories still gate our
+        // actual settings controls and explanatory text for VoiceOver
+        // discoverability. Dynamic Type changing remains a device-settings
+        // acceptance check because this simulator audit can stall in Form.
+        try app.performAccessibilityAudit(for: [
+            .elementDetection,
+            .hitRegion,
+            .sufficientElementDescription,
             .textClipped,
             .trait,
         ])
