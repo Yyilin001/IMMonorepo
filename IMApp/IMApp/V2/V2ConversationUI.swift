@@ -1125,12 +1125,18 @@ private enum V2ConversationMentionInputError: Error, Sendable {
 }
 
 struct V2ConversationListView: View {
+    private enum NewConversationSheet: String, Identifiable {
+        case direct
+        case group
+
+        var id: String { rawValue }
+    }
+
     @Bindable var store: V2ConversationListStore
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     private let accountMenu: V2ConversationAccountMenu?
     @State private var navigationPath = NavigationPath()
-    @State private var isPresentingDirectConversation = false
-    @State private var isPresentingGroupConversation = false
+    @State private var newConversationSheet: NewConversationSheet?
     @State private var directTargetUserID: String
     @State private var localE2EFixtureRoomID: String?
     @State private var groupTitle = ""
@@ -1194,11 +1200,11 @@ struct V2ConversationListView: View {
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button("新建群聊", systemImage: "person.3") {
-                        isPresentingGroupConversation = true
+                        newConversationSheet = .group
                     }
                     .accessibilityIdentifier("v2.conversation.new-group")
                     Button("新建私聊", systemImage: "square.and.pencil") {
-                        isPresentingDirectConversation = true
+                        newConversationSheet = .direct
                     }
                     .accessibilityIdentifier("v2.conversation.new-direct")
                     Button("刷新", systemImage: "arrow.clockwise") {
@@ -1223,7 +1229,9 @@ struct V2ConversationListView: View {
                 )
             }
             .task { await store.observeProjectionChanges() }
-            .sheet(isPresented: $isPresentingDirectConversation) {
+            .sheet(item: $newConversationSheet) { sheet in
+                switch sheet {
+                case .direct:
                 NavigationStack {
                     Form {
                         Section("对方公开 ID") {
@@ -1241,7 +1249,8 @@ struct V2ConversationListView: View {
                     .navigationTitle("新建私聊")
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("取消") { isPresentingDirectConversation = false }
+                            Button("取消") { newConversationSheet = nil }
+                                .accessibilityIdentifier("v2.conversation.direct-cancel")
                         }
                         ToolbarItem(placement: .confirmationAction) {
                             Button("开始") {
@@ -1252,7 +1261,7 @@ struct V2ConversationListView: View {
                                         directSubmissionTask = nil
                                         directTargetUserID = ""
                                         localE2EFixtureRoomID = roomID
-                                        isPresentingDirectConversation = false
+                                        newConversationSheet = nil
                                         navigationPath.append(roomID)
                                     } else if !Task.isCancelled {
                                         directSubmissionTask = nil
@@ -1266,10 +1275,12 @@ struct V2ConversationListView: View {
                             .accessibilityIdentifier("v2.conversation.direct-submit")
                         }
                     }
-                    .onDisappear { directSubmissionTask?.cancel() }
+                    .onDisappear {
+                        directSubmissionTask?.cancel()
+                        directSubmissionTask = nil
+                    }
                 }
-            }
-            .sheet(isPresented: $isPresentingGroupConversation) {
+                case .group:
                 NavigationStack {
                     Form {
                         Section("群名称") {
@@ -1299,7 +1310,8 @@ struct V2ConversationListView: View {
                     .navigationTitle("新建群聊")
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("取消") { isPresentingGroupConversation = false }
+                            Button("取消") { newConversationSheet = nil }
+                                .accessibilityIdentifier("v2.conversation.group-cancel")
                         }
                         ToolbarItem(placement: .confirmationAction) {
                             Button("创建") {
@@ -1311,7 +1323,7 @@ struct V2ConversationListView: View {
                                         groupSubmissionTask = nil
                                         groupTitle = ""
                                         groupMemberUserIDs = ""
-                                        isPresentingGroupConversation = false
+                                        newConversationSheet = nil
                                         navigationPath.append(roomID)
                                     } else if !Task.isCancelled {
                                         groupSubmissionTask = nil
@@ -1325,7 +1337,11 @@ struct V2ConversationListView: View {
                             .accessibilityIdentifier("v2.conversation.group-submit")
                         }
                     }
-                    .onDisappear { groupSubmissionTask?.cancel() }
+                    .onDisappear {
+                        groupSubmissionTask?.cancel()
+                        groupSubmissionTask = nil
+                    }
+                }
                 }
             }
         }

@@ -30,6 +30,18 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "账户菜单必须作为会话列表导航栏的一部分出现。"
         )
         try auditOrdinaryChatSurface(in: app)
+        let newGroup = app.buttons["v2.conversation.new-group"]
+        XCTAssertTrue(newGroup.isHittable)
+        newGroup.tap()
+        let groupTitle = app.textFields["v2.conversation.group-title"]
+        XCTAssertTrue(
+            groupTitle.waitForExistence(timeout: 10) && groupTitle.isHittable,
+            "新建群聊必须由唯一的会话创建呈现状态打开，并提供可访问的群名称输入。"
+        )
+        let cancelGroup = app.buttons["v2.conversation.group-cancel"]
+        XCTAssertTrue(cancelGroup.exists)
+        cancelGroup.tap()
+        XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 5))
         app.buttons["v2.account-menu"].tap()
         let privacySettings = app.buttons["v2.privacy.open"]
         XCTAssertTrue(privacySettings.waitForExistence(timeout: 5))

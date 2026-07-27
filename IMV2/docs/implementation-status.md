@@ -685,7 +685,7 @@ TLS gateway 连接创建 direct room；随后双方断开，发送端先把消�
 消息详情分别执行元素、触达区域、描述、Dynamic Type、文本裁切和 traits 审计；消息详情输入区还
 通过了普通对比度审计，低对比度的“添加附件”和“发送”文字按钮已改用高对比度系统主色调。账户菜单
 还能实际打开陌生人消息接收设置和公开身份资料页，回归会验证其关键开关/文本框可定位、可操作及可返回
-会话列表。它不覆盖 APNs、签名真机、生产网络或容量；VoiceOver 人工阅读顺序、设置页的 Dynamic Type
+会话列表；同一回归还会打开并取消新建群聊表单，确保它与新建私聊共享互斥的呈现状态。它不覆盖 APNs、签名真机、生产网络或容量；VoiceOver 人工阅读顺序、设置页的 Dynamic Type
 与高对比度、减少动态效果和 RTL 仍需人工验收。
 
 The same baseline audit found that the retired macOS automation called removed
