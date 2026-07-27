@@ -173,14 +173,24 @@ final class V2PushWakeSettingsStore {
     /// Signing out must remove the server-side device endpoint while the
     /// current credential is still usable. The user preference itself remains
     /// scoped to that user and is not copied to a later account on this device.
-    func deactivateForSignOut() async {
+    func deactivateForSignOut() async throws {
         guard isEnabled || state != .disabled else { return }
         preferenceGeneration &+= 1
         endpointOperationGeneration &+= 1
         isEnabled = false
         state = .disabled
         feedback = nil
-        try? await endpointClient.remove()
+        do {
+            try await endpointClient.remove()
+        } catch is CancellationError {
+            state = .retryableFailure
+            feedback = "后台同步唤醒端点尚未移除，请联网后重试退出登录。"
+            throw CancellationError()
+        } catch {
+            state = .retryableFailure
+            feedback = "后台同步唤醒端点尚未移除，请联网后重试退出登录。"
+            throw error
+        }
     }
 
     private func requestFreshToken() {

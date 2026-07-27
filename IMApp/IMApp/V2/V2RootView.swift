@@ -109,7 +109,7 @@ struct V2RootView: View {
                     ContentUnavailableView(
                         "正在完成退出登录",
                         systemImage: "lock.trianglebadge.exclamationmark",
-                        description: Text("请解锁设备后重试，以删除此设备上的受保护凭据。")
+                        description: Text("请联网并解锁设备后重试，以移除后台唤醒端点并删除受保护凭据。")
                     )
                     Button("重试") {
                         protectedDataRetryTask?.cancel()

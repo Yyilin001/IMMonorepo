@@ -445,8 +445,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         // Persist intent before the first await so a process termination while
         // protected data is locked cannot resurrect a session on next launch.
         await pendingCredentialDeletionStore.markPending()
-        await pushWakeSettingsStore?.deactivateForSignOut()
         do {
+            try await removePushEndpointBeforeCredentialDeletion()
+            try Task.checkCancellation()
             try await authSession.handleTerminalRejection()
             await pendingCredentialDeletionStore.clearPending()
             await discardAuthenticatedPresentation(route: .signedOut)
@@ -474,6 +475,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         // activation cannot issue duplicate Keychain deletion attempts.
         route = .launching
         do {
+            try await removePushEndpointBeforeCredentialDeletion()
+            try Task.checkCancellation()
             try await authSession.handleTerminalRejection()
             await pendingCredentialDeletionStore.clearPending()
             await discardAuthenticatedPresentation(route: .signedOut)
@@ -481,6 +484,23 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             await discardAuthenticatedPresentation(route: .signOutPendingCredentialDeletion)
         }
         return true
+    }
+
+    /// The device endpoint is authenticated by the same credential record as
+    /// sign-out. Never discard that record before an endpoint DELETE has
+    /// succeeded; a persisted pending sign-out retries this idempotent DELETE
+    /// on the next launch even though the prior UI store has been discarded.
+    private func removePushEndpointBeforeCredentialDeletion() async throws {
+        if let pushWakeSettingsStore {
+            try await pushWakeSettingsStore.deactivateForSignOut()
+            return
+        }
+        guard let configuration, let authSession else { return }
+        let endpointClient = try V2HTTPPushEndpointClient(
+            endpoint: configuration.pushEndpoint,
+            credentials: authSession
+        )
+        try await endpointClient.remove()
     }
 
     private func discardAuthenticatedPresentation(route nextRoute: Route) async {

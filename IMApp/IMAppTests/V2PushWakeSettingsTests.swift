@@ -149,7 +149,7 @@ struct V2PushWakeSettingsTests {
     }
 
     @Test("sign out removes the endpoint without clearing a user scoped preference")
-    func signOutRemovesEndpoint() async {
+    func signOutRemovesEndpoint() async throws {
         let preferences = PushWakePreferences(enabled: true)
         let endpoint = PushEndpointClientFake()
         let remote = RemoteNotificationRegistrarFake()
@@ -161,11 +161,35 @@ struct V2PushWakeSettingsTests {
         )
 
         await store.activate()
-        await store.deactivateForSignOut()
+        try await store.deactivateForSignOut()
 
         #expect(await preferences.value() == true)
         #expect(store.isEnabled == false)
         #expect(store.state == .disabled)
+        #expect(await endpoint.operations() == [.remove])
+    }
+
+    @Test("sign out retains credentials until the endpoint is removed")
+    func signOutEndpointRemovalFailureRemainsRetryable() async {
+        let preferences = PushWakePreferences(enabled: true)
+        let endpoint = PushEndpointClientFake(removeError: PushWakeTestError.failed)
+        let remote = RemoteNotificationRegistrarFake()
+        let store = V2PushWakeSettingsStore(
+            preferences: preferences,
+            endpointClient: endpoint,
+            remoteNotificationRegistrar: remote,
+            environment: .development
+        )
+
+        await store.activate()
+        await #expect(throws: PushWakeTestError.failed) {
+            try await store.deactivateForSignOut()
+        }
+
+        #expect(await preferences.value() == true)
+        #expect(store.isEnabled == false)
+        #expect(store.state == .retryableFailure)
+        #expect(store.feedback == "后台同步唤醒端点尚未移除，请联网后重试退出登录。")
         #expect(await endpoint.operations() == [.remove])
     }
 }
@@ -195,10 +219,12 @@ private actor PushEndpointClientFake: V2ClientPushEndpointRegistering {
     }
 
     private let registerError: Error?
+    private let removeError: Error?
     private var values: [Operation] = []
 
-    init(registerError: Error? = nil) {
+    init(registerError: Error? = nil, removeError: Error? = nil) {
         self.registerError = registerError
+        self.removeError = removeError
     }
 
     func register(
@@ -210,8 +236,9 @@ private actor PushEndpointClientFake: V2ClientPushEndpointRegistering {
         if let registerError { throw registerError }
     }
 
-    func remove() {
+    func remove() throws {
         values.append(.remove)
+        if let removeError { throw removeError }
     }
 
     func operations() -> [Operation] { values }
