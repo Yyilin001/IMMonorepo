@@ -22,4 +22,4 @@ for simulator_id in "${first_simulator_id}" "${second_simulator_id}"; do
 done
 
 printf '%s\n' 'dual-simulator local account-and-delivery E2E: pass'
-printf '%s\n' 'scope: each simulator verifies its own Keychain-backed registration plus two independently registered TLS client identities delivering a direct message while the receiver is disconnected, then catching up into its SQLite projection after reconnect; this does not prove two App installations exchange messages, offline outbox replay, APNs wake-up, or deployment behavior.'
+printf '%s\n' 'scope: each simulator verifies its own Keychain-backed registration plus two independently registered TLS client identities: the sender persists a message while disconnected, reconnects and replays it, and the disconnected receiver catches up into SQLite after reconnect; this does not prove two App installations exchange messages, APNs wake-up, or deployment behavior.'

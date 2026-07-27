@@ -65,10 +65,10 @@ final class IMAppLocalAccountUITests: XCTestCase {
     }
 
     /// Uses two independently registered local accounts, two authenticated
-    /// TLS connections and the receiver's own SQLite projection. The receiver
-    /// disconnects after its initial sync and reconnects before projecting the
-    /// accepted message, proving local offline catch-up without claiming APNs
-    /// wake-up or a deployed environment's delivery behavior.
+    /// TLS connections and two independent SQLite stores. Both parties
+    /// disconnect after the direct room is established: the sender persists
+    /// its message in the outbox, reconnects and replays that immutable ID;
+    /// the receiver then reconnects and projects the accepted message.
     func testTwoLocalClientsDeliverDirectMessageIntoReceiverProjection() async throws {
         let sender = try await registerLocalAccount(displayName: "Local sender")
         let receiver = try await registerLocalAccount(displayName: "Local receiver")
@@ -79,6 +79,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
         let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
         let senderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
         let receiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let reconnectingSenderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
         let reconnectingReceiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
 
         do {
@@ -105,8 +106,12 @@ final class IMAppLocalAccountUITests: XCTestCase {
             )
             let databaseDirectory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("im-v2-dual-client-e2e-\(UUID().uuidString)", isDirectory: true)
+            let senderDatabaseURL = databaseDirectory.appendingPathComponent("sender.sqlite")
             let databaseURL = databaseDirectory.appendingPathComponent("receiver.sqlite")
             defer { try? FileManager.default.removeItem(at: databaseDirectory) }
+            let senderStore = try await V2LocalStoreBootstrapper(
+                bindingStore: LocalE2EInstallationBindingStore()
+            ).open(databaseURL: senderDatabaseURL)
             let receiverStore = try await V2LocalStoreBootstrapper(
                 bindingStore: LocalE2EInstallationBindingStore()
             ).open(databaseURL: databaseURL)
@@ -123,14 +128,52 @@ final class IMAppLocalAccountUITests: XCTestCase {
                 targetUserID: receiver.userID
             )
             let expectedText = "dual-client-local-\(UUID().uuidString.lowercased())"
-            let accepted = try await senderTransport.sendMessage(
+            await senderConnection.disconnect()
+            let offlineSenderOutbox = V2CommandOutboxEngine(store: senderStore, transport: senderTransport)
+            let command = try await offlineSenderOutbox.enqueueMessage(
                 roomID: directRoom.roomID,
-                clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
                 text: expectedText,
                 media: [],
                 mentions: []
             )
-            XCTAssertEqual(accepted.roomID, directRoom.roomID)
+            let firstFlush = try await offlineSenderOutbox.flushOnce()
+            XCTAssertEqual(
+                firstFlush,
+                .retryScheduled(command.clientMessageID),
+                "断线时消息必须保存在 sender SQLite outbox 中，而不能丢弃。"
+            )
+            let scheduledCommands = try await senderStore.pendingMessageCommands()
+            let scheduledCommand = try XCTUnwrap(
+                scheduledCommands.first(where: { $0.clientMessageID == command.clientMessageID })
+            )
+            XCTAssertEqual(scheduledCommand.state, .pending)
+            XCTAssertEqual(scheduledCommand.attemptCount, 1)
+
+            let reconnectedSenderSession = try await reconnectingSenderConnection.connectAndAuthenticate(
+                accessToken: sender.accessToken,
+                deviceID: sender.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            XCTAssertEqual(reconnectedSenderSession.userID, sender.userID)
+            let reconnectedSenderOutbox = V2CommandOutboxEngine(
+                store: senderStore,
+                transport: V2ProtobufSyncTransport(
+                    wire: reconnectingSenderConnection,
+                    protocolVersion: reconnectedSenderSession.protocolVersion
+                )
+            )
+            let acceptedClientMessageID = try await awaitSenderOutboxReplay(
+                reconnectedSenderOutbox,
+                expectedClientMessageID: command.clientMessageID
+            )
+            XCTAssertEqual(acceptedClientMessageID, command.clientMessageID)
+            let acceptedCommands = try await senderStore.pendingMessageCommands()
+            let acceptedCommand = try XCTUnwrap(
+                acceptedCommands.first(where: { $0.clientMessageID == command.clientMessageID })
+            )
+            let acceptedMessageID = try XCTUnwrap(acceptedCommand.acceptedMessageID)
+            XCTAssertEqual(acceptedCommand.state, .accepted)
+            XCTAssertNotNil(acceptedCommand.acceptedRoomSequence)
 
             let reconnectedReceiverSession = try await reconnectingReceiverConnection.connectAndAuthenticate(
                 accessToken: receiver.accessToken,
@@ -149,21 +192,23 @@ final class IMAppLocalAccountUITests: XCTestCase {
             let delivered = try await awaitReceiverProjection(
                 in: receiverStore,
                 roomID: directRoom.roomID,
-                messageID: accepted.messageID,
+                messageID: acceptedMessageID,
                 syncEngine: reconnectedReceiverSync
             )
-            XCTAssertEqual(delivered.messageID, accepted.messageID)
+            XCTAssertEqual(delivered.messageID, acceptedMessageID)
             XCTAssertEqual(delivered.senderUserID, sender.userID)
             XCTAssertEqual(delivered.text, expectedText)
         } catch {
             await senderConnection.disconnect()
             await receiverConnection.disconnect()
+            await reconnectingSenderConnection.disconnect()
             await reconnectingReceiverConnection.disconnect()
             throw error
         }
 
         await senderConnection.disconnect()
         await receiverConnection.disconnect()
+        await reconnectingSenderConnection.disconnect()
         await reconnectingReceiverConnection.disconnect()
     }
 
@@ -314,13 +359,42 @@ private func awaitReceiverProjection(
     throw LocalE2EDeliveryError.receiverProjectionTimedOut(visibleMessageCount: visibleMessages.count)
 }
 
+private func awaitSenderOutboxReplay(
+    _ outbox: V2CommandOutboxEngine,
+    expectedClientMessageID: ClientMessageID
+) async throws -> ClientMessageID {
+    for _ in 0 ..< 50 {
+        switch try await outbox.flushOnce() {
+        case .accepted(let clientMessageID):
+            guard clientMessageID == expectedClientMessageID else {
+                throw LocalE2EDeliveryError.unexpectedOutboxCommand(clientMessageID)
+            }
+            return clientMessageID
+        case .idle, .retryScheduled:
+            try await Task.sleep(for: .milliseconds(100))
+        case .rejected(_, let code):
+            throw LocalE2EDeliveryError.senderOutboxRejected(code)
+        }
+    }
+    throw LocalE2EDeliveryError.senderOutboxReplayTimedOut
+}
+
 private enum LocalE2EDeliveryError: Error, LocalizedError {
     case receiverProjectionTimedOut(visibleMessageCount: Int)
+    case senderOutboxReplayTimedOut
+    case senderOutboxRejected(String)
+    case unexpectedOutboxCommand(ClientMessageID)
 
     var errorDescription: String? {
         switch self {
         case .receiverProjectionTimedOut(let visibleMessageCount):
             "等待接收端 SQLite 投影超时；当前房间可见消息数：\(visibleMessageCount)。"
+        case .senderOutboxReplayTimedOut:
+            "等待发送端 SQLite outbox 重放超时。"
+        case .senderOutboxRejected(let code):
+            "发送端 SQLite outbox 被服务端终态拒绝：\(code)。"
+        case .unexpectedOutboxCommand(let clientMessageID):
+            "发送端 SQLite outbox 重放了非预期消息：\(clientMessageID.rawValue)。"
         }
     }
 }

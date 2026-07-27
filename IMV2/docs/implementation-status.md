@@ -608,14 +608,15 @@ starts/reuses the isolated local stack, adds its generated root CA only to a
 caller-selected simulator, and runs the local account and direct-delivery
 checks with random identities. Besides the registration UI path, it creates
 two separately registered accounts, authenticates two TLS framed gateway
-connections, opens a direct room, disconnects the receiver, sends one message,
-then reconnects the receiver and polls its separate SQLite store until the
-synced projection contains the accepted message.
+connections, opens a direct room, disconnects both parties, persists the
+sender's message in its SQLite outbox, reconnects it to replay the immutable
+client message ID, then reconnects the receiver and polls its separate SQLite
+store until the synced projection contains the accepted message.
 The test resides in a separate `IMAppLocalAccountE2ETests`
 target and `IMAppLocalAccountE2E` scheme, so the regular UI suite contains no
 external-service skip or network dependency. This is local integration
 evidence, not a two-App-installation UI flow, signed-device, production
-WebAuthn, sender offline-outbox replay, APNs, or capacity approval.
+WebAuthn, APNs, or capacity approval.
 Before this suite can exercise Keychain-backed registration, the explicitly
 selected simulator must have been manually unlocked once after its most recent
 boot and the host Mac must be unlocked: the production device identity and
@@ -639,9 +640,10 @@ user-editable form state.
 `IMApp/Scripts/verify_local_account_registration_e2e.sh` 已通过四项检查：模拟器到本机账户
 HTTPS 边缘的 `400` 预检、真实密码注册与设备凭证签发合同、由 UI 点击触发的
 “注册 → Keychain → SQLite 本地会话 → 随机 scope 清理”，以及两个随机本地账户通过两条
-TLS gateway 连接创建 direct room；接收端完成初始同步后断开，发送端投递消息，接收端以原设备
-凭证重新认证并由独立 SQLite 同步投影确认。投影检查以 100 ms 间隔、最多 5 秒的有界同步轮询
-等待异步 fan-out，不把首个 pull 的空批次误判成投递失败。
+TLS gateway 连接创建 direct room；随后双方断开，发送端先把消息持久化到自己的 SQLite outbox，
+重新认证后以相同 `client_message_id` 重放，接收端也以原设备凭证重新认证并由独立 SQLite 同步
+投影确认。outbox 和投影检查都以 100 ms 间隔、最多 5 秒的有界轮询等待，不把空闲或首个 pull 的
+空批次误判成投递失败。
 同次常规 `IMApp` Debug 测试与
 `swift test --package-path IMV2ClientKit` 也通过。该回归同时修复了一个客户端生命周期缺陷：
 提交认证时根路由切换到“认证中”会使登录 View 消失；登录 View 不再因这次预期的消失而取消
@@ -651,9 +653,9 @@ TLS gateway 连接创建 direct room；接收端完成初始同步后断开，�
 同日，在第二台已解锁的 iPhone 17 Pro / iOS 26.2 模拟器上，同一四项本地账户与投递 E2E 也通过。
 `IMApp/Scripts/verify_local_account_dual_simulators_registration_e2e.sh` 将两台明确指定且不同的
 模拟器串行执行这项回归，验证各自的信任根、Keychain、注册操作和本地 SQLite scope 彼此独立；
-每次执行还验证两份独立账号/TLS 连接之间的 direct-message 最终投影，以及接收端断开后的重连
-同步。该测试中的两条客户端连接仍由同一 E2E runner 创建，因此它不声称覆盖两台 App 安装之间的
-UI 交互、发送端离线 outbox 重放或 APNs 唤醒；后两类回归仍需独立完成。
+每次执行还验证两份独立账号/TLS 连接之间的 direct-message 最终投影、发送端离线 outbox 重放，
+以及接收端断开后的重连同步。该测试中的两条客户端连接仍由同一 E2E runner 创建，因此它不声称
+覆盖两台 App 安装之间的 UI 交互或 APNs 唤醒；后两类回归仍需独立完成。
 
 The same baseline audit found that the retired macOS automation called removed
 `Makefile` targets and that the Release build phase directly executed a
