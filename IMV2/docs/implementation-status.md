@@ -17,6 +17,15 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: direct-room opening and group creation now each have a Store
+  single-flight gate, with matching disabled form controls and task ownership
+  in the list UI. A second tap cannot resolve another identity or enqueue a
+  second group-creation operation while the first request is suspended. Two
+  suspended-boundary regressions cover the direct and group paths. The
+  selected iPhone 17 / iOS 26.2 Simulator passed the full shared `IMApp`
+  scheme with **80 Swift tests** and **2 UI tests**, zero failures. This is
+  local command-intent evidence only, not multi-device or deployment
+  evidence.
 - 2026-07-27: group membership changes now remain mutually exclusive with
   in-flight moderated removals. The owner-only add controls expose the same
   disabled state as member-row controls, and the store independently rejects

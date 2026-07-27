@@ -292,6 +292,8 @@ final class V2ConversationListStore {
     private(set) var state: State = .loading
     private(set) var directConversationFeedback: String?
     private(set) var groupConversationFeedback: String?
+    private(set) var isOpeningDirectConversation = false
+    private(set) var isCreatingGroupConversation = false
     private var explicitRoomTitles: [String: String] = [:]
     private var explicitRoomKinds: [String: V2ConversationListItem.Kind] = [:]
     private var refreshGeneration = 0
@@ -357,6 +359,9 @@ final class V2ConversationListStore {
             groupConversationFeedback = "实时网关尚未可用，无法创建群聊。"
             return nil
         }
+        guard !isCreatingGroupConversation else { return nil }
+        isCreatingGroupConversation = true
+        defer { isCreatingGroupConversation = false }
         do {
             let members: [String]
             if handles.isEmpty {
@@ -445,6 +450,9 @@ final class V2ConversationListStore {
             directConversationFeedback = "身份目录暂不可用，无法创建会话。"
             return nil
         }
+        guard !isOpeningDirectConversation else { return nil }
+        isOpeningDirectConversation = true
+        defer { isOpeningDirectConversation = false }
         do {
             let identity = try await publicIdentityResolver.resolve(handle: target)
             try Task.checkCancellation()
@@ -1187,6 +1195,7 @@ struct V2ConversationListView: View {
                             TextField("@handle", text: $directTargetUserID)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
+                                .disabled(store.isOpeningDirectConversation)
                                 .accessibilityIdentifier("v2.conversation.direct-target")
                         }
                         if let feedback = store.directConversationFeedback {
@@ -1201,16 +1210,23 @@ struct V2ConversationListView: View {
                         }
                         ToolbarItem(placement: .confirmationAction) {
                             Button("开始") {
-                                directSubmissionTask?.cancel()
+                                guard directSubmissionTask == nil else { return }
                                 let target = directTargetUserID
                                 directSubmissionTask = Task {
                                     if let roomID = await store.openDirectConversation(handle: target), !Task.isCancelled {
+                                        directSubmissionTask = nil
                                         directTargetUserID = ""
                                         isPresentingDirectConversation = false
                                         navigationPath.append(roomID)
+                                    } else if !Task.isCancelled {
+                                        directSubmissionTask = nil
                                     }
                                 }
                             }
+                            .disabled(
+                                directTargetUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                    || store.isOpeningDirectConversation
+                            )
                             .accessibilityIdentifier("v2.conversation.direct-submit")
                         }
                     }
@@ -1222,6 +1238,7 @@ struct V2ConversationListView: View {
                     Form {
                         Section("群名称") {
                             TextField("群名称", text: $groupTitle)
+                                .disabled(store.isCreatingGroupConversation)
                                 .accessibilityIdentifier("v2.conversation.group-title")
                         }
                         Section("初始成员") {
@@ -1229,6 +1246,7 @@ struct V2ConversationListView: View {
                                 .frame(minHeight: 110)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
+                                .disabled(store.isCreatingGroupConversation)
                                 .accessibilityLabel("初始成员公开 ID")
                                 .accessibilityHint("输入 @handle，用逗号或换行分隔；可留空创建仅自己的群聊")
                                 .accessibilityIdentifier("v2.conversation.group-members")
@@ -1249,19 +1267,25 @@ struct V2ConversationListView: View {
                         }
                         ToolbarItem(placement: .confirmationAction) {
                             Button("创建") {
-                                groupSubmissionTask?.cancel()
+                                guard groupSubmissionTask == nil else { return }
                                 let title = groupTitle
                                 let members = groupMemberUserIDs
                                 groupSubmissionTask = Task {
                                     if let roomID = await store.createGroupConversation(title: title, memberHandlesText: members), !Task.isCancelled {
+                                        groupSubmissionTask = nil
                                         groupTitle = ""
                                         groupMemberUserIDs = ""
                                         isPresentingGroupConversation = false
                                         navigationPath.append(roomID)
+                                    } else if !Task.isCancelled {
+                                        groupSubmissionTask = nil
                                     }
                                 }
                             }
-                            .disabled(groupTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .disabled(
+                                groupTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                    || store.isCreatingGroupConversation
+                            )
                             .accessibilityIdentifier("v2.conversation.group-submit")
                         }
                     }

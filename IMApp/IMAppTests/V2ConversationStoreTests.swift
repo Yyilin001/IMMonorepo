@@ -835,6 +835,29 @@ struct V2ConversationStoreTests {
         #expect(store.directConversationFeedback == nil)
     }
 
+    @Test func directConversationAllowsOnlyOneInFlightOpen() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let opener = V2SuspendingDirectConversationOpener(roomID: "room-direct")
+        let resolver = V2ConversationPublicIdentityResolverFake(values: ["other_user": "other-user"])
+        let store = V2ConversationListStore(
+            dataSource: source,
+            userID: "current-user",
+            directConversationOpener: opener,
+            publicIdentityResolver: resolver
+        )
+
+        let firstOpen = Task { await store.openDirectConversation(handle: "@other_user") }
+        await opener.waitUntilOpening()
+        let duplicateResult = await store.openDirectConversation(handle: "@other_user")
+
+        #expect(duplicateResult == nil)
+        #expect(store.isOpeningDirectConversation)
+        #expect(await opener.openingCount() == 1)
+        await opener.complete()
+        #expect(await firstOpen.value == "room-direct")
+        #expect(!store.isOpeningDirectConversation)
+    }
+
     @Test func cancellingGroupCreationAfterAnUncooperativeResolutionDoesNotCreateARoom() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let creator = V2GroupConversationCreatorFake(result: .created(roomID: "room-group"))
@@ -878,6 +901,29 @@ struct V2ConversationStoreTests {
 
         #expect(roomID == nil)
         #expect(store.groupConversationFeedback == "建群请求已安全保存，连接恢复后会继续。")
+    }
+
+    @Test func groupConversationAllowsOnlyOneInFlightCreation() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let creator = V2SuspendingGroupConversationCreator(result: .created(roomID: "room-group"))
+        let store = V2ConversationListStore(
+            dataSource: source,
+            userID: "current-user",
+            groupConversationCreator: creator
+        )
+
+        let firstCreation = Task {
+            await store.createGroupConversation(title: "项目群", memberHandlesText: "")
+        }
+        await creator.waitUntilCreating()
+        let duplicateResult = await store.createGroupConversation(title: "项目群", memberHandlesText: "")
+
+        #expect(duplicateResult == nil)
+        #expect(store.isCreatingGroupConversation)
+        #expect(await creator.creationCount() == 1)
+        await creator.complete()
+        #expect(await firstCreation.value == "room-group")
+        #expect(!store.isCreatingGroupConversation)
     }
 
     @Test func groupMemberDirectoryPaginatesThroughAnInjectableReader() async {
@@ -1740,6 +1786,7 @@ private actor V2DirectConversationOpenerFake: V2DirectConversationOpening {
 
 private actor V2SuspendingDirectConversationOpener: V2DirectConversationOpening {
     private let roomID: String
+    private var count = 0
     private var openingWaiter: CheckedContinuation<Void, Never>?
     private var completion: CheckedContinuation<Void, Never>?
 
@@ -1748,6 +1795,7 @@ private actor V2SuspendingDirectConversationOpener: V2DirectConversationOpening 
     }
 
     func openConversation(with _: V2PublicIdentity) async throws -> String {
+        count += 1
         openingWaiter?.resume()
         openingWaiter = nil
         await withCheckedContinuation { completion = $0 }
@@ -1763,6 +1811,8 @@ private actor V2SuspendingDirectConversationOpener: V2DirectConversationOpening 
         completion?.resume()
         completion = nil
     }
+
+    func openingCount() -> Int { count }
 }
 
 private actor V2ConversationPublicIdentityResolverFake: V2ConversationPublicIdentityResolving {
@@ -1829,6 +1879,40 @@ private actor V2GroupConversationCreatorFake: V2GroupConversationCreating {
     }
     func requests() -> [Request] { requestsValue }
     struct Request: Equatable, Sendable { let title: String; let memberUserIDs: [String] }
+}
+
+private actor V2SuspendingGroupConversationCreator: V2GroupConversationCreating {
+    private let result: V2GroupConversationCreationOutcome
+    private var count = 0
+    private var startWaiter: CheckedContinuation<Void, Never>?
+    private var completion: CheckedContinuation<Void, Never>?
+
+    init(result: V2GroupConversationCreationOutcome) {
+        self.result = result
+    }
+
+    func createConversation(
+        title _: String,
+        initialMemberUserIDs _: [String]
+    ) async throws -> V2GroupConversationCreationOutcome {
+        count += 1
+        startWaiter?.resume()
+        startWaiter = nil
+        await withCheckedContinuation { completion = $0 }
+        return result
+    }
+
+    func waitUntilCreating() async {
+        guard count == 0 else { return }
+        await withCheckedContinuation { startWaiter = $0 }
+    }
+
+    func complete() {
+        completion?.resume()
+        completion = nil
+    }
+
+    func creationCount() -> Int { count }
 }
 
 private actor V2GroupMemberDirectoryFake: V2GroupMemberDirectoryReading {
