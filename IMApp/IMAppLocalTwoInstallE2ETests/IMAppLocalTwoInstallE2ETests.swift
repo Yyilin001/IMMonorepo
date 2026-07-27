@@ -147,6 +147,11 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             deliveredMessage.waitForExistence(timeout: 15),
             "接收端会话详情必须包含发送端离线期间投递、经同步投影恢复的消息。"
         )
+        try auditOrdinaryChatSurface(in: app)
+        // This is a populated, receiver-side projection rather than the
+        // sender's draft-only detail state. Keep contrast gated here too so
+        // restored message content and the composer stay legible together.
+        try app.performAccessibilityAudit(for: [.contrast])
         app.terminate()
     }
 

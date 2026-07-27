@@ -1460,11 +1460,15 @@ private struct V2ConversationDetailView: View {
                             .lineLimit(1 ... 4)
                             .disabled(store.isSending)
                             .accessibilityIdentifier("v2.message.draft")
-                        Button(store.isSending ? "发送中…" : "发送") { Task { await store.sendDraft() } }
-                            .disabled(store.isSending || (store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.attachments.isEmpty))
-                            .tint(.primary)
-                            .accessibilityValue(store.isSending ? "正在保存消息" : "")
-                            .accessibilityIdentifier("v2.message.send")
+                        if store.isSending {
+                            ProgressView()
+                                .frame(minWidth: 44, minHeight: 44)
+                                .accessibilityLabel("正在保存消息")
+                        } else if canSendDraft {
+                            Button("发送") { Task { await store.sendDraft() } }
+                                .tint(.primary)
+                                .accessibilityIdentifier("v2.message.send")
+                        }
                     }
                     .padding()
                     if let sendFeedback = store.sendFeedback {
@@ -1522,6 +1526,11 @@ private struct V2ConversationDetailView: View {
             Task { await store.stageAttachment(from: url) }
         }
         .task { await store.observeProjectionChanges() }
+    }
+
+    private var canSendDraft: Bool {
+        !store.isSending
+            && (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.attachments.isEmpty)
     }
 }
 
@@ -1635,8 +1644,8 @@ private struct V2ConversationMessageBubble: View {
                 .accessibilityIdentifier("v2.message.attachments.\(message.id)")
             }
             Text(message.createdAt, format: .dateTime.hour().minute())
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                .font(.caption)
+                .foregroundStyle(.primary)
             if store.canReactToMessage(message) {
                 V2ConversationReactionControls(store: store, message: message)
             }
@@ -1816,6 +1825,7 @@ private struct V2ConversationReactionControls: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(reaction.includesCurrentUser ? .accentColor : .secondary)
+                .frame(minWidth: 44, minHeight: 44)
                 .disabled(!store.canReactToMessage(message))
                 .accessibilityLabel(reaction.reaction + " 表情反应")
                 .accessibilityValue(reactionAccessibilityValue(reaction))
@@ -1831,6 +1841,8 @@ private struct V2ConversationReactionControls: View {
                 }
             } label: {
                 Image(systemName: "face.smiling")
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(.rect)
             }
             .disabled(!store.canReactToMessage(message))
             .accessibilityLabel("添加反应")

@@ -688,7 +688,8 @@ TLS gateway 连接创建 direct room；随后双方断开，发送端先把消�
 会话列表；同一回归还会打开并取消新建群聊表单，确保它与新建私聊共享互斥的呈现状态。它不覆盖 APNs、签名真机、生产网络或容量；VoiceOver 人工阅读顺序、设置页的 Dynamic Type
 与高对比度、减少动态效果和 RTL 仍需人工验收。设置页中的陌生人消息、屏蔽、后台同步唤醒和
 公开资料的异步成功/失败反馈现已与聊天操作共用 VoiceOver 公告机制；公告本身仍需在启用 VoiceOver
-的设备上人工确认。
+的设备上人工确认。恢复端含真实投递消息的详情页同样执行了该审计；审计驱动修复了添加反应的最小
+触达面积、时间戳的 Dynamic Type/对比度，以及空草稿时不应显示低对比度禁用发送操作的问题。
 
 The same baseline audit found that the retired macOS automation called removed
 `Makefile` targets and that the Release build phase directly executed a
