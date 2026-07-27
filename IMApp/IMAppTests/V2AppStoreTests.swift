@@ -3,6 +3,46 @@ import Testing
 
 @MainActor
 struct V2AppStoreTests {
+    @Test("实时启动任务结束后允许新的前台尝试")
+    func completedRealtimeAttemptReleasesTheGate() {
+        var gate = V2RealtimeAttemptGate()
+
+        let first = gate.begin(ifApplicationActive: true)
+        #expect(first != nil)
+        guard let first else { return }
+        #expect(gate.hasInFlightAttempt)
+        let concurrentAttempt = gate.begin(ifApplicationActive: true)
+        #expect(concurrentAttempt == nil)
+
+        let released = gate.finish(generation: first)
+        #expect(released)
+        #expect(!gate.hasInFlightAttempt)
+        let second = gate.begin(ifApplicationActive: true)
+        #expect(second != nil)
+        guard let second else { return }
+        #expect(second > first)
+    }
+
+    @Test("已取消实时启动的迟到完成不能释放新任务")
+    func staleRealtimeAttemptCompletionCannotReleaseNewAttempt() {
+        var gate = V2RealtimeAttemptGate()
+
+        let first = gate.begin(ifApplicationActive: true)
+        #expect(first != nil)
+        guard let first else { return }
+        gate.cancel()
+        let second = gate.begin(ifApplicationActive: true)
+        #expect(second != nil)
+        guard let second else { return }
+
+        let staleCompletionWasIgnored = !gate.finish(generation: first)
+        #expect(staleCompletionWasIgnored)
+        #expect(gate.hasInFlightAttempt)
+        #expect(gate.matchesCurrentGeneration(second))
+        let currentCompletionReleasedGate = gate.finish(generation: second)
+        #expect(currentCompletionReleasedGate)
+    }
+
     @Test("UI test startup mode bypasses device state and remains signed out")
     func uiTestingStartupModeStaysSignedOut() async {
         let store = V2AppStore(startupMode: .uiTestingSignedOut)

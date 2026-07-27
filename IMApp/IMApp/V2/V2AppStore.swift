@@ -5,6 +5,40 @@ import Observation
 import OSLog
 import UIKit
 
+/// Tracks the short-lived task that starts the foreground realtime runtime.
+/// The runtime itself owns its live loops after startup; this gate only keeps
+/// a completed or cancelled startup task from blocking a later retry.
+@MainActor
+struct V2RealtimeAttemptGate {
+    private(set) var generation: UInt64 = 0
+    private(set) var hasInFlightAttempt = false
+
+    mutating func begin(ifApplicationActive isApplicationActive: Bool) -> UInt64? {
+        guard isApplicationActive, !hasInFlightAttempt else { return nil }
+        generation &+= 1
+        hasInFlightAttempt = true
+        return generation
+    }
+
+    /// Returns `true` only when this completion belongs to the current task.
+    /// A stopped runtime may finish its cancelled task after a newer attempt
+    /// has been created, and must not clear that newer task's ownership.
+    mutating func finish(generation completedGeneration: UInt64) -> Bool {
+        guard hasInFlightAttempt, generation == completedGeneration else { return false }
+        hasInFlightAttempt = false
+        return true
+    }
+
+    mutating func cancel() {
+        generation &+= 1
+        hasInFlightAttempt = false
+    }
+
+    func matchesCurrentGeneration(_ candidate: UInt64) -> Bool {
+        generation == candidate
+    }
+}
+
 @MainActor
 @Observable
 final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
@@ -71,7 +105,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private weak var remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)?
     @ObservationIgnored private var realtimeRuntime: V2ClientRuntime?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
-    @ObservationIgnored private var realtimeGeneration: UInt64 = 0
+    @ObservationIgnored private var realtimeAttemptGate = V2RealtimeAttemptGate()
     @ObservationIgnored private var isApplicationActive = true
 
     private(set) var route: Route
@@ -527,10 +561,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         runtime: V2ClientRuntime,
         conversations: V2ConversationListStore
     ) {
-        guard isApplicationActive, realtimeTask == nil else { return }
-        realtimeGeneration &+= 1
-        let taskGeneration = realtimeGeneration
+        guard let taskGeneration = realtimeAttemptGate.begin(ifApplicationActive: isApplicationActive) else { return }
         realtimeTask = Task { [weak self, runtime, conversations] in
+            defer { self?.finishRealtimeAttempt(generation: taskGeneration) }
             do {
                 _ = try await runtime.start()
                 await conversations.refresh()
@@ -546,15 +579,20 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     private func stopRealtime() async {
-        realtimeGeneration &+= 1
+        realtimeAttemptGate.cancel()
         realtimeTask?.cancel()
         realtimeTask = nil
         await realtimeRuntime?.stop()
     }
 
     private func signOutIfCurrentRealtimeAttempt(_ taskGeneration: UInt64) async {
-        guard realtimeGeneration == taskGeneration else { return }
+        guard realtimeAttemptGate.matchesCurrentGeneration(taskGeneration) else { return }
         await signOut()
+    }
+
+    private func finishRealtimeAttempt(generation taskGeneration: UInt64) {
+        guard realtimeAttemptGate.finish(generation: taskGeneration) else { return }
+        realtimeTask = nil
     }
 
     func receiveAPNSToken(_ token: String) async {

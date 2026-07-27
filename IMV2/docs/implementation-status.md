@@ -17,6 +17,17 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: the selected iPhone 17 / iOS 26.2 Simulator passed the full
+  shared `IMApp` scheme with **62 Swift tests** and **2 UI tests**, zero
+  failures. The app now releases its foreground realtime-start task after it
+  succeeds, fails or is cancelled. A generation-fenced gate prevents a stale
+  cancelled task from releasing a newer attempt, so a transient startup
+  failure cannot leave an already-completed task blocking a later foreground
+  retry. Focused tests cover both release and stale-completion fencing. This
+  fix also passed the dedicated local-account UI suite (**3 tests**) through
+  real HTTPS registration, device-credential issuance, Keychain session
+  creation and scoped cleanup. It remains local Simulator lifecycle evidence
+  only, not multi-device product E2E or a signed-device result.
 - 2026-07-27: the same iPhone 17 / iOS 26.2 Simulator passed the full shared
   `IMApp` scheme with **60 Swift tests** and **2 UI tests**, zero failures.
   iOS now constructs independent member-mute and audited-member-removal
