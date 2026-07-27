@@ -112,7 +112,7 @@
 
 | 门禁 | 必须证据 |
 | --- | --- |
-| 构建与测试 | 本机隔离 Server/ClientKit 回归通过；iOS 指定模拟器/真机测试；当前 CoreSimulator 主机故障恢复后补齐 post-`461d0f2` 回归 |
+| 构建与测试 | 本机隔离 Core/Server/ClientKit 回归通过；iOS 指定模拟器的 Debug 全量测试、通用 Simulator `build-for-testing` 与本机账户 E2E 均已通过；真机测试仍须在设备可用时执行 |
 | 安全 | WebAuthn/密码策略评审、secret 管理、TLS、rate limit、operator 最小权限与审计 |
 | 正确性 | PostgreSQL durable recovery、双设备同步、媒体扫描失败、Push 失效、replay 演练 |
 | 运维 | 指标、Alertmanager receiver、runbook、备份恢复、on-call ownership |
