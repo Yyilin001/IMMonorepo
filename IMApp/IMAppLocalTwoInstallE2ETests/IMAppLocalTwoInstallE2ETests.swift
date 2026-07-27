@@ -297,10 +297,34 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let createGroup = app.buttons["v2.conversation.group-submit"]
         XCTAssertTrue(createGroup.isEnabled)
         createGroup.tap()
+        let openGroupMembers = app.buttons["v2.group.members"]
         XCTAssertTrue(
-            app.buttons["v2.group.members"].waitForExistence(timeout: 30),
+            openGroupMembers.waitForExistence(timeout: 30),
             "接收端必须使用已注册的独立发送端账号创建真实群聊。"
         )
+        openGroupMembers.tap()
+        let memberSheet = app.collectionViews["v2.group.members.sheet"]
+        XCTAssertTrue(
+            memberSheet.waitForExistence(timeout: 15),
+            "创建含独立发送端的群后必须能打开按需成员目录。"
+        )
+        let senderMember = app.staticTexts["Two install sender"]
+        XCTAssertTrue(
+            senderMember.waitForExistence(timeout: 30),
+            "初始成员目录必须投影已解析的发送端公开资料，而不能只创建空群。"
+        )
+        let memberRows = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "v2.group.member.")
+        )
+        XCTAssertGreaterThanOrEqual(
+            memberRows.count,
+            2,
+            "成员目录必须至少包含群主和通过公开 ID 解析加入的独立发送端。"
+        )
+        let closeGroupMembers = app.buttons["v2.group.members.close"]
+        XCTAssertTrue(closeGroupMembers.isHittable)
+        closeGroupMembers.tap()
+        XCTAssertTrue(openGroupMembers.waitForExistence(timeout: 5))
         let groupDraft = app.textViews["v2.message.draft"]
         XCTAssertTrue(groupDraft.exists)
         let groupDraftValue = groupDraft.value as? String ?? ""
