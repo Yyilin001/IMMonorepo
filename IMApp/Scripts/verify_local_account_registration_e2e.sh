@@ -12,7 +12,7 @@ local_compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
 project_file="${app_dir}/IMApp.xcodeproj"
 scheme="${IMAPP_LOCAL_ACCOUNT_E2E_SCHEME:-IMAppLocalAccountE2E}"
 destination_id="${IMAPP_LOCAL_ACCOUNT_E2E_SIMULATOR_ID:-}"
-expected_test_count="${IMAPP_LOCAL_ACCOUNT_E2E_EXPECTED_TESTS:-6}"
+expected_test_count="${IMAPP_LOCAL_ACCOUNT_E2E_EXPECTED_TESTS:-7}"
 
 source "${repo_root}/IMV2/scripts/local_compose.sh"
 

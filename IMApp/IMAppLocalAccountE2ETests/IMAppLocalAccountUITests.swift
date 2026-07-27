@@ -345,6 +345,123 @@ final class IMAppLocalAccountUITests: XCTestCase {
         await receiverConnection.disconnect()
     }
 
+    /// Exercises the ordinary group command surface against the real local
+    /// gateway. Group roster facts stay on the explicit directory read: they
+    /// are never inferred from a direct-message projection or from a client
+    /// cache.
+    func testGroupCreationMembershipChangeAndRosterReadThroughGateway() async throws {
+        let owner = try await registerLocalAccount(displayName: "Group owner")
+        let initialMember = try await registerLocalAccount(displayName: "Initial group member")
+        let addedMember = try await registerLocalAccount(displayName: "Added group member")
+        let frameLimits = try V2FrameLimits(
+            maximumPayloadBytes: 65_536,
+            acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
+        )
+        let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
+        let ownerConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let initialMemberConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let addedMemberConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+
+        do {
+            let ownerSession = try await ownerConnection.connectAndAuthenticate(
+                accessToken: owner.accessToken,
+                deviceID: owner.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            let initialMemberSession = try await initialMemberConnection.connectAndAuthenticate(
+                accessToken: initialMember.accessToken,
+                deviceID: initialMember.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            let addedMemberSession = try await addedMemberConnection.connectAndAuthenticate(
+                accessToken: addedMember.accessToken,
+                deviceID: addedMember.deviceID,
+                supportedCapabilityProfiles: ["base"]
+            )
+            XCTAssertEqual(ownerSession.userID, owner.userID)
+            XCTAssertEqual(initialMemberSession.userID, initialMember.userID)
+            XCTAssertEqual(addedMemberSession.userID, addedMember.userID)
+
+            let ownerTransport = V2ProtobufSyncTransport(
+                wire: ownerConnection,
+                protocolVersion: ownerSession.protocolVersion
+            )
+            let initialMemberTransport = V2ProtobufSyncTransport(
+                wire: initialMemberConnection,
+                protocolVersion: initialMemberSession.protocolVersion
+            )
+            let addedMemberTransport = V2ProtobufSyncTransport(
+                wire: addedMemberConnection,
+                protocolVersion: addedMemberSession.protocolVersion
+            )
+            let group = try await ownerTransport.createGroupRoom(
+                operationID: try GroupRoomOperationID(UUID().uuidString.lowercased()),
+                title: "  Local gateway group  ",
+                initialMemberUserIDs: [initialMember.userID]
+            )
+            XCTAssertEqual(group.title, "Local gateway group")
+            XCTAssertEqual(Set(group.memberUserIDs), Set([owner.userID, initialMember.userID]))
+
+            let ownerPage = try await ownerTransport.listRoomMembers(
+                roomID: group.roomID,
+                cursor: nil,
+                pageSize: 10
+            )
+            XCTAssertEqual(ownerPage.actorRole, .owner)
+            XCTAssertEqual(Set(ownerPage.members.map(\.userID)), Set([owner.userID, initialMember.userID]))
+            XCTAssertNil(ownerPage.nextCursor)
+
+            let initialMemberPage = try await initialMemberTransport.listRoomMembers(
+                roomID: group.roomID,
+                cursor: nil,
+                pageSize: 10
+            )
+            XCTAssertEqual(initialMemberPage.actorRole, .member)
+            XCTAssertEqual(initialMemberPage.membershipRevision, ownerPage.membershipRevision)
+            XCTAssertEqual(Set(initialMemberPage.members.map(\.userID)), Set([owner.userID, initialMember.userID]))
+
+            let added = try await ownerTransport.changeMembership(
+                roomID: group.roomID,
+                operationID: try MembershipOperationID(UUID().uuidString.lowercased()),
+                targetUserID: addedMember.userID,
+                action: .add,
+                expectedMembershipRevision: ownerPage.membershipRevision
+            )
+            XCTAssertEqual(added.action, .add)
+            XCTAssertEqual(added.targetUserID, addedMember.userID)
+            XCTAssertGreaterThan(added.membershipRevision, ownerPage.membershipRevision)
+
+            let addedMemberPage = try await addedMemberTransport.listRoomMembers(
+                roomID: group.roomID,
+                cursor: nil,
+                pageSize: 10
+            )
+            XCTAssertEqual(addedMemberPage.actorRole, .member)
+            XCTAssertEqual(addedMemberPage.membershipRevision, added.membershipRevision)
+            XCTAssertEqual(
+                Set(addedMemberPage.members.map(\.userID)),
+                Set([owner.userID, initialMember.userID, addedMember.userID])
+            )
+            let acceptance = try await addedMemberTransport.sendMessage(
+                roomID: group.roomID,
+                clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
+                text: "accepted-after-membership-change",
+                media: [],
+                mentions: []
+            )
+            XCTAssertEqual(acceptance.roomID, group.roomID)
+        } catch {
+            await ownerConnection.disconnect()
+            await initialMemberConnection.disconnect()
+            await addedMemberConnection.disconnect()
+            throw error
+        }
+
+        await ownerConnection.disconnect()
+        await initialMemberConnection.disconnect()
+        await addedMemberConnection.disconnect()
+    }
+
     @MainActor
     func testPasswordRegistrationEstablishesLocalSession() throws {
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
