@@ -18,6 +18,9 @@ public struct V2PendingMessageWithdrawal: Equatable, Sendable {
 
 public protocol V2LocalMessageWithdrawalStore: Sendable {
     func enqueue(_ command: V2PendingMessageWithdrawal) async throws
+    /// A retry of the same pending withdrawal must retain its original
+    /// operation ID, including when the app has restarted.
+    func enqueueOrReusePendingMessageWithdrawal(_ command: V2PendingMessageWithdrawal) async throws -> V2PendingMessageWithdrawal
     func nextReadyMessageWithdrawal(now: Date) async throws -> V2PendingMessageWithdrawal?
     func markMessageWithdrawalAcknowledged(operationID: MessageWithdrawalOperationID, messageRevision: UInt64, roomSequence: UInt64) async throws
     func scheduleMessageWithdrawalRetry(operationID: MessageWithdrawalOperationID, nextAttemptAt: Date) async throws
@@ -40,8 +43,7 @@ public actor V2MessageWithdrawalOutboxEngine {
 
     public func enqueueWithdrawal(roomID: RoomID, messageID: MessageID, expectedMessageRevision: UInt64) async throws -> V2PendingMessageWithdrawal {
         let command = V2PendingMessageWithdrawal(roomID: roomID, operationID: try .init(makeUUID().uuidString), messageID: messageID, expectedMessageRevision: expectedMessageRevision, state: .pending, attemptCount: 0, nextAttemptAt: now(), resultingMessageRevision: nil, resultingRoomSequence: nil, terminalCode: nil, terminalCurrentRevision: nil)
-        try await store.enqueue(command)
-        return command
+        return try await store.enqueueOrReusePendingMessageWithdrawal(command)
     }
 
     public func flushOnce() async throws -> V2MessageWithdrawalFlushResult {

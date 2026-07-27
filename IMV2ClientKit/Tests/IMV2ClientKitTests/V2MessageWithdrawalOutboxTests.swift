@@ -36,6 +36,38 @@ struct V2MessageWithdrawalOutboxTests {
         #expect(saved.terminalCurrentRevision == 2)
         #expect(try await engine.flushOnce() == .idle)
     }
+
+    @Test("duplicate pending withdrawal after restart reuses its original operation ID")
+    func duplicatePendingWithdrawalReusesTheOriginalOperationAfterRestart() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-withdrawal-\(UUID().uuidString).sqlite")
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000958")
+        let messageID = try MessageID("00000000-0000-0000-0000-000000000959")
+        let originalStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: withdrawalBinding)
+        let originalEngine = V2MessageWithdrawalOutboxEngine(
+            store: originalStore,
+            transport: ScriptedWithdrawalTransport(results: []),
+            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000960")! }
+        )
+        let original = try await originalEngine.enqueueWithdrawal(
+            roomID: roomID,
+            messageID: messageID,
+            expectedMessageRevision: 3
+        )
+
+        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: withdrawalBinding)
+        let restartedEngine = V2MessageWithdrawalOutboxEngine(
+            store: restartedStore,
+            transport: ScriptedWithdrawalTransport(results: [])
+        )
+        let reused = try await restartedEngine.enqueueWithdrawal(
+            roomID: roomID,
+            messageID: messageID,
+            expectedMessageRevision: 3
+        )
+
+        #expect(reused.operationID == original.operationID)
+        #expect(try await restartedStore.pendingMessageWithdrawals().count == 1)
+    }
 }
 
 private actor ScriptedWithdrawalTransport: V2ClientMessageWithdrawalTransport {

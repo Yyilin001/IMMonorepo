@@ -733,6 +733,64 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
+    public func enqueueOrReusePendingMessageWithdrawal(
+        _ command: V2PendingMessageWithdrawal
+    ) throws -> V2PendingMessageWithdrawal {
+        try databasePool.write { db in
+            guard command.state == .pending,
+                  command.attemptCount == 0,
+                  command.resultingMessageRevision == nil,
+                  command.resultingRoomSequence == nil,
+                  command.terminalCode == nil,
+                  command.terminalCurrentRevision == nil
+            else { throw V2ClientCommandError.commandConflict }
+            let expectedRevision = try Self.commandStorageInteger(command.expectedMessageRevision)
+            if let existing = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM v2_pending_message_withdrawals WHERE operation_id = ?",
+                arguments: [command.operationID.rawValue]
+            ) {
+                let decoded = try Self.decodePendingMessageWithdrawal(existing)
+                guard decoded.roomID == command.roomID,
+                      decoded.messageID == command.messageID,
+                      decoded.expectedMessageRevision == command.expectedMessageRevision,
+                      decoded.state == .pending
+                else { throw V2ClientCommandError.commandConflict }
+                return decoded
+            }
+            if let existing = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM v2_pending_message_withdrawals
+                WHERE room_id = ? AND message_id = ?
+                  AND expected_message_revision = ? AND state = 'pending'
+                ORDER BY created_at, operation_id
+                LIMIT 1
+                """,
+                arguments: [command.roomID.rawValue, command.messageID.rawValue, expectedRevision]
+            ) {
+                return try Self.decodePendingMessageWithdrawal(existing)
+            }
+            try db.execute(
+                sql: """
+                INSERT INTO v2_pending_message_withdrawals
+                    (operation_id, room_id, message_id, expected_message_revision,
+                     state, attempt_count, next_attempt_at, created_at)
+                VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
+                """,
+                arguments: [
+                    command.operationID.rawValue,
+                    command.roomID.rawValue,
+                    command.messageID.rawValue,
+                    expectedRevision,
+                    command.nextAttemptAt.timeIntervalSince1970,
+                    command.nextAttemptAt.timeIntervalSince1970
+                ]
+            )
+            return command
+        }
+    }
+
     public func nextReadyMessageWithdrawal(now: Date) throws -> V2PendingMessageWithdrawal? {
         try databasePool.read { db in
             guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_withdrawals WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }

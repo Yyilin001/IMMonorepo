@@ -17,6 +17,14 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: a duplicate pending message withdrawal now atomically reuses
+  the original operation ID when its room, message, and expected message
+  revision are unchanged. A retry after a lost response or app restart no
+  longer writes a second terminal command; a changed revision stays a distinct
+  user action. The native `IMV2ClientKit` suite passed **128 tests**; the
+  selected iPhone 17 / iOS 26.2 Simulator passed the full shared `IMApp`
+  scheme with **80 Swift tests** and **2 UI tests**, zero failures. This is
+  local durable-intent evidence only, not multi-device or deployment evidence.
 - 2026-07-27: equivalent pending social commands now atomically reuse their
   operation ID across restarts. This covers relationship, user-block, and
   stranger-message-preference commands; a changed target or desired preference
