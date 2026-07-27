@@ -43,6 +43,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         /// unavailable. This is distinct from a terminal configuration or
         /// local-store failure because a foreground retry may recover it.
         case protectedDataUnavailable
+        /// The user has signed out, but iOS has not yet allowed the protected
+        /// credential deletion to complete. Old credentials must not restore
+        /// until this state has finished.
+        case signOutPendingCredentialDeletion
         case uiTestingLiveLocalAccountCleanupCompleted
         case unavailable(message: String)
     }
@@ -57,6 +61,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private let localKeychainService: String?
     @ObservationIgnored private let localDatabaseURL: URL?
     @ObservationIgnored private let liveLocalAccountE2ETestScope: V2LiveLocalAccountE2ETestScope?
+    @ObservationIgnored private let pendingCredentialDeletionStore: (any V2PendingCredentialDeletionStoring)?
     @ObservationIgnored private weak var remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)?
     @ObservationIgnored private var realtimeRuntime: V2ClientRuntime?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
@@ -85,6 +90,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             localKeychainService = nil
             localDatabaseURL = nil
             self.liveLocalAccountE2ETestScope = nil
+            pendingCredentialDeletionStore = nil
             route = .signedOut
             authenticationMessage = nil
             conversationStore = nil
@@ -120,6 +126,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             localKeychainService = keychainService
             localDatabaseURL = databaseURL
             self.liveLocalAccountE2ETestScope = liveLocalAccountE2ETestScope
+            pendingCredentialDeletionStore = V2UserDefaultsPendingCredentialDeletionStore(
+                key: keychainService + ".pending-credential-deletion"
+            )
             self.bootstrapper = V2ClientSessionBootstrapper(
                 authSession: authSession,
                 localStoreBootstrapper: .init(bindingStore: V2KeychainInstallationBindingStore(service: keychainService)),
@@ -152,6 +161,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             localKeychainService = nil
             localDatabaseURL = nil
             self.liveLocalAccountE2ETestScope = nil
+            pendingCredentialDeletionStore = nil
             route = .unavailable(message: "V2 账户服务配置无效。")
             authenticationMessage = nil
             conversationStore = nil
@@ -171,6 +181,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         guard startupMode.restoresPersistedSession else {
             route = .signedOut
             authenticationMessage = nil
+            return
+        }
+        if await finishPendingCredentialDeletionIfNeeded() {
             return
         }
         guard let bootstrapper else { return }
@@ -296,8 +309,52 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     func signOut() async {
+        guard let authSession, let pendingCredentialDeletionStore else {
+            await discardAuthenticatedPresentation(route: .signedOut)
+            return
+        }
+        // Persist intent before the first await so a process termination while
+        // protected data is locked cannot resurrect a session on next launch.
+        await pendingCredentialDeletionStore.markPending()
         await pushWakeSettingsStore?.deactivateForSignOut()
-        try? await authSession?.handleTerminalRejection()
+        do {
+            try await authSession.handleTerminalRejection()
+            await pendingCredentialDeletionStore.clearPending()
+            await discardAuthenticatedPresentation(route: .signedOut)
+        } catch {
+            await discardAuthenticatedPresentation(route: .signOutPendingCredentialDeletion)
+        }
+    }
+
+    /// Attempts the already-persisted logout completion after protected data
+    /// becomes available. It never opens an authenticated session.
+    func retryPendingCredentialDeletion() async {
+        guard route == .signOutPendingCredentialDeletion else { return }
+        _ = await finishPendingCredentialDeletionIfNeeded()
+    }
+
+    private func finishPendingCredentialDeletionIfNeeded() async -> Bool {
+        guard let pendingCredentialDeletionStore,
+              await pendingCredentialDeletionStore.isPending()
+        else { return false }
+        guard let authSession else {
+            route = .unavailable(message: "V2 账户服务配置无效。")
+            return true
+        }
+        // Claim the route before awaiting the actor so manual retry and scene
+        // activation cannot issue duplicate Keychain deletion attempts.
+        route = .launching
+        do {
+            try await authSession.handleTerminalRejection()
+            await pendingCredentialDeletionStore.clearPending()
+            await discardAuthenticatedPresentation(route: .signedOut)
+        } catch {
+            await discardAuthenticatedPresentation(route: .signOutPendingCredentialDeletion)
+        }
+        return true
+    }
+
+    private func discardAuthenticatedPresentation(route nextRoute: Route) async {
         await stopRealtime()
         realtimeRuntime = nil
         authenticationMessage = nil
@@ -305,7 +362,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         privacySettingsStore = nil
         publicIdentitySettingsStore = nil
         pushWakeSettingsStore = nil
-        route = .signedOut
+        route = nextRoute
     }
 
     private func currentUserID() async throws -> String {
@@ -401,6 +458,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     /// realtime attempt after the app returns to the foreground.
     func applicationDidBecomeActive() async {
         isApplicationActive = true
+        if route == .signOutPendingCredentialDeletion {
+            await retryPendingCredentialDeletion()
+            return
+        }
         if route == .protectedDataUnavailable {
             await retryProtectedDataAccess()
             return
@@ -493,6 +554,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 service: localKeychainService
             ).delete()
             try await V2KeychainInstallationBindingStore(service: localKeychainService).delete()
+            await pendingCredentialDeletionStore?.clearPending()
             try Self.eraseDatabaseArtifacts(at: localDatabaseURL)
             route = .uiTestingLiveLocalAccountCleanupCompleted
         } catch {

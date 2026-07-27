@@ -103,6 +103,19 @@ struct V2RootView: View {
                     }
                     .accessibilityIdentifier("v2.protected-data.retry")
                 }
+            case .signOutPendingCredentialDeletion:
+                VStack(spacing: 16) {
+                    ContentUnavailableView(
+                        "正在完成退出登录",
+                        systemImage: "lock.trianglebadge.exclamationmark",
+                        description: Text("请解锁设备后重试，以删除此设备上的受保护凭据。")
+                    )
+                    Button("重试") {
+                        protectedDataRetryTask?.cancel()
+                        protectedDataRetryTask = Task { await store.retryPendingCredentialDeletion() }
+                    }
+                    .accessibilityIdentifier("v2.sign-out.pending.retry")
+                }
             case .unavailable(let message):
                 ContentUnavailableView("V2 暂不可用", systemImage: "exclamationmark.triangle", description: Text(message))
             }
