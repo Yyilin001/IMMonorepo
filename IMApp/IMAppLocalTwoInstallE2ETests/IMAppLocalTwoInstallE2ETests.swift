@@ -317,6 +317,23 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "群消息必须先经真实持久化命令被网关接受或安全保存。"
         )
         XCTAssertTrue(sendFeedback.label.contains("已发送") || sendFeedback.label.contains("已安全保存"))
+        let groupMessageRow = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.row.")
+        ).firstMatch
+        XCTAssertTrue(
+            groupMessageRow.waitForExistence(timeout: 15),
+            "发送端群消息必须先被本机同步投影渲染，才能验证前后台恢复不会清空详情状态。"
+        )
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(
+            app.textViews["v2.message.draft"].waitForExistence(timeout: 30),
+            "群消息发送后从后台回到前台必须恢复原有会话详情，而不能丢失本地导航或会话状态。"
+        )
+        XCTAssertTrue(
+            groupMessageRow.waitForExistence(timeout: 15),
+            "前台恢复后的详情页必须继续读取同一 SQLite 消息投影。"
+        )
         app.terminate()
     }
 
