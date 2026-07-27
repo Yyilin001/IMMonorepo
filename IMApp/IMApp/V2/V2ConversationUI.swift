@@ -1559,6 +1559,7 @@ private struct V2ConversationAttachmentRow: View {
             Button("移除", role: .destructive) {
                 Task { await store.removeAttachment(id: attachment.id) }
             }
+            .frame(minWidth: 44, minHeight: 44)
             .disabled(store.isSending)
             .accessibilityLabel(removalLabel)
             .accessibilityIdentifier(removeIdentifier)
@@ -1788,6 +1789,7 @@ private struct V2ConversationMediaAttachmentRow: View {
                 Label("分享附件", systemImage: "square.and.arrow.up")
             }
             .font(.caption)
+            .frame(minWidth: 44, minHeight: 44)
             .accessibilityLabel("分享附件")
             .accessibilityHint("打开系统分享菜单")
             .accessibilityIdentifier(identifier)
@@ -1802,6 +1804,7 @@ private struct V2ConversationMediaAttachmentRow: View {
             Task { await store.downloadMedia(media, from: message) }
         }
         .font(.caption)
+        .frame(minWidth: 44, minHeight: 44)
         .accessibilityHint("重新验证权限后下载到此设备")
         .accessibilityIdentifier(identifier)
     }
@@ -1936,6 +1939,8 @@ private struct V2GroupMembersSheet: View {
                                 .accessibilityIdentifier("v2.group.member.moderated-remove.\(member.id)")
                             } label: {
                                 Image(systemName: "shield")
+                                    .frame(minWidth: 44, minHeight: 44)
+                                    .contentShape(.rect)
                             }
                             .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || store.isApplyingGroupModeration)
                             .accessibilityLabel("群管理 \(member.displayName ?? member.handle ?? "成员")")
