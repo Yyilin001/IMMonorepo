@@ -3,6 +3,7 @@ import IMV2ClientKit
 import IMV2Core
 import Observation
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// App-facing, value-only view data. The UI never reads SQLite rows or sync
@@ -1380,6 +1381,10 @@ private struct V2ConversationDetailView: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal)
                             .padding(.bottom, 8)
+                            .onAppear { announceForVoiceOver(sendFeedback) }
+                            .onChange(of: sendFeedback) { _, updatedFeedback in
+                                announceForVoiceOver(updatedFeedback)
+                            }
                             .accessibilityIdentifier("v2.message.send-feedback")
                     }
                     if let messageActionFeedback = store.messageActionFeedback {
@@ -1388,6 +1393,10 @@ private struct V2ConversationDetailView: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal)
                             .padding(.bottom, 8)
+                            .onAppear { announceForVoiceOver(messageActionFeedback) }
+                            .onChange(of: messageActionFeedback) { _, updatedFeedback in
+                                announceForVoiceOver(updatedFeedback)
+                            }
                             .accessibilityIdentifier("v2.message.action-feedback")
                     }
                 }
@@ -1554,6 +1563,12 @@ private struct V2ConversationMessageBubble: View {
                 .accessibilityIdentifier("v2.message.withdraw.\(message.id)")
             }
         }
+        .modifier(V2MessageAccessibilityActions(
+            canEdit: store.canEditMessage(message),
+            canWithdraw: store.canWithdrawMessage(message),
+            edit: beginEditing,
+            withdraw: { Task { await store.withdrawMessage(message) } }
+        ))
     }
 
     private var attachmentSummary: String {
@@ -1569,6 +1584,30 @@ private struct V2ConversationMessageBubble: View {
         case (true, 0): return "提及所有人"
         case (true, _): return "提及所有人及 \(userCount) 位成员"
         case (false, _): return "提及 \(userCount) 位成员"
+        }
+    }
+}
+
+/// Makes long-press-only message operations available from the VoiceOver rotor.
+/// The operations remain conditional so inaccessible actions are never announced.
+private struct V2MessageAccessibilityActions: ViewModifier {
+    let canEdit: Bool
+    let canWithdraw: Bool
+    let edit: () -> Void
+    let withdraw: () -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if canEdit && canWithdraw {
+            content
+                .accessibilityAction(named: "编辑消息") { edit() }
+                .accessibilityAction(named: "撤回消息") { withdraw() }
+        } else if canEdit {
+            content.accessibilityAction(named: "编辑消息") { edit() }
+        } else if canWithdraw {
+            content.accessibilityAction(named: "撤回消息") { withdraw() }
+        } else {
+            content
         }
     }
 }
@@ -1813,6 +1852,10 @@ private struct V2GroupMembersSheet: View {
                 }
                 if let feedback = store.groupMemberFeedback {
                     Text(feedback).foregroundStyle(.secondary)
+                        .onAppear { announceForVoiceOver(feedback) }
+                        .onChange(of: feedback) { _, updatedFeedback in
+                            announceForVoiceOver(updatedFeedback)
+                        }
                         .accessibilityIdentifier("v2.group.members.feedback")
                 }
             }
@@ -1879,4 +1922,10 @@ private struct V2GroupMembersSheet: View {
             moderationTask = nil
         }
     }
+}
+
+@MainActor
+private func announceForVoiceOver(_ message: String) {
+    guard UIAccessibility.isVoiceOverRunning else { return }
+    UIAccessibility.post(notification: .announcement, argument: message)
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct V2RootView: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -160,6 +161,7 @@ private struct V2SignInView: View {
     @State private var publicHandle = ""
     @State private var displayName = ""
     @State private var mode: V2AppStore.PasswordMode = .signIn
+    @State private var inputValidationMessage: String?
     @State private var actionTask: Task<Void, Never>?
 
     init(
@@ -186,8 +188,9 @@ private struct V2SignInView: View {
                 Button {
                     run { await store.signInWithPasskey() }
                 } label: {
-                    Label("使用 Passkey 登录", systemImage: "key.fill")
+                    Image(systemName: "key.fill")
                 }
+                .accessibilityLabel("使用 Passkey 登录")
                 .accessibilityIdentifier("v2.passkey.sign-in")
             } footer: {
                 Text("Passkey 是推荐方式；系统会使用 Face ID、Touch ID 或设备密码。")
@@ -202,9 +205,10 @@ private struct V2SignInView: View {
                     .textContentType(mode == .register ? .newPassword : .password)
                 .accessibilityIdentifier("v2.password.value")
                 if mode == .register {
-                    TextField("公开 ID（例如 @alice）", text: $publicHandle)
+                    TextField("公开 ID", text: $publicHandle)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .accessibilityHint("例如 @alice")
                         .accessibilityIdentifier("v2.identity.public-handle")
                     TextField("显示名称", text: $displayName)
                         .accessibilityIdentifier("v2.identity.display-name")
@@ -215,7 +219,13 @@ private struct V2SignInView: View {
                 }
                 .pickerStyle(.segmented)
                 .accessibilityIdentifier("v2.password.mode")
-                Button(mode == .register ? "创建账号" : "使用密码登录") {
+                Button(mode == .register ? "注册" : "使用密码登录") {
+                    guard canSubmitPasswordAction else {
+                        inputValidationMessage = validationMessage
+                        return
+                    }
+
+                    inputValidationMessage = nil
                     let submittedPassword = password
                     password = ""
                     run {
@@ -228,13 +238,13 @@ private struct V2SignInView: View {
                         )
                     }
                 }
-                .disabled(accountHandle.isEmpty || password.isEmpty || (mode == .register && (publicHandle.isEmpty || displayName.isEmpty)))
                 .accessibilityIdentifier("v2.password.submit")
             }
 
-            if let authenticationMessage {
+            if let feedbackMessage {
                 Section {
-                    Text(authenticationMessage)
+                    Text(feedbackMessage)
+                        .font(.body)
                         .foregroundStyle(.red)
                         .accessibilityIdentifier("v2.authentication.message")
                 }
@@ -242,16 +252,48 @@ private struct V2SignInView: View {
         }
         .scrollContentBackground(.hidden)
         .navigationTitle("登录")
+        .onAppear {
+            if let feedbackMessage {
+                announceAuthenticationMessage(feedbackMessage)
+            }
+        }
+        .onChange(of: feedbackMessage) { _, updatedMessage in
+            if let updatedMessage {
+                announceAuthenticationMessage(updatedMessage)
+            }
+        }
         // Submitting switches the root route to `.authenticating`, which
         // removes this view immediately. Cancelling here would therefore abort
         // the very account request the user just started. A replacement submit
         // still cancels the prior task in `run(_:)`.
     }
 
+    private var canSubmitPasswordAction: Bool {
+        !accountHandle.isEmpty
+            && !password.isEmpty
+            && (mode == .signIn || (!publicHandle.isEmpty && !displayName.isEmpty))
+    }
+
+    private var validationMessage: String {
+        mode == .register
+            ? "请输入账号、密码、公开 ID 和显示名称。"
+            : "请输入账号和密码。"
+    }
+
+    private var feedbackMessage: String? {
+        authenticationMessage ?? inputValidationMessage
+    }
+
     private func run(_ operation: @escaping @MainActor @Sendable () async -> Void) {
         actionTask?.cancel()
         actionTask = Task { await operation() }
     }
+}
+
+@MainActor
+private func announceAuthenticationMessage(_ message: String) {
+    guard UIAccessibility.isVoiceOverRunning else { return }
+    UIAccessibility.post(notification: .announcement, argument: message)
 }
 
 private struct V2SignedInRootView: View {
