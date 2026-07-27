@@ -11,6 +11,9 @@ public struct V2PendingMessageEdit: Equatable, Sendable {
 
 public protocol V2LocalMessageEditStore: Sendable {
     func enqueue(_ command: V2PendingMessageEdit) async throws
+    /// A retry of the same revision-fenced edit retains the original operation
+    /// ID, including after an app restart.
+    func enqueueOrReusePendingMessageEdit(_ command: V2PendingMessageEdit) async throws -> V2PendingMessageEdit
     func nextReadyMessageEdit(now: Date) async throws -> V2PendingMessageEdit?
     func markMessageEditAcknowledged(operationID: MessageEditOperationID, messageRevision: UInt64, roomSequence: UInt64) async throws
     func scheduleMessageEditRetry(operationID: MessageEditOperationID, nextAttemptAt: Date) async throws
@@ -27,7 +30,7 @@ public actor V2MessageEditOutboxEngine {
     }
     public func enqueueEdit(roomID: RoomID, messageID: MessageID, expectedMessageRevision: UInt64, text: String) async throws -> V2PendingMessageEdit {
         let command = V2PendingMessageEdit(roomID: roomID, operationID: try .init(makeUUID().uuidString), messageID: messageID, expectedMessageRevision: expectedMessageRevision, text: text, state: .pending, attemptCount: 0, nextAttemptAt: now(), resultingMessageRevision: nil, resultingRoomSequence: nil, terminalCode: nil, terminalCurrentRevision: nil)
-        try await store.enqueue(command); return command
+        return try await store.enqueueOrReusePendingMessageEdit(command)
     }
     public func flushOnce() async throws -> V2MessageEditFlushResult {
         guard let command = try await store.nextReadyMessageEdit(now: now()) else { return .idle }

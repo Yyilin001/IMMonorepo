@@ -11,6 +11,9 @@ public struct V2PendingMessageReaction: Equatable, Sendable {
 
 public protocol V2LocalMessageReactionStore: Sendable {
     func enqueue(_ command: V2PendingMessageReaction) async throws
+    /// Identical pending reaction changes retain their operation ID across
+    /// retries and restarts; a different action remains a new intent.
+    func enqueueOrReusePendingMessageReaction(_ command: V2PendingMessageReaction) async throws -> V2PendingMessageReaction
     func nextReadyMessageReaction(now: Date) async throws -> V2PendingMessageReaction?
     func markMessageReactionAcknowledged(operationID: MessageReactionOperationID, roomSequence: UInt64) async throws
     func scheduleMessageReactionRetry(operationID: MessageReactionOperationID, nextAttemptAt: Date) async throws
@@ -25,7 +28,7 @@ public actor V2MessageReactionOutboxEngine {
     public init(store: any V2LocalMessageReactionStore, transport: any V2ClientMessageReactionTransport, makeUUID: @escaping @Sendable () -> UUID = UUID.init, now: @escaping @Sendable () -> Date = Date.init, retryDelay: TimeInterval = 1) { self.store = store; self.transport = transport; self.makeUUID = makeUUID; self.now = now; self.retryDelay = retryDelay }
     public func enqueueReaction(roomID: RoomID, messageID: MessageID, reaction: String, action: V2MessageReactionAction) async throws -> V2PendingMessageReaction {
         let command = try V2PendingMessageReaction(roomID: roomID, operationID: .init(makeUUID().uuidString), messageID: messageID, reaction: reaction, action: action, state: .pending, attemptCount: 0, nextAttemptAt: now(), resultingRoomSequence: nil, terminalCode: nil)
-        try await store.enqueue(command); return command
+        return try await store.enqueueOrReusePendingMessageReaction(command)
     }
     public func flushOnce() async throws -> V2MessageReactionFlushResult {
         guard let command = try await store.nextReadyMessageReaction(now: now()) else { return .idle }

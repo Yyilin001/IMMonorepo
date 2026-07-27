@@ -34,6 +34,47 @@ struct V2MessageEditOutboxTests {
         let saved = try #require(await store.pendingMessageEdits().first)
         #expect(saved.terminalCurrentRevision == 2)
     }
+
+    @Test("duplicate pending edit after restart reuses its original operation ID")
+    func duplicatePendingEditReusesTheOriginalOperationAfterRestart() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-edit-\(UUID().uuidString).sqlite")
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000968")
+        let messageID = try MessageID("00000000-0000-0000-0000-000000000969")
+        let originalStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: editBinding)
+        let originalEngine = V2MessageEditOutboxEngine(
+            store: originalStore,
+            transport: EditTransport(results: []),
+            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000970")! }
+        )
+        let original = try await originalEngine.enqueueEdit(
+            roomID: roomID,
+            messageID: messageID,
+            expectedMessageRevision: 4,
+            text: "replacement"
+        )
+
+        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: editBinding)
+        let restartedEngine = V2MessageEditOutboxEngine(
+            store: restartedStore,
+            transport: EditTransport(results: [])
+        )
+        let reused = try await restartedEngine.enqueueEdit(
+            roomID: roomID,
+            messageID: messageID,
+            expectedMessageRevision: 4,
+            text: "replacement"
+        )
+
+        #expect(reused.operationID == original.operationID)
+        let changedText = try await restartedEngine.enqueueEdit(
+            roomID: roomID,
+            messageID: messageID,
+            expectedMessageRevision: 4,
+            text: "a distinct replacement"
+        )
+        #expect(changedText.operationID != original.operationID)
+        #expect(try await restartedStore.pendingMessageEdits().count == 2)
+    }
 }
 
 private actor EditTransport: V2ClientMessageEditTransport {

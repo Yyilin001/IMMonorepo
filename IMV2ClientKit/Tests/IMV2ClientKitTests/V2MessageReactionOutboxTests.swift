@@ -23,6 +23,47 @@ struct V2MessageReactionOutboxTests {
         #expect(saved.state == .acknowledged)
         #expect(saved.resultingRoomSequence == 8)
     }
+
+    @Test("duplicate pending reaction after restart reuses its original operation ID")
+    func duplicatePendingReactionReusesTheOriginalOperationAfterRestart() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-reaction-\(UUID().uuidString).sqlite")
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000956")
+        let messageID = try MessageID("00000000-0000-0000-0000-000000000957")
+        let originalStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        let originalEngine = V2MessageReactionOutboxEngine(
+            store: originalStore,
+            transport: ReactionTransport(results: []),
+            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000958")! }
+        )
+        let original = try await originalEngine.enqueueReaction(
+            roomID: roomID,
+            messageID: messageID,
+            reaction: "👍",
+            action: .add
+        )
+
+        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        let restartedEngine = V2MessageReactionOutboxEngine(
+            store: restartedStore,
+            transport: ReactionTransport(results: [])
+        )
+        let reused = try await restartedEngine.enqueueReaction(
+            roomID: roomID,
+            messageID: messageID,
+            reaction: "👍",
+            action: .add
+        )
+
+        #expect(reused.operationID == original.operationID)
+        let removal = try await restartedEngine.enqueueReaction(
+            roomID: roomID,
+            messageID: messageID,
+            reaction: "👍",
+            action: .remove
+        )
+        #expect(removal.operationID != original.operationID)
+        #expect(try await restartedStore.pendingMessageReactions().count == 2)
+    }
 }
 
 private let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000954")!)

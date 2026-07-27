@@ -976,6 +976,73 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try db.execute(sql: "INSERT INTO v2_pending_message_edits (operation_id, room_id, message_id, expected_message_revision, text_body, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, try Self.commandStorageInteger(command.expectedMessageRevision), command.text, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
         }
     }
+
+    public func enqueueOrReusePendingMessageEdit(
+        _ command: V2PendingMessageEdit
+    ) throws -> V2PendingMessageEdit {
+        try databasePool.write { db in
+            guard !command.text.isEmpty,
+                  command.state == .pending,
+                  command.attemptCount == 0,
+                  command.resultingMessageRevision == nil,
+                  command.resultingRoomSequence == nil,
+                  command.terminalCode == nil,
+                  command.terminalCurrentRevision == nil
+            else { throw V2ClientCommandError.commandConflict }
+            let expectedRevision = try Self.commandStorageInteger(command.expectedMessageRevision)
+            if let existing = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM v2_pending_message_edits WHERE operation_id = ?",
+                arguments: [command.operationID.rawValue]
+            ) {
+                let decoded = try Self.decodePendingMessageEdit(existing)
+                guard decoded.roomID == command.roomID,
+                      decoded.messageID == command.messageID,
+                      decoded.expectedMessageRevision == command.expectedMessageRevision,
+                      decoded.text == command.text,
+                      decoded.state == .pending
+                else { throw V2ClientCommandError.commandConflict }
+                return decoded
+            }
+            if let existing = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM v2_pending_message_edits
+                WHERE room_id = ? AND message_id = ?
+                  AND expected_message_revision = ? AND text_body = ?
+                  AND state = 'pending'
+                ORDER BY created_at, operation_id
+                LIMIT 1
+                """,
+                arguments: [
+                    command.roomID.rawValue,
+                    command.messageID.rawValue,
+                    expectedRevision,
+                    command.text
+                ]
+            ) {
+                return try Self.decodePendingMessageEdit(existing)
+            }
+            try db.execute(
+                sql: """
+                INSERT INTO v2_pending_message_edits
+                    (operation_id, room_id, message_id, expected_message_revision,
+                     text_body, state, attempt_count, next_attempt_at, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                """,
+                arguments: [
+                    command.operationID.rawValue,
+                    command.roomID.rawValue,
+                    command.messageID.rawValue,
+                    expectedRevision,
+                    command.text,
+                    command.nextAttemptAt.timeIntervalSince1970,
+                    command.nextAttemptAt.timeIntervalSince1970
+                ]
+            )
+            return command
+        }
+    }
     public func nextReadyMessageEdit(now: Date) throws -> V2PendingMessageEdit? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_edits WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingMessageEdit(row) } }
     public func markMessageEditAcknowledged(operationID: MessageEditOperationID, messageRevision: UInt64, roomSequence: UInt64) throws { guard messageRevision > 0, roomSequence > 0 else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingMessageEdit(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_edits SET state = 'acknowledged', resulting_message_revision = ?, resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(messageRevision), try Self.commandStorageInteger(roomSequence), operationID.rawValue]) } }
     public func scheduleMessageEditRetry(operationID: MessageEditOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingMessageEdit(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_edits SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
@@ -1015,6 +1082,68 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 return
             }
             try db.execute(sql: "INSERT INTO v2_pending_message_reactions (operation_id, room_id, message_id, reaction, action, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, command.reaction, command.action.rawValue, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+        }
+    }
+
+    public func enqueueOrReusePendingMessageReaction(
+        _ command: V2PendingMessageReaction
+    ) throws -> V2PendingMessageReaction {
+        try databasePool.write { db in
+            guard command.state == .pending,
+                  command.attemptCount == 0,
+                  command.resultingRoomSequence == nil,
+                  command.terminalCode == nil
+            else { throw V2ClientCommandError.commandConflict }
+            if let existing = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM v2_pending_message_reactions WHERE operation_id = ?",
+                arguments: [command.operationID.rawValue]
+            ) {
+                let decoded = try Self.decodePendingMessageReaction(existing)
+                guard decoded.roomID == command.roomID,
+                      decoded.messageID == command.messageID,
+                      decoded.reaction == command.reaction,
+                      decoded.action == command.action,
+                      decoded.state == .pending
+                else { throw V2ClientCommandError.commandConflict }
+                return decoded
+            }
+            if let existing = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM v2_pending_message_reactions
+                WHERE room_id = ? AND message_id = ? AND reaction = ? AND action = ?
+                  AND state = 'pending'
+                ORDER BY created_at, operation_id
+                LIMIT 1
+                """,
+                arguments: [
+                    command.roomID.rawValue,
+                    command.messageID.rawValue,
+                    command.reaction,
+                    command.action.rawValue
+                ]
+            ) {
+                return try Self.decodePendingMessageReaction(existing)
+            }
+            try db.execute(
+                sql: """
+                INSERT INTO v2_pending_message_reactions
+                    (operation_id, room_id, message_id, reaction, action,
+                     state, attempt_count, next_attempt_at, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                """,
+                arguments: [
+                    command.operationID.rawValue,
+                    command.roomID.rawValue,
+                    command.messageID.rawValue,
+                    command.reaction,
+                    command.action.rawValue,
+                    command.nextAttemptAt.timeIntervalSince1970,
+                    command.nextAttemptAt.timeIntervalSince1970
+                ]
+            )
+            return command
         }
     }
 
