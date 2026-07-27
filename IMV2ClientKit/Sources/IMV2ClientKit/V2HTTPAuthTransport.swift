@@ -2,6 +2,9 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+#if canImport(OSLog)
+import OSLog
+#endif
 import IMV2Core
 
 /// Isolates URLSession from authentication request/response validation. This
@@ -14,13 +17,28 @@ public protocol V2AuthHTTPTransport: Sendable {
 public actor V2URLSessionAuthHTTPTransport: V2AuthHTTPTransport {
     private let session: URLSession
 
+    #if canImport(OSLog)
+    private static let logger = Logger(subsystem: "com.stskcxfz.imapp", category: "v2.http-auth")
+    #endif
+
     public init(session: URLSession = .shared) {
         self.session = session
     }
 
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let error as URLError {
+            #if canImport(OSLog)
+            // URLSession's numeric code is enough to distinguish trust,
+            // connection and timeout failures without logging a URL or payload.
+            Self.logger.error("Auth HTTP transport failed with URL error code \(error.code.rawValue, privacy: .public)")
+            #endif
+            throw error
+        }
         guard let response = response as? HTTPURLResponse else {
             throw V2HTTPAuthTransportError.invalidResponse
         }

@@ -242,7 +242,10 @@ private struct V2SignInView: View {
         }
         .scrollContentBackground(.hidden)
         .navigationTitle("登录")
-        .onDisappear { actionTask?.cancel() }
+        // Submitting switches the root route to `.authenticating`, which
+        // removes this view immediately. Cancelling here would therefore abort
+        // the very account request the user just started. A replacement submit
+        // still cancels the prior task in `run(_:)`.
     }
 
     private func run(_ operation: @escaping @MainActor @Sendable () async -> Void) {

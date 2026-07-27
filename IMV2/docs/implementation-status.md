@@ -391,6 +391,15 @@ session activation path. Release ignores this fixture input and has no test
 device-identity provider; the ordinary offline UI suite continues to inspect
 user-editable form state.
 
+2026-07-27 本机在 iPhone 17 / iOS 26.2 模拟器上执行
+`IMApp/Scripts/verify_local_account_registration_e2e.sh` 已通过三项检查：模拟器到本机账户
+HTTPS 边缘的 `400` 预检、真实密码注册与设备凭证签发合同、以及由 UI 点击触发的
+“注册 → Keychain → SQLite 本地会话 → 随机 scope 清理”。同次常规 `IMApp` Debug 测试与
+`swift test --package-path IMV2ClientKit` 也通过。该回归同时修复了一个客户端生命周期缺陷：
+提交认证时根路由切换到“认证中”会使登录 View 消失；登录 View 不再因这次预期的消失而取消
+认证任务，只有后续显式提交才会取消前一个认证任务。这是本机客户端正确性记录，不涉及部署、
+生产接入或容量结论。
+
 The same baseline audit found that the retired macOS automation called removed
 `Makefile` targets and that the Release build phase directly executed a
 non-executable validation script. The checked-in local scripts and build phase

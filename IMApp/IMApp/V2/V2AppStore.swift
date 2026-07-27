@@ -2,11 +2,17 @@ import Foundation
 import IMV2ClientKit
 import IMV2Core
 import Observation
+import OSLog
 import UIKit
 
 @MainActor
 @Observable
 final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
+    private static let authenticationLogger = Logger(
+        subsystem: "com.stskcxfz.imapp",
+        category: "v2.authentication"
+    )
+
     enum StartupMode: Sendable, Equatable {
         case production
         case uiTestingSignedOut
@@ -300,13 +306,43 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         } catch V2AccountAuthenticationError.authenticationRejected {
             route = .signedOut
             authenticationMessage = "账号或密码不正确。"
+        } catch let error as V2AccountAuthenticationError {
+            // Every remaining case contains only a transport classification or
+            // HTTP status. Keep it local to diagnostics; it is not user-facing
+            // and has no account or credential material.
+            Self.authenticationLogger.error(
+                "Password account authentication failed: \(String(reflecting: error), privacy: .public)"
+            )
+            route = .signedOut
+            authenticationMessage = "账户服务暂不可用，请稍后重试。"
         } catch V2AccountAssertionCredentialProviderError.deviceIdentityUnavailable {
             route = .signedOut
             authenticationMessage = "受保护凭据暂不可用，请解锁设备后重试。"
         } catch V2AccountAssertionCredentialProviderError.registrationOperationUnavailable {
             route = .signedOut
             authenticationMessage = "无法保存本次设备注册，请稍后重试。"
+        } catch V2AuthSessionError.credentialsUnavailable {
+            // Device credentials were issued but could not be durably written.
+            // This is normally a temporary protected-data/keychain state; never
+            // discard the server-side registration or misreport it as a network
+            // outage.
+            route = .protectedDataUnavailable
+        } catch V2LocalStoreBootstrapError.installationBindingUnavailable {
+            // The device-only installation anchor uses the same protected
+            // Keychain boundary as credentials. It can recover after unlock.
+            route = .protectedDataUnavailable
+        } catch V2ClientLocalStorageError.backupExclusionVerificationFailed {
+            route = .signedOut
+            authenticationMessage = "无法按安全策略准备本地数据存储。"
+        } catch is V2DeviceLocalStorageError {
+            route = .signedOut
+            authenticationMessage = "无法按安全策略准备本地数据存储。"
         } catch {
+            // Keep diagnostics useful without exposing account identifiers,
+            // assertion material, credentials, or server response bodies.
+            Self.authenticationLogger.error(
+                "Password authentication failed with error type \(String(reflecting: type(of: error)), privacy: .public)"
+            )
             route = .signedOut
             authenticationMessage = "账户服务暂不可用，请稍后重试。"
         }
