@@ -308,6 +308,13 @@ private func announceAuthenticationMessage(_ message: String) {
 }
 
 private struct V2SignedInRootView: View {
+    private enum PresentedSettingsSheet: String, Identifiable {
+        case privacy
+        case publicIdentity
+
+        var id: String { rawValue }
+    }
+
     let conversationStore: V2ConversationListStore
     let privacySettingsStore: V2PrivacySettingsStore
     let userBlockSettingsStore: V2UserBlockSettingsStore?
@@ -316,8 +323,7 @@ private struct V2SignedInRootView: View {
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     let signOut: @MainActor @Sendable () async -> Void
     @State private var signOutTask: Task<Void, Never>?
-    @State private var isPresentingPrivacySettings = false
-    @State private var isPresentingPublicIdentitySettings = false
+    @State private var presentedSettingsSheet: PresentedSettingsSheet?
 
     var body: some View {
         V2ConversationListView(
@@ -325,8 +331,8 @@ private struct V2SignedInRootView: View {
             localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
             accountMenu: V2ConversationAccountMenu(
                 canOpenPublicIdentity: publicIdentitySettingsStore != nil,
-                openPublicIdentity: { isPresentingPublicIdentitySettings = true },
-                openPrivacySettings: { isPresentingPrivacySettings = true },
+                openPublicIdentity: { presentedSettingsSheet = .publicIdentity },
+                openPrivacySettings: { presentedSettingsSheet = .privacy },
                 signOut: {
                     guard signOutTask == nil else { return }
                     signOutTask = Task {
@@ -338,31 +344,33 @@ private struct V2SignedInRootView: View {
             )
         )
             .onDisappear { signOutTask?.cancel() }
-            .sheet(isPresented: $isPresentingPrivacySettings) {
-                NavigationStack {
-                    V2PrivacySettingsView(
-                        store: privacySettingsStore,
-                        pushWakeSettingsStore: pushWakeSettingsStore,
-                        userBlockSettingsStore: userBlockSettingsStore
-                    )
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("完成") { isPresentingPrivacySettings = false }
-                                    .accessibilityIdentifier("v2.privacy.done")
-                            }
-                        }
-                }
-            }
-            .sheet(isPresented: $isPresentingPublicIdentitySettings) {
-                if let publicIdentitySettingsStore {
+            .sheet(item: $presentedSettingsSheet) { sheet in
+                switch sheet {
+                case .privacy:
                     NavigationStack {
-                        V2PublicIdentitySettingsView(store: publicIdentitySettingsStore)
+                        V2PrivacySettingsView(
+                            store: privacySettingsStore,
+                            pushWakeSettingsStore: pushWakeSettingsStore,
+                            userBlockSettingsStore: userBlockSettingsStore
+                        )
                             .toolbar {
                                 ToolbarItem(placement: .cancellationAction) {
-                                    Button("完成") { isPresentingPublicIdentitySettings = false }
-                                        .accessibilityIdentifier("v2.identity.done")
+                                    Button("完成") { presentedSettingsSheet = nil }
+                                        .accessibilityIdentifier("v2.privacy.done")
                                 }
                             }
+                    }
+                case .publicIdentity:
+                    if let publicIdentitySettingsStore {
+                        NavigationStack {
+                            V2PublicIdentitySettingsView(store: publicIdentitySettingsStore)
+                                .toolbar {
+                                    ToolbarItem(placement: .cancellationAction) {
+                                        Button("完成") { presentedSettingsSheet = nil }
+                                            .accessibilityIdentifier("v2.identity.done")
+                                    }
+                                }
+                        }
                     }
                 }
             }
