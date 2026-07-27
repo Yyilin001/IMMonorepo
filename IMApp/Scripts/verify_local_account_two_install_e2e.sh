@@ -82,6 +82,7 @@ receiver_public_handle="twor${scenario_suffix:0:20}"
 sender_account_handle="twos_${scenario_suffix:0:20}"
 sender_public_handle="twos${scenario_suffix:0:20}"
 message="two-install-${scenario_suffix:0:16}"
+receiver_group_title="群聊${scenario_suffix:0:6}"
 
 result_directory="$(mktemp -d "${TMPDIR:-/tmp}/im-v2-local-two-install-e2e.XXXXXX")"
 build_products_directory="$(xcodebuild -showBuildSettings -json \
@@ -178,7 +179,8 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-local-password localpassword \
   -v2-ui-testing-account-handle "${receiver_account_handle}" \
   -v2-ui-testing-public-handle "${receiver_public_handle}" \
-  -v2-ui-testing-display-name 'Two install receiver'
+  -v2-ui-testing-display-name 'Two install receiver' \
+  -v2-ui-testing-group-title "${receiver_group_title}"
 run_stage "${receiver_simulator_id}" testReceiverRegistersIndependentInstallation
 
 launch_fixture "${sender_simulator_id}" \

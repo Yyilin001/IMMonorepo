@@ -45,7 +45,8 @@ struct V2RootView: View {
         localE2EConversationLaunchFixture = startupMode.usesLiveLocalAccountE2ETestScope
             ? .init(
                 directTargetHandle: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-direct-target"),
-                initialMessage: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-message")
+                initialMessage: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-message"),
+                initialGroupTitle: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-group-title")
             )
             : nil
         let liveLocalAccountE2ETestScope = startupMode.usesLiveLocalAccountE2ETestScope

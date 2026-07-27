@@ -27,15 +27,21 @@ struct V2LiveLocalAccountE2ETestScope: Sendable, Equatable {
 }
 
 /// A deliberately narrow Debug-launch fixture for the two-install local E2E.
-/// It can only prefill the ordinary direct-message UI; it never bypasses the
-/// authenticated directory, room-opening or message-send paths.
+/// It can only prefill direct-message and group-creation form values; it never
+/// bypasses the authenticated directory, room-opening or message-send paths.
 struct V2LiveLocalAccountE2EConversationLaunchFixture: Sendable, Equatable {
     let directTargetHandle: String?
     let initialMessage: String?
+    let initialGroupTitle: String?
 
-    init(directTargetHandle: String?, initialMessage: String?) {
+    init(
+        directTargetHandle: String?,
+        initialMessage: String?,
+        initialGroupTitle: String?
+    ) {
         self.directTargetHandle = Self.nonEmptyValue(directTargetHandle)
         self.initialMessage = Self.nonEmptyValue(initialMessage)
+        self.initialGroupTitle = Self.nonEmptyValue(initialGroupTitle)
     }
 
     private static func nonEmptyValue(_ value: String?) -> String? {

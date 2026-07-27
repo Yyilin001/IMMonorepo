@@ -1155,6 +1155,9 @@ struct V2ConversationListView: View {
         _directTargetUserID = State(
             initialValue: localE2EConversationLaunchFixture?.directTargetHandle ?? ""
         )
+        _groupTitle = State(
+            initialValue: localE2EConversationLaunchFixture?.initialGroupTitle ?? ""
+        )
     }
 
     var body: some View {
@@ -1437,12 +1440,15 @@ private struct V2ConversationDetailView: View {
                         .accessibilityIdentifier("v2.message.attachments")
                     }
                     if store.isGroupConversation {
-                        TextField("提及（@all 或 @handle）", text: $store.mentionHandlesText)
-                            .textFieldStyle(.roundedBorder)
+                        V2ComposerTextInput(
+                            text: $store.mentionHandlesText,
+                            placeholder: "提及（@all 或 @handle）",
+                            accessibilityLabel: "提及成员",
+                            accessibilityHint: "输入 @all 或成员公开 ID，用逗号或换行分隔；最多 20 个"
+                        )
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .disabled(store.isSending)
-                            .accessibilityHint("输入 @all 或成员公开 ID，用逗号或换行分隔；最多 20 个")
                             .accessibilityIdentifier("v2.message.mentions")
                             .padding(.horizontal)
                             .padding(.top, 8)
@@ -1455,9 +1461,12 @@ private struct V2ConversationDetailView: View {
                         .tint(.primary)
                         .accessibilityHint("从文件中选择要发送的附件")
                         .accessibilityIdentifier("v2.message.attachment.add")
-                        TextField("消息", text: $store.draft, axis: .vertical)
-                            .textFieldStyle(.roundedBorder)
-                            .lineLimit(1 ... 4)
+                        V2ComposerTextInput(
+                            text: $store.draft,
+                            placeholder: "消息",
+                            accessibilityLabel: "消息内容",
+                            accessibilityHint: "输入要发送的消息"
+                        )
                             .disabled(store.isSending)
                             .accessibilityIdentifier("v2.message.draft")
                         if store.isSending {
@@ -1531,6 +1540,43 @@ private struct V2ConversationDetailView: View {
     private var canSendDraft: Bool {
         !store.isSending
             && (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.attachments.isEmpty)
+    }
+}
+
+/// A scrollable editor avoids the fixed-height UIKit text-field clipping that
+/// occurs in a message composer at accessibility Dynamic Type sizes.
+private struct V2ComposerTextInput: View {
+    @Binding var text: String
+    let placeholder: String
+    let accessibilityLabel: String
+    let accessibilityHint: String
+
+    var body: some View {
+        TextEditor(text: $text)
+            .font(.body)
+            .scrollContentBackground(.hidden)
+            .padding(8)
+            .frame(minHeight: 64, maxHeight: 128)
+            .background {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(.background)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 9)
+                            .stroke(.quaternary)
+                    }
+            }
+            .overlay(alignment: .topLeading) {
+                if text.isEmpty {
+                    Text(placeholder)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 14)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityHint(accessibilityHint)
     }
 }
 
@@ -1970,6 +2016,7 @@ private struct V2GroupMembersSheet: View {
                         .accessibilityIdentifier("v2.group.members.feedback")
                 }
             }
+            .accessibilityIdentifier("v2.group.members.sheet")
             .overlay {
                 if store.isLoadingGroupMembers, store.groupMembers.isEmpty, store.groupMemberFeedback == nil {
                     ProgressView("正在读取成员…")
@@ -1981,7 +2028,10 @@ private struct V2GroupMembersSheet: View {
                 moderationTask?.cancel()
             }
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                        .accessibilityIdentifier("v2.group.members.close")
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button("刷新") { Task { await store.loadGroupMembers(reset: true) } }
                         .disabled(store.isLoadingGroupMembers)

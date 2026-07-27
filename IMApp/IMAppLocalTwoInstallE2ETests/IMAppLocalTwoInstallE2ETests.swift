@@ -38,9 +38,34 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             groupTitle.waitForExistence(timeout: 10) && groupTitle.isHittable,
             "新建群聊必须由唯一的会话创建呈现状态打开，并提供可访问的群名称输入。"
         )
-        let cancelGroup = app.buttons["v2.conversation.group-cancel"]
-        XCTAssertTrue(cancelGroup.exists)
-        cancelGroup.tap()
+        XCTAssertFalse(
+            (groupTitle.value as? String ?? "").isEmpty,
+            "本机回归启动夹具必须只预填群名称，仍由真实已认证的建群命令创建会话。"
+        )
+        let createGroup = app.buttons["v2.conversation.group-submit"]
+        XCTAssertTrue(createGroup.isEnabled)
+        createGroup.tap()
+        let groupMembers = app.buttons["v2.group.members"]
+        XCTAssertTrue(
+            groupMembers.waitForExistence(timeout: 30),
+            "创建仅自己的群聊后必须进入群详情，并提供成员管理入口。"
+        )
+        try auditOrdinaryChatSurface(in: app)
+        groupMembers.tap()
+        let groupMembersSheet = app.collectionViews["v2.group.members.sheet"]
+        XCTAssertTrue(
+            groupMembersSheet.waitForExistence(timeout: 15),
+            "群成员入口必须打开可供辅助技术定位的成员页。"
+        )
+        let closeGroupMembers = app.buttons["v2.group.members.close"]
+        XCTAssertTrue(closeGroupMembers.isHittable)
+        closeGroupMembers.tap()
+        XCTAssertTrue(groupMembers.waitForExistence(timeout: 5))
+        // The system-owned navigation back button is the only control here
+        // without an app identifier. The test otherwise uses stable IDs.
+        let backToConversationList = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(backToConversationList.isHittable)
+        backToConversationList.tap()
         XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 5))
         app.buttons["v2.account-menu"].tap()
         let privacySettings = app.buttons["v2.privacy.open"]
@@ -98,7 +123,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(start.isEnabled)
         start.tap()
 
-        let draft = app.textFields["v2.message.draft"]
+        let draft = app.textViews["v2.message.draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 30))
         XCTAssertFalse((draft.value as? String ?? "").isEmpty)
         XCTAssertFalse(
@@ -139,7 +164,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "接收端重启后必须通过自身 SQLite 同步投影看到发送端离线期间投递的会话。"
         )
         firstConversation.tap()
-        XCTAssertTrue(app.textFields["v2.message.draft"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.textViews["v2.message.draft"].waitForExistence(timeout: 15))
         let deliveredMessage = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.row.")
         ).firstMatch
