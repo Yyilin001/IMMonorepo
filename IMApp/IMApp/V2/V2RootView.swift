@@ -80,6 +80,7 @@ struct V2RootView: View {
                    V2SignedInRootView(
                         conversationStore: conversationStore,
                         privacySettingsStore: privacySettingsStore,
+                        userBlockSettingsStore: store.userBlockSettingsStore,
                         publicIdentitySettingsStore: store.publicIdentitySettingsStore,
                         pushWakeSettingsStore: store.pushWakeSettingsStore,
                         signOut: { await store.signOut() }
@@ -253,6 +254,7 @@ private struct V2SignInView: View {
 private struct V2SignedInRootView: View {
     let conversationStore: V2ConversationListStore
     let privacySettingsStore: V2PrivacySettingsStore
+    let userBlockSettingsStore: V2UserBlockSettingsStore?
     let publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     let pushWakeSettingsStore: V2PushWakeSettingsStore?
     let signOut: @MainActor @Sendable () async -> Void
@@ -291,7 +293,11 @@ private struct V2SignedInRootView: View {
             .onDisappear { signOutTask?.cancel() }
             .sheet(isPresented: $isPresentingPrivacySettings) {
                 NavigationStack {
-                    V2PrivacySettingsView(store: privacySettingsStore, pushWakeSettingsStore: pushWakeSettingsStore)
+                    V2PrivacySettingsView(
+                        store: privacySettingsStore,
+                        pushWakeSettingsStore: pushWakeSettingsStore,
+                        userBlockSettingsStore: userBlockSettingsStore
+                    )
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
                                 Button("完成") { isPresentingPrivacySettings = false }

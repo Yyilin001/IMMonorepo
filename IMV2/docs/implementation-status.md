@@ -17,6 +17,19 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-07-27: the caller-selected, manually booted iPhone 17 / iOS 26.2
+  Simulator passed `xcodebuild test -project IMApp/IMApp.xcodeproj -scheme
+  IMApp -configuration Debug -destination 'platform=iOS Simulator,id=…'` with
+  **57 Swift tests** and **2 UI tests**, zero failures. This includes the new
+  public-handle user-block/undo flow (durable social outbox, opaque terminal
+  errors) and bounded group mention flow (`@all`/exact handles resolved to no
+  more than 20 opaque targets before message enqueue). The full disposable
+  PostgreSQL Core/Server regression also passed through
+  `docker compose -f IMV2/docker-compose.isolated-tests.yml run --rm --build
+  swift-tests`, covering compilation of the directory rule that preserves a
+  caller's own unblock path while keeping reverse blocks opaque. This is local
+  correctness evidence only; it does not prove two-device E2E, accessibility
+  manual review, media-provider integration, throughput, or deployment.
 - 2026-07-27: on the caller-selected, manually unlocked iPhone 17 / iOS 26.2
   Simulator, `bash IMApp/Scripts/verify_local_account_registration_e2e.sh`
   passed twice consecutively using the project’s `Sign to Run Locally` Debug

@@ -346,6 +346,53 @@ struct V2ConversationStoreTests {
         #expect(await stager.discardedAttachments().isEmpty)
     }
 
+    @Test func groupMessageResolvesPublicHandlesAndSendsBoundedMentionTargets() async throws {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let sender = V2ConversationSenderFake(result: .accepted)
+        let resolver = V2ConversationPublicIdentityResolverFake(values: ["member_a": "member-a"])
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: sender,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            publicIdentityResolver: resolver
+        )
+        store.draft = "请关注"
+        store.mentionHandlesText = "@member_a, @all"
+        let expectedMentions: [V2MentionTarget] = [.user(try .init("member-a")), .everyone]
+
+        await store.sendDraft()
+
+        #expect(await sender.sentMessages() == [
+            .init(text: "请关注", roomID: "room-group", mentions: expectedMentions)
+        ])
+        #expect(store.mentionHandlesText.isEmpty)
+        #expect(store.sendFeedback == "已发送，正在同步。")
+    }
+
+    @Test func groupMessageDoesNotSendDuplicateMentionTargets() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let sender = V2ConversationSenderFake(result: .accepted)
+        let resolver = V2ConversationPublicIdentityResolverFake(values: ["member_a": "member-a"])
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: sender,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            publicIdentityResolver: resolver
+        )
+        store.draft = "请关注"
+        store.mentionHandlesText = "@member_a, @member_a"
+
+        await store.sendDraft()
+
+        #expect(await sender.sentMessages().isEmpty)
+        #expect(store.draft == "请关注")
+        #expect(store.sendFeedback == "提及对象不能重复。")
+    }
+
     @Test func attachmentStagerCopiesImporterFileIntoItsOwnDirectoryAndDiscardsOnlyTheCopy() async throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
@@ -940,6 +987,52 @@ struct V2ConversationStoreTests {
         #expect(store.feedback == nil)
         #expect(await updater.requestedValues() == [false])
     }
+
+    @Test func userBlockResolvesAPublicHandleThenPersistsTheDurableCommand() async throws {
+        let targetID = "00000000-0000-0000-0000-000000000e03"
+        let resolver = V2UserBlockPublicIdentityResolverFake(values: ["blocked_user": targetID])
+        let changer = V2UserBlockChangerFake(result: .queuedForRetry)
+        let store = V2UserBlockSettingsStore(
+            resolver: resolver,
+            changer: changer,
+            currentUserID: "00000000-0000-0000-0000-000000000e02"
+        )
+
+        await store.changeBlock(handle: "  @BLOCKED_USER  ", action: .block)
+
+        #expect(await resolver.requestedHandles() == ["@BLOCKED_USER"])
+        #expect(await changer.requests() == [.init(targetUserID: targetID, action: .block)])
+        #expect(store.feedback == "屏蔽请求已安全保存，连接恢复后会同步。")
+        #expect(!store.isChanging)
+    }
+
+    @Test func userBlockRejectsSelfBeforeWritingACommand() async {
+        let currentUserID = "00000000-0000-0000-0000-000000000e02"
+        let resolver = V2UserBlockPublicIdentityResolverFake(values: ["self_user": currentUserID])
+        let changer = V2UserBlockChangerFake(result: .accepted)
+        let store = V2UserBlockSettingsStore(resolver: resolver, changer: changer, currentUserID: currentUserID)
+
+        await store.changeBlock(handle: "@self_user", action: .block)
+
+        #expect(await changer.requests().isEmpty)
+        #expect(store.feedback == "不能屏蔽自己。")
+        #expect(!store.isChanging)
+    }
+
+    @Test func userBlockDoesNotExposeTheServerRejectionCode() async {
+        let resolver = V2UserBlockPublicIdentityResolverFake(values: ["blocked_user": "00000000-0000-0000-0000-000000000e03"])
+        let changer = V2UserBlockChangerFake(result: .rejected(code: "TARGET_POLICY"))
+        let store = V2UserBlockSettingsStore(
+            resolver: resolver,
+            changer: changer,
+            currentUserID: "00000000-0000-0000-0000-000000000e02"
+        )
+
+        await store.changeBlock(handle: "@blocked_user", action: .unblock)
+
+        #expect(store.feedback == "无法完成此用户设置。")
+        #expect(!store.isChanging)
+    }
 }
 
 private actor V2ConversationDataSourceFake: V2ConversationDataSource {
@@ -1046,6 +1139,11 @@ private actor V2ConversationSenderFake: V2ConversationSending {
         return result
     }
 
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], in roomID: String) async throws -> V2ConversationSendOutcome {
+        messages.append(.init(text: text, media: media, roomID: roomID, mentions: mentions))
+        return result
+    }
+
     func sentMessages() -> [V2SentMessage] {
         messages
     }
@@ -1083,11 +1181,13 @@ private struct V2SentMessage: Equatable, Sendable {
     let text: String
     let media: [V2MediaReference]
     let roomID: String
+    let mentions: [V2MentionTarget]
 
-    init(text: String, media: [V2MediaReference] = [], roomID: String) {
+    init(text: String, media: [V2MediaReference] = [], roomID: String, mentions: [V2MentionTarget] = []) {
         self.text = text
         self.media = media
         self.roomID = roomID
+        self.mentions = mentions
     }
 }
 
@@ -1535,5 +1635,48 @@ private actor V2StrangerMessagePreferenceUpdaterFake: V2StrangerMessagePreferenc
 
     func requestedValues() -> [Bool] {
         values
+    }
+}
+
+private actor V2UserBlockPublicIdentityResolverFake: V2PublicIdentityResolving {
+    private let values: [String: String]
+    private var handles: [String] = []
+
+    init(values: [String: String]) {
+        self.values = values
+    }
+
+    func resolve(handle: String) async throws -> V2PublicIdentity {
+        handles.append(handle)
+        let canonical = try V2PublicHandle(handle).rawValue
+        guard let userID = values[canonical] else { throw V2PublicIdentityDirectoryClientError.notFound }
+        return try .init(userID: .init(userID), handle: .init(canonical), displayName: canonical)
+    }
+
+    func requestedHandles() -> [String] {
+        handles
+    }
+}
+
+private actor V2UserBlockChangerFake: V2UserBlockChanging {
+    struct Request: Equatable, Sendable {
+        let targetUserID: String
+        let action: V2UserBlockAction
+    }
+
+    private let result: V2UserBlockChangeOutcome
+    private var requestsValue: [Request] = []
+
+    init(result: V2UserBlockChangeOutcome) {
+        self.result = result
+    }
+
+    func changeBlock(targetUserID: String, action: V2UserBlockAction) async throws -> V2UserBlockChangeOutcome {
+        requestsValue.append(.init(targetUserID: targetUserID, action: action))
+        return result
+    }
+
+    func requests() -> [Request] {
+        requestsValue
     }
 }

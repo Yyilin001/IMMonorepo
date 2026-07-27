@@ -16,8 +16,10 @@ public protocol V2PublicIdentityAccountManaging: V2PublicIdentityDirectoryReadin
     func updateDisplayName(for userID: UserID, displayName: String) async throws -> V2PublicIdentity
 }
 
-/// Account-edge directory backed solely by public-profile data. A mutual block
-/// resolves as nil, exactly like an absent handle.
+/// Account-edge directory backed solely by public-profile data. A target that
+/// has blocked the caller resolves as nil, exactly like an absent handle. The
+/// caller's own block is deliberately not hidden: it lets the caller resolve a
+/// known exact handle again in order to revoke their own block.
 public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging, Sendable {
     private let database: any Database
     private let policy: V2PublicIdentityLookupRateLimitPolicy
@@ -47,8 +49,8 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
                 WHERE p.public_handle = \(bind: handle.rawValue)
                   AND NOT EXISTS (
                     SELECT 1 FROM im_v2.user_blocks b
-                    WHERE (b.blocker_user_id = \(bind: actorUUID) AND b.blocked_user_id = p.user_id)
-                       OR (b.blocker_user_id = p.user_id AND b.blocked_user_id = \(bind: actorUUID))
+                    WHERE b.blocker_user_id = p.user_id
+                      AND b.blocked_user_id = \(bind: actorUUID)
                   )
                 """).first(decoding: PublicIdentityRow.self),
                 let userID = try? UserID(row.userID.uuidString),

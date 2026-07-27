@@ -72,6 +72,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var authenticationMessage: String?
     private(set) var conversationStore: V2ConversationListStore?
     private(set) var privacySettingsStore: V2PrivacySettingsStore?
+    private(set) var userBlockSettingsStore: V2UserBlockSettingsStore?
     private(set) var publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     private(set) var pushWakeSettingsStore: V2PushWakeSettingsStore?
 
@@ -95,6 +96,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             authenticationMessage = nil
             conversationStore = nil
             privacySettingsStore = nil
+            userBlockSettingsStore = nil
             publicIdentitySettingsStore = nil
             pushWakeSettingsStore = nil
             realtimeRuntime = nil
@@ -149,6 +151,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             authenticationMessage = nil
             conversationStore = nil
             privacySettingsStore = nil
+            userBlockSettingsStore = nil
             publicIdentitySettingsStore = nil
             pushWakeSettingsStore = nil
             realtimeRuntime = nil
@@ -166,6 +169,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             authenticationMessage = nil
             conversationStore = nil
             privacySettingsStore = nil
+            userBlockSettingsStore = nil
             publicIdentitySettingsStore = nil
             pushWakeSettingsStore = nil
             realtimeRuntime = nil
@@ -360,6 +364,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         authenticationMessage = nil
         conversationStore = nil
         privacySettingsStore = nil
+        userBlockSettingsStore = nil
         publicIdentitySettingsStore = nil
         pushWakeSettingsStore = nil
         route = nextRoute
@@ -386,6 +391,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let attachmentStager = try? V2FileConversationAttachmentStager(directory: try Self.attachmentStagingDirectory())
         await attachmentStager?.discardOrphanedStagedFiles()
         await realtime.mediaCacheMaintenance.discardOrphanedTemporaryFiles()
+        let publicIdentityDirectory = try V2HTTPPublicIdentityDirectory(
+            endpoint: configuration.endpoint("v2/public-identities/resolve"),
+            credentials: authSession
+        )
         let conversations = V2ConversationListStore(
             dataSource: V2GRDBConversationDataSource(localStore: localStore),
             userID: userID,
@@ -395,10 +404,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             messageEditor: realtime.messageEditor,
             readReceiptReporter: realtime.readReceiptReporter,
             directConversationOpener: realtime.directConversationOpener,
-            publicIdentityResolver: try V2HTTPPublicIdentityDirectory(
-                endpoint: configuration.endpoint("v2/public-identities/resolve"),
-                credentials: authSession
-            ),
+            publicIdentityResolver: publicIdentityDirectory,
             groupConversationCreator: realtime.groupConversationCreator,
             groupMemberDirectory: realtime.groupMemberDirectory,
             groupMembershipChanger: realtime.groupMembershipChanger,
@@ -409,6 +415,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let privacySettings = V2PrivacySettingsStore(
             reader: V2GRDBStrangerMessagePreferenceDataSource(localStore: localStore),
             updater: realtime.strangerMessagePreferenceUpdater
+        )
+        let userBlockSettings = V2UserBlockSettingsStore(
+            resolver: publicIdentityDirectory,
+            changer: realtime.userBlockChanger,
+            currentUserID: userID
         )
         let publicIdentitySettings = try V2PublicIdentitySettingsStore(
             manager: V2HTTPPublicIdentityProfileClient(
@@ -437,6 +448,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         realtimeRuntime = realtime.runtime
         conversationStore = conversations
         privacySettingsStore = privacySettings
+        userBlockSettingsStore = userBlockSettings
         publicIdentitySettingsStore = publicIdentitySettings
         pushWakeSettingsStore = pushWakeSettings
         route = .signedIn(userID: userID)

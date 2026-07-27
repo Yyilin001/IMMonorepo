@@ -10,12 +10,22 @@ enum V2ConversationSendOutcome: Equatable, Sendable {
 
 protocol V2ConversationSending: Sendable {
     func send(text: String, media: [V2MediaReference], in roomID: String) async throws -> V2ConversationSendOutcome
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], in roomID: String) async throws -> V2ConversationSendOutcome
 }
 
 extension V2ConversationSending {
     func send(text: String, in roomID: String) async throws -> V2ConversationSendOutcome {
         try await send(text: text, media: [], in: roomID)
     }
+
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], in roomID: String) async throws -> V2ConversationSendOutcome {
+        guard mentions.isEmpty else { throw V2ConversationMentionError.unsupported }
+        return try await send(text: text, media: media, in: roomID)
+    }
+}
+
+enum V2ConversationMentionError: Error, Sendable {
+    case unsupported
 }
 
 enum V2MessageWithdrawalOutcome: Equatable, Sendable {
@@ -137,6 +147,18 @@ protocol V2StrangerMessagePreferenceUpdating: Sendable {
     func update(allowsStrangerMessages: Bool) async throws -> V2StrangerMessagePreferenceUpdateOutcome
 }
 
+enum V2UserBlockChangeOutcome: Equatable, Sendable {
+    case accepted
+    case queuedForRetry
+    case rejected(code: String)
+}
+
+/// UI-facing boundary for a user-owned block list. Commands are persisted
+/// before transport; the received social projection remains authoritative.
+protocol V2UserBlockChanging: Sendable {
+    func changeBlock(targetUserID: String, action: V2UserBlockAction) async throws -> V2UserBlockChangeOutcome
+}
+
 /// UI-facing sender. It persists a command before attempting transport, so a
 /// foreground connection failure becomes a durable retry rather than lost UI
 /// intent.
@@ -148,7 +170,11 @@ actor V2OutboxConversationSender: V2ConversationSending {
     }
 
     func send(text: String, media: [V2MediaReference], in roomID: String) async throws -> V2ConversationSendOutcome {
-        _ = try await outbox.enqueueMessage(roomID: .init(roomID), text: text, media: media)
+        try await send(text: text, media: media, mentions: [], in: roomID)
+    }
+
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], in roomID: String) async throws -> V2ConversationSendOutcome {
+        _ = try await outbox.enqueueMessage(roomID: .init(roomID), text: text, media: media, mentions: mentions)
         switch try await outbox.flushOnce() {
         case .accepted:
             return .accepted
@@ -360,6 +386,29 @@ actor V2OutboxStrangerMessagePreferenceUpdater: V2StrangerMessagePreferenceUpdat
     }
 }
 
+actor V2OutboxUserBlockChanger: V2UserBlockChanging {
+    private let outbox: V2SocialCommandOutboxEngine
+
+    init(outbox: V2SocialCommandOutboxEngine) {
+        self.outbox = outbox
+    }
+
+    func changeBlock(targetUserID: String, action: V2UserBlockAction) async throws -> V2UserBlockChangeOutcome {
+        _ = try await outbox.enqueueUserBlock(
+            targetUserID: try .init(targetUserID),
+            action: action
+        )
+        switch try await outbox.flushOnce() {
+        case .acknowledged:
+            return .accepted
+        case .retryScheduled, .idle:
+            return .queuedForRetry
+        case .rejected(_, let code):
+            return .rejected(code: code)
+        }
+    }
+}
+
 struct V2AppRealtimeRuntime {
     let runtime: V2ClientRuntime
     let sender: any V2ConversationSending
@@ -477,6 +526,7 @@ struct V2AppRealtimeRuntime {
         groupMemberDirectory = V2RealtimeGroupMemberDirectory(transport: transport)
         groupMembershipChanger = V2OutboxGroupMembershipChanger(outbox: membershipOutbox)
         strangerMessagePreferenceUpdater = V2OutboxStrangerMessagePreferenceUpdater(outbox: socialOutbox)
+        userBlockChanger = V2OutboxUserBlockChanger(outbox: socialOutbox)
     }
 
     let directConversationOpener: any V2DirectConversationOpening
@@ -484,4 +534,5 @@ struct V2AppRealtimeRuntime {
     let groupMemberDirectory: any V2GroupMemberDirectoryReading
     let groupMembershipChanger: any V2GroupMembershipChanging
     let strangerMessagePreferenceUpdater: any V2StrangerMessagePreferenceUpdating
+    let userBlockChanger: any V2UserBlockChanging
 }

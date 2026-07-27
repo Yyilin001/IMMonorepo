@@ -43,17 +43,21 @@ struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
     /// Opaque media IDs from the local projection. The UI may show that a
     /// message has attachments, but never receives a provider URL here.
     let media: [V2MediaReference]
+    /// Protocol-level mention targets. IDs are kept opaque in the UI; the
+    /// message bubble exposes only aggregate mention semantics.
+    let mentions: [V2MentionTarget]
     let createdAt: Date
     let isOutgoing: Bool
     let isWithdrawn: Bool
     let reactions: [V2ConversationMessageReaction]
 
-    init(id: String, roomSequence: UInt64 = 1, revision: UInt64, text: String, media: [V2MediaReference] = [], createdAt: Date, isOutgoing: Bool, isWithdrawn: Bool, reactions: [V2ConversationMessageReaction] = []) {
+    init(id: String, roomSequence: UInt64 = 1, revision: UInt64, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], createdAt: Date, isOutgoing: Bool, isWithdrawn: Bool, reactions: [V2ConversationMessageReaction] = []) {
         self.id = id
         self.roomSequence = roomSequence
         self.revision = revision
         self.text = text
         self.media = media
+        self.mentions = mentions
         self.createdAt = createdAt
         self.isOutgoing = isOutgoing
         self.isWithdrawn = isWithdrawn
@@ -185,6 +189,7 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource {
                 revision: message.messageRevision,
                 text: message.isWithdrawn ? "消息已撤回" : message.text,
                 media: message.isWithdrawn ? [] : message.media,
+                mentions: message.isWithdrawn ? [] : message.mentions,
                 createdAt: message.createdAt,
                 isOutgoing: message.senderUserID.rawValue == userID,
                 isWithdrawn: message.isWithdrawn,
@@ -450,6 +455,7 @@ final class V2ConversationDetailStore {
     private var nextGroupMemberCursor: String?
     private var refreshGeneration = 0
     var draft = ""
+    var mentionHandlesText = ""
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
@@ -530,24 +536,74 @@ final class V2ConversationDetailStore {
             return
         }
         do {
-            switch try await sender.send(text: text, media: media, in: roomID) {
+            let mentions = try await resolvedMentions()
+            try Task.checkCancellation()
+            switch try await sender.send(text: text, media: media, mentions: mentions, in: roomID) {
             case .accepted:
                 sendFeedback = "已发送，正在同步。"
                 await discardAttachmentsAfterDurableSend()
                 draft = ""
+                mentionHandlesText = ""
             case .queuedForRetry:
                 sendFeedback = "已安全保存，连接恢复后会重试。"
                 await discardAttachmentsAfterDurableSend()
                 draft = ""
+                mentionHandlesText = ""
             case .rejected(let code):
                 sendFeedback = Self.sendRejectionFeedback(for: code)
             }
             await refresh()
         } catch is CancellationError {
             return
+        } catch is V2ConversationMentionInputError {
+            return
         } catch {
             sendFeedback = "无法保存待发送消息。"
         }
+    }
+
+    private func resolvedMentions() async throws -> [V2MentionTarget] {
+        let handles = mentionHandlesText
+            .split(whereSeparator: { $0 == "," || $0 == "\n" })
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !handles.isEmpty else { return [] }
+        guard isGroupConversation else {
+            sendFeedback = "仅群聊支持提及成员。"
+            throw V2ConversationMentionInputError.invalidInput
+        }
+        guard handles.count <= V2MessageCommandLimits.maxMentions else {
+            sendFeedback = "每条消息最多提及 \(V2MessageCommandLimits.maxMentions) 个目标。"
+            throw V2ConversationMentionInputError.invalidInput
+        }
+        guard let publicIdentityResolver else {
+            sendFeedback = "身份目录暂不可用，无法解析提及对象。"
+            throw V2ConversationMentionInputError.invalidInput
+        }
+        var mentions: [V2MentionTarget] = []
+        for handle in handles {
+            if handle.lowercased() == "@all" {
+                mentions.append(.everyone)
+                continue
+            }
+            do {
+                let identity = try await publicIdentityResolver.resolve(handle: handle)
+                mentions.append(.user(identity.userID))
+                try Task.checkCancellation()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Exact-handle lookup is deliberately opaque: do not reveal
+                // whether the target is absent, blocked, or unavailable.
+                sendFeedback = "无法解析提及对象，请检查公开 ID 后重试。"
+                throw V2ConversationMentionInputError.invalidInput
+            }
+        }
+        guard Set(mentions).count == mentions.count else {
+            sendFeedback = "提及对象不能重复。"
+            throw V2ConversationMentionInputError.invalidInput
+        }
+        return mentions
     }
 
     private static func sendRejectionFeedback(for code: String) -> String {
@@ -877,6 +933,10 @@ final class V2ConversationDetailStore {
     }
 }
 
+private enum V2ConversationMentionInputError: Error, Sendable {
+    case invalidInput
+}
+
 struct V2ConversationListView: View {
     @Bindable var store: V2ConversationListStore
     @State private var navigationPath = NavigationPath()
@@ -1087,6 +1147,17 @@ private struct V2ConversationDetailView: View {
                         .padding(.vertical, 8)
                         .accessibilityIdentifier("v2.message.attachments")
                     }
+                    if store.isGroupConversation {
+                        TextField("提及（@all 或 @handle）", text: $store.mentionHandlesText)
+                            .textFieldStyle(.roundedBorder)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .disabled(store.isSending)
+                            .accessibilityHint("输入 @all 或成员公开 ID，用逗号或换行分隔；最多 20 个")
+                            .accessibilityIdentifier("v2.message.mentions")
+                            .padding(.horizontal)
+                            .padding(.top, 8)
+                    }
                     HStack(alignment: .bottom) {
                         Button("添加附件", systemImage: "paperclip") {
                             isPresentingAttachmentImporter = true
@@ -1238,6 +1309,12 @@ private struct V2ConversationMessageBubble: View {
                 Text(message.text)
                     .foregroundStyle(message.isWithdrawn ? .secondary : .primary)
             }
+            if !message.mentions.isEmpty {
+                Text(mentionSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(mentionSummary)
+            }
             if !message.media.isEmpty {
                 VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 6) {
                     Label(attachmentSummary, systemImage: "paperclip")
@@ -1281,6 +1358,18 @@ private struct V2ConversationMessageBubble: View {
 
     private var attachmentSummary: String {
         "\(message.media.count) 个附件"
+    }
+
+    private var mentionSummary: String {
+        let userCount = message.mentions.reduce(into: 0) { count, target in
+            if case .user = target { count += 1 }
+        }
+        let includesEveryone = message.mentions.contains(.everyone)
+        switch (includesEveryone, userCount) {
+        case (true, 0): return "提及所有人"
+        case (true, _): return "提及所有人及 \(userCount) 位成员"
+        case (false, _): return "提及 \(userCount) 位成员"
+        }
     }
 }
 

@@ -1,10 +1,71 @@
 import Foundation
 import IMV2ClientKit
+import IMV2Core
 import Observation
 import SwiftUI
 
 protocol V2StrangerMessagePreferenceReading: Sendable {
     func strangerMessagePreference() async throws -> Bool?
+}
+
+@MainActor
+@Observable
+final class V2UserBlockSettingsStore {
+    private let resolver: any V2PublicIdentityResolving
+    private let changer: any V2UserBlockChanging
+    private let currentUserID: String
+
+    private(set) var isChanging = false
+    private(set) var feedback: String?
+
+    init(
+        resolver: any V2PublicIdentityResolving,
+        changer: any V2UserBlockChanging,
+        currentUserID: String
+    ) {
+        self.resolver = resolver
+        self.changer = changer
+        self.currentUserID = currentUserID
+    }
+
+    func changeBlock(handle: String, action: V2UserBlockAction) async {
+        guard !isChanging else { return }
+        let trimmedHandle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedHandle.isEmpty else {
+            feedback = "请输入要管理的公开 ID。"
+            return
+        }
+        isChanging = true
+        feedback = nil
+        defer { isChanging = false }
+        do {
+            let identity = try await resolver.resolve(handle: trimmedHandle)
+            try Task.checkCancellation()
+            guard identity.userID.rawValue != currentUserID else {
+                feedback = "不能屏蔽自己。"
+                return
+            }
+            switch try await changer.changeBlock(
+                targetUserID: identity.userID.rawValue,
+                action: action
+            ) {
+            case .accepted:
+                feedback = action == .block ? "已屏蔽该用户。" : "已解除屏蔽。"
+            case .queuedForRetry:
+                feedback = action == .block
+                    ? "屏蔽请求已安全保存，连接恢复后会同步。"
+                    : "解除屏蔽请求已安全保存，连接恢复后会同步。"
+            case .rejected:
+                // Do not disclose whether a target exists, has blocked this
+                // user, or another privacy policy caused the rejection.
+                feedback = "无法完成此用户设置。"
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            feedback = "无法解析公开 ID 或保存设置，请稍后重试。"
+        }
+    }
 }
 
 actor V2GRDBStrangerMessagePreferenceDataSource: V2StrangerMessagePreferenceReading {
@@ -91,6 +152,7 @@ final class V2PrivacySettingsStore {
 struct V2PrivacySettingsView: View {
     @Bindable var store: V2PrivacySettingsStore
     let pushWakeSettingsStore: V2PushWakeSettingsStore?
+    let userBlockSettingsStore: V2UserBlockSettingsStore?
     @State private var preferenceTask: Task<Void, Never>?
 
     var body: some View {
@@ -125,6 +187,9 @@ struct V2PrivacySettingsView: View {
                 if let pushWakeSettingsStore {
                     V2PushWakeSettingsSection(store: pushWakeSettingsStore)
                 }
+                if let userBlockSettingsStore {
+                    V2UserBlockSettingsSection(store: userBlockSettingsStore)
+                }
                 if store.isSaving {
                     ProgressView("正在保存…")
                 }
@@ -144,6 +209,55 @@ struct V2PrivacySettingsView: View {
     private func run(_ operation: @escaping @MainActor @Sendable () async -> Void) {
         preferenceTask?.cancel()
         preferenceTask = Task { await operation() }
+    }
+}
+
+private struct V2UserBlockSettingsSection: View {
+    @Bindable var store: V2UserBlockSettingsStore
+    @State private var handle = ""
+    @State private var changeTask: Task<Void, Never>?
+
+    var body: some View {
+        Section("屏蔽用户") {
+            TextField("公开 ID（例如 @alice）", text: $handle)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .disabled(store.isChanging)
+                .accessibilityIdentifier("v2.privacy.block.handle")
+            Text("屏蔽后，你们之间不能再发送新的私聊消息。解除屏蔽时输入同一公开 ID。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("屏蔽", role: .destructive) {
+                    run(action: .block)
+                }
+                .disabled(handle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isChanging)
+                .accessibilityIdentifier("v2.privacy.block.submit")
+                Button("解除屏蔽") {
+                    run(action: .unblock)
+                }
+                .disabled(handle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isChanging)
+                .accessibilityIdentifier("v2.privacy.unblock.submit")
+            }
+            if store.isChanging {
+                ProgressView("正在保存用户设置…")
+            }
+            if let feedback = store.feedback {
+                Text(feedback)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("v2.privacy.block.feedback")
+            }
+        }
+        .onDisappear { changeTask?.cancel() }
+    }
+
+    private func run(action: V2UserBlockAction) {
+        changeTask?.cancel()
+        let submittedHandle = handle
+        changeTask = Task {
+            await store.changeBlock(handle: submittedHandle, action: action)
+        }
     }
 }
 
