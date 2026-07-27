@@ -1375,9 +1375,22 @@ struct V2ConversationAccountMenu: View {
 }
 
 private struct V2ConversationDetailView: View {
+    private enum PresentedDetailSheet: Identifiable {
+        case groupMembers
+        case edit(V2ConversationMessageItem)
+
+        var id: String {
+            switch self {
+            case .groupMembers:
+                "groupMembers"
+            case .edit(let message):
+                "edit-\(message.id)"
+            }
+        }
+    }
+
     @State private var store: V2ConversationDetailStore
-    @State private var isPresentingGroupMembers = false
-    @State private var messageBeingEdited: V2ConversationMessageItem?
+    @State private var presentedDetailSheet: PresentedDetailSheet?
     @State private var isPresentingAttachmentImporter = false
 
     init(store: V2ConversationDetailStore) {
@@ -1404,7 +1417,7 @@ private struct V2ConversationDetailView: View {
                             LazyVStack(alignment: .leading, spacing: 10) {
                                 ForEach(store.messages) { message in
                                     V2ConversationMessageRow(store: store, message: message) {
-                                        messageBeingEdited = message
+                                        presentedDetailSheet = .edit(message)
                                     }
                                 }
                             }
@@ -1486,17 +1499,19 @@ private struct V2ConversationDetailView: View {
         .toolbar {
             if store.isGroupConversation {
                 Button("成员", systemImage: "person.3") {
-                    isPresentingGroupMembers = true
+                    presentedDetailSheet = .groupMembers
                 }
                 .accessibilityHint("查看和管理群成员")
                 .accessibilityIdentifier("v2.group.members")
             }
         }
-        .sheet(isPresented: $isPresentingGroupMembers) {
-            V2GroupMembersSheet(store: store)
-        }
-        .sheet(item: $messageBeingEdited) { message in
-            V2MessageEditSheet(store: store, message: message)
+        .sheet(item: $presentedDetailSheet) { sheet in
+            switch sheet {
+            case .groupMembers:
+                V2GroupMembersSheet(store: store)
+            case .edit(let message):
+                V2MessageEditSheet(store: store, message: message)
+            }
         }
         .fileImporter(
             isPresented: $isPresentingAttachmentImporter,
