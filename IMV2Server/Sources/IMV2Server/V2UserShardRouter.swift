@@ -42,6 +42,9 @@ public struct V2UserShardWriteIdentity: Equatable, Sendable {
 /// The router is deliberately an injected, versioned control-plane boundary.
 /// Fan-out planning must not derive a bucket by hashing an identifier locally.
 public protocol V2UserShardRouter: Sendable {
+    /// Returns exactly one route for each requested user, in the input order.
+    /// Bounded planners and delivery workers use this ordering to retain a
+    /// route epoch fence without issuing one control-plane query per user.
     func routes(for users: [UserID]) async throws -> [V2UserShardRoute]
 }
 

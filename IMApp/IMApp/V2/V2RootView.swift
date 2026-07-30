@@ -46,6 +46,7 @@ struct V2RootView: View {
             ? .init(
                 directTargetHandle: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-direct-target"),
                 initialMessage: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-message"),
+                initialMentionHandles: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-message-mentions"),
                 initialGroupTitle: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-group-title"),
                 initialGroupMemberHandles: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-group-members")
             )
@@ -53,6 +54,8 @@ struct V2RootView: View {
         let liveLocalAccountE2ETestScope = startupMode.usesLiveLocalAccountE2ETestScope
             ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-e2e-scope").flatMap(V2LiveLocalAccountE2ETestScope.init(rawValue:))
             : nil
+        let debugForcesUnavailableRealtimeForLiveLocalAccountE2E = startupMode.usesLiveLocalAccountE2ETestScope
+            && arguments.contains("-v2-ui-testing-unavailable-realtime")
         #else
         let startupMode: V2AppStore.StartupMode = .production
         initialPasswordMode = .signIn
@@ -62,10 +65,12 @@ struct V2RootView: View {
         initialLocalE2ETestDisplayName = nil
         localE2EConversationLaunchFixture = nil
         let liveLocalAccountE2ETestScope: V2LiveLocalAccountE2ETestScope? = nil
+        let debugForcesUnavailableRealtimeForLiveLocalAccountE2E = false
         #endif
         _store = State(initialValue: V2AppStore(
             startupMode: startupMode,
             liveLocalAccountE2ETestScope: liveLocalAccountE2ETestScope,
+            debugForcesUnavailableRealtimeForLiveLocalAccountE2E: debugForcesUnavailableRealtimeForLiveLocalAccountE2E,
             remoteNotificationRegistrar: appPushDelegate
         ))
     }

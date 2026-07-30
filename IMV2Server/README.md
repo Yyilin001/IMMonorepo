@@ -35,8 +35,8 @@ and the [V2 document entry](../IMV2/docs/README.md).
    to encrypt the opaque APNs token at rest; do not place this key in the iOS
    app or a client-visible configuration file.
 5. Set every required variable in [`.env.example`](.env.example), then run the
-   V2 app. The `IM_V2_NATS_*` variables are an all-or-nothing optional hint
-   layer, not a required broker dependency.
+   V2 app. The `IM_V2_NATS_*` and `IM_V2_GROUP_WAKE_NATS_*` variables are
+   all-or-nothing optional hint layers, not required broker dependencies.
 
 Before packaging a deployment, verify that the three checked-in examples still
 match their strict runtime constructors:
@@ -156,14 +156,56 @@ evidence remains local-stack coverage, not a production deployment approval.
   application-owned heartbeats; background clients rely on reconnect and sync.
 - `IM_V2_WORKER_BATCH_SIZE` and `IM_V2_WORKER_POLL_INTERVAL_MS` schedule the
   bounded durable path from room outbox to fan-out plan to user sync log.
+- `IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE` groups 1...128 co-located target
+  projections into one atomic PostgreSQL transaction (baseline: 128). A batch
+  failure rolls back all its inbox, sequence, sync-log and completion updates.
+- `IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE` separately groups
+  1...256 remote user-shard target effects before their lease-fenced control
+  acknowledgement (baseline: 256). It does not widen the co-located
+  transaction above. Forwarding deliveries retain their per-target path because
+  a process-local transaction cannot make multiple databases atomic.
+- `IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY` permits at most two
+  target/control commits from one already-claimed remote lease set to overlap
+  (baseline: 2). It is not claim-worker parallelism: completions and live
+  hints remain source-batch ordered, a failed batch retries alone, and
+  co-located delivery remains at one.
+- `IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE` independently bounds how many
+  lease-fenced deliveries one worker may hold in a pass (1...2,000; baseline:
+  2,000). It reduces claim-query overhead without increasing the 128-target
+  transaction or changing the generic outbox/planner worker batch.
+- Planning and durable Hybrid-group wake relays run on their own worker cadence. A
+  long delivery drain therefore does not serially delay creation of a new
+  durable plan or a best-effort Hybrid wake; both paths remain bounded by the
+  configured PostgreSQL pool and their explicit concurrency limits.
+- `IM_V2_FANOUT_FRESH_BURST_PASSES` bounds how many new-delivery claim passes
+  can run before one recovery-first pass. That pass alternates due retries and
+  expired leases; empty lanes fall through within the same poll. It changes
+  scheduling fairness only—claim tokens, lease fencing and the inbox-backed
+  exactly-once projection remain the durable correctness boundary.
 - PostgreSQL durable polling is always the correctness path. When
   `IM_V2_NATS_URL` and `IM_V2_NATS_SUBJECT` are both configured, the gateway
   publishes a best-effort Core NATS wake hint only after durable publication.
   Loss, duplication or publishing failure cannot release work or change user
   state; polling recovers it. The current adapter opens a fresh connection for
-  each hint and has no NATS TLS/NKey, broker acknowledgement, consumer,
-  reconnection or broker-health implementation, so it is not production broker
-  evidence and must not be used as a delivery dependency.
+  each hint, bounds both connection and broker confirmation to two seconds,
+  then requires a Core NATS `PONG` after `PUB`. It has no NATS TLS/NKey,
+  persistent consumer, connection reuse/reconnection, circuit breaker or
+  broker-health implementation. The isolated suite does prove a real Core
+  NATS subscriber receives the privacy-safe trigger envelope, but the adapter
+  is still not a delivery dependency.
+- Groups use the existing authenticated TLS/protobuf connection rather than
+  WebSocket or one-second foreground polling. An active detail view sends a
+  room subscription, receives a metadata-only availability frame, then pulls
+  authorized room events. For `large_group_hybrid`, the local room cursor is
+  durable; for `standard_fanout`, the pull is an in-memory preview only and
+  the personal sync stream remains the sole ACK/recovery authority. Each
+  committed Hybrid event is coalesced in a PostgreSQL wake outbox, while an
+  accepted message in either group mode may emit an immediate lossy hint.
+  In a multi-Gateway deployment set
+  `IM_V2_GROUP_WAKE_NATS_URL`, `...SUBJECT_PREFIX`, optional `...TOKEN`, and
+  `...ROUTING_KEY_BASE64` on every replica. The routing key derives opaque HMAC
+  room subjects; NATS loss or duplication only delays visibility because the
+  Hybrid cursor or standard personal sync remains authoritative.
 - `IM_V2_DURABLE_RETRY_*` is an explicit exponential-backoff budget for that
   path. The initial/max delays, attempt budget and 0–100% jitter are required
   deployment inputs. Exhausted work becomes alertable `paused` durable work;

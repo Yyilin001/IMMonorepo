@@ -117,13 +117,17 @@ public protocol V2ClientDirectMessagingTransport: Sendable {
 public struct V2ClientGroupRoom: Equatable, Sendable {
     public let roomID: RoomID
     public let title: String
+    public let deliveryMode: V2GroupDeliveryMode
     public let memberUserIDs: [UserID]
+    public let memberCount: UInt32
     public let createdAt: Date
 
-    public init(roomID: RoomID, title: String, memberUserIDs: [UserID], createdAt: Date) {
+    public init(roomID: RoomID, title: String, deliveryMode: V2GroupDeliveryMode, memberUserIDs: [UserID], memberCount: UInt32, createdAt: Date) {
         self.roomID = roomID
         self.title = title
+        self.deliveryMode = deliveryMode
         self.memberUserIDs = memberUserIDs.sorted()
+        self.memberCount = memberCount
         self.createdAt = createdAt
     }
 }
@@ -131,7 +135,7 @@ public struct V2ClientGroupRoom: Equatable, Sendable {
 /// Authenticated boundary for the atomic group-bootstrap command. The caller
 /// owns the durable operation ID and may retry the exact same intent.
 public protocol V2ClientGroupMessagingTransport: Sendable {
-    func createGroupRoom(operationID: GroupRoomOperationID, title: String, initialMemberUserIDs: [UserID]) async throws -> V2ClientGroupRoom
+    func createGroupRoom(operationID: GroupRoomOperationID, title: String, deliveryMode: V2GroupDeliveryMode, initialMemberUserIDs: [UserID]) async throws -> V2ClientGroupRoom
 }
 
 /// Authenticated social command boundary. These calls return canonical server
@@ -311,7 +315,7 @@ public struct V2SHA256SnapshotPageDigestVerifier: V2SnapshotPageDigestVerifier {
 /// Maps protobuf envelopes at the authenticated frame boundary onto the
 /// SyncEngine transport protocol. DTO validation happens here; the engine only
 /// sees V2 value types suitable for durable local application.
-public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTransport, V2ClientMembershipTransport, V2ClientMembershipDirectoryTransport, V2ClientDirectMessagingTransport, V2ClientGroupMessagingTransport, V2ClientSocialRelationshipTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageRedactionTransport, V2ClientMemberMuteTransport, V2ClientModeratedMemberRemovalTransport, V2ClientMessageEditTransport, V2ClientMessageReactionTransport, V2ClientReadReceiptTransport, V2HeartbeatSender {
+public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTransport, V2ClientMembershipTransport, V2ClientMembershipDirectoryTransport, V2ClientDirectMessagingTransport, V2ClientGroupMessagingTransport, V2ClientGroupEventTransport, V2ClientGroupEventSubscriptionTransport, V2ClientSocialRelationshipTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageRedactionTransport, V2ClientMemberMuteTransport, V2ClientModeratedMemberRemovalTransport, V2ClientMessageEditTransport, V2ClientMessageReactionTransport, V2ClientReadReceiptTransport, V2HeartbeatSender {
     private let wire: any V2AuthenticatedFrameTransport
     private let protocolVersion: UInt8
     private let maximumSnapshotPages: Int
@@ -539,22 +543,91 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         return try .init(roomID: .init(opened.roomID), targetUserID: .init(opened.targetUserID), createdAt: Date(timeIntervalSince1970: TimeInterval(opened.createdAtMs) / 1_000))
     }
 
-    public func createGroupRoom(operationID: GroupRoomOperationID, title: String, initialMemberUserIDs: [UserID]) async throws -> V2ClientGroupRoom {
+    public func createGroupRoom(operationID: GroupRoomOperationID, title: String, deliveryMode: V2GroupDeliveryMode, initialMemberUserIDs: [UserID]) async throws -> V2ClientGroupRoom {
         var request = IMV2Envelope(); request.createGroupRoom = .init()
         request.createGroupRoom.operationID = operationID.rawValue
         request.createGroupRoom.title = title
+        request.createGroupRoom.deliveryMode = switch deliveryMode {
+        case .standardFanout: .standardFanout
+        case .largeGroupHybrid: .largeGroupHybrid
+        }
         request.createGroupRoom.initialMemberUserIds = initialMemberUserIDs.map(\.rawValue)
         let response = try await requestEnvelope(request)
         guard case .groupRoomCreated(let created)? = response.body else {
             try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
         }
+        let returnedDeliveryMode: V2GroupDeliveryMode = switch created.deliveryMode {
+        case .standardFanout: .standardFanout
+        case .largeGroupHybrid: .largeGroupHybrid
+        case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse
+        }
         let members = try created.memberUserIds.map { try UserID($0) }
         let expectedMembers = Set(initialMemberUserIDs)
         guard !created.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               members.count == Set(members).count,
-              expectedMembers.isSubset(of: Set(members))
+              returnedDeliveryMode == deliveryMode,
+              created.memberCount > 0,
+              created.memberCount >= initialMemberUserIDs.count + 1,
+              (deliveryMode == .largeGroupHybrid || expectedMembers.isSubset(of: Set(members)))
         else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(created.roomID), title: created.title, memberUserIDs: members, createdAt: Date(timeIntervalSince1970: TimeInterval(created.createdAtMs) / 1_000))
+        return try .init(roomID: .init(created.roomID), title: created.title, deliveryMode: returnedDeliveryMode, memberUserIDs: members, memberCount: created.memberCount, createdAt: Date(timeIntervalSince1970: TimeInterval(created.createdAtMs) / 1_000))
+    }
+
+    public func pullGroupEvents(roomID: RoomID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2ClientGroupEventPage {
+        guard pageSize > 0, pageSize <= V2GroupEventLogLimits.maximumPageSize else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        var request = IMV2Envelope(); request.groupEventPull = .init()
+        request.groupEventPull.roomID = roomID.rawValue
+        request.groupEventPull.afterRoomSequence = afterRoomSequence
+        request.groupEventPull.pageSize = UInt32(pageSize)
+        let response = try await requestEnvelope(request)
+        guard case .groupEventPage(let page)? = response.body,
+              page.roomID == roomID.rawValue,
+              page.events.count <= pageSize,
+              page.nextRoomSequence >= afterRoomSequence
+        else {
+            try throwServerErrorIfPresent(response)
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        let events: [V2ClientGroupEvent] = try page.events.map {
+            guard $0.roomSequence > afterRoomSequence,
+                  !$0.projectionKind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !$0.payload.isEmpty
+            else { throw V2RealtimeTransportError.unexpectedResponse }
+            return .init(sourceEventID: try .init($0.sourceEventID), roomSequence: $0.roomSequence, projectionKind: $0.projectionKind, payload: $0.payload)
+        }
+        guard zip(events, events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence }),
+              (events.last.map(\.roomSequence) ?? afterRoomSequence) == page.nextRoomSequence,
+              !page.hasMore_p || !events.isEmpty
+        else { throw V2RealtimeTransportError.unexpectedResponse }
+        return try .init(roomID: .init(page.roomID), events: events, nextRoomSequence: page.nextRoomSequence, hasMore: page.hasMore_p)
+    }
+
+    public func subscribeToGroupEvents(roomID: RoomID, afterRoomSequence: UInt64) async throws -> V2ClientGroupEventSubscription {
+        var request = IMV2Envelope()
+        request.groupEventSubscribe = .init()
+        request.groupEventSubscribe.roomID = roomID.rawValue
+        request.groupEventSubscribe.afterRoomSequence = afterRoomSequence
+        let response = try await requestEnvelope(request)
+        guard case .groupEventSubscribed(let subscribed)? = response.body,
+              subscribed.roomID == roomID.rawValue
+        else {
+            try throwServerErrorIfPresent(response)
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        return .init(roomID: roomID, highWatermark: subscribed.highWatermark)
+    }
+
+    public func unsubscribeFromGroupEvents(roomID: RoomID) async throws {
+        var request = IMV2Envelope()
+        request.groupEventUnsubscribe = .init()
+        request.groupEventUnsubscribe.roomID = roomID.rawValue
+        let response = try await requestEnvelope(request)
+        guard case .acknowledged? = response.body else {
+            try throwServerErrorIfPresent(response)
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
     }
 
     public func setStrangerMessagePermission(operationID: StrangerMessagePreferenceOperationID, permission: V2StrangerMessagePermission) async throws -> Date {

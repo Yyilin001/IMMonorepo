@@ -19,6 +19,71 @@ struct V2GatewayRuntimeConfigurationTests {
         }
     }
 
+    @Test("runtime requires an explicit fan-out fresh-burst fairness policy")
+    func rejectsMissingFanoutFreshBurstPolicy() {
+        var values = runtimeValues
+        values.removeValue(forKey: "IM_V2_FANOUT_FRESH_BURST_PASSES")
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_FANOUT_FRESH_BURST_PASSES")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+    }
+
+    @Test("runtime requires a bounded fan-out delivery commit batch size")
+    func validatesFanoutDeliveryCommitBatchSize() {
+        var missing = runtimeValues
+        missing.removeValue(forKey: "IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missing))
+        }
+        var oversized = runtimeValues
+        oversized["IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE"] = "129"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(oversized))
+        }
+    }
+
+    @Test("runtime requires a bounded cross-store fan-out delivery commit batch size")
+    func validatesCrossStoreFanoutDeliveryCommitBatchSize() {
+        var missing = runtimeValues
+        missing.removeValue(forKey: "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missing))
+        }
+        var oversized = runtimeValues
+        oversized["IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE"] = "257"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(oversized))
+        }
+    }
+
+    @Test("runtime requires a bounded cross-store fan-out commit concurrency")
+    func validatesCrossStoreFanoutDeliveryCommitConcurrency() {
+        var missing = runtimeValues
+        missing.removeValue(forKey: "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY")
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missing))
+        }
+        var oversized = runtimeValues
+        oversized["IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY"] = "3"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(oversized))
+        }
+    }
+
+    @Test("runtime requires a bounded fan-out delivery claim batch size")
+    func validatesFanoutDeliveryClaimBatchSize() {
+        var missing = runtimeValues
+        missing.removeValue(forKey: "IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE")
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missing))
+        }
+        var oversized = runtimeValues
+        oversized["IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE"] = "2001"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(oversized))
+        }
+    }
+
     @Test("runtime requires an explicit PostgreSQL pool ceiling")
     func rejectsMissingDatabasePoolCeiling() {
         var values = runtimeValues
@@ -39,6 +104,11 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.capacityProfile.limits.maxEligibleMembers == 100_000)
         #expect(configuration.workerBatchSize == 256)
         #expect(configuration.workerPollIntervalMilliseconds == 100)
+        #expect(configuration.fanoutDeliveryCommitBatchSize == 128)
+        #expect(configuration.crossStoreFanoutDeliveryCommitBatchSize == 256)
+        #expect(configuration.crossStoreFanoutDeliveryCommitConcurrency == 2)
+        #expect(configuration.fanoutDeliveryClaimBatchSize == 2_000)
+        #expect(configuration.fanoutFreshBurstPasses == 7)
         #expect(configuration.durableRetryPolicy.initialDelay == 1)
         #expect(configuration.durableRetryPolicy.maximumDelay == 60)
         #expect(configuration.durableRetryPolicy.maximumAttempts == 10)
@@ -49,6 +119,7 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.metrics == expectedMetrics)
         #expect(configuration.idleTimeoutMilliseconds == 60_000)
         #expect(configuration.gatewayNodeID == "gateway-a")
+        #expect(configuration.gatewayReplicaCount == 1)
         #expect(configuration.userShardRoute.bucket == "users-primary")
         #expect(configuration.userShardRoute.observedRouterEpoch == 7)
         #expect(configuration.userShardStorage == [try .init(bucket: "users-primary", databaseURL: "postgres://v2:password@db/im_v2")])
@@ -75,6 +146,34 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(nats.subject == "imv2.fanout.wake")
         values.removeValue(forKey: "IM_V2_NATS_SUBJECT")
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+    }
+
+    @Test("Hybrid wake routing requires an opaque-subject key with its NATS configuration")
+    func parsesAndValidatesGroupWakeNATSConfiguration() throws {
+        var values = runtimeValues
+        values["IM_V2_GROUP_WAKE_NATS_URL"] = "nats://nats.internal:4222"
+        values["IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX"] = "imv2.group.wake"
+        values["IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64"] = Data(repeating: 9, count: 32).base64EncodedString()
+        let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        guard case .nats(let nats) = configuration.groupEventWake else {
+            Issue.record("Expected group wake NATS configuration")
+            return
+        }
+        #expect(nats.routingKey == Data(repeating: 9, count: 32))
+
+        values.removeValue(forKey: "IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64")
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_URL/IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX/IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+    }
+
+    @Test("a multi-gateway topology cannot silently use process-local hybrid wakes")
+    func rejectsLocalOnlyGroupWakeForMultipleGatewayReplicas() {
+        var values = runtimeValues
+        values["IM_V2_GATEWAY_REPLICA_COUNT"] = "2"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_GATEWAY_REPLICA_COUNT/IM_V2_GROUP_WAKE_NATS_URL/IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX/IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64")) {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         }
     }
@@ -197,6 +296,11 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_IDLE_TIMEOUT_MS": "60000",
             "IM_V2_WORKER_BATCH_SIZE": "256",
             "IM_V2_WORKER_POLL_INTERVAL_MS": "100",
+            "IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE": "128",
+            "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE": "256",
+            "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY": "2",
+            "IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE": "2000",
+            "IM_V2_FANOUT_FRESH_BURST_PASSES": "7",
             "IM_V2_DURABLE_RETRY_INITIAL_DELAY_MS": "1000",
             "IM_V2_DURABLE_RETRY_MAX_DELAY_MS": "60000",
             "IM_V2_DURABLE_RETRY_MAX_ATTEMPTS": "10",
@@ -206,6 +310,7 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_METRICS_HOST": "127.0.0.1",
             "IM_V2_METRICS_PORT": "9464",
             "IM_V2_GATEWAY_NODE_ID": "gateway-a",
+            "IM_V2_GATEWAY_REPLICA_COUNT": "1",
             "IM_V2_USER_SHARD_BUCKET": "users-primary",
             "IM_V2_USER_SHARD_ROUTER_EPOCH": "7",
             "IM_V2_DIRECT_ROOM_SHARD_ID": "rooms-primary",

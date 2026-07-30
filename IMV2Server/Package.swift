@@ -95,6 +95,8 @@ let package = Package(
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "VaporTesting", package: "vapor"),
                 .product(name: "SQLKit", package: "sql-kit"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),
     ]

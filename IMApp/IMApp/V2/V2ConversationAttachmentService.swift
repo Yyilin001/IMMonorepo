@@ -39,14 +39,12 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
     private let makeUUID: @Sendable () -> UUID
 
     init(directory: URL, fileManager: FileManager = .default, makeUUID: @escaping @Sendable () -> UUID = UUID.init) throws {
-        self.directory = directory.standardizedFileURL
+        self.directory = try V2DeviceLocalStoragePolicy.prepareManagedDirectory(
+            directory,
+            fileManager: fileManager
+        )
         self.fileManager = fileManager
         self.makeUUID = makeUUID
-        do {
-            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        } catch {
-            throw V2ConversationAttachmentStagingError.fileSystemFailure
-        }
     }
 
     func stageImportedFile(at sourceURL: URL) throws -> V2StagedConversationAttachment {
@@ -66,7 +64,15 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         let destination = directory.appendingPathComponent(id.uuidString, isDirectory: false)
         do {
             try fileManager.copyItem(at: sourceURL, to: destination)
+            // A copied document can retain the importer's attributes.  Apply
+            // V2's managed-file policy explicitly before exposing its URL to
+            // the uploader, and remove the copy if that policy cannot hold.
+            try V2DeviceLocalStoragePolicy.applyToManagedFile(destination, fileManager: fileManager)
+        } catch let error as V2DeviceLocalStorageError {
+            try? fileManager.removeItem(at: destination)
+            throw error
         } catch {
+            try? fileManager.removeItem(at: destination)
             throw V2ConversationAttachmentStagingError.fileSystemFailure
         }
         let contentType = values.contentType

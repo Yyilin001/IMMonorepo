@@ -10,7 +10,7 @@ struct V2ProtobufFrameCodecTests {
         envelope.requestID = 7
         envelope.protocolVersion = IMV2ProtocolVersion.current
         envelope.syncPull = .init()
-        let frame = try V2ProtobufFrameCodec.encode(envelope, frameVersion: 1)
+        let frame = try V2ProtobufFrameCodec.encode(envelope, frameVersion: UInt8(IMV2ProtocolVersion.current))
         #expect(try V2ProtobufFrameCodec.decode(frame) == envelope)
     }
 

@@ -367,6 +367,56 @@ public enum FanoutAdmissionEvaluator {
     }
 }
 
+/// Reserves only the command-rate portion of admission.  Large hybrid groups
+/// retain the same room and shard fencing as fan-out groups, but their room
+/// events are read from the ordered room log instead of creating one delivery
+/// unit per member.  In particular, this evaluator never increments fan-out
+/// windows or outstanding-plan counters.
+public enum V2CommandOnlyAdmissionEvaluator {
+    public static func reserve(
+        profile: RoomCapacityProfile,
+        roomState: RoomAdmissionState,
+        shardState: ShardAdmissionState,
+        now: Date
+    ) throws -> FanoutAdmissionResult {
+        guard let lease = shardState.lease else { return .unavailable(.missingShardLease) }
+        guard lease.isValid(at: now) else { return .unavailable(.expiredShardLease) }
+        guard roomState.eligibleMemberCount <= profile.maxEligibleMembers,
+              roomState.commandWindow.limit == profile.maxCommandsPerWindow,
+              roomState.fanoutWindow.limit == profile.maxFanoutUnitsPerWindow,
+              roomState.commandWindow.canReserve(1),
+              lease.commandWindow.canReserve(1)
+        else { return .rateLimited(retryAfterSeconds: profile.retryAfterSeconds) }
+
+        let nextRoom = try RoomAdmissionState(
+            eligibleMemberCount: roomState.eligibleMemberCount,
+            commandWindow: roomState.commandWindow.reserving(1),
+            fanoutWindow: roomState.fanoutWindow,
+            outstandingFanoutUnits: roomState.outstandingFanoutUnits,
+            outstandingPlans: roomState.outstandingPlans
+        )
+        let nextLease = try ShardAdmissionLease(
+            id: lease.id,
+            generation: lease.generation,
+            validUntil: lease.validUntil,
+            commandWindow: lease.commandWindow.reserving(1),
+            fanoutWindow: lease.fanoutWindow,
+            maxOutstandingFanoutUnits: lease.maxOutstandingFanoutUnits,
+            maxOutstandingPlans: lease.maxOutstandingPlans
+        )
+        let nextShard = try ShardAdmissionState(
+            lease: nextLease,
+            outstandingFanoutUnits: shardState.outstandingFanoutUnits,
+            outstandingPlans: shardState.outstandingPlans
+        )
+        return .accepted(
+            reservation: .init(cost: try .init(targetCount: 0), shardLeaseID: lease.id, shardLeaseGeneration: lease.generation),
+            roomState: nextRoom,
+            shardState: nextShard
+        )
+    }
+}
+
 public enum CompletionUnitState: Equatable, Sendable {
     case pending
     case terminal

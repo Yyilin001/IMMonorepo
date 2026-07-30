@@ -32,7 +32,7 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore {
             }
 
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id
+                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, delivery_mode
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: WithdrawalRoomRow.self) else { throw V2MessageWithdrawalStoreError.roomNotFound }
             guard room.capacityProfileID == capacityProfile.id else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }
@@ -66,8 +66,9 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore {
                 throw V2MessageWithdrawalStoreError.corruptPersistenceState
             }
 
-            let reservation = try FanoutAdmissionEvaluator.reserve(
-                request: .init(targetRule: .eligibleMemberCount),
+            let reservation = try V2RoomEventDeliveryMode.reserve(
+                deliveryMode: room.deliveryMode,
+                targetRule: .eligibleMemberCount,
                 profile: capacityProfile.limits,
                 roomState: try admission.state(),
                 shardState: try shard.state(),
@@ -123,16 +124,7 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore {
                                            'server_created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000)),
                                            'is_withdrawn', true), \(bind: room.membershipRevision), \(bind: now))
                 """).run()
-            let targetCount = admission.eligibleMemberCount
-            try await sql.raw("""
-                INSERT INTO im_v2.fanout_plans
-                    (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
-                     target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at)
-                VALUES (\(bind: planUUID), \(bind: eventUUID), \(bind: roomID), \(bind: nextRoomSequence), \(bind: room.membershipRevision),
-                        '{"kind":"eligible_member_count"}'::jsonb, jsonb_build_object('after_user_id', NULL),
-                        \(bind: targetCount), \(bind: targetCount), 'planning', \(bind: now))
-                """).run()
-            try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: eventUUID), \(bind: planUUID), 'pending', \(bind: now))").run()
+            try await V2RoomEventDeliveryMode.persistPlan(deliveryMode: room.deliveryMode, planID: planUUID, eventID: eventUUID, roomID: roomID, roomSequence: nextRoomSequence, committedMembershipRevision: room.membershipRevision, standardTargetRuleJSON: "{\"kind\":\"eligible_member_count\"}", standardTargetCount: admission.eligibleMemberCount, now: now, sql: sql)
             try await sql.raw("""
                 INSERT INTO im_v2.message_withdrawal_operations
                     (actor_user_id, operation_id, room_id, message_id, expected_message_revision,
@@ -147,7 +139,7 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore {
     }
 }
 
-private struct WithdrawalRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id" } }
+private struct WithdrawalRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let deliveryMode: V2GroupDeliveryMode; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", deliveryMode = "delivery_mode" } }
 private struct WithdrawalMessageRow: Decodable { let roomID: UUID; let senderUserID: UUID; let contentRevision: Int64; let withdrawnAt: Date?; enum CodingKeys: String, CodingKey { case roomID = "room_id", senderUserID = "sender_user_id", contentRevision = "content_revision", withdrawnAt = "withdrawn_at" } }
 private struct WithdrawalOperationRow: Decodable {
     let roomID: UUID; let messageID: UUID; let expectedMessageRevision: Int64; let resultingMessageRevision: Int64; let roomSequence: Int64; let eventID: UUID; let planID: UUID; let createdAt: Date

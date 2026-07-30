@@ -9,6 +9,7 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
     public let roomID: RoomID
     public let title: String
     public let ownerUserID: UserID
+    public let deliveryMode: V2GroupDeliveryMode?
     public let membershipRevision: UInt64
     public let createdAt: Date
 
@@ -19,10 +20,11 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
             let title: String
             let ownerUserID: String
             let membershipRevision: UInt64
+            let deliveryMode: String?
             let createdAtMilliseconds: Int64
             enum CodingKeys: String, CodingKey {
                 case eventType = "event_type"; case roomID = "room_id"; case title
-                case ownerUserID = "owner_user_id"; case membershipRevision = "membership_revision"; case createdAtMilliseconds = "created_at_ms"
+                case ownerUserID = "owner_user_id"; case membershipRevision = "membership_revision"; case deliveryMode = "delivery_mode"; case createdAtMilliseconds = "created_at_ms"
             }
         }
         let payload: Wire
@@ -42,13 +44,17 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
             roomID = try .init(payload.roomID)
             title = normalizedTitle
             ownerUserID = try .init(payload.ownerUserID)
+            deliveryMode = try payload.deliveryMode.map {
+                guard let mode = V2GroupDeliveryMode(rawValue: $0) else { throw V2ClientProjectionError.invalidMessagePayload }
+                return mode
+            }
             membershipRevision = payload.membershipRevision
             createdAt = Date(timeIntervalSince1970: TimeInterval(payload.createdAtMilliseconds) / 1_000)
         } catch { throw V2ClientProjectionError.invalidMessagePayload }
     }
 
-    init(snapshotProjection: V2SnapshotRoomProfileProjection) {
+    init(snapshotProjection: V2SnapshotRoomProfileProjection, deliveryMode: V2GroupDeliveryMode? = nil) {
         sourceEventID = snapshotProjection.sourceEventID; roomID = snapshotProjection.roomID
-        title = snapshotProjection.title; ownerUserID = snapshotProjection.ownerUserID; membershipRevision = snapshotProjection.membershipRevision; createdAt = snapshotProjection.createdAt
+        title = snapshotProjection.title; ownerUserID = snapshotProjection.ownerUserID; self.deliveryMode = deliveryMode; membershipRevision = snapshotProjection.membershipRevision; createdAt = snapshotProjection.createdAt
     }
 }

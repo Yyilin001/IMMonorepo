@@ -45,6 +45,7 @@ public actor V2GatewayByteStream {
             var outbound: [Data] = []
             outbound.reserveCapacity(inbound.count)
             for frame in inbound {
+                let inboundEnvelope = try V2ServerProtobufFrameCodec.decode(frame)
                 let response: V2Frame
                 if await session.authenticatedIdentity() == nil {
                     response = try await session.receiveBootstrap(frame)
@@ -52,6 +53,7 @@ public actor V2GatewayByteStream {
                     response = try await session.receiveAuthenticated(frame, handler: handler)
                 }
                 try await registerAuthenticatedDeviceIfNeeded()
+                try await updateHybridGroupSubscription(inbound: inboundEnvelope, response: response)
                 outbound.append(try V2FrameCodec.encode(response, limits: frameLimits))
             }
             return outbound
@@ -112,6 +114,23 @@ public actor V2GatewayByteStream {
         outboundWriter(bytes)
     }
 
+    /// A best-effort foreground wake over the same authenticated TLS stream.
+    /// Its payload is deliberately metadata-only; cursor pull remains the
+    /// durable and authorization-checked read path.
+    public func sendGroupEventAvailable(roomID: RoomID, highWatermark: UInt64) async {
+        guard let version = await session.authenticatedProtocolVersion(), let outboundWriter else { return }
+        var envelope = IMV2Envelope()
+        envelope.requestID = 0
+        envelope.protocolVersion = UInt32(version)
+        envelope.groupEventAvailable = .init()
+        envelope.groupEventAvailable.roomID = roomID.rawValue
+        envelope.groupEventAvailable.highWatermark = highWatermark
+        guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version),
+              let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits)
+        else { return }
+        outboundWriter(bytes)
+    }
+
     private func registerAuthenticatedDeviceIfNeeded() async throws {
         guard registeredIdentity == nil, let registry, let identity = await session.authenticatedIdentity() else { return }
         registeredIdentity = identity
@@ -122,5 +141,21 @@ public actor V2GatewayByteStream {
         guard registeredIdentity != nil else { return }
         registeredIdentity = nil
         await registry?.unregister(connectionID: connectionID)
+    }
+
+    private func updateHybridGroupSubscription(inbound: IMV2Envelope, response: V2Frame) async throws {
+        guard let registry else { return }
+        switch inbound.body {
+        case .groupEventSubscribe(let request):
+            let responseEnvelope = try V2ServerProtobufFrameCodec.decode(response)
+            guard case .groupEventSubscribed(let subscribed)? = responseEnvelope.body,
+                  subscribed.roomID == request.roomID
+            else { return }
+            await registry.subscribeForegroundGroup(self, connectionID: connectionID, roomID: try .init(request.roomID))
+        case .groupEventUnsubscribe(let request):
+            await registry.unsubscribeForegroundGroup(connectionID: connectionID, roomID: try .init(request.roomID))
+        default:
+            return
+        }
     }
 }

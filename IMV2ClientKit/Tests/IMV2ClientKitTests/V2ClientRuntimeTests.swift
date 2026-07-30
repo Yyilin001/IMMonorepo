@@ -165,8 +165,8 @@ struct V2ClientRuntimeTests {
         #expect(await recorder.count() == 2)
     }
 
-    @Test("terminal command maintenance follows every successful sync")
-    func terminalCommandMaintenanceFollowsEverySuccessfulSync() async throws {
+    @Test("terminal command maintenance follows each command flush after a successful sync")
+    func terminalCommandMaintenanceFollowsCommandFlush() async throws {
         let sync = AvailabilitySyncDriver()
         let recorder = ProjectionSyncRecorder()
         let activity = V2DefaultClientRuntimeActivity(
@@ -178,6 +178,7 @@ struct V2ClientRuntimeTests {
         )
 
         try await activity.synchronizeAfterConnection()
+        try await activity.flushDurableCommands()
         await #expect(throws: AvailabilityLoopStop.finished) {
             try await activity.runAvailabilityLoop()
         }

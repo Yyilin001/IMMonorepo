@@ -75,6 +75,10 @@ public struct V2AcceptedMessage: Equatable, Sendable {
     public let text: String
     public let media: [V2MediaReference]
     public let mentions: [V2MentionTarget]
+    /// Present only for a group room. It is acceptance metadata used for
+    /// non-authoritative foreground availability hints; it does not change
+    /// the durable fan-out or acknowledgement contract.
+    public let groupDeliveryMode: V2GroupDeliveryMode?
     public let createdAt: Date
 
     public init(
@@ -86,6 +90,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         text: String,
         media: [V2MediaReference] = [],
         mentions: [V2MentionTarget] = [],
+        groupDeliveryMode: V2GroupDeliveryMode? = nil,
         createdAt: Date
     ) {
         self.messageID = messageID
@@ -96,6 +101,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         self.text = text
         self.media = media
         self.mentions = mentions
+        self.groupDeliveryMode = groupDeliveryMode
         self.createdAt = createdAt
     }
 }

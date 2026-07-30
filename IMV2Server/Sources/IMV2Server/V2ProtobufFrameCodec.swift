@@ -90,6 +90,12 @@ public enum V2ServerProtobufFrameCodec {
         case .groupRoomCreated?: return .groupRoomCreated
         case .listRoomMembers?: return .listRoomMembers
         case .roomMembersPage?: return .roomMembersPage
+        case .groupEventPull?: return .groupEventPull
+        case .groupEventPage?: return .groupEventPage
+        case .groupEventSubscribe?: return .groupEventSubscribe
+        case .groupEventSubscribed?: return .groupEventSubscribed
+        case .groupEventUnsubscribe?: return .groupEventUnsubscribe
+        case .groupEventAvailable?: return .groupEventAvailable
         case .setStrangerMessagePermission?: return .setStrangerMessagePermission
         case .strangerMessagePermissionSet?: return .strangerMessagePermissionSet
         case .changeRelationship?: return .changeRelationship

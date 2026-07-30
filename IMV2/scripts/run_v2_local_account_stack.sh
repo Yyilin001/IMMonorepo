@@ -12,6 +12,8 @@ local_account_build_stage_label="com.imv2.local-account-build-stage=true"
 # Keep `.env.local` authoritative even when the invoking terminal exported an
 # unrelated `IM_V2_*` value.
 source "${script_dir}/local_compose.sh"
+# shellcheck source=local_admission_pool.sh
+source "${script_dir}/local_admission_pool.sh"
 
 compose() {
   v2_local_compose "${env_file}" --project-name "${compose_project}" --file "${compose_file}" "$@"
@@ -36,37 +38,6 @@ require_command uuidgen
 # or volume owned by another project.
 prune_unreferenced_local_build_stages() {
   docker image prune --force --filter "label=${local_account_build_stage_label}" >/dev/null
-}
-
-# The production control plane owns admission leases.  The disposable local
-# stack has no such control-plane service, but real room creation deliberately
-# refuses to proceed without a live fenced pool.  Seed only its single local
-# profile after migrations: an existing live fence is preserved; an expired
-# one receives a fresh lease ID and generation with the same semantics as the
-# tested replacement operation.  This is local functionality, not a capacity
-# approval or a production lease-management mechanism.
-seed_local_admission_pool() {
-  local replacement_lease_id
-  replacement_lease_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-  compose exec -T postgres psql --quiet --set=ON_ERROR_STOP=1 --username im_v2 --dbname im_v2 <<SQL
-INSERT INTO im_v2.shard_admission_pools AS pool
-    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
-     command_window_limit, fanout_window_limit,
-     max_outstanding_fanout_units, max_outstanding_plans)
-VALUES
-    ('rooms-primary', 'standard', '${replacement_lease_id}', 1, CURRENT_TIMESTAMP + INTERVAL '24 hours',
-     1000, 100000, 1000000, 10000)
-ON CONFLICT (room_shard_id, capacity_profile_id) DO UPDATE
-SET lease_id = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.lease_id ELSE pool.lease_id END,
-    generation = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN pool.generation + 1 ELSE pool.generation END,
-    valid_until = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.valid_until ELSE pool.valid_until END,
-    command_window_limit = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.command_window_limit ELSE pool.command_window_limit END,
-    fanout_window_limit = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.fanout_window_limit ELSE pool.fanout_window_limit END,
-    max_outstanding_fanout_units = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.max_outstanding_fanout_units ELSE pool.max_outstanding_fanout_units END,
-    max_outstanding_plans = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.max_outstanding_plans ELSE pool.max_outstanding_plans END,
-    command_window_used = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN 0 ELSE pool.command_window_used END,
-    fanout_window_used = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN 0 ELSE pool.fanout_window_used END;
-SQL
 }
 
 prune_unreferenced_local_build_stages
@@ -171,7 +142,7 @@ prune_unreferenced_local_build_stages
 # migration ledger before any V2 service runs its schema readiness gate.
 compose up -d --wait --force-recreate postgres
 "${script_dir}/apply_v2_local_schema_migrations.sh"
-seed_local_admission_pool
+v2_seed_local_admission_pool
 # Caddy's development leaf certificate is intentionally short-lived. Recreate
 # the local TLS edge on every explicit start so a retained Compose project
 # cannot stay "healthy" after its certificate expires. The local CA volume is

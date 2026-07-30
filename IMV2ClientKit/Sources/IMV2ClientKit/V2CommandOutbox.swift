@@ -106,6 +106,15 @@ public actor V2CommandOutboxEngine {
         } catch let error as V2RealtimeTransportError {
             switch error {
             case .server(let code, let retryable, let retryAfter, _):
+                // A rate-limit response is a conclusive rejection of this
+                // particular send attempt. Although the server permits a
+                // later request, silently replaying chat content after the
+                // cooldown would surprise the sender. Keep the draft in the
+                // UI and require an explicit subsequent send instead.
+                if code == "RATE_LIMITED" {
+                    try await store.rejectMessage(clientMessageID: command.clientMessageID, code: code)
+                    return .rejected(command.clientMessageID, code: code)
+                }
                 if retryable {
                     try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: now().addingTimeInterval(TimeInterval(max(retryAfter, 1))))
                     return .retryScheduled(command.clientMessageID)

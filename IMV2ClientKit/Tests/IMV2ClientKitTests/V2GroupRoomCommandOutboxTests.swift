@@ -17,7 +17,7 @@ struct V2GroupRoomCommandOutboxTests {
         let first = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         let firstEngine = V2GroupRoomCommandOutboxEngine(store: first, transport: transport, makeUUID: { operation }, now: { started })
 
-        let command = try await firstEngine.enqueueCreation(title: " 项目群 ", initialMemberUserIDs: [member])
+        let command = try await firstEngine.enqueueCreation(title: " 项目群 ", deliveryMode: .standardFanout, initialMemberUserIDs: [member])
         #expect(command.title == "项目群")
         #expect(try await firstEngine.flushOnce() == .retryScheduled(command.operationID))
         let retried = try #require(await first.pendingGroupRoomCreations().first)
@@ -37,7 +37,7 @@ struct V2GroupRoomCommandOutboxTests {
         let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000705")!)
         let store = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-v2-group-rejected-\(UUID().uuidString).sqlite"), installationBinding: binding)
         let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: ScriptedGroupTransport(results: [.rejected]), makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000706")! }, now: Date.init)
-        let command = try await engine.enqueueCreation(title: "项目群", initialMemberUserIDs: [])
+        let command = try await engine.enqueueCreation(title: "项目群", deliveryMode: .standardFanout, initialMemberUserIDs: [])
         #expect(try await engine.flushOnce() == .rejected(command.operationID, code: "INVALID_ARGUMENT"))
         #expect(try await engine.flushOnce() == .idle)
     }
@@ -55,13 +55,13 @@ struct V2GroupRoomCommandOutboxTests {
             makeUUID: { firstOperation }
         )
 
-        let original = try await firstEngine.enqueueCreation(title: " 项目群 ", initialMemberUserIDs: [])
+        let original = try await firstEngine.enqueueCreation(title: " 项目群 ", deliveryMode: .standardFanout, initialMemberUserIDs: [])
         let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         let restartedEngine = V2GroupRoomCommandOutboxEngine(
             store: restartedStore,
             transport: ScriptedGroupTransport(results: [])
         )
-        let reused = try await restartedEngine.enqueueCreation(title: "项目群", initialMemberUserIDs: [])
+        let reused = try await restartedEngine.enqueueCreation(title: "项目群", deliveryMode: .standardFanout, initialMemberUserIDs: [])
 
         #expect(reused.operationID == original.operationID)
         let pending = try await restartedStore.pendingGroupRoomCreations()
@@ -75,12 +75,12 @@ private actor ScriptedGroupTransport: V2ClientGroupMessagingTransport {
     private var received: [GroupRoomOperationID] = []
     init(results: [Result]) { self.results = results }
 
-    func createGroupRoom(operationID: GroupRoomOperationID, title: String, initialMemberUserIDs: [UserID]) throws -> V2ClientGroupRoom {
+    func createGroupRoom(operationID: GroupRoomOperationID, title: String, deliveryMode: V2GroupDeliveryMode, initialMemberUserIDs: [UserID]) throws -> V2ClientGroupRoom {
         received.append(operationID)
         switch results.removeFirst() {
         case .retryableFailure: throw V2RealtimeTransportError.unexpectedResponse
         case .rejected: throw V2RealtimeTransportError.server(code: "INVALID_ARGUMENT", retryable: false, retryAfterSeconds: 0, currentRevision: 0)
-        case .created(let roomID): return .init(roomID: roomID, title: title.trimmingCharacters(in: .whitespacesAndNewlines), memberUserIDs: initialMemberUserIDs, createdAt: .distantPast)
+        case .created(let roomID): return .init(roomID: roomID, title: title.trimmingCharacters(in: .whitespacesAndNewlines), deliveryMode: deliveryMode, memberUserIDs: initialMemberUserIDs, memberCount: UInt32(initialMemberUserIDs.count + 1), createdAt: .distantPast)
         }
     }
 

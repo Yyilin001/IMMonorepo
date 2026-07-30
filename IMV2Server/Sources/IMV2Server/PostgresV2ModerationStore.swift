@@ -49,7 +49,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 return .idempotent(try prior.result(operationID: command.operationID))
             }
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, frozen_at
+                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, delivery_mode, frozen_at
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: ModerationControlRoomRow.self) else { throw V2ModerationStoreError.roomNotFound }
             guard room.capacityProfileID == capacityProfile.id else { throw V2ModerationStoreError.corruptPersistenceState }
@@ -77,7 +77,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 FOR UPDATE
                 """).first(decoding: ModerationShardRow.self) else { throw V2ModerationStoreError.corruptPersistenceState }
             guard admission.shardLeaseID == shard.leaseID, admission.shardLeaseGeneration == shard.generation else { throw V2ModerationStoreError.corruptPersistenceState }
-            let reservation = try FanoutAdmissionEvaluator.reserve(request: .init(targetRule: .eligibleMemberCount), profile: capacityProfile.limits, roomState: try admission.state(), shardState: try shard.state(), now: now)
+            let reservation = try V2RoomEventDeliveryMode.reserve(deliveryMode: room.deliveryMode, targetRule: .eligibleMemberCount, profile: capacityProfile.limits, roomState: try admission.state(), shardState: try shard.state(), now: now)
             let nextRoom: RoomAdmissionState; let nextShard: ShardAdmissionState
             switch reservation {
             case .rateLimited(let seconds): return .rateLimited(retryAfterSeconds: seconds)
@@ -105,11 +105,12 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 VALUES (\(bind: eventUUID), \(bind: roomID), \(bind: roomSequence), \(bind: eventType), \(bind: actorID),
                         jsonb_build_object('event_type', \(bind: eventType), 'room_id', \(bind: roomID.uuidString), 'room_sequence', \(bind: roomSequence), 'actor_user_id', \(bind: actorID.uuidString), 'server_created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))), \(bind: room.membershipRevision), \(bind: now))
                 """).run()
-            let targetCount = admission.eligibleMemberCount
-            try await sql.raw("""
-                INSERT INTO im_v2.fanout_plans (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision, target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at) VALUES (\(bind: planUUID), \(bind: eventUUID), \(bind: roomID), \(bind: roomSequence), \(bind: room.membershipRevision), '{"kind":"eligible_member_count"}'::jsonb, jsonb_build_object('after_user_id', NULL), \(bind: targetCount), \(bind: targetCount), 'planning', \(bind: now))
-                """).run()
-            try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: eventUUID), \(bind: planUUID), 'pending', \(bind: now))").run()
+            try await V2RoomEventDeliveryMode.persistPlan(
+                deliveryMode: room.deliveryMode, planID: planUUID, eventID: eventUUID, roomID: roomID,
+                roomSequence: roomSequence, committedMembershipRevision: room.membershipRevision,
+                standardTargetRuleJSON: #"{"kind":"eligible_member_count"}"#,
+                standardTargetCount: admission.eligibleMemberCount, now: now, sql: sql
+            )
             try await sql.raw("""
                 INSERT INTO im_v2.moderation_operations (actor_user_id, operation_id, room_id, action, target_user_id, message_id, resulting_message_revision, mute_until, reason_code, room_sequence, event_id, plan_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), \(bind: command.action == .freezeRoom ? "freeze_room" : "unfreeze_room"), NULL, NULL, NULL, NULL, \(bind: command.reasonCode.rawValue), \(bind: roomSequence), \(bind: eventUUID), \(bind: planUUID), \(bind: now))
                 """).run()
@@ -140,7 +141,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 return .idempotent(try prior.result(operationID: command.operationID))
             }
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id
+                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, delivery_mode
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: ModerationRoomRow.self) else { throw V2ModerationStoreError.roomNotFound }
             guard room.capacityProfileID == capacityProfile.id else { throw V2ModerationStoreError.corruptPersistenceState }
@@ -176,7 +177,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 FOR UPDATE
                 """).first(decoding: ModerationShardRow.self) else { throw V2ModerationStoreError.corruptPersistenceState }
             guard admission.shardLeaseID == shard.leaseID, admission.shardLeaseGeneration == shard.generation else { throw V2ModerationStoreError.corruptPersistenceState }
-            let reservation = try FanoutAdmissionEvaluator.reserve(request: .init(targetRule: .eligibleMemberCount), profile: capacityProfile.limits, roomState: try admission.state(), shardState: try shard.state(), now: now)
+            let reservation = try V2RoomEventDeliveryMode.reserve(deliveryMode: room.deliveryMode, targetRule: .eligibleMemberCount, profile: capacityProfile.limits, roomState: try admission.state(), shardState: try shard.state(), now: now)
             let nextRoom: RoomAdmissionState; let nextShard: ShardAdmissionState
             switch reservation {
             case .rateLimited(let seconds): return .rateLimited(retryAfterSeconds: seconds)
@@ -199,11 +200,12 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 VALUES (\(bind: eventUUID), \(bind: roomID), \(bind: roomSequence), 'message.redacted', \(bind: actorID),
                         jsonb_build_object('event_type', 'message.redacted', 'room_id', \(bind: roomID.uuidString), 'room_sequence', \(bind: roomSequence), 'message_id', \(bind: messageID.uuidString), 'message_revision', \(bind: messageRevision), 'actor_user_id', \(bind: actorID.uuidString), 'server_created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000)), 'is_withdrawn', true), \(bind: room.membershipRevision), \(bind: now))
                 """).run()
-            let targetCount = admission.eligibleMemberCount
-            try await sql.raw("""
-                INSERT INTO im_v2.fanout_plans (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision, target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at) VALUES (\(bind: planUUID), \(bind: eventUUID), \(bind: roomID), \(bind: roomSequence), \(bind: room.membershipRevision), '{"kind":"eligible_member_count"}'::jsonb, jsonb_build_object('after_user_id', NULL), \(bind: targetCount), \(bind: targetCount), 'planning', \(bind: now))
-                """).run()
-            try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: eventUUID), \(bind: planUUID), 'pending', \(bind: now))").run()
+            try await V2RoomEventDeliveryMode.persistPlan(
+                deliveryMode: room.deliveryMode, planID: planUUID, eventID: eventUUID, roomID: roomID,
+                roomSequence: roomSequence, committedMembershipRevision: room.membershipRevision,
+                standardTargetRuleJSON: #"{"kind":"eligible_member_count"}"#,
+                standardTargetCount: admission.eligibleMemberCount, now: now, sql: sql
+            )
             try await sql.raw("""
                 INSERT INTO im_v2.moderation_operations (actor_user_id, operation_id, room_id, action, target_user_id, message_id, resulting_message_revision, mute_until, reason_code, room_sequence, event_id, plan_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), 'redact_message', NULL, \(bind: messageID), \(bind: messageRevision), NULL, \(bind: command.reasonCode.rawValue), \(bind: roomSequence), \(bind: eventUUID), \(bind: planUUID), \(bind: now))
                 """).run()
@@ -236,7 +238,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 return .idempotent(try prior.result(operationID: command.operationID))
             }
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id
+                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, delivery_mode
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: ModerationRoomRow.self) else { throw V2ModerationStoreError.roomNotFound }
             guard room.capacityProfileID == capacityProfile.id else { throw V2ModerationStoreError.corruptPersistenceState }
@@ -278,7 +280,10 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                   admission.eligibleMemberCount == members.count
             else { throw V2ModerationStoreError.corruptPersistenceState }
             let audience = members.map(\.userID)
-            let reservation = try FanoutAdmissionEvaluator.reserve(request: .init(targetRule: .exactTargetCount(audience.count)), profile: capacityProfile.limits, roomState: try admission.state(), shardState: try shard.state(), now: now)
+            // The removed account needs a durable control record. Other hybrid
+            // members consume this ordered event from the room log.
+            let deliveryAudience = room.deliveryMode == .largeGroupHybrid ? [targetID] : audience
+            let reservation = try FanoutAdmissionEvaluator.reserve(request: .init(targetRule: .exactTargetCount(deliveryAudience.count)), profile: capacityProfile.limits, roomState: try admission.state(), shardState: try shard.state(), now: now)
             let reservedRoom: RoomAdmissionState; let reservedShard: ShardAdmissionState
             switch reservation {
             case .rateLimited(let seconds): return .rateLimited(retryAfterSeconds: seconds)
@@ -302,12 +307,12 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             try await sql.raw("""
                 INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at)
                 VALUES (\(bind: eventUUID), \(bind: roomID), \(bind: roomSequence), 'membership_changed', \(bind: actorID),
-                        jsonb_build_object('event_type', 'membership_changed', 'room_id', \(bind: roomID.uuidString), 'room_sequence', \(bind: roomSequence), 'actor_user_id', \(bind: actorID.uuidString), 'target_user_id', \(bind: targetID.uuidString), 'action', 'remove', 'membership_revision', \(bind: membershipRevision), 'moderation_reason_code', \(bind: command.reasonCode.rawValue), 'server_created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))), \(bind: membershipRevision), \(bind: now))
+                        jsonb_build_object('event_type', 'membership_changed', 'room_id', \(bind: roomID.uuidString), 'room_sequence', \(bind: roomSequence), 'actor_user_id', \(bind: actorID.uuidString), 'target_user_id', \(bind: targetID.uuidString), 'action', 'remove', 'membership_revision', \(bind: membershipRevision), 'delivery_mode', \(bind: room.deliveryMode.rawValue), 'moderation_reason_code', \(bind: command.reasonCode.rawValue), 'server_created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))), \(bind: membershipRevision), \(bind: now))
                 """).run()
             try await sql.raw("""
-                INSERT INTO im_v2.fanout_plans (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision, target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at) VALUES (\(bind: planUUID), \(bind: eventUUID), \(bind: roomID), \(bind: roomSequence), \(bind: membershipRevision), '{"kind":"frozen_targets"}'::jsonb, jsonb_build_object('after_user_id', NULL), \(bind: audience.count), \(bind: audience.count), 'planning', \(bind: now))
+                INSERT INTO im_v2.fanout_plans (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision, target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at) VALUES (\(bind: planUUID), \(bind: eventUUID), \(bind: roomID), \(bind: roomSequence), \(bind: membershipRevision), '{"kind":"frozen_targets"}'::jsonb, jsonb_build_object('after_user_id', NULL), \(bind: deliveryAudience.count), \(bind: deliveryAudience.count), 'planning', \(bind: now))
                 """).run()
-            let targetsJSON = String(data: try JSONSerialization.data(withJSONObject: audience.map(\.uuidString)), encoding: .utf8)!
+            let targetsJSON = String(data: try JSONSerialization.data(withJSONObject: deliveryAudience.map(\.uuidString)), encoding: .utf8)!
             try await sql.raw("INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id) SELECT \(bind: eventUUID), value::uuid FROM jsonb_array_elements_text(\(bind: targetsJSON)::jsonb) AS value").run()
             try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: eventUUID), \(bind: planUUID), 'pending', \(bind: now))").run()
             try await sql.raw("""
@@ -340,7 +345,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 return .idempotent(try prior.result(operationID: command.operationID))
             }
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id
+                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, delivery_mode
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: ModerationRoomRow.self) else { throw V2ModerationStoreError.roomNotFound }
             guard room.capacityProfileID == capacityProfile.id else { throw V2ModerationStoreError.corruptPersistenceState }
@@ -382,7 +387,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 FOR UPDATE
                 """).first(decoding: ModerationShardRow.self) else { throw V2ModerationStoreError.corruptPersistenceState }
             guard admission.shardLeaseID == shard.leaseID, admission.shardLeaseGeneration == shard.generation else { throw V2ModerationStoreError.corruptPersistenceState }
-            let reservation = try FanoutAdmissionEvaluator.reserve(request: .init(targetRule: .eligibleMemberCount), profile: capacityProfile.limits, roomState: try admission.state(), shardState: try shard.state(), now: now)
+            let reservation = try V2RoomEventDeliveryMode.reserve(deliveryMode: room.deliveryMode, targetRule: .eligibleMemberCount, profile: capacityProfile.limits, roomState: try admission.state(), shardState: try shard.state(), now: now)
             let nextRoom: RoomAdmissionState; let nextShard: ShardAdmissionState
             switch reservation {
             case .rateLimited(let seconds): return .rateLimited(retryAfterSeconds: seconds)
@@ -411,11 +416,12 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 VALUES (\(bind: eventUUID), \(bind: roomID), \(bind: roomSequence), 'member.muted', \(bind: actorID),
                         jsonb_build_object('event_type', 'member.muted', 'room_id', \(bind: roomID.uuidString), 'room_sequence', \(bind: roomSequence), 'actor_user_id', \(bind: actorID.uuidString), 'target_user_id', \(bind: targetID.uuidString), 'mute_until_ms', \(bind: Int64(commandMuteUntil.timeIntervalSince1970 * 1_000)), 'server_created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))), \(bind: room.membershipRevision), \(bind: now))
                 """).run()
-            let targetCount = admission.eligibleMemberCount
-            try await sql.raw("""
-                INSERT INTO im_v2.fanout_plans (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision, target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at) VALUES (\(bind: planUUID), \(bind: eventUUID), \(bind: roomID), \(bind: roomSequence), \(bind: room.membershipRevision), '{"kind":"eligible_member_count"}'::jsonb, jsonb_build_object('after_user_id', NULL), \(bind: targetCount), \(bind: targetCount), 'planning', \(bind: now))
-                """).run()
-            try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: eventUUID), \(bind: planUUID), 'pending', \(bind: now))").run()
+            try await V2RoomEventDeliveryMode.persistPlan(
+                deliveryMode: room.deliveryMode, planID: planUUID, eventID: eventUUID, roomID: roomID,
+                roomSequence: roomSequence, committedMembershipRevision: room.membershipRevision,
+                standardTargetRuleJSON: #"{"kind":"eligible_member_count"}"#,
+                standardTargetCount: admission.eligibleMemberCount, now: now, sql: sql
+            )
             try await sql.raw("""
                 INSERT INTO im_v2.moderation_operations (actor_user_id, operation_id, room_id, action, target_user_id, message_id, resulting_message_revision, mute_until, reason_code, room_sequence, event_id, plan_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), 'mute_member', \(bind: targetID), NULL, NULL, \(bind: commandMuteUntil), \(bind: command.reasonCode.rawValue), \(bind: roomSequence), \(bind: eventUUID), \(bind: planUUID), \(bind: now))
                 """).run()
@@ -427,8 +433,8 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
     }
 }
 
-private struct ModerationRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id" } }
-private struct ModerationControlRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let frozenAt: Date?; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", frozenAt = "frozen_at" } }
+private struct ModerationRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let deliveryMode: V2GroupDeliveryMode; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", deliveryMode = "delivery_mode" } }
+private struct ModerationControlRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let deliveryMode: V2GroupDeliveryMode; let frozenAt: Date?; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", deliveryMode = "delivery_mode", frozenAt = "frozen_at" } }
 private struct ModerationRoleRow: Decodable { let role: String }
 private struct ModerationBooleanRow: Decodable { let value: Bool }
 private struct ModerationMuteRow: Decodable { let muteUntil: Date; enum CodingKeys: String, CodingKey { case muteUntil = "mute_until" } }

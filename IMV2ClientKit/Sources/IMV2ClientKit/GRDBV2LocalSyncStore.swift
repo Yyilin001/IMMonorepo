@@ -4,7 +4,7 @@ import IMV2Core
 
 /// V2's local database is intentionally separate from the V1 conversation
 /// cache. It applies sync records incrementally in one SQLite transaction.
-public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore {
+public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2LocalForegroundGroupEventPreviewStore {
     private let databasePool: DatabasePool
     private let databaseURL: URL
 
@@ -46,6 +46,134 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
     public func cursor() throws -> V2LocalSyncCursor? {
         try databasePool.read { db in try Self.readCursor(db) }
+    }
+
+    public func groupEventCursor(roomID: RoomID) throws -> UInt64 {
+        try databasePool.read { db in
+            let sequence: Int64 = try Row.fetchOne(
+                db,
+                sql: "SELECT applied_room_sequence FROM v2_group_event_cursors WHERE room_id = ?",
+                arguments: [roomID.rawValue]
+            )?["applied_room_sequence"] ?? 0
+            return try Self.storageUnsigned(sequence)
+        }
+    }
+
+    public func knownHybridGroupRoomIDs() throws -> [RoomID] {
+        try databasePool.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT room_id FROM v2_room_profile_projections WHERE delivery_mode = ? ORDER BY room_id",
+                arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue]
+            ).map(RoomID.init)
+        }
+    }
+
+    public func isKnownHybridGroupRoom(roomID: RoomID) throws -> Bool {
+        try databasePool.read { db in
+            try Bool.fetchOne(
+                db,
+                sql: "SELECT EXISTS (SELECT 1 FROM v2_room_profile_projections WHERE room_id = ? AND delivery_mode = ?)",
+                arguments: [roomID.rawValue, V2GroupDeliveryMode.largeGroupHybrid.rawValue]
+            ) ?? false
+        }
+    }
+
+    public func groupDeliveryMode(roomID: RoomID) throws -> V2GroupDeliveryMode? {
+        try databasePool.read { db in
+            guard let raw: String = try Row.fetchOne(
+                db,
+                sql: "SELECT delivery_mode FROM v2_room_profile_projections WHERE room_id = ?",
+                arguments: [roomID.rawValue]
+            )?["delivery_mode"]
+            else { return nil }
+            return V2GroupDeliveryMode(rawValue: raw)
+        }
+    }
+
+    public func foregroundGroupEventPreviewStartSequence(roomID: RoomID) throws -> UInt64 {
+        try databasePool.read { db in
+            let sequence: Int64 = try Row.fetchOne(
+                db,
+                sql: "SELECT COALESCE(MAX(room_sequence), 0) AS room_sequence FROM v2_message_projections WHERE room_id = ?",
+                arguments: [roomID.rawValue]
+            )?["room_sequence"] ?? 0
+            return try Self.storageUnsigned(sequence)
+        }
+    }
+
+    public func deactivateHybridGroupRoom(roomID: RoomID) throws {
+        try databasePool.write { db in
+            try db.execute(
+                sql: "UPDATE v2_room_profile_projections SET delivery_mode = NULL WHERE room_id = ? AND delivery_mode = ?",
+                arguments: [roomID.rawValue, V2GroupDeliveryMode.largeGroupHybrid.rawValue]
+            )
+        }
+    }
+
+    public func applyGroupEventPage(_ page: V2ClientGroupEventPage) throws -> UInt64 {
+        try databasePool.write { db in
+            let current: Int64 = try Row.fetchOne(
+                db,
+                sql: "SELECT applied_room_sequence FROM v2_group_event_cursors WHERE room_id = ?",
+                arguments: [page.roomID.rawValue]
+            )?["applied_room_sequence"] ?? 0
+            let cursor = try Self.storageUnsigned(current)
+            guard page.nextRoomSequence >= cursor,
+                  zip(page.events, page.events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence }),
+                  (page.events.last?.roomSequence ?? cursor) == page.nextRoomSequence
+            else { throw V2ClientSyncError.invalidRecordOrdering }
+            for event in page.events {
+                if event.roomSequence <= cursor {
+                    guard let existing = try Row.fetchOne(
+                        db,
+                        sql: "SELECT source_event_id, projection_kind, payload FROM v2_group_events WHERE room_id = ? AND room_sequence = ?",
+                        arguments: [page.roomID.rawValue, try Self.storageInteger(event.roomSequence)]
+                    ) else { throw V2ClientSyncError.invalidRecordOrdering }
+                    let sourceEventID: String = existing["source_event_id"]
+                    let projectionKind: String = existing["projection_kind"]
+                    let payload: Data = existing["payload"]
+                    guard sourceEventID == event.sourceEventID.rawValue, projectionKind == event.projectionKind, payload == event.payload else {
+                        throw V2ClientSyncError.invalidRecordOrdering
+                    }
+                    continue
+                }
+                let record = V2ClientSyncRecord(sequence: event.roomSequence, sourceEventID: event.sourceEventID, projectionKind: event.projectionKind, payload: event.payload)
+                try Self.applyRoomEventProjection(record, db: db)
+                try db.execute(
+                    sql: "INSERT INTO v2_group_events (room_id, room_sequence, source_event_id, projection_kind, payload) VALUES (?, ?, ?, ?, ?)",
+                    arguments: [page.roomID.rawValue, try Self.storageInteger(event.roomSequence), event.sourceEventID.rawValue, event.projectionKind, event.payload]
+                )
+            }
+            try db.execute(
+                sql: "INSERT INTO v2_group_event_cursors (room_id, applied_room_sequence) VALUES (?, ?) ON CONFLICT(room_id) DO UPDATE SET applied_room_sequence = excluded.applied_room_sequence",
+                arguments: [page.roomID.rawValue, try Self.storageInteger(page.nextRoomSequence)]
+            )
+            return page.nextRoomSequence
+        }
+    }
+
+    public func applyForegroundGroupEventPreviewPage(_ page: V2ClientGroupEventPage) throws -> UInt64 {
+        try databasePool.write { db in
+            guard zip(page.events, page.events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence }),
+                  (page.events.last?.roomSequence ?? page.nextRoomSequence) == page.nextRoomSequence
+            else { throw V2ClientSyncError.invalidRecordOrdering }
+            for event in page.events {
+                try Self.applyRoomEventProjection(
+                    .init(
+                        sequence: event.roomSequence,
+                        sourceEventID: event.sourceEventID,
+                        projectionKind: event.projectionKind,
+                        payload: event.payload
+                    ),
+                    db: db
+                )
+            }
+            // This is deliberately not a durable cursor or ACK. The normal
+            // per-user sync stream remains the standard group's recovery
+            // authority after a process restart or a missed foreground hint.
+            return page.nextRoomSequence
+        }
     }
 
     public func apply(_ batch: V2ClientSyncBatch) throws -> V2LocalSyncCursor {
@@ -420,14 +548,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
     public func roomProfile(roomID: RoomID) throws -> V2ClientRoomProfileProjection? {
         try databasePool.read { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT source_event_id, room_id, title, owner_user_id, membership_revision, created_at FROM v2_room_profile_projections WHERE room_id = ?", arguments: [roomID.rawValue]) else { return nil }
+            guard let row = try Row.fetchOne(db, sql: "SELECT source_event_id, room_id, title, owner_user_id, delivery_mode, membership_revision, created_at FROM v2_room_profile_projections WHERE room_id = ?", arguments: [roomID.rawValue]) else { return nil }
             return try Self.decodeRoomProfileProjection(row)
         }
     }
 
     public func roomProfiles() throws -> [V2ClientRoomProfileProjection] {
         try databasePool.read { db in
-            try Row.fetchAll(db, sql: "SELECT source_event_id, room_id, title, owner_user_id, membership_revision, created_at FROM v2_room_profile_projections ORDER BY created_at DESC, room_id").map(Self.decodeRoomProfileProjection)
+            try Row.fetchAll(db, sql: "SELECT source_event_id, room_id, title, owner_user_id, delivery_mode, membership_revision, created_at FROM v2_room_profile_projections ORDER BY created_at DESC, room_id").map(Self.decodeRoomProfileProjection)
         }
     }
 
@@ -1395,13 +1523,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try databasePool.write { db in
             guard command.state == .pending, command.attemptCount == 0, command.createdRoomID == nil, command.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
             let members = try Self.encodeGroupMemberUserIDs(command.initialMemberUserIDs)
-            if let existing = try Row.fetchOne(db, sql: "SELECT title, initial_member_user_ids FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [command.operationID.rawValue]) {
+            if let existing = try Row.fetchOne(db, sql: "SELECT title, delivery_mode, initial_member_user_ids FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [command.operationID.rawValue]) {
                 let title: String = existing["title"]
+                let deliveryMode: String = existing["delivery_mode"]
                 let existingMembers: String = existing["initial_member_user_ids"]
-                guard title == command.title, existingMembers == members else { throw V2ClientCommandError.commandConflict }
+                guard title == command.title, deliveryMode == command.deliveryMode.rawValue, existingMembers == members else { throw V2ClientCommandError.commandConflict }
                 return
             }
-            try db.execute(sql: "INSERT INTO v2_pending_group_room_creations (operation_id, title, initial_member_user_ids, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.title, members, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+            try db.execute(sql: "INSERT INTO v2_pending_group_room_creations (operation_id, title, delivery_mode, initial_member_user_ids, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.title, command.deliveryMode.rawValue, members, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
         }
     }
 
@@ -1422,6 +1551,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             ) {
                 let decoded = try Self.decodePendingGroupRoomCreation(existing)
                 guard decoded.title == command.title,
+                      decoded.deliveryMode == command.deliveryMode,
                       decoded.initialMemberUserIDs == command.initialMemberUserIDs,
                       decoded.state == .pending
                 else { throw V2ClientCommandError.commandConflict }
@@ -1431,23 +1561,24 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 db,
                 sql: """
                 SELECT * FROM v2_pending_group_room_creations
-                WHERE title = ? AND initial_member_user_ids = ? AND state = 'pending'
+                WHERE title = ? AND delivery_mode = ? AND initial_member_user_ids = ? AND state = 'pending'
                 ORDER BY created_at, operation_id
                 LIMIT 1
                 """,
-                arguments: [command.title, members]
+                arguments: [command.title, command.deliveryMode.rawValue, members]
             ) {
                 return try Self.decodePendingGroupRoomCreation(existing)
             }
             try db.execute(
                 sql: """
                 INSERT INTO v2_pending_group_room_creations
-                (operation_id, title, initial_member_user_ids, state, attempt_count, next_attempt_at, created_at)
-                VALUES (?, ?, ?, 'pending', 0, ?, ?)
+                (operation_id, title, delivery_mode, initial_member_user_ids, state, attempt_count, next_attempt_at, created_at)
+                VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
                 """,
                 arguments: [
                     command.operationID.rawValue,
                     command.title,
+                    command.deliveryMode.rawValue,
                     members,
                     command.nextAttemptAt.timeIntervalSince1970,
                     command.nextAttemptAt.timeIntervalSince1970
@@ -1504,6 +1635,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             throw V2ClientSyncError.storageRangeExceeded
         }
         return result
+    }
+
+    private static func storageUnsigned(_ value: Int64) throws -> UInt64 {
+        guard value >= 0 else { throw V2ClientSyncError.storageRangeExceeded }
+        return UInt64(value)
     }
 
     private static func commandStorageInteger(_ value: UInt64) throws -> Int64 {
@@ -1660,6 +1796,15 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
+    private static func applyRoomEventProjection(_ record: V2ClientSyncRecord, db: Database) throws {
+        switch record.projectionKind {
+        case "message": try applyMessage(record, db: db)
+        case "moderation": try applyModeration(record, db: db)
+        case "room", "membership": try persist(V2ClientRoomProfileProjection(record: record), db: db)
+        default: throw V2ClientProjectionError.invalidMessagePayload
+        }
+    }
+
     private static func applyRelationship(_ record: V2ClientSyncRecord, db: Database) throws {
         struct Payload: Decodable { let targetUserID: String; let state: String; let requestedByUserID: String?; let updatedAtMilliseconds: Int64; enum CodingKeys: String, CodingKey { case targetUserID = "target_user_id"; case state; case requestedByUserID = "requested_by_user_id"; case updatedAtMilliseconds = "updated_at_ms" } }
         let payload: Payload
@@ -1779,7 +1924,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     }
 
     private static func persist(_ projection: V2ClientRoomProfileProjection, db: Database) throws {
-        if let existing = try Row.fetchOne(db, sql: "SELECT source_event_id, title, owner_user_id, membership_revision, created_at FROM v2_room_profile_projections WHERE room_id = ?", arguments: [projection.roomID.rawValue]) {
+        if let existing = try Row.fetchOne(db, sql: "SELECT source_event_id, title, owner_user_id, delivery_mode, membership_revision, created_at FROM v2_room_profile_projections WHERE room_id = ?", arguments: [projection.roomID.rawValue]) {
             let sourceEventID: String = existing["source_event_id"]; let title: String = existing["title"]
             let ownerUserID: String = existing["owner_user_id"]; let membershipRevision: Int64 = existing["membership_revision"]; let createdAt: Double = existing["created_at"]
             let incomingRevision = try storageInteger(projection.membershipRevision)
@@ -1791,10 +1936,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 guard sourceEventID == projection.sourceEventID.rawValue else { throw V2ClientProjectionError.invalidMessagePayload }
                 return
             }
-            try db.execute(sql: "UPDATE v2_room_profile_projections SET source_event_id = ?, membership_revision = ? WHERE room_id = ?", arguments: [projection.sourceEventID.rawValue, incomingRevision, projection.roomID.rawValue])
+            try db.execute(sql: "UPDATE v2_room_profile_projections SET source_event_id = ?, delivery_mode = COALESCE(?, delivery_mode), membership_revision = ? WHERE room_id = ?", arguments: [projection.sourceEventID.rawValue, projection.deliveryMode?.rawValue, incomingRevision, projection.roomID.rawValue])
             return
         }
-        try db.execute(sql: "INSERT INTO v2_room_profile_projections (room_id, source_event_id, title, owner_user_id, membership_revision, created_at) VALUES (?, ?, ?, ?, ?, ?)", arguments: [projection.roomID.rawValue, projection.sourceEventID.rawValue, projection.title, projection.ownerUserID.rawValue, try storageInteger(projection.membershipRevision), projection.createdAt.timeIntervalSince1970])
+        try db.execute(sql: "INSERT INTO v2_room_profile_projections (room_id, source_event_id, title, owner_user_id, delivery_mode, membership_revision, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", arguments: [projection.roomID.rawValue, projection.sourceEventID.rawValue, projection.title, projection.ownerUserID.rawValue, projection.deliveryMode?.rawValue, try storageInteger(projection.membershipRevision), projection.createdAt.timeIntervalSince1970])
     }
 
     private static func persist(_ projection: V2ClientDirectRoomProfileProjection, db: Database) throws {
@@ -2040,7 +2185,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     private static func decodeRoomProfileProjection(_ row: Row) throws -> V2ClientRoomProfileProjection {
         let revision = UInt64(row["membership_revision"] as Int64)
         let snapshot = try V2SnapshotRoomProfileProjection(sourceEventID: .init(row["source_event_id"] as String), roomID: .init(row["room_id"] as String), title: row["title"], ownerUserID: .init(row["owner_user_id"] as String), membershipRevision: revision, createdAt: Date(timeIntervalSince1970: row["created_at"] as Double))
-        return .init(snapshotProjection: snapshot)
+        let deliveryMode = (row["delivery_mode"] as String?).flatMap(V2GroupDeliveryMode.init)
+        return .init(snapshotProjection: snapshot, deliveryMode: deliveryMode)
     }
 
     private static func decodeDirectRoomIdentity(_ row: Row) throws -> V2ClientDirectRoomIdentity {
@@ -2076,8 +2222,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     private static func decodePendingGroupRoomCreation(_ row: Row) throws -> V2PendingGroupRoomCreation {
         let membersData = Data((row["initial_member_user_ids"] as String).utf8)
         let members = try JSONDecoder().decode([String].self, from: membersData).map(UserID.init)
-        guard let state = V2PendingGroupRoomCreation.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(operationID: .init(row["operation_id"] as String), title: row["title"], initialMemberUserIDs: members, state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), createdRoomID: try (row["created_room_id"] as String?).map(RoomID.init), terminalCode: row["terminal_code"])
+        guard let state = V2PendingGroupRoomCreation.State(rawValue: row["state"] as String),
+              let deliveryMode = V2GroupDeliveryMode(rawValue: row["delivery_mode"] as String)
+        else { throw V2ClientCommandError.commandConflict }
+        return try .init(operationID: .init(row["operation_id"] as String), title: row["title"], deliveryMode: deliveryMode, initialMemberUserIDs: members, state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), createdRoomID: try (row["created_room_id"] as String?).map(RoomID.init), terminalCode: row["terminal_code"])
     }
 
     private static let migrator: DatabaseMigrator = {
@@ -2516,6 +2664,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         migrator.registerMigration("addV2RoomProfileMembershipRevision") { db in
             try db.execute(sql: "ALTER TABLE v2_room_profile_projections ADD COLUMN membership_revision INTEGER NOT NULL DEFAULT 1 CHECK (membership_revision > 0)")
         }
+        migrator.registerMigration("addV2RoomProfileDeliveryMode") { db in
+            try db.execute(sql: "ALTER TABLE v2_room_profile_projections ADD COLUMN delivery_mode TEXT CHECK (delivery_mode IS NULL OR delivery_mode IN ('standard_fanout', 'large_group_hybrid'))")
+        }
         migrator.registerMigration("addV2DirectRoomIdentityCache") { db in
             try db.execute(sql: """
                 CREATE TABLE v2_direct_room_identities (
@@ -2583,6 +2734,27 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     ON v2_pending_group_room_creations
                     (title, initial_member_user_ids, created_at, operation_id)
                     WHERE state = 'pending';
+            """)
+        }
+        migrator.registerMigration("addV2PendingGroupRoomCreationDeliveryMode") { db in
+            try db.execute(sql: "ALTER TABLE v2_pending_group_room_creations ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'standard_fanout' CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid'))")
+            try db.execute(sql: "DROP INDEX v2_pending_group_room_creations_intent_idx")
+            try db.execute(sql: "CREATE INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx ON v2_pending_group_room_creations (title, delivery_mode, initial_member_user_ids, created_at, operation_id) WHERE state = 'pending'")
+        }
+        migrator.registerMigration("addV2HybridGroupEventCursors") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_group_event_cursors (
+                    room_id TEXT PRIMARY KEY,
+                    applied_room_sequence INTEGER NOT NULL CHECK (applied_room_sequence >= 0)
+                );
+                CREATE TABLE v2_group_events (
+                    room_id TEXT NOT NULL,
+                    room_sequence INTEGER NOT NULL CHECK (room_sequence > 0),
+                    source_event_id TEXT NOT NULL UNIQUE,
+                    projection_kind TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    PRIMARY KEY (room_id, room_sequence)
+                );
             """)
         }
         migrator.registerMigration("addV2TerminalCommandRetentionIndexes") { db in

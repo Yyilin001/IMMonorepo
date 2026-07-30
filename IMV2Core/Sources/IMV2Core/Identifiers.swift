@@ -25,10 +25,32 @@ public struct V2Identifier<Tag: V2IdentifierTag>: Hashable, Codable, Sendable, C
         else {
             throw V2CoreError.invalidIdentifier
         }
-        self.rawValue = rawValue
+        // UUID-backed IDs are emitted by PostgreSQL, HTTP, and protobuf
+        // boundaries. Those boundaries are allowed to differ only in UUID
+        // letter casing, never in identity. Persist one canonical spelling so
+        // projections from independent endpoints still join on the same local
+        // SQLite key. Foundation's UUID spelling is also the one used by the
+        // server's room-event payloads, so every layer shares one lexical key.
+        // Non-UUID opaque identifiers deliberately retain their exact
+        // URL-safe spelling.
+        self.rawValue = UUID(uuidString: rawValue)?.uuidString ?? rawValue
     }
 
     public var description: String { rawValue }
+
+    /// Keep decoding on the same validation and canonicalization boundary as
+    /// every other external identifier input. Synthesis would write directly
+    /// into `rawValue`, allowing an invalid or differently cased UUID to
+    /// bypass `init(_:)` when an identifier is embedded in a Codable model.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(container.decode(String.self, forKey: .rawValue))
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(rawValue, forKey: .rawValue)
+    }
 
     public static func < (lhs: Self, rhs: Self) -> Bool {
         lhs.rawValue < rhs.rawValue
@@ -41,6 +63,10 @@ public struct V2Identifier<Tag: V2IdentifierTag>: Hashable, Codable, Sendable, C
         default:
             false
         }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case rawValue
     }
 }
 

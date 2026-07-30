@@ -17,6 +17,17 @@ struct V2ConversationListItem: Hashable, Identifiable, Sendable {
         /// A message arrived before its corresponding room projection. Keep
         /// it readable, but do not expose group-only controls speculatively.
         case unknown
+
+        /// Test-only consumers can distinguish a locally projected direct
+        /// room from a group without depending on a mutable display name.
+        /// The opaque room ID remains the final identifier component.
+        var accessibilityIdentifierComponent: String {
+            switch self {
+            case .direct: "direct"
+            case .group: "group"
+            case .unknown: "unknown"
+            }
+        }
     }
 
     let id: String
@@ -103,6 +114,41 @@ enum V2ConversationMediaDownloadState: Hashable, Sendable {
 protocol V2ConversationDataSource: Sendable {
     func conversationSummaries(for userID: String) async throws -> [V2ConversationListItem]
     func messages(in roomID: String, for userID: String) async throws -> [V2ConversationMessageItem]
+}
+
+/// A foreground-only boundary for the currently open hybrid room. It is not a
+/// member notification channel: only the device that is displaying a room
+/// polls it, and every returned event still commits through the durable local
+/// cursor before SwiftUI is refreshed.
+enum V2ActiveHybridGroupSyncOutcome: Equatable, Sendable {
+    case notHybridRoom
+    case synchronized(appliedEventCount: Int, hasMore: Bool)
+}
+
+enum V2ActiveHybridGroupSubscriptionOutcome: Equatable, Sendable {
+    case notHybridRoom
+    /// Test and transitional implementations retain a sparse polling fallback;
+    /// the production runtime always selects `.subscribed`.
+    case legacyPolling
+    case subscribed(highWatermark: UInt64)
+}
+
+struct V2ActiveHybridGroupWake: Equatable, Sendable {
+    let roomID: String
+    let highWatermark: UInt64
+}
+
+protocol V2ActiveHybridGroupSynchronizing: Sendable {
+    func synchronizeOnePage(roomID: String) async throws -> V2ActiveHybridGroupSyncOutcome
+    func subscribe(roomID: String) async throws -> V2ActiveHybridGroupSubscriptionOutcome
+    func nextWake() async throws -> V2ActiveHybridGroupWake
+    func unsubscribe(roomID: String) async
+}
+
+extension V2ActiveHybridGroupSynchronizing {
+    func subscribe(roomID _: String) async throws -> V2ActiveHybridGroupSubscriptionOutcome { .legacyPolling }
+    func nextWake() async throws -> V2ActiveHybridGroupWake { throw CancellationError() }
+    func unsubscribe(roomID _: String) async {}
 }
 
 /// Bridges durable sync completion to UI stores without exposing transport
@@ -289,6 +335,7 @@ final class V2ConversationListStore {
     private let attachmentUploader: (any V2ConversationAttachmentUploading)?
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
     private let projectionChangeNotifier: V2ProjectionChangeNotifier?
+    private let activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)?
     private(set) var items: [V2ConversationListItem] = []
     private(set) var state: State = .loading
     private(set) var directConversationFeedback: String?
@@ -317,7 +364,8 @@ final class V2ConversationListStore {
         attachmentStager: (any V2ConversationAttachmentStaging)? = nil,
         attachmentUploader: (any V2ConversationAttachmentUploading)? = nil,
         mediaDownloader: (any V2ConversationMediaDownloading)? = nil,
-        projectionChangeNotifier: V2ProjectionChangeNotifier? = nil
+        projectionChangeNotifier: V2ProjectionChangeNotifier? = nil,
+        activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil
     ) {
         self.dataSource = dataSource
         self.userID = userID
@@ -337,6 +385,7 @@ final class V2ConversationListStore {
         self.attachmentUploader = attachmentUploader
         self.mediaDownloader = mediaDownloader
         self.projectionChangeNotifier = projectionChangeNotifier
+        self.activeHybridGroupSynchronizer = activeHybridGroupSynchronizer
     }
 
     func createGroupConversation(title: String, memberHandlesText: String) async -> String? {
@@ -422,12 +471,13 @@ final class V2ConversationListStore {
 
     func detailStore(
         for roomID: String,
-        initialDraft: String? = nil
+        initialDraft: String? = nil,
+        initialMentionHandles: String? = nil
     ) -> V2ConversationDetailStore {
         let item = items.first(where: { $0.id == roomID })
         let title = explicitRoomTitles[roomID] ?? item?.title ?? "会话"
         let kind = explicitRoomKinds[roomID] ?? item?.kind ?? .unknown
-        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader, projectionChangeNotifier: projectionChangeNotifier, initialDraft: initialDraft)
+        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader, projectionChangeNotifier: projectionChangeNotifier, activeHybridGroupSynchronizer: activeHybridGroupSynchronizer, initialDraft: initialDraft, initialMentionHandles: initialMentionHandles)
     }
 
     func observeProjectionChanges() async {
@@ -504,6 +554,7 @@ final class V2ConversationDetailStore {
     private let attachmentUploader: (any V2ConversationAttachmentUploading)?
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
     private let projectionChangeNotifier: V2ProjectionChangeNotifier?
+    private let activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)?
     let roomID: String
     let title: String
     let isGroupConversation: Bool
@@ -530,7 +581,7 @@ final class V2ConversationDetailStore {
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
-    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil, projectionChangeNotifier: V2ProjectionChangeNotifier? = nil, initialDraft: String? = nil) {
+    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil, projectionChangeNotifier: V2ProjectionChangeNotifier? = nil, activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil, initialDraft: String? = nil, initialMentionHandles: String? = nil) {
         self.dataSource = dataSource
         self.sender = sender
         self.messageWithdrawer = messageWithdrawer
@@ -550,7 +601,9 @@ final class V2ConversationDetailStore {
         self.attachmentUploader = attachmentUploader
         self.mediaDownloader = mediaDownloader
         self.projectionChangeNotifier = projectionChangeNotifier
+        self.activeHybridGroupSynchronizer = activeHybridGroupSynchronizer
         draft = initialDraft ?? ""
+        mentionHandlesText = initialMentionHandles ?? ""
     }
 
     func refresh() async {
@@ -587,6 +640,121 @@ final class V2ConversationDetailStore {
         }
     }
 
+    /// This task is owned by the detail view's `.task` modifier, so it stops
+    /// automatically when the user leaves the conversation or the scene tears
+    /// down. Production rooms wait for a server wake on the existing TLS
+    /// connection; a 30-second cursor pull remains only as loss recovery.
+    func pollVisibleHybridGroupEvents() async {
+        guard isGroupConversation,
+              let activeHybridGroupSynchronizer
+        else { return }
+        let subscription: V2ActiveHybridGroupSubscriptionOutcome
+        do {
+            subscription = try await activeHybridGroupSynchronizer.subscribe(roomID: roomID)
+        } catch is CancellationError {
+            return
+        } catch {
+            // The transient recovery path below still preserves local history
+            // while the foreground connection is being re-established.
+            await pollHybridGroupFallback(activeHybridGroupSynchronizer)
+            return
+        }
+        switch subscription {
+        case .notHybridRoom:
+            return
+        case .legacyPolling:
+            await pollHybridGroupFallback(activeHybridGroupSynchronizer)
+        case .subscribed:
+            await runSubscribedHybridGroup(activeHybridGroupSynchronizer)
+            await activeHybridGroupSynchronizer.unsubscribe(roomID: roomID)
+        }
+    }
+
+    private func runSubscribedHybridGroup(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async {
+        while !Task.isCancelled {
+            let shouldContinue = await synchronizeHybridGroupUntilIdle(synchronizer)
+            guard shouldContinue else { return }
+            do {
+                let wake = try await nextHybridWakeOrFallback(synchronizer)
+                if let wake, wake.roomID != roomID {
+                    continue
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                // A broken connection may fail immediately. Slow only this
+                // failure path so it cannot become a hot sync loop; normal
+                // foreground delivery still waits for a TLS wake.
+                await waitAfterRealtimeWakeFailure()
+            }
+        }
+    }
+
+    /// Existing injected fakes and deliberately unavailable realtime paths use
+    /// the same durable sync engine at a much lower cadence. It is never the
+    /// normal online Hybrid delivery path.
+    private func pollHybridGroupFallback(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async {
+        while !Task.isCancelled {
+            let shouldContinue = await synchronizeHybridGroupUntilIdle(synchronizer)
+            guard shouldContinue else { return }
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch is CancellationError {
+                return
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func synchronizeHybridGroupUntilIdle(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async -> Bool {
+        while !Task.isCancelled {
+            do {
+                switch try await synchronizer.synchronizeOnePage(roomID: roomID) {
+                case .notHybridRoom:
+                    return false
+                case .synchronized(let appliedEventCount, let hasMore):
+                    if appliedEventCount > 0 {
+                        await projectionChangeNotifier?.publish()
+                    }
+                    if hasMore {
+                        await Task.yield()
+                    } else {
+                        return true
+                    }
+                }
+            } catch is CancellationError {
+                return false
+            } catch {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// A broker wake gives normal foreground latency. The timer only recovers
+    /// a lost best-effort wake and is deliberately not a one-second poll.
+    private func nextHybridWakeOrFallback(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async throws -> V2ActiveHybridGroupWake? {
+        try await withThrowingTaskGroup(of: V2ActiveHybridGroupWake?.self) { group in
+            group.addTask { try await synchronizer.nextWake() }
+            group.addTask {
+                try await Task.sleep(for: .seconds(30))
+                return nil
+            }
+            guard let result = try await group.next() else { throw CancellationError() }
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func waitAfterRealtimeWakeFailure() async {
+        do {
+            try await Task.sleep(for: .seconds(1))
+        } catch {
+            // The owning detail-view task will exit on cancellation.
+        }
+    }
+
     private func reportReadThroughVisibleMessages() async {
         guard let readReceiptReporter,
               let lastVisibleSequence = messages.map(\.roomSequence).max()
@@ -611,18 +779,21 @@ final class V2ConversationDetailStore {
         }
         isSending = true
         defer { isSending = false }
-        guard await uploadPendingAttachments() else { return }
-        let media = attachments.compactMap { item -> V2MediaReference? in
-            guard case .available(let reference) = item.state else { return nil }
-            return reference
-        }
-        guard media.count == attachments.count else {
-            sendFeedback = "附件尚未准备完成。"
-            return
-        }
         do {
+            // Resolve all user-entered intent before any attachment transfer.
+            // An invalid mention must not spend upload/scan work or alter the
+            // staged attachment state.
             let mentions = try await resolvedMentions()
             try Task.checkCancellation()
+            guard await uploadPendingAttachments() else { return }
+            let media = attachments.compactMap { item -> V2MediaReference? in
+                guard case .available(let reference) = item.state else { return nil }
+                return reference
+            }
+            guard media.count == attachments.count else {
+                sendFeedback = "附件尚未准备完成。"
+                return
+            }
             let outcome = try await sender.send(text: text, media: media, mentions: mentions, in: roomID)
             try Task.checkCancellation()
             switch outcome {
@@ -663,15 +834,17 @@ final class V2ConversationDetailStore {
             sendFeedback = "每条消息最多提及 \(V2MessageCommandLimits.maxMentions) 个目标。"
             throw V2ConversationMentionInputError.invalidInput
         }
-        guard let publicIdentityResolver else {
-            sendFeedback = "身份目录暂不可用，无法解析提及对象。"
-            throw V2ConversationMentionInputError.invalidInput
-        }
         var mentions: [V2MentionTarget] = []
         for handle in handles {
             if handle.lowercased() == "@all" {
                 mentions.append(.everyone)
                 continue
+            }
+            // `@all` is a protocol-level target and needs no directory
+            // lookup. Only exact member handles depend on that availability.
+            guard let publicIdentityResolver else {
+                sendFeedback = "身份目录暂不可用，无法解析提及对象。"
+                throw V2ConversationMentionInputError.invalidInput
             }
             do {
                 let identity = try await publicIdentityResolver.resolve(handle: handle)
@@ -696,7 +869,7 @@ final class V2ConversationDetailStore {
     private static func sendRejectionFeedback(for code: String) -> String {
         switch code {
         case "RATE_LIMITED":
-            return "发送频率已达上限，请稍后再试。"
+            return "发送失败：发送频率已达上限，请稍后再试。"
         case "FORBIDDEN":
             // Do not disclose whether the receiver disabled stranger messages,
             // blocked the sender, or a separate room policy denied the action.
@@ -1197,7 +1370,7 @@ struct V2ConversationListView: View {
                                     .lineLimit(1)
                             }
                         }
-                        .accessibilityIdentifier("v2.conversation.\(item.id)")
+                        .accessibilityIdentifier("v2.conversation.\(item.kind.accessibilityIdentifierComponent).\(item.id)")
                     }
                     .accessibilityIdentifier("v2.conversation.list")
                 }
@@ -1230,6 +1403,9 @@ struct V2ConversationListView: View {
                         for: roomID,
                         initialDraft: localE2EFixtureRoomID == roomID
                             ? localE2EConversationLaunchFixture?.initialMessage
+                            : nil,
+                        initialMentionHandles: localE2EFixtureRoomID == roomID
+                            ? localE2EConversationLaunchFixture?.initialMentionHandles
                             : nil
                     )
                 )
@@ -1542,6 +1718,7 @@ private struct V2ConversationDetailView: View {
             Task { await store.stageAttachment(from: url) }
         }
         .task { await store.observeProjectionChanges() }
+        .task { await store.pollVisibleHybridGroupEvents() }
     }
 
     private var canSendDraft: Bool {
@@ -1704,6 +1881,7 @@ private struct V2ConversationMessageBubble: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityLabel(mentionSummary)
+                    .accessibilityIdentifier("v2.message.mentions.\(message.id)")
             }
             if !message.media.isEmpty {
                 VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 6) {

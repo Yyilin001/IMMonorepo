@@ -13,7 +13,7 @@ protocol V2StrangerMessagePreferenceReading: Sendable {
 final class V2UserBlockSettingsStore {
     private let resolver: any V2PublicIdentityResolving
     private let changer: any V2UserBlockChanging
-    private let currentUserID: String
+    private let currentUserID: UserID
 
     private(set) var isChanging = false
     private(set) var feedback: String?
@@ -21,7 +21,7 @@ final class V2UserBlockSettingsStore {
     init(
         resolver: any V2PublicIdentityResolving,
         changer: any V2UserBlockChanging,
-        currentUserID: String
+        currentUserID: UserID
     ) {
         self.resolver = resolver
         self.changer = changer
@@ -41,7 +41,7 @@ final class V2UserBlockSettingsStore {
         do {
             let identity = try await resolver.resolve(handle: trimmedHandle)
             try Task.checkCancellation()
-            guard identity.userID.rawValue != currentUserID else {
+            guard identity.userID != currentUserID else {
                 feedback = "不能屏蔽自己。"
                 return
             }

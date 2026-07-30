@@ -39,10 +39,14 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
                                  WHERE user_id = \(bind: userUUID)), 0) AS value
                 """).first(decoding: SnapshotProjectionWatermarkRow.self)?.value ?? 0
             let log = try await sql.raw("""
-                SELECT user_sync_sequence, source_event_id, projection_kind, payload::text AS payload_json
-                FROM im_v2.user_sync_log
-                WHERE user_id = \(bind: userUUID)
-                ORDER BY user_sync_sequence
+                SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind,
+                       CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE shared.payload END::text AS payload_json
+                FROM im_v2.user_sync_log AS log
+                LEFT JOIN im_v2.fanout_sync_payloads AS shared
+                  ON shared.source_event_id = log.source_event_id
+                 AND shared.projection_kind = log.projection_kind
+                WHERE log.user_id = \(bind: userUUID)
+                ORDER BY log.user_sync_sequence
                 """).all(decoding: SnapshotProjectionSyncLogRow.self)
             let relationships = try await sql.raw("""
                 SELECT CASE WHEN lower_user_id = \(bind: userUUID) THEN higher_user_id ELSE lower_user_id END AS target_user_id,

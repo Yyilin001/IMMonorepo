@@ -27,6 +27,8 @@ struct V2PrometheusTelemetrySinkTests {
             staleRouteDeliveries: 1,
             releasedDeliveries: 2,
             pausedDeliveries: 3,
+            relayElapsedMilliseconds: 3,
+            deliveryElapsedMilliseconds: 5,
             elapsedMilliseconds: 8
         ))
         await sink.record(.fanoutFailure(traceID: trace, stage: .delivery, elapsedMilliseconds: 1))
@@ -40,6 +42,8 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(metrics.contains("im_v2_fanout_outbox_rows_total{state=\"paused\"} 2"))
         #expect(metrics.contains("im_v2_fanout_deliveries_total{state=\"stale_route\"} 1"))
         #expect(metrics.contains("im_v2_fanout_deliveries_total{state=\"paused\"} 3"))
+        #expect(metrics.contains("im_v2_fanout_relay_duration_milliseconds_sum 3"))
+        #expect(metrics.contains("im_v2_fanout_delivery_duration_milliseconds_sum 5"))
         #expect(metrics.contains("im_v2_fanout_failures_total{stage=\"delivery\"} 1"))
         #expect(!metrics.contains(trace.uuidString))
         #expect(!metrics.contains("room_id"))

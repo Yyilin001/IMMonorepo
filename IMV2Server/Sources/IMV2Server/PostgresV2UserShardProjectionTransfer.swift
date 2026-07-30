@@ -58,21 +58,43 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
         var afterSequence: Int64 = 0
         while true {
             let page = try await sourceSQL.raw("""
-                SELECT user_sync_sequence, source_event_id, projection_kind, payload::text AS payload_json, created_at
-                FROM \(unsafeRaw: sourceTable("user_sync_log"))
-                WHERE user_id = \(bind: userID) AND user_sync_sequence > \(bind: afterSequence)
-                ORDER BY user_sync_sequence
+                SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind,
+                       CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE shared.payload END::text AS payload_json,
+                       log.payload_storage, log.created_at
+                FROM \(unsafeRaw: sourceTable("user_sync_log")) AS log
+                LEFT JOIN \(unsafeRaw: sourceTable("fanout_sync_payloads")) AS shared
+                  ON shared.source_event_id = log.source_event_id
+                 AND shared.projection_kind = log.projection_kind
+                WHERE log.user_id = \(bind: userID) AND log.user_sync_sequence > \(bind: afterSequence)
+                ORDER BY log.user_sync_sequence
                 LIMIT \(bind: pageSize)
                 """).all(decoding: ProjectionSyncLogRow.self)
             guard !page.isEmpty else { break }
             try await target.transaction { database in
                 guard let targetSQL = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 for row in page {
+                    if row.payloadStorage == "fanout_shared" {
+                        try await targetSQL.raw("""
+                            INSERT INTO \(unsafeRaw: targetTable("fanout_sync_payloads"))
+                                (source_event_id, projection_kind, payload, created_at)
+                            VALUES (\(bind: row.sourceEventID), \(bind: row.projectionKind), \(bind: row.payloadJSON)::jsonb, \(bind: row.createdAt))
+                            ON CONFLICT DO NOTHING
+                            """).run()
+                        guard let match = try await targetSQL.raw("""
+                            SELECT 1 AS value FROM \(unsafeRaw: targetTable("fanout_sync_payloads"))
+                            WHERE source_event_id = \(bind: row.sourceEventID)
+                              AND projection_kind = \(bind: row.projectionKind)
+                              AND payload = \(bind: row.payloadJSON)::jsonb
+                            """).first(decoding: ProjectionPayloadMatchRow.self), match.value == 1 else {
+                            throw V2RoomWriteStoreError.corruptPersistenceState
+                        }
+                    }
                     try await targetSQL.raw("""
                         INSERT INTO \(unsafeRaw: targetTable("user_sync_log"))
-                            (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
+                            (user_id, user_sync_sequence, source_event_id, projection_kind, payload, payload_storage, created_at)
                         VALUES (\(bind: userID), \(bind: row.sequence), \(bind: row.sourceEventID), \(bind: row.projectionKind),
-                                \(bind: row.payloadJSON)::jsonb, \(bind: row.createdAt))
+                                CASE WHEN \(bind: row.payloadStorage) = 'inline' THEN \(bind: row.payloadJSON)::jsonb ELSE NULL END,
+                                \(bind: row.payloadStorage), \(bind: row.createdAt))
                         ON CONFLICT DO NOTHING
                         """).run()
                 }
@@ -216,10 +238,15 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
         var afterSequence: Int64 = 0
         while true {
             let page = try await sql.raw("""
-                SELECT user_sync_sequence, source_event_id, projection_kind, payload::text AS payload_json, created_at
-                FROM \(unsafeRaw: sourceTable("user_sync_log"))
-                WHERE user_id = \(bind: userID) AND user_sync_sequence > \(bind: afterSequence)
-                ORDER BY user_sync_sequence LIMIT \(bind: pageSize)
+                SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind,
+                       CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE shared.payload END::text AS payload_json,
+                       log.payload_storage, log.created_at
+                FROM \(unsafeRaw: sourceTable("user_sync_log")) AS log
+                LEFT JOIN \(unsafeRaw: sourceTable("fanout_sync_payloads")) AS shared
+                  ON shared.source_event_id = log.source_event_id
+                 AND shared.projection_kind = log.projection_kind
+                WHERE log.user_id = \(bind: userID) AND log.user_sync_sequence > \(bind: afterSequence)
+                ORDER BY log.user_sync_sequence LIMIT \(bind: pageSize)
                 """).all(decoding: ProjectionSyncLogRow.self)
             guard !page.isEmpty else { break }
             lines.append(contentsOf: page.map(ProjectionSyncLogRow.canonicalLine))
@@ -281,13 +308,14 @@ private struct ProjectionInboxRow: Decodable, Sendable {
     static func canonicalLine(_ row: Self) -> String { "inbox|\(row.consumerName)|\(row.sourceEventID)|\(row.targetUserID)|\(row.projectionKind)" }
 }
 private struct ProjectionSyncLogRow: Decodable, Sendable {
-    let sequence: Int64; let sourceEventID: UUID; let projectionKind: String; let payloadJSON: String; let createdAt: Date
-    enum CodingKeys: String, CodingKey { case sequence = "user_sync_sequence", sourceEventID = "source_event_id", projectionKind = "projection_kind", payloadJSON = "payload_json", createdAt = "created_at" }
+    let sequence: Int64; let sourceEventID: UUID; let projectionKind: String; let payloadJSON: String; let payloadStorage: String; let createdAt: Date
+    enum CodingKeys: String, CodingKey { case sequence = "user_sync_sequence", sourceEventID = "source_event_id", projectionKind = "projection_kind", payloadJSON = "payload_json", payloadStorage = "payload_storage", createdAt = "created_at" }
     // The event payload and per-user sequence define what a receiver observes;
     // `created_at` is local commit timing and can differ across a recovered
     // source-to-target shadow write.
     static func canonicalLine(_ row: Self) -> String { "log|\(row.sequence)|\(row.sourceEventID)|\(row.projectionKind)|\(row.payloadJSON)" }
 }
+private struct ProjectionPayloadMatchRow: Decodable, Sendable { let value: Int }
 private struct ProjectionCursorRow: Decodable, Sendable {
     let userID: UUID; let deviceID: UUID; let state: String; let resetGeneration: Int64; let acknowledgedSequence: Int64; let pendingSnapshotID: UUID?; let pendingBaseSequence: Int64?; let pendingSnapshotExpiresAt: Date?; let completedSnapshotID: UUID?; let completedSnapshotAckReceipt: String?
     enum CodingKeys: String, CodingKey { case userID = "user_id", deviceID = "device_id", state, resetGeneration = "reset_generation", acknowledgedSequence = "acknowledged_sequence", pendingSnapshotID = "pending_snapshot_id", pendingBaseSequence = "pending_base_sequence", pendingSnapshotExpiresAt = "pending_snapshot_expires_at", completedSnapshotID = "completed_snapshot_id", completedSnapshotAckReceipt = "completed_snapshot_ack_receipt" }

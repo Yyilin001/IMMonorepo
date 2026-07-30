@@ -78,6 +78,34 @@ struct V2CommandOutboxTests {
         #expect(try await engine.flushOnce() == .idle)
     }
 
+    @Test("rate limit rejects the current send and never silently replays its content")
+    func rateLimitIsRejectedInsteadOfBeingRescheduled() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: temporaryOutboxDatabaseURL(),
+            installationBinding: testInstallationBinding
+        )
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let transport = ScriptedMessageTransport(results: [.rateLimited])
+        let engine = V2CommandOutboxEngine(
+            store: store,
+            transport: transport,
+            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000515")! },
+            now: { now }
+        )
+        let command = try await engine.enqueueMessage(
+            roomID: .init("00000000-0000-0000-0000-000000000516"),
+            text: "do not silently retry"
+        )
+
+        #expect(try await engine.flushOnce() == .rejected(command.clientMessageID, code: "RATE_LIMITED"))
+        let rejected = try #require(await store.pendingMessageCommands().first)
+        #expect(rejected.state == .rejected)
+        #expect(rejected.terminalCode == "RATE_LIMITED")
+        #expect(rejected.attemptCount == 0)
+        #expect(try await engine.flushOnce() == .idle)
+        #expect(await transport.clientMessageIDs() == [command.clientMessageID])
+    }
+
     @Test("an out-of-range accepted sequence leaves the durable command pending")
     func rejectsUnpersistableAcceptanceSequence() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryOutboxDatabaseURL(), installationBinding: testInstallationBinding)
@@ -147,7 +175,7 @@ struct V2CommandOutboxTests {
 }
 
 private actor ScriptedMessageTransport: V2ClientMessageTransport {
-    enum Result: Sendable { case retryableFailure, terminalConflict, acceptedThenResponseLost, accepted }
+    enum Result: Sendable { case retryableFailure, terminalConflict, rateLimited, acceptedThenResponseLost, accepted }
     private var results: [Result]
     private var receivedIDs: [ClientMessageID] = []
     private var remoteAcceptedIDs: [ClientMessageID] = []
@@ -163,6 +191,7 @@ private actor ScriptedMessageTransport: V2ClientMessageTransport {
         switch results.removeFirst() {
         case .retryableFailure: throw V2RealtimeTransportError.unexpectedResponse
         case .terminalConflict: throw V2RealtimeTransportError.server(code: "IDEMPOTENCY_CONFLICT", retryable: false, retryAfterSeconds: 0, currentRevision: nil)
+        case .rateLimited: throw V2RealtimeTransportError.server(code: "RATE_LIMITED", retryable: true, retryAfterSeconds: 30, currentRevision: nil)
         case .acceptedThenResponseLost:
             remoteAcceptedIDs.append(clientMessageID)
             throw V2RealtimeTransportError.unexpectedResponse

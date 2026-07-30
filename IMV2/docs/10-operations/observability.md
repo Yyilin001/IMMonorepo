@@ -4,11 +4,12 @@
 
 ## 已实现的边界
 
-PostgreSQL durable-work 指标是 worker 健康和积压的权威观测面。可选 NATS 只会在
-durable publication 之后发送最佳努力 wake hint；提示发布失败不会改变 outbox、plan
-或 delivery 状态，因此不会产生“broker 成功即投递成功”的指标语义。当前 adapter
-也没有 NATS connection、publish-confirmation、consumer lag、reconnect 或 broker
-availability 指标；启用 NATS 前不能把这些缺失指标误解为健康。
+PostgreSQL durable-work 指标是 worker 健康和积压的权威观测面。Hybrid 群的
+`group_event_wake_outbox` 也只在 room event 提交后发送最佳努力 wake hint；提示
+发布失败不会改变 cursor、outbox、plan 或 delivery 状态，因此不会产生“broker 成功
+即投递成功”的指标语义。当前 adapter 也没有 NATS connection、publish-confirmation、
+consumer lag、reconnect 或 broker availability 指标；启用 NATS 前不能把这些缺失
+指标误解为健康。
 
 `V2TelemetrySink` 是 Server 的可注入边界。网关命令和一次 fan-out pipeline
 进度分别写入 `V2TelemetryEvent`；生产应用使用 `V2ApplicationTelemetrySink`
@@ -19,7 +20,7 @@ availability 指标；启用 NATS 前不能把这些缺失指标误解为健康�
 | 事件 | 字段 | 用途 |
 | --- | --- | --- |
 | `im_v2.gateway.command` | `trace_id`、有限 `command`、`outcome`、有限 `rejection`、`elapsed_ms` | 接受/拒绝/失败命令计数与延迟 |
-| `im_v2.fanout.progress` | `trace_id`、outbox/delivery 的 claimed/published/committed/released/**paused** 聚合数、`stale_route_deliveries`、`elapsed_ms` | durable fan-out 进度、重试、暂停与路由切换异常；纯空轮询不发事件，避免高频日志噪声 |
+| `im_v2.fanout.progress` | `trace_id`、outbox/delivery 的 claimed/published/committed/released/**paused** 聚合数、`stale_route_deliveries`、`relay_elapsed_ms`、`delivery_elapsed_ms`、`elapsed_ms` | durable fan-out 进度、重试、暂停与路由切换异常；分别定位 relay、投递与整轮耗时；纯空轮询不发事件，避免高频日志噪声 |
 | `im_v2.fanout.failure` | `trace_id`、有限 `stage`、`elapsed_ms` | relay/delivery/pipeline 失败告警 |
 
 `trace_id` 是每次网关请求或 pipeline 运行生成的随机 UUID，只用于日志关联；
@@ -27,7 +28,7 @@ availability 指标；启用 NATS 前不能把这些缺失指标误解为健康�
 
 `V2PrometheusTelemetrySink` 会与结构化日志 sink 同时接收同一封闭事件词汇，
 并聚合为稳定的
-Prometheus 0.0.4 文本：网关命令计数/耗时、fan-out run 耗时、outbox/delivery
+Prometheus 0.0.4 文本：网关命令计数/耗时、fan-out 整轮/relay/delivery 耗时、outbox/delivery
 进度及按 stage 的失败计数。它丢弃 trace ID，并对意外的负聚合数按零处理；
 测试断言指标中不存在 trace ID、room/user 字段或任意输入文本。该 exporter
 只通过独立的 `/metrics` HTTP listener 暴露：运行时强制
@@ -40,7 +41,9 @@ Prometheus 0.0.4 文本：网关命令计数/耗时、fan-out run 耗时、outbo
 `im_v2_gateway_active_devices` 与
 `im_v2_gateway_active_connections`。两者只计已认证且仍被注册的连接；认证、
 EOF、协议错误和设备撤销都会走同一注销路径。它们仅描述当前 gateway
-进程，不可直接当作整个集群的在线人数，集群级聚合应由采集系统完成。
+进程，不可直接当作整个集群的在线人数，集群级聚合应由采集系统完成。Hybrid
+room wake 的 viewer/room 数同样是进程内短暂兴趣状态，必须单独补齐无标签 gauge；
+它不能替代 PostgreSQL wake outbox 的积压、重试和租约指标。
 
 网关 NIO handler 还维护独立的进程内 transport 快照：
 `im_v2_gateway_transport_active_connections` 包含认证前 socket，

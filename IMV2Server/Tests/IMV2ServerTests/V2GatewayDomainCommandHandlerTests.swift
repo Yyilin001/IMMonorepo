@@ -66,6 +66,37 @@ struct V2GatewayDomainCommandHandlerTests {
         }
     }
 
+    @Test("an accepted group message emits only a best-effort foreground watermark hint")
+    func acceptedGroupMessagePublishesForegroundHint() async throws {
+        let fixture = try GatewayDomainFixture()
+        let accepted = V2AcceptedMessage(
+            messageID: try .init("00000000-0000-0000-0000-000000000040"),
+            roomID: fixture.roomID,
+            roomSequence: 9,
+            senderUserID: fixture.userID,
+            clientMessageID: fixture.clientMessageID,
+            text: "hello",
+            groupDeliveryMode: .standardFanout,
+            createdAt: fixture.now
+        )
+        let hints = GatewayForegroundHintRecorder()
+        let handler = V2GatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .accepted(accepted))),
+            foregroundGroupEventHints: hints,
+            sync: fixture.syncService()
+        )
+        var request = IMV2Envelope(); request.sendMessage = .init()
+        request.sendMessage.roomID = fixture.roomID.rawValue
+        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
+        request.sendMessage.content = .init()
+        request.sendMessage.content.text = "hello"
+
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+
+        #expect(response.messageAccepted.roomSequence == 9)
+        #expect(await hints.values() == [.init(roomID: fixture.roomID, highWatermark: 9)])
+    }
+
     @Test("invalid sync state is returned as a stable protocol error")
     func syncStateErrors() async throws {
         let fixture = try GatewayDomainFixture()
@@ -129,10 +160,34 @@ struct V2GatewayDomainCommandHandlerTests {
         request.createGroupRoom.operationID = "00000000-0000-0000-0000-000000000034"
         request.createGroupRoom.title = " 项目群 "
         request.createGroupRoom.initialMemberUserIds = ["00000000-0000-0000-0000-000000000035"]
+        // A wire caller may claim hybrid for a two-member room; the server
+        // must derive the immutable mode from the audience instead.
+        request.createGroupRoom.deliveryMode = .largeGroupHybrid
 
         let response = try await handler.handle(envelope: request, identity: fixture.identity)
         #expect(response.groupRoomCreated.title == "项目群")
         #expect(response.groupRoomCreated.memberUserIds.contains(fixture.userID.rawValue))
+        #expect(response.groupRoomCreated.deliveryMode == .standardFanout)
+        #expect(await store.actor() == fixture.userID)
+    }
+
+    @Test("Hybrid room subscription verifies the session actor and returns only its waterline")
+    func groupEventSubscriptionUsesAuthenticatedActor() async throws {
+        let fixture = try GatewayDomainFixture()
+        let store = GatewayGroupEventLogStore()
+        let handler = V2GatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
+            groupEventLog: .init(store: store),
+            sync: fixture.syncService()
+        )
+        var request = IMV2Envelope(); request.groupEventSubscribe = .init()
+        request.groupEventSubscribe.roomID = fixture.roomID.rawValue
+        request.groupEventSubscribe.afterRoomSequence = 77
+
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+
+        #expect(response.groupEventSubscribed.roomID == fixture.roomID.rawValue)
+        #expect(response.groupEventSubscribed.highWatermark == 91)
         #expect(await store.actor() == fixture.userID)
     }
 
@@ -290,6 +345,29 @@ private struct GatewayRejectingSyncStore: V2SyncStore {
     func acknowledgeSnapshot(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, baseSequence _: UInt64, receipt _: V2SyncReceipt, now _: Date) async throws {}
 }
 
+private struct GatewayAcceptedMessageStore: V2RoomWriteStore {
+    let outcome: V2SendMessageOutcome
+
+    func accept(
+        command _: V2SendMessageCommand,
+        capacityProfile _: V2CapacityProfile,
+        identifiers _: V2AcceptanceIdentifiers,
+        now _: Date
+    ) async throws -> V2SendMessageOutcome {
+        outcome
+    }
+}
+
+private actor GatewayForegroundHintRecorder: V2ForegroundGroupEventHintPublishing {
+    private var hints: [V2GroupEventWake] = []
+
+    func publishForegroundHint(_ hint: V2GroupEventWake) {
+        hints.append(hint)
+    }
+
+    func values() -> [V2GroupEventWake] { hints }
+}
+
 private actor GatewayMembershipStore: V2RoomMembershipStore {
     private var capturedActor: UserID?
 
@@ -329,7 +407,22 @@ private actor GatewayGroupStore: V2GroupMessagingStore {
 
     func create(command: V2CreateGroupRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID: RoomID, eventID _: EventID, planID _: FanoutPlanID, now: Date) -> V2CreateGroupRoomOutcome {
         capturedActor = command.actorUserID
-        return .created(.init(roomID: roomID, ownerUserID: command.actorUserID, title: command.title, memberUserIDs: command.allMemberUserIDs, createdAt: now))
+        return .created(.init(roomID: roomID, ownerUserID: command.actorUserID, title: command.title, deliveryMode: command.deliveryMode, memberUserIDs: command.allMemberUserIDs, createdAt: now))
+    }
+
+    func actor() -> UserID? { capturedActor }
+}
+
+private actor GatewayGroupEventLogStore: V2GroupEventLogStore {
+    private var capturedActor: UserID?
+
+    func pull(roomID: RoomID, actorUserID: UserID, afterRoomSequence: UInt64, pageSize: Int) throws -> V2GroupEventLogPage {
+        .init(roomID: roomID, events: [], nextRoomSequence: afterRoomSequence, hasMore: false)
+    }
+
+    func subscribe(roomID: RoomID, actorUserID: UserID) throws -> V2GroupEventSubscription {
+        capturedActor = actorUserID
+        return .init(roomID: roomID, highWatermark: 91)
     }
 
     func actor() -> UserID? { capturedActor }

@@ -108,6 +108,37 @@ enum IMV2ServerApp {
                 capacityProfile: configuration.capacityProfile,
                 roomShardID: configuration.groupRoomShardID
             )
+            let groupEventLog = V2GroupEventLogService(
+                store: PostgresV2GroupEventLogStore(database: database)
+            )
+            // Foreground availability is intentionally a best-effort hint.
+            // The same broker adapter also serves the durable Hybrid wake
+            // outbox, but the two contracts remain distinct at the command
+            // handler boundary.
+            let groupEventWakePublisher: any V2GroupEventWakePublishing
+            let foregroundGroupEventHintPublisher: any V2ForegroundGroupEventHintPublishing
+            switch configuration.groupEventWake {
+            case .localOnly:
+                let publisher = V2LocalGroupEventWakePublisher(registry: connectionRegistry)
+                groupEventWakePublisher = publisher
+                foregroundGroupEventHintPublisher = publisher
+            case .nats(let nats):
+                let broker = V2NATSGroupEventWakeBroker(
+                    configuration: nats,
+                    receiveWake: { wake in
+                        await connectionRegistry.notifyForegroundGroupAvailable(
+                            roomID: wake.roomID,
+                            highWatermark: wake.highWatermark
+                        )
+                    }
+                )
+                await connectionRegistry.configureForegroundGroupInterestManager(broker)
+                groupEventWakePublisher = broker
+                foregroundGroupEventHintPublisher = broker
+            }
+            let foregroundGroupEventHints = V2ForegroundGroupEventHintDispatcher(
+                publisher: foregroundGroupEventHintPublisher
+            )
             let membershipDirectory = V2RoomMembershipDirectoryService(
                 store: PostgresV2RoomMembershipDirectoryStore(database: database)
             )
@@ -127,6 +158,8 @@ enum IMV2ServerApp {
                 readReceipt: readReceipt,
                 directMessaging: directMessaging,
                 groupMessaging: groupMessaging,
+                groupEventLog: groupEventLog,
+                foregroundGroupEventHints: foregroundGroupEventHints,
                 membershipDirectory: membershipDirectory,
                 socialRelationships: socialRelationships,
                 moderation: moderation,
@@ -134,6 +167,9 @@ enum IMV2ServerApp {
                 telemetry: telemetry
             )
             let fanoutDeliveryControlStore = PostgresV2FanoutDeliveryStore(database: database)
+            let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
+                storage.databaseURL == configuration.databaseURL && storage.schema == "im_v2" ? storage.bucket : nil
+            })
             let durableFanoutPublisher = V2LocalFanoutPlanPublisher(
                 planner: .init(
                     store: PostgresV2FanoutPlanStore(database: database, router: userShardRouter),
@@ -159,18 +195,34 @@ enum IMV2ServerApp {
                     .map(\.bucket)
                     .sorted()
                     .map { bucket in
-                        V2FanoutDeliveryWorker(
+                        let isCoLocated = coLocatedControlBuckets.contains(bucket)
+                        return V2FanoutDeliveryWorker(
                             store: V2CrossStoreFanoutDeliveryStore(
                                 control: fanoutDeliveryControlStore, registry: userShardStorage,
-                                migrations: userShardMigrations
+                                migrations: userShardMigrations,
+                                coLocatedControlBucket: isCoLocated ? bucket : nil
                             ),
                             bucket: bucket,
                             liveNotifier: connectionRegistry,
                             router: userShardRouter,
-                            retryPolicy: configuration.durableRetryPolicy
+                            retryPolicy: configuration.durableRetryPolicy,
+                            claimScheduler: .init(freshBurstPasses: configuration.fanoutFreshBurstPasses),
+                            commitBatchSize: isCoLocated
+                                ? configuration.fanoutDeliveryCommitBatchSize
+                                : configuration.crossStoreFanoutDeliveryCommitBatchSize,
+                            maximumConcurrentCommitBatches: isCoLocated
+                                ? 1
+                                : configuration.crossStoreFanoutDeliveryCommitConcurrency
                         )
                     },
                 telemetry: telemetry
+            )
+            // The wake relay is not a delivery dependency: a failed or
+            // duplicated publication only changes foreground latency because
+            // Hybrid clients always cursor-pull the room event log.
+            let groupEventWakeRelay = V2GroupEventWakeRelay(
+                store: PostgresV2GroupEventWakeStore(database: database),
+                publisher: groupEventWakePublisher
             )
             let directRoomProfilePropagationWorker = V2DirectRoomProfilePropagationWorker(
                 database: database,
@@ -251,20 +303,77 @@ enum IMV2ServerApp {
             let maintenanceCadence = try V2MaintenanceCadence(
                 intervalMilliseconds: configuration.maintenancePollIntervalMilliseconds
             )
-            let workerTask = Task {
-                var nextMaintenanceAt: Date?
+            // Foreground metadata publication is deliberately owned outside
+            // the command handler. An optional broker or socket stall can
+            // therefore never extend the committed-message response path.
+            let foregroundGroupEventHintTask = Task {
+                await foregroundGroupEventHints.run()
+            }
+            // Planning stays on its own cadence. A delivery pass may hold a
+            // large, lease-fenced batch while it commits several bounded
+            // transactions; serially placing planning behind it would add the
+            // entire drain duration to a newly committed room event.
+            let fanoutPlanningTask = Task {
                 while !Task.isCancelled {
                     do {
-                        _ = try await fanoutPipeline.runOnce(
+                        _ = try await fanoutPipeline.runRelayAndPlanOnce(
                             limit: configuration.workerBatchSize,
-                            plannerConcurrency: configuration.capacityProfile.limits.maxPlannerConcurrency,
-                            deliveryConcurrency: configuration.capacityProfile.limits.maxDeliveryConcurrency
+                            concurrency: configuration.capacityProfile.limits.maxPlannerConcurrency
                         )
                     } catch is CancellationError {
                         break
                     } catch {
-                        logger.error("IM V2 fan-out pipeline failed; retrying")
+                        logger.error("IM V2 fan-out relay and planner failed; retrying")
                     }
+                    do {
+                        // Hybrid wake publication is a latency hint and is
+                        // independent from fan-out delivery correctness; keep
+                        // it beside the short planning pass rather than after
+                        // a potentially long user-projection drain.
+                        _ = try await groupEventWakeRelay.runOnce(limit: configuration.workerBatchSize)
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        logger.error("IM V2 group-event wake relay failed; retrying")
+                    }
+                    do {
+                        try await Task.sleep(for: .milliseconds(configuration.workerPollIntervalMilliseconds))
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        break
+                    }
+                }
+            }
+            // Delivery owns its own cadence. It must not wait behind Push,
+            // revocation, profile propagation, or retention work: those
+            // workers have independent durable retry semantics, while a
+            // delayed delivery pass directly increases a standard group's
+            // recipient-visible convergence age.
+            let fanoutDeliveryTask = Task {
+                while !Task.isCancelled {
+                    do {
+                        _ = try await fanoutPipeline.runDeliveryOnce(
+                            claimLimit: configuration.fanoutDeliveryClaimBatchSize,
+                            concurrency: configuration.capacityProfile.limits.maxDeliveryConcurrency
+                        )
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        logger.error("IM V2 fan-out delivery failed; retrying")
+                    }
+                    do {
+                        try await Task.sleep(for: .milliseconds(configuration.workerPollIntervalMilliseconds))
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        break
+                    }
+                }
+            }
+            let maintenanceTask = Task {
+                var nextMaintenanceAt: Date?
+                while !Task.isCancelled {
                     do {
                         // Profile changes are a distinct direct-contact
                         // graph from room-event fan-out. Its work budget is
@@ -335,8 +444,15 @@ enum IMV2ServerApp {
                 }
             }
             await TerminationSignal.wait()
-            workerTask.cancel()
-            await workerTask.value
+            fanoutPlanningTask.cancel()
+            fanoutDeliveryTask.cancel()
+            maintenanceTask.cancel()
+            foregroundGroupEventHintTask.cancel()
+            await foregroundGroupEventHints.finish()
+            await fanoutPlanningTask.value
+            await fanoutDeliveryTask.value
+            await maintenanceTask.value
+            await foregroundGroupEventHintTask.value
             try await server.shutdown()
             try await app.asyncShutdown()
         } catch {
@@ -366,7 +482,7 @@ private struct V2ApplicationTelemetrySink: V2TelemetrySink {
                 "rejection": "\(rejection?.rawValue ?? "none")",
                 "elapsed_ms": "\(elapsedMilliseconds)",
             ])
-        case .fanoutProgress(let traceID, let claimedOutboxRows, let publishedOutboxRows, let releasedOutboxRows, let pausedOutboxRows, let claimedDeliveries, let committedDeliveries, let staleDeliveries, let staleRouteDeliveries, let releasedDeliveries, let pausedDeliveries, let elapsedMilliseconds):
+        case .fanoutProgress(let traceID, let claimedOutboxRows, let publishedOutboxRows, let releasedOutboxRows, let pausedOutboxRows, let claimedDeliveries, let committedDeliveries, let staleDeliveries, let staleRouteDeliveries, let releasedDeliveries, let pausedDeliveries, let relayElapsedMilliseconds, let deliveryElapsedMilliseconds, let elapsedMilliseconds):
             logger.info("im_v2.fanout.progress", metadata: [
                 "trace_id": "\(traceID.uuidString)",
                 "claimed_outbox_rows": "\(claimedOutboxRows)",
@@ -379,6 +495,8 @@ private struct V2ApplicationTelemetrySink: V2TelemetrySink {
                 "stale_route_deliveries": "\(staleRouteDeliveries)",
                 "released_deliveries": "\(releasedDeliveries)",
                 "paused_deliveries": "\(pausedDeliveries)",
+                "relay_elapsed_ms": "\(relayElapsedMilliseconds)",
+                "delivery_elapsed_ms": "\(deliveryElapsedMilliseconds)",
                 "elapsed_ms": "\(elapsedMilliseconds)",
             ])
         case .fanoutFailure(let traceID, let stage, let elapsedMilliseconds):

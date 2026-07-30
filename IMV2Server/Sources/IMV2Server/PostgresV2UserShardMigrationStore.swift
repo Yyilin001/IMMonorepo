@@ -46,6 +46,42 @@ public struct PostgresV2UserShardMigrationStore: V2UserShardMigrationStoring {
         return try await select(userID: userID, forUpdate: false, sql: sql)?.record()
     }
 
+    /// Fetches the current control records for a bounded delivery batch. The
+    /// result deliberately omits users with no active migration, which is the
+    /// common case; callers must still treat the returned phase as a routing
+    /// snapshot and retain the existing migration fences for writes.
+    public func load(userIDs: [UserID]) async throws -> [UserID: V2UserShardMigrationRecord] {
+        guard !userIDs.isEmpty else { return [:] }
+        let rawUserIDs = try userIDs.map(userUUID)
+        guard Set(rawUserIDs).count == rawUserIDs.count else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        let inputJSON = try migrationJSON(rawUserIDs.map(\.uuidString))
+        let rows = try await sql.raw("""
+            WITH input AS (
+                SELECT value::uuid AS user_id
+                FROM jsonb_array_elements_text(\(bind: inputJSON)::jsonb) AS values(value)
+            )
+            SELECT migration.migration_id, migration.user_id, migration.source_bucket,
+                   migration.target_bucket, migration.source_router_epoch, migration.phase,
+                   migration.source_fingerprint, migration.target_fingerprint,
+                   migration.verified_at, migration.last_error_code,
+                   migration.cutover_operation_id, migration.retention_until
+            FROM im_v2.user_shard_migrations AS migration
+            JOIN input USING (user_id)
+            """).all(decoding: V2PostgresUserShardMigrationRow.self)
+        var records: [UserID: V2UserShardMigrationRecord] = [:]
+        for row in rows {
+            let record = try row.record()
+            guard records[record.userID] == nil else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            records[record.userID] = record
+        }
+        return records
+    }
+
     public func advance(
         migrationID: UUID,
         expectedPhase: V2UserShardMigrationPhase,
@@ -131,6 +167,14 @@ public struct PostgresV2UserShardMigrationStore: V2UserShardMigrationStoring {
             \(unsafeRaw: forUpdate ? "FOR UPDATE" : "")
             """).first(decoding: V2PostgresUserShardMigrationRow.self)
     }
+}
+
+private func migrationJSON<T: Encodable>(_ value: T) throws -> String {
+    let data = try JSONEncoder().encode(value)
+    guard let json = String(data: data, encoding: .utf8) else {
+        throw V2RoomWriteStoreError.corruptPersistenceState
+    }
+    return json
 }
 
 extension PostgresV2UserShardMigrationStore: V2UserShardMigrationRetentionStoring {

@@ -30,7 +30,3 @@ ALTER TABLE im_v2.fanout_deliveries
 CREATE INDEX room_outbox_retry_claim_idx
     ON im_v2.room_outbox (next_attempt_at, created_at)
     WHERE state = 'pending';
-
-CREATE INDEX fanout_deliveries_retry_claim_idx
-    ON im_v2.fanout_deliveries (target_shard_bucket, next_attempt_at, source_event_id)
-    WHERE state = 'pending';

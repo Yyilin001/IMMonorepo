@@ -9,6 +9,7 @@ public struct V2PendingGroupRoomCreation: Equatable, Sendable {
 
     public let operationID: GroupRoomOperationID
     public let title: String
+    public let deliveryMode: V2GroupDeliveryMode
     public let initialMemberUserIDs: [UserID]
     public let state: State
     public let attemptCount: Int
@@ -16,7 +17,7 @@ public struct V2PendingGroupRoomCreation: Equatable, Sendable {
     public let createdRoomID: RoomID?
     public let terminalCode: String?
 
-    public init(operationID: GroupRoomOperationID, title: String, initialMemberUserIDs: [UserID], state: State, attemptCount: Int, nextAttemptAt: Date, createdRoomID: RoomID?, terminalCode: String?) throws {
+    public init(operationID: GroupRoomOperationID, title: String, deliveryMode: V2GroupDeliveryMode, initialMemberUserIDs: [UserID], state: State, attemptCount: Int, nextAttemptAt: Date, createdRoomID: RoomID?, terminalCode: String?) throws {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty,
               normalizedTitle.utf8.count <= V2CreateGroupRoomCommand.maximumTitleUTF8Bytes,
@@ -30,6 +31,7 @@ public struct V2PendingGroupRoomCreation: Equatable, Sendable {
         else { throw V2ClientCommandError.commandConflict }
         self.operationID = operationID
         self.title = normalizedTitle
+        self.deliveryMode = deliveryMode
         self.initialMemberUserIDs = initialMemberUserIDs.sorted()
         self.state = state
         self.attemptCount = attemptCount
@@ -74,9 +76,10 @@ public actor V2GroupRoomCommandOutboxEngine {
     }
 
     @discardableResult
-    public func enqueueCreation(title: String, initialMemberUserIDs: [UserID]) async throws -> V2PendingGroupRoomCreation {
+    public func enqueueCreation(title: String, deliveryMode: V2GroupDeliveryMode, initialMemberUserIDs: [UserID]) async throws -> V2PendingGroupRoomCreation {
         let command = try V2PendingGroupRoomCreation(
             operationID: .init(makeUUID().uuidString), title: title,
+            deliveryMode: deliveryMode,
             initialMemberUserIDs: initialMemberUserIDs, state: .pending,
             attemptCount: 0, nextAttemptAt: now(), createdRoomID: nil, terminalCode: nil
         )
@@ -86,10 +89,12 @@ public actor V2GroupRoomCommandOutboxEngine {
     public func flushOnce() async throws -> V2GroupRoomCreationFlushResult {
         guard let command = try await store.nextReadyGroupRoomCreation(now: now()) else { return .idle }
         do {
-            let created = try await transport.createGroupRoom(operationID: command.operationID, title: command.title, initialMemberUserIDs: command.initialMemberUserIDs)
+            let created = try await transport.createGroupRoom(operationID: command.operationID, title: command.title, deliveryMode: command.deliveryMode, initialMemberUserIDs: command.initialMemberUserIDs)
             try Task.checkCancellation()
             guard created.title == command.title,
-                  Set(command.initialMemberUserIDs).isSubset(of: Set(created.memberUserIDs))
+                  created.deliveryMode == command.deliveryMode,
+                  created.memberCount >= command.initialMemberUserIDs.count + 1,
+                  (command.deliveryMode == .largeGroupHybrid || Set(command.initialMemberUserIDs).isSubset(of: Set(created.memberUserIDs)))
             else { throw V2RealtimeTransportError.unexpectedResponse }
             try await store.markGroupRoomCreationAcknowledged(operationID: command.operationID, roomID: created.roomID)
             return .acknowledged(command.operationID, roomID: created.roomID)

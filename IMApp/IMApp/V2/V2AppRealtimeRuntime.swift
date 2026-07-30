@@ -17,15 +17,6 @@ extension V2ConversationSending {
     func send(text: String, in roomID: String) async throws -> V2ConversationSendOutcome {
         try await send(text: text, media: [], in: roomID)
     }
-
-    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], in roomID: String) async throws -> V2ConversationSendOutcome {
-        guard mentions.isEmpty else { throw V2ConversationMentionError.unsupported }
-        return try await send(text: text, media: media, in: roomID)
-    }
-}
-
-enum V2ConversationMentionError: Error, Sendable {
-    case unsupported
 }
 
 enum V2MessageWithdrawalOutcome: Equatable, Sendable {
@@ -287,19 +278,26 @@ actor V2OutboxConversationReadReporter: V2ConversationReadReporting {
 actor V2RealtimeDirectConversationOpener: V2DirectConversationOpening {
     private let transport: any V2ClientDirectMessagingTransport
     private let localStore: GRDBV2LocalSyncStore
+    private let runtime: V2ClientRuntime
     private let makeUUID: @Sendable () -> UUID
 
     init(
         transport: any V2ClientDirectMessagingTransport,
         localStore: GRDBV2LocalSyncStore,
+        runtime: V2ClientRuntime,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init
     ) {
         self.transport = transport
         self.localStore = localStore
+        self.runtime = runtime
         self.makeUUID = makeUUID
     }
 
     func openConversation(with publicIdentity: V2PublicIdentity) async throws -> String {
+        // Signing in publishes the local conversation UI before its
+        // foreground-start task is necessarily scheduled. Reuse (or create)
+        // that one runtime attempt before issuing this non-durable request.
+        _ = try await runtime.start()
         let operationID = try DirectRoomOperationID(makeUUID().uuidString)
         let opened = try await transport.openDirectRoom(operationID: operationID, targetUserID: publicIdentity.userID)
         try Task.checkCancellation()
@@ -308,16 +306,36 @@ actor V2RealtimeDirectConversationOpener: V2DirectConversationOpening {
     }
 }
 
-/// UI boundary for durable group bootstrap. It records intent before issuing
-/// the command, preserving the same room-creation operation across reconnects.
+/// UI boundary for durable group bootstrap. It obtains a foreground realtime
+/// session first so a successful create can return its room ID immediately;
+/// if that connection cannot be established, it still records the request and
+/// returns the normal durable-retry outcome.
 actor V2OutboxGroupConversationCreator: V2GroupConversationCreating {
     private let outbox: V2GroupRoomCommandOutboxEngine
+    private let runtime: V2ClientRuntime
 
-    init(outbox: V2GroupRoomCommandOutboxEngine) { self.outbox = outbox }
+    init(outbox: V2GroupRoomCommandOutboxEngine, runtime: V2ClientRuntime) {
+        self.outbox = outbox
+        self.runtime = runtime
+    }
 
     func createConversation(title: String, initialMemberUserIDs: [String]) async throws -> V2GroupConversationCreationOutcome {
         let members = try initialMemberUserIDs.map { try UserID($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-        _ = try await outbox.enqueueCreation(title: title, initialMemberUserIDs: members)
+        do {
+            _ = try await runtime.start()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch V2RealtimeSessionCoordinatorError.authenticationRequired {
+            throw V2RealtimeSessionCoordinatorError.authenticationRequired
+        } catch {
+            // The command remains safe to retry: enqueue it below before the
+            // first transport attempt rather than rejecting a user action just
+            // because this foreground connection is presently unavailable.
+        }
+        guard let deliveryMode = V2GroupDeliveryPolicy().deliveryMode(forInitialMemberCount: members.count + 1) else {
+            return .rejected(code: "GROUP_MEMBER_LIMIT_REACHED")
+        }
+        _ = try await outbox.enqueueCreation(title: title, deliveryMode: deliveryMode, initialMemberUserIDs: members)
         switch try await outbox.flushOnce() {
         case .acknowledged(_, let roomID): return .created(roomID: roomID.rawValue)
         case .retryScheduled, .idle: return .queuedForRetry
@@ -465,6 +483,95 @@ actor V2OutboxUserBlockChanger: V2UserBlockChanging {
     }
 }
 
+/// Bridges the active conversation UI to the reusable room-log engines without
+/// letting a SwiftUI store inspect SQLite or speak the realtime protocol.
+/// Hybrid groups persist a room-log cursor; standard groups use only the
+/// separate in-memory foreground preview cursor and retain normal fan-out as
+/// their durable delivery authority.
+actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing {
+    private let groupEventSync: V2GroupEventSyncEngine
+    private let foregroundGroupPreview: V2ForegroundGroupEventPreviewEngine
+    private let localStore: GRDBV2LocalSyncStore
+    private let subscriptionTransport: any V2ClientGroupEventSubscriptionTransport
+    private let wakeSource: any V2GroupEventAvailabilityHintSource
+
+    init(
+        groupEventSync: V2GroupEventSyncEngine,
+        foregroundGroupPreview: V2ForegroundGroupEventPreviewEngine,
+        localStore: GRDBV2LocalSyncStore,
+        subscriptionTransport: any V2ClientGroupEventSubscriptionTransport,
+        wakeSource: any V2GroupEventAvailabilityHintSource
+    ) {
+        self.groupEventSync = groupEventSync
+        self.foregroundGroupPreview = foregroundGroupPreview
+        self.localStore = localStore
+        self.subscriptionTransport = subscriptionTransport
+        self.wakeSource = wakeSource
+    }
+
+    func synchronizeOnePage(roomID: String) async throws -> V2ActiveHybridGroupSyncOutcome {
+        let parsedRoomID = try RoomID(roomID)
+        guard let deliveryMode = try await localStore.groupDeliveryMode(roomID: parsedRoomID) else {
+            return .notHybridRoom
+        }
+        let progress: V2GroupEventSyncProgress
+        do {
+            switch deliveryMode {
+            case .largeGroupHybrid:
+                progress = try await groupEventSync.synchronizeOnePage(roomID: parsedRoomID)
+            case .standardFanout:
+                progress = try await foregroundGroupPreview.synchronizeOnePage(roomID: parsedRoomID)
+            }
+        } catch let error as V2RealtimeTransportError {
+            guard case .server(let code, _, _, _) = error, code == "FORBIDDEN" else { throw error }
+            if deliveryMode == .largeGroupHybrid {
+                try await localStore.deactivateHybridGroupRoom(roomID: parsedRoomID)
+            }
+            return .notHybridRoom
+        }
+        return .synchronized(appliedEventCount: progress.appliedEventCount, hasMore: progress.hasMore)
+    }
+
+    func subscribe(roomID: String) async throws -> V2ActiveHybridGroupSubscriptionOutcome {
+        let parsedRoomID = try RoomID(roomID)
+        guard let deliveryMode = try await localStore.groupDeliveryMode(roomID: parsedRoomID) else {
+            return .notHybridRoom
+        }
+        do {
+            let cursor: UInt64
+            switch deliveryMode {
+            case .largeGroupHybrid:
+                cursor = try await localStore.groupEventCursor(roomID: parsedRoomID)
+            case .standardFanout:
+                cursor = try await foregroundGroupPreview.cursor(roomID: parsedRoomID)
+            }
+            let subscription = try await subscriptionTransport.subscribeToGroupEvents(
+                roomID: parsedRoomID,
+                afterRoomSequence: cursor
+            )
+            guard subscription.roomID == parsedRoomID else { throw V2RealtimeTransportError.unexpectedResponse }
+            return .subscribed(highWatermark: subscription.highWatermark)
+        } catch let error as V2RealtimeTransportError {
+            guard case .server(let code, _, _, _) = error, code == "FORBIDDEN" else { throw error }
+            if deliveryMode == .largeGroupHybrid {
+                try await localStore.deactivateHybridGroupRoom(roomID: parsedRoomID)
+            }
+            return .notHybridRoom
+        }
+    }
+
+    func nextWake() async throws -> V2ActiveHybridGroupWake {
+        let wake = try await wakeSource.nextGroupEventAvailabilityHint()
+        return .init(roomID: wake.roomID.rawValue, highWatermark: wake.highWatermark)
+    }
+
+    func unsubscribe(roomID: String) async {
+        guard let parsedRoomID = try? RoomID(roomID) else { return }
+        try? await subscriptionTransport.unsubscribeFromGroupEvents(roomID: parsedRoomID)
+        await foregroundGroupPreview.forget(roomID: parsedRoomID)
+    }
+}
+
 struct V2AppRealtimeRuntime {
     let runtime: V2ClientRuntime
     let projectionChangeNotifier: V2ProjectionChangeNotifier
@@ -476,6 +583,7 @@ struct V2AppRealtimeRuntime {
     let attachmentUploader: any V2ConversationAttachmentUploading
     let mediaDownloader: any V2ConversationMediaDownloading
     let mediaCacheMaintenance: V2ForegroundConversationMediaDownloader
+    let activeHybridGroupSynchronizer: any V2ActiveHybridGroupSynchronizing
 
     init(
         configuration: V2AppConfiguration,
@@ -525,6 +633,15 @@ struct V2AppRealtimeRuntime {
             byteTransfer: V2URLSessionMediaByteTransfer()
         )
         let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base")
+        let groupEventSync = V2GroupEventSyncEngine(transport: transport, store: localStore)
+        let foregroundGroupPreview = V2ForegroundGroupEventPreviewEngine(transport: transport, store: localStore)
+        let activeHybridGroupSynchronizer = V2RealtimeActiveHybridGroupSynchronizer(
+            groupEventSync: groupEventSync,
+            foregroundGroupPreview: foregroundGroupPreview,
+            localStore: localStore,
+            subscriptionTransport: transport,
+            wakeSource: connection
+        )
         let coordinator = V2RealtimeSessionCoordinator(
             authSession: authSession,
             connection: connection,
@@ -576,6 +693,11 @@ struct V2AppRealtimeRuntime {
                 }
             },
             afterDurableSynchronization: {
+                // This runs after the priority outboxes.  It advances at most
+                // a small number of persistent room cursors per activity
+                // cycle; visible conversations retain their separate
+                // immediate one-page path.
+                _ = try await groupEventSync.synchronizeBackgroundKnownRooms(maximumPages: 12)
                 try await localStore.pruneTerminalCommands(
                     olderThan: Date().addingTimeInterval(-86_400)
                 )
@@ -586,6 +708,7 @@ struct V2AppRealtimeRuntime {
         )
         runtime = .init(connection: coordinator, activity: activity)
         self.projectionChangeNotifier = projectionChangeNotifier
+        self.activeHybridGroupSynchronizer = activeHybridGroupSynchronizer
         sender = V2OutboxConversationSender(outbox: outbox)
         messageWithdrawer = V2OutboxMessageWithdrawer(outbox: withdrawalOutbox)
         messageReactionChanger = V2OutboxMessageReactionChanger(outbox: reactionOutbox)
@@ -598,8 +721,8 @@ struct V2AppRealtimeRuntime {
         )
         self.mediaDownloader = foregroundMediaDownloader
         self.mediaCacheMaintenance = foregroundMediaDownloader
-        directConversationOpener = V2RealtimeDirectConversationOpener(transport: transport, localStore: localStore)
-        groupConversationCreator = V2OutboxGroupConversationCreator(outbox: groupOutbox)
+        directConversationOpener = V2RealtimeDirectConversationOpener(transport: transport, localStore: localStore, runtime: runtime)
+        groupConversationCreator = V2OutboxGroupConversationCreator(outbox: groupOutbox, runtime: runtime)
         groupMemberDirectory = V2RealtimeGroupMemberDirectory(transport: transport)
         groupMembershipChanger = V2OutboxGroupMembershipChanger(outbox: membershipOutbox)
         groupMemberMuter = V2OutboxGroupMemberMuter(outbox: memberMuteOutbox)

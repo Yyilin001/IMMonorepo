@@ -564,7 +564,7 @@ CREATE TABLE im_v2.fanout_completion_units (
 );
 
 CREATE TABLE im_v2.fanout_deliveries (
-    source_event_id UUID NOT NULL REFERENCES im_v2.room_events(event_id),
+    source_event_id UUID NOT NULL,
     target_user_id UUID NOT NULL,
     projection_kind TEXT NOT NULL,
     completion_unit_id UUID NOT NULL,
@@ -579,9 +579,6 @@ CREATE TABLE im_v2.fanout_deliveries (
     FOREIGN KEY (source_event_id, completion_unit_id)
         REFERENCES im_v2.fanout_completion_units (source_event_id, completion_unit_id)
 );
-CREATE INDEX fanout_deliveries_claim_idx
-    ON im_v2.fanout_deliveries (target_shard_bucket, state, lease_expires_at, source_event_id);
-
 CREATE TABLE im_v2.room_outbox (
     source_event_id UUID PRIMARY KEY REFERENCES im_v2.room_events(event_id),
     plan_id UUID NOT NULL UNIQUE REFERENCES im_v2.fanout_plans(plan_id),
@@ -609,13 +606,35 @@ CREATE TABLE im_v2.user_sync_log (
     user_sync_sequence BIGINT NOT NULL CHECK (user_sync_sequence > 0),
     source_event_id UUID NOT NULL,
     projection_kind TEXT NOT NULL,
+    -- Fan-out rows may refer to one immutable payload held once per user
+    -- shard.  Other projections remain self-contained inline rows.
+    payload JSONB NULL,
+    payload_storage TEXT NOT NULL DEFAULT 'inline'
+        CHECK (payload_storage IN ('inline', 'fanout_shared')),
+    created_at TIMESTAMPTZ NOT NULL,
+    CHECK (
+        (payload_storage = 'inline' AND payload IS NOT NULL)
+        OR (payload_storage = 'fanout_shared' AND payload IS NULL)
+    ),
+    PRIMARY KEY (user_id, user_sync_sequence)
+);
+-- Fan-out has `consumer_inbox` as its durable semantic idempotency fence.
+-- Keep source-event uniqueness for every other projection kind, whose writers
+-- do not own that inbox record. New kinds default to this safer unique path.
+CREATE UNIQUE INDEX user_sync_log_nonfanout_identity_idx
+    ON im_v2.user_sync_log (user_id, source_event_id, projection_kind)
+    WHERE projection_kind NOT IN ('message', 'membership', 'moderation', 'room');
+
+-- The physical user shard owns this payload copy.  A fan-out sync row keeps
+-- only its ordered per-user reference, while pull/snapshot joins the immutable
+-- body back by the stable source-event projection identity.
+CREATE TABLE im_v2.fanout_sync_payloads (
+    source_event_id UUID NOT NULL,
+    projection_kind TEXT NOT NULL,
     payload JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (user_id, user_sync_sequence),
-    UNIQUE (user_id, source_event_id, projection_kind)
+    PRIMARY KEY (source_event_id, projection_kind)
 );
-CREATE INDEX user_sync_log_pull_idx
-    ON im_v2.user_sync_log (user_id, user_sync_sequence);
 
 CREATE TABLE im_v2.user_sync_sequences (
     user_id UUID PRIMARY KEY,

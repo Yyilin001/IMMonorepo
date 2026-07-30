@@ -15,6 +15,11 @@ services:
       retries: 30
     mem_limit: 1g
     pids_limit: 128
+    volumes:
+      # The integration suite drops its disposable `im_v2` schema after each
+      # run. Naming the cluster volume avoids accumulating anonymous volumes
+      # whenever Compose recreates this service between capacity profiles.
+      - postgres-test-data:/var/lib/postgresql/data
 
   # Deliberately separate PostgreSQL process for cross-store fan-out tests.
   # No port is published; the Swift test container alone can reach it.
@@ -31,6 +36,22 @@ services:
       retries: 30
     mem_limit: 1g
     pids_limit: 128
+    volumes:
+      - postgres-secondary-test-data:/var/lib/postgresql/data
+
+  # Optional wake hints are never a correctness dependency, but the isolated
+  # Server suite verifies that the minimal NIO publisher reaches a real Core
+  # NATS subscriber and emits only its privacy-safe trigger envelope.
+  nats:
+    image: nats:2.11-alpine
+    command: ["-m", "8222"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8222/healthz >/dev/null"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    mem_limit: 256m
+    pids_limit: 64
 
   swift-tests:
     build:
@@ -43,17 +64,20 @@ services:
         condition: service_healthy
       postgres-secondary:
         condition: service_healthy
+      nats:
+        condition: service_healthy
     environment:
       IMV2_POSTGRES_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
       IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL: postgres://im_v2_secondary_test:im_v2_secondary_test@postgres-secondary:5432/im_v2_secondary_test
       IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_NATS_TEST_URL: nats://nats:4222
       # A cold SwiftPM dependency mirror can take several minutes. This is a
       # wall-clock watchdog, not a relaxation of the CPU/memory/PID limits.
       V2_TEST_TIMEOUT_SECONDS: "1200"
-      # Keep the compiler below the constrained test container's memory
-      # envelope. The script validates this value and permits an explicit
-      # override for a differently provisioned isolated runner.
-      V2_SWIFTPM_JOBS: "4"
+      # The Server test module has a high cold-compile peak. One compiler job
+      # trades speed for a repeatable run inside the fixed container envelope;
+      # callers can still explicitly raise it on a larger isolated runner.
+      V2_SWIFTPM_JOBS: "1"
       HOME: /tmp/home
       XDG_CACHE_HOME: /tmp/cache
       CLANG_MODULE_CACHE_PATH: /tmp/clang-module-cache
@@ -69,10 +93,15 @@ services:
     read_only: true
     tmpfs:
       - /tmp:exec,size=10g
-    cpus: 2.0
-    mem_limit: 4g
+    # The dedicated local capacity profile has four virtual CPUs and 16 GiB
+    # RAM. Leave headroom for both PostgreSQL instances and NATS while letting
+    # the four delivery workers contend under the intended CPU envelope.
+    cpus: 4.0
+    mem_limit: 12g
     pids_limit: 256
 
 volumes:
+  postgres-test-data:
+  postgres-secondary-test-data:
   swiftpm-cache:
   swiftpm-build-cache:

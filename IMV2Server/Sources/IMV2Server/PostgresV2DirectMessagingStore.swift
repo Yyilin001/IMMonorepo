@@ -109,7 +109,12 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
         guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: recipientID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
             throw V2DirectMessagingStoreError.corruptPersistenceState
         }
-        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: recipientID), \(bind: sequence.nextSequence), \(bind: sourceEventID), 'direct_room_profile', jsonb_build_object('room_id', \(bind: roomID)::text, 'target_user_id', \(bind: profile.userID)::text, 'public_handle', \(bind: profile.publicHandle), 'display_name', \(bind: profile.displayName), 'revision', \(bind: profile.revision), 'updated_at_ms', \(bind: Int64(profile.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: createdAt))").run()
+        // All room-event payloads use Foundation's canonical UUID spelling.
+        // Do not let PostgreSQL's UUID-to-text conversion make direct-profile
+        // records lexically differ from messages for the same room.
+        let wireRoomID = roomID.uuidString
+        let wireTargetUserID = profile.userID.uuidString
+        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: recipientID), \(bind: sequence.nextSequence), \(bind: sourceEventID), 'direct_room_profile', jsonb_build_object('room_id', \(bind: wireRoomID), 'target_user_id', \(bind: wireTargetUserID), 'public_handle', \(bind: profile.publicHandle), 'display_name', \(bind: profile.displayName), 'revision', \(bind: profile.revision), 'updated_at_ms', \(bind: Int64(profile.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: createdAt))").run()
     }
 }
 

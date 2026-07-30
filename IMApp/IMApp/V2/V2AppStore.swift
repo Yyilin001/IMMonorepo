@@ -176,6 +176,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     init(
         startupMode: StartupMode = .production,
         liveLocalAccountE2ETestScope: V2LiveLocalAccountE2ETestScope? = nil,
+        debugForcesUnavailableRealtimeForLiveLocalAccountE2E: Bool = false,
         remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)? = nil
     ) {
         self.startupMode = startupMode
@@ -201,7 +202,14 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             return
         }
         do {
+            #if DEBUG
+            let configuration = try V2AppConfiguration(
+                localE2ETestForcesUnavailableRealtime: startupMode.usesLiveLocalAccountE2ETestScope
+                    && debugForcesUnavailableRealtimeForLiveLocalAccountE2E
+            )
+            #else
             let configuration = try V2AppConfiguration()
+            #endif
             #if DEBUG
             let liveLocalAccountE2ETestScope = startupMode.usesLiveLocalAccountE2ETestScope
                 ? liveLocalAccountE2ETestScope
@@ -543,10 +551,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         route = nextRoute
     }
 
-    private func currentUserID() async throws -> String {
+    private func currentUserID() async throws -> UserID {
         guard let authSession else { throw V2AppConfigurationError.invalidAccountBaseURL }
         let credentials = try await authSession.realtimeCredentials()
-        return credentials.userID.rawValue
+        return credentials.userID
     }
 
     private func beginAuthenticationAttempt() -> UInt64 {
@@ -583,7 +591,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         )
         let conversations = V2ConversationListStore(
             dataSource: V2GRDBConversationDataSource(localStore: localStore),
-            userID: userID,
+            userID: userID.rawValue,
             sender: realtime.sender,
             messageWithdrawer: realtime.messageWithdrawer,
             messageReactionChanger: realtime.messageReactionChanger,
@@ -599,7 +607,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             attachmentStager: attachmentStager,
             attachmentUploader: realtime.attachmentUploader,
             mediaDownloader: realtime.mediaDownloader,
-            projectionChangeNotifier: realtime.projectionChangeNotifier
+            projectionChangeNotifier: realtime.projectionChangeNotifier,
+            activeHybridGroupSynchronizer: realtime.activeHybridGroupSynchronizer
         )
         let privacySettings = V2PrivacySettingsStore(
             reader: V2GRDBStrangerMessagePreferenceDataSource(localStore: localStore),
@@ -624,7 +633,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
            ) {
             pushWakeSettings = .init(
                 preferences: V2UserDefaultsPushWakePreferenceStore(
-                    key: localKeychainService + ".push-wake-enabled." + userID
+                    key: localKeychainService + ".push-wake-enabled." + userID.rawValue
                 ),
                 endpointClient: endpointClient,
                 remoteNotificationRegistrar: remoteNotificationRegistrar,
@@ -643,7 +652,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         userBlockSettingsStore = userBlockSettings
         publicIdentitySettingsStore = publicIdentitySettings
         pushWakeSettingsStore = pushWakeSettings
-        route = .signedIn(userID: userID)
+        route = .signedIn(userID: userID.rawValue)
         await conversations.refresh()
         await pushWakeSettings?.activate()
         guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }

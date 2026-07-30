@@ -83,6 +83,7 @@ struct V2ProtobufSyncTransportTests {
         let room = try await transport.createGroupRoom(
             operationID: try .init("00000000-0000-0000-0000-000000000326"),
             title: "  Project  ",
+            deliveryMode: .standardFanout,
             initialMemberUserIDs: [member]
         )
         #expect(room.title == "Project")
@@ -188,6 +189,48 @@ struct V2ProtobufSyncTransportTests {
         #expect(page.nextCursor == "00000000-0000-0000-0000-000000000342")
         #expect(await wire.requestedPageSize() == 100)
     }
+
+    @Test("Hybrid group subscription maps its cursor and best-effort unsubscribe")
+    func groupEventSubscriptionRoundTrips() async throws {
+        let wire = GroupEventSubscriptionWire()
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000350")
+
+        let subscription = try await transport.subscribeToGroupEvents(roomID: roomID, afterRoomSequence: 21)
+        try await transport.unsubscribeFromGroupEvents(roomID: roomID)
+
+        #expect(subscription == .init(roomID: roomID, highWatermark: 34))
+        #expect(await wire.commands() == [.groupEventSubscribe, .groupEventUnsubscribe])
+        #expect(await wire.afterRoomSequence() == 21)
+    }
+}
+
+private actor GroupEventSubscriptionWire: V2AuthenticatedFrameTransport {
+    private var receivedCommands: [V2FrameCommand] = []
+    private var receivedAfterRoomSequence: UInt64 = 0
+
+    func request(_ frame: V2Frame) throws -> V2Frame {
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        receivedCommands.append(frame.command)
+        var response = IMV2Envelope()
+        response.requestID = request.requestID
+        response.protocolVersion = request.protocolVersion
+        switch request.body {
+        case .groupEventSubscribe(let subscribe):
+            receivedAfterRoomSequence = subscribe.afterRoomSequence
+            response.groupEventSubscribed = .init()
+            response.groupEventSubscribed.roomID = subscribe.roomID
+            response.groupEventSubscribed.highWatermark = 34
+        case .groupEventUnsubscribe:
+            response.acknowledged = .init()
+        default:
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
+    }
+
+    func commands() -> [V2FrameCommand] { receivedCommands }
+    func afterRoomSequence() -> UInt64 { receivedAfterRoomSequence }
 }
 
 private actor MembershipDirectoryWire: V2AuthenticatedFrameTransport {
@@ -353,6 +396,8 @@ private actor GroupMessagingWire: V2AuthenticatedFrameTransport {
         response.groupRoomCreated.title = command.title.trimmingCharacters(in: .whitespacesAndNewlines)
         response.groupRoomCreated.memberUserIds = command.initialMemberUserIds
         response.groupRoomCreated.createdAtMs = 1_750_000_000_000
+        response.groupRoomCreated.deliveryMode = command.deliveryMode
+        response.groupRoomCreated.memberCount = UInt32(command.initialMemberUserIds.count + 1)
         return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
     }
 

@@ -133,11 +133,25 @@ IMAPP_LOCAL_TWO_INSTALL_SENDER_SIMULATOR_ID='<SENDER_SIMULATOR_UDID>' \
   IMApp/Scripts/verify_local_account_two_install_e2e.sh
 ```
 
+若要在最大辅助字体、系统增加对比度和 Arabic RTL 方向下复用同一条本机回归，额外指定：
+
+```sh
+IMAPP_LOCAL_TWO_INSTALL_ACCESSIBILITY_PROFILE=accessibility-xl-rtl \
+IMAPP_LOCAL_TWO_INSTALL_RECEIVER_SIMULATOR_ID='<RECEIVER_SIMULATOR_UDID>' \
+IMAPP_LOCAL_TWO_INSTALL_SENDER_SIMULATOR_ID='<SENDER_SIMULATOR_UDID>' \
+  IMApp/Scripts/verify_local_account_two_install_e2e.sh
+```
+
+该 profile 不改变随机账号、Keychain/SQLite scope 或投递断言；它会临时将两台指定模拟器设为最大辅助字号和系统增加对比度，并以 RTL 环境启动 App，结束时恢复原有模拟器设置，使已有的真实聊天和设置页裁切、触达区域、语义及对比度审计覆盖该显示配置。
+
+两条本地账户 E2E 在开始前都会检查并仅在过期时续期本地 `rooms-primary/standard` 准入租约；因此长时间未重启的本地 Compose 栈不会因测试专用租约过期而把建群误报为网络失败。此处理只适用于本地开发栈，不替代生产控制面的租约管理。
+
 该独立 scheme 会给两端分别创建随机账号、Keychain/SQLite scope 和安装身份：接收端先通过真实
 注册 UI 建立会话并被终止；发送端再通过“新建私聊 → 开始 → 发送”的正常界面路径投递消息；接收端
-仅恢复自己的 scope，确认私聊撤回投影后，以发送端公开 ID 创建真实群聊、在按需成员目录确认群主和发送端资料，再发送普通群消息；接收端会实际
+仅恢复自己的 scope，确认私聊撤回投影后，以发送端公开 ID 创建真实群聊、在按需成员目录确认群主和发送端资料，再通过普通群聊输入区发送带 `@all` 的群消息；接收端会实际
 进入后台并重新激活，确认会话详情与 SQLite 消息投影仍在；发送端仅恢复自己的 scope 后确认群与群消息
-出现，并通过普通输入区回复；最后接收端仅恢复自己的 scope，确认该成员回复也由自身 SQLite 同步投影出现。
+出现且呈现“提及所有人”，并通过普通输入区回复；最后接收端仅恢复自己的 scope，确认该成员回复也由自身 SQLite 同步投影出现。
+在发送端的正常恢复前，脚本还会用仅限 DEBUG 的不可达实时端点启动同一份真实 App：用户经普通私聊输入区发送一条消息后，必须得到“已安全保存，连接恢复后会重试。”的明确反馈。随后以正常端点恢复同一 SQLite scope，接收端最终须在对应私聊详情看到该消息；这同时覆盖离线 outbox 的一次重放与跨投影 UUID 大小写规范化，避免 direct-profile 与 message 投影被错误存为两个房间键。
 消息正文以最小 44×44 的可访问容器呈现，编辑和撤回 VoiceOver 操作挂在完整消息行上。它也确认账户菜单只位于会话列表
 导航栏，不会遮挡会话详情页的输入和发送按钮。脚本会清理两端本次随机 scope，且不会抹掉、重启或关闭
 调用方指定的模拟器。该验证仍仅覆盖本机 Docker 栈和 Simulator，不包含 APNs、真机签名、生产网络或容量。

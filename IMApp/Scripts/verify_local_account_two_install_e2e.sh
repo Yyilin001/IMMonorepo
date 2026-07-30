@@ -16,8 +16,13 @@ receiver_simulator_id="${IMAPP_LOCAL_TWO_INSTALL_RECEIVER_SIMULATOR_ID:-}"
 sender_simulator_id="${IMAPP_LOCAL_TWO_INSTALL_SENDER_SIMULATOR_ID:-}"
 test_class="IMAppLocalTwoInstallE2ETests/IMAppLocalTwoInstallE2ETests"
 keep_result_bundle="${IMAPP_LOCAL_TWO_INSTALL_E2E_KEEP_RESULTS:-false}"
+accessibility_profile="${IMAPP_LOCAL_TWO_INSTALL_ACCESSIBILITY_PROFILE:-default}"
 
 source "${repo_root}/IMV2/scripts/local_compose.sh"
+# shellcheck source=../../IMV2/scripts/local_admission_pool.sh
+source "${repo_root}/IMV2/scripts/local_admission_pool.sh"
+# shellcheck source=../../IMV2/scripts/local_gateway_tls.sh
+source "${repo_root}/IMV2/scripts/local_gateway_tls.sh"
 
 local_compose() {
   v2_local_compose "${local_env_file}" --project-name "${local_compose_project}" --file "${local_compose_file}" "$@"
@@ -44,6 +49,16 @@ if [[ "${receiver_simulator_id}" == "${sender_simulator_id}" ]]; then
   exit 2
 fi
 
+case "${accessibility_profile}" in
+  default) ;;
+  accessibility-xl-rtl)
+    ;;
+  *)
+    printf 'unsupported IMAPP_LOCAL_TWO_INSTALL_ACCESSIBILITY_PROFILE: %s\n' "${accessibility_profile}" >&2
+    exit 2
+    ;;
+esac
+
 for simulator_id in "${receiver_simulator_id}" "${sender_simulator_id}"; do
   if ! xcrun simctl list devices | grep -Fq "(${simulator_id}) (Booted)"; then
     printf 'selected simulator is not booted: %s\n' "${simulator_id}" >&2
@@ -57,11 +72,13 @@ running_services="$(local_compose ps --status running --services 2>/dev/null || 
 if ! grep -qx 'account' <<<"${running_services}" || ! grep -qx 'gateway' <<<"${running_services}" || ! grep -qx 'caddy' <<<"${running_services}"; then
   "${local_stack_script}"
 fi
+v2_seed_local_admission_pool
 
 if [[ ! -f "${local_ca}" ]]; then
   printf 'missing local CA after starting stack: %s\n' "${local_ca}" >&2
   exit 1
 fi
+v2_ensure_local_gateway_tls "${local_ca}"
 
 status="$(curl --silent --output /dev/null --write-out '%{http_code}' --cacert "${local_ca}" \
   --request POST \
@@ -85,6 +102,7 @@ message="two-install-${scenario_suffix:0:16}"
 receiver_self_group_title="自测群${scenario_suffix:0:6}"
 receiver_group_title="跨装群${scenario_suffix:0:6}"
 group_message="two-install-group-${scenario_suffix:0:16}"
+group_message_mentions='@all'
 
 result_directory="$(mktemp -d "${TMPDIR:-/tmp}/im-v2-local-two-install-e2e.XXXXXX")"
 build_products_directory="$(xcodebuild -showBuildSettings -json \
@@ -95,6 +113,12 @@ build_products_directory="$(xcodebuild -showBuildSettings -json \
   | jq --raw-output 'map(select(.target == "IMApp"))[0].buildSettings.BUILT_PRODUCTS_DIR')"
 app_bundle="${build_products_directory}/IMApp.app"
 cleanup_attempted=false
+receiver_original_increase_contrast=""
+sender_original_increase_contrast=""
+receiver_original_content_size=""
+sender_original_content_size=""
+receiver_accessibility_settings_applied=false
+sender_accessibility_settings_applied=false
 
 xcodebuild build \
   -quiet \
@@ -115,7 +139,76 @@ done
 launch_fixture() {
   local simulator_id="$1"
   shift
-  xcrun simctl launch --terminate-running-process "${simulator_id}" "${app_bundle_id}" "$@" >/dev/null
+  if [[ "${accessibility_profile}" == "accessibility-xl-rtl" ]]; then
+    xcrun simctl launch --terminate-running-process "${simulator_id}" "${app_bundle_id}" "$@" \
+      -UIPreferredContentSizeCategoryName UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge \
+      -AppleLanguages '(ar)' \
+      -AppleLocale ar_SA >/dev/null
+  else
+    xcrun simctl launch --terminate-running-process "${simulator_id}" "${app_bundle_id}" "$@" >/dev/null
+  fi
+}
+
+is_supported_content_size() {
+  case "$1" in
+    extra-small|small|medium|large|extra-large|extra-extra-large|extra-extra-extra-large|accessibility-medium|accessibility-large|accessibility-extra-large|accessibility-extra-extra-large|accessibility-extra-extra-extra-large)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+configure_accessibility_profile() {
+  [[ "${accessibility_profile}" == "accessibility-xl-rtl" ]] || return 0
+
+  receiver_original_increase_contrast="$(xcrun simctl ui "${receiver_simulator_id}" increase_contrast)"
+  sender_original_increase_contrast="$(xcrun simctl ui "${sender_simulator_id}" increase_contrast)"
+  receiver_original_content_size="$(xcrun simctl ui "${receiver_simulator_id}" content_size)"
+  sender_original_content_size="$(xcrun simctl ui "${sender_simulator_id}" content_size)"
+
+  for contrast in "${receiver_original_increase_contrast}" "${sender_original_increase_contrast}"; do
+    case "${contrast}" in
+      enabled|disabled) ;;
+      *)
+        printf 'unable to determine simulator increase-contrast state: %s\n' "${contrast}" >&2
+        return 1
+        ;;
+    esac
+  done
+  for content_size in "${receiver_original_content_size}" "${sender_original_content_size}"; do
+    if ! is_supported_content_size "${content_size}"; then
+      printf 'unable to determine simulator content-size state: %s\n' "${content_size}" >&2
+      return 1
+    fi
+  done
+
+  xcrun simctl ui "${receiver_simulator_id}" increase_contrast enabled >/dev/null
+  xcrun simctl ui "${receiver_simulator_id}" content_size accessibility-extra-extra-extra-large >/dev/null
+  receiver_accessibility_settings_applied=true
+  xcrun simctl ui "${sender_simulator_id}" increase_contrast enabled >/dev/null
+  xcrun simctl ui "${sender_simulator_id}" content_size accessibility-extra-extra-extra-large >/dev/null
+  sender_accessibility_settings_applied=true
+  printf '%s\n' 'accessibility profile: enabled system increase contrast and maximum accessibility content size; original simulator settings will be restored on exit.'
+}
+
+restore_accessibility_profile() {
+  local restore_status=0
+
+  if [[ "${receiver_accessibility_settings_applied}" == true ]]; then
+    xcrun simctl ui "${receiver_simulator_id}" increase_contrast "${receiver_original_increase_contrast}" >/dev/null || restore_status=1
+    xcrun simctl ui "${receiver_simulator_id}" content_size "${receiver_original_content_size}" >/dev/null || restore_status=1
+  fi
+  if [[ "${sender_accessibility_settings_applied}" == true ]]; then
+    xcrun simctl ui "${sender_simulator_id}" increase_contrast "${sender_original_increase_contrast}" >/dev/null || restore_status=1
+    xcrun simctl ui "${sender_simulator_id}" content_size "${sender_original_content_size}" >/dev/null || restore_status=1
+  fi
+
+  if [[ "${restore_status}" -ne 0 ]]; then
+    printf '%s\n' 'failed to restore one or more simulator accessibility settings.' >&2
+  fi
+  return "${restore_status}"
 }
 
 run_stage() {
@@ -152,6 +245,7 @@ run_stage() {
 
 cleanup() {
   local original_status="$?"
+  local restore_status=0
   if [[ "${cleanup_attempted}" == false ]]; then
     cleanup_attempted=true
     launch_fixture "${receiver_simulator_id}" \
@@ -165,14 +259,20 @@ cleanup() {
       -v2-ui-testing-e2e-scope "${sender_scope}"
     run_stage "${sender_simulator_id}" testCleansOnlyRequestedIndependentInstallationScope || true
   fi
+  restore_accessibility_profile || restore_status=1
   if [[ "${keep_result_bundle}" == true ]]; then
     printf 'preserving local two-install result bundles: %s\n' "${result_directory}" >&2
   else
     rm -rf -- "${result_directory}"
   fi
+  if [[ "${original_status}" -eq 0 && "${restore_status}" -ne 0 ]]; then
+    original_status="${restore_status}"
+  fi
   exit "${original_status}"
 }
 trap cleanup EXIT
+
+configure_accessibility_profile
 
 launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-live-local-account \
@@ -203,8 +303,16 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-e2e-scope "${receiver_scope}" \
   -v2-ui-testing-group-title "${receiver_group_title}" \
   -v2-ui-testing-group-members "@${sender_public_handle}" \
-  -v2-ui-testing-message "${group_message}"
+  -v2-ui-testing-message "${group_message}" \
+  -v2-ui-testing-message-mentions "${group_message_mentions}"
 run_stage "${receiver_simulator_id}" testReceiverRestoresScopedInstallationAndProjectsOfflineMessageThenSendsGroupMessage
+
+launch_fixture "${sender_simulator_id}" \
+  -v2-ui-testing-live-local-account \
+  -v2-ui-testing-restore-local-account \
+  -v2-ui-testing-unavailable-realtime \
+  -v2-ui-testing-e2e-scope "${sender_scope}"
+run_stage "${sender_simulator_id}" testSenderQueuesDirectMessageWhileRealtimeEndpointIsUnavailable
 
 launch_fixture "${sender_simulator_id}" \
   -v2-ui-testing-live-local-account \
@@ -219,4 +327,4 @@ launch_fixture "${receiver_simulator_id}" \
 run_stage "${receiver_simulator_id}" testReceiverRestoresIndependentGroupMemberReply
 
 printf '%s\n' 'local two-install direct-and-group-message E2E: pass'
-printf '%s\n' 'scope: two different booted simulators independently register real App installations; the receiver is terminated before the sender opens a direct room and sends through the ordinary UI, then restores its scoped Keychain/SQLite state to create a group containing the sender and send a normal group message. The receiver backgrounds and reactivates before the sender restores only its own scope, projects that group message and replies through the ordinary composer. The receiver finally restores only its own scope and projects that member reply after authenticated realtime catch-up. This does not cover APNs, production deployment, or capacity.'
+printf '%s\n' 'scope: two different booted simulators independently register real App installations; the receiver is terminated before the sender opens a direct room and sends through the ordinary UI, then restores its scoped Keychain/SQLite state to create a group containing the sender and send a group message with @all through the ordinary composer. The sender then restores the same SQLite state with a DEBUG-only unavailable realtime endpoint, submits one ordinary direct message and must receive the durable-retry UI feedback. A normal sender restore replays that exact queued message before it projects the group message with its mention summary and replies through the ordinary composer. The receiver finally restores only its own scope and projects both the group reply and the queued direct message after authenticated realtime catch-up. This does not cover APNs, production deployment, or capacity.'

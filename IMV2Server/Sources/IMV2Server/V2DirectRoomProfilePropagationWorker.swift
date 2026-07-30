@@ -168,12 +168,17 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                 """).first(decoding: DirectProfileSequenceRow.self) else {
                 throw V2DirectRoomProfilePropagationError.corruptPersistenceState
             }
+            // Match the room-event UUID spelling used by the gateway. The
+            // direct-profile update must not create a second lexical room key
+            // on a client that receives both projections.
+            let wireRoomID = target.roomID.uuidString
+            let wireTargetUserID = lease.sourceUserID.uuidString
             try await sql.raw("""
                 INSERT INTO im_v2.user_sync_log
                     (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
                 VALUES (\(bind: target.userID), \(bind: sequence.sequence), \(bind: lease.sourceEventID), 'direct_room_profile',
-                        jsonb_build_object('room_id', \(bind: target.roomID)::text,
-                                           'target_user_id', \(bind: lease.sourceUserID)::text,
+                        jsonb_build_object('room_id', \(bind: wireRoomID),
+                                           'target_user_id', \(bind: wireTargetUserID),
                                            'public_handle', \(bind: lease.publicHandle),
                                            'display_name', \(bind: lease.displayName),
                                            'revision', \(bind: lease.revision),

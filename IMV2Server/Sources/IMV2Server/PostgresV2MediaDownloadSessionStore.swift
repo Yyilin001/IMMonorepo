@@ -84,38 +84,12 @@ public struct PostgresV2MediaDownloadSessionStore: V2MediaDownloadSessionStore {
     }
 
     private func isCurrentlyAuthorized(mediaID: UUID, requester: UUID, device: UUID, on sql: any SQLDatabase) async throws -> Bool {
-        try await sql.raw("""
-            SELECT EXISTS (
-                SELECT 1
-                FROM im_v2.media_objects AS media
-                JOIN im_v2.message_media_references AS reference ON reference.media_id = media.media_id
-                JOIN im_v2.messages AS message ON message.message_id = reference.message_id
-                JOIN im_v2.rooms AS room ON room.room_id = message.room_id
-                JOIN im_v2.room_memberships AS membership
-                  ON membership.room_id = room.room_id
-                 AND membership.user_id = \(bind: requester)
-                 AND membership.joined_revision <= room.membership_revision
-                 AND (membership.left_revision IS NULL OR membership.left_revision > room.membership_revision)
-                WHERE media.media_id = \(bind: mediaID)
-                  AND media.state = 'available'
-                  AND message.withdrawn_at IS NULL
-                  AND reference.revoked_at IS NULL
-                  AND EXISTS (
-                      SELECT 1 FROM im_v2.auth_devices AS authenticated_device
-                      WHERE authenticated_device.user_id = \(bind: requester)
-                        AND authenticated_device.device_id = \(bind: device)
-                        AND authenticated_device.revoked_at IS NULL
-                  )
-                  AND EXISTS (
-                      SELECT 1 FROM im_v2.user_sync_log AS delivery
-                      WHERE delivery.user_id = \(bind: requester)
-                        AND delivery.projection_kind = 'message'
-                        AND delivery.payload->>'event_type' = 'message.accepted'
-                        AND delivery.payload->>'message_id' = message.message_id::text
-                        AND delivery.payload->'media_ids' @> jsonb_build_array(media.media_id::text)
-                  )
-            ) AS authorized
-            """).first(decoding: MediaDownloadAuthorizationRow.self)?.authorized ?? false
+        try await V2PostgresMediaVisibilityAuthorization.isAuthorized(
+            mediaID: mediaID,
+            requesterUserID: requester,
+            deviceID: device,
+            on: sql
+        )
     }
 }
 
@@ -129,8 +103,6 @@ private struct MediaDownloadGrantRow: Decodable {
     let expiresAt: Date
     enum CodingKeys: String, CodingKey { case mediaID = "media_id"; case expiresAt = "expires_at" }
 }
-
-private struct MediaDownloadAuthorizationRow: Decodable { let authorized: Bool }
 
 private func mediaDownloadUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
     guard let uuid = UUID(uuidString: value.rawValue) else {

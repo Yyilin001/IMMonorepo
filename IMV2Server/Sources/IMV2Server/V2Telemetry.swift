@@ -161,6 +161,8 @@ public enum V2GatewayTelemetryCommand: String, CaseIterable, Equatable, Sendable
     case syncSnapshot = "sync_snapshot"
     case snapshotPagePull = "snapshot_page_pull"
     case snapshotAck = "snapshot_ack"
+    case groupEventSubscribe = "group_event_subscribe"
+    case groupEventUnsubscribe = "group_event_unsubscribe"
     case unsupported = "unsupported"
 }
 
@@ -214,6 +216,8 @@ public enum V2TelemetryEvent: Equatable, Sendable {
         staleRouteDeliveries: Int,
         releasedDeliveries: Int,
         pausedDeliveries: Int,
+        relayElapsedMilliseconds: UInt64,
+        deliveryElapsedMilliseconds: UInt64,
         elapsedMilliseconds: UInt64
     )
     case fanoutFailure(traceID: UUID, stage: V2FanoutTelemetryStage, elapsedMilliseconds: UInt64)
@@ -286,6 +290,8 @@ public actor V2PrometheusTelemetrySink: V2TelemetrySink {
 
     private var gateway: [GatewayKey: CounterAndDuration] = [:]
     private var fanoutRuns = CounterAndDuration()
+    private var fanoutRelayRuns = CounterAndDuration()
+    private var fanoutDeliveryRuns = CounterAndDuration()
     private var fanoutFailures: [V2FanoutTelemetryStage: UInt64] = [:]
     private var fanoutOutboxClaimed: UInt64 = 0
     private var fanoutOutboxPublished: UInt64 = 0
@@ -308,8 +314,10 @@ public actor V2PrometheusTelemetrySink: V2TelemetrySink {
             aggregate.add(elapsedMilliseconds: elapsedMilliseconds)
             gateway[key] = aggregate
 
-        case let .fanoutProgress(_, claimedOutboxRows, publishedOutboxRows, releasedOutboxRows, pausedOutboxRows, claimedDeliveries, committedDeliveries, staleDeliveries, staleRouteDeliveries, releasedDeliveries, pausedDeliveries, elapsedMilliseconds):
+        case let .fanoutProgress(_, claimedOutboxRows, publishedOutboxRows, releasedOutboxRows, pausedOutboxRows, claimedDeliveries, committedDeliveries, staleDeliveries, staleRouteDeliveries, releasedDeliveries, pausedDeliveries, relayElapsedMilliseconds, deliveryElapsedMilliseconds, elapsedMilliseconds):
             fanoutRuns.add(elapsedMilliseconds: elapsedMilliseconds)
+            fanoutRelayRuns.add(elapsedMilliseconds: relayElapsedMilliseconds)
+            fanoutDeliveryRuns.add(elapsedMilliseconds: deliveryElapsedMilliseconds)
             fanoutOutboxClaimed = v2SaturatingAdd(fanoutOutboxClaimed, v2NonNegative(claimedOutboxRows))
             fanoutOutboxPublished = v2SaturatingAdd(fanoutOutboxPublished, v2NonNegative(publishedOutboxRows))
             fanoutOutboxReleased = v2SaturatingAdd(fanoutOutboxReleased, v2NonNegative(releasedOutboxRows))
@@ -349,6 +357,14 @@ public actor V2PrometheusTelemetrySink: V2TelemetrySink {
             "im_v2_fanout_runs_total \(fanoutRuns.count)",
             "im_v2_fanout_run_duration_milliseconds_sum \(fanoutRuns.elapsedMilliseconds)",
             "im_v2_fanout_run_duration_milliseconds_count \(fanoutRuns.count)",
+            "# HELP im_v2_fanout_relay_duration_milliseconds Aggregate outbox relay phase duration.",
+            "# TYPE im_v2_fanout_relay_duration_milliseconds summary",
+            "im_v2_fanout_relay_duration_milliseconds_sum \(fanoutRelayRuns.elapsedMilliseconds)",
+            "im_v2_fanout_relay_duration_milliseconds_count \(fanoutRelayRuns.count)",
+            "# HELP im_v2_fanout_delivery_duration_milliseconds Aggregate delivery phase duration.",
+            "# TYPE im_v2_fanout_delivery_duration_milliseconds summary",
+            "im_v2_fanout_delivery_duration_milliseconds_sum \(fanoutDeliveryRuns.elapsedMilliseconds)",
+            "im_v2_fanout_delivery_duration_milliseconds_count \(fanoutDeliveryRuns.count)",
             "# HELP im_v2_fanout_outbox_rows_total Aggregate durable outbox progression.",
             "# TYPE im_v2_fanout_outbox_rows_total counter",
             "im_v2_fanout_outbox_rows_total{state=\"claimed\"} \(fanoutOutboxClaimed)",
@@ -406,6 +422,8 @@ func v2TelemetryCommand(for envelope: IMV2Envelope) -> V2GatewayTelemetryCommand
     case .syncSnapshot: .syncSnapshot
     case .snapshotPagePull: .snapshotPagePull
     case .snapshotAck: .snapshotAck
+    case .groupEventSubscribe: .groupEventSubscribe
+    case .groupEventUnsubscribe: .groupEventUnsubscribe
     default: .unsupported
     }
 }

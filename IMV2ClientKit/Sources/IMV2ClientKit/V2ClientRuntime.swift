@@ -19,7 +19,8 @@ public extension V2ClientRuntimeActivity {
 
 /// Default V2 activity composition. A reset is completely materialized and
 /// acknowledged before the runtime starts live availability or heartbeat
-/// loops, so neither loop can observe an incomplete local projection.
+/// loops.  Priority user commands are flushed before optional post-sync
+/// maintenance, so large background histories cannot block sending.
 public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable {
     private let syncEngine: any V2SyncDriving
     private let availabilityRunner: V2AvailabilityDrivenSyncRunner
@@ -47,13 +48,13 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
             source: availabilitySource,
             syncEngine: syncEngine,
             afterSynchronization: { [commandOutbox, maximumInitialCommandFlushes, flushAdditionalDurableCommands, afterDurableSynchronization, onProjectionSynchronized] in
-                try await afterDurableSynchronization()
-                await onProjectionSynchronized()
                 try await Self.flush(
                     commandOutbox: commandOutbox,
                     maximumFlushes: maximumInitialCommandFlushes,
                     flushAdditionalDurableCommands: flushAdditionalDurableCommands
                 )
+                try await afterDurableSynchronization()
+                await onProjectionSynchronized()
             }
         )
         self.heartbeatScheduler = .init(sender: heartbeatSender, interval: heartbeatInterval)
@@ -68,7 +69,6 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         if case .resetPending = try await syncEngine.synchronizeUntilCaughtUp() {
             try await syncEngine.completePendingReset()
         }
-        try await afterDurableSynchronization()
         await onProjectionSynchronized()
     }
 
@@ -81,6 +81,8 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
             maximumFlushes: maximumInitialCommandFlushes,
             flushAdditionalDurableCommands: flushAdditionalDurableCommands
         )
+        try await afterDurableSynchronization()
+        await onProjectionSynchronized()
     }
 
     private static func flush(

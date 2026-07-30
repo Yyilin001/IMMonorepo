@@ -42,43 +42,12 @@ public struct PostgresV2MediaStore: V2MediaStore {
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            let authorized = try await sql.raw("""
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM im_v2.media_objects AS media
-                    JOIN im_v2.message_media_references AS reference
-                      ON reference.media_id = media.media_id
-                    JOIN im_v2.messages AS message
-                      ON message.message_id = reference.message_id
-                    JOIN im_v2.rooms AS room
-                      ON room.room_id = message.room_id
-                    JOIN im_v2.room_memberships AS membership
-                      ON membership.room_id = room.room_id
-                     AND membership.user_id = \(bind: requester)
-                     AND membership.joined_revision <= room.membership_revision
-                     AND (membership.left_revision IS NULL OR membership.left_revision > room.membership_revision)
-                    WHERE media.media_id = \(bind: media)
-                      AND media.state = 'available'
-                      AND message.withdrawn_at IS NULL
-                      AND reference.revoked_at IS NULL
-                      AND EXISTS (
-                          SELECT 1
-                          FROM im_v2.auth_devices AS device
-                          WHERE device.user_id = \(bind: requester)
-                            AND device.device_id = \(bind: device)
-                            AND device.revoked_at IS NULL
-                      )
-                      AND EXISTS (
-                          SELECT 1
-                          FROM im_v2.user_sync_log AS delivery
-                          WHERE delivery.user_id = \(bind: requester)
-                            AND delivery.projection_kind = 'message'
-                            AND delivery.payload->>'event_type' = 'message.accepted'
-                            AND delivery.payload->>'message_id' = message.message_id::text
-                            AND delivery.payload->'media_ids' @> jsonb_build_array(media.media_id::text)
-                      )
-                ) AS authorized
-                """).first(decoding: MediaDownloadAuthorizationRow.self)?.authorized ?? false
+            let authorized = try await V2PostgresMediaVisibilityAuthorization.isAuthorized(
+                mediaID: media,
+                requesterUserID: requester,
+                deviceID: device,
+                on: sql
+            )
             guard authorized else { throw V2MediaStoreError.downloadNotAuthorized }
             try await sql.raw("""
                 INSERT INTO im_v2.media_download_grants
@@ -186,7 +155,6 @@ public enum V2MediaStoreError: Error, Equatable, Sendable { case idempotencyConf
 private struct MediaUploadOperationRow: Decodable { let mediaID: UUID; let contentType: String; let byteCount: Int64; let uploadSessionID: UUID; let expiresAt: Date; let requestingDeviceID: UUID; enum CodingKeys: String, CodingKey { case mediaID = "media_id"; case contentType = "content_type"; case byteCount = "byte_count"; case uploadSessionID = "upload_session_id"; case expiresAt = "expires_at"; case requestingDeviceID = "requesting_device_id" } }
 private struct MediaStateRow: Decodable { let ownerUserID: UUID; let state: String; let expiresAt: Date; let uploadSessionID: UUID; enum CodingKeys: String, CodingKey { case ownerUserID = "owner_user_id"; case state; case expiresAt = "expires_at"; case uploadSessionID = "upload_session_id" } }
 private struct MediaIDRow: Decodable { let mediaID: UUID; enum CodingKeys: String, CodingKey { case mediaID = "media_id" } }
-private struct MediaDownloadAuthorizationRow: Decodable { let authorized: Bool }
 private struct MediaUploadAuthorizationRow: Decodable { let authorized: Bool }
 private struct MediaUploadStatusRow: Decodable { let state: String; let expiresAt: Date; enum CodingKeys: String, CodingKey { case state; case expiresAt = "expires_at" } }
 private func mediaUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let uuid = UUID(uuidString: value.rawValue) else { throw V2MediaStoreError.mediaUnavailable }; return uuid }

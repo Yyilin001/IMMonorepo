@@ -3,9 +3,9 @@ set -Eeuo pipefail
 
 repo_root=/workspace
 timeout_seconds="${V2_TEST_TIMEOUT_SECONDS:-1200}"
-# The test container is intentionally capped at two CPUs and 4 GiB. SwiftPM
-# otherwise derives a much larger host-dependent default, which can OOM while
-# compiling the Server test target before any regression executes.
+# The test container uses an explicit resource envelope. SwiftPM otherwise
+# derives a much larger host-dependent default, which can OOM while compiling
+# the Server test target before any regression executes.
 swiftpm_jobs="${V2_SWIFTPM_JOBS:-4}"
 if ! [[ "${swiftpm_jobs}" =~ ^[1-9][0-9]*$ ]]; then
   printf 'V2_SWIFTPM_JOBS must be a positive integer: %s\n' "${swiftpm_jobs}" >&2

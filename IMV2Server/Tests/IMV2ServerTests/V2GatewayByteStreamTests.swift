@@ -4,10 +4,12 @@ import IMV2Core
 import Testing
 
 struct V2GatewayByteStreamTests {
+    private let protocolVersion = UInt8(IMV2ProtocolVersion.current)
+
     @Test("fragmented bootstrap and authenticated frames preserve request correlation")
     func fragmentedFrames() async throws {
         let stream = V2GatewayByteStream(
-            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, 1]),
+            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
             session: .init(limits: try .init(maximumInFlightRequests: 2), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", now: { Date(timeIntervalSince1970: 0) }),
             handler: ByteStreamCommandFake()
         )
@@ -15,9 +17,9 @@ struct V2GatewayByteStreamTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [1]
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
-        let helloBytes = try V2FrameCodec.encode(try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0), limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, 1]))
+        let helloBytes = try V2FrameCodec.encode(try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0), limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]))
         #expect(try await stream.receive(Data(helloBytes.prefix(5))).isEmpty)
         let helloResponses = try await stream.receive(Data(helloBytes.dropFirst(5)))
         #expect(helloResponses.count == 1)
@@ -25,28 +27,28 @@ struct V2GatewayByteStreamTests {
 
         var authenticate = IMV2Envelope()
         authenticate.requestID = 2
-        authenticate.protocolVersion = 1
+        authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
         authenticate.authenticate.deviceID = "device-a"
-        let authResponses = try await stream.receive(encoded(authenticate, version: 1))
+        let authResponses = try await stream.receive(encoded(authenticate, version: protocolVersion))
         #expect(try decode(authResponses[0]).authenticated.selectedCapabilityProfile == "base")
 
         var heartbeat = IMV2Envelope()
         heartbeat.requestID = 3
-        heartbeat.protocolVersion = 1
+        heartbeat.protocolVersion = UInt32(protocolVersion)
         heartbeat.heartbeat = .init()
         heartbeat.heartbeat.clientTimeMs = 123
-        let heartbeatResponses = try await stream.receive(encoded(heartbeat, version: 1))
+        let heartbeatResponses = try await stream.receive(encoded(heartbeat, version: protocolVersion))
         let heartbeatAck = try decode(try #require(heartbeatResponses.first))
         #expect(heartbeatAck.requestID == 3)
         #expect(heartbeatAck.heartbeatAck.serverTimeMs == 0)
 
         var pull = IMV2Envelope()
         pull.requestID = 4
-        pull.protocolVersion = 1
+        pull.protocolVersion = UInt32(protocolVersion)
         pull.syncPull = .init()
-        let pullResponses = try await stream.receive(encoded(pull, version: 1))
+        let pullResponses = try await stream.receive(encoded(pull, version: protocolVersion))
         let response = try decode(try #require(pullResponses.first))
         #expect(response.requestID == 4)
         #expect(response.error.code == "UNAVAILABLE")
@@ -55,14 +57,14 @@ struct V2GatewayByteStreamTests {
     @Test("malformed framing closes the connection")
     func malformedFrameClosesSession() async throws {
         let stream = V2GatewayByteStream(
-            frameLimits: try .init(maximumPayloadBytes: 128, acceptedVersions: [0, 1]),
+            frameLimits: try .init(maximumPayloadBytes: 128, acceptedVersions: [0, protocolVersion]),
             session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base"),
             handler: ByteStreamCommandFake()
         )
         await #expect(throws: V2FrameCodecError.invalidMagic) {
             try await stream.receive(Data([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
         }
-        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [1]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         await #expect(throws: V2ConnectionStateError.unexpectedCommand) {
             try await stream.receive(encoded(hello, version: 0))
         }
@@ -78,7 +80,7 @@ struct V2GatewayByteStreamTests {
     func emitsSyncAvailableForRegisteredUser() async throws {
         let registry = V2DeviceConnectionRegistry()
         let stream = V2GatewayByteStream(
-            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, 1]),
+            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
             session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base"),
             handler: ByteStreamCommandFake(),
             registry: registry
@@ -87,10 +89,10 @@ struct V2GatewayByteStreamTests {
         await stream.setOutboundWriter { bytes in
             Task { await recorder.append(bytes) }
         }
-        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [1]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
-        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = 1; authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
-        _ = try await stream.receive(encoded(authenticate, version: 1))
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+        _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
         #expect(await registry.connectionMetricsSnapshot() == .init(activeDevices: 1, activeConnections: 1))
 
         await registry.notifySyncAvailable(userID: try .init("user-a"), eventID: 12, highWatermark: 48)
@@ -104,12 +106,45 @@ struct V2GatewayByteStreamTests {
         #expect(await registry.connectionMetricsSnapshot() == .init(activeDevices: 0, activeConnections: 0))
     }
 
+    @Test("a local Hybrid room viewer receives a metadata-only wake on its existing TLS stream")
+    func emitsGroupEventAvailableOnlyWhileLocallySubscribed() async throws {
+        let registry = V2DeviceConnectionRegistry()
+        let connectionID = UUID()
+        let stream = V2GatewayByteStream(
+            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
+            session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base"),
+            handler: ByteStreamCommandFake(),
+            connectionID: connectionID,
+            registry: registry
+        )
+        let recorder = OutboundFrameRecorder()
+        await stream.setOutboundWriter { bytes in Task { await recorder.append(bytes) } }
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+        _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
+
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000c01")
+        await registry.subscribeHybridGroup(stream, connectionID: connectionID, roomID: roomID)
+        await registry.notifyHybridGroupAvailable(roomID: roomID, highWatermark: 42)
+        let frame = try #require(await recorder.waitForFirst())
+        let wake = try decode(frame)
+        #expect(wake.requestID == 0)
+        #expect(wake.groupEventAvailable.roomID == roomID.rawValue)
+        #expect(wake.groupEventAvailable.highWatermark == 42)
+
+        await registry.unsubscribeHybridGroup(connectionID: connectionID, roomID: roomID)
+        await registry.notifyHybridGroupAvailable(roomID: roomID, highWatermark: 43)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(await recorder.count() == 1)
+    }
+
     private func encoded(_ envelope: IMV2Envelope, version: UInt8) throws -> Data {
-        try V2FrameCodec.encode(try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, 1]))
+        try V2FrameCodec.encode(try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]))
     }
 
     private func decode(_ bytes: Data) throws -> IMV2Envelope {
-        try V2ServerProtobufFrameCodec.decode(V2FrameCodec.decodeExactlyOne(bytes, limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, 1])))
+        try V2ServerProtobufFrameCodec.decode(V2FrameCodec.decodeExactlyOne(bytes, limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion])))
     }
 }
 
@@ -125,6 +160,8 @@ private actor OutboundFrameRecorder {
         }
         return nil
     }
+
+    func count() -> Int { frames.count }
 }
 
 private struct ByteStreamAuthFake: V2GatewayAuthenticator {

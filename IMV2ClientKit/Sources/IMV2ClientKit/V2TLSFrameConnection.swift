@@ -49,10 +49,29 @@ public struct V2SyncAvailabilityHint: Equatable, Sendable {
     }
 }
 
+/// Non-authoritative foreground wake for one Hybrid room. The client follows
+/// it with its durable room-event cursor pull before changing local state.
+public struct V2GroupEventAvailabilityHint: Equatable, Sendable {
+    public let roomID: RoomID
+    public let highWatermark: UInt64
+
+    public init(roomID: RoomID, highWatermark: UInt64) {
+        self.roomID = roomID
+        self.highWatermark = highWatermark
+    }
+}
+
 /// A single application-owned consumer waits for best-effort live hints. A
 /// hint is never state: callers must follow it with normal pull/ACK sync.
 public protocol V2SyncAvailabilityHintSource: Sendable {
     func nextAvailabilityHint() async throws -> V2SyncAvailabilityHint
+}
+
+/// There is one foreground Hybrid detail listener per connection. Keeping it
+/// separate from user-sync availability prevents one room's wake from waking
+/// a whole account sync loop.
+public protocol V2GroupEventAvailabilityHintSource: Sendable {
+    func nextGroupEventAvailabilityHint() async throws -> V2GroupEventAvailabilityHint
 }
 
 /// Narrow connection lifecycle boundary used by the app-facing coordinator.
@@ -80,7 +99,7 @@ public protocol V2RealtimeSessionConnecting: Sendable {
 /// reaches `.ready`. Requests are serialized by this actor, matching the
 /// SyncEngine's deterministic apply/ACK behavior.
 #if canImport(Network) && canImport(Security)
-public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2RealtimeConnection {
+public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2RealtimeConnection {
     private let endpoint: V2RealtimeEndpoint
     private let limits: V2FrameLimits
     private let maximumProtobufMessageDepth: Int
@@ -91,6 +110,8 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     private var responseWaiters: [UInt64: CheckedContinuation<V2Frame, Error>] = [:]
     private var availabilityWaiter: CheckedContinuation<V2SyncAvailabilityHint, Error>?
     private var pendingAvailabilityHint: V2SyncAvailabilityHint?
+    private var groupEventAvailabilityWaiter: CheckedContinuation<V2GroupEventAvailabilityHint, Error>?
+    private var pendingGroupEventAvailabilityHint: V2GroupEventAvailabilityHint?
     private var readerTask: Task<Void, Never>?
 
     public init(
@@ -165,6 +186,25 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             }
         }, onCancel: {
             Task { await self.cancelAvailabilityWait() }
+        })
+    }
+
+    public func nextGroupEventAvailabilityHint() async throws -> V2GroupEventAvailabilityHint {
+        guard authenticatedVersion != nil, connection != nil else { throw V2TLSFrameConnectionError.notConnected }
+        if let pendingGroupEventAvailabilityHint {
+            self.pendingGroupEventAvailabilityHint = nil
+            return pendingGroupEventAvailabilityHint
+        }
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                guard groupEventAvailabilityWaiter == nil else {
+                    continuation.resume(throwing: V2TLSFrameConnectionError.concurrentAvailabilityConsumer)
+                    return
+                }
+                groupEventAvailabilityWaiter = continuation
+            }
+        }, onCancel: {
+            Task { await self.cancelGroupEventAvailabilityWait() }
         })
     }
 
@@ -270,13 +310,25 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         guard frame.flags.isEmpty else { throw V2TLSFrameConnectionError.unsupportedFrameFlags }
         if frame.requestID == 0 {
             let envelope = try V2ProtobufFrameCodec.decode(frame, maximumMessageDepth: maximumProtobufMessageDepth)
-            guard case .syncAvailable(let hint)? = envelope.body else { throw V2TLSFrameConnectionError.unexpectedResponse }
-            let value = V2SyncAvailabilityHint(eventID: hint.eventID, highWatermark: hint.highWatermark)
-            if let availabilityWaiter {
-                self.availabilityWaiter = nil
-                availabilityWaiter.resume(returning: value)
-            } else if pendingAvailabilityHint == nil || value.highWatermark >= pendingAvailabilityHint!.highWatermark {
-                pendingAvailabilityHint = value
+            switch envelope.body {
+            case .syncAvailable(let hint):
+                let value = V2SyncAvailabilityHint(eventID: hint.eventID, highWatermark: hint.highWatermark)
+                if let availabilityWaiter {
+                    self.availabilityWaiter = nil
+                    availabilityWaiter.resume(returning: value)
+                } else if pendingAvailabilityHint == nil || value.highWatermark >= pendingAvailabilityHint!.highWatermark {
+                    pendingAvailabilityHint = value
+                }
+            case .groupEventAvailable(let hint):
+                let value = try V2GroupEventAvailabilityHint(roomID: .init(hint.roomID), highWatermark: hint.highWatermark)
+                if let groupEventAvailabilityWaiter {
+                    self.groupEventAvailabilityWaiter = nil
+                    groupEventAvailabilityWaiter.resume(returning: value)
+                } else if pendingGroupEventAvailabilityHint == nil || value.highWatermark >= pendingGroupEventAvailabilityHint!.highWatermark {
+                    pendingGroupEventAvailabilityHint = value
+                }
+            default:
+                throw V2TLSFrameConnectionError.unexpectedResponse
             }
             return
         }
@@ -299,6 +351,11 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         availabilityWaiter = nil
     }
 
+    private func cancelGroupEventAvailabilityWait() {
+        groupEventAvailabilityWaiter?.resume(throwing: CancellationError())
+        groupEventAvailabilityWaiter = nil
+    }
+
     private func closeTransport(error: Error) {
         readerTask?.cancel()
         readerTask = nil
@@ -313,6 +370,9 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         availabilityWaiter?.resume(throwing: error)
         availabilityWaiter = nil
         pendingAvailabilityHint = nil
+        groupEventAvailabilityWaiter?.resume(throwing: error)
+        groupEventAvailabilityWaiter = nil
+        pendingGroupEventAvailabilityHint = nil
     }
 
     private func nextFrame(connection: NWConnection) async throws -> V2Frame {
@@ -348,7 +408,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
 /// The production transport is intentionally unavailable on non-Apple
 /// platforms. Linux remains useful for pure protocol, persistence, and
 /// synchronization regression tests, but may not silently downgrade TLS.
-public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2RealtimeConnection {
+public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2RealtimeConnection {
     public init(
         endpoint _: V2RealtimeEndpoint,
         frameLimits _: V2FrameLimits,
@@ -366,6 +426,10 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     }
 
     public func nextAvailabilityHint() async throws -> V2SyncAvailabilityHint {
+        throw V2TLSFrameConnectionError.notConnected
+    }
+
+    public func nextGroupEventAvailabilityHint() async throws -> V2GroupEventAvailabilityHint {
         throw V2TLSFrameConnectionError.notConnected
     }
 

@@ -52,7 +52,12 @@ public struct V2FanoutPipeline: Sendable {
     }
 
     public func runOnce(limit: Int) async throws -> V2FanoutPipelineReport {
-        try await runOnce(limit: limit, plannerConcurrency: 1, deliveryConcurrency: 1)
+        try await runOnce(
+            relayPlannerLimit: limit,
+            deliveryClaimLimit: limit,
+            plannerConcurrency: 1,
+            deliveryConcurrency: 1
+        )
     }
 
     /// Runs all bounded planner claims before starting delivery claims, so a
@@ -63,12 +68,37 @@ public struct V2FanoutPipeline: Sendable {
         plannerConcurrency: Int,
         deliveryConcurrency: Int
     ) async throws -> V2FanoutPipelineReport {
-        precondition(limit > 0 && plannerConcurrency > 0 && deliveryConcurrency > 0)
+        try await runOnce(
+            relayPlannerLimit: limit,
+            deliveryClaimLimit: limit,
+            plannerConcurrency: plannerConcurrency,
+            deliveryConcurrency: deliveryConcurrency
+        )
+    }
+
+    /// Runs one bounded pipeline progression with independent limits for the
+    /// room-outbox/planning phase and the lease-backed delivery phase. A large
+    /// delivery claim can reduce PostgreSQL claim overhead without widening
+    /// unrelated background workers.
+    public func runOnce(
+        relayPlannerLimit: Int,
+        deliveryClaimLimit: Int,
+        plannerConcurrency: Int,
+        deliveryConcurrency: Int
+    ) async throws -> V2FanoutPipelineReport {
+        precondition(
+            relayPlannerLimit > 0 && deliveryClaimLimit > 0 &&
+            plannerConcurrency > 0 && deliveryConcurrency > 0
+        )
         let traceID = UUID()
         let startedAt = now()
         do {
-            let relay = try await runRelays(limit: limit, concurrency: plannerConcurrency)
-            let delivery = try await runDeliveries(limit: limit, concurrency: deliveryConcurrency)
+            let relayStartedAt = now()
+            let relay = try await runRelays(limit: relayPlannerLimit, concurrency: plannerConcurrency)
+            let relayElapsedMilliseconds = v2ElapsedMilliseconds(since: relayStartedAt, now: now())
+            let deliveryStartedAt = now()
+            let delivery = try await runDeliveries(limit: deliveryClaimLimit, concurrency: deliveryConcurrency)
+            let deliveryElapsedMilliseconds = v2ElapsedMilliseconds(since: deliveryStartedAt, now: now())
             let report = V2FanoutPipelineReport(relay: relay, delivery: delivery)
             // The runtime polls frequently while idle. Emitting an all-zero
             // structured event on each poll turns normal quiescence into log
@@ -88,12 +118,88 @@ public struct V2FanoutPipeline: Sendable {
                     staleRouteDeliveries: delivery.staleRouteCount,
                     releasedDeliveries: delivery.releasedCount,
                     pausedDeliveries: delivery.pausedCount,
+                    relayElapsedMilliseconds: relayElapsedMilliseconds,
+                    deliveryElapsedMilliseconds: deliveryElapsedMilliseconds,
                     elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
                 ))
             }
             return report
         } catch {
             await telemetry.record(.fanoutFailure(traceID: traceID, stage: .pipeline, elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())))
+            throw error
+        }
+    }
+
+    /// Progresses room-outbox publication and plan creation without waiting
+    /// for an in-flight delivery drain. Runtimes can schedule this frequently
+    /// to bound the time from a committed room event to a durable plan.
+    public func runRelayAndPlanOnce(
+        limit: Int,
+        concurrency: Int
+    ) async throws -> V2OutboxRelayReport {
+        precondition(limit > 0 && concurrency > 0)
+        let traceID = UUID()
+        let startedAt = now()
+        do {
+            let relay = try await runRelays(limit: limit, concurrency: concurrency)
+            if relay.containsDurableWork {
+                await telemetry.record(.fanoutProgress(
+                    traceID: traceID,
+                    claimedOutboxRows: relay.claimedCount,
+                    publishedOutboxRows: relay.publishedCount,
+                    releasedOutboxRows: relay.releasedCount,
+                    pausedOutboxRows: relay.pausedCount,
+                    claimedDeliveries: 0,
+                    committedDeliveries: 0,
+                    staleDeliveries: 0,
+                    staleRouteDeliveries: 0,
+                    releasedDeliveries: 0,
+                    pausedDeliveries: 0,
+                    relayElapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now()),
+                    deliveryElapsedMilliseconds: 0,
+                    elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
+                ))
+            }
+            return relay
+        } catch {
+            await telemetry.record(.fanoutFailure(traceID: traceID, stage: .relay, elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())))
+            throw error
+        }
+    }
+
+    /// Progresses only lease-backed user delivery. It is intentionally
+    /// callable independently from planning so a long projection drain does
+    /// not add its duration to new-message planning latency.
+    public func runDeliveryOnce(
+        claimLimit: Int,
+        concurrency: Int
+    ) async throws -> V2FanoutDeliveryReport {
+        precondition(claimLimit > 0 && concurrency > 0)
+        let traceID = UUID()
+        let startedAt = now()
+        do {
+            let delivery = try await runDeliveries(limit: claimLimit, concurrency: concurrency)
+            if delivery.containsDurableWork {
+                await telemetry.record(.fanoutProgress(
+                    traceID: traceID,
+                    claimedOutboxRows: 0,
+                    publishedOutboxRows: 0,
+                    releasedOutboxRows: 0,
+                    pausedOutboxRows: 0,
+                    claimedDeliveries: delivery.claimedCount,
+                    committedDeliveries: delivery.committedCount,
+                    staleDeliveries: delivery.staleCount,
+                    staleRouteDeliveries: delivery.staleRouteCount,
+                    releasedDeliveries: delivery.releasedCount,
+                    pausedDeliveries: delivery.pausedCount,
+                    relayElapsedMilliseconds: 0,
+                    deliveryElapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now()),
+                    elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
+                ))
+            }
+            return delivery
+        } catch {
+            await telemetry.record(.fanoutFailure(traceID: traceID, stage: .delivery, elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())))
             throw error
         }
     }
@@ -121,8 +227,9 @@ public struct V2FanoutPipeline: Sendable {
             return try await runBucketedDeliveries(limit: limit, concurrency: concurrency)
         }
         let deliveryWorker = deliveryWorkers[0]
+        let effectiveConcurrency = min(concurrency, deliveryWorker.maximumConcurrentClaimsPerBucket)
         return try await withThrowingTaskGroup(of: V2FanoutDeliveryReport.self, returning: V2FanoutDeliveryReport.self) { group in
-            for _ in 0..<concurrency {
+            for _ in 0..<effectiveConcurrency {
                 group.addTask { try await deliveryWorker.runOnce(limit: limit) }
             }
             var aggregate = V2FanoutDeliveryReport(claimedCount: 0, committedCount: 0, staleCount: 0, staleRouteCount: 0, releasedCount: 0, pausedCount: 0)
@@ -179,5 +286,18 @@ private extension V2FanoutPipelineReport {
         relay.claimedCount > 0 || relay.publishedCount > 0 || relay.releasedCount > 0 || relay.pausedCount > 0 ||
         delivery.claimedCount > 0 || delivery.committedCount > 0 || delivery.staleCount > 0 ||
         delivery.staleRouteCount > 0 || delivery.releasedCount > 0 || delivery.pausedCount > 0
+    }
+}
+
+private extension V2OutboxRelayReport {
+    var containsDurableWork: Bool {
+        claimedCount > 0 || publishedCount > 0 || releasedCount > 0 || pausedCount > 0
+    }
+}
+
+private extension V2FanoutDeliveryReport {
+    var containsDurableWork: Bool {
+        claimedCount > 0 || committedCount > 0 || staleCount > 0 || staleRouteCount > 0 ||
+        releasedCount > 0 || pausedCount > 0
     }
 }

@@ -37,11 +37,14 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore {
             let operationLockKey = actorID.uuidString + ":" + operationID.uuidString
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: operationLockKey), 0))").run()
             if let previous = try await sql.raw("""
-                SELECT room_id, title, initial_member_user_ids, created_at
+                SELECT room_id, title, delivery_mode, initial_member_user_ids, created_at
                 FROM im_v2.group_room_operations
                 WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)
                 """).first(decoding: GroupOperationRow.self) {
-                guard previous.title == command.title, previous.initialMemberUserIDs == requestedMembers else {
+                guard previous.title == command.title,
+                      previous.deliveryMode == command.deliveryMode,
+                      previous.initialMemberUserIDs == requestedMembers
+                else {
                     return .idempotencyConflict
                 }
                 return .idempotent(try previous.group(ownerUserID: command.actorUserID))
@@ -85,8 +88,8 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore {
             let createdPlanID = try groupUUID(planID)
             try await sql.raw("""
                 INSERT INTO im_v2.rooms
-                    (room_id, room_kind, room_shard_id, room_sequence, membership_revision, capacity_profile_id, created_at)
-                VALUES (\(bind: createdRoomID), 'group', \(bind: roomShardID), 1, 1, \(bind: capacityProfile.id), \(bind: now))
+                    (room_id, room_kind, room_shard_id, room_sequence, membership_revision, capacity_profile_id, delivery_mode, created_at)
+                VALUES (\(bind: createdRoomID), 'group', \(bind: roomShardID), 1, 1, \(bind: capacityProfile.id), \(bind: command.deliveryMode.rawValue), \(bind: now))
                 """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
@@ -132,6 +135,7 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore {
                 VALUES (\(bind: createdEventID), \(bind: createdRoomID), 1, 'room.created', \(bind: actorID),
                         jsonb_build_object('event_type', 'room.created', 'room_id', \(bind: createdRoomID.uuidString),
                                            'owner_user_id', \(bind: actorID.uuidString), 'title', \(bind: command.title),
+                                           'delivery_mode', \(bind: command.deliveryMode.rawValue),
                                            'membership_revision', 1,
                                            'created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))),
                         1, \(bind: now))
@@ -152,12 +156,12 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore {
             let initialMembersJSON = try String(data: JSONEncoder().encode(requestedMembers.map(\.uuidString)), encoding: .utf8).unwrapGroup()
             try await sql.raw("""
                 INSERT INTO im_v2.group_room_operations
-                    (actor_user_id, operation_id, room_id, title, initial_member_user_ids, created_at)
-                VALUES (\(bind: actorID), \(bind: operationID), \(bind: createdRoomID), \(bind: command.title),
+                    (actor_user_id, operation_id, room_id, title, delivery_mode, initial_member_user_ids, created_at)
+                VALUES (\(bind: actorID), \(bind: operationID), \(bind: createdRoomID), \(bind: command.title), \(bind: command.deliveryMode.rawValue),
                         ARRAY(SELECT value::uuid FROM jsonb_array_elements_text(\(bind: initialMembersJSON)::jsonb) AS value ORDER BY value::uuid),
                         \(bind: now))
                 """).run()
-            return .created(.init(roomID: roomID, ownerUserID: command.actorUserID, title: command.title, memberUserIDs: command.allMemberUserIDs, createdAt: now))
+            return .created(.init(roomID: roomID, ownerUserID: command.actorUserID, title: command.title, deliveryMode: command.deliveryMode, memberUserIDs: command.allMemberUserIDs, createdAt: now))
         }
     }
 }
@@ -207,18 +211,20 @@ private struct GroupShardLeaseRow: Decodable {
 private struct GroupOperationRow: Decodable {
     let roomID: UUID
     let title: String
+    let deliveryMode: V2GroupDeliveryMode
     let initialMemberUserIDs: [UUID]
     let createdAt: Date
     enum CodingKeys: String, CodingKey {
         case roomID = "room_id"
         case title
+        case deliveryMode = "delivery_mode"
         case initialMemberUserIDs = "initial_member_user_ids"
         case createdAt = "created_at"
     }
 
     func group(ownerUserID: UserID) throws -> V2GroupRoom {
         let members = try initialMemberUserIDs.map { try UserID($0.uuidString) }
-        return try .init(roomID: .init(roomID.uuidString), ownerUserID: ownerUserID, title: title, memberUserIDs: [ownerUserID] + members, createdAt: createdAt)
+        return try .init(roomID: .init(roomID.uuidString), ownerUserID: ownerUserID, title: title, deliveryMode: deliveryMode, memberUserIDs: [ownerUserID] + members, createdAt: createdAt)
     }
 }
 

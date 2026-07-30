@@ -46,26 +46,40 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(createGroup.isEnabled)
         createGroup.tap()
         let groupMembers = app.buttons["v2.group.members"]
-        XCTAssertTrue(
-            groupMembers.waitForExistence(timeout: 30),
-            "创建仅自己的群聊后必须进入群详情，并提供成员管理入口。"
-        )
-        try auditOrdinaryChatSurface(in: app)
-        groupMembers.tap()
-        let groupMembersSheet = app.collectionViews["v2.group.members.sheet"]
-        XCTAssertTrue(
-            groupMembersSheet.waitForExistence(timeout: 15),
-            "群成员入口必须打开可供辅助技术定位的成员页。"
-        )
-        let closeGroupMembers = app.buttons["v2.group.members.close"]
-        XCTAssertTrue(closeGroupMembers.isHittable)
-        closeGroupMembers.tap()
-        XCTAssertTrue(groupMembers.waitForExistence(timeout: 5))
-        // The system-owned navigation back button is the only control here
-        // without an app identifier. The test otherwise uses stable IDs.
-        let backToConversationList = app.navigationBars.buttons.firstMatch
-        XCTAssertTrue(backToConversationList.isHittable)
-        backToConversationList.tap()
+        if groupMembers.waitForExistence(timeout: 30) {
+            try auditOrdinaryChatSurface(in: app)
+            groupMembers.tap()
+            let groupMembersSheet = app.collectionViews["v2.group.members.sheet"]
+            XCTAssertTrue(
+                groupMembersSheet.waitForExistence(timeout: 15),
+                "群成员入口必须打开可供辅助技术定位的成员页。"
+            )
+            let closeGroupMembers = app.buttons["v2.group.members.close"]
+            XCTAssertTrue(closeGroupMembers.isHittable)
+            closeGroupMembers.tap()
+            XCTAssertTrue(groupMembers.waitForExistence(timeout: 5))
+            // The system-owned navigation back button is the only control
+            // here without an app identifier. The test otherwise uses stable
+            // IDs.
+            let backToConversationList = app.navigationBars.buttons.firstMatch
+            XCTAssertTrue(backToConversationList.isHittable)
+            backToConversationList.tap()
+        } else {
+            // The server may durably accept a creation whose response is lost.
+            // The client must retain that one operation for replay instead of
+            // issuing a second group-create command merely to regain a room
+            // ID. Close the sheet and continue from the authoritative local
+            // conversation list.
+            let groupFeedback = app.staticTexts["v2.conversation.group-feedback"]
+            XCTAssertTrue(
+                groupFeedback.waitForExistence(timeout: 5)
+                    && groupFeedback.label == "建群请求已安全保存，连接恢复后会继续。",
+                "无法立即取得群 ID 时，建群 UI 必须明确保留 durable-retry 语义。"
+            )
+            let cancel = app.buttons["v2.conversation.group-cancel"]
+            XCTAssertTrue(cancel.isHittable)
+            cancel.tap()
+        }
         XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 5))
         app.buttons["v2.account-menu"].tap()
         let privacySettings = app.buttons["v2.privacy.open"]
@@ -334,6 +348,13 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             groupDraftValue.hasPrefix("two-install-group-"),
             "跨安装群消息只能由 Debug 夹具预填，仍须由普通消息发送 UI 提交；实际值：\(groupDraftValue.debugDescription)"
         )
+        let groupMentions = app.textViews["v2.message.mentions"]
+        XCTAssertEqual(
+            groupMentions.value as? String,
+            "@all",
+            "跨安装群消息必须通过普通群聊提及输入区携带 @all，而不能由测试直接写入命令。"
+        )
+        try app.performAccessibilityAudit(for: [.contrast])
         let send = app.buttons["v2.message.send"]
         XCTAssertTrue(send.isEnabled)
         send.tap()
@@ -364,6 +385,46 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     }
 
     @MainActor
+    func testSenderQueuesDirectMessageWhileRealtimeEndpointIsUnavailable() throws {
+        let app = XCUIApplication()
+        app.activate()
+
+        let refresh = app.buttons["v2.conversation.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
+        refresh.tap()
+        let directConversation = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "v2.conversation.direct.")
+        ).firstMatch
+        XCTAssertTrue(
+            directConversation.waitForExistence(timeout: 30) && directConversation.isHittable,
+            "实时端点不可用时，发送端仍必须从自身 SQLite 投影打开已有私聊。"
+        )
+        directConversation.tap()
+        let draft = app.textViews["v2.message.draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 15) && draft.isHittable)
+        draft.tap()
+        // A single character avoids the known simulator multi-character input
+        // truncation while still exercising the ordinary composer and durable
+        // outbox path.
+        draft.typeText("q")
+        XCTAssertEqual(draft.value as? String, "q")
+        let send = app.buttons["v2.message.send"]
+        XCTAssertTrue(send.isEnabled)
+        send.tap()
+        let feedback = app.staticTexts["v2.message.send-feedback"]
+        XCTAssertTrue(
+            feedback.waitForExistence(timeout: 30),
+            "实时端点不可用时，普通输入区必须确认消息已被安全保存，而不能静默丢弃。"
+        )
+        XCTAssertEqual(
+            feedback.label,
+            "已安全保存，连接恢复后会重试。",
+            "DEBUG 无效实时端点夹具只能得到 durable-retry 结果，不能误报为已发送。"
+        )
+        app.terminate()
+    }
+
+    @MainActor
     func testSenderRestoresIndependentGroupAndProjectsMessage() throws {
         let app = XCUIApplication()
         app.activate()
@@ -386,6 +447,13 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(
             groupMessage.waitForExistence(timeout: 30),
             "群成员恢复后必须只凭自身 SQLite 同步投影看到群主离线期间投递的群消息。"
+        )
+        let mentionSummary = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.mentions.", "提及所有人")
+        ).firstMatch
+        XCTAssertTrue(
+            mentionSummary.waitForExistence(timeout: 30),
+            "群成员的同步投影必须保留并呈现群主真实发送的 @all 提及语义。"
         )
         let replyDraft = app.textViews["v2.message.draft"]
         replyDraft.tap()
@@ -430,6 +498,38 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(
             memberReply.waitForExistence(timeout: 30),
             "群主恢复后必须仅凭自身 SQLite 同步投影看到初始成员通过普通输入区发送的回复。"
+        )
+        let backToConversationList = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(backToConversationList.isHittable)
+        backToConversationList.tap()
+        let refreshDirectProjection = app.buttons["v2.conversation.refresh"]
+        XCTAssertTrue(refreshDirectProjection.waitForExistence(timeout: 15))
+        refreshDirectProjection.tap()
+        let directConversation = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "v2.conversation.direct.")
+        ).firstMatch
+        XCTAssertTrue(
+            directConversation.waitForExistence(timeout: 30) && directConversation.isHittable,
+            "接收端恢复后必须继续保有此前私聊的 SQLite 投影。"
+        )
+        directConversation.tap()
+        let replayedOfflineMessage = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "q")
+        ).firstMatch
+        let replayedOfflineMessageAppeared = replayedOfflineMessage.waitForExistence(timeout: 30)
+        if !replayedOfflineMessageAppeared {
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "two-install-replayed-offline-direct-message-missing"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "two-install-replayed-offline-direct-message-ui-hierarchy"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        XCTAssertTrue(
+            replayedOfflineMessageAppeared,
+            "发送端恢复实时连接后，先前由普通 UI 安全保存的私聊消息必须只投递一次并进入接收端投影。"
         )
         app.terminate()
     }

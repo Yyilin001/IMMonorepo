@@ -121,6 +121,36 @@ migration_marker() {
     0019_account_disable.sql)
       printf "%s" "SELECT to_regclass('im_v2.account_disables') IS NOT NULL"
       ;;
+    0020_fanout_delivery_claim_lanes.sql)
+      printf "%s" "SELECT to_regclass('im_v2.fanout_deliveries_fresh_claim_idx') IS NOT NULL"
+      ;;
+    0021_group_delivery_modes.sql)
+      printf "%s" "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'rooms' AND column_name = 'delivery_mode')"
+      ;;
+    0022_group_event_wake_outbox.sql)
+      printf "%s" "SELECT to_regclass('im_v2.group_event_wake_outbox') IS NOT NULL"
+      ;;
+    0023_fanout_set_based_planner.sql)
+      printf "%s" "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'fanout_plans' AND column_name = 'enumerated_target_count')"
+      ;;
+    0024_drop_redundant_user_sync_pull_index.sql)
+      printf "%s" "SELECT to_regclass('im_v2.user_sync_log_pull_idx') IS NULL"
+      ;;
+    0025_drop_legacy_fanout_delivery_claim_index.sql)
+      printf "%s" "SELECT to_regclass('im_v2.fanout_deliveries_claim_idx') IS NULL"
+      ;;
+    0026_drop_legacy_fanout_retry_claim_index.sql)
+      printf "%s" "SELECT to_regclass('im_v2.fanout_deliveries_retry_claim_idx') IS NULL"
+      ;;
+    0027_drop_redundant_fanout_delivery_event_foreign_key.sql)
+      printf "%s" "SELECT NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fanout_deliveries_source_event_id_fkey' AND conrelid = 'im_v2.fanout_deliveries'::regclass)"
+      ;;
+    0028_narrow_user_sync_log_identity_uniqueness.sql)
+      printf "%s" "SELECT to_regclass('im_v2.user_sync_log_nonfanout_identity_idx') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_sync_log_user_id_source_event_id_projection_kind_key' AND conrelid = 'im_v2.user_sync_log'::regclass)"
+      ;;
+    0029_shared_fanout_sync_payloads.sql)
+      printf "%s" "SELECT to_regclass('im_v2.fanout_sync_payloads') IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'user_sync_log' AND column_name = 'payload_storage')"
+      ;;
     *)
       printf 'missing local migration marker for %s; add one before using a retained volume.\n' "$1" >&2
       return 1

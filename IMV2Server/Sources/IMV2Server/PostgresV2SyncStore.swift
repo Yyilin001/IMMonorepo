@@ -61,10 +61,14 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 startSequence = cursor.acknowledgedSequence
             }
             let rows = try await sql.raw("""
-                SELECT user_sync_sequence, source_event_id, projection_kind, payload::text AS payload_json
-                FROM \(unsafeRaw: table("user_sync_log"))
-                WHERE user_id = \(bind: userUUID) AND user_sync_sequence > \(bind: startSequence)
-                ORDER BY user_sync_sequence LIMIT \(bind: maxRecords + 1)
+                SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind,
+                       CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE shared.payload END::text AS payload_json
+                FROM \(unsafeRaw: table("user_sync_log")) AS log
+                LEFT JOIN \(unsafeRaw: table("fanout_sync_payloads")) AS shared
+                  ON shared.source_event_id = log.source_event_id
+                 AND shared.projection_kind = log.projection_kind
+                WHERE log.user_id = \(bind: userUUID) AND log.user_sync_sequence > \(bind: startSequence)
+                ORDER BY log.user_sync_sequence LIMIT \(bind: maxRecords + 1)
                 """).all(decoding: SyncLogRow.self)
             let hasMore = rows.count > maxRecords
             let records = try rows.prefix(maxRecords).map {

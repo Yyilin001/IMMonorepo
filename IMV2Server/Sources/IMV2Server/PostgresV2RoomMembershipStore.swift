@@ -37,7 +37,7 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
             }
 
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id
+                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, delivery_mode
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
             """).first(decoding: MembershipRoomRow.self) else { throw V2RoomMembershipStoreError.roomNotFound }
             guard let group = try await sql.raw("""
@@ -63,7 +63,6 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
             case .remove:
                 guard actorRole == .owner || actorRole == .admin else { throw V2RoomMembershipStoreError.actorNotOwner }
             }
-
             let currentTargets = try await sql.raw("""
                 SELECT user_id, role FROM im_v2.room_memberships
                 WHERE room_id = \(bind: roomID) AND joined_revision <= \(bind: room.membershipRevision)
@@ -76,7 +75,10 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
             switch command.action {
             case .add:
                 guard currentTarget == nil else { return .targetAlreadyMember }
-                guard currentTargets.count + 1 <= capacityProfile.limits.maxEligibleMembers else { return .memberLimitReached }
+                let modeMaximum = V2GroupDeliveryPolicy().maximumMembers(for: room.deliveryMode)
+                guard currentTargets.count + 1 <= capacityProfile.limits.maxEligibleMembers,
+                      currentTargets.count + 1 <= modeMaximum
+                else { return .memberLimitReached }
                 audience = (currentTargets.map(\.userID) + [targetID]).sorted { $0.uuidString < $1.uuidString }
                 nextEligibleCount = currentTargets.count + 1
             case .remove:
@@ -87,6 +89,11 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
                 audience = currentTargets.map(\.userID)
                 nextEligibleCount = currentTargets.count - 1
             }
+            // A large-group membership mutation produces a finite control
+            // projection only for the added/removed user. Existing members
+            // observe the ordered event through the room log, so this path
+            // never reintroduces a group-wide fan-out.
+            let deliveryAudience = room.deliveryMode == .largeGroupHybrid ? [targetID] : audience
 
             guard let admission = try await sql.raw("""
                 SELECT eligible_member_count, command_window_limit, command_window_used,
@@ -107,7 +114,7 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
                   admission.eligibleMemberCount == currentTargets.count
             else { throw V2RoomMembershipStoreError.corruptPersistenceState }
             let reservation = try FanoutAdmissionEvaluator.reserve(
-                request: .init(targetRule: .exactTargetCount(audience.count)),
+                request: .init(targetRule: .exactTargetCount(deliveryAudience.count)),
                 profile: capacityProfile.limits,
                 roomState: try admission.state(),
                 shardState: try shard.state(),
@@ -176,6 +183,7 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
                             'membership_revision', \(bind: nextRevision),
                             'owner_user_id', \(bind: group.ownerUserID.uuidString),
                             'title', \(bind: group.title),
+                            'delivery_mode', \(bind: room.deliveryMode.rawValue),
                             'created_at_ms', \(bind: Int64(group.createdAt.timeIntervalSince1970 * 1_000)),
                             'server_created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))
                         ), \(bind: nextRevision), \(bind: now))
@@ -186,9 +194,9 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
                      target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at)
                 VALUES (\(bind: planUUID), \(bind: eventUUID), \(bind: roomID), \(bind: nextSequence), \(bind: nextRevision),
                         '{"kind":"frozen_targets"}'::jsonb, jsonb_build_object('after_user_id', NULL),
-                        \(bind: audience.count), \(bind: audience.count), 'planning', \(bind: now))
+                        \(bind: deliveryAudience.count), \(bind: deliveryAudience.count), 'planning', \(bind: now))
                 """).run()
-            let targetsJSON = String(data: try JSONSerialization.data(withJSONObject: audience.map(\.uuidString)), encoding: .utf8)!
+            let targetsJSON = String(data: try JSONSerialization.data(withJSONObject: deliveryAudience.map(\.uuidString)), encoding: .utf8)!
             try await sql.raw("""
                 INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id)
                 SELECT \(bind: eventUUID), value::uuid FROM jsonb_array_elements_text(\(bind: targetsJSON)::jsonb) AS value
@@ -208,7 +216,7 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
     }
 }
 
-private struct MembershipRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id" } }
+private struct MembershipRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let deliveryMode: V2GroupDeliveryMode; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", deliveryMode = "delivery_mode" } }
 private struct MembershipGroupRow: Decodable { let ownerUserID: UUID; let title: String; let createdAt: Date; enum CodingKeys: String, CodingKey { case ownerUserID = "owner_user_id", title, createdAt = "created_at" } }
 private struct MembershipTargetRow: Decodable { let userID: UUID; let role: String; enum CodingKeys: String, CodingKey { case userID = "user_id", role } }
 private struct MembershipBooleanRow: Decodable { let value: Bool }

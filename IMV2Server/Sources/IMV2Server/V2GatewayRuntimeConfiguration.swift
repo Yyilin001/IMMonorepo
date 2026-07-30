@@ -84,6 +84,13 @@ public enum V2FanoutHintRuntimeConfiguration: Sendable {
     case nats(V2NATSFanoutHintConfiguration)
 }
 
+/// Hybrid foreground wake routing is optional for a single gateway but must
+/// use a shared broker when active viewers can be connected to other replicas.
+public enum V2GroupEventWakeRuntimeConfiguration: Sendable {
+    case localOnly
+    case nats(V2NATSGroupEventWakeConfiguration)
+}
+
 public struct V2APNSRuntimeConfiguration: Sendable {
     public let teamID: String
     public let keyID: String
@@ -128,12 +135,40 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let capabilityProfile: String
     public let workerBatchSize: Int
     public let workerPollIntervalMilliseconds: Int
+    /// Maximum number of co-located target projections committed in one
+    /// database transaction. Keeping this small bounds rollback work, lock
+    /// hold time and WAL burst size.
+    public let fanoutDeliveryCommitBatchSize: Int
+    /// Maximum number of remote-user-shard effects a cross-store worker
+    /// projects before its separate control-store acknowledgement. This is
+    /// intentionally distinct from the co-located transaction boundary:
+    /// remote delivery pays one target and one control database round-trip per
+    /// batch, so the validated optimum is larger without widening the
+    /// co-located lock/WAL critical section.
+    public let crossStoreFanoutDeliveryCommitBatchSize: Int
+    /// Maximum same-claim remote commit batches in flight for one physical
+    /// user-shard bucket. This overlaps independent target/control database
+    /// transactions but is intentionally capped below general worker
+    /// concurrency to avoid fragmenting claim ownership or amplifying locks.
+    public let crossStoreFanoutDeliveryCommitConcurrency: Int
+    /// Maximum number of durable delivery leases one delivery worker claims in
+    /// one pass. This is intentionally separate from the generic worker
+    /// batch, which controls outbox and planning work as well.
+    public let fanoutDeliveryClaimBatchSize: Int
+    /// Number of full fresh-lane claim passes before a recovery-first pass.
+    /// This is explicit deployment policy because it bounds recovery latency
+    /// under an indefinitely busy new-message stream.
+    public let fanoutFreshBurstPasses: Int
     public let durableRetryPolicy: V2DurableRetryPolicy
     public let fanoutHint: V2FanoutHintRuntimeConfiguration
+    public let groupEventWake: V2GroupEventWakeRuntimeConfiguration
     public let maintenancePollIntervalMilliseconds: Int
     public let mediaWithdrawnRetentionSeconds: Int
     public let metrics: V2MetricsListenerConfiguration
     public let gatewayNodeID: String
+    /// The explicit deployment topology fence for process-local wake routing.
+    /// All replicas of one logical deployment must receive the same value.
+    public let gatewayReplicaCount: Int
     public let userShardRoute: V2UserShardRoute
     public let userShardStorage: [V2UserShardStorageConfiguration]
     public let directRoomShardID: String
@@ -160,6 +195,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         idleTimeoutMilliseconds = try Self.positive("IM_V2_IDLE_TIMEOUT_MS", environment: environment)
         workerBatchSize = try Self.positive("IM_V2_WORKER_BATCH_SIZE", environment: environment)
         workerPollIntervalMilliseconds = try Self.positive("IM_V2_WORKER_POLL_INTERVAL_MS", environment: environment)
+        fanoutDeliveryCommitBatchSize = try Self.deliveryCommitBatchSize(environment: environment)
+        crossStoreFanoutDeliveryCommitBatchSize = try Self.crossStoreDeliveryCommitBatchSize(environment: environment)
+        crossStoreFanoutDeliveryCommitConcurrency = try Self.crossStoreDeliveryCommitConcurrency(environment: environment)
+        fanoutDeliveryClaimBatchSize = try Self.deliveryClaimBatchSize(environment: environment)
+        fanoutFreshBurstPasses = try Self.positive("IM_V2_FANOUT_FRESH_BURST_PASSES", environment: environment)
         let retryInitialDelayMilliseconds = try Self.positive("IM_V2_DURABLE_RETRY_INITIAL_DELAY_MS", environment: environment)
         let retryMaximumDelayMilliseconds = try Self.positive("IM_V2_DURABLE_RETRY_MAX_DELAY_MS", environment: environment)
         guard retryMaximumDelayMilliseconds >= retryInitialDelayMilliseconds else {
@@ -172,6 +212,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             jitterFraction: Self.percentage("IM_V2_DURABLE_RETRY_JITTER_PERCENT", environment: environment)
         )
         fanoutHint = try Self.fanoutHintConfiguration(environment: environment)
+        gatewayReplicaCount = try Self.positive("IM_V2_GATEWAY_REPLICA_COUNT", environment: environment)
+        groupEventWake = try Self.groupEventWakeConfiguration(
+            environment: environment,
+            gatewayReplicaCount: gatewayReplicaCount
+        )
         maintenancePollIntervalMilliseconds = try Self.positive("IM_V2_MAINTENANCE_POLL_INTERVAL_MS", environment: environment)
         mediaWithdrawnRetentionSeconds = try Self.positive("IM_V2_MEDIA_WITHDRAWN_RETENTION_SECONDS", environment: environment)
         metrics = try .init(
@@ -235,6 +280,42 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 retryAfterSeconds: try Self.integer("IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS", environment: environment)
             )
         )
+    }
+
+    private static func deliveryCommitBatchSize(environment: any V2RuntimeEnvironment) throws -> Int {
+        let value = try positive("IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE", environment: environment)
+        guard value <= 128 else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")
+        }
+        return value
+    }
+
+    private static func crossStoreDeliveryCommitBatchSize(environment: any V2RuntimeEnvironment) throws -> Int {
+        let value = try positive("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE", environment: environment)
+        guard value <= 256 else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")
+        }
+        return value
+    }
+
+    private static func crossStoreDeliveryCommitConcurrency(environment: any V2RuntimeEnvironment) throws -> Int {
+        let value = try positive("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY", environment: environment)
+        guard value <= 2 else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY")
+        }
+        return value
+    }
+
+    private static func deliveryClaimBatchSize(environment: any V2RuntimeEnvironment) throws -> Int {
+        let value = try positive("IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE", environment: environment)
+        // A worker processes claimed leases sequentially in commit-sized
+        // transactions. Keep the in-flight lease set bounded to the validated
+        // 100k profile so a slow database cannot turn an aggressive setting
+        // into a lease-recovery burst.
+        guard value <= 2_000 else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE")
+        }
+        return value
     }
 
     private static func required(_ key: String, environment: any V2RuntimeEnvironment) throws -> String {
@@ -315,6 +396,34 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             do { return .nats(try .init(url: url, subject: subject, token: token)) }
             catch { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT") }
         default: throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT")
+        }
+    }
+
+    private static func groupEventWakeConfiguration(
+        environment: any V2RuntimeEnvironment,
+        gatewayReplicaCount: Int
+    ) throws -> V2GroupEventWakeRuntimeConfiguration {
+        let rawURL = optional("IM_V2_GROUP_WAKE_NATS_URL", environment: environment)
+        let subject = optional("IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX", environment: environment)
+        let token = optional("IM_V2_GROUP_WAKE_NATS_TOKEN", environment: environment)
+        let routingKeyBase64 = optional("IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64", environment: environment)
+        switch (rawURL, subject, routingKeyBase64) {
+        case (nil, nil, nil):
+            guard token == nil else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_TOKEN") }
+            guard gatewayReplicaCount == 1 else {
+                throw V2GatewayRuntimeConfigurationError.invalid(
+                    "IM_V2_GATEWAY_REPLICA_COUNT/IM_V2_GROUP_WAKE_NATS_URL/IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX/IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64"
+                )
+            }
+            return .localOnly
+        case let (rawURL?, subject?, routingKeyBase64?):
+            guard let url = URL(string: rawURL) else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_URL") }
+            guard let routingKey = Data(base64Encoded: routingKeyBase64) else {
+                throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64")
+            }
+            do { return .nats(try .init(url: url, subjectPrefix: subject, token: token, routingKey: routingKey)) }
+            catch { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_URL/IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX/IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64") }
+        default: throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_URL/IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX/IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64")
         }
     }
 

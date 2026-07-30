@@ -30,6 +30,66 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 throw TestConfigurationError.schemaAlreadyExists
             }
             try await installSchema(on: sql)
+            // The primary key already supplies this exact `(user, sequence)`
+            // ordering for sync pulls. A second B-tree would only amplify
+            // every fan-out projection's WAL and index-maintenance cost.
+            let redundantSyncPullIndexIsAbsent = try #require(try await sql.raw("""
+                SELECT to_regclass('im_v2.user_sync_log_pull_idx') IS NULL AS exists
+                """).first(decoding: ExistsRow.self))
+            #expect(redundantSyncPullIndexIsAbsent.exists)
+            let legacyFanoutClaimIndexIsAbsent = try #require(try await sql.raw("""
+                SELECT to_regclass('im_v2.fanout_deliveries_claim_idx') IS NULL AS exists
+                """).first(decoding: ExistsRow.self))
+            #expect(legacyFanoutClaimIndexIsAbsent.exists)
+            let legacyFanoutRetryClaimIndexIsAbsent = try #require(try await sql.raw("""
+                SELECT to_regclass('im_v2.fanout_deliveries_retry_claim_idx') IS NULL AS exists
+                """).first(decoding: ExistsRow.self))
+            #expect(legacyFanoutRetryClaimIndexIsAbsent.exists)
+            let redundantFanoutEventForeignKeyIsAbsent = try #require(try await sql.raw("""
+                SELECT NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'fanout_deliveries_source_event_id_fkey'
+                      AND conrelid = 'im_v2.fanout_deliveries'::regclass
+                ) AS exists
+                """).first(decoding: ExistsRow.self))
+            #expect(redundantFanoutEventForeignKeyIsAbsent.exists)
+            let nonFanoutSyncIdentityIndexExists = try #require(try await sql.raw("""
+                SELECT to_regclass('im_v2.user_sync_log_nonfanout_identity_idx') IS NOT NULL AS exists
+                """).first(decoding: ExistsRow.self))
+            #expect(nonFanoutSyncIdentityIndexExists.exists)
+            let fullSyncIdentityConstraintIsAbsent = try #require(try await sql.raw("""
+                SELECT NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'user_sync_log_user_id_source_event_id_projection_kind_key'
+                      AND conrelid = 'im_v2.user_sync_log'::regclass
+                ) AS exists
+                """).first(decoding: ExistsRow.self))
+            #expect(fullSyncIdentityConstraintIsAbsent.exists)
+            // Non-fan-out writers do not acquire `consumer_inbox`, so they
+            // retain the source-event semantic uniqueness that existed before
+            // migration 0028.
+            let nonFanoutUserID = UUID(uuidString: "00000000-0000-0000-0000-000000000e01")!
+            let nonFanoutSourceEventID = UUID(uuidString: "00000000-0000-0000-0000-000000000e02")!
+            try await sql.raw("""
+                INSERT INTO im_v2.user_sync_log
+                    (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
+                VALUES
+                    (\(bind: nonFanoutUserID), 1, \(bind: nonFanoutSourceEventID), 'relationship', '{}'::jsonb, now())
+                """).run()
+            await #expect(throws: (any Error).self) {
+                try await sql.raw("""
+                    INSERT INTO im_v2.user_sync_log
+                        (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
+                    VALUES
+                        (\(bind: nonFanoutUserID), 2, \(bind: nonFanoutSourceEventID), 'relationship', '{}'::jsonb, now())
+                    """).run()
+            }
+            try await sql.raw("""
+                DELETE FROM im_v2.user_sync_log
+                WHERE user_id = \(bind: nonFanoutUserID)
+                  AND source_event_id = \(bind: nonFanoutSourceEventID)
+                  AND projection_kind = 'relationship'
+                """).run()
             try await seedRoom(on: sql)
 
             let profile = try RoomCapacityProfile(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3)
@@ -40,6 +100,21 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 Issue.record("expected accepted message")
                 return
             }
+            // Standard fan-out keeps per-user sync as the reliable path, but
+            // an active detail view may immediately pull this authorized room
+            // event as a transient preview. This must be available before the
+            // fan-out plan drains and must not depend on a Hybrid-only mode.
+            let groupLog = V2GroupEventLogService(store: PostgresV2GroupEventLogStore(database: app.db(.psql)))
+            let standardPreview = try await groupLog.pull(
+                roomID: roomID,
+                actorUserID: senderID,
+                afterRoomSequence: 0,
+                pageSize: 10
+            )
+            let standardSubscription = try await groupLog.subscribe(roomID: roomID, actorUserID: senderID)
+            #expect(standardPreview.events.map(\.roomSequence) == [message.roomSequence])
+            #expect(standardPreview.events.first?.projectionKind == "message")
+            #expect(standardSubscription.highWatermark == message.roomSequence)
             try await sql.raw("""
                 UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)
                 """).run()
@@ -182,12 +257,18 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.fanout_completion_units", on: sql) == 2)
             #expect(try await count("im_v2.fanout_deliveries", on: sql) == 3)
             #expect(try await count("im_v2.user_sync_log", on: sql) == 3)
+            let syncedRecord = try #require(records.first)
+            #expect(syncedRecord.sourceEventID.rawValue == triggerRow.sourceEventID.uuidString)
+            #expect(syncedRecord.projectionKind == "message")
             let syncedMessage = try #require(try await sql.raw("""
-                SELECT payload->>'room_id' AS room_id, payload->>'message_id' AS message_id,
-                       payload->>'sender_user_id' AS sender_user_id, payload->>'text' AS text,
-                       payload->>'event_type' AS event_type
-                FROM im_v2.user_sync_log
-                WHERE projection_kind = 'message'
+                SELECT shared.payload->>'room_id' AS room_id, shared.payload->>'message_id' AS message_id,
+                       shared.payload->>'sender_user_id' AS sender_user_id, shared.payload->>'text' AS text,
+                       shared.payload->>'event_type' AS event_type
+                FROM im_v2.user_sync_log AS log
+                JOIN im_v2.fanout_sync_payloads AS shared
+                  ON shared.source_event_id = log.source_event_id
+                 AND shared.projection_kind = log.projection_kind
+                WHERE log.projection_kind = 'message'
                 LIMIT 1
                 """).first(decoding: SyncedMessagePayloadRow.self))
             #expect(syncedMessage.roomID == roomUUID.uuidString)
@@ -195,6 +276,22 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(syncedMessage.senderUserID == senderUUID.uuidString)
             #expect(syncedMessage.text == "transactional")
             #expect(syncedMessage.eventType == "message.accepted")
+            let payloadEnvelope = try #require(try await sql.raw("""
+                SELECT log.payload IS NULL AS has_null_log_payload,
+                       log.payload_storage AS payload_storage,
+                       shared.payload ? 'source_event_id' AS has_source_event_id,
+                       shared.payload ? 'projection_kind' AS has_projection_kind
+                FROM im_v2.user_sync_log AS log
+                JOIN im_v2.fanout_sync_payloads AS shared
+                  ON shared.source_event_id = log.source_event_id
+                 AND shared.projection_kind = log.projection_kind
+                WHERE log.projection_kind = 'message'
+                LIMIT 1
+                """).first(decoding: SyncPayloadEnvelopeRow.self))
+            #expect(payloadEnvelope.hasNullLogPayload)
+            #expect(payloadEnvelope.payloadStorage == "fanout_shared")
+            #expect(!payloadEnvelope.hasSourceEventID)
+            #expect(!payloadEnvelope.hasProjectionKind)
             let capacity = try #require(try await sql.raw("SELECT command_window_used, fanout_window_used FROM im_v2.room_admission WHERE room_id = \(bind: roomUUID)").first(decoding: CapacityRow.self))
             #expect(capacity.commandWindowUsed == 1)
             #expect(capacity.fanoutWindowUsed == 3)
@@ -416,12 +513,40 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
             let trigger = try #require(try await sql.raw("SELECT source_event_id, plan_id FROM im_v2.room_outbox").first(decoding: TriggerRow.self))
             let plannerTrigger = try V2FanoutPlanTrigger(sourceEventID: .init(trigger.sourceEventID.uuidString), planID: .init(trigger.planID.uuidString))
+            let plannerRouter = V2PostgresUserShardRouter(database: app.db(.psql))
+            try await plannerRouter.bootstrap(defaultRoute: try .init(bucket: "test-users", observedRouterEpoch: 9), now: now)
+            try await sql.raw("""
+                INSERT INTO im_v2.user_shard_route_overrides
+                    (user_id, write_bucket, read_fallback_bucket, router_epoch, updated_at)
+                VALUES (\(bind: memberThreeUUID), 'test-users-override', NULL, 10, \(bind: now))
+                """).run()
+            // Fail the second page inside the set-based INSERT. This verifies
+            // the first page remains durable while the failed page leaves no
+            // completion unit, delivery or checkpoint behind.
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.fail_second_set_based_planner_page()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                    IF NEW.target_user_id = \(literal: memberTwoUUID.uuidString)::uuid THEN
+                        RAISE EXCEPTION 'test fanout planner interruption';
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$;
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER fanout_deliveries_fail_second_set_based_page
+                BEFORE INSERT ON im_v2.fanout_deliveries
+                FOR EACH ROW EXECUTE FUNCTION im_v2.fail_second_set_based_planner_page()
+                """).run()
 
-            await #expect(throws: PlannerInterruption.afterFirstCheckpoint) {
+            await #expect(throws: (any Error).self) {
                 try await V2FanoutPlanner(
                     store: PostgresV2FanoutPlanStore(
                         database: app.db(.psql),
-                        router: FailsOnSecondPageRouter(blockedUserID: try .init(memberTwoUUID.uuidString))
+                        router: plannerRouter
                     ),
                     pageSize: 1,
                     now: { now.addingTimeInterval(1) }
@@ -438,14 +563,23 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
                 now: { now.addingTimeInterval(2) }
             ).runOnce(limit: 8)
+            try await sql.raw("DROP TRIGGER fanout_deliveries_fail_second_set_based_page ON im_v2.fanout_deliveries").run()
+            try await sql.raw("DROP FUNCTION im_v2.fail_second_set_based_planner_page()").run()
 
             let resumed = try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: plannerRouter),
                 pageSize: 1,
                 now: { now.addingTimeInterval(3) }
             ).plan(plannerTrigger)
+            let overriddenRoute = try #require(try await sql.raw("""
+                SELECT target_shard_bucket, observed_router_epoch
+                FROM im_v2.fanout_deliveries
+                WHERE source_event_id = \(bind: trigger.sourceEventID)
+                  AND target_user_id = \(bind: memberThreeUUID)
+                """).first(decoding: FanoutRouteAssertionRow.self))
             let delivery = try await V2FanoutDeliveryWorker(
                 store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
+                router: plannerRouter,
                 now: { now.addingTimeInterval(4) }
             ).runOnce(limit: 8)
 
@@ -455,6 +589,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(interruptedDeliveries == 1)
             #expect(prematureDelivery == .init(claimedCount: 0, committedCount: 0, staleCount: 0, releasedCount: 0))
             #expect(resumed == .init(createdCompletionUnits: 2, createdDeliveries: 2, wasAlreadyPlanned: false))
+            #expect(overriddenRoute.bucket == "test-users-override")
+            #expect(overriddenRoute.epoch == 10)
             #expect(delivery == .init(claimedCount: 3, committedCount: 3, staleCount: 0, releasedCount: 0))
             #expect(try await count("im_v2.fanout_completion_units", on: sql) == 3)
             #expect(try await count("im_v2.fanout_deliveries", on: sql) == 3)
@@ -505,8 +641,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 ORDER BY user_id
                 """).all(decoding: DirectProfileSyncAssertionRow.self)
             #expect(directProfiles == [
-                .init(userID: senderUUID, roomID: room.roomID.rawValue.lowercased(), targetUserID: memberTwoUUID, publicHandle: "member015", displayName: "成员二", revision: 1),
-                .init(userID: memberTwoUUID, roomID: room.roomID.rawValue.lowercased(), targetUserID: senderUUID, publicHandle: "sender012", displayName: "发送者", revision: 1),
+                .init(userID: senderUUID, roomID: room.roomID.rawValue.uppercased(), targetUserID: memberTwoUUID, publicHandle: "member015", displayName: "成员二", revision: 1),
+                .init(userID: memberTwoUUID, roomID: room.roomID.rawValue.uppercased(), targetUserID: senderUUID, publicHandle: "sender012", displayName: "发送者", revision: 1),
             ])
             let snapshot = try await PostgresV2SnapshotProjectionMaterializer(database: app.db(.psql)).materialize(userID: senderID, now: now)
             let snapshotDirectProfiles = try snapshot.pages.flatMap { try V2SnapshotProjectionCodec.decodePage($0.payload).directRoomProfiles }
@@ -721,11 +857,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    /// This deliberately remains opt-in: it writes 100k durable user-sync
-    /// records one transaction at a time, which is valuable end-to-end
-    /// correctness evidence but too expensive for each normal unit run. It is
-    /// not a throughput benchmark; capacity release still needs the dated
-    /// topology/workload report in `standard-100k.md`.
+    /// This deliberately remains opt-in: four workers contend through leases
+    /// while each bounded group of durable user-sync projections commits in
+    /// one transaction. It is valuable end-to-end concurrency evidence but
+    /// too expensive for each normal unit run. It is not a throughput
+    /// benchmark; capacity release still needs the dated topology/workload
+    /// report in `standard-100k.md`.
     @Test("opt-in 100,000-member fan-out drain preserves every durable projection and releases admission")
     func drainsOneHundredThousandMemberAudienceExactly() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
@@ -733,17 +870,56 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
               Environment.get("IMV2_RUN_100K_DELIVERY_SOAK") == "1"
         else { return }
 
+        let commitBatchSize: Int
+        if let value = Environment.get("IMV2_FANOUT_COMMIT_BATCH_SIZE") {
+            guard let parsed = Int(value), parsed > 0, parsed <= 1_000 else {
+                throw TestConfigurationError.invalidFanoutCommitBatchSize(value)
+            }
+            commitBatchSize = parsed
+        } else {
+            commitBatchSize = 128
+        }
+        let deliveryClaimBatchSize: Int
+        if let value = Environment.get("IMV2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE") {
+            guard let parsed = Int(value), parsed > 0, parsed <= 4_096 else {
+                throw TestConfigurationError.invalidFanoutDeliveryClaimBatchSize(value)
+            }
+            deliveryClaimBatchSize = parsed
+        } else {
+            deliveryClaimBatchSize = 1_000
+        }
+        let plannerPageSize: Int
+        if let value = Environment.get("IMV2_FANOUT_PLANNER_PAGE_SIZE") {
+            guard let parsed = Int(value), parsed > 0, parsed <= 5_000 else {
+                throw TestConfigurationError.invalidFanoutPlannerPageSize(value)
+            }
+            plannerPageSize = parsed
+        } else {
+            plannerPageSize = 1_000
+        }
+        let expectedCompletionUnitCount = (100_000 + plannerPageSize - 1) / plannerPageSize
+        let injectFirstProjectionBatchFailure = Environment.get("IMV2_INJECT_100K_DELIVERY_BATCH_FAILURE") == "1"
+
+        let workloadStartedAt = Date()
         let app = try await Application.make(.testing)
         do {
-            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            // Four independently scheduled workers contend through PostgreSQL
+            // leases. The pool cap is deliberately equal to the worker count:
+            // the regression verifies concurrency without creating an
+            // unbounded connection shape.
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
             guard let sql = app.db(.psql) as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
                 throw TestConfigurationError.schemaAlreadyExists
             }
+            let synchronousCommit = try #require(try await sql.raw("SELECT current_setting('synchronous_commit') AS value").first(decoding: StringValueRow.self)).value
+            let schemaStartedAt = Date()
             try await installSchema(on: sql)
+            let schemaElapsedMilliseconds = v2LocalElapsedMilliseconds(since: schemaStartedAt)
 
+            let seedStartedAt = Date()
             let room = UUID(uuidString: "00000000-0000-0000-0000-000000001101")!
             let event = UUID(uuidString: "00000000-0000-0000-0000-000000001102")!
             let plan = UUID(uuidString: "00000000-0000-0000-0000-000000001103")!
@@ -794,29 +970,140 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     (\(bind: plan), \(bind: event), \(bind: room), 1, 0,
                      '{"kind":"membership_at_revision"}'::jsonb, '{}'::jsonb, 100000, 100000, 'planning', \(bind: now))
                 """).run()
+            let seedElapsedMilliseconds = v2LocalElapsedMilliseconds(since: seedStartedAt)
 
             let trigger = try V2FanoutPlanTrigger(sourceEventID: .init(event.uuidString), planID: .init(plan.uuidString))
-            #expect(try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter),
-                pageSize: 1_000,
-                now: { now }
-            ).plan(trigger) == .init(createdCompletionUnits: 100, createdDeliveries: 100_000, wasAlreadyPlanned: false))
-
-            let deliveryWorker = V2FanoutDeliveryWorker(
-                store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
-                bucket: "test-users",
-                router: testUserShardRouter,
-                now: { now.addingTimeInterval(1) }
+            // Exercise the production set-based planner path: member routing
+            // comes from the same PostgreSQL control-plane relation instead
+            // of the test-only in-memory single-bucket router.
+            let plannerRouter = V2PostgresUserShardRouter(database: app.db(.psql))
+            try await plannerRouter.bootstrap(
+                defaultRoute: try .init(bucket: "test-users", observedRouterEpoch: 9),
+                now: now
             )
-            var delivered = 0
-            for _ in 0..<100 {
-                let report = try await deliveryWorker.runOnce(limit: 1_000)
-                #expect(report == .init(claimedCount: 1_000, committedCount: 1_000, staleCount: 0, staleRouteCount: 0, releasedCount: 0))
-                delivered += report.committedCount
-            }
-            #expect(delivered == 100_000)
-            #expect(try await deliveryWorker.runOnce(limit: 1_000) == .init(claimedCount: 0, committedCount: 0, staleCount: 0, staleRouteCount: 0, releasedCount: 0))
+            let planningStartedAt = Date()
+            #expect(try await V2FanoutPlanner(
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: plannerRouter),
+                pageSize: plannerPageSize,
+                now: { now }
+            ).plan(trigger) == .init(
+                createdCompletionUnits: expectedCompletionUnitCount,
+                createdDeliveries: 100_000,
+                wasAlreadyPlanned: false
+            ))
+            let planningElapsedMilliseconds = v2LocalElapsedMilliseconds(since: planningStartedAt)
 
+            if injectFirstProjectionBatchFailure {
+                // `nextval` is intentionally non-transactional. The first
+                // inbox insert raises after advancing the sequence, so the
+                // whole 128-target projection transaction rolls back once
+                // while its later retry is allowed to succeed.
+                try await sql.raw("""
+                    CREATE SEQUENCE im_v2.test_first_projection_batch_failure
+                    """).run()
+                try await sql.raw("""
+                    CREATE FUNCTION im_v2.fail_first_projection_batch() RETURNS trigger
+                    LANGUAGE plpgsql AS $$
+                    BEGIN
+                        IF nextval('im_v2.test_first_projection_batch_failure') = 1 THEN
+                            RAISE EXCEPTION 'injected fanout projection batch failure';
+                        END IF;
+                        RETURN NEW;
+                    END;
+                    $$;
+                    """).run()
+                try await sql.raw("""
+                    CREATE TRIGGER fail_first_projection_batch
+                    BEFORE INSERT ON im_v2.consumer_inbox
+                    FOR EACH ROW EXECUTE FUNCTION im_v2.fail_first_projection_batch()
+                    """).run()
+            }
+
+            let deliveryStore = PostgresV2FanoutDeliveryStore(database: app.db(.psql))
+            let workerCount = 4
+            let drainTracker = V2LocalFanoutDrainTracker(expectedCommitCount: 100_000)
+            let retryPolicy = V2DurableRetryPolicy(
+                initialDelay: 0.01,
+                maximumDelay: 0.1,
+                maximumAttempts: 10,
+                jitterFraction: 0
+            )
+            let deliveryStartedAt = Date()
+            let workerTimings = try await withThrowingTaskGroup(
+                of: V2LocalFanoutDeliverySoakWorkerTiming.self,
+                returning: [V2LocalFanoutDeliverySoakWorkerTiming].self
+            ) { group in
+                for _ in 0..<workerCount {
+                    group.addTask {
+                        let deliveryWorker = V2FanoutDeliveryWorker(
+                            store: deliveryStore,
+                            bucket: "test-users",
+                            router: plannerRouter,
+                            retryPolicy: retryPolicy,
+                            commitBatchSize: commitBatchSize,
+                            now: Date.init
+                        )
+                        let workerStartedAt = Date()
+                        var claimedBatches = 0
+                        var emptyBatches = 0
+                        var aggregate = V2FanoutDeliveryReport(
+                            claimedCount: 0, committedCount: 0, staleCount: 0,
+                            staleRouteCount: 0, releasedCount: 0, pausedCount: 0
+                        )
+                        for _ in 0..<1_000 {
+                            if await drainTracker.isComplete { break }
+                            let report = try await deliveryWorker.runOnce(limit: deliveryClaimBatchSize)
+                            if report.claimedCount > 0 { claimedBatches += 1 } else { emptyBatches += 1 }
+                            aggregate = .init(
+                                claimedCount: aggregate.claimedCount + report.claimedCount,
+                                committedCount: aggregate.committedCount + report.committedCount,
+                                staleCount: aggregate.staleCount + report.staleCount,
+                                staleRouteCount: aggregate.staleRouteCount + report.staleRouteCount,
+                                releasedCount: aggregate.releasedCount + report.releasedCount,
+                                pausedCount: aggregate.pausedCount + report.pausedCount
+                            )
+                            if await drainTracker.record(committedCount: report.committedCount) { break }
+                            if report.claimedCount == 0 {
+                                try await Task.sleep(for: .milliseconds(10))
+                            }
+                        }
+                        return .init(
+                            report: aggregate,
+                            elapsedMilliseconds: v2LocalElapsedMilliseconds(since: workerStartedAt),
+                            claimedBatches: claimedBatches,
+                            emptyBatches: emptyBatches
+                        )
+                    }
+                }
+                var values: [V2LocalFanoutDeliverySoakWorkerTiming] = []
+                for try await timing in group { values.append(timing) }
+                return values
+            }
+            let deliveryElapsedMilliseconds = v2LocalElapsedMilliseconds(since: deliveryStartedAt)
+            let reports = workerTimings.map(\.report)
+            let delivered = reports.reduce(0) { $0 + $1.committedCount }
+            let stale = reports.reduce(0) { $0 + $1.staleCount }
+            let staleRoutes = reports.reduce(0) { $0 + $1.staleRouteCount }
+            let released = reports.reduce(0) { $0 + $1.releasedCount }
+            let paused = reports.reduce(0) { $0 + $1.pausedCount }
+            let drained = await drainTracker.isComplete
+            #expect(drained)
+            #expect(delivered == 100_000)
+            #expect(stale == 0)
+            #expect(staleRoutes == 0)
+            #expect(released == (injectFirstProjectionBatchFailure ? commitBatchSize : 0))
+            #expect(paused == 0)
+            let finalDeliveryWorker = V2FanoutDeliveryWorker(
+                store: deliveryStore,
+                bucket: "test-users",
+                router: plannerRouter,
+                retryPolicy: retryPolicy,
+                commitBatchSize: commitBatchSize,
+                now: Date.init
+            )
+            #expect(try await finalDeliveryWorker.runOnce(limit: deliveryClaimBatchSize) == .init(claimedCount: 0, committedCount: 0, staleCount: 0, staleRouteCount: 0, releasedCount: 0))
+
+            let verificationStartedAt = Date()
             let accounting = try #require(try await sql.raw("""
                 SELECT
                     (SELECT COUNT(*) FROM im_v2.user_sync_log WHERE source_event_id = \(bind: event)) AS sync_records,
@@ -826,6 +1113,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     (SELECT COUNT(*) FROM im_v2.fanout_completion_units WHERE source_event_id = \(bind: event) AND state = 'released') AS released_completion_units,
                     (SELECT state FROM im_v2.fanout_plans WHERE plan_id = \(bind: plan)) AS plan_state
                 """).first(decoding: FanoutDeliveryScaleAccountingRow.self))
+            let retryAccounting = try #require(try await sql.raw("""
+                SELECT
+                    COUNT(*) FILTER (WHERE retry_count = 2) AS retried_deliveries,
+                    COALESCE(MAX(retry_count), 0) AS maximum_retry_count
+                FROM im_v2.fanout_deliveries
+                WHERE source_event_id = \(bind: event)
+                """).first(decoding: FanoutDeliveryRetryAccountingRow.self))
             let roomReservation = try #require(try await sql.raw("""
                 SELECT outstanding_fanout_units, outstanding_plans
                 FROM im_v2.room_admission WHERE room_id = \(bind: room)
@@ -839,12 +1133,442 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(accounting.distinctSyncRecipients == 100_000)
             #expect(accounting.inboxRecords == 100_000)
             #expect(accounting.terminalDeliveries == 100_000)
-            #expect(accounting.releasedCompletionUnits == 100)
+            #expect(accounting.releasedCompletionUnits == Int64(expectedCompletionUnitCount))
             #expect(accounting.planState == "terminal")
+            #expect(retryAccounting.retriedDeliveries == (injectFirstProjectionBatchFailure ? Int64(commitBatchSize) : 0))
+            #expect(retryAccounting.maximumRetryCount == (injectFirstProjectionBatchFailure ? 2 : 1))
             #expect(roomReservation.outstandingFanoutUnits == 0)
             #expect(roomReservation.outstandingPlans == 0)
             #expect(shardReservation.outstandingFanoutUnits == 0)
             #expect(shardReservation.outstandingPlans == 0)
+            let verificationElapsedMilliseconds = v2LocalElapsedMilliseconds(since: verificationStartedAt)
+            print(V2LocalFanoutDeliverySoakTiming(
+                commitBatchSize: commitBatchSize,
+                deliveryClaimBatchSize: deliveryClaimBatchSize,
+                plannerPageSize: plannerPageSize,
+                synchronousCommit: synchronousCommit,
+                injectedFirstProjectionBatchFailure: injectFirstProjectionBatchFailure,
+                totalElapsedMilliseconds: v2LocalElapsedMilliseconds(since: workloadStartedAt),
+                schemaElapsedMilliseconds: schemaElapsedMilliseconds,
+                seedElapsedMilliseconds: seedElapsedMilliseconds,
+                planningElapsedMilliseconds: planningElapsedMilliseconds,
+                deliveryElapsedMilliseconds: deliveryElapsedMilliseconds,
+                verificationElapsedMilliseconds: verificationElapsedMilliseconds,
+                workerTimings: workerTimings
+            ).machineReadableLine)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    /// Exercises the normal group-message path under a bounded burst: source
+    /// acceptance serializes room sequence/admission, while relay/planning and
+    /// delivery independently claim durable work. It is opt-in because the
+    /// 16,000 receiver projections are deliberately larger than a unit test.
+    /// The opt-in member/message knobs let the isolated capacity profile
+    /// exercise the fixed standard-group ceiling (5,000 members) without
+    /// maintaining a separate, lower-fidelity workload implementation.
+    @Test("opt-in concurrent group-message burst preserves sequence, fan-out, and admission")
+    func drainsConcurrentGroupMessageWorkload() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1",
+              Environment.get("IMV2_RUN_CONCURRENT_ROOM_WORKLOAD") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let workload = try V2ConcurrentRoomWorkloadConfiguration()
+            if workload.injectRedundantSyncPullIndex {
+                // A measurement-only A/B control for migration 0024. This
+                // never changes application code or the normal schema; it
+                // recreates the exact historical duplicate index before the
+                // profiler baseline is reset.
+                try await sql.raw("""
+                    CREATE INDEX imv2_capacity_legacy_user_sync_log_pull_idx
+                    ON im_v2.user_sync_log (user_id, user_sync_sequence)
+                    """).run()
+            }
+            if workload.injectLegacyFanoutClaimIndex {
+                // Measurement-only A/B control for migration 0025. The
+                // current lane indexes remain present, reproducing the old
+                // redundant-index write amplification exactly.
+                try await sql.raw("""
+                    CREATE INDEX imv2_capacity_legacy_fanout_claim_idx
+                    ON im_v2.fanout_deliveries
+                        (target_shard_bucket, state, lease_expires_at, source_event_id)
+                    """).run()
+            }
+            if workload.injectLegacyFanoutRetryClaimIndex {
+                // Measurement-only A/B control for migration 0026.
+                try await sql.raw("""
+                    CREATE INDEX imv2_capacity_legacy_fanout_retry_claim_idx
+                    ON im_v2.fanout_deliveries
+                        (target_shard_bucket, next_attempt_at, source_event_id)
+                    WHERE state = 'pending'
+                    """).run()
+            }
+            if workload.injectRedundantFanoutEventForeignKey {
+                // Measurement-only A/B control for migration 0027. The
+                // composite completion-unit FK remains in place, so this
+                // recreates only the redundant direct room-event lookup.
+                try await sql.raw("""
+                    ALTER TABLE im_v2.fanout_deliveries
+                    ADD CONSTRAINT imv2_capacity_legacy_fanout_event_fkey
+                    FOREIGN KEY (source_event_id) REFERENCES im_v2.room_events(event_id)
+                    """).run()
+            }
+            if workload.injectFullFanoutSyncIdentityIndex {
+                // Measurement-only A/B control for migration 0028. It
+                // restores the historical all-projection identity B-tree;
+                // the normal partial non-fan-out index remains present.
+                try await sql.raw("""
+                    CREATE UNIQUE INDEX imv2_capacity_legacy_full_sync_identity_idx
+                    ON im_v2.user_sync_log (user_id, source_event_id, projection_kind)
+                    """).run()
+            }
+            let messageCount = workload.messageCount
+            let memberCount = workload.memberCount
+            let plannerPageSize = workload.plannerPageSize
+            let deliveryClaimBatchSize = workload.deliveryClaimBatchSize
+            let eventPayloadBytes = workload.eventPayloadBytes
+            let room = UUID(uuidString: "00000000-0000-0000-0000-000000001301")!
+            let senderUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+            let lease = UUID(uuidString: "00000000-0000-0000-0000-000000001302")!
+            // This workload calls the real acceptance service with wall-clock
+            // time, so its fenced admission lease must use that same domain.
+            let now = Date()
+            try await sql.raw("""
+                INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id, created_at)
+                VALUES (\(bind: room), 'capacity-concurrent-room', 'standard', \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, fanout_window_limit,
+                     max_outstanding_fanout_units, max_outstanding_plans)
+                VALUES
+                    ('capacity-concurrent-room', 'standard', \(bind: lease), 1, \(bind: now.addingTimeInterval(86_400)),
+                     \(bind: messageCount), \(bind: messageCount * memberCount),
+                     \(bind: messageCount * memberCount), \(bind: messageCount))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_admission
+                    (room_id, eligible_member_count, command_window_limit, fanout_window_limit,
+                     max_outstanding_fanout_units, max_outstanding_plans,
+                     shard_lease_id, shard_lease_generation)
+                VALUES
+                    (\(bind: room), \(bind: memberCount), \(bind: messageCount), \(bind: messageCount * memberCount),
+                     \(bind: messageCount * memberCount), \(bind: messageCount), \(bind: lease), 1)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_memberships (room_id, user_id, joined_revision)
+                SELECT \(bind: room),
+                       ('00000000-0000-0000-0000-' || lpad(to_hex(member), 12, '0'))::uuid,
+                       0
+                FROM generate_series(1, \(bind: memberCount)) AS member
+                """).run()
+            // Match the running gateway: planning and delivery route through
+            // the co-located PostgreSQL router, which enables the planner's
+            // atomic set-based page path. The previous in-memory test router
+            // exercised a deliberately slower cross-store fallback instead.
+            let userShardRouter = V2PostgresUserShardRouter(database: app.db(.psql))
+            try await userShardRouter.bootstrap(
+                defaultRoute: try .init(bucket: "test-users", observedRouterEpoch: 9),
+                now: now
+            )
+
+            let capacityProfile = try V2CapacityProfile(
+                id: "standard",
+                limits: .init(
+                    maxEligibleMembers: memberCount,
+                    maxCommandsPerWindow: messageCount,
+                    maxFanoutUnitsPerWindow: messageCount * memberCount,
+                    maxOutstandingFanoutUnits: messageCount * memberCount,
+                    maxOutstandingPlans: messageCount,
+                    maxEnumerationPageSize: plannerPageSize,
+                    maxPlannerConcurrency: 4,
+                    maxDeliveryConcurrency: 4,
+                    retryAfterSeconds: 1
+                )
+            )
+            let sender = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(database: app.db(.psql)),
+                capacityProfile: capacityProfile,
+                limits: try .init(maxUTF8Bytes: max(64, eventPayloadBytes)),
+                now: Date.init
+            )
+            let roomID = try RoomID(room.uuidString)
+            let senderID = try UserID(senderUUID.uuidString)
+            let requests = try (0..<messageCount).map { index in
+                V2AuthenticatedSendMessage(
+                    roomID: roomID,
+                    actorUserID: senderID,
+                    clientMessageID: try .init(UUID(uuidString: String(format: "00000000-0000-0000-0000-%012X", 0xD0000 + index))!.uuidString),
+                    text: v2ConcurrentRoomMessageText(index: index, payloadBytes: eventPayloadBytes)
+                )
+            }
+            // This is intentionally opt-in: resetting pg_stat_statements is
+            // appropriate only for the disposable, isolated capacity
+            // database. Capture a baseline after schema setup and seeding so
+            // the report describes acceptance, planning and delivery rather
+            // than migration or fixture cost.
+            let postgresProfile = try await V2LocalPostgresDeliveryProfile.startIfEnabled(on: sql)
+            let workloadStartedAt = Date()
+            let acceptanceResults = try await withThrowingTaskGroup(
+                of: ConcurrentRoomWriteAcceptanceResult.self,
+                returning: [ConcurrentRoomWriteAcceptanceResult].self
+            ) { group in
+                for request in requests {
+                    group.addTask {
+                        let startedAt = Date()
+                        let outcome = try await sender.send(request)
+                        return .init(outcome: outcome, elapsedSeconds: Date().timeIntervalSince(startedAt))
+                    }
+                }
+                var values: [ConcurrentRoomWriteAcceptanceResult] = []
+                for try await outcome in group { values.append(outcome) }
+                return values
+            }
+            #expect(acceptanceResults.count == messageCount)
+            #expect(acceptanceResults.allSatisfy {
+                if case .accepted = $0.outcome { return true }
+                return false
+            })
+
+            let retryPolicy = V2DurableRetryPolicy(
+                initialDelay: 0.01,
+                maximumDelay: 0.1,
+                maximumAttempts: 10,
+                jitterFraction: 0
+            )
+            let relay = V2OutboxRelay(
+                store: PostgresV2RoomOutboxStore(database: app.db(.psql)),
+                publisher: V2LocalFanoutPlanPublisher(
+                    planner: .init(
+                        store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: userShardRouter),
+                        // Keep this capacity regression on the production
+                        // standard-profile boundary (1,000 by default), not
+                        // a single 5,000-member planner page. The latter
+                        // hides completion-unit and plan-state behavior that
+                        // the running gateway actually uses.
+                        pageSize: plannerPageSize,
+                        now: Date.init
+                    )
+                ),
+                retryPolicy: retryPolicy,
+                now: Date.init
+            )
+            let deliveryStore: any V2FanoutDeliveryStore
+            if workload.forceGenericProjectionSequenceReservation {
+                // Capacity A/B control for the ordinary distinct-recipient
+                // fast path. The generic CTE remains the correctness fallback
+                // for a batch that contains more than one source event for a
+                // single user.
+                deliveryStore = PostgresV2FanoutDeliveryStore(
+                    database: app.db(.psql),
+                    batchSequenceReservationStrategy: .forceGeneric
+                )
+            } else {
+                // Exercise the actual gateway composition: a co-located
+                // bucket still traverses the topology/migration boundary,
+                // then delegates its projection to the control store's one
+                // database transaction. This keeps the capacity profile from
+                // bypassing claim-payload and migration-fence costs.
+                let control = PostgresV2FanoutDeliveryStore(database: app.db(.psql))
+                let registry = try V2StaticUserShardStorageRegistry(locations: [
+                    try .init(bucket: "test-users", database: app.db(.psql), schema: "im_v2")
+                ])
+                deliveryStore = V2CrossStoreFanoutDeliveryStore(
+                    control: control, registry: registry,
+                    migrations: PostgresV2UserShardMigrationStore(database: app.db(.psql)),
+                    coLocatedControlBucket: "test-users"
+                )
+            }
+            let drainTracker = V2LocalFanoutDrainTracker(expectedCommitCount: messageCount * memberCount)
+            // Production owns planning and delivery in independent scheduled
+            // tasks. Start both at once so this regression measures the same
+            // overlap instead of serializing every plan before the first
+            // receiver projection can begin.
+            async let relayReports: [V2OutboxRelayReport] = withThrowingTaskGroup(
+                of: V2OutboxRelayReport.self,
+                returning: [V2OutboxRelayReport].self
+            ) { group in
+                for _ in 0..<4 {
+                    group.addTask {
+                        var aggregate = V2OutboxRelayReport(claimedCount: 0, publishedCount: 0, releasedCount: 0, pausedCount: 0)
+                        for _ in 0..<12 {
+                            let report = try await relay.runOnce(limit: 1)
+                            aggregate = .init(
+                                claimedCount: aggregate.claimedCount + report.claimedCount,
+                                publishedCount: aggregate.publishedCount + report.publishedCount,
+                                releasedCount: aggregate.releasedCount + report.releasedCount,
+                                pausedCount: aggregate.pausedCount + report.pausedCount
+                            )
+                            if report.claimedCount == 0 { try await Task.sleep(for: .milliseconds(10)) }
+                        }
+                        return aggregate
+                    }
+                }
+                var values: [V2OutboxRelayReport] = []
+                for try await report in group { values.append(report) }
+                return values
+            }
+            async let deliveryReports: [V2FanoutDeliveryReport] = withThrowingTaskGroup(
+                of: V2FanoutDeliveryReport.self,
+                returning: [V2FanoutDeliveryReport].self
+            ) { group in
+                for _ in 0..<workload.deliveryWorkerCount {
+                    group.addTask {
+                        let worker = V2FanoutDeliveryWorker(
+                            store: deliveryStore,
+                            bucket: "test-users",
+                            router: userShardRouter,
+                            retryPolicy: retryPolicy,
+                            now: Date.init
+                        )
+                        var aggregate = V2FanoutDeliveryReport(
+                            claimedCount: 0, committedCount: 0, staleCount: 0,
+                            staleRouteCount: 0, releasedCount: 0, pausedCount: 0
+                        )
+                        // Claim passes can begin before planning has produced
+                        // work. The shared durable-commit tracker, rather
+                        // than a fixed empty-poll count, keeps each worker
+                        // alive until the concurrent planner has drained.
+                        for _ in 0..<1_000 {
+                            if await drainTracker.isComplete { break }
+                            let report = try await worker.runOnce(limit: deliveryClaimBatchSize)
+                            aggregate = .init(
+                                claimedCount: aggregate.claimedCount + report.claimedCount,
+                                committedCount: aggregate.committedCount + report.committedCount,
+                                staleCount: aggregate.staleCount + report.staleCount,
+                                staleRouteCount: aggregate.staleRouteCount + report.staleRouteCount,
+                                releasedCount: aggregate.releasedCount + report.releasedCount,
+                                pausedCount: aggregate.pausedCount + report.pausedCount
+                            )
+                            if await drainTracker.record(committedCount: report.committedCount) { break }
+                            if report.claimedCount == 0 { try await Task.sleep(for: .milliseconds(10)) }
+                        }
+                        return aggregate
+                    }
+                }
+                var values: [V2FanoutDeliveryReport] = []
+                for try await report in group { values.append(report) }
+                return values
+            }
+            let (relayResults, deliveryResults) = try await (relayReports, deliveryReports)
+            #expect(relayResults.reduce(0) { $0 + $1.publishedCount } == messageCount)
+            #expect(relayResults.reduce(0) { $0 + $1.pausedCount } == 0)
+            #expect(await drainTracker.isComplete)
+            #expect(deliveryResults.reduce(0) { $0 + $1.committedCount } == messageCount * memberCount)
+            #expect(deliveryResults.reduce(0) { $0 + $1.staleCount } == 0)
+            #expect(deliveryResults.reduce(0) { $0 + $1.staleRouteCount } == 0)
+            #expect(deliveryResults.reduce(0) { $0 + $1.pausedCount } == 0)
+            // Measure only the acceptance → relay/planning → durable delivery
+            // pipeline. The assertions below intentionally include optional
+            // full-payload scans, which are correctness verification and must
+            // not inflate the published delivery-wall metric.
+            let workloadElapsedSeconds = Date().timeIntervalSince(workloadStartedAt)
+
+            #expect(try await count("im_v2.messages", on: sql) == Int64(messageCount))
+            #expect(try await count("im_v2.room_events", on: sql) == Int64(messageCount))
+            #expect(try await count("im_v2.room_outbox", on: sql) == Int64(messageCount))
+            #expect(try await count("im_v2.fanout_plans", on: sql) == Int64(messageCount))
+            #expect(try await count("im_v2.user_sync_log", on: sql) == Int64(messageCount * memberCount))
+            #expect(try await count("im_v2.consumer_inbox", on: sql) == Int64(messageCount * memberCount))
+            if eventPayloadBytes > 0 {
+                // Keep the payload-size profile honest: every recipient must
+                // still have the complete client-readable message payload,
+                // not merely an event reference or a partially copied body.
+                let fullPayloadRecordCount = try #require(try await sql.raw("""
+                    SELECT COUNT(*) FILTER (
+                        WHERE octet_length(shared.payload ->> 'text') = \(bind: eventPayloadBytes)
+                    ) AS value
+                    FROM im_v2.user_sync_log AS log
+                    JOIN im_v2.fanout_sync_payloads AS shared
+                      ON shared.source_event_id = log.source_event_id
+                     AND shared.projection_kind = log.projection_kind
+                    WHERE log.projection_kind = 'message'
+                    """).first(decoding: CountRow.self)).value
+                #expect(fullPayloadRecordCount == Int64(messageCount * memberCount))
+            }
+            let maxSequence = try #require(try await sql.raw("SELECT MAX(room_sequence)::bigint AS value FROM im_v2.room_events").first(decoding: CountRow.self))
+            let roomReservation = try #require(try await sql.raw("SELECT outstanding_fanout_units, outstanding_plans FROM im_v2.room_admission WHERE room_id = \(bind: room)").first(decoding: OutstandingRow.self))
+            let shardReservation = try #require(try await sql.raw("SELECT outstanding_fanout_units, outstanding_plans FROM im_v2.shard_admission_pools WHERE room_shard_id = 'capacity-concurrent-room' AND capacity_profile_id = 'standard'").first(decoding: OutstandingRow.self))
+            #expect(maxSequence.value == Int64(messageCount))
+            #expect(roomReservation.outstandingFanoutUnits == 0)
+            #expect(roomReservation.outstandingPlans == 0)
+            #expect(shardReservation.outstandingFanoutUnits == 0)
+            #expect(shardReservation.outstandingPlans == 0)
+
+            let acceptanceLatency = V2LocalLatencySummary(
+                samples: acceptanceResults.map(\.elapsedSeconds)
+            )
+            // `terminal_at - created_at` is the durable end-to-end fan-out
+            // latency for each source event: acceptance, relay/planning and
+            // every recipient projection have completed. It avoids treating
+            // the aggregate drain wall time as if every message experienced
+            // the same delay.
+            let terminalLatencyRows = try await sql.raw("""
+                SELECT EXTRACT(EPOCH FROM plan.terminal_at - event.created_at) AS elapsed_seconds
+                FROM im_v2.fanout_plans AS plan
+                JOIN im_v2.room_events AS event ON event.event_id = plan.source_event_id
+                WHERE plan.room_id = \(bind: room)
+                  AND plan.state = 'terminal' AND plan.terminal_at IS NOT NULL
+                ORDER BY plan.source_room_sequence
+                """).all(decoding: FanoutTerminalLatencyRow.self)
+            #expect(terminalLatencyRows.count == messageCount)
+            let terminalLatency = V2LocalLatencySummary(
+                samples: terminalLatencyRows.map(\.elapsedSeconds)
+            )
+            let regressionLimits = try V2LocalCapacityRegressionLimits()
+            #expect(acceptanceLatency.p99Milliseconds <= regressionLimits.maximumAcceptanceP99Milliseconds)
+            #expect(Int((workloadElapsedSeconds * 1_000).rounded()) <= regressionLimits.maximumPipelineWallMilliseconds)
+            let postgresProfileReport = try await postgresProfile?.finish(on: sql)
+            print(
+                "V2_LOCAL_CONCURRENT_ROOM_WORKLOAD " +
+                    "acceptance_p50_ms=\(acceptanceLatency.p50Milliseconds) " +
+                    "acceptance_p95_ms=\(acceptanceLatency.p95Milliseconds) " +
+                    "acceptance_p99_ms=\(acceptanceLatency.p99Milliseconds) " +
+                    "terminal_p50_ms=\(terminalLatency.p50Milliseconds) " +
+                    "terminal_p95_ms=\(terminalLatency.p95Milliseconds) " +
+                    "terminal_p99_ms=\(terminalLatency.p99Milliseconds) " +
+                    "pipeline_wall_ms=\(Int((workloadElapsedSeconds * 1_000).rounded())) " +
+                    "acceptance_p99_limit_ms=\(regressionLimits.maximumAcceptanceP99Milliseconds) " +
+                    "pipeline_wall_limit_ms=\(regressionLimits.maximumPipelineWallMilliseconds) " +
+                    "accepted_messages=\(messageCount) members=\(memberCount) " +
+                    "planner_page_size=\(plannerPageSize) " +
+                    "delivery_claim_batch_size=\(deliveryClaimBatchSize) " +
+                    "delivery_worker_count=\(workload.deliveryWorkerCount) " +
+                    "event_payload_bytes=\(eventPayloadBytes) " +
+                    "redundant_sync_pull_index=\(workload.injectRedundantSyncPullIndex) " +
+                    "legacy_fanout_claim_index=\(workload.injectLegacyFanoutClaimIndex) " +
+                    "legacy_fanout_retry_claim_index=\(workload.injectLegacyFanoutRetryClaimIndex) " +
+                    "redundant_fanout_event_foreign_key=\(workload.injectRedundantFanoutEventForeignKey) " +
+                    "full_fanout_sync_identity_index=\(workload.injectFullFanoutSyncIdentityIndex) " +
+                    "force_generic_projection_sequence_reservation=\(workload.forceGenericProjectionSequenceReservation) " +
+                    "receiver_projections=\(messageCount * memberCount)"
+            )
+            if let postgresProfileReport {
+                for line in postgresProfileReport.machineReadableLines() {
+                    print(line)
+                }
+            }
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -1835,7 +2559,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let state = try #require(try await sql.raw("SELECT withdrawn_at IS NOT NULL AS withdrawn, content_revision FROM im_v2.messages WHERE message_id = \(bind: UUID(uuidString: message.messageID.rawValue)!)").first(decoding: ModerationMessageAssertionRow.self))
             let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(3) }).plan(.init(sourceEventID: result.eventID, planID: result.fanoutPlanID))
             let delivery = try await V2FanoutDeliveryWorker(store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)), now: { now.addingTimeInterval(4) }).runOnce(limit: 8)
-            let delivered = try #require(try await sql.raw("SELECT payload->>'event_type' AS event_type FROM im_v2.user_sync_log WHERE source_event_id = \(bind: UUID(uuidString: result.eventID.rawValue)!) LIMIT 1").first(decoding: ModerationDeliveredEventRow.self))
+            let delivered = try #require(try await sql.raw("""
+                SELECT (CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE shared.payload END)->>'event_type' AS event_type
+                FROM im_v2.user_sync_log AS log
+                LEFT JOIN im_v2.fanout_sync_payloads AS shared
+                  ON shared.source_event_id = log.source_event_id
+                 AND shared.projection_kind = log.projection_kind
+                WHERE log.source_event_id = \(bind: UUID(uuidString: result.eventID.rawValue)!)
+                LIMIT 1
+                """).first(decoding: ModerationDeliveredEventRow.self))
             let snapshot = try await PostgresV2SnapshotProjectionMaterializer(database: app.db(.psql)).materialize(userID: senderID, now: now.addingTimeInterval(5))
             let snapshotMessages = try snapshot.pages.flatMap { try V2SnapshotProjectionCodec.decodePage($0.payload).messages }
             #expect(replay == .idempotent(result))
@@ -1934,7 +2666,16 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
             let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(1) }).plan(.init(sourceEventID: frozen.eventID, planID: frozen.fanoutPlanID))
             let delivery = try await V2FanoutDeliveryWorker(store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)), now: { now.addingTimeInterval(2) }).runOnce(limit: 8)
-            let projection = try #require(try await sql.raw("SELECT projection_kind, payload->>'event_type' AS event_type FROM im_v2.user_sync_log WHERE source_event_id = \(bind: UUID(uuidString: frozen.eventID.rawValue)!) LIMIT 1").first(decoding: FreezeProjectionRow.self))
+            let projection = try #require(try await sql.raw("""
+                SELECT log.projection_kind,
+                       (CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE shared.payload END)->>'event_type' AS event_type
+                FROM im_v2.user_sync_log AS log
+                LEFT JOIN im_v2.fanout_sync_payloads AS shared
+                  ON shared.source_event_id = log.source_event_id
+                 AND shared.projection_kind = log.projection_kind
+                WHERE log.source_event_id = \(bind: UUID(uuidString: frozen.eventID.rawValue)!)
+                LIMIT 1
+                """).first(decoding: FreezeProjectionRow.self))
 
             let unfreeze = try V2TrustedSafetyRoomControl(roomID: roomID, operationID: .init("00000000-0000-0000-0000-000000000113"), action: .unfreezeRoom, reasonCode: .init("safety_review"))
             let unfrozen = try await safety.apply(unfreeze)
@@ -2886,6 +3627,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let fingerprints = try await transfer.fingerprints(for: record)
             #expect(fingerprints.source == fingerprints.target)
             #expect(try await scopedCount(targetSchema, "user_sync_log", user: user, on: sql) == 2)
+            #expect(try await count("\(targetSchema).fanout_sync_payloads", on: sql) == 1)
             #expect(try await scopedCount(targetSchema, "consumer_inbox", user: user, on: sql) == 1)
             #expect(try await scopedCount(targetSchema, "sync_snapshots", user: user, on: sql) == 1)
             #expect(try await scopedCount(targetSchema, "sync_tokens", user: user, on: sql) == 1)
@@ -2974,6 +3716,25 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 try .init(bucket: "users-source", database: app.db(.psql), schema: "im_v2"),
                 try .init(bucket: "users-remote", database: app.db(secondaryID), schema: "im_v2"),
             ])
+            let crossStore = V2CrossStoreFanoutDeliveryStore(
+                control: control, registry: registry, migrations: migrations
+            )
+            #expect(crossStore.maximumConcurrentClaimsPerBucket == 1)
+            let coLocatedCrossStore = V2CrossStoreFanoutDeliveryStore(
+                control: control, registry: registry, migrations: migrations,
+                coLocatedControlBucket: "users-source"
+            )
+            #expect(coLocatedCrossStore.maximumConcurrentClaimsPerBucket == 8)
+            let payloadLease = try #require(try await crossStore.claimPending(
+                bucket: "users-source", now: now.addingTimeInterval(2), leaseDuration: 30, limit: 1
+            ).first)
+            #expect(payloadLease.eventPayloadJSON != nil)
+            try await crossStore.release(payloadLease)
+            let coLocatedLease = try #require(try await coLocatedCrossStore.claimPending(
+                bucket: "users-source", now: now.addingTimeInterval(2), leaseDuration: 30, limit: 1
+            ).first)
+            #expect(coLocatedLease.eventPayloadJSON == nil)
+            try await coLocatedCrossStore.release(coLocatedLease)
             // Model a process loss after the target transaction commits but
             // before the control-store completion transaction begins.
             let abandoned = try #require(try await control.claimPending(
@@ -2987,10 +3748,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await control.release(abandoned)
 
             let report = try await V2FanoutDeliveryWorker(
-                store: V2CrossStoreFanoutDeliveryStore(
-                    control: control, registry: registry,
-                    migrations: migrations
-                ),
+                store: crossStore,
                 bucket: "users-source", now: { now.addingTimeInterval(3) }
             ).runOnce(limit: 10)
             #expect(report == .init(claimedCount: 3, committedCount: 3, staleCount: 0, releasedCount: 0))
@@ -3113,6 +3871,22 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(recovered == .init(claimedCount: 3, committedCount: 3, staleCount: 0, releasedCount: 0))
             #expect(try await count("im_v2.user_sync_log", on: secondarySQL) == 3)
             #expect(try await count("im_v2.consumer_inbox", on: secondarySQL) == 3)
+            let remotePayloadEnvelope = try #require(try await secondarySQL.raw("""
+                SELECT log.payload IS NULL AS has_null_log_payload,
+                       log.payload_storage AS payload_storage,
+                       shared.payload ? 'source_event_id' AS has_source_event_id,
+                       shared.payload ? 'projection_kind' AS has_projection_kind
+                FROM im_v2.user_sync_log AS log
+                JOIN im_v2.fanout_sync_payloads AS shared
+                  ON shared.source_event_id = log.source_event_id
+                 AND shared.projection_kind = log.projection_kind
+                WHERE log.source_event_id = \(bind: trigger.sourceEventID)
+                LIMIT 1
+                """).first(decoding: SyncPayloadEnvelopeRow.self))
+            #expect(remotePayloadEnvelope.hasNullLogPayload)
+            #expect(remotePayloadEnvelope.payloadStorage == "fanout_shared")
+            #expect(!remotePayloadEnvelope.hasSourceEventID)
+            #expect(!remotePayloadEnvelope.hasProjectionKind)
             let terminal = try #require(try await sql.raw("""
                 SELECT state FROM im_v2.fanout_plans WHERE source_event_id = \(bind: trigger.sourceEventID)
                 """).first(decoding: PushStateRow.self))
@@ -3124,6 +3898,382 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         } catch {
             if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
             if let secondarySQL = app.db(DatabaseID(string: "secondary")) as? any SQLDatabase { try? await secondarySQL.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    /// The cross-store store normally receives 128 claimed targets at once.
+    /// Keep this opt-in profile focused on the target-store half so it can
+    /// compare the old per-target transaction protocol with the new bounded
+    /// inbox/sequence/log transaction without conflating control completion
+    /// locks or router traffic.
+    @Test("opt-in cross-store target projection batch preserves retry identity")
+    func profilesCrossStoreTargetProjectionBatch() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1",
+              Environment.get("IMV2_RUN_CROSS_STORE_BATCH_PROFILE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            let sourceEventID = try EventID("00000000-0000-0000-0000-00000000e001")
+            let inputs = try (0..<1_000).map { index in
+                V2FanoutProjectionInput(
+                    sourceEventID: sourceEventID,
+                    targetUserID: try .init(UUID(uuidString: String(format: "00000000-0000-0000-0000-%012X", 0xE1000 + index))!.uuidString),
+                    projectionKind: "message",
+                    eventPayloadJSON: index.isMultiple(of: 2)
+                        ? "{\"profile\":\"cross_store_batch\",\"payload_lane\":\"even\"}"
+                        : "{\"profile\":\"cross_store_batch\",\"payload_lane\":\"odd\"}"
+                )
+            }
+            let projector = try PostgresV2UserShardFanoutProjector(database: app.db(.psql), schema: "im_v2")
+            let now = Date(timeIntervalSince1970: 1_750_000_200)
+
+            try await installSchema(on: sql)
+            let sequentialStartedAt = Date()
+            for input in inputs {
+                _ = try await projector.project(input, now: now)
+            }
+            let sequentialMilliseconds = v2LocalElapsedMilliseconds(since: sequentialStartedAt)
+            #expect(try await count("im_v2.user_sync_log", on: sql) == 1_000)
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+
+            try await installSchema(on: sql)
+            // Fail after the target transaction has begun. A target batch is
+            // useful only if it retains the old one-target transaction's
+            // all-or-nothing inbox/sequence/log boundary.
+            try await sql.raw("CREATE SEQUENCE im_v2.test_cross_store_batch_failure").run()
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.fail_first_cross_store_batch_insert() RETURNS trigger
+                LANGUAGE plpgsql AS $$
+                BEGIN
+                    IF nextval('im_v2.test_cross_store_batch_failure') = 1 THEN
+                        RAISE EXCEPTION 'injected cross-store batch failure';
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$;
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER fail_first_cross_store_batch_insert
+                BEFORE INSERT ON im_v2.consumer_inbox
+                FOR EACH ROW EXECUTE FUNCTION im_v2.fail_first_cross_store_batch_insert()
+                """).run()
+            await #expect(throws: (any Error).self) {
+                _ = try await projector.projectBatch(inputs, now: now)
+            }
+            #expect(try await count("im_v2.user_sync_log", on: sql) == 0)
+            #expect(try await count("im_v2.consumer_inbox", on: sql) == 0)
+            try await sql.raw("DROP TRIGGER fail_first_cross_store_batch_insert ON im_v2.consumer_inbox").run()
+            try await sql.raw("DROP FUNCTION im_v2.fail_first_cross_store_batch_insert()").run()
+            let batchStartedAt = Date()
+            let firstBatch = try await projector.projectBatch(inputs, now: now)
+            let batchMilliseconds = v2LocalElapsedMilliseconds(since: batchStartedAt)
+            let retryBatch = try await projector.projectBatch(inputs, now: now.addingTimeInterval(1))
+            #expect(firstBatch == Array(repeating: 1, count: inputs.count))
+            #expect(retryBatch == firstBatch)
+            #expect(try await count("im_v2.user_sync_log", on: sql) == 1_000)
+            #expect(try await count("im_v2.consumer_inbox", on: sql) == 1_000)
+            let payloadLaneCounts = try await sql.raw("""
+                SELECT payload ->> 'payload_lane' AS payload_lane,
+                       COUNT(*)::bigint AS entry_count
+                FROM im_v2.user_sync_log
+                GROUP BY payload ->> 'payload_lane'
+                ORDER BY payload_lane
+                """).all(decoding: PayloadLaneCountRow.self)
+            #expect(payloadLaneCounts == [
+                .init(payloadLane: "even", entryCount: 500),
+                .init(payloadLane: "odd", entryCount: 500),
+            ])
+            print(
+                "V2_LOCAL_CROSS_STORE_TARGET_BATCH " +
+                    "targets=\(inputs.count) " +
+                    "sequential_target_projection_ms=\(sequentialMilliseconds) " +
+                    "batched_target_projection_ms=\(batchMilliseconds) " +
+                    "retry_sequence_identity=true"
+            )
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    /// Measures the actual cross-store delivery protocol at the fixed
+    /// standard-group ceiling: planner writes control records, one remote
+    /// bucket worker performs its batch read/project/complete loop, and both
+    /// stores must reach their durable terminal facts. It is opt-in because
+    /// it performs 5,000 target-store writes and is a local diagnostic, not a
+    /// production throughput promise.
+    @Test("opt-in cross-store 5,000-member delivery reaches terminal state")
+    func profilesCrossStoreFiveThousandMemberDelivery() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              let secondaryDatabaseURL = Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1",
+              Environment.get("IMV2_RUN_CROSS_STORE_5K_PROFILE") == "1"
+        else { return }
+        let deliveryConcurrency: Int
+        if let raw = Environment.get("IMV2_CROSS_STORE_5K_DELIVERY_CONCURRENCY") {
+            guard let value = Int(raw), (1...4).contains(value) else {
+                throw TestConfigurationError.invalidCrossStoreDeliveryConcurrency(raw)
+            }
+            deliveryConcurrency = value
+        } else {
+            deliveryConcurrency = 1
+        }
+        let commitBatchSize: Int
+        if let raw = Environment.get("IMV2_CROSS_STORE_5K_COMMIT_BATCH_SIZE") {
+            guard let value = Int(raw), [32, 64, 128, 256].contains(value) else {
+                throw TestConfigurationError.invalidCrossStoreCommitBatchSize(raw)
+            }
+            commitBatchSize = value
+        } else {
+            commitBatchSize = 256
+        }
+        let commitConcurrency: Int
+        if let raw = Environment.get("IMV2_CROSS_STORE_5K_BATCH_COMMIT_CONCURRENCY") {
+            guard let value = Int(raw), (1...2).contains(value) else {
+                throw TestConfigurationError.invalidCrossStoreBatchCommitConcurrency(raw)
+            }
+            commitConcurrency = value
+        } else {
+            commitConcurrency = 2
+        }
+        let eventPayloadBytes: Int
+        if let raw = Environment.get("IMV2_CROSS_STORE_5K_EVENT_PAYLOAD_BYTES") {
+            guard let value = Int(raw), (0...16_384).contains(value) else {
+                throw TestConfigurationError.invalidCrossStoreEventPayloadBytes(raw)
+            }
+            eventPayloadBytes = value
+        } else {
+            eventPayloadBytes = 0
+        }
+        let eventPayloadJSON = eventPayloadBytes == 0
+            ? "{}"
+            : "{\"body\":\"\(String(repeating: "x", count: eventPayloadBytes))\"}"
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: max(deliveryConcurrency, commitConcurrency)),
+                as: .psql, isDefault: true
+            )
+            let secondaryID = DatabaseID(string: "secondary")
+            app.databases.use(
+                try .postgres(url: secondaryDatabaseURL, maxConnectionsPerEventLoop: max(deliveryConcurrency, commitConcurrency)),
+                as: secondaryID
+            )
+            guard let controlSQL = app.db(.psql) as? any SQLDatabase,
+                  let targetSQL = app.db(secondaryID) as? any SQLDatabase
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await controlSQL.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false,
+                  (try await targetSQL.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false
+            else { throw TestConfigurationError.schemaAlreadyExists }
+            try await installSchema(on: controlSQL)
+            try await installSchema(on: targetSQL)
+
+            let memberCount = 5_000
+            let plannerPageSize = 1_000
+            let expectedCompletionUnits = memberCount / plannerPageSize
+            let room = UUID(uuidString: "00000000-0000-0000-0000-00000000f501")!
+            let event = UUID(uuidString: "00000000-0000-0000-0000-00000000f502")!
+            let plan = UUID(uuidString: "00000000-0000-0000-0000-00000000f503")!
+            let admissionLease = UUID(uuidString: "00000000-0000-0000-0000-00000000f504")!
+            let now = Date(timeIntervalSince1970: 1_750_000_300)
+            try await controlSQL.raw("""
+                INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id, created_at)
+                VALUES (\(bind: room), 'cross-store-capacity', 'standard', \(bind: now))
+                """).run()
+            try await controlSQL.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, command_window_used, fanout_window_limit, fanout_window_used,
+                     max_outstanding_fanout_units, outstanding_fanout_units,
+                     max_outstanding_plans, outstanding_plans)
+                VALUES
+                    ('cross-store-capacity', 'standard', \(bind: admissionLease), 1, \(bind: now.addingTimeInterval(86_400)),
+                     1, 1, \(bind: memberCount), \(bind: memberCount), \(bind: memberCount), \(bind: memberCount), 1, 1)
+                """).run()
+            try await controlSQL.raw("""
+                INSERT INTO im_v2.room_admission
+                    (room_id, eligible_member_count, command_window_limit, command_window_used,
+                     fanout_window_limit, fanout_window_used, max_outstanding_fanout_units,
+                     outstanding_fanout_units, max_outstanding_plans, outstanding_plans,
+                     shard_lease_id, shard_lease_generation)
+                VALUES
+                    (\(bind: room), \(bind: memberCount), 1, 1, \(bind: memberCount), \(bind: memberCount),
+                     \(bind: memberCount), \(bind: memberCount), 1, 1, \(bind: admissionLease), 1)
+                """).run()
+            try await controlSQL.raw("""
+                INSERT INTO im_v2.room_memberships (room_id, user_id, joined_revision)
+                SELECT \(bind: room),
+                       ('00000000-0000-0000-0000-' || lpad(to_hex(member), 12, '0'))::uuid,
+                       0
+                FROM generate_series(1, \(bind: memberCount)) AS member
+                """).run()
+            try await controlSQL.raw("""
+                INSERT INTO im_v2.room_events
+                    (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at)
+                VALUES (\(bind: event), \(bind: room), 1, 'message.accepted', NULL, \(bind: eventPayloadJSON)::jsonb, 0, \(bind: now))
+                """).run()
+            try await controlSQL.raw("""
+                INSERT INTO im_v2.fanout_plans
+                    (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
+                     target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at)
+                VALUES
+                    (\(bind: plan), \(bind: event), \(bind: room), 1, 0,
+                     '{"kind":"membership_at_revision"}'::jsonb, '{}'::jsonb,
+                     \(bind: memberCount), \(bind: memberCount), 'planning', \(bind: now))
+                """).run()
+
+            let remoteRoute = try V2UserShardRoute(bucket: "users-remote", observedRouterEpoch: 1)
+            let trigger = try V2FanoutPlanTrigger(sourceEventID: .init(event.uuidString), planID: .init(plan.uuidString))
+            let planningStartedAt = Date()
+            #expect(try await V2FanoutPlanner(
+                store: PostgresV2FanoutPlanStore(
+                    database: app.db(.psql), router: V2SingleUserShardRouter(route: remoteRoute)
+                ),
+                pageSize: plannerPageSize, now: { now }
+            ).plan(trigger) == .init(
+                createdCompletionUnits: expectedCompletionUnits,
+                createdDeliveries: memberCount,
+                wasAlreadyPlanned: false
+            ))
+            let planningMilliseconds = v2LocalElapsedMilliseconds(since: planningStartedAt)
+            // Reset only the isolated control and target databases after
+            // planning so the two reports attribute the cross-store delivery
+            // protocol itself, rather than schema setup or audience planning.
+            let controlProfile = try await V2LocalPostgresDeliveryProfile.startIfEnabled(on: controlSQL)
+            let targetProfile = try await V2LocalPostgresDeliveryProfile.startIfEnabled(on: targetSQL)
+            let timingRecorder = V2LocalCrossStoreFanoutTimingRecorder()
+
+            let deliveryStore = V2CrossStoreFanoutDeliveryStore(
+                control: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
+                registry: try V2StaticUserShardStorageRegistry(locations: [
+                    try .init(bucket: "users-remote", database: app.db(secondaryID), schema: "im_v2"),
+                ]),
+                migrations: PostgresV2UserShardMigrationStore(database: app.db(.psql)),
+                timingRecorder: timingRecorder
+            )
+            let worker = V2FanoutDeliveryWorker(
+                store: deliveryStore, bucket: "users-remote",
+                router: V2SingleUserShardRouter(route: remoteRoute),
+                retryPolicy: .init(initialDelay: 0.01, maximumDelay: 0.1, maximumAttempts: 10, jitterFraction: 0),
+                commitBatchSize: commitBatchSize,
+                maximumConcurrentCommitBatches: commitConcurrency,
+                now: Date.init
+            )
+            // Only `runDeliveryOnce` is exercised below. The relay is still
+            // a real durable composition so this profile uses the same
+            // pipeline concurrency gate as the running server.
+            let pipeline = V2FanoutPipeline(
+                relay: .init(
+                    store: PostgresV2RoomOutboxStore(database: app.db(.psql)),
+                    publisher: V2LocalFanoutPlanPublisher(planner: .init(
+                        store: PostgresV2FanoutPlanStore(
+                            database: app.db(.psql), router: V2SingleUserShardRouter(route: remoteRoute)
+                        ),
+                        pageSize: plannerPageSize,
+                        now: Date.init
+                    )),
+                    retryPolicy: .init(initialDelay: 0.01, maximumDelay: 0.1, maximumAttempts: 10, jitterFraction: 0),
+                    now: Date.init
+                ),
+                deliveryWorker: worker
+            )
+            let deliveryStartedAt = Date()
+            var aggregate = V2FanoutDeliveryReport(
+                claimedCount: 0, committedCount: 0, staleCount: 0,
+                staleRouteCount: 0, releasedCount: 0, pausedCount: 0
+            )
+            var claimPasses = 0
+            for _ in 0..<8 {
+                let report = try await pipeline.runDeliveryOnce(
+                    claimLimit: 2_000, concurrency: deliveryConcurrency
+                )
+                if report.claimedCount == 0 { break }
+                claimPasses += 1
+                aggregate = .init(
+                    claimedCount: aggregate.claimedCount + report.claimedCount,
+                    committedCount: aggregate.committedCount + report.committedCount,
+                    staleCount: aggregate.staleCount + report.staleCount,
+                    staleRouteCount: aggregate.staleRouteCount + report.staleRouteCount,
+                    releasedCount: aggregate.releasedCount + report.releasedCount,
+                    pausedCount: aggregate.pausedCount + report.pausedCount
+                )
+            }
+            let deliveryMilliseconds = v2LocalElapsedMilliseconds(since: deliveryStartedAt)
+            let controlProfileReport = try await controlProfile?.finish(on: controlSQL)
+            let targetProfileReport = try await targetProfile?.finish(on: targetSQL)
+            let crossStoreTiming = await timingRecorder.summary()
+
+            #expect(aggregate == .init(
+                claimedCount: memberCount, committedCount: memberCount, staleCount: 0,
+                staleRouteCount: 0, releasedCount: 0, pausedCount: 0
+            ))
+            #expect(try await count("im_v2.user_sync_log", on: targetSQL) == Int64(memberCount))
+            #expect(try await count("im_v2.consumer_inbox", on: targetSQL) == Int64(memberCount))
+            #expect(try await count("im_v2.fanout_deliveries WHERE state = 'terminal'", on: controlSQL) == Int64(memberCount))
+            if eventPayloadBytes > 0 {
+                let expectedBody = String(repeating: "x", count: eventPayloadBytes)
+                let persistedPayloads = try await targetSQL.raw("""
+                    SELECT COUNT(*)::bigint AS value
+                    FROM im_v2.user_sync_log AS log
+                    JOIN im_v2.fanout_sync_payloads AS shared
+                      ON shared.source_event_id = log.source_event_id
+                     AND shared.projection_kind = log.projection_kind
+                    WHERE shared.payload ->> 'body' = \(bind: expectedBody)
+                    """).first(decoding: CountRow.self)?.value
+                #expect(persistedPayloads == Int64(memberCount))
+            }
+            let terminal = try #require(try await controlSQL.raw("""
+                SELECT state FROM im_v2.fanout_plans WHERE plan_id = \(bind: plan)
+                """).first(decoding: PushStateRow.self))
+            #expect(terminal.state == "terminal")
+            let roomReservation = try #require(try await controlSQL.raw("""
+                SELECT outstanding_fanout_units, outstanding_plans
+                FROM im_v2.room_admission WHERE room_id = \(bind: room)
+                """).first(decoding: OutstandingRow.self))
+            #expect(roomReservation.outstandingFanoutUnits == 0)
+            #expect(roomReservation.outstandingPlans == 0)
+            print(
+                "V2_LOCAL_CROSS_STORE_5K_DELIVERY " +
+                    "members=\(memberCount) planner_page_size=\(plannerPageSize) " +
+                    "commit_batch_size=\(commitBatchSize) commit_concurrency=\(commitConcurrency) delivery_claim_batch_size=2000 delivery_concurrency=\(deliveryConcurrency) " +
+                    "event_payload_bytes=\(eventPayloadBytes) " +
+                    "planning_ms=\(planningMilliseconds) delivery_ms=\(deliveryMilliseconds) " +
+                    "claim_passes=\(claimPasses) \(crossStoreTiming.machineReadableFields) terminal=true"
+            )
+            if let controlProfileReport {
+                for line in controlProfileReport.machineReadableLines(scope: "CROSS_STORE_CONTROL") {
+                    print(line)
+                }
+            }
+            if let targetProfileReport {
+                for line in targetProfileReport.machineReadableLines(scope: "CROSS_STORE_TARGET") {
+                    print(line)
+                }
+            }
+
+            try await controlSQL.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await targetSQL.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let controlSQL = app.db(.psql) as? any SQLDatabase {
+                try? await controlSQL.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            if let targetSQL = app.db(DatabaseID(string: "secondary")) as? any SQLDatabase {
+                try? await targetSQL.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
             try? await app.asyncShutdown()
             throw error
         }
@@ -3222,7 +4372,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(targetRows.map(\.sequence) == [1, 2, 3, 4])
             #expect(targetRows.map(\.kind) == ["direct_room_profile", "stranger_message_permission", "relationship", "direct_room_profile"])
             let forwardedProfile = try #require(try await secondarySQL.raw("""
-                SELECT user_id, payload->>'display_name' AS display_name,
+                SELECT user_id, payload->>'room_id' AS room_id, payload->>'display_name' AS display_name,
                        (payload->>'revision')::bigint AS revision
                 FROM im_v2.user_sync_log
                 WHERE user_id = \(bind: senderUUID) AND source_event_id = \(bind: profileEventID)
@@ -3230,6 +4380,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 """).first(decoding: ProfilePropagationProjectionRow.self))
             #expect(forwardedProfile.displayName == "成员二新版")
             #expect(forwardedProfile.revision == 2)
+            #expect(UUID(uuidString: forwardedProfile.roomID)?.uuidString == forwardedProfile.roomID)
 
             let transfer = try PostgresV2UserShardProjectionTransfer(
                 source: app.db(.psql), target: app.db(secondaryID),
@@ -3595,7 +4746,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(completed.state == "completed")
             #expect(completed.completed)
             let projections = try await sql.raw("""
-                SELECT user_id, payload->>'display_name' AS display_name,
+                SELECT user_id, payload->>'room_id' AS room_id, payload->>'display_name' AS display_name,
                        (payload->>'revision')::bigint AS revision
                 FROM im_v2.user_sync_log
                 WHERE source_event_id = \(bind: profileEventID) AND projection_kind = 'direct_room_profile'
@@ -3603,6 +4754,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 """).all(decoding: ProfilePropagationProjectionRow.self)
             #expect(projections.map(\.userID) == [firstPeerUUID, secondPeerUUID])
             #expect(projections.allSatisfy { $0.displayName == "新名称" && $0.revision == 2 })
+            #expect(projections.allSatisfy { UUID(uuidString: $0.roomID)?.uuidString == $0.roomID })
 
             // A completed source event is never reprojected on a later poll.
             let replay = try await worker.runOnce(limit: 8)
@@ -3616,6 +4768,171 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             if let sql = app.db(.psql) as? any SQLDatabase {
                 try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
             }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("mention authorization preserves bilateral block checks without scanning a whole room")
+    func mentionAuthorizationRejectsBlockedUserTargets() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            try await seedRoom(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            try await sql.raw("""
+                INSERT INTO im_v2.user_blocks (blocker_user_id, blocked_user_id, created_at)
+                VALUES (\(bind: memberTwoUUID), \(bind: senderUUID), \(bind: now))
+                """).run()
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3))
+            let service = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(database: app.db(.psql)),
+                capacityProfile: profile,
+                limits: try .init(maxUTF8Bytes: 64),
+                now: { now }
+            )
+
+            await #expect(throws: V2MentionValidationError.notAuthorized) {
+                try await service.send(.init(
+                    roomID: roomID,
+                    actorUserID: senderID,
+                    clientMessageID: clientMessageID,
+                    text: "@受限成员",
+                    mentions: [.user(try .init(memberTwoUUID.uuidString))]
+                ))
+            }
+            #expect(try await count("im_v2.messages", on: sql) == 0)
+            #expect(try await count("im_v2.room_events", on: sql) == 0)
+            #expect(try await count("im_v2.fanout_plans", on: sql) == 0)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("a 100k hybrid group persists ordinary messages as room-log events and fans out only explicit mentions")
+    func acceptsOneHundredThousandMemberHybridRoomWithoutGlobalFanout() async throws {
+        guard Environment.get("IMV2_RUN_HYBRID_100K_CAPACITY") == "1",
+              let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let startedAt = Date()
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            let schemaElapsed = v2LocalElapsedMilliseconds(since: startedAt)
+
+            let room = UUID(uuidString: "00000000-0000-0000-0000-00000000b001")!
+            let sender = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+            let mentioned = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+            let lease = UUID(uuidString: "00000000-0000-0000-0000-00000000b002")!
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            try await sql.raw("""
+                INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id, delivery_mode)
+                VALUES (\(bind: room), 'hybrid-100k', 'hybrid-100k', 'large_group_hybrid')
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
+                VALUES (\(bind: room), \(bind: sender), '十万混合群', \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans)
+                VALUES ('hybrid-100k', 'hybrid-100k', \(bind: lease), 1, \(bind: now.addingTimeInterval(600)),
+                        1_000, 1_000, 1_000, 1_000)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_admission
+                    (room_id, eligible_member_count, command_window_limit, fanout_window_limit,
+                     max_outstanding_fanout_units, max_outstanding_plans, shard_lease_id, shard_lease_generation)
+                VALUES (\(bind: room), 100000, 1_000, 1_000, 1_000, 1_000, \(bind: lease), 1)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision)
+                SELECT \(bind: room),
+                       ('00000000-0000-0000-0000-' || lpad(to_hex(member_number), 12, '0'))::uuid,
+                       CASE WHEN member_number = 1 THEN 'owner' ELSE 'member' END,
+                       0
+                FROM generate_series(1, 100000) AS member_number
+                """).run()
+            let seedElapsed = v2LocalElapsedMilliseconds(since: startedAt) - schemaElapsed
+
+            let profile = try RoomCapacityProfile(maxEligibleMembers: 100000, maxCommandsPerWindow: 1_000, maxFanoutUnitsPerWindow: 1_000, maxOutstandingFanoutUnits: 1_000, maxOutstandingPlans: 1_000, maxEnumerationPageSize: 1_000, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 1)
+            let service = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(database: app.db(.psql)),
+                capacityProfile: try .init(id: "hybrid-100k", limits: profile),
+                limits: try .init(maxUTF8Bytes: 64), now: { now }
+            )
+            let ordinaryStart = Date()
+            guard case .accepted(let ordinary) = try await service.send(.init(roomID: try .init(room.uuidString), actorUserID: try .init(sender.uuidString), clientMessageID: try .init("00000000-0000-0000-0000-00000000b003"), text: "普通大群消息")) else {
+                Issue.record("expected hybrid ordinary message acceptance")
+                return
+            }
+            let ordinaryElapsed = v2LocalElapsedMilliseconds(since: ordinaryStart)
+
+            let groupLog = V2GroupEventLogService(store: PostgresV2GroupEventLogStore(database: app.db(.psql)))
+            let pullStart = Date()
+            let ordinaryPage = try await groupLog.pull(roomID: try .init(room.uuidString), actorUserID: try .init(sender.uuidString), afterRoomSequence: 0, pageSize: 10)
+            let pullElapsed = v2LocalElapsedMilliseconds(since: pullStart)
+
+            let mentionStart = Date()
+            guard case .accepted(let mentionedMessage) = try await service.send(.init(
+                roomID: try .init(room.uuidString), actorUserID: try .init(sender.uuidString),
+                clientMessageID: try .init("00000000-0000-0000-0000-00000000b004"), text: "@指定成员",
+                mentions: [.user(try .init(mentioned.uuidString))]
+            )) else {
+                Issue.record("expected hybrid mention message acceptance")
+                return
+            }
+            let mentionElapsed = v2LocalElapsedMilliseconds(since: mentionStart)
+
+            let plans = try await sql.raw("""
+                SELECT source_room_sequence, state, target_count, reserved_fanout_cost
+                FROM im_v2.fanout_plans WHERE room_id = \(bind: room)
+                ORDER BY source_room_sequence
+                """).all(decoding: HybridPlanAssertionRow.self)
+            let outboxCount = try await count("im_v2.room_outbox", on: sql)
+            let targetCount = try await count("im_v2.fanout_plan_targets", on: sql)
+            let verificationElapsed = v2LocalElapsedMilliseconds(since: startedAt) - schemaElapsed - seedElapsed - ordinaryElapsed - pullElapsed - mentionElapsed
+
+            #expect(ordinary.roomSequence == 1)
+            #expect(ordinaryPage.events.count == 1)
+            #expect(ordinaryPage.events.first?.roomSequence == ordinary.roomSequence)
+            #expect(ordinaryPage.events.first?.projectionKind == "message")
+            #expect(mentionedMessage.roomSequence == 2)
+            #expect(plans == [
+                .init(roomSequence: 1, state: "terminal", targetCount: 0, reservedFanoutCost: 0),
+                .init(roomSequence: 2, state: "planning", targetCount: 1, reservedFanoutCost: 1),
+            ])
+            #expect(outboxCount == 1)
+            #expect(targetCount == 1)
+            print("V2_LOCAL_HYBRID_100K_TIMING total_wall_ms=\(v2LocalElapsedMilliseconds(since: startedAt)) schema_ms=\(schemaElapsed) seed_ms=\(seedElapsed) ordinary_accept_ms=\(ordinaryElapsed) first_pull_ms=\(pullElapsed) mention_accept_ms=\(mentionElapsed) verification_ms=\(max(0, verificationElapsed)) ordinary_fanout_targets=0 mention_fanout_targets=1")
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
             try? await app.asyncShutdown()
             throw error
         }
@@ -3642,9 +4959,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 .split(separator: "\n", omittingEmptySubsequences: false)
                 .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }
                 .joined(separator: "\n")
-            for fragment in executableSQL.split(separator: ";") {
-                let statement = fragment
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            for statement in postgresStatements(in: executableSQL) {
                 guard !statement.isEmpty else { continue }
                 try await sql.raw("\(unsafeRaw: statement)").run()
             }
@@ -3658,9 +4973,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         try await sql.raw("INSERT INTO \(unsafeRaw: schema).user_sync_sequences (user_id, next_sequence) VALUES (\(bind: user), 2)").run()
         try await sql.raw("""
             INSERT INTO \(unsafeRaw: schema).user_sync_log
-                (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
-            VALUES (\(bind: user), 1, \(bind: eventOne), 'message', '{"body":"one"}'::jsonb, \(bind: now)),
-                   (\(bind: user), 2, \(bind: eventTwo), 'message', '{"body":"two"}'::jsonb, \(bind: now))
+                (user_id, user_sync_sequence, source_event_id, projection_kind, payload, payload_storage, created_at)
+            VALUES (\(bind: user), 1, \(bind: eventOne), 'message', '{"body":"one"}'::jsonb, 'inline', \(bind: now)),
+                   (\(bind: user), 2, \(bind: eventTwo), 'message', NULL, 'fanout_shared', \(bind: now))
+            """).run()
+        try await sql.raw("""
+            INSERT INTO \(unsafeRaw: schema).fanout_sync_payloads
+                (source_event_id, projection_kind, payload, created_at)
+            VALUES (\(bind: eventTwo), 'message', '{"body":"two"}'::jsonb, \(bind: now))
             """).run()
         try await sql.raw("""
             INSERT INTO \(unsafeRaw: schema).consumer_inbox
@@ -3740,6 +5060,43 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     }
 }
 
+/// Test schema installation must handle PostgreSQL function bodies as a
+/// single statement. A plain `split(separator: ";")` breaks `$$` blocks and
+/// can mask migration failures before a database-backed regression starts.
+private func postgresStatements(in source: String) -> [String] {
+    var statements: [String] = []
+    var buffer = ""
+    var dollarQuote: String?
+    var index = source.startIndex
+    while index < source.endIndex {
+        let character = source[index]
+        if character == "$" {
+            let remainder = source[index...]
+            if let closing = remainder.dropFirst().firstIndex(of: "$") {
+                let tag = String(remainder[...closing])
+                let isDollarTag = tag.dropFirst().dropLast().allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+                if isDollarTag && (dollarQuote == nil || dollarQuote == tag) {
+                    dollarQuote = dollarQuote == nil ? tag : nil
+                    buffer.append(contentsOf: tag)
+                    index = source.index(after: closing)
+                    continue
+                }
+            }
+        }
+        if character == ";", dollarQuote == nil {
+            let statement = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !statement.isEmpty { statements.append(statement) }
+            buffer = ""
+        } else {
+            buffer.append(character)
+        }
+        index = source.index(after: index)
+    }
+    let tail = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !tail.isEmpty { statements.append(tail) }
+    return statements
+}
+
 private let roomUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
 private let senderUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
 private let clientUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000013")!
@@ -3770,6 +5127,556 @@ private struct CompletionUnitRecoveryTestRouter: V2UserShardRouter {
     }
 }
 
+private struct ConcurrentRoomWriteAcceptanceResult: Sendable {
+    let outcome: V2SendMessageOutcome
+    let elapsedSeconds: TimeInterval
+}
+
+private struct V2LocalFanoutDeliverySoakWorkerTiming: Sendable {
+    let report: V2FanoutDeliveryReport
+    let elapsedMilliseconds: Int
+    let claimedBatches: Int
+    let emptyBatches: Int
+}
+
+/// Coordinates the four test workers by durable commits rather than by a
+/// fixed number of empty polls. This keeps the measured delivery wall time
+/// comparable when the lease-claim budget changes.
+private actor V2LocalFanoutDrainTracker {
+    private let expectedCommitCount: Int
+    private var committedCount = 0
+
+    init(expectedCommitCount: Int) {
+        precondition(expectedCommitCount > 0)
+        self.expectedCommitCount = expectedCommitCount
+    }
+
+    var isComplete: Bool { committedCount == expectedCommitCount }
+
+    func record(committedCount additionalCount: Int) -> Bool {
+        precondition(additionalCount >= 0)
+        committedCount += additionalCount
+        precondition(committedCount <= expectedCommitCount)
+        return isComplete
+    }
+}
+
+/// One privacy-safe, machine-readable summary for the opt-in 100k drain.
+/// It contains only aggregate stage duration and worker distribution facts;
+/// no room, source event, target user or payload reaches test output.
+private struct V2LocalFanoutDeliverySoakTiming {
+    let commitBatchSize: Int
+    let deliveryClaimBatchSize: Int
+    let plannerPageSize: Int
+    let synchronousCommit: String
+    let injectedFirstProjectionBatchFailure: Bool
+    let totalElapsedMilliseconds: Int
+    let schemaElapsedMilliseconds: Int
+    let seedElapsedMilliseconds: Int
+    let planningElapsedMilliseconds: Int
+    let deliveryElapsedMilliseconds: Int
+    let verificationElapsedMilliseconds: Int
+    let workerTimings: [V2LocalFanoutDeliverySoakWorkerTiming]
+
+    var machineReadableLine: String {
+        let workers = workerTimings.sorted { $0.elapsedMilliseconds < $1.elapsedMilliseconds }
+        return "V2_LOCAL_100K_DELIVERY_TIMING " +
+            "commit_batch_size=\(commitBatchSize) " +
+            "delivery_claim_batch_size=\(deliveryClaimBatchSize) " +
+            "planner_page_size=\(plannerPageSize) " +
+            "synchronous_commit=\(synchronousCommit) " +
+            "injected_first_projection_batch_failure=\(injectedFirstProjectionBatchFailure) " +
+            "total_wall_ms=\(totalElapsedMilliseconds) " +
+            "schema_ms=\(schemaElapsedMilliseconds) " +
+            "seed_ms=\(seedElapsedMilliseconds) " +
+            "planning_ms=\(planningElapsedMilliseconds) " +
+            "delivery_wall_ms=\(deliveryElapsedMilliseconds) " +
+            "verification_ms=\(verificationElapsedMilliseconds) " +
+            "worker_elapsed_ms=\(workers.map(\.elapsedMilliseconds).map(String.init).joined(separator: ",")) " +
+            "worker_claimed_batches=\(workers.map(\.claimedBatches).map(String.init).joined(separator: ",")) " +
+            "worker_empty_batches=\(workers.map(\.emptyBatches).map(String.init).joined(separator: ",")) " +
+            "worker_committed=\(workers.map(\.report.committedCount).map(String.init).joined(separator: ","))"
+    }
+}
+
+/// Test-only aggregation for the cross-store ceiling profile. The production
+/// store exposes only anonymous batch durations; this actor turns them into a
+/// single machine-readable line without collecting room, event, user or
+/// payload data.
+private actor V2LocalCrossStoreFanoutTimingRecorder: V2CrossStoreFanoutDeliveryTimingRecording {
+    private var timings: [V2CrossStoreFanoutBatchTiming] = []
+
+    func record(_ timing: V2CrossStoreFanoutBatchTiming) {
+        timings.append(timing)
+    }
+
+    func summary() -> V2LocalCrossStoreFanoutTimingSummary {
+        .init(timings: timings)
+    }
+}
+
+private struct V2LocalCrossStoreFanoutTimingSummary {
+    let batchCount: Int
+    let targetCount: Int
+    let migrationReadMilliseconds: Int
+    let targetProjectionMilliseconds: Int
+    let controlCompletionMilliseconds: Int
+    let batchWallMilliseconds: Int
+    let targetProjectionMaximumMilliseconds: Int
+    let controlCompletionMaximumMilliseconds: Int
+
+    init(timings: [V2CrossStoreFanoutBatchTiming]) {
+        batchCount = timings.count
+        targetCount = timings.reduce(0) { $0 + $1.targetCount }
+        migrationReadMilliseconds = timings.reduce(0) { $0 + $1.migrationReadMilliseconds }
+        targetProjectionMilliseconds = timings.reduce(0) { $0 + $1.targetProjectionMilliseconds }
+        controlCompletionMilliseconds = timings.reduce(0) { $0 + $1.controlCompletionMilliseconds }
+        batchWallMilliseconds = timings.reduce(0) { $0 + $1.totalMilliseconds }
+        targetProjectionMaximumMilliseconds = timings.map(\.targetProjectionMilliseconds).max() ?? 0
+        controlCompletionMaximumMilliseconds = timings.map(\.controlCompletionMilliseconds).max() ?? 0
+    }
+
+    var machineReadableFields: String {
+        "cross_store_batches=\(batchCount) " +
+            "cross_store_targets=\(targetCount) " +
+            "cross_store_migration_read_ms_sum=\(migrationReadMilliseconds) " +
+            "cross_store_target_projection_ms_sum=\(targetProjectionMilliseconds) " +
+            "cross_store_target_projection_ms_max=\(targetProjectionMaximumMilliseconds) " +
+            "cross_store_control_completion_ms_sum=\(controlCompletionMilliseconds) " +
+            "cross_store_control_completion_ms_max=\(controlCompletionMaximumMilliseconds) " +
+            "cross_store_batch_wall_ms_sum=\(batchWallMilliseconds)"
+    }
+}
+
+private func v2LocalElapsedMilliseconds(since startedAt: Date, now: Date = Date()) -> Int {
+    max(0, Int((now.timeIntervalSince(startedAt) * 1_000).rounded()))
+}
+
+/// A compact local workload summary. Nearest-rank percentiles deliberately
+/// avoid interpolation: this is a small 16-sample regression report, not a
+/// statistically significant production latency distribution.
+private struct V2LocalLatencySummary {
+    let p50Milliseconds: Int
+    let p95Milliseconds: Int
+    let p99Milliseconds: Int
+
+    init(samples: [TimeInterval]) {
+        precondition(!samples.isEmpty)
+        let sorted = samples.sorted()
+        p50Milliseconds = Self.milliseconds(Self.nearestRank(sorted, percentile: 0.50))
+        p95Milliseconds = Self.milliseconds(Self.nearestRank(sorted, percentile: 0.95))
+        p99Milliseconds = Self.milliseconds(Self.nearestRank(sorted, percentile: 0.99))
+    }
+
+    private static func nearestRank(_ sorted: [TimeInterval], percentile: Double) -> TimeInterval {
+        let index = max(0, min(sorted.count - 1, Int(ceil(percentile * Double(sorted.count))) - 1))
+        return sorted[index]
+    }
+
+    private static func milliseconds(_ value: TimeInterval) -> Int {
+        Int((value * 1_000).rounded())
+    }
+}
+
+/// Deliberately broad local regression limits for the isolated Docker
+/// baseline. They catch order-of-magnitude regressions while remaining
+/// overrideable on a differently provisioned local machine; they are never a
+/// production SLO or admission policy.
+private struct V2LocalCapacityRegressionLimits {
+    let maximumAcceptanceP99Milliseconds: Int
+    let maximumPipelineWallMilliseconds: Int
+
+    init() throws {
+        maximumAcceptanceP99Milliseconds = try Self.read(
+            "IMV2_LOCAL_CAPACITY_MAX_ACCEPTANCE_P99_MS", defaultValue: 250
+        )
+        maximumPipelineWallMilliseconds = try Self.read(
+            "IMV2_LOCAL_CAPACITY_MAX_PIPELINE_WALL_MS", defaultValue: 60_000
+        )
+    }
+
+    private static func read(_ name: String, defaultValue: Int) throws -> Int {
+        guard let raw = Environment.get(name) else { return defaultValue }
+        guard let value = Int(raw), value > 0 else {
+            throw TestConfigurationError.invalidLocalCapacityLimit(name)
+        }
+        return value
+    }
+}
+
+/// Bounded shape controls for the opt-in concurrent-room capacity regression.
+/// A standard group is intentionally capped at 5,000 members by the product
+/// design, so a local test must not silently exercise a different delivery
+/// mode by accepting a larger value here. The default remains the fast 16k
+/// projection smoke workload; the 5,000-member case is explicitly opt-in.
+private struct V2ConcurrentRoomWorkloadConfiguration {
+    let messageCount: Int
+    let memberCount: Int
+    let plannerPageSize: Int
+    let deliveryClaimBatchSize: Int
+    let deliveryWorkerCount: Int
+    /// Test-only body size used to measure the cost of copying an immutable
+    /// event payload into each recipient's durable sync log. Zero keeps the
+    /// ordinary short-message workload.
+    let eventPayloadBytes: Int
+    let injectRedundantSyncPullIndex: Bool
+    let injectLegacyFanoutClaimIndex: Bool
+    let injectLegacyFanoutRetryClaimIndex: Bool
+    let injectRedundantFanoutEventForeignKey: Bool
+    let injectFullFanoutSyncIdentityIndex: Bool
+    let forceGenericProjectionSequenceReservation: Bool
+
+    init() throws {
+        messageCount = try Self.read(
+            "IMV2_CONCURRENT_ROOM_MESSAGE_COUNT", defaultValue: 16, range: 1...64
+        )
+        memberCount = try Self.read(
+            "IMV2_CONCURRENT_ROOM_MEMBER_COUNT", defaultValue: 1_000, range: 1...5_000
+        )
+        plannerPageSize = try Self.read(
+            "IMV2_CONCURRENT_ROOM_PLANNER_PAGE_SIZE", defaultValue: 1_000, range: 1...5_000
+        )
+        deliveryClaimBatchSize = try Self.read(
+            "IMV2_CONCURRENT_ROOM_DELIVERY_CLAIM_BATCH_SIZE", defaultValue: 2_000, range: 1...2_000
+        )
+        deliveryWorkerCount = try Self.read(
+            "IMV2_CONCURRENT_ROOM_DELIVERY_WORKER_COUNT", defaultValue: 4, range: 1...16
+        )
+        eventPayloadBytes = try Self.read(
+            "IMV2_CONCURRENT_ROOM_EVENT_PAYLOAD_BYTES", defaultValue: 0, range: 0...16_384
+        )
+        injectRedundantSyncPullIndex = Environment.get("IMV2_INJECT_REDUNDANT_SYNC_PULL_INDEX") == "1"
+        injectLegacyFanoutClaimIndex = Environment.get("IMV2_INJECT_LEGACY_FANOUT_CLAIM_INDEX") == "1"
+        injectLegacyFanoutRetryClaimIndex = Environment.get("IMV2_INJECT_LEGACY_FANOUT_RETRY_CLAIM_INDEX") == "1"
+        injectRedundantFanoutEventForeignKey = Environment.get("IMV2_INJECT_REDUNDANT_FANOUT_EVENT_FOREIGN_KEY") == "1"
+        injectFullFanoutSyncIdentityIndex = Environment.get("IMV2_INJECT_FULL_FANOUT_SYNC_IDENTITY_INDEX") == "1"
+        forceGenericProjectionSequenceReservation = Environment.get("IMV2_FORCE_GENERIC_PROJECTION_SEQUENCE_RESERVATION") == "1"
+    }
+
+    private static func read(_ name: String, defaultValue: Int, range: ClosedRange<Int>) throws -> Int {
+        guard let raw = Environment.get(name) else { return defaultValue }
+        guard let value = Int(raw), range.contains(value) else {
+            throw TestConfigurationError.invalidConcurrentRoomWorkloadValue(name)
+        }
+        return value
+    }
+}
+
+/// Produces deterministic printable ASCII with low repetition, so a payload
+/// profile measures the stored event-copy path rather than benefiting from an
+/// artificial all-zero string's compression ratio. This is test-only and
+/// never accepts a payload from an environment variable directly.
+private func v2ConcurrentRoomMessageText(index: Int, payloadBytes: Int) -> String {
+    guard payloadBytes > 0 else { return "burst-\(index)" }
+    var state = UInt64(index) &+ 1
+    var bytes: [UInt8] = []
+    bytes.reserveCapacity(payloadBytes)
+    for _ in 0..<payloadBytes {
+        state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        bytes.append(33 + UInt8(truncatingIfNeeded: state >> 57) % 94)
+    }
+    // The generated range is printable ASCII, so this conversion cannot fail.
+    return String(bytes: bytes, encoding: .ascii)!
+}
+
+/// Optional PostgreSQL attribution for the concurrent-room regression. It is
+/// deliberately a test-only diagnostic: production code neither requires the
+/// extension nor has permission to reset its shared statement statistics.
+///
+/// Enable it only with the local `capacity-profile` compose overlay and
+/// `IMV2_CAPTURE_POSTGRES_DELIVERY_PROFILE=1`. The output uses stable
+/// categories rather than SQL text, keeping it both privacy-safe and easy to
+/// compare between local runs.
+private struct V2LocalPostgresDeliveryProfile {
+    private let databaseCounters: V2LocalPostgresDatabaseCounters
+    private let walCounters: V2LocalPostgresWALCounters
+
+    static func startIfEnabled(on sql: any SQLDatabase) async throws -> Self? {
+        guard Environment.get("IMV2_CAPTURE_POSTGRES_DELIVERY_PROFILE") == "1" else { return nil }
+        try await sql.raw("CREATE EXTENSION IF NOT EXISTS pg_stat_statements").run()
+        try await sql.raw("SELECT pg_stat_statements_reset()").run()
+        // PostgreSQL accumulates database and WAL counters asynchronously.
+        // Force a snapshot only in this disposable profiling mode so a
+        // database-wide WAL delta can be compared meaningfully with the
+        // statement-level WAL attribution below.
+        try await sql.raw("SELECT pg_stat_force_next_flush()").run()
+        // Statistics views cache a snapshot per backend. Clear it explicitly
+        // after the forced collector flush.
+        try await sql.raw("SELECT pg_stat_clear_snapshot()").run()
+        guard let databaseCounters = try await sql.raw("""
+            SELECT xact_commit::bigint AS xact_commit,
+                   xact_rollback::bigint AS xact_rollback,
+                   temp_bytes::bigint AS temp_bytes,
+                   blk_read_time AS blk_read_time,
+                   blk_write_time AS blk_write_time
+            FROM pg_stat_database
+            WHERE datname = current_database()
+            """).first(decoding: V2LocalPostgresDatabaseCounters.self),
+              let walCounters = try await sql.raw("""
+            SELECT wal_records::bigint AS wal_records,
+                   wal_fpi::bigint AS wal_fpi,
+                   wal_bytes::bigint AS wal_bytes,
+                   pg_current_wal_lsn()::text AS wal_lsn
+            FROM pg_stat_wal
+            """).first(decoding: V2LocalPostgresWALCounters.self)
+        else {
+            throw TestConfigurationError.postgresProfileUnavailable
+        }
+        return .init(databaseCounters: databaseCounters, walCounters: walCounters)
+    }
+
+    func finish(on sql: any SQLDatabase) async throws -> V2LocalPostgresDeliveryProfileReport {
+        try await sql.raw("SELECT pg_stat_force_next_flush()").run()
+        try await sql.raw("SELECT pg_stat_clear_snapshot()").run()
+        guard let databaseAfter = try await sql.raw("""
+            SELECT xact_commit::bigint AS xact_commit,
+                   xact_rollback::bigint AS xact_rollback,
+                   temp_bytes::bigint AS temp_bytes,
+                   blk_read_time AS blk_read_time,
+                   blk_write_time AS blk_write_time
+            FROM pg_stat_database
+            WHERE datname = current_database()
+            """).first(decoding: V2LocalPostgresDatabaseCounters.self),
+              let walAfter = try await sql.raw("""
+            SELECT wal_records::bigint AS wal_records,
+                   wal_fpi::bigint AS wal_fpi,
+                   wal_bytes::bigint AS wal_bytes,
+                   pg_current_wal_lsn()::text AS wal_lsn
+            FROM pg_stat_wal
+            """).first(decoding: V2LocalPostgresWALCounters.self)
+        else {
+            throw TestConfigurationError.postgresProfileUnavailable
+        }
+        let walLSNDelta = try #require(try await sql.raw("""
+            SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), \(bind: walCounters.walLSN)::pg_lsn)::bigint AS value
+            """).first(decoding: CountRow.self)).value
+        let statements = try await sql.raw("""
+            WITH classified AS (
+                SELECT CASE
+                    WHEN query LIKE '%jsonb_to_recordset%' AND query LIKE '%consumer_inbox%' THEN 'projection_cte'
+                    WHEN query LIKE '%fanout_deliveries%' AND query LIKE '%FOR UPDATE SKIP LOCKED%' THEN 'delivery_claim'
+                    WHEN query LIKE '%jsonb_array_elements_text%' AND query LIKE '%user_shard_migrations%' THEN 'migration_batch_read'
+                    WHEN query LIKE '%event_payload_json%' AND query LIKE '%fanout_deliveries%' THEN 'projection_input_batch_read'
+                    WHEN query LIKE '%UPDATE im_v2.fanout_completion_units%' THEN 'completion_counter'
+                    WHEN query LIKE '%UPDATE im_v2.room_admission%' THEN 'terminal_release'
+                    WHEN query LIKE '%routed_members%' THEN 'planner_cte'
+                    WHEN query LIKE '%INSERT INTO im_v2.messages%' THEN 'acceptance'
+                    WHEN query LIKE '%FOR KEY SHARE%' THEN 'foreign_key_checks'
+                    ELSE 'other_im_v2'
+                END AS category,
+                calls, total_exec_time, rows, shared_blks_hit, shared_blks_read,
+                shared_blks_dirtied, shared_blks_written, temp_blks_read,
+                temp_blks_written, wal_bytes
+                FROM pg_stat_statements
+                WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+                  AND query LIKE '%im_v2%'
+            )
+            SELECT category,
+                   SUM(calls)::bigint AS calls,
+                   SUM(total_exec_time)::double precision AS total_exec_ms,
+                   (SUM(total_exec_time) / NULLIF(SUM(calls), 0))::double precision AS mean_exec_ms,
+                   SUM(rows)::bigint AS rows,
+                   SUM(shared_blks_hit)::bigint AS shared_blks_hit,
+                   SUM(shared_blks_read)::bigint AS shared_blks_read,
+                   SUM(shared_blks_dirtied)::bigint AS shared_blks_dirtied,
+                   SUM(shared_blks_written)::bigint AS shared_blks_written,
+                   SUM(temp_blks_read)::bigint AS temp_blks_read,
+                   SUM(temp_blks_written)::bigint AS temp_blks_written,
+                   SUM(wal_bytes)::bigint AS wal_bytes
+            FROM classified
+            GROUP BY category
+            ORDER BY total_exec_ms DESC, category
+            """).all(decoding: V2LocalPostgresStatementProfile.self)
+        return .init(
+            databaseDelta: databaseAfter.subtracting(databaseCounters),
+            walDelta: walAfter.subtracting(walCounters),
+            walLSNDeltaBytes: walLSNDelta,
+            durableEffects: try await V2LocalPostgresDurableEffectCounts.capture(on: sql),
+            statements: statements
+        )
+    }
+}
+
+private struct V2LocalPostgresDeliveryProfileReport {
+    let databaseDelta: V2LocalPostgresDatabaseCounters
+    let walDelta: V2LocalPostgresWALCounters
+    let walLSNDeltaBytes: Int64
+    let durableEffects: V2LocalPostgresDurableEffectCounts
+    let statements: [V2LocalPostgresStatementProfile]
+
+    func machineReadableLines(scope: String = "DELIVERY") -> [String] {
+        let counters = "V2_LOCAL_POSTGRES_\(scope)_COUNTERS " +
+            "xact_commit=\(databaseDelta.xactCommit) " +
+            "xact_rollback=\(databaseDelta.xactRollback) " +
+            "temp_bytes=\(databaseDelta.tempBytes) " +
+            "blk_read_ms=\(databaseDelta.blkReadMilliseconds) " +
+            "blk_write_ms=\(databaseDelta.blkWriteMilliseconds) " +
+            "wal_records=\(walDelta.walRecords) " +
+            "wal_fpi=\(walDelta.walFPI) " +
+            "wal_bytes=\(walDelta.walBytes) " +
+            "wal_lsn_bytes=\(walLSNDeltaBytes)"
+        let effects = "V2_LOCAL_POSTGRES_\(scope)_EFFECTS " +
+            "inbox_rows=\(durableEffects.inboxRows) " +
+            "sync_log_rows=\(durableEffects.syncLogRows) " +
+            "shared_payload_rows=\(durableEffects.sharedPayloadRows) " +
+            "sequence_rows=\(durableEffects.sequenceRows) " +
+            "sequence_advances=\(durableEffects.sequenceAdvances) " +
+            "delivery_rows=\(durableEffects.deliveryRows) " +
+            "delivery_claim_attempts=\(durableEffects.deliveryClaimAttempts) " +
+            "terminal_deliveries=\(durableEffects.terminalDeliveries) " +
+            "completion_units=\(durableEffects.completionUnits) " +
+            "released_completion_units=\(durableEffects.releasedCompletionUnits)"
+        return [counters, effects] + statements.map { statement in
+            "V2_LOCAL_POSTGRES_\(scope)_SQL " +
+                "category=\(statement.category) " +
+                "calls=\(statement.calls) " +
+                "total_exec_ms=\(statement.totalExecMilliseconds) " +
+                "mean_exec_ms=\(statement.meanExecMilliseconds) " +
+                "rows=\(statement.rows) " +
+                "shared_hit=\(statement.sharedBlocksHit) " +
+                "shared_read=\(statement.sharedBlocksRead) " +
+                "shared_dirtied=\(statement.sharedBlocksDirtied) " +
+                "shared_written=\(statement.sharedBlocksWritten) " +
+                "temp_read=\(statement.tempBlocksRead) " +
+                "temp_written=\(statement.tempBlocksWritten) " +
+                "wal_bytes=\(statement.walBytes)"
+        }
+    }
+}
+
+/// Exact durable effect counts, read from the workload's verified state. They
+/// intentionally replace `pg_stat_user_tables.n_tup_*` here: those counters
+/// are eventually consistent across pooled backends and can lag a completed
+/// concurrent run, while these values are the actual rows and increments the
+/// delivery contract committed before the test emits its profile.
+private struct V2LocalPostgresDurableEffectCounts: Decodable {
+    let inboxRows: Int64
+    let syncLogRows: Int64
+    let sharedPayloadRows: Int64
+    let sequenceRows: Int64
+    let sequenceAdvances: Int64
+    let deliveryRows: Int64
+    let deliveryClaimAttempts: Int64
+    let terminalDeliveries: Int64
+    let completionUnits: Int64
+    let releasedCompletionUnits: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case inboxRows = "inbox_rows"
+        case syncLogRows = "sync_log_rows"
+        case sharedPayloadRows = "shared_payload_rows"
+        case sequenceRows = "sequence_rows"
+        case sequenceAdvances = "sequence_advances"
+        case deliveryRows = "delivery_rows"
+        case deliveryClaimAttempts = "delivery_claim_attempts"
+        case terminalDeliveries = "terminal_deliveries"
+        case completionUnits = "completion_units"
+        case releasedCompletionUnits = "released_completion_units"
+    }
+
+    static func capture(on sql: any SQLDatabase) async throws -> Self {
+        guard let effects = try await sql.raw("""
+            SELECT
+                (SELECT COUNT(*)::bigint FROM im_v2.consumer_inbox) AS inbox_rows,
+                (SELECT COUNT(*)::bigint FROM im_v2.user_sync_log) AS sync_log_rows,
+                (SELECT COUNT(*)::bigint FROM im_v2.fanout_sync_payloads) AS shared_payload_rows,
+                (SELECT COUNT(*)::bigint FROM im_v2.user_sync_sequences) AS sequence_rows,
+                (SELECT COALESCE(SUM(next_sequence - 1), 0)::bigint
+                   FROM im_v2.user_sync_sequences) AS sequence_advances,
+                (SELECT COUNT(*)::bigint FROM im_v2.fanout_deliveries) AS delivery_rows,
+                (SELECT COALESCE(SUM(retry_count), 0)::bigint
+                   FROM im_v2.fanout_deliveries) AS delivery_claim_attempts,
+                (SELECT COUNT(*) FILTER (WHERE state = 'terminal')::bigint
+                   FROM im_v2.fanout_deliveries) AS terminal_deliveries,
+                (SELECT COUNT(*)::bigint FROM im_v2.fanout_completion_units) AS completion_units,
+                (SELECT COUNT(*) FILTER (WHERE state = 'released')::bigint
+                   FROM im_v2.fanout_completion_units) AS released_completion_units
+            """).first(decoding: Self.self)
+        else { throw TestConfigurationError.postgresProfileUnavailable }
+        return effects
+    }
+}
+
+private struct V2LocalPostgresDatabaseCounters: Decodable {
+    let xactCommit: Int64
+    let xactRollback: Int64
+    let tempBytes: Int64
+    let blkReadTime: Double
+    let blkWriteTime: Double
+
+    enum CodingKeys: String, CodingKey {
+        case xactCommit = "xact_commit"
+        case xactRollback = "xact_rollback"
+        case tempBytes = "temp_bytes"
+        case blkReadTime = "blk_read_time"
+        case blkWriteTime = "blk_write_time"
+    }
+
+    func subtracting(_ other: Self) -> Self {
+        .init(
+            xactCommit: xactCommit - other.xactCommit,
+            xactRollback: xactRollback - other.xactRollback,
+            tempBytes: tempBytes - other.tempBytes,
+            blkReadTime: blkReadTime - other.blkReadTime,
+            blkWriteTime: blkWriteTime - other.blkWriteTime
+        )
+    }
+
+    var blkReadMilliseconds: Int { Int(blkReadTime.rounded()) }
+    var blkWriteMilliseconds: Int { Int(blkWriteTime.rounded()) }
+}
+
+private struct V2LocalPostgresWALCounters: Decodable {
+    let walRecords: Int64
+    let walFPI: Int64
+    let walBytes: Int64
+    let walLSN: String
+
+    enum CodingKeys: String, CodingKey {
+        case walRecords = "wal_records"
+        case walFPI = "wal_fpi"
+        case walBytes = "wal_bytes"
+        case walLSN = "wal_lsn"
+    }
+
+    func subtracting(_ other: Self) -> Self {
+        .init(
+            walRecords: walRecords - other.walRecords,
+            walFPI: walFPI - other.walFPI,
+            walBytes: walBytes - other.walBytes,
+            walLSN: walLSN
+        )
+    }
+}
+
+private struct V2LocalPostgresStatementProfile: Decodable {
+    let category: String
+    let calls: Int64
+    let totalExecMilliseconds: Double
+    let meanExecMilliseconds: Double
+    let rows: Int64
+    let sharedBlocksHit: Int64
+    let sharedBlocksRead: Int64
+    let sharedBlocksDirtied: Int64
+    let sharedBlocksWritten: Int64
+    let tempBlocksRead: Int64
+    let tempBlocksWritten: Int64
+    let walBytes: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case category, calls, rows
+        case totalExecMilliseconds = "total_exec_ms"
+        case meanExecMilliseconds = "mean_exec_ms"
+        case sharedBlocksHit = "shared_blks_hit"
+        case sharedBlocksRead = "shared_blks_read"
+        case sharedBlocksDirtied = "shared_blks_dirtied"
+        case sharedBlocksWritten = "shared_blks_written"
+        case tempBlocksRead = "temp_blks_read"
+        case tempBlocksWritten = "temp_blks_written"
+        case walBytes = "wal_bytes"
+    }
+}
+
 private enum PlannerInterruption: Error { case afterFirstCheckpoint }
 
 /// Deterministically fails on the second UUID-sorted seeded member. The first
@@ -3785,12 +5692,41 @@ private struct FailsOnSecondPageRouter: V2UserShardRouter {
 }
 
 private struct ExistsRow: Decodable { let exists: Bool }
+private struct StringValueRow: Decodable { let value: String }
+private struct SyncPayloadEnvelopeRow: Decodable {
+    let hasNullLogPayload: Bool
+    let payloadStorage: String
+    let hasSourceEventID: Bool
+    let hasProjectionKind: Bool
+    enum CodingKeys: String, CodingKey {
+        case hasNullLogPayload = "has_null_log_payload"
+        case payloadStorage = "payload_storage"
+        case hasSourceEventID = "has_source_event_id"
+        case hasProjectionKind = "has_projection_kind"
+    }
+}
 
 private struct EdgeClientRateLimitKeyRow: Decodable {
     let clientKey: String
     enum CodingKeys: String, CodingKey { case clientKey = "client_key" }
 }
 private struct CountRow: Decodable { let value: Int64 }
+private struct FanoutTerminalLatencyRow: Decodable {
+    let elapsedSeconds: TimeInterval
+    enum CodingKeys: String, CodingKey { case elapsedSeconds = "elapsed_seconds" }
+}
+private struct HybridPlanAssertionRow: Decodable, Equatable {
+    let roomSequence: Int64
+    let state: String
+    let targetCount: Int
+    let reservedFanoutCost: Int
+    enum CodingKeys: String, CodingKey {
+        case roomSequence = "source_room_sequence"
+        case state
+        case targetCount = "target_count"
+        case reservedFanoutCost = "reserved_fanout_cost"
+    }
+}
 private struct PasswordAuthenticationAuditRow: Decodable {
     let outcome: String
     let userID: UUID?
@@ -3856,6 +5792,14 @@ private struct FanoutDeliveryScaleAccountingRow: Decodable {
         case planState = "plan_state"
     }
 }
+private struct FanoutDeliveryRetryAccountingRow: Decodable {
+    let retriedDeliveries: Int64
+    let maximumRetryCount: Int64
+    enum CodingKeys: String, CodingKey {
+        case retriedDeliveries = "retried_deliveries"
+        case maximumRetryCount = "maximum_retry_count"
+    }
+}
 private struct CapacityRow: Decodable {
     let commandWindowUsed: Int
     let fanoutWindowUsed: Int
@@ -3872,6 +5816,14 @@ private struct PlanningCheckpointAssertionRow: Decodable {
     enum CodingKeys: String, CodingKey {
         case state
         case afterUserID = "after_user_id"
+    }
+}
+private struct FanoutRouteAssertionRow: Decodable {
+    let bucket: String
+    let epoch: Int64
+    enum CodingKeys: String, CodingKey {
+        case bucket = "target_shard_bucket"
+        case epoch = "observed_router_epoch"
     }
 }
 private struct DeliveryRouteRow: Decodable, Equatable {
@@ -3984,6 +5936,15 @@ private struct SyncKindRow: Decodable {
     let kind: String
     enum CodingKeys: String, CodingKey { case sequence = "user_sync_sequence", kind = "projection_kind" }
 }
+private struct PayloadLaneCountRow: Decodable, Equatable {
+    let payloadLane: String
+    let entryCount: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case payloadLane = "payload_lane"
+        case entryCount = "entry_count"
+    }
+}
 private struct ProfilePropagationOutboxRow: Decodable {
     let state: String
     let checkpointed: Bool
@@ -3994,10 +5955,12 @@ private struct ProfilePropagationCompletedRow: Decodable {
 }
 private struct ProfilePropagationProjectionRow: Decodable {
     let userID: UUID
+    let roomID: String
     let displayName: String
     let revision: Int64
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
+        case roomID = "room_id"
         case displayName = "display_name"
         case revision
     }
@@ -4067,4 +6030,16 @@ private struct ModeratedRemovalEventAssertionRow: Decodable { let eventType: Str
 private struct FrozenRoomAssertionRow: Decodable { let frozenAt: Date?; let frozenByUserID: UUID?; enum CodingKeys: String, CodingKey { case frozenAt = "frozen_at", frozenByUserID = "frozen_by_user_id" } }
 private struct FreezeProjectionRow: Decodable { let projectionKind: String; let eventType: String; enum CodingKeys: String, CodingKey { case projectionKind = "projection_kind", eventType = "event_type" } }
 private struct ModerationDeliveredEventRow: Decodable { let eventType: String; enum CodingKeys: String, CodingKey { case eventType = "event_type" } }
-private enum TestConfigurationError: Error { case schemaAlreadyExists }
+private enum TestConfigurationError: Error {
+    case schemaAlreadyExists
+    case invalidLocalCapacityLimit(String)
+    case invalidFanoutCommitBatchSize(String)
+    case invalidFanoutDeliveryClaimBatchSize(String)
+    case invalidFanoutPlannerPageSize(String)
+    case invalidConcurrentRoomWorkloadValue(String)
+    case invalidCrossStoreDeliveryConcurrency(String)
+    case invalidCrossStoreCommitBatchSize(String)
+    case invalidCrossStoreBatchCommitConcurrency(String)
+    case invalidCrossStoreEventPayloadBytes(String)
+    case postgresProfileUnavailable
+}

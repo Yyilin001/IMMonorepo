@@ -85,6 +85,155 @@ struct V2SyncEngineTests {
         #expect(profile.membershipRevision == 2)
     }
 
+    @Test("a hybrid membership projection enrolls the room in cursor synchronization")
+    func hybridMembershipProjectionRegistersRoomLog() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let roomID = "00000000-0000-0000-0000-000000000274"
+        let record = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000275"),
+            projectionKind: "membership",
+            payload: try JSONSerialization.data(withJSONObject: [
+                "event_type": "membership_changed", "room_id": roomID, "title": "大群",
+                "owner_user_id": "00000000-0000-0000-0000-000000000276",
+                "target_user_id": "00000000-0000-0000-0000-000000000277",
+                "action": "add", "membership_revision": 2,
+                "delivery_mode": "large_group_hybrid",
+                "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
+            ])
+        )
+        _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("hybrid-member-token"), receipt: .init("hybrid-member-receipt"), hasMore: false, capabilityProfile: "base"))
+
+        #expect(try await store.knownHybridGroupRoomIDs() == [try .init(roomID)])
+        try await store.deactivateHybridGroupRoom(roomID: .init(roomID))
+        #expect(try await store.knownHybridGroupRoomIDs().isEmpty)
+        #expect(try await store.roomProfile(roomID: .init(roomID))?.deliveryMode == nil)
+    }
+
+    @Test("a room-log page and its cursor commit atomically and accept an exact retry")
+    func hybridGroupEventPageIsDurableAndIdempotent() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000278")
+        let event = try V2ClientGroupEvent(
+            sourceEventID: .init("00000000-0000-0000-0000-000000000279"),
+            roomSequence: 3,
+            projectionKind: "message",
+            payload: messagePayload(roomID: roomID.rawValue, roomSequence: 3, messageID: "00000000-0000-0000-0000-00000000027a", text: "从群日志拉取")
+        )
+        let page = V2ClientGroupEventPage(roomID: roomID, events: [event], nextRoomSequence: 3, hasMore: false)
+
+        #expect(try await store.applyGroupEventPage(page) == 3)
+        #expect(try await store.applyGroupEventPage(page) == 3)
+        #expect(try await store.groupEventCursor(roomID: roomID) == 3)
+        #expect(try await store.messages(in: roomID).map(\.text) == ["从群日志拉取"])
+    }
+
+    @Test("one group-log pull reports durable progress for a foreground caller")
+    func hybridGroupEventPullReportsProgress() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let roomID: RoomID = try .init("00000000-0000-0000-0000-00000000027b")
+        let event = try V2ClientGroupEvent(
+            sourceEventID: .init("00000000-0000-0000-0000-00000000027c"),
+            roomSequence: 1,
+            projectionKind: "message",
+            payload: messagePayload(roomID: roomID.rawValue, roomSequence: 1, messageID: "00000000-0000-0000-0000-00000000027d", text: "前台轮询")
+        )
+        let transport = GroupEventTransportFake(page: .init(roomID: roomID, events: [event], nextRoomSequence: 1, hasMore: true))
+        let engine = V2GroupEventSyncEngine(transport: transport, store: store)
+
+        #expect(try await engine.synchronizeOnePage(roomID: roomID) == .init(appliedEventCount: 1, hasMore: true))
+        #expect(try await store.groupEventCursor(roomID: roomID) == 1)
+        #expect(try await store.messages(in: roomID).map(\.text) == ["前台轮询"])
+    }
+
+    @Test("a standard-group foreground preview stays outside durable group cursors and personal ACKs")
+    func standardGroupForegroundPreviewIsTransientAndIdempotent() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let roomID: RoomID = try .init("00000000-0000-0000-0000-00000000028a")
+        let profile = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-00000000028b"),
+            projectionKind: "membership",
+            payload: try JSONSerialization.data(withJSONObject: [
+                "event_type": "membership_changed", "room_id": roomID.rawValue, "title": "普通群",
+                "owner_user_id": "00000000-0000-0000-0000-00000000028c",
+                "target_user_id": "00000000-0000-0000-0000-00000000028d",
+                "action": "add", "membership_revision": 2,
+                "delivery_mode": "standard_fanout",
+                "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
+            ])
+        )
+        let delivered = try V2ClientSyncRecord(
+            sequence: 2,
+            sourceEventID: .init("00000000-0000-0000-0000-00000000028e"),
+            projectionKind: "message",
+            payload: messagePayload(roomID: roomID.rawValue, roomSequence: 2, messageID: "00000000-0000-0000-0000-00000000028f", text: "可靠投递")
+        )
+        _ = try await store.apply(.init(generation: 1, records: [profile, delivered], nextSyncToken: .init("standard-preview-token"), receipt: .init("standard-preview-receipt"), hasMore: false, capabilityProfile: "base"))
+
+        let preview = try V2ClientGroupEvent(
+            sourceEventID: .init("00000000-0000-0000-0000-000000000290"),
+            roomSequence: 3,
+            projectionKind: "message",
+            payload: messagePayload(roomID: roomID.rawValue, roomSequence: 3, messageID: "00000000-0000-0000-0000-000000000291", text: "前台预览")
+        )
+        let transport = GroupEventTransportFake(page: .init(roomID: roomID, events: [preview], nextRoomSequence: 3, hasMore: false))
+        let engine = V2ForegroundGroupEventPreviewEngine(transport: transport, store: store)
+
+        #expect(try await store.groupDeliveryMode(roomID: roomID) == .standardFanout)
+        #expect(try await engine.synchronizeOnePage(roomID: roomID) == .init(appliedEventCount: 1, hasMore: false))
+        #expect(await transport.requestedCursors() == [2])
+        #expect(try await store.messages(in: roomID).map(\.text) == ["可靠投递", "前台预览"])
+        #expect(try await store.groupEventCursor(roomID: roomID) == 0)
+        #expect(try await store.cursor()?.appliedSequence == 2)
+
+        // A retry is safe and still does not create a durable room-log ACK.
+        #expect(try await engine.synchronizeOnePage(roomID: roomID).appliedEventCount == 1)
+        #expect(try await store.groupEventCursor(roomID: roomID) == 0)
+    }
+
+    @Test("a forbidden hybrid room is deactivated without blocking normal synchronization")
+    func forbiddenHybridRoomStopsFutureCursorPulls() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let roomID = "00000000-0000-0000-0000-00000000027e"
+        let record = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-00000000027f"),
+            projectionKind: "membership",
+            payload: try JSONSerialization.data(withJSONObject: [
+                "event_type": "membership_changed", "room_id": roomID, "title": "已移出的大群",
+                "owner_user_id": "00000000-0000-0000-0000-000000000280",
+                "target_user_id": "00000000-0000-0000-0000-000000000281",
+                "action": "remove", "membership_revision": 3,
+                "delivery_mode": "large_group_hybrid",
+                "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
+            ])
+        )
+        _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("removed-hybrid-token"), receipt: .init("removed-hybrid-receipt"), hasMore: false, capabilityProfile: "base"))
+        let engine = V2GroupEventSyncEngine(transport: ForbiddenGroupEventTransport(), store: store)
+
+        _ = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 1)
+
+        #expect(try await store.knownHybridGroupRoomIDs().isEmpty)
+    }
+
+    @Test("background hybrid maintenance is page-bounded and round-robin fair")
+    func backgroundHybridMaintenanceIsBoundedAndFair() async throws {
+        let first = try RoomID("00000000-0000-0000-0000-0000000002a0")
+        let second = try RoomID("00000000-0000-0000-0000-0000000002a1")
+        let store = BackgroundGroupEventStoreFake(roomIDs: [first, second])
+        let transport = BackgroundGroupEventTransportFake()
+        let engine = V2GroupEventSyncEngine(transport: transport, store: store)
+
+        let firstPass = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 3)
+        #expect(firstPass == .init(processedPageCount: 3, appliedEventCount: 0, mayHaveRemainingWork: true))
+        #expect(await transport.requestedRoomIDs() == [first, second, first])
+
+        let secondPass = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 1)
+        #expect(secondPass == .init(processedPageCount: 1, appliedEventCount: 0, mayHaveRemainingWork: true))
+        #expect(await transport.requestedRoomIDs() == [first, second, first, second])
+    }
+
     @Test("local store applies an incremental batch once and accepts an exact retry")
     func incrementalApplyIsIdempotent() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
@@ -600,6 +749,56 @@ private actor FakeTransport: V2ClientSyncTransport {
     func acknowledgeSnapshot(_: V2ClientSnapshotManifest) { snapshotAcknowledgements += 1 }
     func acknowledgements() -> [Acknowledgement] { acknowledgementsLog }
     func snapshotAcknowledgementCount() -> Int { snapshotAcknowledgements }
+}
+
+private actor GroupEventTransportFake: V2ClientGroupEventTransport {
+    private let page: V2ClientGroupEventPage
+    private var cursors: [UInt64] = []
+
+    init(page: V2ClientGroupEventPage) { self.page = page }
+
+    func pullGroupEvents(roomID: RoomID, afterRoomSequence: UInt64, pageSize _: Int) throws -> V2ClientGroupEventPage {
+        guard roomID == page.roomID else { throw V2RealtimeTransportError.unexpectedResponse }
+        cursors.append(afterRoomSequence)
+        return page
+    }
+
+    func requestedCursors() -> [UInt64] { cursors }
+}
+
+private struct ForbiddenGroupEventTransport: V2ClientGroupEventTransport {
+    func pullGroupEvents(roomID _: RoomID, afterRoomSequence _: UInt64, pageSize _: Int) throws -> V2ClientGroupEventPage {
+        throw V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: 0, currentRevision: nil)
+    }
+}
+
+private actor BackgroundGroupEventStoreFake: V2LocalGroupEventStore {
+    private var roomIDs: [RoomID]
+    private var cursors: [RoomID: UInt64] = [:]
+
+    init(roomIDs: [RoomID]) {
+        self.roomIDs = roomIDs
+    }
+
+    func knownHybridGroupRoomIDs() -> [RoomID] { roomIDs }
+    func isKnownHybridGroupRoom(roomID: RoomID) -> Bool { roomIDs.contains(roomID) }
+    func deactivateHybridGroupRoom(roomID: RoomID) { roomIDs.removeAll { $0 == roomID } }
+    func groupEventCursor(roomID: RoomID) -> UInt64 { cursors[roomID, default: 0] }
+    func applyGroupEventPage(_ page: V2ClientGroupEventPage) -> UInt64 {
+        cursors[page.roomID] = page.nextRoomSequence
+        return page.nextRoomSequence
+    }
+}
+
+private actor BackgroundGroupEventTransportFake: V2ClientGroupEventTransport {
+    private var requestedRooms: [RoomID] = []
+
+    func pullGroupEvents(roomID: RoomID, afterRoomSequence: UInt64, pageSize _: Int) -> V2ClientGroupEventPage {
+        requestedRooms.append(roomID)
+        return .init(roomID: roomID, events: [], nextRoomSequence: afterRoomSequence, hasMore: true)
+    }
+
+    func requestedRoomIDs() -> [RoomID] { requestedRooms }
 }
 
 private struct Acknowledgement: Equatable, Sendable {

@@ -15,6 +15,10 @@ destination_id="${IMAPP_LOCAL_ACCOUNT_E2E_SIMULATOR_ID:-}"
 expected_test_count="${IMAPP_LOCAL_ACCOUNT_E2E_EXPECTED_TESTS:-9}"
 
 source "${repo_root}/IMV2/scripts/local_compose.sh"
+# shellcheck source=../../IMV2/scripts/local_admission_pool.sh
+source "${repo_root}/IMV2/scripts/local_admission_pool.sh"
+# shellcheck source=../../IMV2/scripts/local_gateway_tls.sh
+source "${repo_root}/IMV2/scripts/local_gateway_tls.sh"
 
 local_compose() {
   v2_local_compose "${local_env_file}" --project-name "${local_compose_project}" --file "${local_compose_file}" "$@"
@@ -59,11 +63,13 @@ running_services="$(local_compose ps --status running --services 2>/dev/null || 
 if ! grep -qx 'account' <<<"${running_services}" || ! grep -qx 'gateway' <<<"${running_services}" || ! grep -qx 'caddy' <<<"${running_services}"; then
   "${local_stack_script}"
 fi
+v2_seed_local_admission_pool
 
 if [[ ! -f "${local_ca}" ]]; then
   printf 'missing local CA after starting stack: %s\n' "${local_ca}" >&2
   exit 1
 fi
+v2_ensure_local_gateway_tls "${local_ca}"
 
 status="$(curl --silent --output /dev/null --write-out '%{http_code}' --cacert "${local_ca}" \
   --request POST \

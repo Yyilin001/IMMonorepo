@@ -60,6 +60,16 @@ message Envelope {
     GroupRoomCreated group_room_created = 58;
     ListRoomMembers list_room_members = 59;
     RoomMembersPage room_members_page = 60;
+    GroupEventPull group_event_pull = 61;
+    GroupEventPage group_event_page = 62;
+    GroupEventSubscribe group_event_subscribe = 63;
+    GroupEventSubscribed group_event_subscribed = 64;
+    GroupEventUnsubscribe group_event_unsubscribe = 65;
+    // Server initiated, request_id = 0. This is a non-authoritative wake;
+    // clients always read authorized durable events with GroupEventPull. A
+    // standard group uses this only for an active-view preview; its reliable
+    // delivery and ACK still use the personal sync stream.
+    GroupEventAvailable group_event_available = 66;
     Error error = 90;
   }
 }
@@ -305,6 +315,7 @@ message CreateGroupRoom {
   string operation_id = 1;
   string title = 2;
   repeated string initial_member_user_ids = 3;
+  GroupDeliveryMode delivery_mode = 4;
 }
 
 message GroupRoomCreated {
@@ -312,6 +323,14 @@ message GroupRoomCreated {
   string title = 2;
   repeated string member_user_ids = 3;
   int64 created_at_ms = 4;
+  GroupDeliveryMode delivery_mode = 5;
+  uint32 member_count = 6;
+}
+
+enum GroupDeliveryMode {
+  GROUP_DELIVERY_MODE_UNSPECIFIED = 0;
+  GROUP_DELIVERY_MODE_STANDARD_FANOUT = 1;
+  GROUP_DELIVERY_MODE_LARGE_GROUP_HYBRID = 2;
 }
 
 // A read-only, seek-paginated directory.  Member lists are never attached to
@@ -348,6 +367,54 @@ message RoomMembersPage {
   repeated RoomMember members = 3;
   string next_cursor = 4;
   RoomMembershipRole actor_role = 5;
+}
+
+// Groups retain one ordered room log. The caller must be an active member now
+// and must also have been eligible at each event's committed membership
+// revision; leaving a room therefore revokes future reads without exposing
+// events from before a later re-join. For standard-fan-out groups this endpoint
+// is foreground preview only, never a replacement for personal sync ACKs.
+message GroupEventPull {
+  string room_id = 1;
+  uint64 after_room_sequence = 2;
+  uint32 page_size = 3;
+}
+
+message GroupEvent {
+  string source_event_id = 1;
+  uint64 room_sequence = 2;
+  string projection_kind = 3;
+  bytes payload = 4;
+}
+
+message GroupEventPage {
+  string room_id = 1;
+  repeated GroupEvent events = 2;
+  uint64 next_room_sequence = 3;
+  bool has_more = 4;
+}
+
+// A foreground client subscribes only while a group detail view is visible.
+// `after_room_sequence` is advisory and lets the server return a useful
+// waterline; it never replaces Hybrid cursor pull or standard personal-sync
+// acknowledgement.
+message GroupEventSubscribe {
+  string room_id = 1;
+  uint64 after_room_sequence = 2;
+}
+
+message GroupEventSubscribed {
+  string room_id = 1;
+  uint64 high_watermark = 2;
+}
+
+message GroupEventUnsubscribe {
+  string room_id = 1;
+}
+
+message GroupEventAvailable {
+  string room_id = 1;
+  uint64 high_watermark = 2;
 }
 
 enum StrangerMessagePermission {

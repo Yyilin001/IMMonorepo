@@ -33,7 +33,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             let clientMessageID = try uuid(command.clientMessageID)
 
             guard let room = try await sql.raw("""
-                SELECT room_kind, room_shard_id, room_sequence, membership_revision, capacity_profile_id, frozen_at
+                SELECT room_kind, room_shard_id, room_sequence, membership_revision, capacity_profile_id, delivery_mode, frozen_at
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: RoomRow.self)
             else {
@@ -56,7 +56,11 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 """).first(decoding: MessageRow.self) {
                 let priorMedia = try await sql.raw("SELECT media_id FROM im_v2.message_media_references WHERE message_id = \(bind: existing.messageID) ORDER BY ordinal").all(decoding: MediaReferenceRow.self)
                 let priorMentions = try await sql.raw("SELECT mention_kind, mentioned_user_id FROM im_v2.message_mentions WHERE message_id = \(bind: existing.messageID) ORDER BY ordinal").all(decoding: MentionRow.self)
-                let accepted = try existing.acceptedMessage(media: priorMedia.map { try .init(mediaID: .init($0.mediaID.uuidString)) }, mentions: try priorMentions.map { try $0.target })
+                let accepted = try existing.acceptedMessage(
+                    media: priorMedia.map { try .init(mediaID: .init($0.mediaID.uuidString)) },
+                    mentions: try priorMentions.map { try $0.target },
+                    groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
+                )
                 return accepted.roomID == command.roomID && accepted.text == command.text && accepted.media == command.media && accepted.mentions == command.mentions
                     ? .idempotent(accepted)
                     : .idempotencyConflict
@@ -114,16 +118,36 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             }
             try await assertMentionsAuthorized(command.mentions, roomID: roomID, membershipRevision: room.membershipRevision, senderID: senderID, sql: sql)
             try await assertAvailableMedia(command.media, ownerID: senderID, now: now, sql: sql)
+            // Hybrid delivery never expands @everyone. Explicit user mentions
+            // are bounded by the command limit and receive a finite reliable
+            // projection; everyone else observes the canonical room event.
+            let hybridReliableTargets = room.deliveryMode == .largeGroupHybrid
+                ? hybridMentionTargetIDs(command.mentions, excluding: senderID)
+                : []
             let roomState = try room.commandState(roomID: command.roomID, admission: admission)
             let shardState = try shard.admissionState()
-            let result = try V2SendMessageReducer.reduce(
-                command: command,
-                roomState: roomState,
-                shardState: shardState,
-                profile: capacityProfile.limits,
-                identifiers: identifiers,
-                now: now
-            )
+            let result: V2SendMessageAcceptanceResult
+            switch room.deliveryMode {
+            case .standardFanout:
+                result = try V2SendMessageReducer.reduce(
+                    command: command,
+                    roomState: roomState,
+                    shardState: shardState,
+                    profile: capacityProfile.limits,
+                    identifiers: identifiers,
+                    now: now
+                )
+            case .largeGroupHybrid:
+                result = try hybridReduction(
+                    command: command,
+                    roomState: roomState,
+                    shardState: shardState,
+                    profile: capacityProfile.limits,
+                    identifiers: identifiers,
+                    reliableTargetCount: hybridReliableTargets.count,
+                    now: now
+                )
+            }
             guard case .accepted(let writeSet) = result else {
                 return result.outcome
             }
@@ -137,7 +161,23 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             }
 
             try await persist(writeSet, command: command, room: room, sql: sql)
-            return .accepted(writeSet.acceptedMessage)
+            let message = writeSet.acceptedMessage
+            // The room row is locked for this transaction, so this metadata
+            // is exactly the immutable mode that committed the event.  It is
+            // used only to avoid emitting foreground-group hints for direct
+            // rooms after the source transaction succeeds.
+            return .accepted(.init(
+                messageID: message.messageID,
+                roomID: message.roomID,
+                roomSequence: message.roomSequence,
+                senderUserID: message.senderUserID,
+                clientMessageID: message.clientMessageID,
+                text: message.text,
+                media: message.media,
+                mentions: message.mentions,
+                groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil,
+                createdAt: message.createdAt
+            ))
         }
     }
 
@@ -208,6 +248,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         guard let mentionedUsersJSON = String(data: try JSONEncoder().encode(mentionedUserIDs), encoding: .utf8) else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
+        let hybridReliableTargets = hybridMentionTargetIDs(message.mentions, excluding: senderID)
         try await sql.raw("""
             UPDATE im_v2.room_admission
             SET command_window_used = \(bind: roomAdmission.commandWindow.used),
@@ -266,20 +307,58 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                  )),
                  \(bind: room.membershipRevision), \(bind: message.createdAt))
             """).run()
-        try await sql.raw("""
-            INSERT INTO im_v2.fanout_plans
-                (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
-                 target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at)
-            VALUES
-                (\(bind: planID), \(bind: eventID), \(bind: roomID), \(bind: roomSequence), \(bind: room.membershipRevision),
-                 \(bind: targetRuleJSON(writeSet.fanoutPlan.reservation.cost, commandRule: command.targetRule))::jsonb,
-                 jsonb_build_object('after_user_id', NULL),
-                 \(bind: writeSet.fanoutPlan.reservation.cost.targetCount), \(bind: writeSet.fanoutPlan.reservation.cost.targetCount), 'planning', \(bind: message.createdAt))
-            """).run()
-        try await sql.raw("""
-            INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at)
-            VALUES (\(bind: eventID), \(bind: planID), 'pending', \(bind: message.createdAt))
-            """).run()
+        switch room.deliveryMode {
+        case .standardFanout:
+            try await sql.raw("""
+                INSERT INTO im_v2.fanout_plans
+                    (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
+                     target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at)
+                VALUES
+                    (\(bind: planID), \(bind: eventID), \(bind: roomID), \(bind: roomSequence), \(bind: room.membershipRevision),
+                     \(bind: targetRuleJSON(writeSet.fanoutPlan.reservation.cost, commandRule: command.targetRule))::jsonb,
+                     jsonb_build_object('after_user_id', NULL),
+                     \(bind: writeSet.fanoutPlan.reservation.cost.targetCount), \(bind: writeSet.fanoutPlan.reservation.cost.targetCount), 'planning', \(bind: message.createdAt))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at)
+                VALUES (\(bind: eventID), \(bind: planID), 'pending', \(bind: message.createdAt))
+                """).run()
+        case .largeGroupHybrid:
+            guard writeSet.fanoutPlan.reservation.cost.targetCount == hybridReliableTargets.count else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            if hybridReliableTargets.isEmpty {
+                // Retain a terminal plan row so every operation result has
+                // the same audit shape, while making global fan-out
+                // structurally impossible for an ordinary large-group event.
+                try await sql.raw("""
+                    INSERT INTO im_v2.fanout_plans
+                        (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
+                         target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at, terminal_at)
+                    VALUES
+                        (\(bind: planID), \(bind: eventID), \(bind: roomID), \(bind: roomSequence), \(bind: room.membershipRevision),
+                         '{"kind":"hybrid_room_log"}'::jsonb, jsonb_build_object('after_user_id', NULL),
+                         0, 0, 'terminal', \(bind: message.createdAt), \(bind: message.createdAt))
+                    """).run()
+            } else {
+                let targetsJSON = String(data: try JSONSerialization.data(withJSONObject: hybridReliableTargets.map(\.uuidString)), encoding: .utf8)!
+                try await sql.raw("""
+                    INSERT INTO im_v2.fanout_plans
+                        (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
+                         target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at)
+                    VALUES
+                        (\(bind: planID), \(bind: eventID), \(bind: roomID), \(bind: roomSequence), \(bind: room.membershipRevision),
+                         '{"kind":"hybrid_mention_targets"}'::jsonb, jsonb_build_object('after_user_id', NULL),
+                         \(bind: hybridReliableTargets.count), \(bind: hybridReliableTargets.count), 'planning', \(bind: message.createdAt))
+                    """).run()
+                try await sql.raw("""
+                    INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id)
+                    SELECT \(bind: eventID), value::uuid
+                    FROM jsonb_array_elements_text(\(bind: targetsJSON)::jsonb) AS value
+                    """).run()
+                try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: eventID), \(bind: planID), 'pending', \(bind: message.createdAt))").run()
+            }
+        }
     }
 
     private func assertAvailableMedia(_ media: [V2MediaReference], ownerID: UUID, now: Date, sql: any SQLDatabase) async throws {
@@ -292,22 +371,50 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
 
     private func assertMentionsAuthorized(_ mentions: [V2MentionTarget], roomID: UUID, membershipRevision: Int64, senderID: UUID, sql: any SQLDatabase) async throws {
         guard !mentions.isEmpty else { return }
-        let rows = try await sql.raw("""
-            SELECT membership.user_id, membership.role,
-                   NOT EXISTS (
-                     SELECT 1 FROM im_v2.user_blocks AS blocks
-                     WHERE (blocks.blocker_user_id = \(bind: senderID) AND blocks.blocked_user_id = membership.user_id)
-                        OR (blocks.blocker_user_id = membership.user_id AND blocks.blocked_user_id = \(bind: senderID))
-                   ) AS mentionable
-            FROM im_v2.room_memberships AS membership
-            WHERE membership.room_id = \(bind: roomID)
-              AND membership.joined_revision <= \(bind: membershipRevision)
-              AND (membership.left_revision IS NULL OR membership.left_revision > \(bind: membershipRevision))
+        guard mentions.count <= V2MessageCommandLimits.maxMentions,
+              Set(mentions).count == mentions.count
+        else { throw V2MentionValidationError.invalidTargetSet }
+        guard let sender = try await sql.raw("""
+            SELECT role
+            FROM im_v2.room_memberships
+            WHERE room_id = \(bind: roomID) AND user_id = \(bind: senderID)
+              AND joined_revision <= \(bind: membershipRevision)
+              AND (left_revision IS NULL OR left_revision > \(bind: membershipRevision))
             FOR UPDATE
-            """).all(decoding: MentionMembershipRow.self)
-        guard let sender = rows.first(where: { $0.userID == senderID }),
+            """).first(decoding: MentionSenderMembershipRow.self),
               let role = V2RoomMembershipRole(rawValue: sender.role)
         else { throw V2RoomWriteStoreError.actorNotEligible }
+
+        var mentionedUserIDs: [UUID] = []
+        for target in mentions {
+            guard case .user(let userID) = target else { continue }
+            mentionedUserIDs.append(try uuid(userID))
+        }
+        let rows: [MentionMembershipRow]
+        if mentionedUserIDs.isEmpty {
+            rows = []
+        } else {
+            let targetJSON = try mentionTargetJSON(mentionedUserIDs)
+            rows = try await sql.raw("""
+                WITH targets AS (
+                    SELECT value::uuid AS user_id
+                    FROM jsonb_array_elements_text(\(bind: targetJSON)::jsonb) AS value
+                )
+                SELECT membership.user_id,
+                       NOT EXISTS (
+                         SELECT 1 FROM im_v2.user_blocks AS blocks
+                         WHERE (blocks.blocker_user_id = \(bind: senderID) AND blocks.blocked_user_id = membership.user_id)
+                            OR (blocks.blocker_user_id = membership.user_id AND blocks.blocked_user_id = \(bind: senderID))
+                       ) AS mentionable
+                FROM targets
+                JOIN im_v2.room_memberships AS membership
+                  ON membership.user_id = targets.user_id
+                WHERE membership.room_id = \(bind: roomID)
+                  AND membership.joined_revision <= \(bind: membershipRevision)
+                  AND (membership.left_revision IS NULL OR membership.left_revision > \(bind: membershipRevision))
+                FOR UPDATE OF membership
+                """).all(decoding: MentionMembershipRow.self)
+        }
         let visibility = V2MentionVisibility(
             senderRole: role,
             visibleActiveUsers: Set(try rows.map { try UserID($0.userID.uuidString) }),
@@ -335,8 +442,9 @@ private struct RoomRow: Decodable {
     let roomSequence: Int64
     let membershipRevision: Int64
     let capacityProfileID: String
+    let deliveryMode: V2GroupDeliveryMode
     let frozenAt: Date?
-    enum CodingKeys: String, CodingKey { case kind = "room_kind", roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", frozenAt = "frozen_at" }
+    enum CodingKeys: String, CodingKey { case kind = "room_kind", roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", deliveryMode = "delivery_mode", frozenAt = "frozen_at" }
 
     func commandState(roomID: RoomID, admission: AdmissionRow) throws -> V2RoomCommandState {
         try .init(
@@ -345,6 +453,75 @@ private struct RoomRow: Decodable {
             admission: admission.roomAdmissionState()
         )
     }
+}
+
+private func hybridReduction(
+    command: V2SendMessageCommand,
+    roomState: V2RoomCommandState,
+    shardState: ShardAdmissionState,
+    profile: RoomCapacityProfile,
+    identifiers: V2AcceptanceIdentifiers,
+    reliableTargetCount: Int,
+    now: Date
+) throws -> V2SendMessageAcceptanceResult {
+    let admission: FanoutAdmissionResult
+    if reliableTargetCount == 0 {
+        admission = try V2CommandOnlyAdmissionEvaluator.reserve(profile: profile, roomState: roomState.admission, shardState: shardState, now: now)
+    } else {
+        admission = try FanoutAdmissionEvaluator.reserve(
+            request: .init(targetRule: .exactTargetCount(reliableTargetCount)),
+            profile: profile,
+            roomState: roomState.admission,
+            shardState: shardState,
+            now: now
+        )
+    }
+    switch admission {
+    case .rateLimited(let seconds):
+        return .rateLimited(retryAfterSeconds: seconds)
+    case .unavailable(let reason):
+        return .unavailable(reason)
+    case .accepted(let reservation, let nextAdmission, let nextShard):
+        let accepted = V2AcceptedMessage(
+            messageID: identifiers.messageID,
+            roomID: command.roomID,
+            roomSequence: roomState.nextRoomSequence,
+            senderUserID: command.senderUserID,
+            clientMessageID: command.clientMessageID,
+            text: command.text,
+            media: command.media,
+            mentions: command.mentions,
+            createdAt: now
+        )
+        let nextRoom = V2RoomCommandState(
+            roomID: roomState.roomID,
+            nextRoomSequence: roomState.nextRoomSequence + 1,
+            admission: nextAdmission
+        )
+        return .accepted(.init(
+            acceptedMessage: accepted,
+            eventID: identifiers.eventID,
+            fanoutPlan: .init(id: identifiers.planID, sourceEventID: identifiers.eventID, roomID: command.roomID, roomSequence: accepted.roomSequence, reservation: reservation),
+            nextRoomState: nextRoom,
+            nextShardState: nextShard
+        ))
+    }
+}
+
+private func hybridMentionTargetIDs(_ mentions: [V2MentionTarget], excluding senderID: UUID) -> [UUID] {
+    Array(Set(mentions.compactMap { target -> UUID? in
+        guard case .user(let userID) = target, let value = UUID(uuidString: userID.rawValue), value != senderID else { return nil }
+        return value
+    })).sorted { $0.uuidString < $1.uuidString }
+}
+
+private func mentionTargetJSON(_ userIDs: [UUID]) throws -> String {
+    let values = userIDs.map(\.uuidString)
+    let data = try JSONEncoder().encode(values)
+    guard let json = String(data: data, encoding: .utf8) else {
+        throw V2RoomWriteStoreError.corruptPersistenceState
+    }
+    return json
 }
 
 private struct AdmissionRow: Decodable {
@@ -396,8 +573,12 @@ private struct MessageRow: Decodable {
     let textBody: String
     let createdAt: Date
     enum CodingKeys: String, CodingKey { case messageID = "message_id", roomID = "room_id", roomSequence = "room_sequence", senderUserID = "sender_user_id", clientMessageID = "client_message_id", textBody = "text_body", createdAt = "created_at" }
-    func acceptedMessage(media: [V2MediaReference] = [], mentions: [V2MentionTarget] = []) throws -> V2AcceptedMessage {
-        try .init(messageID: .init(messageID.uuidString), roomID: .init(roomID.uuidString), roomSequence: unsigned(roomSequence), senderUserID: .init(senderUserID.uuidString), clientMessageID: .init(clientMessageID.uuidString), text: textBody, media: media, mentions: mentions, createdAt: createdAt)
+    func acceptedMessage(
+        media: [V2MediaReference] = [],
+        mentions: [V2MentionTarget] = [],
+        groupDeliveryMode: V2GroupDeliveryMode? = nil
+    ) throws -> V2AcceptedMessage {
+        try .init(messageID: .init(messageID.uuidString), roomID: .init(roomID.uuidString), roomSequence: unsigned(roomSequence), senderUserID: .init(senderUserID.uuidString), clientMessageID: .init(clientMessageID.uuidString), text: textBody, media: media, mentions: mentions, groupDeliveryMode: groupDeliveryMode, createdAt: createdAt)
     }
 }
 
@@ -411,7 +592,8 @@ private struct DirectRoomPairRow: Decodable {
 private struct DirectPolicyBooleanRow: Decodable { let value: Bool }
 private struct DirectMessageWindowRow: Decodable { let messageCount: Int; enum CodingKeys: String, CodingKey { case messageCount = "message_count" } }
 private struct MediaReferenceRow: Decodable { let mediaID: UUID; enum CodingKeys: String, CodingKey { case mediaID = "media_id" } }
-private struct MentionMembershipRow: Decodable { let userID: UUID; let role: String; let mentionable: Bool; enum CodingKeys: String, CodingKey { case userID = "user_id", role, mentionable } }
+private struct MentionSenderMembershipRow: Decodable { let role: String }
+private struct MentionMembershipRow: Decodable { let userID: UUID; let mentionable: Bool; enum CodingKeys: String, CodingKey { case userID = "user_id", mentionable } }
 private struct MentionRow: Decodable {
     let kind: String; let userID: UUID?
     enum CodingKeys: String, CodingKey { case kind = "mention_kind", userID = "mentioned_user_id" }

@@ -325,7 +325,7 @@ struct V2ConversationStoreTests {
         await store.sendDraft()
 
         #expect(store.draft == "稍后再发")
-        #expect(store.sendFeedback == "发送频率已达上限，请稍后再试。")
+        #expect(store.sendFeedback == "发送失败：发送频率已达上限，请稍后再试。")
         #expect(await sender.sentMessages() == [.init(text: "稍后再发", roomID: "room-a")])
     }
 
@@ -412,6 +412,43 @@ struct V2ConversationStoreTests {
         #expect(await stager.discardedAttachments().isEmpty)
     }
 
+    @Test func invalidMentionDoesNotUploadOrScanStagedAttachments() async throws {
+        let staged = V2StagedConversationAttachment(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000612")!,
+            fileURL: URL(fileURLWithPath: "/tmp/v2-invalid-mention-attachment"),
+            displayName: "document.pdf",
+            contentType: "application/pdf",
+            byteCount: 42
+        )
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let sender = V2ConversationSenderFake(result: .accepted)
+        let stager = V2ConversationAttachmentStagerFake(result: .success(staged))
+        let reference = V2MediaReference(mediaID: try .init("00000000-0000-0000-0000-000000000613"))
+        let uploader = V2ConversationAttachmentUploaderFake(result: .success(reference))
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: sender,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            attachmentStager: stager,
+            attachmentUploader: uploader
+        )
+        store.draft = "附件说明"
+        store.mentionHandlesText = "@member_a"
+
+        await store.stageAttachment(from: URL(fileURLWithPath: "/tmp/imported-document.pdf"))
+        await store.sendDraft()
+
+        #expect(await uploader.uploadedAttachments().isEmpty)
+        #expect(await sender.sentMessages().isEmpty)
+        #expect(store.attachments.count == 1)
+        #expect(store.draft == "附件说明")
+        #expect(store.mentionHandlesText == "@member_a")
+        #expect(store.sendFeedback == "身份目录暂不可用，无法解析提及对象。")
+        #expect(await stager.discardedAttachments().isEmpty)
+    }
+
     @Test func groupMessageResolvesPublicHandlesAndSendsBoundedMentionTargets() async throws {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .accepted)
@@ -432,6 +469,28 @@ struct V2ConversationStoreTests {
 
         #expect(await sender.sentMessages() == [
             .init(text: "请关注", roomID: "room-group", mentions: expectedMentions)
+        ])
+        #expect(store.mentionHandlesText.isEmpty)
+        #expect(store.sendFeedback == "已发送，正在同步。")
+    }
+
+    @Test func groupMessageSendsEveryoneMentionWhenTheIdentityDirectoryIsUnavailable() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let sender = V2ConversationSenderFake(result: .accepted)
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: sender,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true
+        )
+        store.draft = "全体注意"
+        store.mentionHandlesText = "@all"
+
+        await store.sendDraft()
+
+        #expect(await sender.sentMessages() == [
+            .init(text: "全体注意", roomID: "room-group", mentions: [.everyone])
         ])
         #expect(store.mentionHandlesText.isEmpty)
         #expect(store.sendFeedback == "已发送，正在同步。")
@@ -480,6 +539,8 @@ struct V2ConversationStoreTests {
         #expect(fileManager.contentsEqual(atPath: source.path, andPath: staged.fileURL.path))
         #expect(staged.displayName == "imported-note.txt")
         #expect(staged.byteCount == Int64("private attachment bytes".utf8.count))
+        #expect(try staged.fileURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+        #expect(try stagingDirectory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
 
         await stager.discard(staged)
 
@@ -1331,27 +1392,32 @@ struct V2ConversationStoreTests {
 
     @Test func userBlockResolvesAPublicHandleThenPersistsTheDurableCommand() async throws {
         let targetID = "00000000-0000-0000-0000-000000000e03"
+        let expectedTargetID = try UserID(targetID).rawValue
         let resolver = V2UserBlockPublicIdentityResolverFake(values: ["blocked_user": targetID])
         let changer = V2UserBlockChangerFake(result: .queuedForRetry)
         let store = V2UserBlockSettingsStore(
             resolver: resolver,
             changer: changer,
-            currentUserID: "00000000-0000-0000-0000-000000000e02"
+            currentUserID: try .init("00000000-0000-0000-0000-000000000e02")
         )
 
         await store.changeBlock(handle: "  @BLOCKED_USER  ", action: .block)
 
         #expect(await resolver.requestedHandles() == ["@BLOCKED_USER"])
-        #expect(await changer.requests() == [.init(targetUserID: targetID, action: .block)])
+        #expect(await changer.requests() == [.init(targetUserID: expectedTargetID, action: .block)])
         #expect(store.feedback == "屏蔽请求已安全保存，连接恢复后会同步。")
         #expect(!store.isChanging)
     }
 
-    @Test func userBlockRejectsSelfBeforeWritingACommand() async {
+    @Test func userBlockRejectsSelfBeforeWritingACommand() async throws {
         let currentUserID = "00000000-0000-0000-0000-000000000e02"
         let resolver = V2UserBlockPublicIdentityResolverFake(values: ["self_user": currentUserID])
         let changer = V2UserBlockChangerFake(result: .accepted)
-        let store = V2UserBlockSettingsStore(resolver: resolver, changer: changer, currentUserID: currentUserID)
+        let store = V2UserBlockSettingsStore(
+            resolver: resolver,
+            changer: changer,
+            currentUserID: try .init(currentUserID)
+        )
 
         await store.changeBlock(handle: "@self_user", action: .block)
 
@@ -1360,13 +1426,13 @@ struct V2ConversationStoreTests {
         #expect(!store.isChanging)
     }
 
-    @Test func userBlockDoesNotExposeTheServerRejectionCode() async {
+    @Test func userBlockDoesNotExposeTheServerRejectionCode() async throws {
         let resolver = V2UserBlockPublicIdentityResolverFake(values: ["blocked_user": "00000000-0000-0000-0000-000000000e03"])
         let changer = V2UserBlockChangerFake(result: .rejected(code: "TARGET_POLICY"))
         let store = V2UserBlockSettingsStore(
             resolver: resolver,
             changer: changer,
-            currentUserID: "00000000-0000-0000-0000-000000000e02"
+            currentUserID: try .init("00000000-0000-0000-0000-000000000e02")
         )
 
         await store.changeBlock(handle: "@blocked_user", action: .unblock)
@@ -1375,7 +1441,7 @@ struct V2ConversationStoreTests {
         #expect(!store.isChanging)
     }
 
-    @Test func userBlockIgnoresLateSuccessAfterCancellation() async {
+    @Test func userBlockIgnoresLateSuccessAfterCancellation() async throws {
         let resolver = V2UserBlockPublicIdentityResolverFake(
             values: ["blocked_user": "00000000-0000-0000-0000-000000000e03"]
         )
@@ -1383,7 +1449,7 @@ struct V2ConversationStoreTests {
         let store = V2UserBlockSettingsStore(
             resolver: resolver,
             changer: changer,
-            currentUserID: "00000000-0000-0000-0000-000000000e02"
+            currentUserID: try .init("00000000-0000-0000-0000-000000000e02")
         )
 
         let change = Task { await store.changeBlock(handle: "@blocked_user", action: .block) }
@@ -1394,6 +1460,128 @@ struct V2ConversationStoreTests {
 
         #expect(!store.isChanging)
         #expect(store.feedback == nil)
+    }
+
+    @Test func visibleHybridGroupPollStopsForANonHybridRoomWithoutNetworkLoop() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let synchronizer = V2ActiveHybridGroupSynchronizerFake(outcomes: [.notHybridRoom])
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-standard",
+            isGroupConversation: true,
+            activeHybridGroupSynchronizer: synchronizer
+        )
+
+        await store.pollVisibleHybridGroupEvents()
+
+        #expect(await synchronizer.requestedRoomIDs() == ["room-standard"])
+    }
+
+    @Test func visibleHybridGroupUsesATLSWakeBeforeTheNextCursorPullAndUnsubscribesOnExit() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let synchronizer = V2SubscribedHybridGroupSynchronizerFake()
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-hybrid",
+            isGroupConversation: true,
+            activeHybridGroupSynchronizer: synchronizer
+        )
+
+        let task = Task { await store.pollVisibleHybridGroupEvents() }
+        await synchronizer.waitForSynchronizationCount(1)
+        await synchronizer.waitForWakeCount(1)
+        await synchronizer.emitWake(.init(roomID: "room-hybrid", highWatermark: 8))
+        await synchronizer.waitForSynchronizationCount(2)
+        await synchronizer.waitForWakeCount(2)
+
+        task.cancel()
+        await synchronizer.emitWake(.init(roomID: "room-hybrid", highWatermark: 8))
+        await task.value
+
+        #expect(await synchronizer.subscribedRoomIDs() == ["room-hybrid"])
+        #expect(await synchronizer.unsubscribedRoomIDs() == ["room-hybrid"])
+    }
+}
+
+private actor V2ActiveHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchronizing {
+    private var outcomes: [V2ActiveHybridGroupSyncOutcome]
+    private var roomIDs: [String] = []
+
+    init(outcomes: [V2ActiveHybridGroupSyncOutcome]) {
+        self.outcomes = outcomes
+    }
+
+    func synchronizeOnePage(roomID: String) throws -> V2ActiveHybridGroupSyncOutcome {
+        roomIDs.append(roomID)
+        guard !outcomes.isEmpty else { return .notHybridRoom }
+        return outcomes.removeFirst()
+    }
+
+    func requestedRoomIDs() -> [String] { roomIDs }
+}
+
+private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchronizing {
+    private var synchronizationCount = 0
+    private var wakeCount = 0
+    private var synchronizationWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var wakeWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var wakeContinuation: CheckedContinuation<V2ActiveHybridGroupWake, Never>?
+    private var subscribed: [String] = []
+    private var unsubscribed: [String] = []
+
+    func synchronizeOnePage(roomID _: String) -> V2ActiveHybridGroupSyncOutcome {
+        synchronizationCount += 1
+        resumeSynchronizationWaiters()
+        return .synchronized(appliedEventCount: 0, hasMore: false)
+    }
+
+    func subscribe(roomID: String) -> V2ActiveHybridGroupSubscriptionOutcome {
+        subscribed.append(roomID)
+        return .subscribed(highWatermark: 0)
+    }
+
+    func nextWake() async throws -> V2ActiveHybridGroupWake {
+        try Task.checkCancellation()
+        wakeCount += 1
+        resumeWakeWaiters()
+        return await withCheckedContinuation { wakeContinuation = $0 }
+    }
+
+    func unsubscribe(roomID: String) { unsubscribed.append(roomID) }
+
+    func waitForSynchronizationCount(_ expected: Int) async {
+        guard synchronizationCount < expected else { return }
+        await withCheckedContinuation { synchronizationWaiters.append((expected, $0)) }
+    }
+
+    func waitForWakeCount(_ expected: Int) async {
+        guard wakeCount < expected else { return }
+        await withCheckedContinuation { wakeWaiters.append((expected, $0)) }
+    }
+
+    func emitWake(_ wake: V2ActiveHybridGroupWake) {
+        let continuation = wakeContinuation
+        wakeContinuation = nil
+        continuation?.resume(returning: wake)
+    }
+
+    func subscribedRoomIDs() -> [String] { subscribed }
+    func unsubscribedRoomIDs() -> [String] { unsubscribed }
+
+    private func resumeSynchronizationWaiters() {
+        let ready = synchronizationWaiters.filter { $0.0 <= synchronizationCount }
+        synchronizationWaiters.removeAll { $0.0 <= synchronizationCount }
+        for (_, continuation) in ready { continuation.resume() }
+    }
+
+    private func resumeWakeWaiters() {
+        let ready = wakeWaiters.filter { $0.0 <= wakeCount }
+        wakeWaiters.removeAll { $0.0 <= wakeCount }
+        for (_, continuation) in ready { continuation.resume() }
     }
 }
 
@@ -1518,7 +1706,11 @@ private actor V2SuspendingConversationSender: V2ConversationSending {
     private var completion: CheckedContinuation<Void, Never>?
 
     func send(text: String, media: [V2MediaReference], in roomID: String) async throws -> V2ConversationSendOutcome {
-        messages.append(.init(text: text, media: media, roomID: roomID))
+        try await send(text: text, media: media, mentions: [], in: roomID)
+    }
+
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], in roomID: String) async throws -> V2ConversationSendOutcome {
+        messages.append(.init(text: text, media: media, roomID: roomID, mentions: mentions))
         beganSending = true
         startWaiter?.resume()
         startWaiter = nil

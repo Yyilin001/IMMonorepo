@@ -64,4 +64,35 @@ struct V2DirectRoomIdentityCacheTests {
         try await store.commitStagedSnapshot(manifest)
         #expect(try await store.directRoomIdentities() == [.init(roomID: roomID, publicIdentity: synced, updatedAt: Date(timeIntervalSince1970: 1_750_000_001))])
     }
+
+    @Test("mixed-case UUID room IDs from direct profiles and messages share one local conversation")
+    func joinsMixedCaseDirectRoomProjection() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-direct-mixed-case-\(UUID().uuidString).sqlite")
+        let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000d21")!)
+        let lowerRoomID = "f90a83a4-dec2-4bf5-80aa-4068a71afc9f"
+        let upperRoomID = lowerRoomID.uppercased()
+        let userID = "00000000-0000-0000-0000-000000000d22"
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        let directProfile = Data("""
+            {"room_id":"\(lowerRoomID)","target_user_id":"\(userID)","public_handle":"direct_user","display_name":"对方","revision":1,"updated_at_ms":1750000000000}
+            """.utf8)
+        let acceptedMessage = Data("""
+            {"event_type":"message.accepted","message_id":"00000000-0000-0000-0000-000000000d23","room_id":"\(upperRoomID)","room_sequence":1,"message_revision":1,"sender_user_id":"\(userID)","text":"离线重放","media_ids":[],"mention_user_ids":[],"mentions_everyone":false,"server_created_at_ms":1750000000000}
+            """.utf8)
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [
+                .init(sequence: 1, sourceEventID: try .init("00000000-0000-0000-0000-000000000d24"), projectionKind: "direct_room_profile", payload: directProfile),
+                .init(sequence: 2, sourceEventID: try .init("00000000-0000-0000-0000-000000000d25"), projectionKind: "message", payload: acceptedMessage),
+            ],
+            nextSyncToken: try .init("direct-mixed-case-token"),
+            receipt: .init("direct-mixed-case-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+
+        let roomID = try RoomID(lowerRoomID)
+        #expect(try await store.directRoomIdentities().map(\.roomID) == [roomID])
+        #expect(try await store.messages(in: roomID).map(\.text) == ["离线重放"])
+    }
 }
