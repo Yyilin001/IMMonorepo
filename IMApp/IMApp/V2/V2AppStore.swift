@@ -160,6 +160,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private weak var remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)?
     @ObservationIgnored private var realtimeRuntime: V2ClientRuntime?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
+    @ObservationIgnored private var messageSearchIndexTask: Task<Void, Never>?
     @ObservationIgnored private var realtimeAttemptGate = V2RealtimeAttemptGate()
     @ObservationIgnored private var authenticationAttemptGate = V2AuthenticationAttemptGate()
     @ObservationIgnored private var signOutAttemptGate = V2SignOutAttemptGate()
@@ -199,6 +200,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             pushWakeSettingsStore = nil
             realtimeRuntime = nil
             realtimeTask = nil
+            messageSearchIndexTask = nil
             return
         }
         do {
@@ -261,6 +263,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             pushWakeSettingsStore = nil
             realtimeRuntime = nil
             realtimeTask = nil
+            messageSearchIndexTask = nil
         } catch {
             configuration = nil
             authSession = nil
@@ -540,6 +543,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     private func discardAuthenticatedPresentation(route nextRoute: Route) async {
+        messageSearchIndexTask?.cancel()
+        messageSearchIndexTask = nil
         await stopRealtime()
         realtimeRuntime = nil
         authenticationMessage = nil
@@ -589,8 +594,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             endpoint: configuration.endpoint("v2/public-identities/resolve"),
             credentials: authSession
         )
+        let conversationDataSource = V2GRDBConversationDataSource(localStore: localStore)
         let conversations = V2ConversationListStore(
-            dataSource: V2GRDBConversationDataSource(localStore: localStore),
+            dataSource: conversationDataSource,
+            messageSearcher: conversationDataSource,
             userID: userID.rawValue,
             sender: realtime.sender,
             messageWithdrawer: realtime.messageWithdrawer,
@@ -653,6 +660,17 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         publicIdentitySettingsStore = publicIdentitySettings
         pushWakeSettingsStore = pushWakeSettings
         route = .signedIn(userID: userID.rawValue)
+        messageSearchIndexTask?.cancel()
+        messageSearchIndexTask = Task { [localStore] in
+            do {
+                try await localStore.prepareMessageSearchIndex()
+            } catch is CancellationError {
+                return
+            } catch {
+                // The search UI reports the persistent index state. A failed
+                // derived index must never break the authenticated runtime.
+            }
+        }
         await conversations.refresh()
         await pushWakeSettings?.activate()
         guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }

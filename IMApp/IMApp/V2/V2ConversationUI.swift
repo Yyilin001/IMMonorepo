@@ -116,6 +116,12 @@ protocol V2ConversationDataSource: Sendable {
     func messages(in roomID: String, for userID: String) async throws -> [V2ConversationMessageItem]
 }
 
+/// Keeps the FTS/GRDB boundary out of the SwiftUI search state in the same way
+/// the conversation data source keeps message projections out of views.
+protocol V2ConversationMessageSearching: Sendable {
+    func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage
+}
+
 /// A foreground-only boundary for the currently open hybrid room. It is not a
 /// member notification channel: only the device that is displaying a room
 /// polls it, and every returned event still commits through the durable local
@@ -185,7 +191,7 @@ actor V2ProjectionChangeNotifier {
 
 /// Boundary from the UI feature to the V2 SQLite projection. All IDs are
 /// parsed at this boundary; invalid data can never become a navigation route.
-actor V2GRDBConversationDataSource: V2ConversationDataSource {
+actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMessageSearching {
     private let localStore: GRDBV2LocalSyncStore
 
     init(localStore: GRDBV2LocalSyncStore) {
@@ -280,6 +286,10 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource {
         }
     }
 
+    func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage {
+        try await localStore.searchMessages(request)
+    }
+
     private static func roomTitle(_ roomID: String) -> String {
         // A room ID is an opaque routing key, never product-facing identity.
         // Known group and direct titles are resolved above; this conservative
@@ -318,6 +328,7 @@ final class V2ConversationListStore {
     }
 
     private let dataSource: any V2ConversationDataSource
+    private let messageSearcher: (any V2ConversationMessageSearching)?
     private let userID: String
     private let sender: (any V2ConversationSending)?
     private let messageWithdrawer: (any V2MessageWithdrawing)?
@@ -349,6 +360,7 @@ final class V2ConversationListStore {
 
     init(
         dataSource: any V2ConversationDataSource,
+        messageSearcher: (any V2ConversationMessageSearching)? = nil,
         userID: String,
         sender: (any V2ConversationSending)? = nil,
         messageWithdrawer: (any V2MessageWithdrawing)? = nil,
@@ -369,6 +381,7 @@ final class V2ConversationListStore {
         activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil
     ) {
         self.dataSource = dataSource
+        self.messageSearcher = messageSearcher
         self.userID = userID
         self.sender = sender
         self.messageWithdrawer = messageWithdrawer
@@ -536,7 +549,12 @@ final class V2ConversationListStore {
         let item = items.first(where: { $0.id == roomID })
         let title = explicitRoomTitles[roomID] ?? item?.title ?? "会话"
         let kind = explicitRoomKinds[roomID] ?? item?.kind ?? .unknown
-        return .init(dataSource: dataSource, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader, projectionChangeNotifier: projectionChangeNotifier, activeHybridGroupSynchronizer: activeHybridGroupSynchronizer, initialDraft: initialDraft, initialMentionHandles: initialMentionHandles)
+        return .init(dataSource: dataSource, messageSearcher: messageSearcher, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader, projectionChangeNotifier: projectionChangeNotifier, activeHybridGroupSynchronizer: activeHybridGroupSynchronizer, initialDraft: initialDraft, initialMentionHandles: initialMentionHandles)
+    }
+
+    func messageSearchStore() -> V2ConversationSearchStore? {
+        guard let messageSearcher else { return nil }
+        return .init(searcher: messageSearcher)
     }
 
     func observeProjectionChanges() async {
@@ -590,6 +608,88 @@ final class V2ConversationListStore {
 
 @MainActor
 @Observable
+final class V2ConversationSearchStore {
+    enum State: Equatable {
+        case idle
+        case indexing
+        case loading
+        case loaded
+        case failed
+    }
+
+    private let searcher: any V2ConversationMessageSearching
+    private let scope: V2MessageSearchScope
+    private var generation = 0
+    private var cursor: V2MessageSearchCursor?
+
+    var query = ""
+    private(set) var hits: [V2MessageSearchHit] = []
+    private(set) var state: State = .idle
+    private(set) var canLoadMore = false
+
+    init(searcher: any V2ConversationMessageSearching, scope: V2MessageSearchScope = .allMessages) {
+        self.searcher = searcher
+        self.scope = scope
+    }
+
+    func search() async {
+        generation &+= 1
+        let requestGeneration = generation
+        cursor = nil
+        hits = []
+        guard !query.isEmpty else {
+            state = .idle
+            canLoadMore = false
+            return
+        }
+        state = .loading
+        do {
+            try await Task.sleep(for: .milliseconds(200))
+            try Task.checkCancellation()
+            let page = try await searcher.searchMessages(.init(query: query, scope: scope))
+            try Task.checkCancellation()
+            guard requestGeneration == generation else { return }
+            hits = page.hits
+            cursor = page.nextCursor
+            canLoadMore = page.nextCursor != nil
+            state = .loaded
+        } catch is CancellationError {
+            return
+        } catch V2MessageSearchError.indexUnavailable(.building) {
+            guard requestGeneration == generation else { return }
+            state = .indexing
+        } catch {
+            guard requestGeneration == generation else { return }
+            state = .failed
+        }
+    }
+
+    func loadMore() async {
+        guard let cursor, state == .loaded else { return }
+        let requestGeneration = generation
+        do {
+            let page = try await searcher.searchMessages(
+                .init(query: query, scope: scope, cursor: cursor)
+            )
+            try Task.checkCancellation()
+            guard requestGeneration == generation else { return }
+            hits += page.hits
+            self.cursor = page.nextCursor
+            canLoadMore = page.nextCursor != nil
+        } catch is CancellationError {
+            return
+        } catch V2MessageSearchError.indexUnavailable(.building) {
+            guard requestGeneration == generation else { return }
+            state = .indexing
+        } catch {
+            guard requestGeneration == generation else { return }
+            state = .failed
+        }
+    }
+}
+
+@MainActor
+@Observable
 final class V2ConversationDetailStore {
     enum State: Equatable {
         case loading
@@ -598,6 +698,7 @@ final class V2ConversationDetailStore {
     }
 
     private let dataSource: any V2ConversationDataSource
+    private let messageSearcher: (any V2ConversationMessageSearching)?
     private let sender: (any V2ConversationSending)?
     private let messageWithdrawer: (any V2MessageWithdrawing)?
     private let messageReactionChanger: (any V2MessageReactionChanging)?
@@ -640,8 +741,9 @@ final class V2ConversationDetailStore {
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
-    init(dataSource: any V2ConversationDataSource, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil, projectionChangeNotifier: V2ProjectionChangeNotifier? = nil, activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil, initialDraft: String? = nil, initialMentionHandles: String? = nil) {
+    init(dataSource: any V2ConversationDataSource, messageSearcher: (any V2ConversationMessageSearching)? = nil, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil, projectionChangeNotifier: V2ProjectionChangeNotifier? = nil, activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil, initialDraft: String? = nil, initialMentionHandles: String? = nil) {
         self.dataSource = dataSource
+        self.messageSearcher = messageSearcher
         self.sender = sender
         self.messageWithdrawer = messageWithdrawer
         self.messageReactionChanger = messageReactionChanger
@@ -663,6 +765,11 @@ final class V2ConversationDetailStore {
         self.activeHybridGroupSynchronizer = activeHybridGroupSynchronizer
         draft = initialDraft ?? ""
         mentionHandlesText = initialMentionHandles ?? ""
+    }
+
+    func messageSearchStore() -> V2ConversationSearchStore? {
+        guard let messageSearcher, let roomID = try? RoomID(roomID) else { return nil }
+        return .init(searcher: messageSearcher, scope: .room(roomID))
     }
 
     func refresh() async {
@@ -1364,6 +1471,11 @@ struct V2ConversationListView: View {
         var id: String { rawValue }
     }
 
+    private struct SearchNavigationDestination: Hashable {
+        let roomID: String
+        let messageID: String
+    }
+
     @Bindable var store: V2ConversationListStore
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     private let accountMenu: V2ConversationAccountMenu?
@@ -1376,6 +1488,8 @@ struct V2ConversationListView: View {
     @State private var directSubmissionTask: Task<Void, Never>?
     @State private var groupSubmissionTask: Task<Void, Never>?
     @State private var groupCancellationTask: Task<Void, Never>?
+    @State private var messageSearchStore: V2ConversationSearchStore?
+    @State private var isPresentingMessageSearch = false
 
     init(
         store: V2ConversationListStore,
@@ -1438,6 +1552,12 @@ struct V2ConversationListView: View {
             .navigationTitle("消息")
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("搜索消息", systemImage: "magnifyingglass") {
+                        guard let searchStore = store.messageSearchStore() else { return }
+                        messageSearchStore = searchStore
+                        isPresentingMessageSearch = true
+                    }
+                    .accessibilityIdentifier("v2.message.search")
                     Button("新建群聊", systemImage: "person.3") {
                         newConversationSheet = .group
                     }
@@ -1470,7 +1590,25 @@ struct V2ConversationListView: View {
                     )
                 )
             }
+            .navigationDestination(for: SearchNavigationDestination.self) { destination in
+                V2ConversationDetailView(
+                    store: store.detailStore(for: destination.roomID),
+                    initiallyFocusedMessageID: destination.messageID
+                )
+            }
             .task { await store.observeProjectionChanges() }
+            .sheet(isPresented: $isPresentingMessageSearch, onDismiss: {
+                messageSearchStore = nil
+            }) {
+                if let messageSearchStore {
+                    NavigationStack {
+                        V2MessageSearchView(store: messageSearchStore) { hit in
+                            isPresentingMessageSearch = false
+                            navigationPath.append(SearchNavigationDestination(roomID: hit.roomID.rawValue, messageID: hit.messageID.rawValue))
+                        }
+                    }
+                }
+            }
             .sheet(item: $newConversationSheet) { sheet in
                 switch sheet {
                 case .direct:
@@ -1636,6 +1774,88 @@ struct V2ConversationAccountMenu: View {
     }
 }
 
+private struct V2MessageSearchView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var store: V2ConversationSearchStore
+    let onSelect: (V2MessageSearchHit) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextField("搜索消息", text: $store.query)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+                .padding()
+                .accessibilityLabel("搜索消息")
+                .accessibilityHint("支持单个字符和连续文本搜索")
+                .accessibilityIdentifier("v2.message.search.query")
+            switch store.state {
+            case .idle:
+                ContentUnavailableView(
+                    "搜索本地消息",
+                    systemImage: "magnifyingglass",
+                    description: Text("输入任意字符或连续文本。")
+                )
+            case .indexing:
+                ContentUnavailableView(
+                    "正在建立搜索索引",
+                    systemImage: "magnifyingglass.circle",
+                    description: Text("完成后即可搜索历史消息。")
+                )
+            case .loading:
+                Spacer()
+                ProgressView("正在搜索…")
+                Spacer()
+            case .failed:
+                ContentUnavailableView(
+                    "无法搜索本地消息",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text("请稍后重试。")
+                )
+            case .loaded:
+                if store.hits.isEmpty {
+                    ContentUnavailableView("没有匹配消息", systemImage: "text.magnifyingglass")
+                } else {
+                    List {
+                        ForEach(store.hits) { hit in
+                            Button {
+                                onSelect(hit)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(hit.text)
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(2)
+                                    Text(hit.createdAt, format: .dateTime.year().month().day().hour().minute())
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .accessibilityLabel(hit.text)
+                            .accessibilityHint("打开这条消息所在的会话")
+                            .accessibilityIdentifier("v2.message.search.result.\(hit.messageID.rawValue)")
+                        }
+                        if store.canLoadMore {
+                            Button("继续加载") { Task { await store.loadMore() } }
+                                .accessibilityIdentifier("v2.message.search.load-more")
+                        }
+                    }
+                    .accessibilityIdentifier("v2.message.search.results")
+                }
+            }
+        }
+        .navigationTitle("搜索消息")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("关闭") { dismiss() }
+            }
+        }
+        .task(id: store.query) {
+            await store.search()
+        }
+    }
+}
+
 private struct V2ConversationDetailView: View {
     private enum PresentedDetailSheet: Identifiable {
         case groupMembers
@@ -1654,9 +1874,13 @@ private struct V2ConversationDetailView: View {
     @State private var store: V2ConversationDetailStore
     @State private var presentedDetailSheet: PresentedDetailSheet?
     @State private var isPresentingAttachmentImporter = false
+    @State private var messageSearchStore: V2ConversationSearchStore?
+    @State private var isPresentingMessageSearch = false
+    @State private var focusedMessageID: String?
 
-    init(store: V2ConversationDetailStore) {
+    init(store: V2ConversationDetailStore, initiallyFocusedMessageID: String? = nil) {
         _store = State(initialValue: store)
+        _focusedMessageID = State(initialValue: initiallyFocusedMessageID)
     }
 
     var body: some View {
@@ -1675,15 +1899,25 @@ private struct V2ConversationDetailView: View {
                     if store.messages.isEmpty {
                         ContentUnavailableView("暂无消息", systemImage: "bubble")
                     } else {
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 10) {
-                                ForEach(store.messages) { message in
-                                    V2ConversationMessageRow(store: store, message: message) {
-                                        presentedDetailSheet = .edit(message)
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 10) {
+                                    ForEach(store.messages) { message in
+                                        V2ConversationMessageRow(store: store, message: message) {
+                                            presentedDetailSheet = .edit(message)
+                                        }
+                                        .id(message.id)
                                     }
                                 }
+                                .padding()
                             }
-                            .padding()
+                            .onAppear { scrollToFocusedMessage(with: proxy) }
+                            .onChange(of: focusedMessageID) { _, _ in
+                                scrollToFocusedMessage(with: proxy)
+                            }
+                            .onChange(of: store.messages.map(\.id)) { _, _ in
+                                scrollToFocusedMessage(with: proxy)
+                            }
                         }
                         .accessibilityIdentifier("v2.message.list")
                     }
@@ -1769,6 +2003,14 @@ private struct V2ConversationDetailView: View {
         .navigationTitle(store.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if store.messageSearchStore() != nil {
+                Button("搜索本会话", systemImage: "magnifyingglass") {
+                    messageSearchStore = store.messageSearchStore()
+                    isPresentingMessageSearch = messageSearchStore != nil
+                }
+                .accessibilityHint("只搜索当前会话中的消息")
+                .accessibilityIdentifier("v2.message.search.current-room")
+            }
             if store.isGroupConversation {
                 Button("成员", systemImage: "person.3") {
                     presentedDetailSheet = .groupMembers
@@ -1783,6 +2025,18 @@ private struct V2ConversationDetailView: View {
                 V2GroupMembersSheet(store: store)
             case .edit(let message):
                 V2MessageEditSheet(store: store, message: message)
+            }
+        }
+        .sheet(isPresented: $isPresentingMessageSearch, onDismiss: {
+            messageSearchStore = nil
+        }) {
+            if let messageSearchStore {
+                NavigationStack {
+                    V2MessageSearchView(store: messageSearchStore) { hit in
+                        focusedMessageID = hit.messageID.rawValue
+                        isPresentingMessageSearch = false
+                    }
+                }
             }
         }
         .fileImporter(
@@ -1800,6 +2054,11 @@ private struct V2ConversationDetailView: View {
     private var canSendDraft: Bool {
         !store.isSending
             && (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.attachments.isEmpty)
+    }
+
+    private func scrollToFocusedMessage(with proxy: ScrollViewProxy) {
+        guard let focusedMessageID else { return }
+        withAnimation { proxy.scrollTo(focusedMessageID, anchor: .center) }
     }
 }
 

@@ -386,6 +386,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                   Set(snapshotUserBlocks.map(\.targetUserID)).count == snapshotUserBlocks.count,
                   snapshotPreferences.count <= 1
             else { throw V2ClientSocialProjectionError.invalidPayload }
+            try Self.resetMessageSearchIndex(db: db)
             try db.execute(sql: "DELETE FROM v2_sync_events")
             try db.execute(sql: "DELETE FROM v2_message_projections")
             try db.execute(sql: "DELETE FROM v2_message_tombstones")
@@ -411,6 +412,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             if let preference = snapshotPreferences.first { try Self.persist(preference, db: db) }
             for action in snapshotModerationActions { try Self.persist(.init(snapshotProjection: action), db: db) }
             for control in snapshotRoomControls { try Self.persist(.init(snapshotProjection: control), db: db) }
+            try Self.finishMessageSearchIndexRebuild(
+                generation: try Self.messageSearchIndexGeneration(db: db),
+                db: db
+            )
             try db.execute(sql: "DELETE FROM v2_snapshot_pages")
             try db.execute(
                 sql: """
@@ -465,6 +470,101 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     public func messages(in roomID: RoomID) throws -> [V2ClientMessageProjection] {
         try databasePool.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM v2_message_projections WHERE room_id = ? ORDER BY room_sequence, message_id", arguments: [roomID.rawValue]).map(Self.decodeMessageProjection)
+        }
+    }
+
+    /// Rebuilds the derived character index in bounded transactions. The
+    /// durable message projection remains readable while this runs; callers
+    /// should expose `.building` instead of treating a partial index as an
+    /// empty search result.
+    public func rebuildMessageSearchIndex() async throws {
+        while !Task.isCancelled {
+            let generation = try await databasePool.write { db in
+                try Self.beginMessageSearchIndexRebuild(db: db)
+            }
+            var lastRowID: Int64 = 0
+
+            while !Task.isCancelled {
+                let pageStart = lastRowID
+                let outcome = try await databasePool.write { db -> V2MessageSearchRebuildOutcome in
+                    guard try Self.messageSearchIndexGeneration(db: db) == generation else {
+                        return .restartRequired
+                    }
+                    let rows = try Row.fetchAll(
+                        db,
+                        sql: """
+                        SELECT rowid, message_id, room_id, room_sequence, sender_user_id,
+                               text_body, server_created_at, is_withdrawn
+                        FROM v2_message_projections
+                        WHERE rowid > ?
+                        ORDER BY rowid
+                        LIMIT 250
+                        """,
+                        arguments: [pageStart]
+                    )
+                    guard let last = rows.last else {
+                        try Self.finishMessageSearchIndexRebuild(generation: generation, db: db)
+                        return .finished
+                    }
+                    for row in rows {
+                        try Self.writeMessageSearchIndex(row: row, db: db)
+                    }
+                    let nextRowID: Int64 = last["rowid"]
+                    return .advanced(nextRowID)
+                }
+                switch outcome {
+                case .advanced(let nextRowID):
+                    lastRowID = nextRowID
+                    await Task.yield()
+                case .finished:
+                    return
+                case .restartRequired:
+                    // A snapshot commit fully rebuilt the derived index inside
+                    // its own transaction. Do not discard that fresh index and
+                    // start a redundant second pass.
+                    if try messageSearchIndexState() == .ready {
+                        return
+                    }
+                    break
+                }
+                if case .restartRequired = outcome { break }
+            }
+            try Task.checkCancellation()
+        }
+        throw CancellationError()
+    }
+
+    /// Ensures the derived index is available without needlessly rebuilding a
+    /// valid index on every authenticated session activation.
+    public func prepareMessageSearchIndex() async throws {
+        guard try messageSearchIndexState() != .ready else { return }
+        do {
+            try await rebuildMessageSearchIndex()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try? await databasePool.write { db in
+                try db.execute(sql: "UPDATE v2_message_search_state SET state = 'failed' WHERE singleton = 1")
+            }
+            throw error
+        }
+    }
+
+    public func messageSearchIndexState() throws -> V2MessageSearchIndexState {
+        try databasePool.read { db in try Self.readMessageSearchIndexState(db: db) }
+    }
+
+    /// FTS is a candidate index; the normalized Swift substring check is the
+    /// final semantic authority for every returned hit.
+    public func searchMessages(_ request: V2MessageSearchRequest) throws -> V2MessageSearchPage {
+        guard (1 ... 100).contains(request.limit) else { throw V2MessageSearchError.invalidPageSize }
+        let tokenizer = V2CharacterGramTokenizer()
+        let query = tokenizer.tokenize(request.query)
+        guard !query.unigrams.isEmpty else { throw V2MessageSearchError.emptyQuery }
+        return try databasePool.read { db in
+            let state = try Self.readMessageSearchIndexState(db: db)
+            guard state == .ready else { throw V2MessageSearchError.indexUnavailable(state) }
+            return try Self.searchMessages(request, query: query, db: db)
         }
     }
 
@@ -1955,6 +2055,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             guard roomID == projection.roomID.rawValue, revision > (try storageInteger(projection.messageRevision)) else { throw V2ClientProjectionError.invalidMessagePayload }
             try db.execute(sql: "UPDATE v2_message_projections SET message_revision = ?, is_withdrawn = 1 WHERE message_id = ?", arguments: [revision, projection.messageID.rawValue])
         }
+        try refreshMessageSearchIndex(messageID: projection.messageID, db: db)
     }
 
     private static func persist(_ projection: V2ClientModerationProjection, db: Database) throws {
@@ -2038,6 +2139,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             let revision: Int64 = projection["message_revision"]
             guard roomID == tombstone.roomID.rawValue, revision < tombstoneRevision else { throw V2ClientProjectionError.invalidMessagePayload }
             try db.execute(sql: "UPDATE v2_message_projections SET message_revision = ?, is_withdrawn = 1 WHERE message_id = ?", arguments: [try storageInteger(tombstone.messageRevision), tombstone.messageID.rawValue])
+            try refreshMessageSearchIndex(messageID: tombstone.messageID, db: db)
         }
     }
 
@@ -2053,6 +2155,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
               edit.messageRevision == UInt64(revision + 1)
         else { throw V2ClientProjectionError.invalidMessagePayload }
         try db.execute(sql: "UPDATE v2_message_projections SET text_body = ?, message_revision = ? WHERE message_id = ?", arguments: [edit.text, try storageInteger(edit.messageRevision), edit.messageID.rawValue])
+        try refreshMessageSearchIndex(messageID: edit.messageID, db: db)
     }
 
     private static func persist(_ reaction: V2ClientMessageReaction, action: V2MessageReactionAction, db: Database) throws {
@@ -2297,6 +2400,165 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
               let deliveryMode = V2GroupDeliveryMode(rawValue: row["delivery_mode"] as String)
         else { throw V2ClientCommandError.commandConflict }
         return try .init(operationID: .init(row["operation_id"] as String), title: row["title"], deliveryMode: deliveryMode, initialMemberUserIDs: members, uploadedMemberCount: row["uploaded_member_count"] as Int, state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), createdRoomID: try (row["created_room_id"] as String?).map(RoomID.init), terminalCode: row["terminal_code"])
+    }
+
+    private enum V2MessageSearchRebuildOutcome {
+        case advanced(Int64)
+        case finished
+        case restartRequired
+    }
+
+    private static func readMessageSearchIndexState(db: Database) throws -> V2MessageSearchIndexState {
+        guard let row = try Row.fetchOne(db, sql: "SELECT index_version, state FROM v2_message_search_state WHERE singleton = 1"),
+              let version: Int = row["index_version"],
+              let raw: String = row["state"],
+              let state = V2MessageSearchIndexState(storageValue: raw)
+        else { throw V2ClientProjectionError.invalidMessagePayload }
+        return version == V2CharacterGramTokenizer.version ? state : .building
+    }
+
+    private static func messageSearchIndexGeneration(db: Database) throws -> Int64 {
+        guard let generation: Int64 = try Row.fetchOne(db, sql: "SELECT generation FROM v2_message_search_state WHERE singleton = 1")?["generation"]
+        else { throw V2ClientProjectionError.invalidMessagePayload }
+        return generation
+    }
+
+    @discardableResult
+    private static func beginMessageSearchIndexRebuild(db: Database) throws -> Int64 {
+        let generation = try messageSearchIndexGeneration(db: db)
+        guard generation < Int64.max else { throw V2ClientProjectionError.invalidMessagePayload }
+        let nextGeneration = generation + 1
+        try db.execute(sql: "DELETE FROM v2_message_char_fts")
+        try db.execute(
+            sql: "UPDATE v2_message_search_state SET index_version = ?, state = 'building', generation = ? WHERE singleton = 1",
+            arguments: [V2CharacterGramTokenizer.version, nextGeneration]
+        )
+        return nextGeneration
+    }
+
+    private static func resetMessageSearchIndex(db: Database) throws {
+        _ = try beginMessageSearchIndexRebuild(db: db)
+    }
+
+    private static func finishMessageSearchIndexRebuild(generation: Int64, db: Database) throws {
+        guard try messageSearchIndexGeneration(db: db) == generation else { return }
+        try db.execute(sql: "UPDATE v2_message_search_state SET state = 'ready' WHERE singleton = 1")
+    }
+
+    private static func refreshMessageSearchIndex(messageID: MessageID, db: Database) throws {
+        guard let row = try Row.fetchOne(
+            db,
+            sql: "SELECT rowid, message_id, room_id, room_sequence, sender_user_id, text_body, server_created_at, is_withdrawn FROM v2_message_projections WHERE message_id = ?",
+            arguments: [messageID.rawValue]
+        ) else { return }
+        try writeMessageSearchIndex(row: row, db: db)
+    }
+
+    private static func writeMessageSearchIndex(row: Row, db: Database) throws {
+        let rowID: Int64 = row["rowid"]
+        try db.execute(sql: "DELETE FROM v2_message_char_fts WHERE rowid = ?", arguments: [rowID])
+        let isWithdrawn: Bool = row["is_withdrawn"]
+        let text: String = row["text_body"]
+        guard !isWithdrawn, !text.isEmpty else { return }
+        let tokens = V2CharacterGramTokenizer().tokenize(text)
+        guard !tokens.unigrams.isEmpty else { return }
+        let roomID: String = row["room_id"]
+        let senderUserID: String = row["sender_user_id"]
+        try db.execute(
+            sql: "INSERT INTO v2_message_char_fts (rowid, room_scope, sender_scope, unigrams, bigrams) VALUES (?, ?, ?, ?, ?)",
+            arguments: [
+                rowID,
+                V2CharacterGramTokenizer.scopeToken(prefix: "r", identifier: roomID),
+                V2CharacterGramTokenizer.scopeToken(prefix: "s", identifier: senderUserID),
+                tokens.unigrams.joined(separator: " "),
+                tokens.bigrams.joined(separator: " ")
+            ]
+        )
+    }
+
+    private static func searchMessages(_ request: V2MessageSearchRequest, query: V2CharacterGramTokenizer.Tokens, db: Database) throws -> V2MessageSearchPage {
+        let match = messageSearchMatch(scope: request.scope, query: query)
+        var cursor = try validatedSearchCursor(request.cursor, for: request.scope)
+        var scanCursor = cursor
+        var hits: [V2MessageSearchHit] = []
+        let batchSize = max(128, request.limit * 2)
+        while true {
+            let rows = try searchCandidateRows(match: match, scope: request.scope, cursor: scanCursor, limit: batchSize, db: db)
+            guard !rows.isEmpty else { return .init(hits: hits, nextCursor: nil) }
+            for row in rows {
+                let candidate = try searchCandidate(row)
+                let candidateCursor = searchCursor(for: candidate, scope: request.scope)
+                scanCursor = candidateCursor
+                guard V2CharacterGramTokenizer.normalize(candidate.text).range(of: query.normalized) != nil else { continue }
+                if hits.count == request.limit {
+                    // The query has at least one further verified result, so
+                    // the cursor after the final included hit is meaningful.
+                    return .init(hits: hits, nextCursor: cursor)
+                }
+                hits.append(candidate)
+                cursor = candidateCursor
+            }
+            if rows.count < batchSize { return .init(hits: hits, nextCursor: nil) }
+        }
+    }
+
+    private static func messageSearchMatch(scope: V2MessageSearchScope, query: V2CharacterGramTokenizer.Tokens) -> String {
+        var clauses: [String] = []
+        switch scope {
+        case .room(let roomID):
+            clauses.append("room_scope : " + V2CharacterGramTokenizer.scopeToken(prefix: "r", identifier: roomID.rawValue))
+        case .allMessages:
+            break
+        case .sender(let userID):
+            clauses.append("sender_scope : " + V2CharacterGramTokenizer.scopeToken(prefix: "s", identifier: userID.rawValue))
+        }
+        if query.characterCount == 1 {
+            clauses.append("unigrams : " + query.unigrams[0])
+        } else {
+            clauses.append("bigrams : \"" + query.bigrams.joined(separator: " ") + "\"")
+        }
+        return clauses.joined(separator: " AND ")
+    }
+
+    private static func validatedSearchCursor(_ cursor: V2MessageSearchCursor?, for scope: V2MessageSearchScope) throws -> V2MessageSearchCursor? {
+        guard let cursor else { return nil }
+        switch (scope, cursor.storage) {
+        case (.room(let scopeRoomID), .room(let cursorRoomID, _, _)) where scopeRoomID == cursorRoomID:
+            return cursor
+        case (.room, _), (.allMessages, .room), (.sender, .room):
+            throw V2MessageSearchError.cursorDoesNotMatchScope
+        case (.allMessages, .global), (.sender, .global):
+            return cursor
+        }
+    }
+
+    private static func searchCandidateRows(match: String, scope: V2MessageSearchScope, cursor: V2MessageSearchCursor?, limit: Int, db: Database) throws -> [Row] {
+        let base = "SELECT p.message_id, p.room_id, p.room_sequence, p.sender_user_id, p.text_body, p.server_created_at FROM v2_message_char_fts JOIN v2_message_projections p ON p.rowid = v2_message_char_fts.rowid WHERE v2_message_char_fts MATCH ? AND p.is_withdrawn = 0 AND length(p.text_body) > 0"
+        switch (scope, cursor?.storage) {
+        case (.room, nil):
+            return try Row.fetchAll(db, sql: base + " ORDER BY p.room_sequence DESC, p.message_id DESC LIMIT ?", arguments: [match, limit])
+        case (.room, .room(_, let sequence, let messageID)):
+            return try Row.fetchAll(db, sql: base + " AND (p.room_sequence < ? OR (p.room_sequence = ? AND p.message_id < ?)) ORDER BY p.room_sequence DESC, p.message_id DESC LIMIT ?", arguments: [match, try storageInteger(sequence), try storageInteger(sequence), messageID.rawValue, limit])
+        case (.allMessages, nil), (.sender, nil):
+            return try Row.fetchAll(db, sql: base + " ORDER BY p.server_created_at DESC, p.message_id DESC LIMIT ?", arguments: [match, limit])
+        case (.allMessages, .global(let createdAt, let messageID)), (.sender, .global(let createdAt, let messageID)):
+            return try Row.fetchAll(db, sql: base + " AND (p.server_created_at < ? OR (p.server_created_at = ? AND p.message_id < ?)) ORDER BY p.server_created_at DESC, p.message_id DESC LIMIT ?", arguments: [match, createdAt.timeIntervalSince1970, createdAt.timeIntervalSince1970, messageID.rawValue, limit])
+        default:
+            throw V2MessageSearchError.cursorDoesNotMatchScope
+        }
+    }
+
+    private static func searchCandidate(_ row: Row) throws -> V2MessageSearchHit {
+        try .init(messageID: .init(row["message_id"] as String), roomID: .init(row["room_id"] as String), roomSequence: UInt64(row["room_sequence"] as Int64), senderUserID: .init(row["sender_user_id"] as String), text: row["text_body"], createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double))
+    }
+
+    private static func searchCursor(for hit: V2MessageSearchHit, scope: V2MessageSearchScope) -> V2MessageSearchCursor {
+        switch scope {
+        case .room:
+            .init(storage: .room(roomID: hit.roomID, roomSequence: hit.roomSequence, messageID: hit.messageID))
+        case .allMessages, .sender:
+            .init(storage: .global(createdAt: hit.createdAt, messageID: hit.messageID))
+        }
     }
 
     private static let migrator: DatabaseMigrator = {
@@ -2922,6 +3184,28 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 CREATE INDEX v2_pending_group_room_creations_terminal_retention_idx
                     ON v2_pending_group_room_creations (created_at)
                     WHERE state <> 'pending';
+                """)
+        }
+        migrator.registerMigration("addV2MessageCharacterSearch") { db in
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE v2_message_char_fts USING fts5(
+                    room_scope,
+                    sender_scope,
+                    unigrams,
+                    bigrams,
+                    tokenize = 'ascii',
+                    detail = full,
+                    columnsize = 0
+                );
+                CREATE TABLE v2_message_search_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    index_version INTEGER NOT NULL CHECK (index_version > 0),
+                    state TEXT NOT NULL CHECK (state IN ('building', 'ready', 'failed')),
+                    generation INTEGER NOT NULL CHECK (generation > 0)
+                );
+                INSERT INTO v2_message_search_state
+                    (singleton, index_version, state, generation)
+                VALUES (1, 1, 'building', 1);
                 """)
         }
         return migrator

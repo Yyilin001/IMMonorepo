@@ -1526,6 +1526,59 @@ struct V2ConversationStoreTests {
         #expect(await synchronizer.subscribedRoomIDs() == ["room-hybrid"])
         #expect(await synchronizer.unsubscribedRoomIDs() == ["room-hybrid"])
     }
+
+    @Test func messageSearchStorePublishesHitsAndPreservesTheNextPageCursor() async throws {
+        let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000f01")
+        let messageID: MessageID = try .init("00000000-0000-0000-0000-000000000f02")
+        let senderID: UserID = try .init("00000000-0000-0000-0000-000000000f03")
+        let hit = V2MessageSearchHit(
+            messageID: messageID,
+            roomID: roomID,
+            roomSequence: 9,
+            senderUserID: senderID,
+            text: "你好，搜索结果",
+            createdAt: Date(timeIntervalSince1970: 1_750_000_000)
+        )
+        let searcher = V2MessageSearchFake(result: .success(.init(hits: [hit], nextCursor: nil)))
+        let store = V2ConversationSearchStore(searcher: searcher)
+        store.query = "你好"
+
+        await store.search()
+
+        #expect(store.state == .loaded)
+        #expect(store.hits == [hit])
+        #expect(!store.canLoadMore)
+        #expect(await searcher.requests().map(\.query) == ["你好"])
+    }
+
+    @Test func messageSearchStoreShowsIndexingUntilTheBackgroundBuildCompletes() async {
+        let searcher = V2MessageSearchFake(result: .failure(.indexUnavailable(.building)))
+        let store = V2ConversationSearchStore(searcher: searcher)
+        store.query = "你好"
+
+        await store.search()
+
+        #expect(store.state == .indexing)
+        #expect(store.hits.isEmpty)
+    }
+
+    @Test func currentConversationMessageSearchUsesTheRoomScope() async throws {
+        let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000f11")
+        let searcher = V2MessageSearchFake(result: .success(.init(hits: [], nextCursor: nil)))
+        let detail = V2ConversationDetailStore(
+            dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            messageSearcher: searcher,
+            sender: nil,
+            userID: "current-user",
+            roomID: roomID.rawValue
+        )
+        let store = try #require(detail.messageSearchStore())
+        store.query = "你好"
+
+        await store.search()
+
+        #expect(await searcher.requests().map(\.scope) == [.room(roomID)])
+    }
 }
 
 private actor V2ActiveHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchronizing {
@@ -1626,6 +1679,22 @@ private actor V2ConversationDataSourceFake: V2ConversationDataSource {
     }
 
     func messageRequestCount() -> Int { requestedMessageCount }
+}
+
+private actor V2MessageSearchFake: V2ConversationMessageSearching {
+    private let result: Result<V2MessageSearchPage, V2MessageSearchError>
+    private var receivedRequests: [V2MessageSearchRequest] = []
+
+    init(result: Result<V2MessageSearchPage, V2MessageSearchError>) {
+        self.result = result
+    }
+
+    func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage {
+        receivedRequests.append(request)
+        return try result.get()
+    }
+
+    func requests() -> [V2MessageSearchRequest] { receivedRequests }
 }
 
 private actor V2SequencedConversationDataSource: V2ConversationDataSource {
