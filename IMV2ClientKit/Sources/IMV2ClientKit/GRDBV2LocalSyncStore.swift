@@ -4,7 +4,7 @@ import IMV2Core
 
 /// V2's local database is intentionally separate from the V1 conversation
 /// cache. It applies sync records incrementally in one SQLite transaction.
-public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2LocalForegroundGroupEventPreviewStore {
+public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2LocalForegroundGroupEventPreviewStore, V2ClientProfileProjectionStore {
     private let databasePool: DatabasePool
     private let databaseURL: URL
 
@@ -213,6 +213,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     try Self.persist(V2ClientRoomProfileProjection(record: record), db: db)
                 } else if record.projectionKind == "direct_room_profile" {
                     try Self.persist(V2ClientDirectRoomProfileProjection(record: record), db: db)
+                } else if record.projectionKind == "profile_invalidation" {
+                    try Self.persist(V2ClientProfileInvalidation(record: record), db: db)
                 }
                 try db.execute(
                     sql: """
@@ -395,6 +397,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try db.execute(sql: "DELETE FROM v2_room_control_projections")
             try db.execute(sql: "DELETE FROM v2_room_profile_projections")
             try db.execute(sql: "DELETE FROM v2_direct_room_profile_projections")
+            try db.execute(sql: "DELETE FROM v2_profile_views")
+            try db.execute(sql: "DELETE FROM v2_profile_invalidations")
             try db.execute(sql: "DELETE FROM v2_relationship_projections")
             try db.execute(sql: "DELETE FROM v2_user_block_projections")
             try db.execute(sql: "DELETE FROM v2_stranger_message_preference")
@@ -705,6 +709,72 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 .merging(Dictionary(cached.map { ($0.roomID, $0) }, uniquingKeysWith: { _, incoming in incoming }), uniquingKeysWith: { projected, _ in projected })
                 .values
                 .sorted { $0.updatedAt == $1.updatedAt ? $0.roomID.rawValue < $1.roomID.rawValue : $0.updatedAt > $1.updatedAt }
+        }
+    }
+
+    /// Reads the last authorized profile representation. Callers must resolve
+    /// it through `V2ProfileResolver`; they must not copy its dynamic display
+    /// data into message or conversation structures.
+    public func profileView(userID: UserID) throws -> V2ProfileView? {
+        try databasePool.read { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT user_id, public_handle, display_name, avatar_media_id, state, revision, visibility_revision FROM v2_profile_views WHERE user_id = ?",
+                arguments: [userID.rawValue]
+            ) else { return nil }
+            return try Self.decodeProfileView(row)
+        }
+    }
+
+    public func profileViews(userIDs: [UserID]) throws -> [UserID: V2ProfileView] {
+        let uniqueIDs = Array(Set(userIDs)).sorted()
+        guard !uniqueIDs.isEmpty else { return [:] }
+        return try databasePool.read { db in
+            let placeholders = Array(repeating: "?", count: uniqueIDs.count).joined(separator: ", ")
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT user_id, public_handle, display_name, avatar_media_id, state, revision, visibility_revision FROM v2_profile_views WHERE user_id IN (\(placeholders))",
+                arguments: StatementArguments(uniqueIDs.map(\.rawValue))
+            )
+            return try Dictionary(uniqueKeysWithValues: rows.map { row in
+                let view = try Self.decodeProfileView(row)
+                return (view.userID, view)
+            })
+        }
+    }
+
+    /// Called only with a fully authorized server response. The write and
+    /// invalidation cleanup share one transaction, so UI never observes a
+    /// fresh profile alongside a pending older refresh requirement.
+    public func saveProfileView(_ profile: V2ProfileView) throws {
+        try databasePool.write { db in
+            try Self.persist(profile, db: db)
+        }
+    }
+
+    /// Deletes an inaccessible view instead of retaining old profile data in
+    /// the local account projection. The image cache observes the same signal
+    /// at a higher media boundary and must evict any protected avatar bytes.
+    public func markProfileUnavailable(userID: UserID) throws {
+        try databasePool.write { db in
+            try db.execute(sql: "DELETE FROM v2_profile_views WHERE user_id = ?", arguments: [userID.rawValue])
+            try db.execute(sql: "DELETE FROM v2_profile_invalidations WHERE user_id = ?", arguments: [userID.rawValue])
+        }
+    }
+
+    public func pendingProfileInvalidations(limit: Int) throws -> [V2ProfileInvalidation] {
+        guard limit > 0 else { return [] }
+        return try databasePool.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT user_id, minimum_revision FROM v2_profile_invalidations ORDER BY updated_at, user_id LIMIT ?",
+                arguments: [limit]
+            ).map { row in
+                guard let revision = V2ProfileRevision(rawValue: try Self.storageUnsigned(row["minimum_revision"] as Int64)) else {
+                    throw V2ClientProjectionError.invalidMessagePayload
+                }
+                return try .init(userID: .init(row["user_id"] as String), minimumRevision: revision)
+            }
         }
     }
 
@@ -1927,6 +1997,33 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try .init(sequence: UInt64(row["sequence"] as Int64), sourceEventID: .init(row["source_event_id"] as String), projectionKind: row["projection_kind"], payload: row["payload"])
     }
 
+    private static func decodeProfileView(_ row: Row) throws -> V2ProfileView {
+        let userID = try UserID(row["user_id"] as String)
+        guard let state = V2ProfileState(rawValue: row["state"] as String),
+              let revision = V2ProfileRevision(rawValue: try storageUnsigned(row["revision"] as Int64)),
+              let visibilityRevision = V2ProfileRevision(rawValue: try storageUnsigned(row["visibility_revision"] as Int64))
+        else { throw V2ClientProjectionError.invalidMessagePayload }
+        let handle: String? = row["public_handle"]
+        let displayName: String? = row["display_name"]
+        let avatarMediaID: String? = row["avatar_media_id"]
+        let identity: V2PublicIdentity?
+        switch (handle, displayName) {
+        case (.none, .none): identity = nil
+        case let (.some(handle), .some(displayName)):
+            identity = try .init(userID: userID, handle: .init(handle), displayName: displayName)
+        default: throw V2ClientProjectionError.invalidMessagePayload
+        }
+        let avatar = try avatarMediaID.map { try V2AvatarReference(mediaID: .init($0)) }
+        return try .init(
+            userID: userID,
+            publicIdentity: identity,
+            avatar: avatar,
+            state: state,
+            revision: revision,
+            visibilityRevision: visibilityRevision
+        )
+    }
+
     private static func decodeRelationshipProjection(_ row: Row) throws -> V2ClientRelationshipProjection {
         guard let state = V2RelationshipState(rawValue: row["state"] as String) else { throw V2ClientSocialProjectionError.invalidPayload }
         let requestedBy = try (row["requested_by_user_id"] as String?).map(UserID.init)
@@ -2117,12 +2214,93 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                       (existing["public_handle"] as String) == projection.publicIdentity.handle.rawValue,
                       (existing["display_name"] as String) == projection.publicIdentity.displayName
                 else { throw V2ClientProjectionError.invalidMessagePayload }
+                try persist(profileView(from: projection), db: db)
                 return
             }
             try db.execute(sql: "UPDATE v2_direct_room_profile_projections SET source_event_id = ?, target_user_id = ?, public_handle = ?, display_name = ?, revision = ?, updated_at = ? WHERE room_id = ?", arguments: [projection.sourceEventID.rawValue, projection.publicIdentity.userID.rawValue, projection.publicIdentity.handle.rawValue, projection.publicIdentity.displayName, incomingRevision, projection.updatedAt.timeIntervalSince1970, projection.roomID.rawValue])
+            try persist(profileView(from: projection), db: db)
             return
         }
         try db.execute(sql: "INSERT INTO v2_direct_room_profile_projections (room_id, source_event_id, target_user_id, public_handle, display_name, revision, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", arguments: [projection.roomID.rawValue, projection.sourceEventID.rawValue, projection.publicIdentity.userID.rawValue, projection.publicIdentity.handle.rawValue, projection.publicIdentity.displayName, try storageInteger(projection.revision), projection.updatedAt.timeIntervalSince1970])
+        try persist(profileView(from: projection), db: db)
+    }
+
+    private static func profileView(from projection: V2ClientDirectRoomProfileProjection) throws -> V2ProfileView {
+        guard let revision = V2ProfileRevision(rawValue: projection.revision) else {
+            throw V2ClientProjectionError.invalidMessagePayload
+        }
+        return try .init(
+            userID: projection.publicIdentity.userID,
+            publicIdentity: projection.publicIdentity,
+            avatar: nil,
+            state: .active,
+            revision: revision,
+            visibilityRevision: revision
+        )
+    }
+
+    private static func persist(_ profile: V2ProfileView, db: Database) throws {
+        let incomingRevision = try storageInteger(profile.revision.rawValue)
+        let incomingVisibilityRevision = try storageInteger(profile.visibilityRevision.rawValue)
+        if let existing = try Row.fetchOne(
+            db,
+            sql: "SELECT public_handle, display_name, avatar_media_id, state, revision, visibility_revision FROM v2_profile_views WHERE user_id = ?",
+            arguments: [profile.userID.rawValue]
+        ) {
+            let existingRevision: Int64 = existing["revision"]
+            let existingVisibilityRevision: Int64 = existing["visibility_revision"]
+            guard existingRevision <= incomingRevision, existingVisibilityRevision <= incomingVisibilityRevision else {
+                throw V2ClientProjectionError.invalidMessagePayload
+            }
+            if existingRevision == incomingRevision, existingVisibilityRevision == incomingVisibilityRevision {
+                guard (existing["public_handle"] as String?) == profile.publicIdentity?.handle.rawValue,
+                      (existing["display_name"] as String?) == profile.publicIdentity?.displayName,
+                      (existing["avatar_media_id"] as String?) == profile.avatar?.mediaID.rawValue,
+                      (existing["state"] as String) == profile.state.rawValue
+                else { throw V2ClientProjectionError.invalidMessagePayload }
+                try clearSatisfiedInvalidation(for: profile, db: db)
+                return
+            }
+            try db.execute(
+                sql: "UPDATE v2_profile_views SET public_handle = ?, display_name = ?, avatar_media_id = ?, state = ?, revision = ?, visibility_revision = ?, updated_at = ? WHERE user_id = ?",
+                arguments: [profile.publicIdentity?.handle.rawValue, profile.publicIdentity?.displayName, profile.avatar?.mediaID.rawValue, profile.state.rawValue, incomingRevision, incomingVisibilityRevision, Date().timeIntervalSince1970, profile.userID.rawValue]
+            )
+        } else {
+            try db.execute(
+                sql: "INSERT INTO v2_profile_views (user_id, public_handle, display_name, avatar_media_id, state, revision, visibility_revision, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                arguments: [profile.userID.rawValue, profile.publicIdentity?.handle.rawValue, profile.publicIdentity?.displayName, profile.avatar?.mediaID.rawValue, profile.state.rawValue, incomingRevision, incomingVisibilityRevision, Date().timeIntervalSince1970]
+            )
+        }
+        try clearSatisfiedInvalidation(for: profile, db: db)
+    }
+
+    private static func persist(_ invalidation: V2ClientProfileInvalidation, db: Database) throws {
+        let revision = try storageInteger(invalidation.minimumRevision.rawValue)
+        if let existing = try Row.fetchOne(
+            db,
+            sql: "SELECT revision FROM v2_profile_views WHERE user_id = ?",
+            arguments: [invalidation.userID.rawValue]
+        ) {
+            let existingRevision: Int64 = existing["revision"]
+            if existingRevision >= revision { return }
+        }
+        try db.execute(
+            sql: """
+            INSERT INTO v2_profile_invalidations (user_id, minimum_revision, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                minimum_revision = MAX(v2_profile_invalidations.minimum_revision, excluded.minimum_revision),
+                updated_at = excluded.updated_at
+            """,
+            arguments: [invalidation.userID.rawValue, revision, Date().timeIntervalSince1970]
+        )
+    }
+
+    private static func clearSatisfiedInvalidation(for profile: V2ProfileView, db: Database) throws {
+        try db.execute(
+            sql: "DELETE FROM v2_profile_invalidations WHERE user_id = ? AND minimum_revision <= ?",
+            arguments: [profile.userID.rawValue, try storageInteger(profile.revision.rawValue)]
+        )
     }
 
     private static func persist(_ tombstone: V2ClientMessageTombstone, db: Database) throws {
@@ -3068,6 +3246,27 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     (title, initial_member_user_ids, created_at, operation_id)
                     WHERE state = 'pending';
             """)
+        }
+        migrator.registerMigration("addV2ProfileViews") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_profile_views (
+                    user_id TEXT PRIMARY KEY,
+                    public_handle TEXT NULL CHECK (public_handle IS NULL OR length(public_handle) BETWEEN 3 AND 32),
+                    display_name TEXT NULL CHECK (display_name IS NULL OR length(display_name) BETWEEN 1 AND 80),
+                    avatar_media_id TEXT NULL,
+                    state TEXT NOT NULL CHECK (state IN ('active', 'deleted', 'suspended', 'hidden')),
+                    revision INTEGER NOT NULL CHECK (revision > 0),
+                    visibility_revision INTEGER NOT NULL CHECK (visibility_revision > 0),
+                    updated_at REAL NOT NULL,
+                    CHECK ((public_handle IS NULL) = (display_name IS NULL)),
+                    CHECK ((state = 'active') OR (public_handle IS NULL AND avatar_media_id IS NULL))
+                );
+                CREATE TABLE v2_profile_invalidations (
+                    user_id TEXT PRIMARY KEY,
+                    minimum_revision INTEGER NOT NULL CHECK (minimum_revision > 0),
+                    updated_at REAL NOT NULL
+                );
+                """)
         }
         migrator.registerMigration("addV2PendingGroupRoomCreationDeliveryMode") { db in
             try db.execute(sql: "ALTER TABLE v2_pending_group_room_creations ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'standard_fanout' CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid'))")

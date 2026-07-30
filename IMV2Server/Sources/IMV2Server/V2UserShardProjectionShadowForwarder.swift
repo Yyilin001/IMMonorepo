@@ -55,7 +55,11 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                 userID: userID, sourceEventID: sourceEventID, projectionKind: row.projectionKind,
                 payloadJSON: row.payloadJSON, createdAt: row.createdAt
             )
-            if liveSequence == nil { liveSequence = sequence }
+            // A single source event can now carry a compatibility projection
+            // plus a profile invalidation. The wake hint must cover the last
+            // mirrored sequence, otherwise a client could stop just before
+            // the invalidation and retain stale profile data.
+            liveSequence = max(liveSequence ?? 0, sequence)
             if let migration,
                (migration.phase == .forwarding || migration.phase == .verified),
                migration.sourceBucket == routes[0].bucket {

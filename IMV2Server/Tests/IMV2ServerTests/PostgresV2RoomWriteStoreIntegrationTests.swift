@@ -4788,6 +4788,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 WHERE source_event_id = \(bind: profileEventID) AND projection_kind = 'direct_room_profile'
                 """).first(decoding: CountRow.self))
             #expect(interruptedControlCount.value == 1)
+            let interruptedInvalidationCount = try #require(try await sql.raw("""
+                SELECT COUNT(*)::bigint AS value FROM im_v2.user_sync_log
+                WHERE source_event_id = \(bind: profileEventID) AND projection_kind = 'profile_invalidation'
+                """).first(decoding: CountRow.self))
+            #expect(interruptedInvalidationCount.value == 1)
             let interruptedOutbox = try #require(try await sql.raw("""
                 SELECT state, enumeration_checkpoint IS NOT NULL AS checkpointed
                 FROM im_v2.public_profile_update_outbox WHERE source_event_id = \(bind: profileEventID)
@@ -4832,12 +4837,23 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(projections.map(\.userID) == [firstPeerUUID, secondPeerUUID])
             #expect(projections.allSatisfy { $0.displayName == "新名称" && $0.revision == 2 })
             #expect(projections.allSatisfy { UUID(uuidString: $0.roomID)?.uuidString == $0.roomID })
+            let invalidations = try await sql.raw("""
+                SELECT user_id, payload->>'user_id' AS user_id_payload,
+                       (payload->>'minimum_profile_revision')::bigint AS minimum_profile_revision
+                FROM im_v2.user_sync_log
+                WHERE source_event_id = \(bind: profileEventID) AND projection_kind = 'profile_invalidation'
+                ORDER BY user_id
+                """).all(decoding: ProfileInvalidationAssertionRow.self)
+            #expect(invalidations.map(\.recipientUserID) == [firstPeerUUID, secondPeerUUID])
+            #expect(invalidations.allSatisfy {
+                $0.invalidatedUserID == sourceUUID && $0.minimumProfileRevision == 2
+            })
 
             // A completed source event is never reprojected on a later poll.
             let replay = try await worker.runOnce(limit: 8)
             #expect(replay.projectedRecipientCount == 0)
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: firstPeerUUID, on: sql) == 2)
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: secondPeerUUID, on: sql) == 2)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: firstPeerUUID, on: sql) == 3)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: secondPeerUUID, on: sql) == 3)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -6202,6 +6218,17 @@ private struct ProfilePropagationProjectionRow: Decodable {
         case roomID = "room_id"
         case displayName = "display_name"
         case revision
+    }
+}
+private struct ProfileInvalidationAssertionRow: Decodable {
+    let recipientUserID: UUID
+    let invalidatedUserID: UUID
+    let minimumProfileRevision: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case recipientUserID = "user_id"
+        case invalidatedUserID = "user_id_payload"
+        case minimumProfileRevision = "minimum_profile_revision"
     }
 }
 private struct ProfilePropagationFailingShadowForwarder: V2UserShardProjectionShadowing {

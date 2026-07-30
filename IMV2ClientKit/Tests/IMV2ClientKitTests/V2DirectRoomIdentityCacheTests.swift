@@ -49,6 +49,7 @@ struct V2DirectRoomIdentityCacheTests {
             capabilityProfile: "base"
         ))
         #expect(try await store.directRoomIdentities() == [.init(roomID: roomID, publicIdentity: synced, updatedAt: Date(timeIntervalSince1970: 1_750_000_001))])
+        #expect(try await store.profileView(userID: userID)?.publicIdentity == synced)
 
         let snapshotProfile = try V2SnapshotDirectRoomProfileProjection(
             sourceEventID: try .init(roomID.rawValue), roomID: roomID,
@@ -63,6 +64,37 @@ struct V2DirectRoomIdentityCacheTests {
         try await store.stageSnapshotPage(.init(index: 0, digest: pageDigest, payload: payloadPage), for: manifest)
         try await store.commitStagedSnapshot(manifest)
         #expect(try await store.directRoomIdentities() == [.init(roomID: roomID, publicIdentity: synced, updatedAt: Date(timeIntervalSince1970: 1_750_000_001))])
+    }
+
+    @Test("profile invalidation is durable until an authorized hydration replaces it")
+    func retainsInvalidationUntilHydrated() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-profile-invalidation-\(UUID().uuidString).sqlite")
+        let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000d31")!)
+        let userID: UserID = try .init("00000000-0000-0000-0000-000000000d32")
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        let invalidation = Data("{\"user_id\":\"\(userID.rawValue)\",\"minimum_profile_revision\":3}".utf8)
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [.init(sequence: 1, sourceEventID: try .init("00000000-0000-0000-0000-000000000d33"), projectionKind: "profile_invalidation", payload: invalidation)],
+            nextSyncToken: try .init("profile-invalidation-token"),
+            receipt: .init("profile-invalidation-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+        #expect(try await store.pendingProfileInvalidations(limit: 10) == [
+            .init(userID: userID, minimumRevision: try #require(V2ProfileRevision(rawValue: 3)))
+        ])
+
+        let identity = try V2PublicIdentity(userID: userID, handle: .init("hydrated_user"), displayName: "重新读取")
+        try await store.saveProfileView(.init(
+            userID: userID,
+            publicIdentity: identity,
+            avatar: nil,
+            state: .active,
+            revision: try #require(V2ProfileRevision(rawValue: 3)),
+            visibilityRevision: try #require(V2ProfileRevision(rawValue: 1))
+        ))
+        #expect(try await store.pendingProfileInvalidations(limit: 10).isEmpty)
     }
 
     @Test("mixed-case UUID room IDs from direct profiles and messages share one local conversation")

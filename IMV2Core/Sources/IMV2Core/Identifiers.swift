@@ -93,6 +93,7 @@ public enum RelationshipOperationIDTag: V2IdentifierTag {}
 public enum UserBlockOperationIDTag: V2IdentifierTag {}
 public enum MediaIDTag: V2IdentifierTag {}
 public enum MediaUploadOperationIDTag: V2IdentifierTag {}
+public enum ProfileUpdateOperationIDTag: V2IdentifierTag {}
 public enum MediaUploadSessionIDTag: V2IdentifierTag {}
 public enum MediaDownloadSessionIDTag: V2IdentifierTag {}
 
@@ -119,5 +120,6 @@ public typealias RelationshipOperationID = V2Identifier<RelationshipOperationIDT
 public typealias UserBlockOperationID = V2Identifier<UserBlockOperationIDTag>
 public typealias MediaID = V2Identifier<MediaIDTag>
 public typealias MediaUploadOperationID = V2Identifier<MediaUploadOperationIDTag>
+public typealias ProfileUpdateOperationID = V2Identifier<ProfileUpdateOperationIDTag>
 public typealias MediaUploadSessionID = V2Identifier<MediaUploadSessionIDTag>
 public typealias MediaDownloadSessionID = V2Identifier<MediaDownloadSessionIDTag>

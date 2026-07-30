@@ -69,11 +69,11 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
             let targets = Array(candidates.prefix(remaining))
             let isComplete = candidates.count <= remaining
             for target in targets {
-                _ = try await appendControlProjection(target: target, lease: lease)
+                _ = try await appendControlProjections(target: target, lease: lease)
                 let eventID = try EventID(lease.sourceEventID.uuidString)
                 guard let liveSequence = try await shadowForwarder.shadowIfForwarding(
                     userID: try .init(target.userID.uuidString), sourceEventID: eventID,
-                    projectionKinds: ["direct_room_profile"]
+                    projectionKinds: ["direct_room_profile", "profile_invalidation"]
                 ) else {
                     throw V2DirectRoomProfilePropagationError.missingControlProjection
                 }
@@ -141,9 +141,24 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
             """).all(decoding: DirectProfileTarget.self)
     }
 
-    private func appendControlProjection(target: DirectProfileTarget, lease: ProfileUpdateLease) async throws -> UInt64 {
+    /// During the protocol transition, old clients retain their compact
+    /// direct-room projection while new clients receive only a revision fence
+    /// and rehydrate a normalized view on demand. Both records share the same
+    /// source event and are appended atomically so a retry cannot expose a
+    /// half-updated cache.
+    private func appendControlProjections(target: DirectProfileTarget, lease: ProfileUpdateLease) async throws -> UInt64 {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectRoomProfilePropagationError.corruptPersistenceState }
+            let existingInvalidation = try await sql.raw("""
+                SELECT user_sync_sequence, payload->>'user_id' AS user_id,
+                       (payload->>'minimum_profile_revision')::bigint AS minimum_profile_revision
+                FROM im_v2.user_sync_log
+                WHERE user_id = \(bind: target.userID) AND source_event_id = \(bind: lease.sourceEventID)
+                  AND projection_kind = 'profile_invalidation'
+                """).first(decoding: ExistingProfileInvalidationRow.self)
+            if let existingInvalidation, !existingInvalidation.matches(lease: lease) {
+                throw V2DirectRoomProfilePropagationError.corruptPersistenceState
+            }
             if let existing = try await sql.raw("""
                 SELECT user_sync_sequence, payload->>'room_id' AS room_id,
                        payload->>'target_user_id' AS target_user_id,
@@ -158,17 +173,16 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                 guard existing.matches(target: target, lease: lease) else {
                     throw V2DirectRoomProfilePropagationError.corruptPersistenceState
                 }
-                return try directProfileUnsigned(existing.sequence)
+                if let existingInvalidation {
+                    return try directProfileUnsigned(max(existing.sequence, existingInvalidation.sequence))
+                }
+                let invalidationSequence = try await allocateSequence(userID: target.userID, sql: sql)
+                try await appendInvalidation(
+                    target: target, lease: lease, sequence: invalidationSequence, sql: sql
+                )
+                return try directProfileUnsigned(invalidationSequence)
             }
-            guard let sequence = try await sql.raw("""
-                INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence)
-                VALUES (\(bind: target.userID), 1)
-                ON CONFLICT (user_id) DO UPDATE
-                SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1
-                RETURNING next_sequence AS user_sync_sequence
-                """).first(decoding: DirectProfileSequenceRow.self) else {
-                throw V2DirectRoomProfilePropagationError.corruptPersistenceState
-            }
+            let sequence = try await allocateSequence(userID: target.userID, sql: sql)
             // Match the room-event UUID spelling used by the gateway. The
             // direct-profile update must not create a second lexical room key
             // on a client that receives both projections.
@@ -177,7 +191,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
             try await sql.raw("""
                 INSERT INTO im_v2.user_sync_log
                     (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
-                VALUES (\(bind: target.userID), \(bind: sequence.sequence), \(bind: lease.sourceEventID), 'direct_room_profile',
+                VALUES (\(bind: target.userID), \(bind: sequence), \(bind: lease.sourceEventID), 'direct_room_profile',
                         jsonb_build_object('room_id', \(bind: wireRoomID),
                                            'target_user_id', \(bind: wireTargetUserID),
                                            'public_handle', \(bind: lease.publicHandle),
@@ -186,8 +200,42 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                                            'updated_at_ms', \(bind: lease.updatedAtMilliseconds)),
                         \(bind: lease.profileUpdatedAt))
                 """).run()
-            return try directProfileUnsigned(sequence.sequence)
+            if let existingInvalidation {
+                return try directProfileUnsigned(max(sequence, existingInvalidation.sequence))
+            }
+            let invalidationSequence = try await allocateSequence(userID: target.userID, sql: sql)
+            try await appendInvalidation(target: target, lease: lease, sequence: invalidationSequence, sql: sql)
+            return try directProfileUnsigned(invalidationSequence)
         }
+    }
+
+    private func allocateSequence(userID: UUID, sql: any SQLDatabase) async throws -> Int64 {
+        guard let sequence = try await sql.raw("""
+            INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence)
+            VALUES (\(bind: userID), 1)
+            ON CONFLICT (user_id) DO UPDATE
+            SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1
+            RETURNING next_sequence AS user_sync_sequence
+            """).first(decoding: DirectProfileSequenceRow.self) else {
+            throw V2DirectRoomProfilePropagationError.corruptPersistenceState
+        }
+        return sequence.sequence
+    }
+
+    private func appendInvalidation(
+        target: DirectProfileTarget,
+        lease: ProfileUpdateLease,
+        sequence: Int64,
+        sql: any SQLDatabase
+    ) async throws {
+        try await sql.raw("""
+            INSERT INTO im_v2.user_sync_log
+                (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
+            VALUES (\(bind: target.userID), \(bind: sequence), \(bind: lease.sourceEventID), 'profile_invalidation',
+                    jsonb_build_object('user_id', \(bind: lease.sourceUserID.uuidString),
+                                       'minimum_profile_revision', \(bind: lease.revision)),
+                    \(bind: lease.profileUpdatedAt))
+            """).run()
     }
 
     private func advance(lease: ProfileUpdateLease, lastTargetUserID: UUID?, completed: Bool, now: Date) async throws {
@@ -310,6 +358,22 @@ private struct ExistingDirectProfileProjectionRow: Decodable {
         }
         return publicHandle == lease.publicHandle && displayName == lease.displayName &&
             revision == lease.revision && updatedAtMilliseconds == lease.updatedAtMilliseconds
+    }
+}
+
+private struct ExistingProfileInvalidationRow: Decodable {
+    let sequence: Int64
+    let userID: String
+    let minimumProfileRevision: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case sequence = "user_sync_sequence"
+        case userID = "user_id"
+        case minimumProfileRevision = "minimum_profile_revision"
+    }
+
+    func matches(lease: ProfileUpdateLease) -> Bool {
+        userID == lease.sourceUserID.uuidString && minimumProfileRevision == lease.revision
     }
 }
 

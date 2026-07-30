@@ -1,0 +1,101 @@
+import IMV2Core
+import IMV2Server
+@testable import IMV2ServerHTTP
+import Testing
+import Vapor
+import VaporTesting
+
+@Suite("V2 profile update routes")
+struct V2VaporProfileUpdateRoutesTests {
+    @Test("profile writes require credentials, retain the revision fence, and return no-store")
+    func updatesProfile() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let actor = try UserID("00000000-0000-0000-0000-000000000811")
+        let view = try updateFixtureProfile(userID: actor, revision: 2)
+        V2VaporProfileUpdateRoutes(
+            authenticator: ProfileUpdateRouteAuthenticator(userID: actor),
+            profiles: .init(store: ProfileUpdateRouteStore(result: .updated(view)))
+        ).register(on: app)
+
+        try await app.testing().test(.PUT, "v2/profile/me", beforeRequest: { request in
+            request.headers.bearerAuthorization = .init(token: "access-token")
+            request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: "00000000-0000-0000-0000-000000000812")
+            try request.content.encode(V2ProfileUpdateHTTPRequest(
+                operationID: "00000000-0000-0000-0000-000000000813",
+                expectedRevision: 1,
+                displayName: "更新后名称",
+                avatarMediaID: nil
+            ))
+        }) { response async throws in
+            #expect(response.status == .ok)
+            #expect(response.headers.first(name: .cacheControl) == "no-store")
+            let body = try response.content.decode(V2ProfileUpdateHTTPResponse.self)
+            #expect(body.displayName == "资料名称")
+            #expect(body.revision == 2)
+            #expect(body.idempotent == false)
+        }
+    }
+
+    @Test("revision conflict returns the current revision without leaking a profile")
+    func reportsConflict() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let actor = try UserID("00000000-0000-0000-0000-000000000821")
+        let currentRevision = try #require(V2ProfileRevision(rawValue: 9))
+        V2VaporProfileUpdateRoutes(
+            authenticator: ProfileUpdateRouteAuthenticator(userID: actor),
+            profiles: .init(store: ProfileUpdateRouteStore(result: nil, error: .revisionConflict(current: currentRevision)))
+        ).register(on: app)
+
+        try await app.testing().test(.PUT, "v2/profile/me", beforeRequest: { request in
+            request.headers.bearerAuthorization = .init(token: "access-token")
+            request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: "00000000-0000-0000-0000-000000000822")
+            try request.content.encode(V2ProfileUpdateHTTPRequest(
+                operationID: "00000000-0000-0000-0000-000000000823",
+                expectedRevision: 1,
+                displayName: "冲突名称",
+                avatarMediaID: nil
+            ))
+        }) { response async throws in
+            #expect(response.status == .conflict)
+            let body = try response.content.decode(V2ProfileUpdateHTTPResponse.self)
+            #expect(body.currentRevision == 9)
+            #expect(body.displayName == nil)
+        }
+    }
+}
+
+private struct ProfileUpdateRouteAuthenticator: V2GatewayAuthenticator {
+    let userID: UserID
+    func authenticate(accessToken: String, deviceID _: DeviceID) async throws -> UserID {
+        guard accessToken == "access-token" else { throw ProfileUpdateRouteTestError.denied }
+        return userID
+    }
+}
+
+private actor ProfileUpdateRouteStore: V2ProfileUpdateStore {
+    let result: V2ProfileUpdateOutcome?
+    let error: V2ProfileUpdateError?
+    init(result: V2ProfileUpdateOutcome?, error: V2ProfileUpdateError? = nil) {
+        self.result = result
+        self.error = error
+    }
+    func update(_: V2ProfileUpdateCommand) async throws -> V2ProfileUpdateOutcome {
+        if let error { throw error }
+        return try #require(result)
+    }
+}
+
+private func updateFixtureProfile(userID: UserID, revision: UInt64) throws -> V2ProfileView {
+    try .init(
+        userID: userID,
+        publicIdentity: .init(userID: userID, handle: .init("profile_user"), displayName: "资料名称"),
+        avatar: nil,
+        state: .active,
+        revision: try #require(V2ProfileRevision(rawValue: revision)),
+        visibilityRevision: try #require(V2ProfileRevision(rawValue: revision))
+    )
+}
+
+private enum ProfileUpdateRouteTestError: Error { case denied }

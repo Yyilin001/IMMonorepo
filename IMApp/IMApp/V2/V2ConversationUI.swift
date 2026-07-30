@@ -202,7 +202,19 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMess
         let profiles = try await localStore.roomProfiles()
         let titles = Dictionary(uniqueKeysWithValues: profiles.map { ($0.roomID, $0.title) })
         let directIdentities = try await localStore.directRoomIdentities()
-        let directTitles = Dictionary(uniqueKeysWithValues: directIdentities.map { ($0.roomID, $0.publicIdentity.displayName) })
+        let profileViews = try await localStore.profileViews(userIDs: Array(Set(directIdentities.map(\.publicIdentity.userID))))
+        let directTitles = Dictionary(uniqueKeysWithValues: directIdentities.map { identity in
+            (
+                identity.roomID,
+                V2ProfileResolver.resolve(
+                    userID: identity.publicIdentity.userID,
+                    profile: profileViews[identity.publicIdentity.userID],
+                    alias: nil,
+                    groupMember: nil,
+                    surface: .directConversation
+                ).displayName
+            )
+        })
         let groupRoomIDs = Set(profiles.map(\.roomID))
         let directRoomIDs = Set(directIdentities.map(\.roomID))
         let summaries = try await localStore.conversationSummaries()
@@ -220,14 +232,16 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMess
         return Self.mergingEmptyProjectionItems(
             messageItems: messageItems,
             profiles: profiles,
-            directIdentities: directIdentities
+            directIdentities: directIdentities,
+            directTitles: directTitles
         )
     }
 
     static func mergingEmptyProjectionItems(
         messageItems: [V2ConversationListItem],
         profiles: [V2ClientRoomProfileProjection],
-        directIdentities: [V2ClientDirectRoomIdentity]
+        directIdentities: [V2ClientDirectRoomIdentity],
+        directTitles: [RoomID: String]? = nil
     ) -> [V2ConversationListItem] {
         let messageRoomIDs = Set(messageItems.map(\.id))
         let emptyProfileItems: [V2ConversationListItem] = profiles.compactMap { profile in
@@ -250,7 +264,7 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMess
             guard !representedRoomIDs.contains(identity.roomID.rawValue) else { return nil }
             return V2ConversationListItem(
                 id: identity.roomID.rawValue,
-                title: identity.publicIdentity.displayName,
+                title: directTitles?[identity.roomID] ?? identity.publicIdentity.displayName,
                 preview: "暂无消息",
                 lastActivity: identity.updatedAt,
                 isOutgoing: false,

@@ -58,6 +58,14 @@ enum IMV2AccountServerApp {
                     policy: configuration.publicIdentityLookupRateLimit
                 )
             ).register(on: app)
+            V2VaporProfileViewRoutes(
+                authenticator: authenticator,
+                profiles: .init(store: PostgresV2ProfileViewStore(database: database))
+            ).register(on: app)
+            V2VaporProfileUpdateRoutes(
+                authenticator: authenticator,
+                profiles: .init(store: PostgresV2ProfileUpdateStore(database: database))
+            ).register(on: app)
             V2PasswordAccountRoutes(
                 store: .init(database: database),
                 assertionIssuer: assertionIssuer,

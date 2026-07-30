@@ -687,6 +687,13 @@ struct V2AppRealtimeRuntime {
             targetResolver: mediaDownloadResolver,
             byteTransfer: V2URLSessionMediaByteTransfer()
         )
+        let profileRepository = V2ProfileRepository(
+            store: localStore,
+            reader: try V2HTTPProfileViewClient(
+                endpoint: configuration.endpoint("v2/profile-views/batch"),
+                credentials: authSession
+            )
+        )
         let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base")
         let groupEventSync = V2GroupEventSyncEngine(transport: transport, store: localStore)
         let foregroundGroupPreview = V2ForegroundGroupEventPreviewEngine(transport: transport, store: localStore)
@@ -736,6 +743,17 @@ struct V2AppRealtimeRuntime {
                 // cycle; visible conversations retain their separate
                 // immediate one-page path.
                 _ = try await groupEventSync.synchronizeBackgroundKnownRooms(maximumPages: 12)
+                // Profile invalidations are already durable at this point.
+                // A transient account-edge failure must not roll back or
+                // stall realtime synchronization; the next sync activity
+                // coalesces the same pending rows into another bounded read.
+                do {
+                    _ = try await profileRepository.refreshPendingInvalidations()
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    // Keep the invalidation row for a later authorized retry.
+                }
                 try await localStore.pruneTerminalCommands(
                     olderThan: Date().addingTimeInterval(-86_400)
                 )
