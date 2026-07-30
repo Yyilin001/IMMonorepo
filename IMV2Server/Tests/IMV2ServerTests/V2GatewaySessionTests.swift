@@ -43,12 +43,35 @@ struct V2GatewaySessionTests {
             _ = try await session.receiveAuthenticated(frame, handler: GatewayCommandFake())
         }
     }
+
+    @Test("an access-token lease expires an otherwise active session")
+    func expiresAuthenticatedSessionLease() async throws {
+        let clock = SessionClock(Date(timeIntervalSince1970: 10))
+        let auth = GatewayAuthFake(userID: try .init("user-a"), expiresAt: Date(timeIntervalSince1970: 11))
+        let session = V2GatewaySession(limits: try .init(maximumInFlightRequests: 2), authenticator: auth, capabilityProfile: "base", now: { clock.now })
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+        _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion))
+        clock.now = Date(timeIntervalSince1970: 11)
+        var request = IMV2Envelope(); request.requestID = 3; request.protocolVersion = UInt32(protocolVersion); request.heartbeat = .init()
+        await #expect(throws: V2GatewaySessionError.sessionExpired) {
+            _ = try await session.receiveAuthenticated(try V2ServerProtobufFrameCodec.encode(request, frameVersion: protocolVersion), handler: GatewayCommandFake())
+        }
+    }
 }
 
 private actor GatewayAuthFake: V2GatewayAuthenticator {
     let userID: UserID
-    init(userID: UserID) { self.userID = userID }
+    let expiresAt: Date?
+    init(userID: UserID, expiresAt: Date? = nil) { self.userID = userID; self.expiresAt = expiresAt }
     func authenticate(accessToken _: String, deviceID _: DeviceID) -> UserID { userID }
+    func authenticatedSessionExpiresAt(accessToken _: String, deviceID _: DeviceID) -> Date? { expiresAt }
+}
+
+private final class SessionClock: @unchecked Sendable {
+    var now: Date
+    init(_ now: Date) { self.now = now }
 }
 
 private struct GatewayCommandFake: V2GatewayCommandHandler {

@@ -75,9 +75,32 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         }
         return userID
     }
+
+    public func authenticatedSessionExpiresAt(accessToken: String, deviceID: DeviceID) async throws -> Date? {
+        guard !accessToken.isEmpty, let database = database as? any SQLDatabase,
+              let deviceUUID = UUID(uuidString: deviceID.rawValue)
+        else { throw V2GatewayAuthenticationError.unauthenticated }
+        guard let row = try await database.raw("""
+            SELECT token.expires_at
+            FROM im_v2.device_access_tokens AS token
+            JOIN im_v2.auth_devices AS device
+              ON device.user_id = token.user_id AND device.device_id = token.device_id
+            WHERE token.token_hmac = \(bind: tokenKey.digest(accessToken))
+              AND token.device_id = \(bind: deviceUUID)
+              AND token.expires_at > \(bind: now())
+              AND token.revoked_at IS NULL
+              AND device.revoked_at IS NULL
+            """).first(decoding: V2AuthenticatedExpiryRow.self)
+        else { throw V2GatewayAuthenticationError.unauthenticated }
+        return row.expiresAt
+    }
 }
 
 private struct V2AuthenticatedUserRow: Decodable {
     let userID: UUID
     enum CodingKeys: String, CodingKey { case userID = "user_id" }
+}
+private struct V2AuthenticatedExpiryRow: Decodable {
+    let expiresAt: Date
+    enum CodingKeys: String, CodingKey { case expiresAt = "expires_at" }
 }

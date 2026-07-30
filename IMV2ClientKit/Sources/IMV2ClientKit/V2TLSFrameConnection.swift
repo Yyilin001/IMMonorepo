@@ -30,6 +30,7 @@ public enum V2TLSFrameConnectionError: Error, Equatable, Sendable {
     case notConnected
     case connectionFailed
     case connectionClosed
+    case requestTimedOut
     case unsupportedVersion
     case authenticationFailed
     case invalidHandshake
@@ -103,6 +104,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     private let endpoint: V2RealtimeEndpoint
     private let limits: V2FrameLimits
     private let maximumProtobufMessageDepth: Int
+    private let requestTimeout: Duration
     private var decoder: V2FrameDecoder
     private var bufferedFrames: [V2Frame] = []
     private var connection: NWConnection?
@@ -117,12 +119,14 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     public init(
         endpoint: V2RealtimeEndpoint,
         frameLimits: V2FrameLimits,
-        maximumProtobufMessageDepth: Int = V2ProtobufFrameCodec.defaultMaximumMessageDepth
+        maximumProtobufMessageDepth: Int = V2ProtobufFrameCodec.defaultMaximumMessageDepth,
+        requestTimeout: Duration = .seconds(20)
     ) {
         precondition(maximumProtobufMessageDepth > 0)
         self.endpoint = endpoint
         self.limits = frameLimits
         self.maximumProtobufMessageDepth = maximumProtobufMessageDepth
+        self.requestTimeout = requestTimeout
         self.decoder = .init(limits: frameLimits)
     }
 
@@ -220,20 +224,42 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         let parameters = NWParameters(tls: tls, tcp: .init())
         let connection = NWConnection(host: .init(endpoint.host), port: .init(rawValue: endpoint.port)!, using: parameters)
         self.connection = connection
-        try await withCheckedThrowingContinuation { continuation in
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    connection.stateUpdateHandler = nil
-                    continuation.resume()
-                case .failed, .cancelled:
-                    connection.stateUpdateHandler = nil
-                    continuation.resume(throwing: V2TLSFrameConnectionError.connectionFailed)
-                default:
-                    break
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await withCheckedThrowingContinuation { continuation in
+                        connection.stateUpdateHandler = { state in
+                            switch state {
+                            case .ready:
+                                connection.stateUpdateHandler = nil
+                                continuation.resume()
+                            case .failed, .cancelled:
+                                connection.stateUpdateHandler = nil
+                                continuation.resume(throwing: V2TLSFrameConnectionError.connectionFailed)
+                            default:
+                                break
+                            }
+                        }
+                        connection.start(queue: .global(qos: .utility))
+                    }
                 }
+                group.addTask { [requestTimeout] in
+                    try await Task.sleep(for: requestTimeout)
+                    // Cancelling a task does not necessarily interrupt an
+                    // outstanding Network.framework receive, so actively
+                    // close the socket to release the competing waiter.
+                    connection.cancel()
+                    throw V2TLSFrameConnectionError.requestTimedOut
+                }
+                defer { group.cancelAll() }
+                guard let result = try await group.next() else {
+                    throw V2TLSFrameConnectionError.connectionFailed
+                }
+                return result
             }
-            connection.start(queue: .global(qos: .utility))
+        } catch let error as V2TLSFrameConnectionError where error == .requestTimedOut {
+            closeTransport(error: error)
+            throw error
         }
     }
 
@@ -246,6 +272,31 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     }
 
     private func exchangeBootstrap(_ frame: V2Frame) async throws -> V2Frame {
+        do {
+            return try await withThrowingTaskGroup(of: V2Frame.self) { group in
+                group.addTask { [self] in
+                    try await exchangeBootstrapWithoutDeadline(frame)
+                }
+                group.addTask { [requestTimeout, weak self] in
+                    try await Task.sleep(for: requestTimeout)
+                    // `nextFrame` is continuation-based. Closing transport
+                    // is what makes its pending receive complete promptly.
+                    await self?.closeTransport(error: V2TLSFrameConnectionError.requestTimedOut)
+                    throw V2TLSFrameConnectionError.requestTimedOut
+                }
+                defer { group.cancelAll() }
+                guard let result = try await group.next() else {
+                    throw V2TLSFrameConnectionError.connectionFailed
+                }
+                return result
+            }
+        } catch let error as V2TLSFrameConnectionError where error == .requestTimedOut {
+            closeTransport(error: error)
+            throw error
+        }
+    }
+
+    private func exchangeBootstrapWithoutDeadline(_ frame: V2Frame) async throws -> V2Frame {
         guard let connection else { throw V2TLSFrameConnectionError.notConnected }
         try await send(frame, on: connection)
         while true {
@@ -258,10 +309,36 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     }
 
     private func sendAndAwaitResponse(_ frame: V2Frame) async throws -> V2Frame {
-        guard let connection else { throw V2TLSFrameConnectionError.notConnected }
+        guard connection != nil else { throw V2TLSFrameConnectionError.notConnected }
         let bytes = try V2FrameCodec.encode(frame, limits: limits)
+        do {
+            return try await withThrowingTaskGroup(of: V2Frame.self) { group in
+                group.addTask { [self] in
+                    try await awaitResponse(frame: frame, bytes: bytes)
+                }
+                group.addTask { [requestTimeout] in
+                    try await Task.sleep(for: requestTimeout)
+                    throw V2TLSFrameConnectionError.requestTimedOut
+                }
+                defer { group.cancelAll() }
+                guard let result = try await group.next() else {
+                    throw V2TLSFrameConnectionError.connectionFailed
+                }
+                return result
+            }
+        } catch let error as V2TLSFrameConnectionError where error == .requestTimedOut {
+            // A response deadline means this correlation can no longer be
+            // trusted. Closing also releases every other pending waiter and
+            // lets the app-level supervisor establish a fresh TLS session.
+            closeTransport(error: error)
+            throw error
+        }
+    }
+
+    private func awaitResponse(frame: V2Frame, bytes: Data) async throws -> V2Frame {
+        guard let connection else { throw V2TLSFrameConnectionError.notConnected }
         return try await withTaskCancellationHandler(operation: {
-            try await withCheckedThrowingContinuation { continuation in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<V2Frame, Error>) in
                 guard responseWaiters[frame.requestID] == nil else {
                     continuation.resume(throwing: V2TLSFrameConnectionError.unexpectedResponse)
                     return
@@ -339,7 +416,12 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     }
 
     private func failRequest(_ requestID: UInt64) {
-        responseWaiters.removeValue(forKey: requestID)?.resume(throwing: V2TLSFrameConnectionError.connectionFailed)
+        // A failed NWConnection send means the stream can no longer provide a
+        // trustworthy ordering boundary. Closing releases *all* waiters and
+        // makes the owning runtime reconnect instead of leaving a seemingly
+        // healthy session with only one request failed.
+        guard responseWaiters[requestID] != nil else { return }
+        closeTransport(error: V2TLSFrameConnectionError.connectionFailed)
     }
 
     private func cancelRequest(_ requestID: UInt64) {

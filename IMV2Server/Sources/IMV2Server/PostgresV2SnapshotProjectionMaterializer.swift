@@ -90,6 +90,7 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
                     ON profile.user_id = CASE WHEN pair.lower_user_id = \(bind: userUUID)
                                               THEN pair.higher_user_id ELSE pair.lower_user_id END
                 WHERE pair.lower_user_id = \(bind: userUUID) OR pair.higher_user_id = \(bind: userUUID)
+                  AND EXISTS (SELECT 1 FROM im_v2.messages WHERE room_id = pair.room_id)
                 ORDER BY pair.room_id
                 """).all(decoding: SnapshotProjectionDirectRoomProfileRow.self)
             return (watermark, log, relationships, blocks, preference, directRoomProfiles)

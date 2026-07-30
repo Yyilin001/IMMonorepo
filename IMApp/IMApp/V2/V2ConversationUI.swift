@@ -342,6 +342,7 @@ final class V2ConversationListStore {
     private(set) var groupConversationFeedback: String?
     private(set) var isOpeningDirectConversation = false
     private(set) var isCreatingGroupConversation = false
+    private(set) var pendingGroupConversationOperationID: String?
     private var explicitRoomTitles: [String: String] = [:]
     private var explicitRoomKinds: [String: V2ConversationListItem.Kind] = [:]
     private var refreshGeneration = 0
@@ -432,14 +433,17 @@ final class V2ConversationListStore {
             try Task.checkCancellation()
             switch outcome {
             case .created(let roomID):
+                pendingGroupConversationOperationID = nil
                 explicitRoomTitles[roomID] = title.trimmingCharacters(in: .whitespacesAndNewlines)
                 explicitRoomKinds[roomID] = .group
                 groupConversationFeedback = nil
                 return roomID
-            case .queuedForRetry:
-                groupConversationFeedback = "建群请求已安全保存，连接恢复后会继续。"
+            case .queuedForRetry(let operationID):
+                pendingGroupConversationOperationID = operationID
+                groupConversationFeedback = "建群请求已安全保存；取消可阻止其在恢复连接后继续创建。"
                 return nil
             case .rejected(let code):
+                pendingGroupConversationOperationID = nil
                 groupConversationFeedback = "无法创建群聊（\(code)）。"
                 return nil
             }
@@ -448,6 +452,29 @@ final class V2ConversationListStore {
         } catch {
             groupConversationFeedback = "无法保存建群请求。"
             return nil
+        }
+    }
+
+    func cancelPendingGroupConversationCreation() async {
+        guard let operationID = pendingGroupConversationOperationID else { return }
+        guard let groupConversationCreator else {
+            groupConversationFeedback = "无法取消已保存的建群请求，请恢复连接后重试。"
+            return
+        }
+        do {
+            switch try await groupConversationCreator.cancelConversationCreation(operationID: operationID) {
+            case .cancelled:
+                pendingGroupConversationOperationID = nil
+                groupConversationFeedback = "建群请求已取消。"
+            case .queuedForRetry:
+                pendingGroupConversationOperationID = nil
+                groupConversationFeedback = "建群请求正在取消；恢复连接后会完成取消。"
+            case .finalizationAlreadyStarted:
+                pendingGroupConversationOperationID = nil
+                groupConversationFeedback = "群聊已进入创建阶段，无法取消；完成后会显示在会话列表。"
+            }
+        } catch {
+            groupConversationFeedback = "无法取消建群请求，请稍后重试。"
         }
     }
 
@@ -461,11 +488,43 @@ final class V2ConversationListStore {
             guard generation == refreshGeneration else { return }
             items = refreshedItems
             state = .loaded
+            await restoreDurableGroupCreationStatusIfNeeded()
         } catch is CancellationError {
             return
         } catch {
             guard generation == refreshGeneration else { return }
             state = .failed
+        }
+    }
+
+    private func restoreDurableGroupCreationStatusIfNeeded() async {
+        guard let groupConversationCreator else { return }
+        do {
+            switch try await groupConversationCreator.restoredCreationStatus() {
+            case .queuedForRetry(let operationID):
+                pendingGroupConversationOperationID = operationID
+                groupConversationFeedback = "建群请求已安全保存；取消可阻止其在恢复连接后继续创建。"
+            case .cancelling:
+                pendingGroupConversationOperationID = nil
+                groupConversationFeedback = "建群请求正在取消；恢复连接后会完成取消。"
+            case .finalizing:
+                pendingGroupConversationOperationID = nil
+                groupConversationFeedback = "群聊已进入创建阶段，无法取消；完成后会显示在会话列表。"
+            case .cancelled:
+                pendingGroupConversationOperationID = nil
+                groupConversationFeedback = "建群请求已取消。"
+            case .rejected(let code):
+                pendingGroupConversationOperationID = nil
+                groupConversationFeedback = "无法创建群聊（\(code)）。"
+            case nil:
+                break
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            // Conversation data already loaded successfully. Do not replace it
+            // with a misleading bootstrap error just because status recovery
+            // was temporarily unavailable.
         }
     }
 
@@ -1316,6 +1375,7 @@ struct V2ConversationListView: View {
     @State private var groupMemberUserIDs = ""
     @State private var directSubmissionTask: Task<Void, Never>?
     @State private var groupSubmissionTask: Task<Void, Never>?
+    @State private var groupCancellationTask: Task<Void, Never>?
 
     init(
         store: V2ConversationListStore,
@@ -1492,7 +1552,21 @@ struct V2ConversationListView: View {
                     .navigationTitle("新建群聊")
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("取消") { newConversationSheet = nil }
+                            Button("取消") {
+                                groupSubmissionTask?.cancel()
+                                groupSubmissionTask = nil
+                                guard store.pendingGroupConversationOperationID != nil else {
+                                    newConversationSheet = nil
+                                    return
+                                }
+                                guard groupCancellationTask == nil else { return }
+                                groupCancellationTask = Task {
+                                    await store.cancelPendingGroupConversationCreation()
+                                    guard !Task.isCancelled else { return }
+                                    groupCancellationTask = nil
+                                    newConversationSheet = nil
+                                }
+                            }
                                 .accessibilityIdentifier("v2.conversation.group-cancel")
                         }
                         ToolbarItem(placement: .confirmationAction) {
@@ -1526,6 +1600,8 @@ struct V2ConversationListView: View {
                     .onDisappear {
                         groupSubmissionTask?.cancel()
                         groupSubmissionTask = nil
+                        groupCancellationTask?.cancel()
+                        groupCancellationTask = nil
                     }
                 }
                 }

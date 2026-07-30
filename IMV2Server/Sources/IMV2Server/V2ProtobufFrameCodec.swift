@@ -96,6 +96,13 @@ public enum V2ServerProtobufFrameCodec {
         case .groupEventSubscribed?: return .groupEventSubscribed
         case .groupEventUnsubscribe?: return .groupEventUnsubscribe
         case .groupEventAvailable?: return .groupEventAvailable
+        case .beginGroupRoomCreation?: return .beginGroupRoomCreation
+        case .groupRoomCreationPrepared?: return .groupRoomCreationPrepared
+        case .appendGroupRoomCreationMembers?: return .appendGroupRoomCreationMembers
+        case .groupRoomCreationMembersAppended?: return .groupRoomCreationMembersAppended
+        case .finalizeGroupRoomCreation?: return .finalizeGroupRoomCreation
+        case .cancelGroupRoomCreation?: return .cancelGroupRoomCreation
+        case .groupRoomCreationCancelled?: return .groupRoomCreationCancelled
         case .setStrangerMessagePermission?: return .setStrangerMessagePermission
         case .strangerMessagePermissionSet?: return .strangerMessagePermissionSet
         case .changeRelationship?: return .changeRelationship

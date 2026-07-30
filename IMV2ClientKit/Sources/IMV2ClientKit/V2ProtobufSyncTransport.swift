@@ -132,10 +132,32 @@ public struct V2ClientGroupRoom: Equatable, Sendable {
     }
 }
 
+/// A bounded server-side staging acknowledgement. It deliberately exposes no
+/// roster: the count is enough for a durable client outbox to resume pages.
+public struct V2ClientGroupAudienceDraft: Equatable, Sendable {
+    public let operationID: GroupRoomOperationID
+    public let title: String
+    public let stagedMemberCount: Int
+
+    public init(operationID: GroupRoomOperationID, title: String, stagedMemberCount: Int) throws {
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, stagedMemberCount >= 0 else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        self.operationID = operationID
+        self.title = title
+        self.stagedMemberCount = stagedMemberCount
+    }
+}
+
 /// Authenticated boundary for the atomic group-bootstrap command. The caller
 /// owns the durable operation ID and may retry the exact same intent.
 public protocol V2ClientGroupMessagingTransport: Sendable {
-    func createGroupRoom(operationID: GroupRoomOperationID, title: String, deliveryMode: V2GroupDeliveryMode, initialMemberUserIDs: [UserID]) async throws -> V2ClientGroupRoom
+    func beginGroupRoomCreation(operationID: GroupRoomOperationID, title: String) async throws -> V2ClientGroupAudienceDraft
+    func appendGroupRoomCreationMembers(operationID: GroupRoomOperationID, memberUserIDs: [UserID]) async throws -> V2ClientGroupAudienceDraft
+    func finalizeGroupRoomCreation(operationID: GroupRoomOperationID) async throws -> V2ClientGroupRoom
+    /// Cancels a mutable server-side draft. Clients call this only after their
+    /// local durable intent has been removed/cancelled by product policy.
+    func cancelGroupRoomCreation(operationID: GroupRoomOperationID) async throws
 }
 
 /// Authenticated social command boundary. These calls return canonical server
@@ -543,15 +565,40 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         return try .init(roomID: .init(opened.roomID), targetUserID: .init(opened.targetUserID), createdAt: Date(timeIntervalSince1970: TimeInterval(opened.createdAtMs) / 1_000))
     }
 
-    public func createGroupRoom(operationID: GroupRoomOperationID, title: String, deliveryMode: V2GroupDeliveryMode, initialMemberUserIDs: [UserID]) async throws -> V2ClientGroupRoom {
-        var request = IMV2Envelope(); request.createGroupRoom = .init()
-        request.createGroupRoom.operationID = operationID.rawValue
-        request.createGroupRoom.title = title
-        request.createGroupRoom.deliveryMode = switch deliveryMode {
-        case .standardFanout: .standardFanout
-        case .largeGroupHybrid: .largeGroupHybrid
+    public func beginGroupRoomCreation(operationID: GroupRoomOperationID, title: String) async throws -> V2ClientGroupAudienceDraft {
+        var request = IMV2Envelope(); request.beginGroupRoomCreation = .init()
+        request.beginGroupRoomCreation.operationID = operationID.rawValue
+        request.beginGroupRoomCreation.title = title
+        let response = try await requestEnvelope(request)
+        guard case .groupRoomCreationPrepared(let prepared)? = response.body,
+              prepared.operationID == operationID.rawValue,
+              prepared.stagedMemberCount <= UInt32(V2GroupDeliveryPolicy.largeGroupHybridMaximumMembers - 1)
+        else {
+            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
         }
-        request.createGroupRoom.initialMemberUserIds = initialMemberUserIDs.map(\.rawValue)
+        return try .init(operationID: .init(prepared.operationID), title: prepared.title, stagedMemberCount: Int(prepared.stagedMemberCount))
+    }
+
+    public func appendGroupRoomCreationMembers(operationID: GroupRoomOperationID, memberUserIDs: [UserID]) async throws -> V2ClientGroupAudienceDraft {
+        guard !memberUserIDs.isEmpty, memberUserIDs.count <= V2GroupAudienceImportLimits.maximumMembersPerAppend else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        var request = IMV2Envelope(); request.appendGroupRoomCreationMembers = .init()
+        request.appendGroupRoomCreationMembers.operationID = operationID.rawValue
+        request.appendGroupRoomCreationMembers.memberUserIds = memberUserIDs.map(\.rawValue)
+        let response = try await requestEnvelope(request)
+        guard case .groupRoomCreationMembersAppended(let appended)? = response.body,
+              appended.operationID == operationID.rawValue,
+              appended.stagedMemberCount <= UInt32(V2GroupDeliveryPolicy.largeGroupHybridMaximumMembers - 1)
+        else {
+            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
+        }
+        return try .init(operationID: operationID, title: "staged", stagedMemberCount: Int(appended.stagedMemberCount))
+    }
+
+    public func finalizeGroupRoomCreation(operationID: GroupRoomOperationID) async throws -> V2ClientGroupRoom {
+        var request = IMV2Envelope(); request.finalizeGroupRoomCreation = .init()
+        request.finalizeGroupRoomCreation.operationID = operationID.rawValue
         let response = try await requestEnvelope(request)
         guard case .groupRoomCreated(let created)? = response.body else {
             try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
@@ -562,15 +609,23 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse
         }
         let members = try created.memberUserIds.map { try UserID($0) }
-        let expectedMembers = Set(initialMemberUserIDs)
         guard !created.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               members.count == Set(members).count,
-              returnedDeliveryMode == deliveryMode,
               created.memberCount > 0,
-              created.memberCount >= initialMemberUserIDs.count + 1,
-              (deliveryMode == .largeGroupHybrid || expectedMembers.isSubset(of: Set(members)))
+              members.isEmpty
         else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(created.roomID), title: created.title, deliveryMode: returnedDeliveryMode, memberUserIDs: members, memberCount: created.memberCount, createdAt: Date(timeIntervalSince1970: TimeInterval(created.createdAtMs) / 1_000))
+    }
+
+    public func cancelGroupRoomCreation(operationID: GroupRoomOperationID) async throws {
+        var request = IMV2Envelope(); request.cancelGroupRoomCreation = .init()
+        request.cancelGroupRoomCreation.operationID = operationID.rawValue
+        let response = try await requestEnvelope(request)
+        guard case .groupRoomCreationCancelled(let cancelled)? = response.body,
+              cancelled.operationID == operationID.rawValue
+        else {
+            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
+        }
     }
 
     public func pullGroupEvents(roomID: RoomID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2ClientGroupEventPage {

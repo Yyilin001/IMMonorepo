@@ -166,9 +166,137 @@ struct V2GatewayDomainCommandHandlerTests {
 
         let response = try await handler.handle(envelope: request, identity: fixture.identity)
         #expect(response.groupRoomCreated.title == "项目群")
-        #expect(response.groupRoomCreated.memberUserIds.contains(fixture.userID.rawValue))
+        #expect(response.groupRoomCreated.memberUserIds.isEmpty)
         #expect(response.groupRoomCreated.deliveryMode == .standardFanout)
         #expect(await store.actor() == fixture.userID)
+    }
+
+    @Test("staged group creation binds every page and finalization to the authenticated owner")
+    func stagedGroupCreationUsesAuthenticatedActor() async throws {
+        let fixture = try GatewayDomainFixture()
+        let groupStore = GatewayGroupStore()
+        let audienceStore = GatewayAudienceImportStore()
+        let groupMessaging = try V2GroupMessagingService(
+            store: groupStore,
+            capacityProfile: .init(id: "standard", limits: fixture.profile),
+            roomShardID: "rooms-primary",
+            now: { fixture.now }
+        )
+        let audienceImports = V2GroupAudienceImportService(
+            store: audienceStore,
+            groupMessaging: groupMessaging,
+            now: { fixture.now }
+        )
+        let handler = V2GatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
+            groupAudienceImports: audienceImports,
+            sync: fixture.syncService()
+        )
+        let operationID = "00000000-0000-0000-0000-000000000036"
+        let memberID = "00000000-0000-0000-0000-000000000037"
+
+        var begin = IMV2Envelope(); begin.beginGroupRoomCreation = .init()
+        begin.beginGroupRoomCreation.operationID = operationID
+        begin.beginGroupRoomCreation.title = " 分页项目群 "
+        let prepared = try await handler.handle(envelope: begin, identity: fixture.identity)
+        #expect(prepared.groupRoomCreationPrepared.title == "分页项目群")
+        #expect(prepared.groupRoomCreationPrepared.stagedMemberCount == 0)
+
+        var append = IMV2Envelope(); append.appendGroupRoomCreationMembers = .init()
+        append.appendGroupRoomCreationMembers.operationID = operationID
+        append.appendGroupRoomCreationMembers.memberUserIds = [memberID]
+        let appended = try await handler.handle(envelope: append, identity: fixture.identity)
+        #expect(appended.groupRoomCreationMembersAppended.stagedMemberCount == 1)
+
+        var finalize = IMV2Envelope(); finalize.finalizeGroupRoomCreation = .init()
+        finalize.finalizeGroupRoomCreation.operationID = operationID
+        let created = try await handler.handle(envelope: finalize, identity: fixture.identity)
+        #expect(created.groupRoomCreated.memberCount == 2)
+        #expect(created.groupRoomCreated.memberUserIds.isEmpty)
+        #expect(await groupStore.actor() == fixture.userID)
+        #expect(await groupStore.members() == [fixture.userID, try UserID(memberID)])
+        #expect(await audienceStore.actor() == fixture.userID)
+    }
+
+    @Test("stalled finalizing draft is replayed with its original operation identity")
+    func finalizingDraftRecoveryReplaysTheOriginalOperation() async throws {
+        let fixture = try GatewayDomainFixture()
+        let groupStore = GatewayGroupStore()
+        let audienceStore = GatewayAudienceImportStore()
+        let groupMessaging = try V2GroupMessagingService(
+            store: groupStore,
+            capacityProfile: .init(id: "standard", limits: fixture.profile),
+            roomShardID: "rooms-primary",
+            now: { fixture.now }
+        )
+        let imports = V2GroupAudienceImportService(
+            store: audienceStore,
+            groupMessaging: groupMessaging,
+            policy: .init(maximumStagedMembersPerActor: fixture.profile.maxEligibleMembers, finalizingRecoveryInterval: 30),
+            now: { fixture.now }
+        )
+        let operationID = try GroupRoomOperationID("00000000-0000-0000-0000-000000000038")
+        let member = try UserID("00000000-0000-0000-0000-000000000039")
+        _ = try await imports.begin(actorUserID: fixture.userID, operationID: operationID, title: "恢复群")
+        _ = try await imports.append(actorUserID: fixture.userID, operationID: operationID, memberUserIDs: [member])
+        await audienceStore.setRecoveryCandidates([.init(actorUserID: fixture.userID, operationID: operationID)])
+
+        #expect(try await imports.recoverFinalizing(limit: 1) == .init(claimedCount: 1, recoveredCount: 1, failedCount: 0))
+        #expect(await groupStore.actor() == fixture.userID)
+        #expect(await groupStore.members() == [fixture.userID, member])
+        #expect(await audienceStore.completedOperationIDs() == [operationID])
+    }
+
+    @Test("one corrupt recovery candidate does not strand later claimed candidates")
+    func recoveryContinuesAfterAnIndividualCandidateFails() async throws {
+        let fixture = try GatewayDomainFixture()
+        let groupStore = GatewayGroupStore()
+        let audienceStore = GatewayAudienceImportStore()
+        let groupMessaging = try V2GroupMessagingService(
+            store: groupStore,
+            capacityProfile: .init(id: "standard", limits: fixture.profile),
+            roomShardID: "rooms-primary",
+            now: { fixture.now }
+        )
+        let imports = V2GroupAudienceImportService(
+            store: audienceStore,
+            groupMessaging: groupMessaging,
+            policy: .init(maximumStagedMembersPerActor: fixture.profile.maxEligibleMembers, finalizingRecoveryInterval: 30),
+            now: { fixture.now }
+        )
+        let goodOperation = try GroupRoomOperationID("00000000-0000-0000-0000-000000000040")
+        let badOperation = try GroupRoomOperationID("00000000-0000-0000-0000-000000000041")
+        _ = try await imports.begin(actorUserID: fixture.userID, operationID: goodOperation, title: "可恢复群")
+        await audienceStore.setRecoveryCandidates([
+            .init(actorUserID: fixture.userID, operationID: badOperation),
+            .init(actorUserID: fixture.userID, operationID: goodOperation)
+        ])
+        await audienceStore.setFailingRecoveryOperationIDs([badOperation])
+
+        #expect(try await imports.recoverFinalizing(limit: 2) == .init(claimedCount: 2, recoveredCount: 1, failedCount: 1))
+        #expect(await audienceStore.completedOperationIDs() == [goodOperation])
+    }
+
+    @Test("frozen group creation cancellation has a distinct stable protocol code")
+    func frozenGroupCreationCancellationUsesDedicatedProtocolCode() async throws {
+        let fixture = try GatewayDomainFixture()
+        let audienceStore = GatewayAudienceImportStore()
+        await audienceStore.setCancellationFrozen(true)
+        let groupMessaging = try V2GroupMessagingService(
+            store: GatewayGroupStore(),
+            capacityProfile: .init(id: "standard", limits: fixture.profile),
+            roomShardID: "rooms-primary",
+            now: { fixture.now }
+        )
+        let handler = V2GatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
+            groupAudienceImports: .init(store: audienceStore, groupMessaging: groupMessaging, now: { fixture.now }),
+            sync: fixture.syncService()
+        )
+        var request = IMV2Envelope(); request.cancelGroupRoomCreation = .init()
+        request.cancelGroupRoomCreation.operationID = "00000000-0000-0000-0000-000000000042"
+
+        #expect(try await handler.handle(envelope: request, identity: fixture.identity).error.code == "GROUP_CREATION_FROZEN")
     }
 
     @Test("Hybrid room subscription verifies the session actor and returns only its waterline")
@@ -404,13 +532,80 @@ private actor GatewayMembershipDirectoryStore: V2RoomMembershipDirectoryStore {
 
 private actor GatewayGroupStore: V2GroupMessagingStore {
     private var capturedActor: UserID?
+    private var capturedMembers: [UserID] = []
 
     func create(command: V2CreateGroupRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID: RoomID, eventID _: EventID, planID _: FanoutPlanID, now: Date) -> V2CreateGroupRoomOutcome {
         capturedActor = command.actorUserID
+        capturedMembers = command.allMemberUserIDs
         return .created(.init(roomID: roomID, ownerUserID: command.actorUserID, title: command.title, deliveryMode: command.deliveryMode, memberUserIDs: command.allMemberUserIDs, createdAt: now))
     }
 
     func actor() -> UserID? { capturedActor }
+    func members() -> [UserID] { capturedMembers }
+}
+
+private actor GatewayAudienceImportStore: V2GroupAudienceImportStore {
+    private var capturedActor: UserID?
+    private var title: String?
+    private var members: [UserID] = []
+    private var recoveryCandidates: [V2GroupAudienceRecoveryCandidate] = []
+    private var completedOperationIDsValue: [GroupRoomOperationID] = []
+    private var failingRecoveryOperationIDs: Set<GroupRoomOperationID> = []
+    private var cancellationFrozen = false
+
+    func begin(actorUserID: UserID, operationID: GroupRoomOperationID, title: String, policy _: V2GroupAudienceImportPolicy, now _: Date) throws -> V2GroupAudienceDraft {
+        capturedActor = actorUserID
+        if let existingTitle = self.title {
+            guard existingTitle == title else { throw V2GroupAudienceImportError.idempotencyConflict }
+        } else {
+            self.title = title
+        }
+        return .init(operationID: operationID, title: title, stagedMemberCount: members.count)
+    }
+
+    func append(actorUserID: UserID, operationID: GroupRoomOperationID, memberUserIDs: [UserID], maximumMembers: Int, policy _: V2GroupAudienceImportPolicy, now _: Date) throws -> V2GroupAudienceDraft {
+        capturedActor = actorUserID
+        guard let title else { throw V2GroupAudienceImportError.missingDraft }
+        members = Array(Set(members).union(memberUserIDs)).sorted()
+        guard members.count <= maximumMembers else { throw V2GroupAudienceImportError.memberLimitReached }
+        return .init(operationID: operationID, title: title, stagedMemberCount: members.count)
+    }
+
+    func freeze(actorUserID: UserID, operationID: GroupRoomOperationID, policy _: V2GroupAudienceImportPolicy, now _: Date) throws -> V2GroupAudienceImport {
+        capturedActor = actorUserID
+        if failingRecoveryOperationIDs.contains(operationID) {
+            throw V2GroupAudienceImportError.corruptPersistenceState
+        }
+        guard let title else { throw V2GroupAudienceImportError.missingDraft }
+        return try .init(actorUserID: actorUserID, operationID: operationID, title: title, memberUserIDs: members)
+    }
+
+    func complete(actorUserID: UserID, operationID: GroupRoomOperationID, roomID _: RoomID, policy _: V2GroupAudienceImportPolicy, now _: Date) {
+        capturedActor = actorUserID
+        completedOperationIDsValue.append(operationID)
+    }
+
+    func discardFrozen(actorUserID: UserID, operationID _: GroupRoomOperationID, now _: Date) {
+        capturedActor = actorUserID
+        title = nil
+        members = []
+    }
+
+    func cancel(actorUserID: UserID, operationID _: GroupRoomOperationID, now _: Date) throws {
+        capturedActor = actorUserID
+        if cancellationFrozen { throw V2GroupAudienceImportError.draftFrozen }
+        title = nil
+        members = []
+    }
+
+    func purgeExpired(now _: Date, limit _: Int) -> Int { 0 }
+    func recoverableFinalizing(now _: Date, staleAfter _: TimeInterval, limit: Int) -> [V2GroupAudienceRecoveryCandidate] { Array(recoveryCandidates.prefix(limit)) }
+
+    func actor() -> UserID? { capturedActor }
+    func setRecoveryCandidates(_ candidates: [V2GroupAudienceRecoveryCandidate]) { recoveryCandidates = candidates }
+    func setFailingRecoveryOperationIDs(_ operationIDs: Set<GroupRoomOperationID>) { failingRecoveryOperationIDs = operationIDs }
+    func setCancellationFrozen(_ frozen: Bool) { cancellationFrozen = frozen }
+    func completedOperationIDs() -> [GroupRoomOperationID] { completedOperationIDsValue }
 }
 
 private actor GatewayGroupEventLogStore: V2GroupEventLogStore {

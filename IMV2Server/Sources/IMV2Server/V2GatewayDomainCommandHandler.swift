@@ -11,6 +11,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     private let readReceipt: V2ReadReceiptService?
     private let directMessaging: V2DirectMessagingService?
     private let groupMessaging: V2GroupMessagingService?
+    private let groupAudienceImports: V2GroupAudienceImportService?
     private let groupEventLog: V2GroupEventLogService?
     private let foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing
     private let membershipDirectory: V2RoomMembershipDirectoryService?
@@ -20,7 +21,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     private let telemetry: any V2TelemetrySink
     private let now: @Sendable () -> Date
 
-    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService? = nil, withdrawal: V2MessageWithdrawalService? = nil, reaction: V2MessageReactionService? = nil, edit: V2MessageEditService? = nil, readReceipt: V2ReadReceiptService? = nil, directMessaging: V2DirectMessagingService? = nil, groupMessaging: V2GroupMessagingService? = nil, groupEventLog: V2GroupEventLogService? = nil, foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing = V2NoopForegroundGroupEventHintPublisher(), membershipDirectory: V2RoomMembershipDirectoryService? = nil, socialRelationships: V2SocialRelationshipService? = nil, moderation: V2ModerationService? = nil, sync: V2SyncService, telemetry: any V2TelemetrySink = V2NoopTelemetrySink(), now: @escaping @Sendable () -> Date = Date.init) {
+    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService? = nil, withdrawal: V2MessageWithdrawalService? = nil, reaction: V2MessageReactionService? = nil, edit: V2MessageEditService? = nil, readReceipt: V2ReadReceiptService? = nil, directMessaging: V2DirectMessagingService? = nil, groupMessaging: V2GroupMessagingService? = nil, groupAudienceImports: V2GroupAudienceImportService? = nil, groupEventLog: V2GroupEventLogService? = nil, foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing = V2NoopForegroundGroupEventHintPublisher(), membershipDirectory: V2RoomMembershipDirectoryService? = nil, socialRelationships: V2SocialRelationshipService? = nil, moderation: V2ModerationService? = nil, sync: V2SyncService, telemetry: any V2TelemetrySink = V2NoopTelemetrySink(), now: @escaping @Sendable () -> Date = Date.init) {
         self.sendMessage = sendMessage
         self.membership = membership
         self.withdrawal = withdrawal
@@ -29,6 +30,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         self.readReceipt = readReceipt
         self.directMessaging = directMessaging
         self.groupMessaging = groupMessaging
+        self.groupAudienceImports = groupAudienceImports
         self.groupEventLog = groupEventLog
         self.foregroundGroupEventHints = foregroundGroupEventHints
         self.membershipDirectory = membershipDirectory
@@ -88,6 +90,10 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             case .recordReadReceipt(let request): return try await handleReadReceipt(request, identity: identity)
             case .openDirectRoom(let request): return try await handleOpenDirectRoom(request, identity: identity)
             case .createGroupRoom(let request): return try await handleCreateGroupRoom(request, identity: identity)
+            case .beginGroupRoomCreation(let request): return try await handleBeginGroupRoomCreation(request, identity: identity)
+            case .appendGroupRoomCreationMembers(let request): return try await handleAppendGroupRoomCreationMembers(request, identity: identity)
+            case .finalizeGroupRoomCreation(let request): return try await handleFinalizeGroupRoomCreation(request, identity: identity)
+            case .cancelGroupRoomCreation(let request): return try await handleCancelGroupRoomCreation(request, identity: identity)
             case .listRoomMembers(let request): return try await handleListRoomMembers(request, identity: identity)
             case .groupEventPull(let request): return try await handleGroupEventPull(request, identity: identity)
             case .groupEventSubscribe(let request): return try await handleGroupEventSubscribe(request, identity: identity)
@@ -109,8 +115,18 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
                 return successEnvelope()
             default: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
             }
-        } catch V2CoreError.invalidIdentifier, V2SendMessageValidationError.invalidTextLength, V2MediaStoreError.invalidReferenceSet, V2MentionValidationError.invalidLimits, V2MentionValidationError.invalidTargetSet, V2ModerationValidationError.invalidReasonCode, V2ModerationValidationError.invalidActionShape, V2ModerationValidationError.invalidMuteExpiry, V2RoomMembershipValidationError.selfTargetingNotAllowed, V2DirectMessagingValidationError.selfTargetingNotAllowed, V2SocialRelationshipValidationError.selfTargetingNotAllowed, V2MessageReactionValidationError.invalidReaction, V2MessageEditValidationError.invalidText, V2ReadReceiptValidationError.invalidRoomSequence, V2GroupMessagingValidationError.invalidTitle, V2GroupMessagingValidationError.invalidInitialMembers, V2RoomMembershipDirectoryError.invalidRequest, V2RoomMembershipDirectoryError.invalidCursor, V2GroupEventLogError.invalidRequest {
+        } catch V2CoreError.invalidIdentifier, V2SendMessageValidationError.invalidTextLength, V2MediaStoreError.invalidReferenceSet, V2MentionValidationError.invalidLimits, V2MentionValidationError.invalidTargetSet, V2ModerationValidationError.invalidReasonCode, V2ModerationValidationError.invalidActionShape, V2ModerationValidationError.invalidMuteExpiry, V2RoomMembershipValidationError.selfTargetingNotAllowed, V2DirectMessagingValidationError.selfTargetingNotAllowed, V2SocialRelationshipValidationError.selfTargetingNotAllowed, V2MessageReactionValidationError.invalidReaction, V2MessageEditValidationError.invalidText, V2ReadReceiptValidationError.invalidRoomSequence, V2GroupMessagingValidationError.invalidTitle, V2GroupMessagingValidationError.invalidInitialMembers, V2GroupAudienceImportError.invalidInput, V2RoomMembershipDirectoryError.invalidRequest, V2RoomMembershipDirectoryError.invalidCursor, V2GroupEventLogError.invalidRequest {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        } catch V2GroupAudienceImportError.memberLimitReached, V2GroupAudienceImportError.activeDraftLimitReached {
+            return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        } catch V2GroupAudienceImportError.missingDraft {
+            return errorEnvelope(code: "NOT_FOUND", retryable: false)
+        } catch V2GroupAudienceImportError.draftFrozen {
+            return errorEnvelope(code: "GROUP_CREATION_FROZEN", retryable: false)
+        } catch V2GroupAudienceImportError.idempotencyConflict {
+            return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
+        } catch V2GroupAudienceImportError.corruptPersistenceState {
+            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2RoomMembershipStoreError.actorNotOwner {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2RoomMembershipDirectoryError.actorNotMember {
@@ -431,6 +447,12 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
 
     private func handleCreateGroupRoom(_ request: IMV2CreateGroupRoom, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         guard let groupMessaging else { return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
+        // The one-frame command is deliberately capped below the transport
+        // limit. New clients use the staged import, so no valid group depends
+        // on a giant unbounded repeated field.
+        guard request.initialMemberUserIds.count <= V2GroupAudienceImport.maximumMembersPerAppend else {
+            return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        }
         let members = try request.initialMemberUserIds.map { try UserID($0) }
         // `delivery_mode` remains in the wire request for rolling-client
         // compatibility, but is deliberately not an authorization input.
@@ -447,10 +469,9 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             var response = IMV2Envelope(); response.groupRoomCreated = .init()
             response.groupRoomCreated.roomID = room.roomID.rawValue
             response.groupRoomCreated.title = room.title
-            // A large-group bootstrap response carries only the aggregate.
-            // Returning a 100k roster here would defeat the pull-based model
-            // and is not an authorization mechanism for roster reads.
-            response.groupRoomCreated.memberUserIds = room.deliveryMode == .standardFanout ? room.memberUserIDs.map(\.rawValue) : []
+            // A roster is never returned by room creation. It is read through
+            // the authenticated, bounded ListRoomMembers directory.
+            response.groupRoomCreated.memberUserIds = []
             response.groupRoomCreated.createdAtMs = Int64(room.createdAt.timeIntervalSince1970 * 1_000)
             response.groupRoomCreated.deliveryMode = switch room.deliveryMode {
             case .standardFanout: .standardFanout
@@ -463,6 +484,58 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
         case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         }
+    }
+
+    private func handleBeginGroupRoomCreation(_ request: IMV2BeginGroupRoomCreation, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        guard let groupAudienceImports else { return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
+        let draft = try await groupAudienceImports.begin(actorUserID: identity.userID, operationID: try .init(request.operationID), title: request.title)
+        var response = IMV2Envelope(); response.groupRoomCreationPrepared = .init()
+        response.groupRoomCreationPrepared.operationID = draft.operationID.rawValue
+        response.groupRoomCreationPrepared.title = draft.title
+        response.groupRoomCreationPrepared.stagedMemberCount = UInt32(draft.stagedMemberCount)
+        return response
+    }
+
+    private func handleAppendGroupRoomCreationMembers(_ request: IMV2AppendGroupRoomCreationMembers, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        guard let groupAudienceImports else { return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
+        let members = try request.memberUserIds.map { try UserID($0) }
+        let draft = try await groupAudienceImports.append(actorUserID: identity.userID, operationID: try .init(request.operationID), memberUserIDs: members)
+        var response = IMV2Envelope(); response.groupRoomCreationMembersAppended = .init()
+        response.groupRoomCreationMembersAppended.operationID = draft.operationID.rawValue
+        response.groupRoomCreationMembersAppended.stagedMemberCount = UInt32(draft.stagedMemberCount)
+        return response
+    }
+
+    private func handleFinalizeGroupRoomCreation(_ request: IMV2FinalizeGroupRoomCreation, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        guard let groupAudienceImports else { return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
+        let outcome = try await groupAudienceImports.finalize(actorUserID: identity.userID, operationID: try .init(request.operationID))
+        switch outcome {
+        case .created(let room), .idempotent(let room):
+            return groupRoomCreatedEnvelope(room)
+        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
+        case .memberLimitReached: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
+        case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
+        }
+    }
+
+    private func handleCancelGroupRoomCreation(_ request: IMV2CancelGroupRoomCreation, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        guard let groupAudienceImports else { return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
+        let operationID = try GroupRoomOperationID(request.operationID)
+        try await groupAudienceImports.cancel(actorUserID: identity.userID, operationID: operationID)
+        var response = IMV2Envelope(); response.groupRoomCreationCancelled = .init()
+        response.groupRoomCreationCancelled.operationID = operationID.rawValue
+        return response
+    }
+
+    private func groupRoomCreatedEnvelope(_ room: V2GroupRoom) -> IMV2Envelope {
+        var response = IMV2Envelope(); response.groupRoomCreated = .init()
+        response.groupRoomCreated.roomID = room.roomID.rawValue
+        response.groupRoomCreated.title = room.title
+        response.groupRoomCreated.createdAtMs = Int64(room.createdAt.timeIntervalSince1970 * 1_000)
+        response.groupRoomCreated.deliveryMode = room.deliveryMode == .standardFanout ? .standardFanout : .largeGroupHybrid
+        response.groupRoomCreated.memberCount = UInt32(room.memberUserIDs.count)
+        return response
     }
 
     private func handleListRoomMembers(_ request: IMV2ListRoomMembers, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {

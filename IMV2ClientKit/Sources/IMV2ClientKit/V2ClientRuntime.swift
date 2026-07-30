@@ -128,6 +128,7 @@ public actor V2ClientRuntime {
     private var startAttempt: StartAttempt?
     private var availabilityTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    private var stopWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     public init(connection: any V2RealtimeSessionConnecting, activity: any V2ClientRuntimeActivity) {
         self.connection = connection
@@ -135,6 +136,25 @@ public actor V2ClientRuntime {
     }
 
     public func currentState() -> V2ClientRuntimeState { state }
+
+    /// Waits for a running/starting lifecycle to reach its terminal stopped
+    /// state. The app owns reconnection policy; this actor only exposes the
+    /// transition so foreground recovery has no polling race.
+    public func waitUntilStopped() async {
+        guard state != .stopped else { return }
+        let waiterID = UUID()
+        await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                guard state != .stopped else {
+                    continuation.resume()
+                    return
+                }
+                stopWaiters[waiterID] = continuation
+            }
+        }, onCancel: {
+            Task { await self.cancelStopWaiter(waiterID) }
+        })
+    }
 
     /// Connects and completes initial durable sync before live tasks exist.
     /// Simultaneous callers share the same result rather than performing two
@@ -198,6 +218,7 @@ public actor V2ClientRuntime {
         heartbeatTask?.cancel()
         heartbeatTask = nil
         state = .stopped
+        resumeStopWaiters()
         await connection.disconnect()
     }
 
@@ -232,7 +253,18 @@ public actor V2ClientRuntime {
         heartbeatTask?.cancel()
         heartbeatTask = nil
         state = .stopped
+        resumeStopWaiters()
         await connection.disconnect()
+    }
+
+    private func cancelStopWaiter(_ waiterID: UUID) {
+        stopWaiters.removeValue(forKey: waiterID)?.resume()
+    }
+
+    private func resumeStopWaiters() {
+        let waiters = stopWaiters.values
+        stopWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters { waiter.resume() }
     }
 }
 

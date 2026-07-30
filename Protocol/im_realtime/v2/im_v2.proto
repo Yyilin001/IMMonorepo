@@ -70,6 +70,13 @@ message Envelope {
     // standard group uses this only for an active-view preview; its reliable
     // delivery and ACK still use the personal sync stream.
     GroupEventAvailable group_event_available = 66;
+    BeginGroupRoomCreation begin_group_room_creation = 67;
+    GroupRoomCreationPrepared group_room_creation_prepared = 68;
+    AppendGroupRoomCreationMembers append_group_room_creation_members = 69;
+    GroupRoomCreationMembersAppended group_room_creation_members_appended = 70;
+    FinalizeGroupRoomCreation finalize_group_room_creation = 71;
+    CancelGroupRoomCreation cancel_group_room_creation = 72;
+    GroupRoomCreationCancelled group_room_creation_cancelled = 73;
     Error error = 90;
   }
 }
@@ -308,9 +315,9 @@ message DirectRoomOpened {
   int64 created_at_ms = 3;
 }
 
-// `operation_id` is durable client intent. Group bootstrap is a single atomic
-// command: the room and all initial memberships either exist together or not
-// at all. Later additions/removals use ChangeRoomMembership.
+// Legacy one-frame bootstrap. New clients must use the bounded staged import
+// below; keeping this message lets the gateway reject oversized legacy calls
+// explicitly instead of silently exceeding its frame contract.
 message CreateGroupRoom {
   string operation_id = 1;
   string title = 2;
@@ -325,6 +332,47 @@ message GroupRoomCreated {
   int64 created_at_ms = 4;
   GroupDeliveryMode delivery_mode = 5;
   uint32 member_count = 6;
+}
+
+// Group membership is collected in bounded pages, then frozen and committed
+// under one durable operation ID. The room's immutable delivery mode is
+// derived only from that frozen audience by the server. No roster is ever
+// returned by this protocol path; use ListRoomMembers after creation.
+message BeginGroupRoomCreation {
+  string operation_id = 1;
+  string title = 2;
+}
+
+message GroupRoomCreationPrepared {
+  string operation_id = 1;
+  string title = 2;
+  uint32 staged_member_count = 3;
+}
+
+message AppendGroupRoomCreationMembers {
+  string operation_id = 1;
+  repeated string member_user_ids = 2;
+}
+
+message GroupRoomCreationMembersAppended {
+  string operation_id = 1;
+  uint32 staged_member_count = 2;
+}
+
+message FinalizeGroupRoomCreation {
+  string operation_id = 1;
+}
+
+// Cancels only a mutable staging draft. The operation is idempotent if the
+// draft was already removed by expiry or an earlier cancellation; a frozen
+// draft must continue through finalize so its room idempotency boundary stays
+// unambiguous.
+message CancelGroupRoomCreation {
+  string operation_id = 1;
+}
+
+message GroupRoomCreationCancelled {
+  string operation_id = 1;
 }
 
 enum GroupDeliveryMode {

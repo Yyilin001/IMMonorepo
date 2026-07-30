@@ -41,7 +41,6 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
                 WHERE user_id = \(bind: actorID) OR user_id = \(bind: targetID)
                 """).all(decoding: DirectPublicProfileRow.self)
             guard profiles.count == 2,
-                  let actorProfile = profiles.first(where: { $0.userID == actorID }),
                   let targetProfile = profiles.first(where: { $0.userID == targetID })
             else { throw V2DirectMessagingStoreError.corruptPersistenceState }
             guard let lease = try await sql.raw("SELECT lease_id, generation, valid_until FROM im_v2.shard_admission_pools WHERE room_shard_id = \(bind: roomShardID) AND capacity_profile_id = \(bind: capacityProfile.id) FOR UPDATE").first(decoding: DirectShardLeaseRow.self), lease.validUntil > now else {
@@ -53,7 +52,6 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             try await sql.raw("INSERT INTO im_v2.room_admission (room_id, eligible_member_count, command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans, shard_lease_id, shard_lease_generation) VALUES (\(bind: createdRoomID), 2, \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: capacityProfile.limits.maxFanoutUnitsPerWindow), \(bind: capacityProfile.limits.maxOutstandingFanoutUnits), \(bind: capacityProfile.limits.maxOutstandingPlans), \(bind: lease.leaseID), \(bind: lease.generation))").run()
             try await insertOperation(actorID: actorID, operationID: operationID, targetID: targetID, roomID: createdRoomID, createdAt: now, sql: sql)
             try await appendDirectRoomProfileProjection(recipientID: actorID, roomID: createdRoomID, profile: targetProfile, sourceEventID: operationID, createdAt: now, sql: sql)
-            try await appendDirectRoomProfileProjection(recipientID: targetID, roomID: createdRoomID, profile: actorProfile, sourceEventID: operationID, createdAt: now, sql: sql)
             return .opened(.init(roomID: roomID, actorUserID: command.actorUserID, targetUserID: command.targetUserID, createdAt: now))
         }
         switch outcome {
@@ -61,7 +59,6 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             guard let shadowForwarder else { return outcome }
             let sourceEventID = try EventID(command.operationID.rawValue)
             _ = try await shadowForwarder.shadowIfForwarding(userID: command.actorUserID, sourceEventID: sourceEventID, projectionKinds: ["direct_room_profile"])
-            _ = try await shadowForwarder.shadowIfForwarding(userID: command.targetUserID, sourceEventID: sourceEventID, projectionKinds: ["direct_room_profile"])
         case .idempotencyConflict, .unavailable:
             break
         }

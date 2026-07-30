@@ -75,19 +75,19 @@ struct V2ProtobufSyncTransportTests {
         #expect(await wire.operationIDs() == ["00000000-0000-0000-0000-000000000319", "00000000-0000-0000-0000-000000000320"])
     }
 
-    @Test("group creation preserves durable intent and canonical response")
+    @Test("staged group creation preserves durable intent and bounded response")
     func groupCreationRoundTrips() async throws {
         let wire = GroupMessagingWire()
         let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
         let member = try UserID("00000000-0000-0000-0000-000000000327")
-        let room = try await transport.createGroupRoom(
-            operationID: try .init("00000000-0000-0000-0000-000000000326"),
-            title: "  Project  ",
-            deliveryMode: .standardFanout,
-            initialMemberUserIDs: [member]
-        )
+        let operationID: GroupRoomOperationID = try .init("00000000-0000-0000-0000-000000000326")
+        let prepared = try await transport.beginGroupRoomCreation(operationID: operationID, title: "  Project  ")
+        let appended = try await transport.appendGroupRoomCreationMembers(operationID: operationID, memberUserIDs: [member])
+        let room = try await transport.finalizeGroupRoomCreation(operationID: operationID)
+        #expect(prepared.title == "Project")
+        #expect(appended.stagedMemberCount == 1)
         #expect(room.title == "Project")
-        #expect(room.memberUserIDs.contains(member))
+        #expect(room.memberUserIDs.isEmpty)
         #expect(await wire.operationID() == "00000000-0000-0000-0000-000000000326")
     }
 
@@ -385,19 +385,33 @@ private actor DirectMessagingWire: V2AuthenticatedFrameTransport {
 
 private actor GroupMessagingWire: V2AuthenticatedFrameTransport {
     private var receivedOperationID = ""
+    private var title = ""
+    private var stagedMembers: [String] = []
 
     func request(_ frame: V2Frame) throws -> V2Frame {
         let request = try V2ProtobufFrameCodec.decode(frame)
-        guard case .createGroupRoom(let command)? = request.body else { throw V2RealtimeTransportError.unexpectedResponse }
-        receivedOperationID = command.operationID
         var response = IMV2Envelope(); response.requestID = request.requestID; response.protocolVersion = request.protocolVersion
-        response.groupRoomCreated = .init()
-        response.groupRoomCreated.roomID = "00000000-0000-0000-0000-000000000328"
-        response.groupRoomCreated.title = command.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        response.groupRoomCreated.memberUserIds = command.initialMemberUserIds
-        response.groupRoomCreated.createdAtMs = 1_750_000_000_000
-        response.groupRoomCreated.deliveryMode = command.deliveryMode
-        response.groupRoomCreated.memberCount = UInt32(command.initialMemberUserIds.count + 1)
+        switch request.body {
+        case .beginGroupRoomCreation(let command):
+            receivedOperationID = command.operationID; title = command.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            response.groupRoomCreationPrepared = .init()
+            response.groupRoomCreationPrepared.operationID = command.operationID
+            response.groupRoomCreationPrepared.title = title
+        case .appendGroupRoomCreationMembers(let command):
+            receivedOperationID = command.operationID; stagedMembers.append(contentsOf: command.memberUserIds)
+            response.groupRoomCreationMembersAppended = .init()
+            response.groupRoomCreationMembersAppended.operationID = command.operationID
+            response.groupRoomCreationMembersAppended.stagedMemberCount = UInt32(stagedMembers.count)
+        case .finalizeGroupRoomCreation(let command):
+            receivedOperationID = command.operationID
+            response.groupRoomCreated = .init()
+            response.groupRoomCreated.roomID = "00000000-0000-0000-0000-000000000328"
+            response.groupRoomCreated.title = title
+            response.groupRoomCreated.createdAtMs = 1_750_000_000_000
+            response.groupRoomCreated.deliveryMode = .standardFanout
+            response.groupRoomCreated.memberCount = UInt32(stagedMembers.count + 1)
+        default: throw V2RealtimeTransportError.unexpectedResponse
+        }
         return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
     }
 

@@ -1553,7 +1553,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 guard decoded.title == command.title,
                       decoded.deliveryMode == command.deliveryMode,
                       decoded.initialMemberUserIDs == command.initialMemberUserIDs,
-                      decoded.state == .pending
+                      decoded.state == .pending || decoded.state == .finalizing
                 else { throw V2ClientCommandError.commandConflict }
                 return decoded
             }
@@ -1561,7 +1561,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 db,
                 sql: """
                 SELECT * FROM v2_pending_group_room_creations
-                WHERE title = ? AND delivery_mode = ? AND initial_member_user_ids = ? AND state = 'pending'
+                WHERE title = ? AND delivery_mode = ? AND initial_member_user_ids = ? AND state IN ('pending', 'finalizing')
                 ORDER BY created_at, operation_id
                 LIMIT 1
                 """,
@@ -1590,35 +1590,98 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
     public func nextReadyGroupRoomCreation(now: Date) throws -> V2PendingGroupRoomCreation? {
         try databasePool.read { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_room_creations WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_room_creations WHERE state IN ('pending', 'finalizing') AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }
             return try Self.decodePendingGroupRoomCreation(row)
+        }
+    }
+
+    public func markGroupRoomCreationMembersUploaded(operationID: GroupRoomOperationID, uploadedMemberCount: Int) throws {
+        try databasePool.write { db in
+            guard uploadedMemberCount >= 0,
+                  let row = try Row.fetchOne(
+                    db,
+                    sql: "SELECT initial_member_user_ids, uploaded_member_count FROM v2_pending_group_room_creations WHERE operation_id = ? AND state IN ('pending', 'finalizing')",
+                    arguments: [operationID.rawValue]
+                  )
+            else { throw V2ClientCommandError.commandNotPending }
+            let memberIDs = try Self.decodeGroupMemberUserIDs(row["initial_member_user_ids"] as String)
+            let current = Int(row["uploaded_member_count"] as Int64)
+            guard uploadedMemberCount >= current, uploadedMemberCount <= memberIDs.count else {
+                throw V2ClientCommandError.commandConflict
+            }
+            try db.execute(
+                sql: "UPDATE v2_pending_group_room_creations SET uploaded_member_count = ? WHERE operation_id = ?",
+                arguments: [uploadedMemberCount, operationID.rawValue]
+            )
+        }
+    }
+
+    public func resetGroupRoomCreationUploadProgress(operationID: GroupRoomOperationID) throws {
+        try databasePool.write { db in
+            try Self.requireActiveGroupRoomCreation(operationID, db: db)
+            try db.execute(
+                sql: "UPDATE v2_pending_group_room_creations SET uploaded_member_count = 0 WHERE operation_id = ?",
+                arguments: [operationID.rawValue]
+            )
         }
     }
 
     public func markGroupRoomCreationAcknowledged(operationID: GroupRoomOperationID, roomID: RoomID) throws {
         try databasePool.write { db in
-            try Self.requirePendingGroupRoomCreation(operationID, db: db)
+            try Self.requireActiveGroupRoomCreation(operationID, db: db)
             try db.execute(sql: "UPDATE v2_pending_group_room_creations SET state = 'acknowledged', created_room_id = ?, terminal_code = NULL WHERE operation_id = ?", arguments: [roomID.rawValue, operationID.rawValue])
         }
     }
 
     public func scheduleGroupRoomCreationRetry(operationID: GroupRoomOperationID, nextAttemptAt: Date) throws {
         try databasePool.write { db in
-            try Self.requirePendingGroupRoomCreation(operationID, db: db)
+            guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == "pending" || state == "finalizing" || state == "cancelling" else { throw V2ClientCommandError.commandNotPending }
             try db.execute(sql: "UPDATE v2_pending_group_room_creations SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue])
+        }
+    }
+
+    public func beginCancellingGroupRoomCreation(operationID: GroupRoomOperationID, now: Date) throws {
+        try databasePool.write { db in
+            try Self.requirePendingGroupRoomCreation(operationID, db: db)
+            try db.execute(sql: "UPDATE v2_pending_group_room_creations SET state = 'cancelling', next_attempt_at = ? WHERE operation_id = ?", arguments: [now.timeIntervalSince1970, operationID.rawValue])
+        }
+    }
+
+    public func nextReadyGroupRoomCreationCancellation(now: Date) throws -> V2PendingGroupRoomCreation? {
+        try databasePool.read { db in
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_room_creations WHERE state = 'cancelling' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }
+            return try Self.decodePendingGroupRoomCreation(row)
+        }
+    }
+
+    public func markGroupRoomCreationCancelled(operationID: GroupRoomOperationID) throws {
+        try databasePool.write { db in
+            guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == "cancelling" else { throw V2ClientCommandError.commandNotPending }
+            try db.execute(sql: "UPDATE v2_pending_group_room_creations SET state = 'cancelled', terminal_code = NULL WHERE operation_id = ?", arguments: [operationID.rawValue])
+        }
+    }
+
+    public func resumeGroupRoomCreationAfterCancellationRefusal(operationID: GroupRoomOperationID, now: Date) throws {
+        try databasePool.write { db in
+            guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == "cancelling" else { throw V2ClientCommandError.commandNotPending }
+            try db.execute(sql: "UPDATE v2_pending_group_room_creations SET state = 'finalizing', next_attempt_at = ? WHERE operation_id = ?", arguments: [now.timeIntervalSince1970, operationID.rawValue])
         }
     }
 
     public func rejectGroupRoomCreation(operationID: GroupRoomOperationID, code: String) throws {
         guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }
         try databasePool.write { db in
-            try Self.requirePendingGroupRoomCreation(operationID, db: db)
+            try Self.requireActiveGroupRoomCreation(operationID, db: db)
             try db.execute(sql: "UPDATE v2_pending_group_room_creations SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue])
         }
     }
 
     public func pendingGroupRoomCreations() throws -> [V2PendingGroupRoomCreation] {
         try databasePool.read { db in try Row.fetchAll(db, sql: "SELECT * FROM v2_pending_group_room_creations ORDER BY created_at, operation_id").map(Self.decodePendingGroupRoomCreation) }
+    }
+
+    public func groupRoomCreations() throws -> [V2PendingGroupRoomCreation] {
+        try pendingGroupRoomCreations()
     }
 
     private static func validateOrdering(_ records: [V2ClientSyncRecord]) throws {
@@ -2057,6 +2120,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     private static func requirePendingReadReceipt(_ operationID: ReadReceiptOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_read_receipts WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingReadReceipt.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
     private static func requirePendingSocialCommand(_ operationID: String, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_social_commands WHERE operation_id = ?", arguments: [operationID])?["state"], state == V2PendingSocialCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
     private static func requirePendingGroupRoomCreation(_ operationID: GroupRoomOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingGroupRoomCreation.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
+    private static func requireActiveGroupRoomCreation(_ operationID: GroupRoomOperationID, db: Database) throws {
+        guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingGroupRoomCreation.State.pending.rawValue || state == V2PendingGroupRoomCreation.State.finalizing.rawValue else {
+            throw V2ClientCommandError.commandNotPending
+        }
+    }
 
     private static func decodePendingCommand(_ row: Row) throws -> V2PendingMessageCommand {
         guard let state = V2PendingMessageCommand.State(rawValue: row["state"] as String) else {
@@ -2219,13 +2287,16 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         guard let encoded = String(data: try JSONEncoder().encode(members.map(\.rawValue)), encoding: .utf8) else { throw V2ClientCommandError.commandConflict }
         return encoded
     }
+    private static func decodeGroupMemberUserIDs(_ encoded: String) throws -> [UserID] {
+        try JSONDecoder().decode([String].self, from: Data(encoded.utf8)).map(UserID.init)
+    }
     private static func decodePendingGroupRoomCreation(_ row: Row) throws -> V2PendingGroupRoomCreation {
         let membersData = Data((row["initial_member_user_ids"] as String).utf8)
         let members = try JSONDecoder().decode([String].self, from: membersData).map(UserID.init)
         guard let state = V2PendingGroupRoomCreation.State(rawValue: row["state"] as String),
               let deliveryMode = V2GroupDeliveryMode(rawValue: row["delivery_mode"] as String)
         else { throw V2ClientCommandError.commandConflict }
-        return try .init(operationID: .init(row["operation_id"] as String), title: row["title"], deliveryMode: deliveryMode, initialMemberUserIDs: members, state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), createdRoomID: try (row["created_room_id"] as String?).map(RoomID.init), terminalCode: row["terminal_code"])
+        return try .init(operationID: .init(row["operation_id"] as String), title: row["title"], deliveryMode: deliveryMode, initialMemberUserIDs: members, uploadedMemberCount: row["uploaded_member_count"] as Int, state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), createdRoomID: try (row["created_room_id"] as String?).map(RoomID.init), terminalCode: row["terminal_code"])
     }
 
     private static let migrator: DatabaseMigrator = {
@@ -2740,6 +2811,65 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try db.execute(sql: "ALTER TABLE v2_pending_group_room_creations ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'standard_fanout' CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid'))")
             try db.execute(sql: "DROP INDEX v2_pending_group_room_creations_intent_idx")
             try db.execute(sql: "CREATE INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx ON v2_pending_group_room_creations (title, delivery_mode, initial_member_user_ids, created_at, operation_id) WHERE state = 'pending'")
+        }
+        migrator.registerMigration("addV2PendingGroupRoomCreationUploadProgress") { db in
+            try db.execute(sql: "ALTER TABLE v2_pending_group_room_creations ADD COLUMN uploaded_member_count INTEGER NOT NULL DEFAULT 0 CHECK (uploaded_member_count >= 0)")
+        }
+        migrator.registerMigration("addV2PendingGroupRoomCreationCancellation") { db in
+            try db.execute(sql: "DROP INDEX v2_pending_group_room_creations_ready_idx")
+            try db.execute(sql: "DROP INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx")
+            try db.execute(sql: "ALTER TABLE v2_pending_group_room_creations RENAME TO v2_pending_group_room_creations_legacy")
+            try db.execute(sql: """
+                CREATE TABLE v2_pending_group_room_creations (
+                    operation_id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                    initial_member_user_ids TEXT NOT NULL,
+                    delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid')),
+                    uploaded_member_count INTEGER NOT NULL DEFAULT 0 CHECK (uploaded_member_count >= 0),
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'cancelling', 'cancelled', 'acknowledged', 'rejected')),
+                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL,
+                    created_room_id TEXT, terminal_code TEXT,
+                    CHECK ((state IN ('pending', 'cancelling', 'cancelled') AND created_room_id IS NULL AND terminal_code IS NULL)
+                        OR (state = 'acknowledged' AND created_room_id IS NOT NULL AND terminal_code IS NULL)
+                        OR (state = 'rejected' AND created_room_id IS NULL AND terminal_code IS NOT NULL))
+                );
+                INSERT INTO v2_pending_group_room_creations
+                    (operation_id, title, initial_member_user_ids, delivery_mode, uploaded_member_count, state, attempt_count, next_attempt_at, created_at, created_room_id, terminal_code)
+                SELECT operation_id, title, initial_member_user_ids, delivery_mode, uploaded_member_count, state, attempt_count, next_attempt_at, created_at, created_room_id, terminal_code
+                FROM v2_pending_group_room_creations_legacy;
+                DROP TABLE v2_pending_group_room_creations_legacy;
+                CREATE INDEX v2_pending_group_room_creations_ready_idx
+                    ON v2_pending_group_room_creations (state, next_attempt_at, created_at) WHERE state IN ('pending', 'cancelling');
+                CREATE INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx
+                    ON v2_pending_group_room_creations (title, delivery_mode, initial_member_user_ids, created_at, operation_id) WHERE state = 'pending';
+                """)
+        }
+        migrator.registerMigration("preserveFrozenGroupCreationCancellationOutcome") { db in
+            try db.execute(sql: "DROP INDEX v2_pending_group_room_creations_ready_idx")
+            try db.execute(sql: "DROP INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx")
+            try db.execute(sql: "ALTER TABLE v2_pending_group_room_creations RENAME TO v2_pending_group_room_creations_legacy")
+            try db.execute(sql: """
+                CREATE TABLE v2_pending_group_room_creations (
+                    operation_id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                    initial_member_user_ids TEXT NOT NULL,
+                    delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid')),
+                    uploaded_member_count INTEGER NOT NULL DEFAULT 0 CHECK (uploaded_member_count >= 0),
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'cancelling', 'finalizing', 'cancelled', 'acknowledged', 'rejected')),
+                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL,
+                    created_room_id TEXT, terminal_code TEXT,
+                    CHECK ((state IN ('pending', 'cancelling', 'finalizing', 'cancelled') AND created_room_id IS NULL AND terminal_code IS NULL)
+                        OR (state = 'acknowledged' AND created_room_id IS NOT NULL AND terminal_code IS NULL)
+                        OR (state = 'rejected' AND created_room_id IS NULL AND terminal_code IS NOT NULL))
+                );
+                INSERT INTO v2_pending_group_room_creations
+                    (operation_id, title, initial_member_user_ids, delivery_mode, uploaded_member_count, state, attempt_count, next_attempt_at, created_at, created_room_id, terminal_code)
+                SELECT operation_id, title, initial_member_user_ids, delivery_mode, uploaded_member_count, state, attempt_count, next_attempt_at, created_at, created_room_id, terminal_code
+                FROM v2_pending_group_room_creations_legacy;
+                DROP TABLE v2_pending_group_room_creations_legacy;
+                CREATE INDEX v2_pending_group_room_creations_ready_idx
+                    ON v2_pending_group_room_creations (state, next_attempt_at, created_at) WHERE state IN ('pending', 'finalizing', 'cancelling');
+                CREATE INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx
+                    ON v2_pending_group_room_creations (title, delivery_mode, initial_member_user_ids, created_at, operation_id) WHERE state IN ('pending', 'finalizing');
+                """)
         }
         migrator.registerMigration("addV2HybridGroupEventCursors") { db in
             try db.execute(sql: """

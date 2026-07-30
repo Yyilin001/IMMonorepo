@@ -90,6 +90,54 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                   AND source_event_id = \(bind: nonFanoutSourceEventID)
                   AND projection_kind = 'relationship'
                 """).run()
+            // Staged group creation owns temporary audiences outside the room
+            // bootstrap transaction. Verify its PostgreSQL admission and
+            // lifecycle boundaries directly: actor quota, cancellation's
+            // cascading member cleanup, and bounded expiry reclamation.
+            let audienceStore = PostgresV2GroupAudienceImportStore(database: app.db(.psql))
+            let audienceActor = try UserID("00000000-0000-0000-0000-000000000e10")
+            let audienceOperationA = try GroupRoomOperationID("00000000-0000-0000-0000-000000000e11")
+            let audienceOperationB = try GroupRoomOperationID("00000000-0000-0000-0000-000000000e12")
+            let audienceMembers = [
+                try UserID("00000000-0000-0000-0000-000000000e13"),
+                try UserID("00000000-0000-0000-0000-000000000e14")
+            ]
+            let audienceNow = Date(timeIntervalSince1970: 1_750_000_000)
+            let audiencePolicy = V2GroupAudienceImportPolicy(
+                maximumActiveDraftsPerActor: 1,
+                maximumStagedMembersPerActor: 2,
+                stagingLifetime: 10,
+                completedRetention: 10
+            )
+            let staged = try await audienceStore.begin(
+                actorUserID: audienceActor, operationID: audienceOperationA,
+                title: "临时群", policy: audiencePolicy, now: audienceNow
+            )
+            #expect(staged.stagedMemberCount == 0)
+            await #expect(throws: V2GroupAudienceImportError.activeDraftLimitReached) {
+                try await audienceStore.begin(
+                    actorUserID: audienceActor, operationID: audienceOperationB,
+                    title: "第二个临时群", policy: audiencePolicy, now: audienceNow
+                )
+            }
+            let appended = try await audienceStore.append(
+                actorUserID: audienceActor, operationID: audienceOperationA,
+                memberUserIDs: audienceMembers, maximumMembers: 2,
+                policy: audiencePolicy, now: audienceNow
+            )
+            #expect(appended.stagedMemberCount == 2)
+            try await audienceStore.cancel(actorUserID: audienceActor, operationID: audienceOperationA, now: audienceNow)
+            let remainingAudienceMembers = try await sql.raw("""
+                SELECT COUNT(*)::bigint AS value
+                FROM im_v2.group_room_creation_draft_members
+                WHERE actor_user_id = \(bind: UUID(uuidString: audienceActor.rawValue)!)
+                """).first(decoding: CountRow.self)
+            #expect(remainingAudienceMembers?.value == 0)
+            _ = try await audienceStore.begin(
+                actorUserID: audienceActor, operationID: audienceOperationB,
+                title: "第二个临时群", policy: audiencePolicy, now: audienceNow
+            )
+            #expect(try await audienceStore.purgeExpired(now: audienceNow.addingTimeInterval(11), limit: 10) == 1)
             try await seedRoom(on: sql)
 
             let profile = try RoomCapacityProfile(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3)
@@ -642,7 +690,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 """).all(decoding: DirectProfileSyncAssertionRow.self)
             #expect(directProfiles == [
                 .init(userID: senderUUID, roomID: room.roomID.rawValue.uppercased(), targetUserID: memberTwoUUID, publicHandle: "member015", displayName: "成员二", revision: 1),
-                .init(userID: memberTwoUUID, roomID: room.roomID.rawValue.uppercased(), targetUserID: senderUUID, publicHandle: "sender012", displayName: "发送者", revision: 1),
             ])
             let snapshot = try await PostgresV2SnapshotProjectionMaterializer(database: app.db(.psql)).materialize(userID: senderID, now: now)
             let snapshotDirectProfiles = try snapshot.pages.flatMap { try V2SnapshotProjectionCodec.decodePage($0.payload).directRoomProfiles }
@@ -654,6 +701,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             await #expect(throws: V2RoomWriteStoreError.strangerMessagePermissionDenied) {
                 _ = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000074"), text: "blocked-by-setting"))
             }
+            let deniedRecipientProfiles = try #require(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE user_id = \(bind: memberTwoUUID) AND projection_kind = 'direct_room_profile'").first(decoding: CountRow.self))
+            #expect(deniedRecipientProfiles.value == 0)
 
             _ = try await directService.setStrangerMessagePermission(actorUserID: recipient, operationID: try .init("00000000-0000-0000-0000-000000000075"), permission: .allow)
             let attempts = await withTaskGroup(of: StrangerMessageAttempt.self, returning: [StrangerMessageAttempt].self) { group in
@@ -676,6 +725,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(attempts.filter { $0 == .limited }.count == 1)
             #expect(!attempts.contains(.unexpectedOutcome))
             #expect(!attempts.contains(.unexpectedFailure))
+            let acceptedRecipientProfiles = try #require(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE user_id = \(bind: memberTwoUUID) AND projection_kind = 'direct_room_profile' AND payload->>'room_id' = \(bind: room.roomID.rawValue)").first(decoding: CountRow.self))
+            #expect(acceptedRecipientProfiles.value == 1)
             let reply = try await messages.send(.init(roomID: room.roomID, actorUserID: recipient, clientMessageID: try .init("00000000-0000-0000-0000-000000000080"), text: "reply"))
             guard case .accepted = reply else { Issue.record("expected reply"); return }
             let afterReply = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000081"), text: "unlimited-after-reply"))
@@ -4668,12 +4719,38 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 store: PostgresV2DirectMessagingStore(database: app.db(.psql)),
                 capacityProfile: capacityProfile, roomShardID: "rooms-primary", now: { now }
             )
+            var directRoomIDs: [RoomID] = []
             for peer in [firstPeerUUID, secondPeerUUID] {
-                guard case .opened = try await directService.open(
+                guard case .opened(let room) = try await directService.open(
                     actorUserID: sourceUserID, operationID: try .init(UUID().uuidString),
                     targetUserID: try .init(peer.uuidString)
                 ) else {
                     Issue.record("expected direct room")
+                    return
+                }
+                directRoomIDs.append(room.roomID)
+            }
+            // A direct peer becomes visible only once the first eligible
+            // message commits. Seed that state here so this test exercises
+            // display-name propagation for real conversations, rather than
+            // leaking an unopened stranger-initiated room.
+            let directMessages = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(
+                    database: app.db(.psql),
+                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400)
+                ),
+                capacityProfile: capacityProfile,
+                limits: try .init(maxUTF8Bytes: 64),
+                now: { now }
+            )
+            for roomID in directRoomIDs {
+                guard case .accepted = try await directMessages.send(.init(
+                    roomID: roomID,
+                    actorUserID: sourceUserID,
+                    clientMessageID: try .init(UUID().uuidString),
+                    text: "已建立会话"
+                )) else {
+                    Issue.record("expected accepted first direct message")
                     return
                 }
             }
@@ -4928,6 +5005,152 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(outboxCount == 1)
             #expect(targetCount == 1)
             print("V2_LOCAL_HYBRID_100K_TIMING total_wall_ms=\(v2LocalElapsedMilliseconds(since: startedAt)) schema_ms=\(schemaElapsed) seed_ms=\(seedElapsed) ordinary_accept_ms=\(ordinaryElapsed) first_pull_ms=\(pullElapsed) mention_accept_ms=\(mentionElapsed) verification_ms=\(max(0, verificationElapsed)) ordinary_fanout_targets=0 mention_fanout_targets=1")
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("finalizing audience recovery claims each stale draft once before replay")
+    func claimsStaleFinalizingAudienceRecoveryWork() async throws {
+        guard Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1",
+              let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL")
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            let recoveryIndex = try #require(try await sql.raw("""
+                SELECT COUNT(*) AS value
+                FROM pg_indexes
+                WHERE schemaname = 'im_v2'
+                  AND tablename = 'group_room_creation_drafts'
+                  AND indexname = 'group_room_creation_drafts_finalizing_recovery_idx'
+                """).first(decoding: CountRow.self))
+            #expect(recoveryIndex.value == 1)
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let stale = now.addingTimeInterval(-31)
+            let actor = UUID(uuidString: "00000000-0000-0000-0000-00000000c101")!
+            let first = UUID(uuidString: "00000000-0000-0000-0000-00000000c102")!
+            let second = UUID(uuidString: "00000000-0000-0000-0000-00000000c103")!
+            try await sql.raw("""
+                INSERT INTO im_v2.group_room_creation_drafts
+                    (actor_user_id, operation_id, title, state, created_at, updated_at, expires_at)
+                VALUES
+                    (\(bind: actor), \(bind: first), '恢复一', 'finalizing', \(bind: stale), \(bind: stale), \(bind: now.addingTimeInterval(86_400))),
+                    (\(bind: actor), \(bind: second), '恢复二', 'finalizing', \(bind: stale), \(bind: stale), \(bind: now.addingTimeInterval(86_400)))
+                """).run()
+            let store = PostgresV2GroupAudienceImportStore(database: app.db(.psql))
+
+            let firstClaim = try await store.recoverableFinalizing(now: now, staleAfter: 30, limit: 1)
+            let secondClaim = try await store.recoverableFinalizing(now: now, staleAfter: 30, limit: 2)
+            let repeatedClaim = try await store.recoverableFinalizing(now: now, staleAfter: 30, limit: 2)
+
+            #expect(firstClaim.count == 1)
+            #expect(secondClaim.count == 1)
+            #expect(Set((firstClaim + secondClaim).map(\.operationID)) == Set([try GroupRoomOperationID(first.uuidString), try GroupRoomOperationID(second.uuidString)]))
+            #expect(repeatedClaim.isEmpty)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("a 100k hybrid group creation commits one atomic membership and bootstrap fan-out plan")
+    func createsOneHundredThousandMemberHybridRoomAtomically() async throws {
+        guard Environment.get("IMV2_RUN_HYBRID_100K_GROUP_CREATE") == "1",
+              let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let startedAt = Date()
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            let schemaElapsed = v2LocalElapsedMilliseconds(since: startedAt)
+
+            let owner = try UserID("00000000-0000-0000-0000-000000000001")
+            let operationID = try GroupRoomOperationID("00000000-0000-0000-0000-00000000c001")
+            let lease = UUID(uuidString: "00000000-0000-0000-0000-00000000c002")!
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans)
+                VALUES ('hybrid-create-100k', 'hybrid-create-100k', \(bind: lease), 1, \(bind: now.addingTimeInterval(600)),
+                        100_000, 100_000, 100_000, 100_000)
+                """).run()
+            let profileLimits = try RoomCapacityProfile(
+                maxEligibleMembers: 100_000,
+                maxCommandsPerWindow: 100_000,
+                maxFanoutUnitsPerWindow: 100_000,
+                maxOutstandingFanoutUnits: 100_000,
+                maxOutstandingPlans: 100_000,
+                maxEnumerationPageSize: 1_000,
+                maxPlannerConcurrency: 1,
+                maxDeliveryConcurrency: 1,
+                retryAfterSeconds: 1
+            )
+            let members = try (2...100_000).map {
+                try UserID(String(format: "00000000-0000-0000-0000-%012x", $0))
+            }
+            let service = try V2GroupMessagingService(
+                store: PostgresV2GroupMessagingStore(database: app.db(.psql)),
+                capacityProfile: .init(id: "hybrid-create-100k", limits: profileLimits),
+                roomShardID: "hybrid-create-100k",
+                identifiers: .init(makeUUID: { UUID() }),
+                now: { now }
+            )
+
+            let creationStartedAt = Date()
+            guard case .created(let group) = try await service.create(
+                actorUserID: owner,
+                operationID: operationID,
+                title: "十万人混合群创建回归",
+                initialMemberUserIDs: members
+            ) else {
+                Issue.record("expected the 100k hybrid group to be created")
+                return
+            }
+            let creationElapsed = v2LocalElapsedMilliseconds(since: creationStartedAt)
+            let room = UUID(uuidString: group.roomID.rawValue)!
+            let accounting = try #require(try await sql.raw("""
+                SELECT
+                    (SELECT COUNT(*) FROM im_v2.room_memberships WHERE room_id = \(bind: room)) AS member_count,
+                    (SELECT COUNT(*) FROM im_v2.fanout_plan_targets AS target
+                     JOIN im_v2.room_events AS event ON event.event_id = target.source_event_id
+                     WHERE event.room_id = \(bind: room)) AS target_count,
+                    (SELECT delivery_mode FROM im_v2.rooms WHERE room_id = \(bind: room)) AS delivery_mode,
+                    (SELECT state FROM im_v2.fanout_plans WHERE room_id = \(bind: room)) AS plan_state,
+                    (SELECT COUNT(*) FROM im_v2.group_room_operations WHERE actor_user_id = \(bind: UUID(uuidString: owner.rawValue)!) AND operation_id = \(bind: UUID(uuidString: operationID.rawValue)!)) AS operation_count
+                """).first(decoding: GroupCreateScaleAccountingRow.self))
+
+            #expect(group.deliveryMode == .largeGroupHybrid)
+            #expect(group.memberUserIDs.count == 100_000)
+            #expect(accounting.memberCount == 100_000)
+            #expect(accounting.targetCount == 100_000)
+            #expect(accounting.deliveryMode == V2GroupDeliveryMode.largeGroupHybrid.rawValue)
+            #expect(accounting.planState == "planning")
+            #expect(accounting.operationCount == 1)
+            print("V2_LOCAL_HYBRID_100K_GROUP_CREATE_TIMING total_wall_ms=\(v2LocalElapsedMilliseconds(since: startedAt)) schema_ms=\(schemaElapsed) create_ms=\(creationElapsed) members=\(accounting.memberCount) bootstrap_fanout_targets=\(accounting.targetCount)")
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -5776,6 +5999,22 @@ private struct FanoutScaleAccountingRow: Decodable {
         case planState = "plan_state"
     }
 }
+
+private struct GroupCreateScaleAccountingRow: Decodable {
+    let memberCount: Int64
+    let targetCount: Int64
+    let deliveryMode: String
+    let planState: String
+    let operationCount: Int64
+    enum CodingKeys: String, CodingKey {
+        case memberCount = "member_count"
+        case targetCount = "target_count"
+        case deliveryMode = "delivery_mode"
+        case planState = "plan_state"
+        case operationCount = "operation_count"
+    }
+}
+
 private struct FanoutDeliveryScaleAccountingRow: Decodable {
     let syncRecords: Int64
     let distinctSyncRecipients: Int64

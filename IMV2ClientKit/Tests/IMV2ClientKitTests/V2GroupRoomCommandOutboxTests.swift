@@ -25,7 +25,12 @@ struct V2GroupRoomCommandOutboxTests {
 
         let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         let restartedEngine = V2GroupRoomCommandOutboxEngine(store: restarted, transport: transport, now: { started.addingTimeInterval(1) })
-        #expect(try await restartedEngine.flushOnce() == .acknowledged(command.operationID, roomID: roomID))
+        var restartResult: V2GroupRoomCreationFlushResult = .idle
+        for _ in 0 ..< 4 {
+            restartResult = try await restartedEngine.flushOnce()
+            if case .acknowledged = restartResult { break }
+        }
+        #expect(restartResult == .acknowledged(command.operationID, roomID: roomID))
         let complete = try #require(await restarted.pendingGroupRoomCreations().first)
         #expect(complete.state == .acknowledged)
         #expect(complete.createdRoomID == roomID)
@@ -67,22 +72,156 @@ struct V2GroupRoomCommandOutboxTests {
         let pending = try await restartedStore.pendingGroupRoomCreations()
         #expect(pending.count == 1)
     }
+
+    @Test("5000 人建群以受限页面断点续传，不产生超帧请求")
+    func fiveThousandMemberCreationUploadsInBoundedPages() async throws {
+        let operation = UUID(uuidString: "00000000-0000-0000-0000-000000005000")!
+        let roomID = try RoomID("00000000-0000-0000-0000-000000005001")
+        let members = try (1 ... 5_000).map { index in
+            try UserID("00000000-0000-0000-0000-\(String(format: "%012d", index))")
+        }
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-v2-group-pages-\(UUID().uuidString).sqlite"),
+            installationBinding: .init(value: UUID())
+        )
+        let transport = ScriptedGroupTransport(results: [.created(roomID)])
+        let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: transport, makeUUID: { operation }, now: Date.init)
+        let command = try await engine.enqueueCreation(title: "大群", deliveryMode: .standardFanout, initialMemberUserIDs: members)
+        // One scheduler quantum performs exactly one authenticated step:
+        // prepare, one bounded member page, or finalize.
+        #expect(try await engine.flushOnce() == .retryScheduled(command.operationID))
+        for _ in 0 ..< 8 { #expect(try await engine.flushOnce() == .retryScheduled(command.operationID)) }
+        #expect(try #require(await store.pendingGroupRoomCreations().first).uploadedMemberCount == 4_096)
+        #expect(try await engine.flushOnce() == .retryScheduled(command.operationID))
+        #expect(try await engine.flushOnce() == .retryScheduled(command.operationID))
+        #expect(try await engine.flushOnce() == .acknowledged(command.operationID, roomID: roomID))
+    }
+
+    @Test("过期草稿会从第零页安全恢复上传")
+    func expiredDraftResetsTheDurableUploadCursor() async throws {
+        let operation = UUID(uuidString: "00000000-0000-0000-0000-000000005100")!
+        let roomID = try RoomID("00000000-0000-0000-0000-000000005101")
+        let members = try (1 ... 5_000).map { index in
+            try UserID("00000000-0000-0000-0000-\(String(format: "%012d", index + 10_000))")
+        }
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-v2-group-expiry-\(UUID().uuidString).sqlite"),
+            installationBinding: .init(value: UUID())
+        )
+        let transport = ScriptedGroupTransport(results: [.created(roomID)])
+        let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: transport, makeUUID: { operation }, now: Date.init)
+        let command = try await engine.enqueueCreation(title: "租期恢复", deliveryMode: .standardFanout, initialMemberUserIDs: members)
+        #expect(try await engine.flushOnce() == .retryScheduled(command.operationID))
+        for _ in 0 ..< 8 { #expect(try await engine.flushOnce() == .retryScheduled(command.operationID)) }
+        #expect(try #require(await store.pendingGroupRoomCreations().first).uploadedMemberCount == 4_096)
+
+        await transport.expireDraft()
+        #expect(try await engine.flushOnce() == .retryScheduled(command.operationID))
+        var resumed: V2GroupRoomCreationFlushResult = .idle
+        for _ in 0 ..< 16 {
+            resumed = try await engine.flushOnce()
+            if case .acknowledged = resumed { break }
+        }
+        guard case .acknowledged(let returnedOperation, let returnedRoomID) = resumed else {
+            Issue.record("expected expiry recovery to finish on the next bounded flush; got \(resumed)")
+            return
+        }
+        #expect(returnedOperation == command.operationID)
+        #expect(returnedRoomID == roomID)
+        #expect(try #require(await store.pendingGroupRoomCreations().first).uploadedMemberCount == 5_000)
+    }
+
+    @Test("取消先持久化，重连后不会复活建群意图")
+    func cancellationIsDurableAndTerminal() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-v2-group-cancel-\(UUID().uuidString).sqlite"),
+            installationBinding: .init(value: UUID())
+        )
+        let operation = UUID(uuidString: "00000000-0000-0000-0000-000000005200")!
+        let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: ScriptedGroupTransport(results: []), makeUUID: { operation }, now: Date.init)
+        let command = try await engine.enqueueCreation(title: "取消群", deliveryMode: .standardFanout, initialMemberUserIDs: [])
+        try await engine.requestCancellation(operationID: command.operationID)
+        #expect(try await engine.flushOnce() == .cancelled(command.operationID))
+        #expect(try #require(await store.pendingGroupRoomCreations().first).state == .cancelled)
+        #expect(try await engine.flushOnce() == .idle)
+    }
+
+    @Test("冻结后的取消持久化为创建中，并在重启后恢复同一操作")
+    func frozenCancellationPersistsFinalizingCreationAcrossRestart() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-group-cancel-frozen-\(UUID().uuidString).sqlite")
+        let binding = V2LocalInstallationBinding(value: UUID())
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: url,
+            installationBinding: binding
+        )
+        let operation = UUID(uuidString: "00000000-0000-0000-0000-000000005201")!
+        let transport = ScriptedGroupTransport(results: [], rejectsCancellationAsFrozen: true)
+        let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: transport, makeUUID: { operation }, now: Date.init)
+        let command = try await engine.enqueueCreation(title: "冻结群", deliveryMode: .standardFanout, initialMemberUserIDs: [])
+        try await engine.requestCancellation(operationID: command.operationID)
+
+        #expect(try await engine.flushOnce() == .cancellationRefused(command.operationID))
+        #expect(try #require(await store.pendingGroupRoomCreations().first).state == .finalizing)
+        let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        #expect(try #require(await restarted.pendingGroupRoomCreations().first).state == .finalizing)
+        #expect(try await engine.flushOnce() == .retryScheduled(command.operationID))
+    }
 }
 
 private actor ScriptedGroupTransport: V2ClientGroupMessagingTransport {
     enum Result: Sendable { case retryableFailure, created(RoomID), rejected }
     private var results: [Result]
     private var received: [GroupRoomOperationID] = []
-    init(results: [Result]) { self.results = results }
+    private var stagedMemberCount = 0
+    private var stagedTitle = ""
+    private var expired = false
+    private let rejectsCancellationAsFrozen: Bool
 
-    func createGroupRoom(operationID: GroupRoomOperationID, title: String, deliveryMode: V2GroupDeliveryMode, initialMemberUserIDs: [UserID]) throws -> V2ClientGroupRoom {
+    init(results: [Result], rejectsCancellationAsFrozen: Bool = false) {
+        self.results = results
+        self.rejectsCancellationAsFrozen = rejectsCancellationAsFrozen
+    }
+
+    func beginGroupRoomCreation(operationID: GroupRoomOperationID, title: String) throws -> V2ClientGroupAudienceDraft {
         received.append(operationID)
+        stagedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let first = results.first {
+            switch first {
+            case .retryableFailure:
+                _ = results.removeFirst(); throw V2RealtimeTransportError.unexpectedResponse
+            case .rejected:
+                _ = results.removeFirst(); throw V2RealtimeTransportError.server(code: "INVALID_ARGUMENT", retryable: false, retryAfterSeconds: 0, currentRevision: 0)
+            case .created: break
+            }
+        }
+        return try .init(operationID: operationID, title: stagedTitle, stagedMemberCount: stagedMemberCount)
+    }
+
+    func appendGroupRoomCreationMembers(operationID: GroupRoomOperationID, memberUserIDs: [UserID]) throws -> V2ClientGroupAudienceDraft {
+        if expired {
+            expired = false
+            throw V2RealtimeTransportError.server(code: "NOT_FOUND", retryable: false, retryAfterSeconds: 0, currentRevision: 0)
+        }
+        stagedMemberCount += memberUserIDs.count
+        return try .init(operationID: operationID, title: "staged", stagedMemberCount: stagedMemberCount)
+    }
+
+    func finalizeGroupRoomCreation(operationID: GroupRoomOperationID) throws -> V2ClientGroupRoom {
+        guard !results.isEmpty else { throw V2RealtimeTransportError.unexpectedResponse }
         switch results.removeFirst() {
+        case .created(let roomID): return .init(roomID: roomID, title: stagedTitle, deliveryMode: .standardFanout, memberUserIDs: [], memberCount: UInt32(stagedMemberCount + 1), createdAt: .distantPast)
         case .retryableFailure: throw V2RealtimeTransportError.unexpectedResponse
         case .rejected: throw V2RealtimeTransportError.server(code: "INVALID_ARGUMENT", retryable: false, retryAfterSeconds: 0, currentRevision: 0)
-        case .created(let roomID): return .init(roomID: roomID, title: title.trimmingCharacters(in: .whitespacesAndNewlines), deliveryMode: deliveryMode, memberUserIDs: initialMemberUserIDs, memberCount: UInt32(initialMemberUserIDs.count + 1), createdAt: .distantPast)
         }
     }
+
+    func cancelGroupRoomCreation(operationID _: GroupRoomOperationID) throws {
+        if rejectsCancellationAsFrozen {
+            throw V2RealtimeTransportError.server(code: "GROUP_CREATION_FROZEN", retryable: false, retryAfterSeconds: 0, currentRevision: 0)
+        }
+    }
+
+    func expireDraft() { stagedMemberCount = 0; expired = true }
 
     func operationIDs() -> [GroupRoomOperationID] { received }
 }

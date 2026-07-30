@@ -955,13 +955,34 @@ struct V2ConversationStoreTests {
 
     @Test func groupConversationKeepsDurableRetryVisible() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
-        let creator = V2GroupConversationCreatorFake(result: .queuedForRetry)
+        let creator = V2GroupConversationCreatorFake(result: .queuedForRetry(operationID: "group-operation-1"))
         let store = V2ConversationListStore(dataSource: source, userID: "current-user", groupConversationCreator: creator)
 
         let roomID = await store.createGroupConversation(title: "项目群", memberHandlesText: "")
 
         #expect(roomID == nil)
-        #expect(store.groupConversationFeedback == "建群请求已安全保存，连接恢复后会继续。")
+        #expect(store.groupConversationFeedback == "建群请求已安全保存；取消可阻止其在恢复连接后继续创建。")
+        #expect(store.pendingGroupConversationOperationID == "group-operation-1")
+
+        await store.cancelPendingGroupConversationCreation()
+
+        #expect(await creator.cancelledOperationIDs() == ["group-operation-1"])
+        #expect(store.pendingGroupConversationOperationID == nil)
+        #expect(store.groupConversationFeedback == "建群请求正在取消；恢复连接后会完成取消。")
+    }
+
+    @Test func groupConversationRestoresDurableFinalizingStatusAfterUIRecreation() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let creator = V2GroupConversationCreatorFake(
+            result: .queuedForRetry(operationID: "unused"),
+            restoredStatus: .finalizing(operationID: "group-operation-2")
+        )
+        let store = V2ConversationListStore(dataSource: source, userID: "current-user", groupConversationCreator: creator)
+
+        await store.refresh()
+
+        #expect(store.pendingGroupConversationOperationID == nil)
+        #expect(store.groupConversationFeedback == "群聊已进入创建阶段，无法取消；完成后会显示在会话列表。")
     }
 
     @Test func groupConversationAllowsOnlyOneInFlightCreation() async {
@@ -2063,13 +2084,24 @@ private actor V2CancellationIgnoringConversationPublicIdentityResolver: V2Conver
 
 private actor V2GroupConversationCreatorFake: V2GroupConversationCreating {
     private let result: V2GroupConversationCreationOutcome
+    private let restoredStatus: V2RestoredGroupConversationCreationStatus?
     private var requestsValue: [Request] = []
-    init(result: V2GroupConversationCreationOutcome) { self.result = result }
+    private var cancelledOperationIDsValue: [String] = []
+    init(result: V2GroupConversationCreationOutcome, restoredStatus: V2RestoredGroupConversationCreationStatus? = nil) {
+        self.result = result
+        self.restoredStatus = restoredStatus
+    }
     func createConversation(title: String, initialMemberUserIDs: [String]) async throws -> V2GroupConversationCreationOutcome {
         requestsValue.append(.init(title: title, memberUserIDs: initialMemberUserIDs))
         return result
     }
+    func cancelConversationCreation(operationID: String) async throws -> V2GroupConversationCancellationOutcome {
+        cancelledOperationIDsValue.append(operationID)
+        return .queuedForRetry
+    }
+    func restoredCreationStatus() async throws -> V2RestoredGroupConversationCreationStatus? { restoredStatus }
     func requests() -> [Request] { requestsValue }
+    func cancelledOperationIDs() -> [String] { cancelledOperationIDsValue }
     struct Request: Equatable, Sendable { let title: String; let memberUserIDs: [String] }
 }
 
@@ -2093,6 +2125,8 @@ private actor V2SuspendingGroupConversationCreator: V2GroupConversationCreating 
         await withCheckedContinuation { completion = $0 }
         return result
     }
+
+    func cancelConversationCreation(operationID _: String) async throws -> V2GroupConversationCancellationOutcome { .queuedForRetry }
 
     func waitUntilCreating() async {
         guard count == 0 else { return }

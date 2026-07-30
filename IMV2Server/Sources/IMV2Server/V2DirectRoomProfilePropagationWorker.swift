@@ -132,6 +132,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                     THEN pair.higher_user_id ELSE pair.lower_user_id END
                AND target_membership.left_revision IS NULL
             WHERE (pair.lower_user_id = \(bind: lease.sourceUserID) OR pair.higher_user_id = \(bind: lease.sourceUserID))
+              AND EXISTS (SELECT 1 FROM im_v2.messages WHERE room_id = pair.room_id)
               AND (\(bind: lease.enumerationCheckpoint) IS NULL OR
                    CASE WHEN pair.lower_user_id = \(bind: lease.sourceUserID)
                         THEN pair.higher_user_id ELSE pair.lower_user_id END > \(bind: lease.enumerationCheckpoint))

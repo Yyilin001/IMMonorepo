@@ -76,7 +76,11 @@ enum IMV2ServerApp {
                 control: database, router: userShardRouter, migrations: userShardMigrations, registry: userShardStorage
             )
             let sendMessage = V2SendMessageService(
-                store: PostgresV2RoomWriteStore(database: database, strangerMessagePolicy: configuration.strangerMessagePolicy),
+                store: PostgresV2RoomWriteStore(
+                    database: database,
+                    strangerMessagePolicy: configuration.strangerMessagePolicy,
+                    shadowForwarder: userShardShadowForwarder
+                ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits
             )
@@ -107,6 +111,10 @@ enum IMV2ServerApp {
                 store: PostgresV2GroupMessagingStore(database: database),
                 capacityProfile: configuration.capacityProfile,
                 roomShardID: configuration.groupRoomShardID
+            )
+            let groupAudienceImports = V2GroupAudienceImportService(
+                store: PostgresV2GroupAudienceImportStore(database: database),
+                groupMessaging: groupMessaging
             )
             let groupEventLog = V2GroupEventLogService(
                 store: PostgresV2GroupEventLogStore(database: database)
@@ -158,6 +166,7 @@ enum IMV2ServerApp {
                 readReceipt: readReceipt,
                 directMessaging: directMessaging,
                 groupMessaging: groupMessaging,
+                groupAudienceImports: groupAudienceImports,
                 groupEventLog: groupEventLog,
                 foregroundGroupEventHints: foregroundGroupEventHints,
                 membershipDirectory: membershipDirectory,
@@ -414,6 +423,28 @@ enum IMV2ServerApp {
                             break
                         } catch {
                             logger.error("IM V2 moderation-audit retention worker failed; retrying")
+                        }
+                        do {
+                            // Staged creation drafts own potentially large
+                            // temporary audiences. Reclaim them on the same
+                            // bounded maintenance cadence as other retention
+                            // work; cancellation and actor-local admission
+                            // also perform immediate targeted cleanup.
+                            _ = try await groupAudienceImports.purgeExpired(limit: configuration.workerBatchSize)
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            logger.error("IM V2 group creation draft cleanup failed; retrying")
+                        }
+                        do {
+                            let report = try await groupAudienceImports.recoverFinalizing(limit: configuration.workerBatchSize)
+                            if report.failedCount > 0 {
+                                logger.warning("IM V2 group creation finalization recovery left retryable drafts")
+                            }
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            logger.error("IM V2 group creation finalization recovery failed; retrying")
                         }
                         do {
                             _ = try await mediaRetentionWorker.runOnce(limit: configuration.workerBatchSize)

@@ -567,6 +567,30 @@ IMV2_RUN_HYBRID_100K_CAPACITY=1 \
   -e IMV2_RUN_HYBRID_100K_CAPACITY=1 swift-tests
 ```
 
+### 100,000-member group bootstrap
+
+Large-group creation is a one-time bootstrap cost. The immutable `room.created`
+event makes the room visible to every initial member, so its single transaction
+writes the room, 100,000 memberships, the idempotency record, and a 100,000
+target bootstrap fan-out plan. This does not change ordinary Hybrid-message
+delivery: ordinary messages still append only to the room event log.
+
+The opt-in disposable-PostgreSQL regression
+`createsOneHundredThousandMemberHybridRoomAtomically` verifies exactly those
+rows and the one operation record. On 2026-07-30, a local isolated PostgreSQL
+run completed creation in **1,958 ms** (2,567 ms total including 319 ms schema
+installation). This is one-client, one-shard bootstrap evidence—not a
+concurrent-create SLO or a message-delivery latency claim.
+
+```sh
+IMV2_RUN_HYBRID_100K_GROUP_CREATE=1 \
+  docker compose -f IMV2/docker-compose.isolated-tests.yml run --rm \
+  -e IMV2_RUN_HYBRID_100K_GROUP_CREATE=1 \
+  -e V2_TEST_PACKAGES=IMV2Server \
+  -e V2_SERVER_TEST_FILTER=createsOneHundredThousandMemberHybridRoomAtomically \
+  swift-tests
+```
+
 The foreground cadence is an implementation bound, not a measured latency SLO:
 the current local regression verifies task ownership, cancellation-compatible
 room mode gating, cursor durability, and projection refresh. It does not yet

@@ -50,6 +50,60 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore {
                 return .idempotent(try previous.group(ownerUserID: command.actorUserID))
             }
 
+            let createdRoomID = try groupUUID(roomID)
+            let createdEventID = try groupUUID(eventID)
+            let createdPlanID = try groupUUID(planID)
+            try await sql.raw("""
+                INSERT INTO im_v2.rooms
+                    (room_id, room_kind, room_shard_id, room_sequence, membership_revision, capacity_profile_id, delivery_mode, created_at)
+                VALUES (\(bind: createdRoomID), 'group', \(bind: roomShardID), 1, 1, \(bind: capacityProfile.id), \(bind: command.deliveryMode.rawValue), \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
+                VALUES (\(bind: createdRoomID), \(bind: actorID), \(bind: command.title), \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision)
+                VALUES (\(bind: createdRoomID), \(bind: actorID), 'owner', 1)
+            """).run()
+            if !requestedMembers.isEmpty {
+                let membersJSON = try String(data: JSONEncoder().encode(requestedMembers.map(\.uuidString)), encoding: .utf8).unwrapGroup()
+                try await sql.raw("""
+                    INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision)
+                    SELECT \(bind: createdRoomID), value::uuid, 'member', 1
+                    FROM jsonb_array_elements_text(\(bind: membersJSON)::jsonb) AS value
+                    """).run()
+            }
+            let allMembersJSON = try String(data: JSONEncoder().encode(allMembers.map(\.uuidString)), encoding: .utf8).unwrapGroup()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_events
+                    (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at)
+                VALUES (\(bind: createdEventID), \(bind: createdRoomID), 1, 'room.created', \(bind: actorID),
+                        jsonb_build_object('event_type', 'room.created', 'room_id', \(bind: createdRoomID.uuidString),
+                                           'owner_user_id', \(bind: actorID.uuidString), 'title', \(bind: command.title),
+                                           'delivery_mode', \(bind: command.deliveryMode.rawValue),
+                                           'membership_revision', 1,
+                                           'created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))),
+                        1, \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.fanout_plans
+                    (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
+                     target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at)
+                VALUES (\(bind: createdPlanID), \(bind: createdEventID), \(bind: createdRoomID), 1, 1,
+                        '{"kind":"frozen_targets"}'::jsonb, jsonb_build_object('after_user_id', NULL),
+                        \(bind: allMembers.count), \(bind: allMembers.count), 'planning', \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id)
+                SELECT \(bind: createdEventID), value::uuid FROM jsonb_array_elements_text(\(bind: allMembersJSON)::jsonb) AS value
+                """).run()
+            try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: createdEventID), \(bind: createdPlanID), 'pending', \(bind: now))").run()
+            // Admission is intentionally reserved only after the private
+            // heavyweight bootstrap rows are prepared. The transaction still
+            // atomically rolls them all back on rejection, but a 100k group
+            // no longer holds the shared shard-admission row while inserting
+            // memberships and frozen bootstrap targets.
             guard let lease = try await sql.raw("""
                 SELECT lease_id, generation, valid_until, command_window_limit, command_window_used,
                        fanout_window_limit, fanout_window_used, max_outstanding_fanout_units,
@@ -82,31 +136,6 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore {
             case .unavailable: return .unavailable
             }
             guard let reservedLease = reservedShard.lease else { throw V2GroupMessagingStoreError.corruptPersistenceState }
-
-            let createdRoomID = try groupUUID(roomID)
-            let createdEventID = try groupUUID(eventID)
-            let createdPlanID = try groupUUID(planID)
-            try await sql.raw("""
-                INSERT INTO im_v2.rooms
-                    (room_id, room_kind, room_shard_id, room_sequence, membership_revision, capacity_profile_id, delivery_mode, created_at)
-                VALUES (\(bind: createdRoomID), 'group', \(bind: roomShardID), 1, 1, \(bind: capacityProfile.id), \(bind: command.deliveryMode.rawValue), \(bind: now))
-                """).run()
-            try await sql.raw("""
-                INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
-                VALUES (\(bind: createdRoomID), \(bind: actorID), \(bind: command.title), \(bind: now))
-                """).run()
-            try await sql.raw("""
-                INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision)
-                VALUES (\(bind: createdRoomID), \(bind: actorID), 'owner', 1)
-                """).run()
-            if !requestedMembers.isEmpty {
-                let membersJSON = try String(data: JSONEncoder().encode(requestedMembers.map(\.uuidString)), encoding: .utf8).unwrapGroup()
-                try await sql.raw("""
-                    INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision)
-                    SELECT \(bind: createdRoomID), value::uuid, 'member', 1
-                    FROM jsonb_array_elements_text(\(bind: membersJSON)::jsonb) AS value
-                    """).run()
-            }
             try await sql.raw("""
                 INSERT INTO im_v2.room_admission
                     (room_id, eligible_member_count, command_window_limit, fanout_window_limit,
@@ -115,6 +144,7 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore {
                         \(bind: capacityProfile.limits.maxFanoutUnitsPerWindow), \(bind: capacityProfile.limits.maxOutstandingFanoutUnits),
                         \(bind: capacityProfile.limits.maxOutstandingPlans), \(bind: try groupUUID(reservedLease.id)), \(bind: try groupSigned(reservedLease.generation)))
                 """).run()
+            let initialMembersJSON = try String(data: JSONEncoder().encode(requestedMembers.map(\.uuidString)), encoding: .utf8).unwrapGroup()
             try await sql.raw("""
                 UPDATE im_v2.room_admission
                 SET command_window_used = \(bind: reservedRoom.commandWindow.used), fanout_window_used = \(bind: reservedRoom.fanoutWindow.used),
@@ -128,32 +158,6 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore {
                 WHERE room_shard_id = \(bind: roomShardID) AND capacity_profile_id = \(bind: capacityProfile.id)
                   AND lease_id = \(bind: try groupUUID(reservedLease.id)) AND generation = \(bind: try groupSigned(reservedLease.generation))
                 """).run()
-            let allMembersJSON = try String(data: JSONEncoder().encode(allMembers.map(\.uuidString)), encoding: .utf8).unwrapGroup()
-            try await sql.raw("""
-                INSERT INTO im_v2.room_events
-                    (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at)
-                VALUES (\(bind: createdEventID), \(bind: createdRoomID), 1, 'room.created', \(bind: actorID),
-                        jsonb_build_object('event_type', 'room.created', 'room_id', \(bind: createdRoomID.uuidString),
-                                           'owner_user_id', \(bind: actorID.uuidString), 'title', \(bind: command.title),
-                                           'delivery_mode', \(bind: command.deliveryMode.rawValue),
-                                           'membership_revision', 1,
-                                           'created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))),
-                        1, \(bind: now))
-                """).run()
-            try await sql.raw("""
-                INSERT INTO im_v2.fanout_plans
-                    (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
-                     target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at)
-                VALUES (\(bind: createdPlanID), \(bind: createdEventID), \(bind: createdRoomID), 1, 1,
-                        '{"kind":"frozen_targets"}'::jsonb, jsonb_build_object('after_user_id', NULL),
-                        \(bind: allMembers.count), \(bind: allMembers.count), 'planning', \(bind: now))
-                """).run()
-            try await sql.raw("""
-                INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id)
-                SELECT \(bind: createdEventID), value::uuid FROM jsonb_array_elements_text(\(bind: allMembersJSON)::jsonb) AS value
-                """).run()
-            try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: createdEventID), \(bind: createdPlanID), 'pending', \(bind: now))").run()
-            let initialMembersJSON = try String(data: JSONEncoder().encode(requestedMembers.map(\.uuidString)), encoding: .utf8).unwrapGroup()
             try await sql.raw("""
                 INSERT INTO im_v2.group_room_operations
                     (actor_user_id, operation_id, room_id, title, delivery_mode, initial_member_user_ids, created_at)

@@ -694,17 +694,41 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         guard let taskGeneration = realtimeAttemptGate.begin(ifApplicationActive: isApplicationActive) else { return }
         realtimeTask = Task { [weak self, runtime, conversations] in
             defer { self?.finishRealtimeAttempt(generation: taskGeneration) }
-            do {
-                _ = try await runtime.start()
-                try Task.checkCancellation()
-                await conversations.refresh()
-            } catch is CancellationError {
-                return
-            } catch V2RealtimeSessionCoordinatorError.authenticationRequired {
-                await self?.signOutIfCurrentRealtimeAttempt(taskGeneration)
-            } catch {
-                // Local projections remain readable while offline. The next
-                // foreground activation deliberately creates a new attempt.
+            var retryDelay: Duration = .seconds(1)
+            while !Task.isCancelled {
+                do {
+                    let establishedAt = ContinuousClock.now
+                    _ = try await runtime.start()
+                    try Task.checkCancellation()
+                    await conversations.refresh()
+                    // A live-loop failure moves the runtime to `.stopped`.
+                    // Waiting on that explicit transition avoids treating a
+                    // foreground network handoff as permanent offline mode.
+                    await runtime.waitUntilStopped()
+                    // Only a genuinely stable session clears backoff. An
+                    // immediately failing loop otherwise turns into a one-
+                    // second reconnect storm on a bad network path.
+                    if establishedAt.duration(to: .now) >= .seconds(15) {
+                        retryDelay = .seconds(1)
+                    }
+                } catch is CancellationError {
+                    return
+                } catch V2RealtimeSessionCoordinatorError.authenticationRequired {
+                    await self?.signOutIfCurrentRealtimeAttempt(taskGeneration)
+                    return
+                } catch {
+                    // Keep local projections readable, but recover while the
+                    // app remains foregrounded. The bounded exponential delay
+                    // avoids a hot reconnect loop during an outage.
+                }
+                do {
+                    try await Task.sleep(for: retryDelay)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    return
+                }
+                retryDelay = min(retryDelay * 2, .seconds(30))
             }
         }
     }

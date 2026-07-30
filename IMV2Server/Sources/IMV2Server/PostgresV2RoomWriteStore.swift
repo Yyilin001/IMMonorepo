@@ -12,10 +12,16 @@ import SQLKit
 public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private let database: any Database
     private let strangerMessagePolicy: V2StrangerMessagePolicy?
+    private let shadowForwarder: (any V2UserShardProjectionShadowing)?
 
-    public init(database: any Database, strangerMessagePolicy: V2StrangerMessagePolicy? = nil) {
+    public init(
+        database: any Database,
+        strangerMessagePolicy: V2StrangerMessagePolicy? = nil,
+        shadowForwarder: (any V2UserShardProjectionShadowing)? = nil
+    ) {
         self.database = database
         self.strangerMessagePolicy = strangerMessagePolicy
+        self.shadowForwarder = shadowForwarder
     }
 
     public func accept(
@@ -24,7 +30,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         identifiers: V2AcceptanceIdentifiers,
         now: Date
     ) async throws -> V2SendMessageOutcome {
-        try await database.transaction { transaction in
+        let outcome: V2SendMessageOutcome = try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
@@ -161,6 +167,15 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             }
 
             try await persist(writeSet, command: command, room: room, sql: sql)
+            if room.kind == "direct" {
+                try await appendRecipientDirectRoomProfile(
+                    roomID: roomID,
+                    senderID: senderID,
+                    sourceEventID: try uuid(writeSet.eventID),
+                    createdAt: writeSet.acceptedMessage.createdAt,
+                    sql: sql
+                )
+            }
             let message = writeSet.acceptedMessage
             // The room row is locked for this transaction, so this metadata
             // is exactly the immutable mode that committed the event.  It is
@@ -179,6 +194,46 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 createdAt: message.createdAt
             ))
         }
+        try await shadowDirectRoomProfileIfNeeded(command: command, outcome: outcome)
+        return outcome
+    }
+
+    /// The control store remains the source of truth for direct-profile
+    /// visibility. Once a first direct message commits, mirror that profile
+    /// to the recipient's live user shard just as the direct-open path does.
+    /// Running this after the transaction is deliberate: a retry of the same
+    /// immutable client message repeats the idempotent shadow if a process
+    /// crashed after commit but before forwarding.
+    private func shadowDirectRoomProfileIfNeeded(
+        command _: V2SendMessageCommand,
+        outcome: V2SendMessageOutcome
+    ) async throws {
+        guard let shadowForwarder else { return }
+        let message: V2AcceptedMessage
+        switch outcome {
+        case .accepted(let value), .idempotent(let value):
+            message = value
+        case .idempotencyConflict, .rateLimited, .unavailable:
+            return
+        }
+        // A group acceptance carries its immutable delivery mode. Avoid an
+        // unnecessary direct-pair lookup on the high-volume group path.
+        guard message.groupDeliveryMode == nil else { return }
+        guard let sql = database as? any SQLDatabase,
+              let roomID = UUID(uuidString: message.roomID.rawValue),
+              let senderID = UUID(uuidString: message.senderUserID.rawValue),
+              let pair = try await sql.raw("SELECT lower_user_id, higher_user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: roomID)").first(decoding: DirectRoomPairRow.self),
+              let event = try await sql.raw("SELECT event_id FROM im_v2.room_events WHERE room_id = \(bind: roomID) AND room_sequence = \(bind: try signed(message.roomSequence)) AND event_type = 'message.accepted'").first(decoding: DirectMessageEventRow.self)
+        else { return }
+        let recipientID: UUID
+        if pair.lowerUserID == senderID { recipientID = pair.higherUserID }
+        else if pair.higherUserID == senderID { recipientID = pair.lowerUserID }
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        _ = try await shadowForwarder.shadowIfForwarding(
+            userID: try .init(recipientID.uuidString),
+            sourceEventID: try .init(event.eventID.uuidString),
+            projectionKinds: ["direct_room_profile"]
+        )
     }
 
     /// Runs after durable message idempotency and membership authorization. A
@@ -210,6 +265,53 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             RETURNING message_count
             """).first(decoding: DirectMessageWindowRow.self)
         guard consumed != nil else { throw V2RoomWriteStoreError.strangerMessageLimitReached }
+    }
+
+    /// Makes an unopened direct pair visible to the recipient only after its
+    /// first message has passed block, stranger-preference and quota checks in
+    /// this same transaction. The profile precedes the asynchronous message
+    /// fan-out in that recipient's sync stream, so a delivered first message
+    /// always has a stable conversation identity.
+    private func appendRecipientDirectRoomProfile(roomID: UUID, senderID: UUID, sourceEventID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
+        guard let pair = try await sql.raw("SELECT lower_user_id, higher_user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: roomID)").first(decoding: DirectRoomPairRow.self) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let recipientID: UUID
+        if pair.lowerUserID == senderID { recipientID = pair.higherUserID }
+        else if pair.higherUserID == senderID { recipientID = pair.lowerUserID }
+        else { throw V2RoomWriteStoreError.actorNotEligible }
+        let alreadyVisible = try await sql.raw("""
+            SELECT EXISTS (
+                SELECT 1 FROM im_v2.user_sync_log
+                WHERE user_id = \(bind: recipientID) AND projection_kind = 'direct_room_profile'
+                  AND payload->>'room_id' = \(bind: roomID.uuidString)
+            ) AS value
+            """).first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
+        guard !alreadyVisible else { return }
+        guard let profile = try await sql.raw("""
+            SELECT public_handle, display_name, revision, updated_at
+            FROM im_v2.public_user_profiles WHERE user_id = \(bind: senderID)
+            """).first(decoding: DirectMessageSenderProfileRow.self), profile.revision > 0 else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        guard let sequence = try await sql.raw("""
+            INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence)
+            VALUES (\(bind: recipientID), 1)
+            ON CONFLICT (user_id) DO UPDATE
+            SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1
+            RETURNING next_sequence
+            """).first(decoding: DirectMessageSyncSequenceRow.self) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        try await sql.raw("""
+            INSERT INTO im_v2.user_sync_log
+                (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
+            VALUES (\(bind: recipientID), \(bind: sequence.nextSequence), \(bind: sourceEventID), 'direct_room_profile',
+                    jsonb_build_object('room_id', \(bind: roomID.uuidString), 'target_user_id', \(bind: senderID.uuidString),
+                                       'public_handle', \(bind: profile.publicHandle), 'display_name', \(bind: profile.displayName),
+                                       'revision', \(bind: profile.revision), 'updated_at_ms', \(bind: Int64(profile.updatedAt.timeIntervalSince1970 * 1_000))),
+                    \(bind: createdAt))
+            """).run()
     }
 
     private func persist(
@@ -590,6 +692,26 @@ private struct DirectRoomPairRow: Decodable {
     enum CodingKeys: String, CodingKey { case lowerUserID = "lower_user_id", higherUserID = "higher_user_id" }
 }
 private struct DirectPolicyBooleanRow: Decodable { let value: Bool }
+private struct DirectMessageSenderProfileRow: Decodable {
+    let publicHandle: String
+    let displayName: String
+    let revision: Int64
+    let updatedAt: Date
+    enum CodingKeys: String, CodingKey {
+        case publicHandle = "public_handle"
+        case displayName = "display_name"
+        case revision
+        case updatedAt = "updated_at"
+    }
+}
+private struct DirectMessageSyncSequenceRow: Decodable {
+    let nextSequence: Int64
+    enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" }
+}
+private struct DirectMessageEventRow: Decodable {
+    let eventID: UUID
+    enum CodingKeys: String, CodingKey { case eventID = "event_id" }
+}
 private struct DirectMessageWindowRow: Decodable { let messageCount: Int; enum CodingKeys: String, CodingKey { case messageCount = "message_count" } }
 private struct MediaReferenceRow: Decodable { let mediaID: UUID; enum CodingKeys: String, CodingKey { case mediaID = "media_id" } }
 private struct MentionSenderMembershipRow: Decodable { let role: String }

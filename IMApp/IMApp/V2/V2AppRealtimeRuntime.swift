@@ -83,12 +83,37 @@ extension V2HTTPPublicIdentityDirectory: V2ConversationPublicIdentityResolving {
 
 enum V2GroupConversationCreationOutcome: Equatable, Sendable {
     case created(roomID: String)
+    /// The operation was durably saved but has not completed. The UI keeps
+    /// this ID so an explicit cancellation reaches the same durable record.
+    case queuedForRetry(operationID: String)
+    case rejected(code: String)
+}
+
+enum V2GroupConversationCancellationOutcome: Equatable, Sendable {
+    case cancelled
     case queuedForRetry
+    case finalizationAlreadyStarted
+}
+
+/// A durable bootstrap status restored from the local outbox after the UI has
+/// been recreated. It deliberately exposes product state, not transport or
+/// database details.
+enum V2RestoredGroupConversationCreationStatus: Equatable, Sendable {
+    case queuedForRetry(operationID: String)
+    case cancelling(operationID: String)
+    case finalizing(operationID: String)
+    case cancelled
     case rejected(code: String)
 }
 
 protocol V2GroupConversationCreating: Sendable {
     func createConversation(title: String, initialMemberUserIDs: [String]) async throws -> V2GroupConversationCreationOutcome
+    func cancelConversationCreation(operationID: String) async throws -> V2GroupConversationCancellationOutcome
+    func restoredCreationStatus() async throws -> V2RestoredGroupConversationCreationStatus?
+}
+
+extension V2GroupConversationCreating {
+    func restoredCreationStatus() async throws -> V2RestoredGroupConversationCreationStatus? { nil }
 }
 
 struct V2GroupMemberItem: Equatable, Identifiable, Sendable {
@@ -335,11 +360,41 @@ actor V2OutboxGroupConversationCreator: V2GroupConversationCreating {
         guard let deliveryMode = V2GroupDeliveryPolicy().deliveryMode(forInitialMemberCount: members.count + 1) else {
             return .rejected(code: "GROUP_MEMBER_LIMIT_REACHED")
         }
-        _ = try await outbox.enqueueCreation(title: title, deliveryMode: deliveryMode, initialMemberUserIDs: members)
+        let command = try await outbox.enqueueCreation(title: title, deliveryMode: deliveryMode, initialMemberUserIDs: members)
         switch try await outbox.flushOnce() {
         case .acknowledged(_, let roomID): return .created(roomID: roomID.rawValue)
-        case .retryScheduled, .idle: return .queuedForRetry
+        case .retryScheduled, .idle, .cancelled, .cancellationRefused: return .queuedForRetry(operationID: command.operationID.rawValue)
         case .rejected(_, let code): return .rejected(code: code)
+        }
+    }
+
+    func cancelConversationCreation(operationID: String) async throws -> V2GroupConversationCancellationOutcome {
+        try await outbox.requestCancellation(operationID: .init(operationID))
+        switch try await outbox.flushOnce() {
+        case .cancelled:
+            return .cancelled
+        case .cancellationRefused:
+            return .finalizationAlreadyStarted
+        case .retryScheduled, .idle, .acknowledged, .rejected:
+            return .queuedForRetry
+        }
+    }
+
+    func restoredCreationStatus() async throws -> V2RestoredGroupConversationCreationStatus? {
+        guard let creation = try await outbox.latestCreation() else { return nil }
+        switch creation.state {
+        case .pending:
+            return .queuedForRetry(operationID: creation.operationID.rawValue)
+        case .cancelling:
+            return .cancelling(operationID: creation.operationID.rawValue)
+        case .finalizing:
+            return .finalizing(operationID: creation.operationID.rawValue)
+        case .cancelled:
+            return .cancelled
+        case .rejected:
+            return .rejected(code: creation.terminalCode ?? "UNKNOWN")
+        case .acknowledged:
+            return nil
         }
     }
 }
@@ -653,44 +708,27 @@ struct V2AppRealtimeRuntime {
             availabilitySource: connection,
             heartbeatSender: transport,
             heartbeatInterval: .seconds(30),
-            commandOutbox: outbox,
+            // Every durable command, including ordinary sends, participates
+            // in the same one-quantum scheduler. A large offline send queue
+            // must not delay withdrawal or room-authority operations by 256
+            // sequential requests.
+            commandOutbox: nil,
             flushAdditionalDurableCommands: {
-                for _ in 0 ..< 256 {
-                    try Task.checkCancellation()
-                    if case .idle = try await socialOutbox.flushOnce() { break }
-                }
-                for _ in 0 ..< 256 {
-                    try Task.checkCancellation()
-                    if case .idle = try await groupOutbox.flushOnce() { break }
-                }
-                for _ in 0 ..< 256 {
-                    try Task.checkCancellation()
-                    if case .idle = try await membershipOutbox.flushOnce() { break }
-                }
-                for _ in 0 ..< 256 {
-                    try Task.checkCancellation()
-                    if case .idle = try await memberMuteOutbox.flushOnce() { break }
-                }
-                for _ in 0 ..< 256 {
-                    try Task.checkCancellation()
-                    if case .idle = try await moderatedMemberRemovalOutbox.flushOnce() { break }
-                }
-                for _ in 0 ..< 256 {
-                    try Task.checkCancellation()
-                    if case .idle = try await withdrawalOutbox.flushOnce() { break }
-                }
-                for _ in 0 ..< 256 {
-                    try Task.checkCancellation()
-                    if case .idle = try await reactionOutbox.flushOnce() { break }
-                }
-                for _ in 0 ..< 256 {
-                    try Task.checkCancellation()
-                    if case .idle = try await editOutbox.flushOnce() { break }
-                }
-                for _ in 0 ..< 256 {
-                    try Task.checkCancellation()
-                    if case .idle = try await readReceiptOutbox.flushOnce() { break }
-                }
+                let scheduler = V2FairDurableCommandScheduler(lanes: [
+                    // Safety and room-authority changes run before normal
+                    // sends, but all lanes retain one-quantum fairness.
+                    .init { if case .idle = try await withdrawalOutbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await moderatedMemberRemovalOutbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await memberMuteOutbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await membershipOutbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await outbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await groupOutbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await socialOutbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await editOutbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await reactionOutbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await readReceiptOutbox.flushOnce() { return false }; return true },
+                ])
+                _ = try await scheduler.flush(maximumWorkItems: 256)
             },
             afterDurableSynchronization: {
                 // This runs after the priority outboxes.  It advances at most

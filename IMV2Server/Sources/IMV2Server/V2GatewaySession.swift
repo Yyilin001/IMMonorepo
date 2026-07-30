@@ -5,6 +5,13 @@ import IMV2Core
 /// user ID from an unauthenticated protobuf payload.
 public protocol V2GatewayAuthenticator: Sendable {
     func authenticate(accessToken: String, deviceID: DeviceID) async throws -> UserID
+    /// Production authenticators return the verified access-token expiry. A
+    /// nil value is reserved for non-expiring test/auth adapters.
+    func authenticatedSessionExpiresAt(accessToken: String, deviceID: DeviceID) async throws -> Date?
+}
+
+public extension V2GatewayAuthenticator {
+    func authenticatedSessionExpiresAt(accessToken _: String, deviceID _: DeviceID) async throws -> Date? { nil }
 }
 
 public enum V2GatewaySessionError: Error, Equatable, Sendable {
@@ -12,6 +19,7 @@ public enum V2GatewaySessionError: Error, Equatable, Sendable {
     case invalidAuthenticatePayload
     case unsupportedCapabilityProfile
     case unsupportedCommand
+    case sessionExpired
 }
 
 /// Domain router boundary. It receives only a previously authenticated identity
@@ -29,6 +37,7 @@ public actor V2GatewaySession {
     private let capabilityProfile: String
     private let maximumProtobufMessageDepth: Int
     private let now: @Sendable () -> Date
+    private var authenticatedSessionExpiresAt: Date?
 
     public init(
         limits: V2ConnectionLimits,
@@ -72,7 +81,10 @@ public actor V2GatewaySession {
             guard !request.accessToken.isEmpty else { throw V2GatewaySessionError.invalidAuthenticatePayload }
             let deviceID = try DeviceID(request.deviceID)
             let userID = try await authenticator.authenticate(accessToken: request.accessToken, deviceID: deviceID)
+            let expiresAt = try await authenticator.authenticatedSessionExpiresAt(accessToken: request.accessToken, deviceID: deviceID)
+            guard expiresAt.map({ $0 > now() }) ?? true else { throw V2GatewaySessionError.sessionExpired }
             try state.completeAuthentication(.init(userID: userID, deviceID: deviceID, capabilityProfile: capabilityProfile))
+            authenticatedSessionExpiresAt = expiresAt
             guard case .authenticated(let version, _) = state.phase else { throw V2GatewaySessionError.unsupportedCommand }
             var response = IMV2Envelope()
             response.requestID = envelope.requestID
@@ -103,6 +115,10 @@ public actor V2GatewaySession {
         guard case .authenticated(let version, let identity) = state.phase else {
             throw V2GatewaySessionError.unsupportedCommand
         }
+        guard authenticatedSessionExpiresAt.map({ $0 > now() }) ?? true else {
+            state.close()
+            throw V2GatewaySessionError.sessionExpired
+        }
         try state.receiveAuthenticatedRequest(frame)
         do {
             var response: IMV2Envelope
@@ -126,6 +142,6 @@ public actor V2GatewaySession {
         }
     }
 
-    public func revokeDevice() { state.revokeDevice() }
-    public func close() { state.close() }
+    public func revokeDevice() { state.revokeDevice(); authenticatedSessionExpiresAt = nil }
+    public func close() { state.close(); authenticatedSessionExpiresAt = nil }
 }

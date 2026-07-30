@@ -178,6 +178,7 @@ public enum V2GatewayTelemetryRejection: String, CaseIterable, Equatable, Sendab
     case invalidArgument = "INVALID_ARGUMENT"
     case forbidden = "FORBIDDEN"
     case notFound = "NOT_FOUND"
+    case groupCreationFrozen = "GROUP_CREATION_FROZEN"
     case idempotencyConflict = "IDEMPOTENCY_CONFLICT"
     case revisionConflict = "REVISION_CONFLICT"
     case rateLimited = "RATE_LIMITED"
