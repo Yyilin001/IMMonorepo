@@ -77,6 +77,8 @@ message Envelope {
     FinalizeGroupRoomCreation finalize_group_room_creation = 71;
     CancelGroupRoomCreation cancel_group_room_creation = 72;
     GroupRoomCreationCancelled group_room_creation_cancelled = 73;
+    SetUserAddPermission set_user_add_permission = 74;
+    UserAddPermissionSet user_add_permission_set = 75;
     Error error = 90;
   }
 }
@@ -481,6 +483,25 @@ message SetStrangerMessagePermission {
 
 message StrangerMessagePermissionSet {
   StrangerMessagePermission permission = 1;
+  int64 updated_at_ms = 2;
+}
+
+enum UserAddPermission {
+  USER_ADD_PERMISSION_UNSPECIFIED = 0;
+  USER_ADD_PERMISSION_ALLOW = 1;
+  USER_ADD_PERMISSION_DENY = 2;
+}
+
+// Device-independent privacy preference for incoming relationship requests.
+// Rejections intentionally use the generic forbidden response so callers do
+// not learn whether this setting, a block, or another policy caused it.
+message SetUserAddPermission {
+  string operation_id = 1;
+  UserAddPermission permission = 2;
+}
+
+message UserAddPermissionSet {
+  UserAddPermission permission = 1;
   int64 updated_at_ms = 2;
 }
 

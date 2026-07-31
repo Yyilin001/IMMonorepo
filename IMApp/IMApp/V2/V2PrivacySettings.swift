@@ -8,6 +8,10 @@ protocol V2StrangerMessagePreferenceReading: Sendable {
     func strangerMessagePreference() async throws -> Bool?
 }
 
+protocol V2UserAddPreferenceReading: Sendable {
+    func userAddPreference() async throws -> Bool?
+}
+
 @MainActor
 @Observable
 final class V2UserBlockSettingsStore {
@@ -82,6 +86,16 @@ actor V2GRDBStrangerMessagePreferenceDataSource: V2StrangerMessagePreferenceRead
     }
 }
 
+actor V2GRDBUserAddPreferenceDataSource: V2UserAddPreferenceReading {
+    private let localStore: GRDBV2LocalSyncStore
+
+    init(localStore: GRDBV2LocalSyncStore) { self.localStore = localStore }
+
+    func userAddPreference() async throws -> Bool? {
+        try await localStore.userAddPreference()?.allowsBeingAdded
+    }
+}
+
 @MainActor
 @Observable
 final class V2PrivacySettingsStore {
@@ -93,18 +107,25 @@ final class V2PrivacySettingsStore {
 
     private let reader: any V2StrangerMessagePreferenceReading
     private let updater: any V2StrangerMessagePreferenceUpdating
+    private let userAddReader: (any V2UserAddPreferenceReading)?
+    private let userAddUpdater: (any V2UserAddPreferenceUpdating)?
     private(set) var state: State = .loading
     private(set) var allowsStrangerMessages = true
+    private(set) var allowsBeingAdded = true
     private(set) var isSaving = false
     private(set) var feedback: String?
     private var refreshGeneration = 0
 
     init(
         reader: any V2StrangerMessagePreferenceReading,
-        updater: any V2StrangerMessagePreferenceUpdating
+        updater: any V2StrangerMessagePreferenceUpdating,
+        userAddReader: (any V2UserAddPreferenceReading)? = nil,
+        userAddUpdater: (any V2UserAddPreferenceUpdating)? = nil
     ) {
         self.reader = reader
         self.updater = updater
+        self.userAddReader = userAddReader
+        self.userAddUpdater = userAddUpdater
     }
 
     func refresh() async {
@@ -115,9 +136,11 @@ final class V2PrivacySettingsStore {
             // The server defaults to allow. Absence only means this device has
             // not yet received a projection, not that the preference is deny.
             let refreshedPreference = try await reader.strangerMessagePreference() ?? true
+            let refreshedUserAddPreference = try await userAddReader?.userAddPreference() ?? true
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
             allowsStrangerMessages = refreshedPreference
+            allowsBeingAdded = refreshedUserAddPreference
             state = .loaded
         } catch is CancellationError {
             return
@@ -144,6 +167,31 @@ final class V2PrivacySettingsStore {
                 feedback = "设置已安全保存，连接恢复后会同步。"
             case .rejected(let code):
                 feedback = "设置被拒绝（\(code)）。"
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            feedback = "无法保存设置，请稍后重试。"
+        }
+    }
+
+    func setAllowsBeingAdded(_ desiredValue: Bool) async {
+        guard !isSaving, desiredValue != allowsBeingAdded, let userAddUpdater else { return }
+        isSaving = true
+        feedback = nil
+        defer { isSaving = false }
+        do {
+            let outcome = try await userAddUpdater.update(allowsBeingAdded: desiredValue)
+            try Task.checkCancellation()
+            switch outcome {
+            case .accepted:
+                allowsBeingAdded = desiredValue
+                feedback = "已更新添加权限。"
+            case .queuedForRetry:
+                allowsBeingAdded = desiredValue
+                feedback = "设置已安全保存，连接恢复后会同步。"
+            case .rejected:
+                feedback = "无法保存设置，请稍后重试。"
             }
         } catch is CancellationError {
             return
@@ -185,6 +233,22 @@ struct V2PrivacySettingsView: View {
                     .disabled(store.isSaving)
                     .accessibilityIdentifier("v2.privacy.allow-stranger-messages")
                     Text("关闭后，非好友无法向你发起新的陌生人消息。")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                }
+                Section("添加权限") {
+                    Toggle(
+                        "允许他人添加我",
+                        isOn: Binding(
+                            get: { store.allowsBeingAdded },
+                            set: { desiredValue in
+                                run { await store.setAllowsBeingAdded(desiredValue) }
+                            }
+                        )
+                    )
+                    .disabled(store.isSaving)
+                    .accessibilityIdentifier("v2.privacy.allow-being-added")
+                    Text("关闭后，新的添加请求会被拒绝；已有好友和待处理请求不受影响。")
                         .font(.body)
                         .foregroundStyle(.secondary)
                 }

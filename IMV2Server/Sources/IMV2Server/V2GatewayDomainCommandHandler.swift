@@ -99,6 +99,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             case .groupEventSubscribe(let request): return try await handleGroupEventSubscribe(request, identity: identity)
             case .groupEventUnsubscribe: return successEnvelope()
             case .setStrangerMessagePermission(let request): return try await handleStrangerMessagePermission(request, identity: identity)
+            case .setUserAddPermission(let request): return try await handleUserAddPermission(request, identity: identity)
             case .changeRelationship(let request): return try await handleRelationship(request, identity: identity)
             case .changeUserBlock(let request): return try await handleUserBlock(request, identity: identity)
             case .moderateMessage(let request): return try await handleModerateMessage(request, identity: identity)
@@ -622,6 +623,24 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             var response = IMV2Envelope(); response.strangerMessagePermissionSet = .init()
             response.strangerMessagePermissionSet.permission = result == .allow ? .allow : .deny
             response.strangerMessagePermissionSet.updatedAtMs = Int64(updatedAt.timeIntervalSince1970 * 1_000)
+            return response
+        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
+        }
+    }
+
+    private func handleUserAddPermission(_ request: IMV2SetUserAddPermission, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        guard let directMessaging else { return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
+        let permission: V2UserAddPermission
+        switch request.permission {
+        case .allow: permission = .allow
+        case .deny: permission = .deny
+        case .unspecified, .UNRECOGNIZED: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        }
+        switch try await directMessaging.setUserAddPermission(actorUserID: identity.userID, operationID: try .init(request.operationID), permission: permission) {
+        case .updated(let result, let updatedAt), .idempotent(let result, let updatedAt):
+            var response = IMV2Envelope(); response.userAddPermissionSet = .init()
+            response.userAddPermissionSet.permission = result == .allow ? .allow : .deny
+            response.userAddPermissionSet.updatedAtMs = Int64(updatedAt.timeIntervalSince1970 * 1_000)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         }

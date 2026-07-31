@@ -24,4 +24,10 @@ public struct V2ClientStrangerMessagePreference: Equatable, Sendable {
     public init(allowsStrangerMessages: Bool, updatedAt: Date) { self.allowsStrangerMessages = allowsStrangerMessages; self.updatedAt = updatedAt }
 }
 
+public struct V2ClientUserAddPreference: Equatable, Sendable {
+    public let allowsBeingAdded: Bool
+    public let updatedAt: Date
+    public init(allowsBeingAdded: Bool, updatedAt: Date) { self.allowsBeingAdded = allowsBeingAdded; self.updatedAt = updatedAt }
+}
+
 public enum V2ClientSocialProjectionError: Error, Equatable, Sendable { case invalidPayload }

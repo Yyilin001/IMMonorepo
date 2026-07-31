@@ -209,6 +209,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     try Self.applyUserBlock(record, db: db)
                 } else if record.projectionKind == "stranger_message_permission" {
                     try Self.applyStrangerMessagePermission(record, db: db)
+                } else if record.projectionKind == "user_add_permission" {
+                    try Self.applyUserAddPermission(record, db: db)
                 } else if record.projectionKind == "room" || record.projectionKind == "membership" {
                     try Self.persist(V2ClientRoomProfileProjection(record: record), db: db)
                 } else if record.projectionKind == "direct_room_profile" {
@@ -348,6 +350,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             let snapshotRelationships = snapshotPages.flatMap(\.relationships)
             let snapshotUserBlocks = snapshotPages.flatMap(\.userBlocks)
             let snapshotPreferences = snapshotPages.compactMap(\.strangerMessagePreference)
+            let snapshotUserAddPreferences = snapshotPages.compactMap(\.userAddPreference)
             let snapshotModerationActions = snapshotPages.flatMap(\.moderationActions)
             let snapshotRoomControls = snapshotPages.flatMap(\.roomControls)
             let snapshotRoomProfiles = snapshotPages.flatMap(\.roomProfiles)
@@ -386,7 +389,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             guard Set(snapshotDirectRoomProfiles.map(\.roomID)).count == snapshotDirectRoomProfiles.count else { throw V2ClientProjectionError.invalidMessagePayload }
             guard Set(snapshotRelationships.map(\.targetUserID)).count == snapshotRelationships.count,
                   Set(snapshotUserBlocks.map(\.targetUserID)).count == snapshotUserBlocks.count,
-                  snapshotPreferences.count <= 1
+                  snapshotPreferences.count <= 1,
+                  snapshotUserAddPreferences.count <= 1
             else { throw V2ClientSocialProjectionError.invalidPayload }
             try Self.resetMessageSearchIndex(db: db)
             try db.execute(sql: "DELETE FROM v2_sync_events")
@@ -402,6 +406,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try db.execute(sql: "DELETE FROM v2_relationship_projections")
             try db.execute(sql: "DELETE FROM v2_user_block_projections")
             try db.execute(sql: "DELETE FROM v2_stranger_message_preference")
+            try db.execute(sql: "DELETE FROM v2_user_add_preference")
             for message in snapshotMessages {
                 let projection = V2ClientMessageProjection(snapshotProjection: message)
                 try Self.persist(projection, db: db)
@@ -414,6 +419,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             for profile in snapshotDirectRoomProfiles { try Self.persist(V2ClientDirectRoomProfileProjection(snapshotProjection: profile), db: db) }
             for userBlock in snapshotUserBlocks { try Self.persist(userBlock, db: db) }
             if let preference = snapshotPreferences.first { try Self.persist(preference, db: db) }
+            if let preference = snapshotUserAddPreferences.first { try Self.persist(preference, db: db) }
             for action in snapshotModerationActions { try Self.persist(.init(snapshotProjection: action), db: db) }
             for control in snapshotRoomControls { try Self.persist(.init(snapshotProjection: control), db: db) }
             try Self.finishMessageSearchIndexRebuild(
@@ -634,6 +640,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try databasePool.read { db in
             guard let row = try Row.fetchOne(db, sql: "SELECT allows_stranger_messages, updated_at FROM v2_stranger_message_preference WHERE singleton = 1") else { return nil }
             return .init(allowsStrangerMessages: row["allows_stranger_messages"], updatedAt: Date(timeIntervalSince1970: row["updated_at"]))
+        }
+    }
+
+    public func userAddPreference() throws -> V2ClientUserAddPreference? {
+        try databasePool.read { db in
+            guard let row = try Row.fetchOne(db, sql: "SELECT allows_being_added, updated_at FROM v2_user_add_preference WHERE singleton = 1") else { return nil }
+            return .init(allowsBeingAdded: row["allows_being_added"], updatedAt: Date(timeIntervalSince1970: row["updated_at"]))
         }
     }
 
@@ -1603,16 +1616,17 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
     public func enqueue(_ command: V2PendingSocialCommand) throws {
         try databasePool.write { db in
-            if let row = try Row.fetchOne(db, sql: "SELECT command_kind, target_user_id, relationship_action, block_action, stranger_permission FROM v2_pending_social_commands WHERE operation_id = ?", arguments: [command.operationID]) {
+            if let row = try Row.fetchOne(db, sql: "SELECT command_kind, target_user_id, relationship_action, block_action, stranger_permission, user_add_permission FROM v2_pending_social_commands WHERE operation_id = ?", arguments: [command.operationID]) {
                 let kind: String = row["command_kind"]
                 let target: String? = row["target_user_id"]
                 let relationship: String? = row["relationship_action"]
                 let block: String? = row["block_action"]
                 let permission: String? = row["stranger_permission"]
-                guard kind == command.kind.rawValue, target == command.targetUserID?.rawValue, relationship == command.relationshipAction?.rawValue, block == command.blockAction?.rawValue, permission == command.strangerPermission?.rawValue else { throw V2ClientCommandError.commandConflict }
+                let addPermission: String? = row["user_add_permission"]
+                guard kind == command.kind.rawValue, target == command.targetUserID?.rawValue, relationship == command.relationshipAction?.rawValue, block == command.blockAction?.rawValue, permission == command.strangerPermission?.rawValue, addPermission == command.userAddPermission?.rawValue else { throw V2ClientCommandError.commandConflict }
                 return
             }
-            try db.execute(sql: "INSERT INTO v2_pending_social_commands (operation_id, command_kind, target_user_id, relationship_action, block_action, stranger_permission, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID, command.kind.rawValue, command.targetUserID?.rawValue, command.relationshipAction?.rawValue, command.blockAction?.rawValue, command.strangerPermission?.rawValue, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+            try db.execute(sql: "INSERT INTO v2_pending_social_commands (operation_id, command_kind, target_user_id, relationship_action, block_action, stranger_permission, user_add_permission, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID, command.kind.rawValue, command.targetUserID?.rawValue, command.relationshipAction?.rawValue, command.blockAction?.rawValue, command.strangerPermission?.rawValue, command.userAddPermission?.rawValue, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
         }
     }
 
@@ -1631,6 +1645,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                       decoded.relationshipAction == command.relationshipAction,
                       decoded.blockAction == command.blockAction,
                       decoded.strangerPermission == command.strangerPermission,
+                      decoded.userAddPermission == command.userAddPermission,
                       decoded.state == .pending
                 else { throw V2ClientCommandError.commandConflict }
                 return decoded
@@ -1644,6 +1659,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                   AND relationship_action IS ?
                   AND block_action IS ?
                   AND stranger_permission IS ?
+                  AND user_add_permission IS ?
                   AND state = 'pending'
                 ORDER BY created_at, operation_id
                 LIMIT 1
@@ -1654,6 +1670,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     command.relationshipAction?.rawValue,
                     command.blockAction?.rawValue,
                     command.strangerPermission?.rawValue
+                    , command.userAddPermission?.rawValue
                 ]
             ) {
                 return try Self.decodePendingSocialCommand(existing)
@@ -1662,9 +1679,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 sql: """
                 INSERT INTO v2_pending_social_commands
                 (operation_id, command_kind, target_user_id, relationship_action,
-                 block_action, stranger_permission, state, attempt_count,
+                 block_action, stranger_permission, user_add_permission, state, attempt_count,
                  next_attempt_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
                 """,
                 arguments: [
                     command.operationID,
@@ -1673,6 +1690,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     command.relationshipAction?.rawValue,
                     command.blockAction?.rawValue,
                     command.strangerPermission?.rawValue,
+                    command.userAddPermission?.rawValue,
                     command.nextAttemptAt.timeIntervalSince1970,
                     command.nextAttemptAt.timeIntervalSince1970
                 ]
@@ -2092,6 +2110,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try db.execute(sql: "INSERT INTO v2_stranger_message_preference (singleton, allows_stranger_messages, updated_at) VALUES (1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET allows_stranger_messages = excluded.allows_stranger_messages, updated_at = excluded.updated_at", arguments: [payload.allowsStrangerMessages, Double(payload.updatedAtMilliseconds) / 1_000])
     }
 
+    private static func applyUserAddPermission(_ record: V2ClientSyncRecord, db: Database) throws {
+        struct Payload: Decodable { let allowsBeingAdded: Bool; let updatedAtMilliseconds: Int64; enum CodingKeys: String, CodingKey { case allowsBeingAdded = "allows_being_added"; case updatedAtMilliseconds = "updated_at_ms" } }
+        let payload: Payload
+        do { payload = try JSONDecoder().decode(Payload.self, from: record.payload) } catch { throw V2ClientSocialProjectionError.invalidPayload }
+        try db.execute(sql: "INSERT INTO v2_user_add_preference (singleton, allows_being_added, updated_at) VALUES (1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET allows_being_added = excluded.allows_being_added, updated_at = excluded.updated_at", arguments: [payload.allowsBeingAdded, Double(payload.updatedAtMilliseconds) / 1_000])
+    }
+
     private static func applyModeration(_ record: V2ClientSyncRecord, db: Database) throws {
         struct Header: Decodable { let eventType: String; enum CodingKeys: String, CodingKey { case eventType = "event_type" } }
         let header: Header
@@ -2122,6 +2147,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try db.execute(
             sql: "INSERT INTO v2_stranger_message_preference (singleton, allows_stranger_messages, updated_at) VALUES (1, ?, ?)",
             arguments: [projection.allowsStrangerMessages, projection.updatedAt.timeIntervalSince1970]
+        )
+    }
+
+    private static func persist(_ projection: V2SnapshotUserAddPreference, db: Database) throws {
+        try db.execute(
+            sql: "INSERT INTO v2_user_add_preference (singleton, allows_being_added, updated_at) VALUES (1, ?, ?)",
+            arguments: [projection.allowsBeingAdded, projection.updatedAt.timeIntervalSince1970]
         )
     }
 
@@ -2562,7 +2594,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     private static func decodePendingReadReceipt(_ row: Row) throws -> V2PendingReadReceipt { guard let state = V2PendingReadReceipt.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), readThroughRoomSequence: UInt64(row["read_through_room_sequence"] as Int64), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init), terminalCode: row["terminal_code"]) }
     private static func decodePendingSocialCommand(_ row: Row) throws -> V2PendingSocialCommand {
         guard let kind = V2PendingSocialCommandKind(rawValue: row["command_kind"] as String), let state = V2PendingSocialCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(operationID: row["operation_id"], kind: kind, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), relationshipAction: (row["relationship_action"] as String?).flatMap(V2RelationshipAction.init), blockAction: (row["block_action"] as String?).flatMap(V2UserBlockAction.init), strangerPermission: (row["stranger_permission"] as String?).flatMap(V2StrangerMessagePermission.init), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
+        return try .init(operationID: row["operation_id"], kind: kind, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), relationshipAction: (row["relationship_action"] as String?).flatMap(V2RelationshipAction.init), blockAction: (row["block_action"] as String?).flatMap(V2UserBlockAction.init), strangerPermission: (row["stranger_permission"] as String?).flatMap(V2StrangerMessagePermission.init), userAddPermission: (row["user_add_permission"] as String?).flatMap(V2UserAddPermission.init), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
     }
     private static func encodeGroupMemberUserIDs(_ members: [UserID]) throws -> String {
         guard let encoded = String(data: try JSONEncoder().encode(members.map(\.rawValue)), encoding: .utf8) else { throw V2ClientCommandError.commandConflict }
@@ -3001,6 +3033,45 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     ON v2_pending_social_commands (state, next_attempt_at, created_at)
                     WHERE state = 'pending';
             """)
+        }
+        migrator.registerMigration("addV2UserAddPreferences") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_user_add_preference (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    allows_being_added INTEGER NOT NULL CHECK (allows_being_added IN (0, 1)),
+                    updated_at REAL NOT NULL
+                );
+                CREATE TABLE v2_pending_social_commands_new (
+                    operation_id TEXT PRIMARY KEY,
+                    command_kind TEXT NOT NULL CHECK (command_kind IN ('relationship', 'userBlock', 'strangerMessagePreference', 'userAddPreference')),
+                    target_user_id TEXT,
+                    relationship_action TEXT CHECK (relationship_action IN ('request', 'accept', 'reject', 'remove')),
+                    block_action TEXT CHECK (block_action IN ('block', 'unblock')),
+                    stranger_permission TEXT CHECK (stranger_permission IN ('allow', 'deny')),
+                    user_add_permission TEXT CHECK (user_add_permission IN ('allow', 'deny')),
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
+                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+                    next_attempt_at REAL NOT NULL,
+                    created_at REAL NOT NULL,
+                    terminal_code TEXT,
+                    CHECK (
+                        (command_kind = 'relationship' AND target_user_id IS NOT NULL AND relationship_action IS NOT NULL AND block_action IS NULL AND stranger_permission IS NULL AND user_add_permission IS NULL)
+                        OR (command_kind = 'userBlock' AND target_user_id IS NOT NULL AND relationship_action IS NULL AND block_action IS NOT NULL AND stranger_permission IS NULL AND user_add_permission IS NULL)
+                        OR (command_kind = 'strangerMessagePreference' AND target_user_id IS NULL AND relationship_action IS NULL AND block_action IS NULL AND stranger_permission IS NOT NULL AND user_add_permission IS NULL)
+                        OR (command_kind = 'userAddPreference' AND target_user_id IS NULL AND relationship_action IS NULL AND block_action IS NULL AND stranger_permission IS NULL AND user_add_permission IS NOT NULL)
+                    ),
+                    CHECK ((state IN ('pending', 'acknowledged') AND terminal_code IS NULL) OR (state = 'rejected' AND terminal_code IS NOT NULL))
+                );
+                INSERT INTO v2_pending_social_commands_new
+                    (operation_id, command_kind, target_user_id, relationship_action, block_action, stranger_permission, state, attempt_count, next_attempt_at, created_at, terminal_code)
+                SELECT operation_id, command_kind, target_user_id, relationship_action, block_action, stranger_permission, state, attempt_count, next_attempt_at, created_at, terminal_code
+                FROM v2_pending_social_commands;
+                DROP TABLE v2_pending_social_commands;
+                ALTER TABLE v2_pending_social_commands_new RENAME TO v2_pending_social_commands;
+                CREATE INDEX v2_pending_social_ready_idx
+                    ON v2_pending_social_commands (state, next_attempt_at, created_at)
+                    WHERE state = 'pending';
+                """)
         }
         migrator.registerMigration("addV2MessageMediaReferences") { db in
             try db.execute(sql: """

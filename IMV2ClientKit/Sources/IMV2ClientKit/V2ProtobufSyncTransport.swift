@@ -112,6 +112,7 @@ public struct V2ClientDirectRoom: Equatable, Sendable {
 public protocol V2ClientDirectMessagingTransport: Sendable {
     func openDirectRoom(operationID: DirectRoomOperationID, targetUserID: UserID) async throws -> V2ClientDirectRoom
     func setStrangerMessagePermission(operationID: StrangerMessagePreferenceOperationID, permission: V2StrangerMessagePermission) async throws -> Date
+    func setUserAddPermission(operationID: UserAddPreferenceOperationID, permission: V2UserAddPermission) async throws -> Date
 }
 
 public struct V2ClientGroupRoom: Equatable, Sendable {
@@ -694,6 +695,20 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
             try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
         }
         let returned: V2StrangerMessagePermission
+        switch result.permission { case .allow: returned = .allow; case .deny: returned = .deny; case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse }
+        guard returned == permission else { throw V2RealtimeTransportError.unexpectedResponse }
+        return Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000)
+    }
+
+    public func setUserAddPermission(operationID: UserAddPreferenceOperationID, permission: V2UserAddPermission) async throws -> Date {
+        var request = IMV2Envelope(); request.setUserAddPermission = .init()
+        request.setUserAddPermission.operationID = operationID.rawValue
+        request.setUserAddPermission.permission = permission == .allow ? .allow : .deny
+        let response = try await requestEnvelope(request)
+        guard case .userAddPermissionSet(let result)? = response.body else {
+            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
+        }
+        let returned: V2UserAddPermission
         switch result.permission { case .allow: returned = .allow; case .deny: returned = .deny; case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse }
         guard returned == permission else { throw V2RealtimeTransportError.unexpectedResponse }
         return Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000)

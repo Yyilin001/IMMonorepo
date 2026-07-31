@@ -31,6 +31,11 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: pair.lockKey), 0))").run()
             let blocked = try await isBlocked(actorID, targetID, sql: sql)
             guard !blocked else { return .forbidden }
+            if command.action == .request {
+                try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: socialUserAddPreferenceLockKey(targetID)), 0))").run()
+                let allowsBeingAdded = try await sql.raw("SELECT COALESCE((SELECT allows_being_added FROM im_v2.user_add_preferences WHERE user_id = \(bind: targetID)), TRUE) AS value").first(decoding: SocialBooleanRow.self)?.value ?? false
+                guard allowsBeingAdded else { return .forbidden }
+            }
             let existing = try await sql.raw("SELECT state, requested_by_user_id, updated_at FROM im_v2.user_relationships WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher) FOR UPDATE").first(decoding: RelationshipRow.self)
             let result: (state: V2RelationshipState, requestedBy: UUID?)
             switch command.action {
@@ -153,3 +158,4 @@ private struct SocialBooleanRow: Decodable { let value: Bool }
 private struct SocialSyncSequenceRow: Decodable { let nextSequence: Int64; enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" } }
 private func socialUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let result = UUID(uuidString: identifier.rawValue) else { throw V2SocialRelationshipStoreError.corruptPersistenceState }; return result }
 private func socialPair(_ lhs: UUID, _ rhs: UUID) -> (lower: UUID, higher: UUID, lockKey: String) { let left = lhs.uuidString.lowercased(); let right = rhs.uuidString.lowercased(); return left < right ? (lhs, rhs, "\(left)|\(right)") : (rhs, lhs, "\(right)|\(left)") }
+private func socialUserAddPreferenceLockKey(_ userID: UUID) -> String { "v2-user-add-preference:\(userID.uuidString.lowercased())" }

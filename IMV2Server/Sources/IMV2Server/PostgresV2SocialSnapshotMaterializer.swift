@@ -67,7 +67,12 @@ public struct PostgresV2SocialSnapshotMaterializer: Sendable {
                 FROM im_v2.user_stranger_message_preferences
                 WHERE user_id = \(bind: userUUID)
                 """).first(decoding: SnapshotPreferenceRow.self)
-            return (watermark, relationships, blocks, preference)
+            let userAddPreference = try await sql.raw("""
+                SELECT allows_being_added, updated_at
+                FROM im_v2.user_add_preferences
+                WHERE user_id = \(bind: userUUID)
+                """).first(decoding: SnapshotUserAddPreferenceRow.self)
+            return (watermark, relationships, blocks, preference, userAddPreference)
         }
 
         guard social.0 >= 0 else { throw V2SnapshotMaterializerError.corruptPersistenceState }
@@ -82,14 +87,19 @@ public struct PostgresV2SocialSnapshotMaterializer: Sendable {
             allowsStrangerMessages: social.3?.allowsStrangerMessages ?? true,
             updatedAt: social.3?.updatedAt ?? now
         )
-        let pages = try makePages(relationships: relationships, blocks: blocks, preference: preference)
+        let userAddPreference = V2SnapshotUserAddPreference(
+            allowsBeingAdded: social.4?.allowsBeingAdded ?? true,
+            updatedAt: social.4?.updatedAt ?? now
+        )
+        let pages = try makePages(relationships: relationships, blocks: blocks, preference: preference, userAddPreference: userAddPreference)
         return .init(baseSequence: UInt64(social.0), pages: pages.map { .init(digest: snapshotSHA256($0), payload: $0) })
     }
 
     private func makePages(
         relationships: [V2SnapshotRelationshipProjection],
         blocks: [V2SnapshotUserBlockProjection],
-        preference: V2SnapshotStrangerMessagePreference
+        preference: V2SnapshotStrangerMessagePreference,
+        userAddPreference: V2SnapshotUserAddPreference
     ) throws -> [Data] {
         var relationshipOffset = 0
         var blockOffset = 0
@@ -109,7 +119,8 @@ public struct PostgresV2SocialSnapshotMaterializer: Sendable {
                 userBlocks: pageBlocks,
                 strangerMessagePreference: pages.isEmpty ? preference : nil,
                 moderationActions: [],
-                roomControls: []
+                roomControls: [],
+                userAddPreference: pages.isEmpty ? userAddPreference : nil
             )))
         } while relationshipOffset < relationships.count || blockOffset < blocks.count
         return pages
@@ -142,6 +153,11 @@ private struct SnapshotPreferenceRow: Decodable {
     let allowsStrangerMessages: Bool
     let updatedAt: Date
     enum CodingKeys: String, CodingKey { case allowsStrangerMessages = "allows_stranger_messages"; case updatedAt = "updated_at" }
+}
+private struct SnapshotUserAddPreferenceRow: Decodable {
+    let allowsBeingAdded: Bool
+    let updatedAt: Date
+    enum CodingKeys: String, CodingKey { case allowsBeingAdded = "allows_being_added"; case updatedAt = "updated_at" }
 }
 
 private func snapshotUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {

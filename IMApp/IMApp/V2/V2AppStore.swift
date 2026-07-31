@@ -628,7 +628,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         )
         let privacySettings = V2PrivacySettingsStore(
             reader: V2GRDBStrangerMessagePreferenceDataSource(localStore: localStore),
-            updater: realtime.strangerMessagePreferenceUpdater
+            updater: realtime.strangerMessagePreferenceUpdater,
+            userAddReader: V2GRDBUserAddPreferenceDataSource(localStore: localStore),
+            userAddUpdater: realtime.userAddPreferenceUpdater
         )
         let contacts = V2ContactsStore(
             dataSource: contactsDataSource,

@@ -1348,6 +1348,22 @@ struct V2ConversationStoreTests {
         #expect(await updater.requestedValues() == [true])
     }
 
+    @Test func userAddPreferenceKeepsDurableQueuedIntentVisible() async {
+        let reader = V2StrangerMessagePreferenceReaderFake(value: true)
+        let updater = V2StrangerMessagePreferenceUpdaterFake(result: .accepted)
+        let userAddReader = V2UserAddPreferenceReaderFake(value: true)
+        let userAddUpdater = V2UserAddPreferenceUpdaterFake(result: .queuedForRetry)
+        let store = V2PrivacySettingsStore(reader: reader, updater: updater, userAddReader: userAddReader, userAddUpdater: userAddUpdater)
+
+        await store.refresh()
+        await store.setAllowsBeingAdded(false)
+
+        #expect(store.state == .loaded)
+        #expect(!store.allowsBeingAdded)
+        #expect(store.feedback == "设置已安全保存，连接恢复后会同步。")
+        #expect(await userAddUpdater.requestedValues() == [false])
+    }
+
     @Test func strangerMessagePreferenceRefreshIgnoresAFailureSupersededByANewerRefresh() async {
         let reader = V2SequencedStrangerMessagePreferenceReader()
         let updater = V2StrangerMessagePreferenceUpdaterFake(result: .accepted)
@@ -2405,6 +2421,12 @@ private actor V2StrangerMessagePreferenceReaderFake: V2StrangerMessagePreference
     }
 }
 
+private actor V2UserAddPreferenceReaderFake: V2UserAddPreferenceReading {
+    private let value: Bool?
+    init(value: Bool?) { self.value = value }
+    func userAddPreference() async throws -> Bool? { value }
+}
+
 private actor V2SequencedStrangerMessagePreferenceReader: V2StrangerMessagePreferenceReading {
     private var requestCount = 0
     private var requestWaiters: [CheckedContinuation<Void, Never>] = []
@@ -2463,6 +2485,14 @@ private actor V2StrangerMessagePreferenceUpdaterFake: V2StrangerMessagePreferenc
     func requestedValues() -> [Bool] {
         values
     }
+}
+
+private actor V2UserAddPreferenceUpdaterFake: V2UserAddPreferenceUpdating {
+    private let result: V2UserAddPreferenceUpdateOutcome
+    private var values: [Bool] = []
+    init(result: V2UserAddPreferenceUpdateOutcome) { self.result = result }
+    func update(allowsBeingAdded: Bool) async throws -> V2UserAddPreferenceUpdateOutcome { values.append(allowsBeingAdded); return result }
+    func requestedValues() -> [Bool] { values }
 }
 
 private actor V2LateStrangerMessagePreferenceUpdater: V2StrangerMessagePreferenceUpdating {

@@ -57,6 +57,8 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     public static let finalizeGroupRoomCreation = Self(rawValue: 71)
     public static let cancelGroupRoomCreation = Self(rawValue: 72)
     public static let groupRoomCreationCancelled = Self(rawValue: 73)
+    public static let setUserAddPermission = Self(rawValue: 74)
+    public static let userAddPermissionSet = Self(rawValue: 75)
     public static let syncPull = Self(rawValue: 30)
     public static let syncBatch = Self(rawValue: 31)
     public static let syncAck = Self(rawValue: 32)

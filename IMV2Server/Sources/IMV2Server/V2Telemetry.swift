@@ -153,6 +153,7 @@ public enum V2GatewayTelemetryCommand: String, CaseIterable, Equatable, Sendable
     case openDirectRoom = "open_direct_room"
     case createGroupRoom = "create_group_room"
     case setStrangerMessagePermission = "set_stranger_message_permission"
+    case setUserAddPermission = "set_user_add_permission"
     case changeRelationship = "change_relationship"
     case changeUserBlock = "change_user_block"
     case moderateMemberRemoval = "moderate_member_removal"
@@ -415,6 +416,7 @@ func v2TelemetryCommand(for envelope: IMV2Envelope) -> V2GatewayTelemetryCommand
     case .openDirectRoom: .openDirectRoom
     case .createGroupRoom: .createGroupRoom
     case .setStrangerMessagePermission: .setStrangerMessagePermission
+    case .setUserAddPermission: .setUserAddPermission
     case .changeRelationship: .changeRelationship
     case .changeUserBlock: .changeUserBlock
     case .moderateMemberRemoval: .moderateMemberRemoval

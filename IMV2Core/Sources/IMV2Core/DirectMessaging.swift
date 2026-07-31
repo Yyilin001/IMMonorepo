@@ -7,6 +7,13 @@ public enum V2StrangerMessagePermission: String, Codable, Equatable, Sendable {
     case deny
 }
 
+/// The recipient-owned policy for new relationship requests. Existing
+/// relationships and pending requests are intentionally unaffected.
+public enum V2UserAddPermission: String, Codable, Equatable, Sendable {
+    case allow
+    case deny
+}
+
 /// Opens (or returns) the unique direct room for two distinct users. The
 /// operation ID is durable client intent and therefore survives reconnects.
 public struct V2OpenDirectRoomCommand: Equatable, Sendable {
@@ -30,6 +37,19 @@ public struct V2SetStrangerMessagePermissionCommand: Equatable, Sendable {
     public let permission: V2StrangerMessagePermission
 
     public init(actorUserID: UserID, operationID: StrangerMessagePreferenceOperationID, permission: V2StrangerMessagePermission) {
+        self.actorUserID = actorUserID
+        self.operationID = operationID
+        self.permission = permission
+    }
+}
+
+/// A device-independent privacy setting owned by the authenticated user.
+public struct V2SetUserAddPermissionCommand: Equatable, Sendable {
+    public let actorUserID: UserID
+    public let operationID: UserAddPreferenceOperationID
+    public let permission: V2UserAddPermission
+
+    public init(actorUserID: UserID, operationID: UserAddPreferenceOperationID, permission: V2UserAddPermission) {
         self.actorUserID = actorUserID
         self.operationID = operationID
         self.permission = permission

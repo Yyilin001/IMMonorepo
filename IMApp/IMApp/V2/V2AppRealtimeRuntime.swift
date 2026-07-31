@@ -163,6 +163,16 @@ protocol V2StrangerMessagePreferenceUpdating: Sendable {
     func update(allowsStrangerMessages: Bool) async throws -> V2StrangerMessagePreferenceUpdateOutcome
 }
 
+enum V2UserAddPreferenceUpdateOutcome: Equatable, Sendable {
+    case accepted
+    case queuedForRetry
+    case rejected(code: String)
+}
+
+protocol V2UserAddPreferenceUpdating: Sendable {
+    func update(allowsBeingAdded: Bool) async throws -> V2UserAddPreferenceUpdateOutcome
+}
+
 enum V2UserBlockChangeOutcome: Equatable, Sendable {
     case accepted
     case queuedForRetry
@@ -529,6 +539,22 @@ actor V2OutboxStrangerMessagePreferenceUpdater: V2StrangerMessagePreferenceUpdat
     }
 }
 
+actor V2OutboxUserAddPreferenceUpdater: V2UserAddPreferenceUpdating {
+    private let outbox: V2SocialCommandOutboxEngine
+
+    init(outbox: V2SocialCommandOutboxEngine) { self.outbox = outbox }
+
+    func update(allowsBeingAdded: Bool) async throws -> V2UserAddPreferenceUpdateOutcome {
+        let command = try await outbox.enqueueUserAddPermission(allowsBeingAdded ? .allow : .deny)
+        switch try await outbox.flushIfReady(operationID: command.operationID) {
+        case nil: return .queuedForRetry
+        case .acknowledged: return .accepted
+        case .retryScheduled, .idle: return .queuedForRetry
+        case .rejected(_, let code): return .rejected(code: code)
+        }
+    }
+}
+
 actor V2OutboxUserBlockChanger: V2UserBlockChanging {
     private let outbox: V2SocialCommandOutboxEngine
 
@@ -827,6 +853,7 @@ struct V2AppRealtimeRuntime {
         groupMemberMuter = V2OutboxGroupMemberMuter(outbox: memberMuteOutbox)
         moderatedGroupMemberRemover = V2OutboxModeratedGroupMemberRemover(outbox: moderatedMemberRemovalOutbox)
         strangerMessagePreferenceUpdater = V2OutboxStrangerMessagePreferenceUpdater(outbox: socialOutbox)
+        userAddPreferenceUpdater = V2OutboxUserAddPreferenceUpdater(outbox: socialOutbox)
         userBlockChanger = V2OutboxUserBlockChanger(outbox: socialOutbox)
         relationshipChanger = V2OutboxRelationshipChanger(outbox: socialOutbox)
     }
@@ -838,6 +865,7 @@ struct V2AppRealtimeRuntime {
     let groupMemberMuter: any V2GroupMemberMuting
     let moderatedGroupMemberRemover: any V2ModeratedGroupMemberRemoving
     let strangerMessagePreferenceUpdater: any V2StrangerMessagePreferenceUpdating
+    let userAddPreferenceUpdater: any V2UserAddPreferenceUpdating
     let userBlockChanger: any V2UserBlockChanging
     let relationshipChanger: any V2RelationshipChanging
 }

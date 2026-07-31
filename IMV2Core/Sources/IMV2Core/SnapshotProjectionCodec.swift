@@ -85,6 +85,12 @@ public struct V2SnapshotStrangerMessagePreference: Equatable, Sendable {
     public init(allowsStrangerMessages: Bool, updatedAt: Date) { self.allowsStrangerMessages = allowsStrangerMessages; self.updatedAt = updatedAt }
 }
 
+public struct V2SnapshotUserAddPreference: Equatable, Sendable {
+    public let allowsBeingAdded: Bool
+    public let updatedAt: Date
+    public init(allowsBeingAdded: Bool, updatedAt: Date) { self.allowsBeingAdded = allowsBeingAdded; self.updatedAt = updatedAt }
+}
+
 /// A moderation fact that remains visible after a reset. Audit reason text is
 /// deliberately absent: snapshots carry only the client-visible event shape.
 public struct V2SnapshotModerationProjection: Equatable, Sendable {
@@ -176,6 +182,7 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
     public let relationships: [V2SnapshotRelationshipProjection]
     public let userBlocks: [V2SnapshotUserBlockProjection]
     public let strangerMessagePreference: V2SnapshotStrangerMessagePreference?
+    public let userAddPreference: V2SnapshotUserAddPreference?
     public let moderationActions: [V2SnapshotModerationProjection]
     public let roomControls: [V2SnapshotRoomControlProjection]
     public let roomProfiles: [V2SnapshotRoomProfileProjection]
@@ -183,10 +190,10 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
     /// Compatibility overload retained for incremental build products compiled
     /// against snapshot schema v7. New callers may provide room controls.
     public init(messages: [V2SnapshotMessageProjection], relationships: [V2SnapshotRelationshipProjection] = [], userBlocks: [V2SnapshotUserBlockProjection] = [], strangerMessagePreference: V2SnapshotStrangerMessagePreference? = nil, moderationActions: [V2SnapshotModerationProjection] = []) throws {
-        try self.init(messages: messages, relationships: relationships, userBlocks: userBlocks, strangerMessagePreference: strangerMessagePreference, moderationActions: moderationActions, roomControls: [], roomProfiles: [], directRoomProfiles: [])
+        try self.init(messages: messages, relationships: relationships, userBlocks: userBlocks, strangerMessagePreference: strangerMessagePreference, moderationActions: moderationActions, roomControls: [], roomProfiles: [], directRoomProfiles: [], userAddPreference: nil)
     }
 
-    public init(messages: [V2SnapshotMessageProjection], relationships: [V2SnapshotRelationshipProjection], userBlocks: [V2SnapshotUserBlockProjection], strangerMessagePreference: V2SnapshotStrangerMessagePreference?, moderationActions: [V2SnapshotModerationProjection], roomControls: [V2SnapshotRoomControlProjection], roomProfiles: [V2SnapshotRoomProfileProjection] = [], directRoomProfiles: [V2SnapshotDirectRoomProfileProjection] = []) throws {
+    public init(messages: [V2SnapshotMessageProjection], relationships: [V2SnapshotRelationshipProjection], userBlocks: [V2SnapshotUserBlockProjection], strangerMessagePreference: V2SnapshotStrangerMessagePreference?, moderationActions: [V2SnapshotModerationProjection], roomControls: [V2SnapshotRoomControlProjection], roomProfiles: [V2SnapshotRoomProfileProjection] = [], directRoomProfiles: [V2SnapshotDirectRoomProfileProjection] = [], userAddPreference: V2SnapshotUserAddPreference? = nil) throws {
         guard Set(relationships.map(\.targetUserID)).count == relationships.count,
               Set(userBlocks.map(\.targetUserID)).count == userBlocks.count,
               Set(moderationActions.map(\.sourceEventID)).count == moderationActions.count,
@@ -194,7 +201,7 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
               Set(roomProfiles.map(\.roomID)).count == roomProfiles.count,
               Set(directRoomProfiles.map(\.roomID)).count == directRoomProfiles.count
         else { throw V2SnapshotProjectionError.invalidPage }
-        self.messages = messages; self.relationships = relationships; self.userBlocks = userBlocks; self.strangerMessagePreference = strangerMessagePreference; self.moderationActions = moderationActions; self.roomControls = roomControls; self.roomProfiles = roomProfiles; self.directRoomProfiles = directRoomProfiles
+        self.messages = messages; self.relationships = relationships; self.userBlocks = userBlocks; self.strangerMessagePreference = strangerMessagePreference; self.userAddPreference = userAddPreference; self.moderationActions = moderationActions; self.roomControls = roomControls; self.roomProfiles = roomProfiles; self.directRoomProfiles = directRoomProfiles
     }
 }
 
@@ -204,14 +211,14 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
 public enum V2SnapshotProjectionCodec {
     /// V2 snapshot schema. There is deliberately no reader for the earlier
     /// draft page shape: this product has no released data to migrate.
-    public static let schemaVersion: UInt32 = 11
+    public static let schemaVersion: UInt32 = 12
 
     public static func encode(messages: [V2SnapshotMessageProjection]) throws -> Data {
         try encode(.init(messages: messages))
     }
 
     public static func encode(_ page: V2SnapshotProjectionPage) throws -> Data {
-        let wire = Page(schemaVersion: schemaVersion, messages: page.messages.map(Message.init), relationships: page.relationships.map(Relationship.init), userBlocks: page.userBlocks.map(UserBlock.init), strangerMessagePreference: page.strangerMessagePreference.map(StrangerMessagePreference.init), moderationActions: page.moderationActions.map(Moderation.init), roomControls: page.roomControls.map(RoomControl.init), roomProfiles: page.roomProfiles.map(RoomProfile.init), directRoomProfiles: page.directRoomProfiles.map(DirectRoomProfile.init))
+        let wire = Page(schemaVersion: schemaVersion, messages: page.messages.map(Message.init), relationships: page.relationships.map(Relationship.init), userBlocks: page.userBlocks.map(UserBlock.init), strangerMessagePreference: page.strangerMessagePreference.map(StrangerMessagePreference.init), userAddPreference: page.userAddPreference.map(UserAddPreference.init), moderationActions: page.moderationActions.map(Moderation.init), roomControls: page.roomControls.map(RoomControl.init), roomProfiles: page.roomProfiles.map(RoomProfile.init), directRoomProfiles: page.directRoomProfiles.map(DirectRoomProfile.init))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(wire)
@@ -226,7 +233,7 @@ public enum V2SnapshotProjectionCodec {
         do { page = try JSONDecoder().decode(Page.self, from: payload) }
         catch { throw V2SnapshotProjectionError.invalidPage }
         guard page.schemaVersion == schemaVersion else { throw V2SnapshotProjectionError.unsupportedSchemaVersion }
-        do { return try .init(messages: page.messages.map { try $0.projection() }, relationships: page.relationships.map { try $0.projection() }, userBlocks: page.userBlocks.map { try $0.projection() }, strangerMessagePreference: try page.strangerMessagePreference?.projection(), moderationActions: page.moderationActions.map { try $0.projection() }, roomControls: page.roomControls.map { try $0.projection() }, roomProfiles: page.roomProfiles.map { try $0.projection() }, directRoomProfiles: page.directRoomProfiles.map { try $0.projection() }) }
+        do { return try .init(messages: page.messages.map { try $0.projection() }, relationships: page.relationships.map { try $0.projection() }, userBlocks: page.userBlocks.map { try $0.projection() }, strangerMessagePreference: try page.strangerMessagePreference?.projection(), moderationActions: page.moderationActions.map { try $0.projection() }, roomControls: page.roomControls.map { try $0.projection() }, roomProfiles: page.roomProfiles.map { try $0.projection() }, directRoomProfiles: page.directRoomProfiles.map { try $0.projection() }, userAddPreference: try page.userAddPreference?.projection()) }
         catch let error as V2SnapshotProjectionError { throw error }
         catch { throw V2SnapshotProjectionError.invalidPage }
     }
@@ -237,11 +244,12 @@ public enum V2SnapshotProjectionCodec {
         let relationships: [Relationship]
         let userBlocks: [UserBlock]
         let strangerMessagePreference: StrangerMessagePreference?
+        let userAddPreference: UserAddPreference?
         let moderationActions: [Moderation]
         let roomControls: [RoomControl]
         let roomProfiles: [RoomProfile]
         let directRoomProfiles: [DirectRoomProfile]
-        enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version"; case messages; case relationships; case userBlocks = "user_blocks"; case strangerMessagePreference = "stranger_message_preference"; case moderationActions = "moderation_actions"; case roomControls = "room_controls"; case roomProfiles = "room_profiles"; case directRoomProfiles = "direct_room_profiles" }
+        enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version"; case messages; case relationships; case userBlocks = "user_blocks"; case strangerMessagePreference = "stranger_message_preference"; case userAddPreference = "user_add_preference"; case moderationActions = "moderation_actions"; case roomControls = "room_controls"; case roomProfiles = "room_profiles"; case directRoomProfiles = "direct_room_profiles" }
     }
 
     private struct Message: Codable {
@@ -329,6 +337,14 @@ public enum V2SnapshotProjectionCodec {
         init(_ value: V2SnapshotStrangerMessagePreference) { allowsStrangerMessages = value.allowsStrangerMessages; updatedAtMilliseconds = Int64(value.updatedAt.timeIntervalSince1970 * 1_000) }
         func projection() throws -> V2SnapshotStrangerMessagePreference { guard updatedAtMilliseconds >= 0 else { throw V2SnapshotProjectionError.invalidPage }; return .init(allowsStrangerMessages: allowsStrangerMessages, updatedAt: Date(timeIntervalSince1970: TimeInterval(updatedAtMilliseconds) / 1_000)) }
         enum CodingKeys: String, CodingKey { case allowsStrangerMessages = "allows_stranger_messages"; case updatedAtMilliseconds = "updated_at_ms" }
+    }
+
+    private struct UserAddPreference: Codable {
+        let allowsBeingAdded: Bool
+        let updatedAtMilliseconds: Int64
+        init(_ value: V2SnapshotUserAddPreference) { allowsBeingAdded = value.allowsBeingAdded; updatedAtMilliseconds = Int64(value.updatedAt.timeIntervalSince1970 * 1_000) }
+        func projection() throws -> V2SnapshotUserAddPreference { guard updatedAtMilliseconds >= 0 else { throw V2SnapshotProjectionError.invalidPage }; return .init(allowsBeingAdded: allowsBeingAdded, updatedAt: Date(timeIntervalSince1970: TimeInterval(updatedAtMilliseconds) / 1_000)) }
+        enum CodingKeys: String, CodingKey { case allowsBeingAdded = "allows_being_added"; case updatedAtMilliseconds = "updated_at_ms" }
     }
 
     private struct Moderation: Codable {

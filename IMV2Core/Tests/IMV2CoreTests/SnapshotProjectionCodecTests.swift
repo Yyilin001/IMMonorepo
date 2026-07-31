@@ -72,7 +72,11 @@ struct SnapshotProjectionCodecTests {
                 ),
                 revision: 3,
                 updatedAt: Date(timeIntervalSince1970: 1_750_000_007)
-            )]
+            )],
+            userAddPreference: .init(
+                allowsBeingAdded: false,
+                updatedAt: Date(timeIntervalSince1970: 1_750_000_008)
+            )
         )
         let first = try V2SnapshotProjectionCodec.encode(page)
         let second = try V2SnapshotProjectionCodec.encode(page)

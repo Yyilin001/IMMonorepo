@@ -27,6 +27,12 @@ public enum V2SetStrangerMessagePermissionOutcome: Equatable, Sendable {
     case idempotencyConflict
 }
 
+public enum V2SetUserAddPermissionOutcome: Equatable, Sendable {
+    case updated(permission: V2UserAddPermission, updatedAt: Date)
+    case idempotent(permission: V2UserAddPermission, updatedAt: Date)
+    case idempotencyConflict
+}
+
 public protocol V2DirectMessagingStore: Sendable {
     func open(
         command: V2OpenDirectRoomCommand,
@@ -40,6 +46,11 @@ public protocol V2DirectMessagingStore: Sendable {
         command: V2SetStrangerMessagePermissionCommand,
         now: Date
     ) async throws -> V2SetStrangerMessagePermissionOutcome
+
+    func setUserAddPermission(
+        command: V2SetUserAddPermissionCommand,
+        now: Date
+    ) async throws -> V2SetUserAddPermissionOutcome
 }
 
 public struct V2DirectMessagingIDFactory: Sendable {
@@ -75,5 +86,9 @@ public struct V2DirectMessagingService: Sendable {
 
     public func setStrangerMessagePermission(actorUserID: UserID, operationID: StrangerMessagePreferenceOperationID, permission: V2StrangerMessagePermission) async throws -> V2SetStrangerMessagePermissionOutcome {
         try await store.setStrangerMessagePermission(command: .init(actorUserID: actorUserID, operationID: operationID, permission: permission), now: now())
+    }
+
+    public func setUserAddPermission(actorUserID: UserID, operationID: UserAddPreferenceOperationID, permission: V2UserAddPermission) async throws -> V2SetUserAddPermissionOutcome {
+        try await store.setUserAddPermission(command: .init(actorUserID: actorUserID, operationID: operationID, permission: permission), now: now())
     }
 }

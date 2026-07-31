@@ -97,6 +97,36 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
         return outcome
     }
 
+    public func setUserAddPermission(command: V2SetUserAddPermissionCommand, now: Date) async throws -> V2SetUserAddPermissionOutcome {
+        let outcome: V2SetUserAddPermissionOutcome = try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
+            let actorID = try directUUID(command.actorUserID)
+            let operationID = try directUUID(command.operationID)
+            let requested = command.permission == .allow
+            if let existing = try await sql.raw("SELECT allows_being_added, updated_at FROM im_v2.user_add_preference_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: DirectUserAddPreferenceOperationRow.self) {
+                guard existing.allowsBeingAdded == requested else { return .idempotencyConflict }
+                return .idempotent(permission: existing.permission, updatedAt: existing.updatedAt)
+            }
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: userAddPreferenceLockKey(actorID)), 0))").run()
+            try await sql.raw("INSERT INTO im_v2.user_add_preferences (user_id, allows_being_added, updated_at) VALUES (\(bind: actorID), \(bind: requested), \(bind: now)) ON CONFLICT (user_id) DO UPDATE SET allows_being_added = EXCLUDED.allows_being_added, updated_at = EXCLUDED.updated_at").run()
+            try await sql.raw("INSERT INTO im_v2.user_add_preference_operations (actor_user_id, operation_id, allows_being_added, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: requested), \(bind: now))").run()
+            guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: actorID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
+                throw V2DirectMessagingStoreError.corruptPersistenceState
+            }
+            try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actorID), \(bind: sequence.nextSequence), \(bind: operationID), 'user_add_permission', jsonb_build_object('allows_being_added', \(bind: requested), 'updated_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))), \(bind: now))").run()
+            return .updated(permission: command.permission, updatedAt: now)
+        }
+        switch outcome {
+        case .updated, .idempotent:
+            if let shadowForwarder {
+                _ = try await shadowForwarder.shadowIfForwarding(userID: command.actorUserID, sourceEventID: try .init(command.operationID.rawValue), projectionKinds: ["user_add_permission"])
+            }
+        case .idempotencyConflict:
+            break
+        }
+        return outcome
+    }
+
     private func insertOperation(actorID: UUID, operationID: UUID, targetID: UUID, roomID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
         try await sql.raw("INSERT INTO im_v2.direct_room_operations (actor_user_id, operation_id, target_user_id, room_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: targetID), \(bind: roomID), \(bind: createdAt))").run()
     }
@@ -136,6 +166,12 @@ private struct DirectPreferenceOperationRow: Decodable {
     enum CodingKeys: String, CodingKey { case allowsStrangerMessages = "allows_stranger_messages", updatedAt = "updated_at" }
     var permission: V2StrangerMessagePermission { allowsStrangerMessages ? .allow : .deny }
 }
+private struct DirectUserAddPreferenceOperationRow: Decodable {
+    let allowsBeingAdded: Bool; let updatedAt: Date
+    enum CodingKeys: String, CodingKey { case allowsBeingAdded = "allows_being_added", updatedAt = "updated_at" }
+    var permission: V2UserAddPermission { allowsBeingAdded ? .allow : .deny }
+}
+private func userAddPreferenceLockKey(_ userID: UUID) -> String { "v2-user-add-preference:\(userID.uuidString.lowercased())" }
 private struct DirectPublicProfileRow: Decodable {
     let userID: UUID
     let publicHandle: String

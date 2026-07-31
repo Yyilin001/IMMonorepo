@@ -219,6 +219,44 @@ public nonisolated enum IMV2StrangerMessagePermission: SwiftProtobuf.Enum, Swift
 
 }
 
+public nonisolated enum IMV2UserAddPermission: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case allow // = 1
+  case deny // = 2
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .allow
+    case 2: self = .deny
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .allow: return 1
+    case .deny: return 2
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [IMV2UserAddPermission] = [
+    .unspecified,
+    .allow,
+    .deny,
+  ]
+
+}
+
 public nonisolated enum IMV2RelationshipAction: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
@@ -842,6 +880,22 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .groupRoomCreationCancelled(newValue)}
   }
 
+  public var setUserAddPermission: IMV2SetUserAddPermission {
+    get {
+      if case .setUserAddPermission(let v)? = body {return v}
+      return IMV2SetUserAddPermission()
+    }
+    set {body = .setUserAddPermission(newValue)}
+  }
+
+  public var userAddPermissionSet: IMV2UserAddPermissionSet {
+    get {
+      if case .userAddPermissionSet(let v)? = body {return v}
+      return IMV2UserAddPermissionSet()
+    }
+    set {body = .userAddPermissionSet(newValue)}
+  }
+
   public var error: IMV2Error {
     get {
       if case .error(let v)? = body {return v}
@@ -917,6 +971,8 @@ public nonisolated struct IMV2Envelope: Sendable {
     case finalizeGroupRoomCreation(IMV2FinalizeGroupRoomCreation)
     case cancelGroupRoomCreation(IMV2CancelGroupRoomCreation)
     case groupRoomCreationCancelled(IMV2GroupRoomCreationCancelled)
+    case setUserAddPermission(IMV2SetUserAddPermission)
+    case userAddPermissionSet(IMV2UserAddPermissionSet)
     case error(IMV2Error)
 
   }
@@ -1835,6 +1891,37 @@ public nonisolated struct IMV2StrangerMessagePermissionSet: Sendable {
   public init() {}
 }
 
+/// Device-independent privacy preference for incoming relationship requests.
+/// Rejections intentionally use the generic forbidden response so callers do
+/// not learn whether this setting, a block, or another policy caused it.
+public nonisolated struct IMV2SetUserAddPermission: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var operationID: String = String()
+
+  public var permission: IMV2UserAddPermission = .unspecified
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct IMV2UserAddPermissionSet: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var permission: IMV2UserAddPermission = .unspecified
+
+  public var updatedAtMs: Int64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 /// The authenticated user is the actor. While a request is pending only its
 /// recipient may accept or reject it; either participant may remove it.
 public nonisolated struct IMV2ChangeRelationship: Sendable {
@@ -2162,6 +2249,10 @@ nonisolated extension IMV2StrangerMessagePermission: SwiftProtobuf._ProtoNamePro
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0STRANGER_MESSAGE_PERMISSION_UNSPECIFIED\0\u{1}STRANGER_MESSAGE_PERMISSION_ALLOW\0\u{1}STRANGER_MESSAGE_PERMISSION_DENY\0")
 }
 
+nonisolated extension IMV2UserAddPermission: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0USER_ADD_PERMISSION_UNSPECIFIED\0\u{1}USER_ADD_PERMISSION_ALLOW\0\u{1}USER_ADD_PERMISSION_DENY\0")
+}
+
 nonisolated extension IMV2RelationshipAction: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0RELATIONSHIP_ACTION_UNSPECIFIED\0\u{1}RELATIONSHIP_ACTION_REQUEST\0\u{1}RELATIONSHIP_ACTION_ACCEPT\0\u{1}RELATIONSHIP_ACTION_REJECT\0\u{1}RELATIONSHIP_ACTION_REMOVE\0")
 }
@@ -2176,7 +2267,7 @@ nonisolated extension IMV2UserBlockAction: SwiftProtobuf._ProtoNameProviding {
 
 nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Envelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}protocol_version\0\u{4}\u{8}client_hello\0\u{3}server_hello\0\u{1}authenticate\0\u{1}authenticated\0\u{1}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{5}send_message\0\u{3}message_accepted\0\u{3}change_room_membership\0\u{3}membership_changed\0\u{3}withdraw_message\0\u{3}message_withdrawn\0\u{3}change_message_reaction\0\u{3}message_reaction_changed\0\u{3}edit_message\0\u{3}message_edited\0\u{3}sync_pull\0\u{3}sync_batch\0\u{3}sync_ack\0\u{3}reset_required\0\u{3}snapshot_ack\0\u{1}acknowledged\0\u{3}sync_snapshot\0\u{3}snapshot_manifest\0\u{3}snapshot_page_pull\0\u{3}snapshot_page\0\u{3}sync_available\0\u{3}record_read_receipt\0\u{3}read_receipt_recorded\0\u{3}open_direct_room\0\u{3}direct_room_opened\0\u{3}set_stranger_message_permission\0\u{3}stranger_message_permission_set\0\u{3}change_relationship\0\u{3}relationship_changed\0\u{3}change_user_block\0\u{3}user_block_changed\0\u{3}moderate_message\0\u{3}message_redacted\0\u{3}mute_member\0\u{3}member_muted\0\u{3}moderate_member_removal\0\u{3}member_removed_by_moderator\0\u{3}create_group_room\0\u{3}group_room_created\0\u{3}list_room_members\0\u{3}room_members_page\0\u{3}group_event_pull\0\u{3}group_event_page\0\u{3}group_event_subscribe\0\u{3}group_event_subscribed\0\u{3}group_event_unsubscribe\0\u{3}group_event_available\0\u{3}begin_group_room_creation\0\u{3}group_room_creation_prepared\0\u{3}append_group_room_creation_members\0\u{3}group_room_creation_members_appended\0\u{3}finalize_group_room_creation\0\u{3}cancel_group_room_creation\0\u{3}group_room_creation_cancelled\0\u{2}\u{11}error\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}protocol_version\0\u{4}\u{8}client_hello\0\u{3}server_hello\0\u{1}authenticate\0\u{1}authenticated\0\u{1}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{5}send_message\0\u{3}message_accepted\0\u{3}change_room_membership\0\u{3}membership_changed\0\u{3}withdraw_message\0\u{3}message_withdrawn\0\u{3}change_message_reaction\0\u{3}message_reaction_changed\0\u{3}edit_message\0\u{3}message_edited\0\u{3}sync_pull\0\u{3}sync_batch\0\u{3}sync_ack\0\u{3}reset_required\0\u{3}snapshot_ack\0\u{1}acknowledged\0\u{3}sync_snapshot\0\u{3}snapshot_manifest\0\u{3}snapshot_page_pull\0\u{3}snapshot_page\0\u{3}sync_available\0\u{3}record_read_receipt\0\u{3}read_receipt_recorded\0\u{3}open_direct_room\0\u{3}direct_room_opened\0\u{3}set_stranger_message_permission\0\u{3}stranger_message_permission_set\0\u{3}change_relationship\0\u{3}relationship_changed\0\u{3}change_user_block\0\u{3}user_block_changed\0\u{3}moderate_message\0\u{3}message_redacted\0\u{3}mute_member\0\u{3}member_muted\0\u{3}moderate_member_removal\0\u{3}member_removed_by_moderator\0\u{3}create_group_room\0\u{3}group_room_created\0\u{3}list_room_members\0\u{3}room_members_page\0\u{3}group_event_pull\0\u{3}group_event_page\0\u{3}group_event_subscribe\0\u{3}group_event_subscribed\0\u{3}group_event_unsubscribe\0\u{3}group_event_available\0\u{3}begin_group_room_creation\0\u{3}group_room_creation_prepared\0\u{3}append_group_room_creation_members\0\u{3}group_room_creation_members_appended\0\u{3}finalize_group_room_creation\0\u{3}cancel_group_room_creation\0\u{3}group_room_creation_cancelled\0\u{3}set_user_add_permission\0\u{3}user_add_permission_set\0\u{2}\u{f}error\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2966,6 +3057,32 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .groupRoomCreationCancelled(v)
         }
       }()
+      case 74: try {
+        var v: IMV2SetUserAddPermission?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .setUserAddPermission(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .setUserAddPermission(v)
+        }
+      }()
+      case 75: try {
+        var v: IMV2UserAddPermissionSet?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .userAddPermissionSet(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .userAddPermissionSet(v)
+        }
+      }()
       case 90: try {
         var v: IMV2Error?
         var hadOneofValue = false
@@ -3235,6 +3352,14 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .groupRoomCreationCancelled?: try {
       guard case .groupRoomCreationCancelled(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 73)
+    }()
+    case .setUserAddPermission?: try {
+      guard case .setUserAddPermission(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 74)
+    }()
+    case .userAddPermissionSet?: try {
+      guard case .userAddPermissionSet(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 75)
     }()
     case .error?: try {
       guard case .error(let v)? = self.body else { preconditionFailure() }
@@ -5315,6 +5440,76 @@ nonisolated extension IMV2StrangerMessagePermissionSet: SwiftProtobuf.Message, S
   }
 
   public static func ==(lhs: IMV2StrangerMessagePermissionSet, rhs: IMV2StrangerMessagePermissionSet) -> Bool {
+    if lhs.permission != rhs.permission {return false}
+    if lhs.updatedAtMs != rhs.updatedAtMs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2SetUserAddPermission: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".SetUserAddPermission"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{1}permission\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.permission) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.operationID.isEmpty {
+      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
+    }
+    if self.permission != .unspecified {
+      try visitor.visitSingularEnumField(value: self.permission, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2SetUserAddPermission, rhs: IMV2SetUserAddPermission) -> Bool {
+    if lhs.operationID != rhs.operationID {return false}
+    if lhs.permission != rhs.permission {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2UserAddPermissionSet: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".UserAddPermissionSet"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}permission\0\u{3}updated_at_ms\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.permission) }()
+      case 2: try { try decoder.decodeSingularInt64Field(value: &self.updatedAtMs) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.permission != .unspecified {
+      try visitor.visitSingularEnumField(value: self.permission, fieldNumber: 1)
+    }
+    if self.updatedAtMs != 0 {
+      try visitor.visitSingularInt64Field(value: self.updatedAtMs, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2UserAddPermissionSet, rhs: IMV2UserAddPermissionSet) -> Bool {
     if lhs.permission != rhs.permission {return false}
     if lhs.updatedAtMs != rhs.updatedAtMs {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}

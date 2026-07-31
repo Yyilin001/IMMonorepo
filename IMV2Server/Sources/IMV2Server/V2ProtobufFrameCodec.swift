@@ -105,6 +105,8 @@ public enum V2ServerProtobufFrameCodec {
         case .groupRoomCreationCancelled?: return .groupRoomCreationCancelled
         case .setStrangerMessagePermission?: return .setStrangerMessagePermission
         case .strangerMessagePermissionSet?: return .strangerMessagePermissionSet
+        case .setUserAddPermission?: return .setUserAddPermission
+        case .userAddPermissionSet?: return .userAddPermissionSet
         case .changeRelationship?: return .changeRelationship
         case .relationshipChanged?: return .relationshipChanged
         case .changeUserBlock?: return .changeUserBlock

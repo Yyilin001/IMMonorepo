@@ -21,15 +21,17 @@ struct V2SocialCommandOutboxTests {
         #expect(block.kind == .userBlock)
         let preference = try await engine.enqueueStrangerMessagePermission(V2StrangerMessagePermission.deny)
         #expect(preference.kind == .strangerMessagePreference)
-        #expect(try await firstStore.pendingSocialCommands().count == 3)
+        let addPreference = try await engine.enqueueUserAddPermission(V2UserAddPermission.deny)
+        #expect(addPreference.kind == .userAddPreference)
+        #expect(try await firstStore.pendingSocialCommands().count == 4)
 
         let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         let restartedEngine = V2SocialCommandOutboxEngine(store: restartedStore, socialTransport: transport, directTransport: transport, now: { now })
-        for _ in 0..<3 {
+        for _ in 0..<4 {
             guard case .acknowledged = try await restartedEngine.flushOnce() else { Issue.record("expected acknowledgement"); return }
         }
         #expect(try await restartedStore.pendingSocialCommands().allSatisfy { $0.state == V2PendingSocialCommand.State.acknowledged })
-        #expect((await transport.dispatchedKinds()).map(\.rawValue).sorted() == ["relationship", "strangerMessagePreference", "userBlock"])
+        #expect((await transport.dispatchedKinds()).map(\.rawValue).sorted() == ["relationship", "strangerMessagePreference", "userAddPreference", "userBlock"])
     }
 
     @Test("重启后相同待隐私意图复用原操作而新目标状态保留顺序")
@@ -210,5 +212,6 @@ private actor SocialOutboxTransport: V2ClientSocialRelationshipTransport, V2Clie
     }
     func openDirectRoom(operationID _: DirectRoomOperationID, targetUserID _: UserID) throws -> V2ClientDirectRoom { throw V2RealtimeTransportError.unexpectedResponse }
     func setStrangerMessagePermission(operationID _: StrangerMessagePreferenceOperationID, permission _: V2StrangerMessagePermission) -> Date { kinds.append(.strangerMessagePreference); return .distantFuture }
+    func setUserAddPermission(operationID _: UserAddPreferenceOperationID, permission _: V2UserAddPermission) -> Date { kinds.append(.userAddPreference); return .distantFuture }
     func dispatchedKinds() -> [V2PendingSocialCommandKind] { kinds }
 }

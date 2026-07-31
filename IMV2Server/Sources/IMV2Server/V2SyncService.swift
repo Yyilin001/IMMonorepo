@@ -121,6 +121,7 @@ public struct V2SyncService: Sendable {
         var relationshipTargets = Set<UserID>()
         var blockTargets = Set<UserID>()
         var hasStrangerMessagePreference = false
+        var hasUserAddPreference = false
         for page in snapshot.pages {
             let decoded = try V2SnapshotProjectionCodec.decodePage(page.payload)
             for message in decoded.messages {
@@ -141,9 +142,11 @@ public struct V2SyncService: Sendable {
             }
             guard decoded.relationships.allSatisfy({ relationshipTargets.insert($0.targetUserID).inserted }),
                   decoded.userBlocks.allSatisfy({ blockTargets.insert($0.targetUserID).inserted }),
-                  !hasStrangerMessagePreference || decoded.strangerMessagePreference == nil
+                  !hasStrangerMessagePreference || decoded.strangerMessagePreference == nil,
+                  !hasUserAddPreference || decoded.userAddPreference == nil
             else { throw V2SnapshotProjectionError.invalidPage }
             hasStrangerMessagePreference = hasStrangerMessagePreference || decoded.strangerMessagePreference != nil
+            hasUserAddPreference = hasUserAddPreference || decoded.userAddPreference != nil
         }
         return try await store.stageReset(userID: userID, deviceID: deviceID, snapshot: snapshot, now: now())
     }

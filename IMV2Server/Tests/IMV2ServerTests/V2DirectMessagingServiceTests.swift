@@ -54,6 +54,20 @@ struct V2DirectMessagingServiceTests {
         #expect(await store.preferenceCommand()?.permission == .deny)
     }
 
+    @Test("forwards device-independent add permission")
+    func forwardsUserAddPreference() async throws {
+        let store = DirectStoreSpy()
+        let service = try V2DirectMessagingService(store: store, capacityProfile: try profile(), roomShardID: "rooms-primary")
+        let actor = try UserID("00000000-0000-0000-0000-000000000809")
+        let operation = try UserAddPreferenceOperationID("00000000-0000-0000-0000-00000000080a")
+
+        let result = try await service.setUserAddPermission(actorUserID: actor, operationID: operation, permission: .deny)
+
+        guard case .updated(let permission, _) = result else { Issue.record("expected preference update"); return }
+        #expect(permission == .deny)
+        #expect(await store.userAddPreferenceCommand()?.permission == .deny)
+    }
+
     private func profile() throws -> V2CapacityProfile {
         try .init(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 1))
     }
@@ -62,6 +76,7 @@ struct V2DirectMessagingServiceTests {
 private actor DirectStoreSpy: V2DirectMessagingStore {
     private var capturedOpen: V2OpenDirectRoomCommand?
     private var capturedPreference: V2SetStrangerMessagePermissionCommand?
+    private var capturedUserAddPreference: V2SetUserAddPermissionCommand?
 
     func open(command: V2OpenDirectRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID: RoomID, now: Date) throws -> V2OpenDirectRoomOutcome {
         capturedOpen = command
@@ -73,6 +88,12 @@ private actor DirectStoreSpy: V2DirectMessagingStore {
         return .updated(permission: command.permission, updatedAt: now)
     }
 
+    func setUserAddPermission(command: V2SetUserAddPermissionCommand, now: Date) throws -> V2SetUserAddPermissionOutcome {
+        capturedUserAddPreference = command
+        return .updated(permission: command.permission, updatedAt: now)
+    }
+
     func openCommand() -> V2OpenDirectRoomCommand? { capturedOpen }
     func preferenceCommand() -> V2SetStrangerMessagePermissionCommand? { capturedPreference }
+    func userAddPreferenceCommand() -> V2SetUserAddPermissionCommand? { capturedUserAddPreference }
 }

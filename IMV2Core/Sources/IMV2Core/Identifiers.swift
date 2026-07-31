@@ -89,6 +89,7 @@ public enum ReadReceiptOperationIDTag: V2IdentifierTag {}
 public enum DirectRoomOperationIDTag: V2IdentifierTag {}
 public enum GroupRoomOperationIDTag: V2IdentifierTag {}
 public enum StrangerMessagePreferenceOperationIDTag: V2IdentifierTag {}
+public enum UserAddPreferenceOperationIDTag: V2IdentifierTag {}
 public enum RelationshipOperationIDTag: V2IdentifierTag {}
 public enum UserBlockOperationIDTag: V2IdentifierTag {}
 public enum MediaIDTag: V2IdentifierTag {}
@@ -116,6 +117,7 @@ public typealias ReadReceiptOperationID = V2Identifier<ReadReceiptOperationIDTag
 public typealias DirectRoomOperationID = V2Identifier<DirectRoomOperationIDTag>
 public typealias GroupRoomOperationID = V2Identifier<GroupRoomOperationIDTag>
 public typealias StrangerMessagePreferenceOperationID = V2Identifier<StrangerMessagePreferenceOperationIDTag>
+public typealias UserAddPreferenceOperationID = V2Identifier<UserAddPreferenceOperationIDTag>
 public typealias RelationshipOperationID = V2Identifier<RelationshipOperationIDTag>
 public typealias UserBlockOperationID = V2Identifier<UserBlockOperationIDTag>
 public typealias MediaID = V2Identifier<MediaIDTag>
