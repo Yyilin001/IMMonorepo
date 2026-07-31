@@ -25,15 +25,16 @@ struct V2ProfileViewServiceTests {
         let target = try UserID("00000000-0000-0000-0000-000000000712")
         let room = try RoomID("00000000-0000-0000-0000-000000000713")
         let direct = V2ProfileViewLookupKey(userID: target, context: .directConversation)
+        let relationship = V2ProfileViewLookupKey(userID: target, context: .relationship)
         let group = V2ProfileViewLookupKey(userID: target, context: .room(room))
         let store = ProfileViewStoreSpy()
         let service = V2ProfileViewService(store: store)
-        let request = try V2ProfileViewReadRequest(actorUserID: actor, keys: [direct, group])
+        let request = try V2ProfileViewReadRequest(actorUserID: actor, keys: [direct, relationship, group])
 
         let results = try await service.read(request)
 
         #expect(await store.request() == request)
-        #expect(results == [.unavailable(key: direct), .unavailable(key: group)])
+        #expect(results == [.unavailable(key: direct), .unavailable(key: relationship), .unavailable(key: group)])
     }
 }
 

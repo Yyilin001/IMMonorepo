@@ -115,6 +115,11 @@ public struct V2ProfileUpdateCommand: Sendable {
 /// This prevents a batch profile API from becoming an internal-ID directory.
 public enum V2ProfileViewContext: Hashable, Sendable {
     case directConversation
+    /// A current pending or accepted relationship authorizes a bounded
+    /// contact-card read. This is deliberately distinct from a direct room:
+    /// a contact list must not manufacture a chat room merely to display an
+    /// already-authorized public identity.
+    case relationship
     case room(RoomID)
 }
 

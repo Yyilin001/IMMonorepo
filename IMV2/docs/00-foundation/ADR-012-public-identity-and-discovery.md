@@ -75,8 +75,10 @@ fallback 的 `account_handle` 仅是登录标识；它没有被定义为可公�
    在 checkpoint 前中断会重投同一页，但 `(接收者, source event, kind)` 幂等键不
    会重复可见记录；迁移期间仍由既有 shadow-forwarder 写入当前 owner 和 forwarding
    target。群成员资料继续只通过按需、最多 100 人的目录读取，绝不变成 roster sync。
-   离线/多设备交付走既有 user-sync 与 live-sync hint；仍需对删除、handle 改名、
-   隐私策略和容量阈值做单独的产品与压测回归。当前没有联系人或通讯录发现范围。
+   离线/多设备交付走既有 user-sync 与 live-sync hint。iOS 联系人页只可对本地
+   `pending`/`accepted` 关系发起有界（最多 100 条）`relationship` 上下文资料读取；
+   这不是目录、通讯录发现或 UUID 批量查询，关系消失后同一读取立即不可用。仍需对删除、
+   handle 改名、隐私策略和容量阈值做单独的产品与压测回归。
 5. 覆盖规范化冲突、重放、并发抢注、屏蔽/不可发现、目录限流、离线重试、隐私
    日志和真实账号服务 HTTPS 回归。
 

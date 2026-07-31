@@ -175,6 +175,18 @@ protocol V2UserBlockChanging: Sendable {
     func changeBlock(targetUserID: String, action: V2UserBlockAction) async throws -> V2UserBlockChangeOutcome
 }
 
+enum V2RelationshipChangeOutcome: Equatable, Sendable {
+    case accepted
+    case queuedForRetry
+    case rejected(code: String)
+}
+
+/// The visible relationship state remains sync-projection driven. This
+/// boundary only preserves and attempts the user's durable intent.
+protocol V2RelationshipChanging: Sendable {
+    func changeRelationship(targetUserID: String, action: V2RelationshipAction) async throws -> V2RelationshipChangeOutcome
+}
+
 enum V2GroupModerationOutcome: Equatable, Sendable {
     case accepted
     case queuedForRetry
@@ -503,8 +515,10 @@ actor V2OutboxStrangerMessagePreferenceUpdater: V2StrangerMessagePreferenceUpdat
     }
 
     func update(allowsStrangerMessages: Bool) async throws -> V2StrangerMessagePreferenceUpdateOutcome {
-        _ = try await outbox.enqueueStrangerMessagePermission(allowsStrangerMessages ? .allow : .deny)
-        switch try await outbox.flushOnce() {
+        let command = try await outbox.enqueueStrangerMessagePermission(allowsStrangerMessages ? .allow : .deny)
+        switch try await outbox.flushIfReady(operationID: command.operationID) {
+        case nil:
+            return .queuedForRetry
         case .acknowledged:
             return .accepted
         case .retryScheduled, .idle:
@@ -523,11 +537,38 @@ actor V2OutboxUserBlockChanger: V2UserBlockChanging {
     }
 
     func changeBlock(targetUserID: String, action: V2UserBlockAction) async throws -> V2UserBlockChangeOutcome {
-        _ = try await outbox.enqueueUserBlock(
+        let command = try await outbox.enqueueUserBlock(
             targetUserID: try .init(targetUserID),
             action: action
         )
-        switch try await outbox.flushOnce() {
+        switch try await outbox.flushIfReady(operationID: command.operationID) {
+        case nil:
+            return .queuedForRetry
+        case .acknowledged:
+            return .accepted
+        case .retryScheduled, .idle:
+            return .queuedForRetry
+        case .rejected(_, let code):
+            return .rejected(code: code)
+        }
+    }
+}
+
+actor V2OutboxRelationshipChanger: V2RelationshipChanging {
+    private let outbox: V2SocialCommandOutboxEngine
+
+    init(outbox: V2SocialCommandOutboxEngine) {
+        self.outbox = outbox
+    }
+
+    func changeRelationship(targetUserID: String, action: V2RelationshipAction) async throws -> V2RelationshipChangeOutcome {
+        let command = try await outbox.enqueueRelationship(
+            targetUserID: try .init(targetUserID),
+            action: action
+        )
+        switch try await outbox.flushIfReady(operationID: command.operationID) {
+        case nil:
+            return .queuedForRetry
         case .acknowledged:
             return .accepted
         case .retryScheduled, .idle:
@@ -639,6 +680,7 @@ struct V2AppRealtimeRuntime {
     let mediaDownloader: any V2ConversationMediaDownloading
     let mediaCacheMaintenance: V2ForegroundConversationMediaDownloader
     let activeHybridGroupSynchronizer: any V2ActiveHybridGroupSynchronizing
+    let profileRepository: V2ProfileRepository
 
     init(
         configuration: V2AppConfiguration,
@@ -694,6 +736,7 @@ struct V2AppRealtimeRuntime {
                 credentials: authSession
             )
         )
+        self.profileRepository = profileRepository
         let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base")
         let groupEventSync = V2GroupEventSyncEngine(transport: transport, store: localStore)
         let foregroundGroupPreview = V2ForegroundGroupEventPreviewEngine(transport: transport, store: localStore)
@@ -785,6 +828,7 @@ struct V2AppRealtimeRuntime {
         moderatedGroupMemberRemover = V2OutboxModeratedGroupMemberRemover(outbox: moderatedMemberRemovalOutbox)
         strangerMessagePreferenceUpdater = V2OutboxStrangerMessagePreferenceUpdater(outbox: socialOutbox)
         userBlockChanger = V2OutboxUserBlockChanger(outbox: socialOutbox)
+        relationshipChanger = V2OutboxRelationshipChanger(outbox: socialOutbox)
     }
 
     let directConversationOpener: any V2DirectConversationOpening
@@ -795,4 +839,5 @@ struct V2AppRealtimeRuntime {
     let moderatedGroupMemberRemover: any V2ModeratedGroupMemberRemoving
     let strangerMessagePreferenceUpdater: any V2StrangerMessagePreferenceUpdating
     let userBlockChanger: any V2UserBlockChanging
+    let relationshipChanger: any V2RelationshipChanging
 }

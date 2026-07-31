@@ -94,9 +94,11 @@ struct V2RootView: View {
                 ProgressView("正在验证身份…")
             case .signedIn:
                 if let conversationStore = store.conversationStore,
+                   let contactsStore = store.contactsStore,
                    let privacySettingsStore = store.privacySettingsStore {
                    V2SignedInRootView(
                         conversationStore: conversationStore,
+                        contactsStore: contactsStore,
                         privacySettingsStore: privacySettingsStore,
                         userBlockSettingsStore: store.userBlockSettingsStore,
                         publicIdentitySettingsStore: store.publicIdentitySettingsStore,
@@ -317,6 +319,7 @@ private struct V2SignedInRootView: View {
     }
 
     let conversationStore: V2ConversationListStore
+    let contactsStore: V2ContactsStore
     let privacySettingsStore: V2PrivacySettingsStore
     let userBlockSettingsStore: V2UserBlockSettingsStore?
     let publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
@@ -325,25 +328,37 @@ private struct V2SignedInRootView: View {
     let signOut: @MainActor @Sendable () async -> Void
     @State private var signOutTask: Task<Void, Never>?
     @State private var presentedSettingsSheet: PresentedSettingsSheet?
+    @State private var rootNavigation = V2RootNavigationStore()
 
     var body: some View {
-        V2ConversationListView(
-            store: conversationStore,
-            localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
-            accountMenu: V2ConversationAccountMenu(
-                canOpenPublicIdentity: publicIdentitySettingsStore != nil,
-                openPublicIdentity: { presentedSettingsSheet = .publicIdentity },
-                openPrivacySettings: { presentedSettingsSheet = .privacy },
-                signOut: {
-                    guard signOutTask == nil else { return }
-                    signOutTask = Task {
-                        await signOut()
-                        guard !Task.isCancelled else { return }
-                        signOutTask = nil
+        @Bindable var rootNavigation = rootNavigation
+        TabView(selection: $rootNavigation.selectedTab) {
+            V2ConversationListView(
+                store: conversationStore,
+                localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
+                accountMenu: V2ConversationAccountMenu(
+                    canOpenPublicIdentity: publicIdentitySettingsStore != nil,
+                    openPublicIdentity: { presentedSettingsSheet = .publicIdentity },
+                    openPrivacySettings: { presentedSettingsSheet = .privacy },
+                    signOut: {
+                        guard signOutTask == nil else { return }
+                        signOutTask = Task {
+                            await signOut()
+                            guard !Task.isCancelled else { return }
+                            signOutTask = nil
+                        }
                     }
-                }
+                ),
+                rootNavigation: rootNavigation
             )
-        )
+            .tabItem { Label("消息", systemImage: "message") }
+            .tag(V2RootNavigationStore.Tab.conversations)
+
+            V2ContactsRootView(store: contactsStore, rootNavigation: rootNavigation)
+                .tabItem { Label("联系人", systemImage: "person.2") }
+                .badge(contactsStore.incomingRequestCount)
+                .tag(V2RootNavigationStore.Tab.contacts)
+        }
             .onDisappear { signOutTask?.cancel() }
             .sheet(item: $presentedSettingsSheet) { sheet in
                 switch sheet {

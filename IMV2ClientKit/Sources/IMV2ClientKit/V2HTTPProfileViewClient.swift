@@ -94,18 +94,27 @@ private struct RequestBody: Encodable {
 
 private struct RequestKey: Encodable {
     let userID: String
+    let context: String
     let roomID: String?
 
     init(_ key: V2ProfileViewLookupKey) {
         userID = key.userID.rawValue
         switch key.context {
-        case .directConversation: roomID = nil
-        case .room(let roomID): self.roomID = roomID.rawValue
+        case .directConversation:
+            context = "direct"
+            roomID = nil
+        case .relationship:
+            context = "relationship"
+            roomID = nil
+        case .room(let roomID):
+            context = "room"
+            self.roomID = roomID.rawValue
         }
     }
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
+        case context
         case roomID = "room_id"
     }
 }
@@ -116,6 +125,7 @@ private struct ResponseBody: Decodable {
 
 private struct ResponseItem: Decodable {
     let userID: String
+    let context: String
     let roomID: String?
     let unavailable: Bool
     let handle: String?
@@ -127,6 +137,7 @@ private struct ResponseItem: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
+        case context
         case roomID = "room_id"
         case unavailable
         case handle
@@ -140,8 +151,19 @@ private struct ResponseItem: Decodable {
     func result() throws -> V2ProfileViewLookupResult {
         let userID = try UserID(userID)
         let context: V2ProfileViewContext
-        if let roomID { context = .room(try RoomID(roomID)) }
-        else { context = .directConversation }
+        switch self.context {
+        case "direct":
+            guard roomID == nil else { throw V2ProfileViewClientError.invalidResponse }
+            context = .directConversation
+        case "relationship":
+            guard roomID == nil else { throw V2ProfileViewClientError.invalidResponse }
+            context = .relationship
+        case "room":
+            guard let roomID else { throw V2ProfileViewClientError.invalidResponse }
+            context = .room(try RoomID(roomID))
+        default:
+            throw V2ProfileViewClientError.invalidResponse
+        }
         let key = V2ProfileViewLookupKey(userID: userID, context: context)
         if unavailable {
             guard handle == nil, displayName == nil, avatarMediaID == nil,

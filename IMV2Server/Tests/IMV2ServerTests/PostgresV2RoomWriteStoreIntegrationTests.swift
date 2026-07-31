@@ -381,6 +381,64 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("relationship profile reads require a current pending or accepted pair")
+    func relationshipProfileReadsAreBoundedByAuthoritativeRelationshipState() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            let actor = try UserID("00000000-0000-0000-0000-0000000009a1")
+            let target = try UserID("00000000-0000-0000-0000-0000000009a2")
+            let actorUUID = UUID(uuidString: actor.rawValue)!
+            let targetUUID = UUID(uuidString: target.rawValue)!
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            try await sql.raw("""
+                INSERT INTO im_v2.public_user_profiles
+                    (user_id, public_handle, display_name, revision, visibility_revision, created_at, updated_at)
+                VALUES
+                    (\(bind: actorUUID), 'contact_actor', '联系人发起者', 1, 1, \(bind: now), \(bind: now)),
+                    (\(bind: targetUUID), 'contact_target', '联系人目标', 1, 1, \(bind: now), \(bind: now))
+                """).run()
+            let key = V2ProfileViewLookupKey(userID: target, context: .relationship)
+            let store = PostgresV2ProfileViewStore(database: app.db(.psql))
+
+            #expect(try await store.read(.init(actorUserID: actor, keys: [key])) == [.unavailable(key: key)])
+
+            try await sql.raw("""
+                INSERT INTO im_v2.user_relationships
+                    (lower_user_id, higher_user_id, state, requested_by_user_id, updated_at)
+                VALUES (\(bind: actorUUID), \(bind: targetUUID), 'pending', \(bind: actorUUID), \(bind: now))
+                """).run()
+            let pendingResult = try await store.read(.init(actorUserID: actor, keys: [key]))
+            guard case .profile(_, let profile) = try #require(pendingResult.first) else {
+                Issue.record("expected relationship-authorized profile")
+                return
+            }
+            #expect(profile.publicIdentity?.handle.description == "@contact_target")
+
+            try await sql.raw("DELETE FROM im_v2.user_relationships WHERE lower_user_id = \(bind: actorUUID) AND higher_user_id = \(bind: targetUUID)").run()
+            #expect(try await store.read(.init(actorUserID: actor, keys: [key])) == [.unavailable(key: key)])
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("Push wake retries reclaim expired leases without double-spending admission")
     func pushWakeRetryRecoveryPreservesAdmissionBudget() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),

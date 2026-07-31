@@ -169,6 +169,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var route: Route
     private(set) var authenticationMessage: String?
     private(set) var conversationStore: V2ConversationListStore?
+    private(set) var contactsStore: V2ContactsStore?
     private(set) var privacySettingsStore: V2PrivacySettingsStore?
     private(set) var userBlockSettingsStore: V2UserBlockSettingsStore?
     private(set) var publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
@@ -194,6 +195,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             route = .signedOut
             authenticationMessage = nil
             conversationStore = nil
+            contactsStore = nil
             privacySettingsStore = nil
             userBlockSettingsStore = nil
             publicIdentitySettingsStore = nil
@@ -257,6 +259,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             route = .launching
             authenticationMessage = nil
             conversationStore = nil
+            contactsStore = nil
             privacySettingsStore = nil
             userBlockSettingsStore = nil
             publicIdentitySettingsStore = nil
@@ -276,6 +279,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             route = .unavailable(message: "V2 账户服务配置无效。")
             authenticationMessage = nil
             conversationStore = nil
+            contactsStore = nil
             privacySettingsStore = nil
             userBlockSettingsStore = nil
             publicIdentitySettingsStore = nil
@@ -549,6 +553,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         realtimeRuntime = nil
         authenticationMessage = nil
         conversationStore = nil
+        contactsStore = nil
         privacySettingsStore = nil
         userBlockSettingsStore = nil
         publicIdentitySettingsStore = nil
@@ -595,6 +600,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             credentials: authSession
         )
         let conversationDataSource = V2GRDBConversationDataSource(localStore: localStore)
+        let contactsDataSource = V2GRDBContactsDataSource(
+            localStore: localStore,
+            profiles: realtime.profileRepository
+        )
         let conversations = V2ConversationListStore(
             dataSource: conversationDataSource,
             messageSearcher: conversationDataSource,
@@ -620,6 +629,15 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let privacySettings = V2PrivacySettingsStore(
             reader: V2GRDBStrangerMessagePreferenceDataSource(localStore: localStore),
             updater: realtime.strangerMessagePreferenceUpdater
+        )
+        let contacts = V2ContactsStore(
+            dataSource: contactsDataSource,
+            identityResolver: publicIdentityDirectory,
+            relationshipChanger: realtime.relationshipChanger,
+            userBlockChanger: realtime.userBlockChanger,
+            directConversationOpener: realtime.directConversationOpener,
+            currentUserID: userID,
+            projectionChangeNotifier: realtime.projectionChangeNotifier
         )
         let userBlockSettings = V2UserBlockSettingsStore(
             resolver: publicIdentityDirectory,
@@ -655,6 +673,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
         realtimeRuntime = realtime.runtime
         conversationStore = conversations
+        contactsStore = contacts
         privacySettingsStore = privacySettings
         userBlockSettingsStore = userBlockSettings
         publicIdentitySettingsStore = publicIdentitySettings

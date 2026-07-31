@@ -23,7 +23,7 @@ struct V2VaporProfileViewRoutesTests {
             request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: "00000000-0000-0000-0000-000000000803")
             try request.content.encode(V2ProfileViewBatchHTTPRequest(keys: [
                 .init(userID: profile.userID.rawValue),
-                .init(userID: "00000000-0000-0000-0000-000000000804", roomID: "00000000-0000-0000-0000-000000000805"),
+                .init(userID: "00000000-0000-0000-0000-000000000804", context: "room", roomID: "00000000-0000-0000-0000-000000000805"),
             ]))
         }) { response async throws in
             #expect(response.status == .ok)
@@ -31,10 +31,36 @@ struct V2VaporProfileViewRoutesTests {
             let body = try response.content.decode(V2ProfileViewBatchHTTPResponse.self)
             #expect(body.results.count == 2)
             #expect(body.results[0].unavailable == false)
+            #expect(body.results[0].context == "direct")
             #expect(body.results[0].displayName == "资料名称")
             #expect(body.results[0].revision == 4)
             #expect(body.results[1].unavailable == true)
+            #expect(body.results[1].context == "room")
             #expect(body.results[1].displayName == nil)
+        }
+    }
+
+    @Test("relationship context is preserved without a room identifier")
+    func preservesRelationshipContext() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let profile = try fixtureProfile()
+        V2VaporProfileViewRoutes(
+            authenticator: ProfileRouteAuthenticator(userID: try .init("00000000-0000-0000-0000-000000000801")),
+            profiles: .init(store: ProfileRouteStore(profile: profile))
+        ).register(on: app)
+
+        try await app.testing().test(.POST, "v2/profile-views/batch", beforeRequest: { request in
+            request.headers.bearerAuthorization = .init(token: "access-token")
+            request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: "00000000-0000-0000-0000-000000000803")
+            try request.content.encode(V2ProfileViewBatchHTTPRequest(keys: [
+                .init(userID: profile.userID.rawValue, context: "relationship"),
+            ]))
+        }) { response async throws in
+            #expect(response.status == .ok)
+            let body = try response.content.decode(V2ProfileViewBatchHTTPResponse.self)
+            #expect(body.results.first?.context == "relationship")
+            #expect(body.results.first?.roomID == nil)
         }
     }
 }

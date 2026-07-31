@@ -1493,6 +1493,7 @@ struct V2ConversationListView: View {
     @Bindable var store: V2ConversationListStore
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     private let accountMenu: V2ConversationAccountMenu?
+    private let rootNavigation: V2RootNavigationStore?
     @State private var navigationPath = NavigationPath()
     @State private var newConversationSheet: NewConversationSheet?
     @State private var directTargetUserID: String
@@ -1508,11 +1509,13 @@ struct V2ConversationListView: View {
     init(
         store: V2ConversationListStore,
         localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture? = nil,
-        accountMenu: V2ConversationAccountMenu? = nil
+        accountMenu: V2ConversationAccountMenu? = nil,
+        rootNavigation: V2RootNavigationStore? = nil
     ) {
         self.store = store
         self.localE2EConversationLaunchFixture = localE2EConversationLaunchFixture
         self.accountMenu = accountMenu
+        self.rootNavigation = rootNavigation
         _directTargetUserID = State(
             initialValue: localE2EConversationLaunchFixture?.directTargetHandle ?? ""
         )
@@ -1611,6 +1614,10 @@ struct V2ConversationListView: View {
                 )
             }
             .task { await store.observeProjectionChanges() }
+            .onAppear { consumeRequestedConversationIfNeeded() }
+            .onChange(of: rootNavigation?.conversationRequest) { _, _ in
+                consumeRequestedConversationIfNeeded()
+            }
             .sheet(isPresented: $isPresentingMessageSearch, onDismiss: {
                 messageSearchStore = nil
             }) {
@@ -1759,6 +1766,12 @@ struct V2ConversationListView: View {
                 }
             }
         }
+    }
+
+    private func consumeRequestedConversationIfNeeded() {
+        guard let request = rootNavigation?.conversationRequest else { return }
+        rootNavigation?.consumeConversationRequest(id: request.id)
+        navigationPath.append(request.roomID)
     }
 }
 

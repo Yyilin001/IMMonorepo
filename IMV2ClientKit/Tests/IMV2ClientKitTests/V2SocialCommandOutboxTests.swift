@@ -63,6 +63,139 @@ struct V2SocialCommandOutboxTests {
         #expect(pending.count == 2)
         #expect(pending.map(\.strangerPermission) == [.deny, .allow])
     }
+
+    @Test("explicit flush never reports an older queued command as the current action")
+    func flushIfReadyLeavesAnEarlierCommandUntouched() async throws {
+        let target = try UserID("00000000-0000-0000-0000-000000000372")
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let earlierID = "00000000-0000-0000-0000-000000000370"
+        let requestedID = UUID(uuidString: "00000000-0000-0000-0000-000000000371")!
+        let earlier = try V2PendingSocialCommand(
+            operationID: earlierID,
+            kind: .strangerMessagePreference,
+            targetUserID: nil,
+            relationshipAction: nil,
+            blockAction: nil,
+            strangerPermission: .deny,
+            state: .pending,
+            attemptCount: 0,
+            nextAttemptAt: now,
+            terminalCode: nil
+        )
+        let store = SocialOutboxStoreSpy(commands: [earlier])
+        let transport = SocialOutboxTransport()
+        let engine = V2SocialCommandOutboxEngine(
+            store: store,
+            socialTransport: transport,
+            directTransport: transport,
+            makeUUID: { requestedID },
+            now: { now }
+        )
+
+        let requested = try await engine.enqueueRelationship(targetUserID: target, action: .request)
+        let result = try await engine.flushIfReady(operationID: requested.operationID)
+
+        #expect(result == nil)
+        #expect(await transport.dispatchedKinds().isEmpty)
+        #expect(await store.command(operationID: earlierID)?.state == .pending)
+        #expect(await store.command(operationID: requested.operationID)?.state == .pending)
+    }
+}
+
+private actor SocialOutboxStoreSpy: V2LocalSocialCommandStore {
+    private var commands: [V2PendingSocialCommand]
+
+    init(commands: [V2PendingSocialCommand]) {
+        self.commands = commands
+    }
+
+    func enqueue(_ command: V2PendingSocialCommand) async throws {
+        commands.append(command)
+    }
+
+    func enqueueOrReusePendingSocialCommand(_ command: V2PendingSocialCommand) async throws -> V2PendingSocialCommand {
+        if let existing = commands.first(where: {
+            $0.kind == command.kind
+                && $0.targetUserID == command.targetUserID
+                && $0.relationshipAction == command.relationshipAction
+                && $0.blockAction == command.blockAction
+                && $0.strangerPermission == command.strangerPermission
+                && $0.state == .pending
+        }) {
+            return existing
+        }
+        commands.append(command)
+        return command
+    }
+
+    func nextReadySocialCommand(now: Date) async throws -> V2PendingSocialCommand? {
+        commands.first { $0.state == .pending && $0.nextAttemptAt <= now }
+    }
+
+    func markSocialCommandAcknowledged(operationID: String) async throws {
+        try replace(operationID: operationID) { command in
+            try V2PendingSocialCommand(
+                operationID: command.operationID,
+                kind: command.kind,
+                targetUserID: command.targetUserID,
+                relationshipAction: command.relationshipAction,
+                blockAction: command.blockAction,
+                strangerPermission: command.strangerPermission,
+                state: .acknowledged,
+                attemptCount: command.attemptCount,
+                nextAttemptAt: command.nextAttemptAt,
+                terminalCode: nil
+            )
+        }
+    }
+
+    func scheduleSocialCommandRetry(operationID: String, nextAttemptAt: Date) async throws {
+        try replace(operationID: operationID) { command in
+            try V2PendingSocialCommand(
+                operationID: command.operationID,
+                kind: command.kind,
+                targetUserID: command.targetUserID,
+                relationshipAction: command.relationshipAction,
+                blockAction: command.blockAction,
+                strangerPermission: command.strangerPermission,
+                state: .pending,
+                attemptCount: command.attemptCount + 1,
+                nextAttemptAt: nextAttemptAt,
+                terminalCode: nil
+            )
+        }
+    }
+
+    func rejectSocialCommand(operationID: String, code: String) async throws {
+        try replace(operationID: operationID) { command in
+            try V2PendingSocialCommand(
+                operationID: command.operationID,
+                kind: command.kind,
+                targetUserID: command.targetUserID,
+                relationshipAction: command.relationshipAction,
+                blockAction: command.blockAction,
+                strangerPermission: command.strangerPermission,
+                state: .rejected,
+                attemptCount: command.attemptCount,
+                nextAttemptAt: command.nextAttemptAt,
+                terminalCode: code
+            )
+        }
+    }
+
+    func command(operationID: String) -> V2PendingSocialCommand? {
+        commands.first { $0.operationID == operationID }
+    }
+
+    private func replace(
+        operationID: String,
+        transform: (V2PendingSocialCommand) throws -> V2PendingSocialCommand
+    ) throws {
+        guard let index = commands.firstIndex(where: { $0.operationID == operationID }) else {
+            throw V2ClientCommandError.commandNotPending
+        }
+        commands[index] = try transform(commands[index])
+    }
 }
 
 private actor SocialOutboxTransport: V2ClientSocialRelationshipTransport, V2ClientDirectMessagingTransport {

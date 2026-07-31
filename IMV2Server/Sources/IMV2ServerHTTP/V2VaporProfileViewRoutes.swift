@@ -64,26 +64,38 @@ public struct V2ProfileViewBatchHTTPRequest: Content, Sendable {
 
 public struct V2ProfileViewLookupHTTPKey: Content, Sendable {
     public let userID: String
-    /// Omitted means an active direct-room context. Supplying a room ID
-    /// requests group-scoped authorization for that exact room.
+    /// `context` is explicit so an absent room ID cannot accidentally turn a
+    /// relationship contact read into a direct-room authorization check.
+    public let context: String
     public let roomID: String?
 
-    public init(userID: String, roomID: String? = nil) {
+    public init(userID: String, context: String = "direct", roomID: String? = nil) {
         self.userID = userID
+        self.context = context
         self.roomID = roomID
     }
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
+        case context
         case roomID = "room_id"
     }
 
     fileprivate func lookupKey() throws -> V2ProfileViewLookupKey {
         let userID = try UserID(userID)
-        if let roomID {
+        switch context {
+        case "direct":
+            guard roomID == nil else { throw V2ProfileViewReadError.invalidRequest }
+            return .init(userID: userID, context: .directConversation)
+        case "relationship":
+            guard roomID == nil else { throw V2ProfileViewReadError.invalidRequest }
+            return .init(userID: userID, context: .relationship)
+        case "room":
+            guard let roomID else { throw V2ProfileViewReadError.invalidRequest }
             return .init(userID: userID, context: .room(try RoomID(roomID)))
+        default:
+            throw V2ProfileViewReadError.invalidRequest
         }
-        return .init(userID: userID, context: .directConversation)
     }
 }
 
@@ -94,6 +106,7 @@ public struct V2ProfileViewBatchHTTPResponse: Content, Sendable {
 
 public struct V2ProfileViewBatchHTTPResult: Content, Sendable {
     public let userID: String
+    public let context: String
     public let roomID: String?
     public let unavailable: Bool
     public let handle: String?
@@ -105,6 +118,7 @@ public struct V2ProfileViewBatchHTTPResult: Content, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
+        case context
         case roomID = "room_id"
         case unavailable
         case handle
@@ -119,6 +133,7 @@ public struct V2ProfileViewBatchHTTPResult: Content, Sendable {
         switch result {
         case .unavailable(let key):
             userID = key.userID.rawValue
+            context = Self.context(for: key.context)
             roomID = Self.roomID(for: key.context)
             unavailable = true
             handle = nil
@@ -129,6 +144,7 @@ public struct V2ProfileViewBatchHTTPResult: Content, Sendable {
             visibilityRevision = nil
         case .profile(let key, let view):
             userID = key.userID.rawValue
+            context = Self.context(for: key.context)
             roomID = Self.roomID(for: key.context)
             unavailable = false
             handle = view.publicIdentity?.handle.rawValue
@@ -143,7 +159,16 @@ public struct V2ProfileViewBatchHTTPResult: Content, Sendable {
     private static func roomID(for context: V2ProfileViewContext) -> String? {
         switch context {
         case .directConversation: nil
+        case .relationship: nil
         case .room(let roomID): roomID.rawValue
+        }
+    }
+
+    private static func context(for context: V2ProfileViewContext) -> String {
+        switch context {
+        case .directConversation: "direct"
+        case .relationship: "relationship"
+        case .room: "room"
         }
     }
 }

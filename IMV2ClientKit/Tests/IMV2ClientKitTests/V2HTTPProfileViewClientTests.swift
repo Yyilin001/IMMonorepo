@@ -15,8 +15,8 @@ struct V2HTTPProfileViewClientTests {
         let roomID = "00000000-0000-0000-0000-000000000902"
         let response = try #require(HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: [:]))
         let body = try JSONEncoder().encode(ProfileViewResponseBody(results: [
-            .init(userID: userID, roomID: nil, unavailable: false, handle: "profile_user", displayName: "资料名称", state: "active", revision: 4, visibilityRevision: 2),
-            .init(userID: userID, roomID: roomID, unavailable: true, handle: nil, displayName: nil, state: nil, revision: nil, visibilityRevision: nil),
+            .init(userID: userID, context: "direct", roomID: nil, unavailable: false, handle: "profile_user", displayName: "资料名称", state: "active", revision: 4, visibilityRevision: 2),
+            .init(userID: userID, context: "room", roomID: roomID, unavailable: true, handle: nil, displayName: nil, state: nil, revision: nil, visibilityRevision: nil),
         ]))
         let transport = ProfileViewHTTPTransport(result: .success((body, response)))
         let client = try V2HTTPProfileViewClient(endpoint: endpoint, credentials: ProfileViewCredentials(), transport: transport)
@@ -69,6 +69,7 @@ private struct ProfileViewResponseBody: Encodable {
 
 private struct ProfileViewResponseItem: Encodable {
     let userID: String
+    let context: String
     let roomID: String?
     let unavailable: Bool
     let handle: String?
@@ -80,6 +81,7 @@ private struct ProfileViewResponseItem: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
+        case context
         case roomID = "room_id"
         case unavailable
         case handle

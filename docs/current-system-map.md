@@ -46,6 +46,10 @@ flowchart LR
   始终优先使用该服务端同步资料，而非设备本地的显式查询缓存。群 roster 仍保持按需读取，
   不做资料 fan-out。
 - 非好友可以发起私聊，但陌生人消息在服务端持久化事务中按接收方设置和窗口限额准入。默认基线为每个发送者 24 小时 3 条；接收方可关闭此类消息。
+- 联系人页只展示 pending/accepted 关系的公开资料：关系本身来自本地 user-sync 投影，
+  资料读取带 `relationship` 授权上下文并以 100 条为上限。添加、接受、拒绝、撤销、删除
+  与屏蔽先进入 durable social outbox；服务端 ACK 不会乐观修改联系人列表，下一次同步投影
+  才是最终可见状态。好友资料可通过幂等 direct-room 打开操作跳转到会话页。
 - 撤回、编辑、reaction、read receipt、mute/freeze 与 moderation 都通过独立、幂等、可同步的命令/投影处理；UI 不以网络响应直接覆盖同步投影。
 
 ## 可选 NATS 提示层

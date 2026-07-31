@@ -73,6 +73,28 @@ public struct PostgresV2ProfileViewStore: V2ProfileViewStore {
                        OR (pair.higher_user_id = \(bind: actorID) AND pair.lower_user_id = \(bind: targetID))
                   )
                 """).first(decoding: ProfileViewRow.self)
+        case .relationship:
+            // This lookup is deliberately bounded by the request's keys. It
+            // authorizes only an existing bilateral relationship, so the
+            // profile endpoint cannot become an internal-ID directory.
+            row = try await sql.raw("""
+                SELECT p.user_id, p.public_handle, p.display_name,
+                       CASE WHEN avatar.owner_user_id = p.user_id AND avatar.state = 'available'
+                            THEN avatar.media_id ELSE NULL END AS avatar_media_id,
+                       p.state, p.revision, p.visibility_revision
+                FROM im_v2.public_user_profiles AS p
+                LEFT JOIN im_v2.media_objects AS avatar ON avatar.media_id = p.avatar_media_id
+                WHERE p.user_id = \(bind: targetID)
+                  AND EXISTS (
+                    SELECT 1
+                    FROM im_v2.user_relationships AS relationship
+                    WHERE relationship.state IN ('pending', 'accepted')
+                      AND ((relationship.lower_user_id = \(bind: actorID)
+                            AND relationship.higher_user_id = \(bind: targetID))
+                        OR (relationship.higher_user_id = \(bind: actorID)
+                            AND relationship.lower_user_id = \(bind: targetID)))
+                  )
+                """).first(decoding: ProfileViewRow.self)
         case .room(let roomID):
             guard let roomUUID = UUID(uuidString: roomID.rawValue) else {
                 throw V2ProfileViewReadError.corruptPersistenceState

@@ -67,8 +67,22 @@ public actor V2SocialCommandOutboxEngine {
         return try await store.enqueueOrReusePendingSocialCommand(command)
     }
 
+    /// Attempts only the command associated with one explicit UI action. An
+    /// earlier queued social command remains ahead of it; callers then report
+    /// a queued state rather than misattributing that earlier result.
+    public func flushIfReady(operationID: String) async throws -> V2SocialCommandFlushResult? {
+        guard let command = try await store.nextReadySocialCommand(now: now()),
+              command.operationID == operationID
+        else { return nil }
+        return try await flush(command)
+    }
+
     public func flushOnce() async throws -> V2SocialCommandFlushResult {
         guard let command = try await store.nextReadySocialCommand(now: now()) else { return .idle }
+        return try await flush(command)
+    }
+
+    private func flush(_ command: V2PendingSocialCommand) async throws -> V2SocialCommandFlushResult {
         do {
             switch command.kind {
             case .relationship: _ = try await socialTransport.changeRelationship(operationID: try .init(command.operationID), targetUserID: command.targetUserID!, action: command.relationshipAction!)
