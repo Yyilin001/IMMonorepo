@@ -1,6 +1,7 @@
 import Dispatch
 import FluentPostgresDriver
 import Foundation
+import IMV2Core
 import IMV2Server
 import IMV2ServerHTTP
 import Vapor
@@ -14,6 +15,7 @@ import Glibc
 enum IMV2AccountServerApp {
     static func main() async throws {
         let configuration = try V2AccountRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
+        let localMediaConfiguration = try V2LocalFilesystemMediaRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let app = try await Application.make(.production)
         do {
             // Keep the password fallback cost explicit. The dummy verifier in
@@ -43,6 +45,67 @@ enum IMV2AccountServerApp {
                 database: database,
                 tokenKey: configuration.accessTokenKey
             )
+            var localMediaScanTask: Task<Void, Never>?
+            if let localMediaConfiguration {
+                let provider = try V2LocalFilesystemMediaProvider(
+                    rootDirectory: localMediaConfiguration.rootDirectory,
+                    targetBaseURL: localMediaConfiguration.publicBaseURL,
+                    signingKey: localMediaConfiguration.signingKey
+                )
+                try await provider.prepare()
+                let media = V2MediaService(
+                    store: PostgresV2MediaStore(database: database),
+                    limits: try V2MediaUploadLimits(maximumBytes: localMediaConfiguration.maximumBytes)
+                )
+                let uploadProviderSessions = try V2MediaUploadProviderSessionService(
+                    store: PostgresV2MediaUploadSessionStore(database: database),
+                    provider: provider
+                )
+                let downloadProviderSessions = try V2MediaProviderSessionService(
+                    store: PostgresV2MediaDownloadSessionStore(database: database),
+                    provider: provider
+                )
+                V2VaporMediaUploadRoutes(
+                    authenticator: authenticator,
+                    handler: .init(edge: .init(media: media, providerSessions: uploadProviderSessions))
+                ).register(on: app)
+                V2VaporMediaEdgeRoutes(
+                    authenticator: authenticator,
+                    handler: .init(edge: .init(media: media, providerSessions: downloadProviderSessions))
+                ).register(on: app)
+                try V2VaporLocalFilesystemMediaRoutes(
+                    provider: provider,
+                    publicBaseURL: localMediaConfiguration.publicBaseURL,
+                    maximumUploadBytes: localMediaConfiguration.maximumBytes
+                ).register(on: app)
+
+                let scanner = try V2MediaScanWorker(
+                    store: PostgresV2MediaScanStore(database: database),
+                    provider: V2LocalEICARMediaScanner(provider: provider)
+                )
+                let logger = app.logger
+                localMediaScanTask = Task {
+                    while !Task.isCancelled {
+                        do {
+                            _ = try await scanner.runOnce(limit: 16)
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            // This local scanner is deliberately diagnostic
+                            // only; never include IDs, paths, or bytes here.
+                            logger.error("IM V2 local media scan worker failed; retrying")
+                        }
+                        do {
+                            try await Task.sleep(for: .milliseconds(200))
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            break
+                        }
+                    }
+                }
+                app.logger.notice("IM V2 local filesystem media edge enabled")
+            }
             V2VaporDeviceCredentialRoutes(assertionVerifier: assertionIssuer, issuer: credentials).register(on: app)
             V2VaporPushEndpointRoutes(
                 authenticator: authenticator,
@@ -78,6 +141,10 @@ enum IMV2AccountServerApp {
             try await app.startup()
             app.logger.notice("IM V2 account service bound", metadata: ["host": "\(configuration.listener.host)", "port": "\(configuration.listener.port)"])
             await TerminationSignal.wait()
+            localMediaScanTask?.cancel()
+            if let localMediaScanTask {
+                await localMediaScanTask.value
+            }
             try await app.asyncShutdown()
         } catch {
             try? await app.asyncShutdown()

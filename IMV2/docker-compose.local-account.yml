@@ -38,6 +38,13 @@ services:
       IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS: 60
       IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES: 30
       IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS: 60
+      # Explicit local-only filesystem substitute for an object store. The
+      # signed targets still traverse Caddy over HTTPS, so the iOS upload and
+      # download path exercises the same client boundary as production.
+      IM_V2_LOCAL_MEDIA_MODE: filesystem
+      IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY: /var/lib/im-v2-local-media
+      IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL: https://localhost:8443
+      IM_V2_LOCAL_MEDIA_MAXIMUM_BYTES: 52428800
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,6 +60,8 @@ services:
     # port therefore belongs to Caddy, while the account listener stays loopback.
     ports:
       - "127.0.0.1:8443:8443"
+    volumes:
+      - v2-local-media-objects:/var/lib/im-v2-local-media
     mem_limit: 2g
     pids_limit: 256
 
@@ -174,3 +183,4 @@ volumes:
   v2-local-account-postgres:
   v2-local-caddy-data:
   v2-local-caddy-config:
+  v2-local-media-objects:
