@@ -55,25 +55,42 @@ struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
     /// Opaque media IDs from the local projection. The UI may show that a
     /// message has attachments, but never receives a provider URL here.
     let media: [V2MediaReference]
+    /// Server-derived, non-sensitive presentation facts for `media`. These
+    /// let the view choose image/file affordances without reading object-store
+    /// metadata or assuming a provider URL.
+    let mediaPresentations: [V2MediaPresentation]
     /// Protocol-level mention targets. IDs are kept opaque in the UI; the
     /// message bubble exposes only aggregate mention semantics.
     let mentions: [V2MentionTarget]
+    let entities: [V2MessageEntity]
+    let replyTo: V2MessageReplyReference?
     let createdAt: Date
     let isOutgoing: Bool
     let isWithdrawn: Bool
     let reactions: [V2ConversationMessageReaction]
 
-    init(id: String, roomSequence: UInt64 = 1, revision: UInt64, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], createdAt: Date, isOutgoing: Bool, isWithdrawn: Bool, reactions: [V2ConversationMessageReaction] = []) {
+    init(id: String, roomSequence: UInt64 = 1, revision: UInt64, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date, isOutgoing: Bool, isWithdrawn: Bool, reactions: [V2ConversationMessageReaction] = []) {
         self.id = id
         self.roomSequence = roomSequence
         self.revision = revision
         self.text = text
         self.media = media
+        let presentations = mediaPresentations.isEmpty && !media.isEmpty
+            ? media.map(V2MediaPresentation.legacy)
+            : mediaPresentations
+        precondition(presentations.map(\.mediaID) == media.map(\.mediaID))
+        self.mediaPresentations = presentations
         self.mentions = mentions
+        self.entities = entities
+        self.replyTo = replyTo
         self.createdAt = createdAt
         self.isOutgoing = isOutgoing
         self.isWithdrawn = isWithdrawn
         self.reactions = reactions
+    }
+
+    func presentation(for media: V2MediaReference) -> V2MediaPresentation {
+        mediaPresentations.first(where: { $0.mediaID == media.mediaID }) ?? .legacy(media)
     }
 }
 
@@ -288,7 +305,10 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMess
                 revision: message.messageRevision,
                 text: message.isWithdrawn ? "消息已撤回" : message.text,
                 media: message.isWithdrawn ? [] : message.media,
+                mediaPresentations: message.isWithdrawn ? [] : message.mediaPresentations,
                 mentions: message.isWithdrawn ? [] : message.mentions,
+                entities: message.isWithdrawn ? [] : message.entities,
+                replyTo: message.isWithdrawn ? nil : message.replyTo,
                 createdAt: message.createdAt,
                 isOutgoing: message.senderUserID.rawValue == userID,
                 isWithdrawn: message.isWithdrawn,
@@ -752,6 +772,7 @@ final class V2ConversationDetailStore {
     private var inFlightMessageActionIDs: Set<String> = []
     var draft = ""
     var mentionHandlesText = ""
+    private(set) var replyTarget: V2ConversationMessageItem?
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
@@ -974,7 +995,8 @@ final class V2ConversationDetailStore {
                 sendFeedback = "附件尚未准备完成。"
                 return
             }
-            let outcome = try await sender.send(text: text, media: media, mentions: mentions, in: roomID)
+            let replyTo = replyTarget.flatMap { try? V2MessageReplyReference(messageID: .init($0.id)) }
+            let outcome = try await sender.send(text: text, media: media, mentions: mentions, entities: [], replyTo: replyTo, in: roomID)
             try Task.checkCancellation()
             switch outcome {
             case .accepted:
@@ -982,11 +1004,13 @@ final class V2ConversationDetailStore {
                 await discardAttachmentsAfterDurableSend()
                 draft = ""
                 mentionHandlesText = ""
+                replyTarget = nil
             case .queuedForRetry:
                 sendFeedback = "已安全保存，连接恢复后会重试。"
                 await discardAttachmentsAfterDurableSend()
                 draft = ""
                 mentionHandlesText = ""
+                replyTarget = nil
             case .rejected(let code):
                 sendFeedback = Self.sendRejectionFeedback(for: code)
             }
@@ -998,6 +1022,22 @@ final class V2ConversationDetailStore {
         } catch {
             sendFeedback = "无法保存待发送消息。"
         }
+    }
+
+    func beginReply(to message: V2ConversationMessageItem) {
+        guard !message.isWithdrawn else { return }
+        replyTarget = message
+    }
+
+    func cancelReply() {
+        replyTarget = nil
+    }
+
+    func replyPreview(for reference: V2MessageReplyReference) -> String {
+        guard let target = messages.first(where: { $0.id == reference.messageID.rawValue }) else {
+            return "原消息不可用"
+        }
+        return target.text.isEmpty ? "附件" : target.text
     }
 
     private func resolvedMentions() async throws -> [V2MentionTarget] {
@@ -1973,6 +2013,21 @@ private struct V2ConversationDetailView: View {
                             .padding(.horizontal)
                             .padding(.top, 8)
                     }
+                    if let replyTarget = store.replyTarget {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrowshape.turn.up.left.fill")
+                            Text("回复：\(replyTarget.text.isEmpty ? "附件" : replyTarget.text)")
+                                .lineLimit(1)
+                            Spacer()
+                            Button("取消") { store.cancelReply() }
+                                .accessibilityIdentifier("v2.message.reply.cancel")
+                        }
+                        .font(.subheadline)
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("v2.message.reply.composer")
+                    }
                     HStack(alignment: .bottom) {
                         Button("添加附件", systemImage: "paperclip") {
                             isPresentingAttachmentImporter = true
@@ -2222,9 +2277,17 @@ private struct V2ConversationMessageBubble: View {
 
     var body: some View {
         VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 3) {
+            if let replyTo = message.replyTo {
+                Label(store.replyPreview(for: replyTo), systemImage: "arrowshape.turn.up.left")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .accessibilityLabel("回复：\(store.replyPreview(for: replyTo))")
+                    .accessibilityIdentifier("v2.message.reply.reference.\(message.id)")
+            }
             if !message.text.isEmpty {
                 ZStack(alignment: message.isOutgoing ? .trailing : .leading) {
-                    Text(message.text)
+                    V2RichMessageText(text: message.text, entities: message.entities)
                         // A withdrawn-message bubble already has a neutral
                         // background. Keep its tombstone readable rather than
                         // using low-contrast secondary text on that surface.
@@ -2257,6 +2320,7 @@ private struct V2ConversationMessageBubble: View {
                             store: store,
                             message: message,
                             media: media,
+                            presentation: message.presentation(for: media),
                             index: index
                         )
                     }
@@ -2270,10 +2334,19 @@ private struct V2ConversationMessageBubble: View {
             if store.canReactToMessage(message) {
                 V2ConversationReactionControls(store: store, message: message)
             }
+            if !message.isWithdrawn {
+                Button("回复", systemImage: "arrowshape.turn.up.left") { store.beginReply(to: message) }
+                    .font(.caption)
+                    .accessibilityHint("引用这条消息回复")
+                    .accessibilityIdentifier("v2.message.reply.\(message.id)")
+            }
         }
         .padding(10)
         .background(message.isOutgoing ? Color.accentColor.opacity(0.16) : Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
         .contextMenu {
+            if !message.isWithdrawn {
+                Button("回复", systemImage: "arrowshape.turn.up.left") { store.beginReply(to: message) }
+            }
             if store.canEditMessage(message) {
                 Button("编辑") { beginEditing() }
                     .accessibilityIdentifier("v2.message.edit.\(message.id)")
@@ -2290,7 +2363,17 @@ private struct V2ConversationMessageBubble: View {
     }
 
     private var attachmentSummary: String {
-        "\(message.media.count) 个附件"
+        let images = message.mediaPresentations.filter { $0.kind == .image || $0.kind == .animatedImage }.count
+        let videos = message.mediaPresentations.filter { $0.kind == .video }.count
+        let audio = message.mediaPresentations.filter { $0.kind == .audio }.count
+        let files = message.media.count - images - videos - audio
+        let components = [
+            images > 0 ? "\(images) 张图片" : nil,
+            videos > 0 ? "\(videos) 个视频" : nil,
+            audio > 0 ? "\(audio) 个音频" : nil,
+            files > 0 ? "\(files) 个文件" : nil,
+        ].compactMap { $0 }
+        return components.joined(separator: "、")
     }
 
     private var mentionSummary: String {
@@ -2303,6 +2386,41 @@ private struct V2ConversationMessageBubble: View {
         case (true, _): return "提及所有人及 \(userCount) 位成员"
         case (false, _): return "提及 \(userCount) 位成员"
         }
+    }
+}
+
+private struct V2RichMessageText: View {
+    let text: String
+    let entities: [V2MessageEntity]
+
+    var body: some View {
+        Text(attributedText)
+    }
+
+    private var attributedText: AttributedString {
+        var value = AttributedString(text)
+        for entity in entities {
+            let range = NSRange(location: entity.offsetUTF16, length: entity.lengthUTF16)
+            guard let stringRange = Range(range, in: text),
+                  let attributedRange = Range(stringRange, in: value)
+            else { continue }
+            switch entity.kind {
+            case .bold:
+                value[attributedRange].font = .body.bold()
+            case .italic:
+                value[attributedRange].font = .body.italic()
+            case .code, .preformatted:
+                value[attributedRange].font = .system(.body, design: .monospaced)
+            case .link:
+                value[attributedRange].link = entity.linkURL
+                value[attributedRange].foregroundColor = .blue
+            case .underline, .strikethrough, .spoiler:
+                // The canonical entity still synchronizes on platforms where
+                // the native text renderer has no matching visual style.
+                break
+            }
+        }
+        return value
     }
 }
 
@@ -2387,29 +2505,48 @@ private struct V2ConversationMediaAttachmentRow: View {
     @Bindable var store: V2ConversationDetailStore
     let message: V2ConversationMessageItem
     let media: V2MediaReference
+    let presentation: V2MediaPresentation
     let index: Int
 
     var body: some View {
         switch store.mediaDownloadState(for: media) {
         case .notDownloaded:
-            downloadButton(title: "下载附件", systemImage: "arrow.down.circle")
+            downloadButton(title: downloadTitle, systemImage: "arrow.down.circle")
         case .downloading:
-            Label("正在下载附件", systemImage: "arrow.down.circle")
+            Label("正在下载\(kindLabel)", systemImage: "arrow.down.circle")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .accessibilityLabel("正在下载附件")
+                .accessibilityLabel("正在下载\(kindLabel)")
                 .accessibilityIdentifier(identifier)
         case .downloaded(let downloaded):
+            downloadedContent(downloaded)
+        case .failed:
+            downloadButton(title: "重新下载\(kindLabel)", systemImage: "arrow.clockwise")
+        }
+    }
+
+    @ViewBuilder
+    private func downloadedContent(_ downloaded: V2DownloadedConversationMedia) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if (presentation.kind == .image || presentation.kind == .animatedImage),
+               let image = UIImage(contentsOfFile: downloaded.fileURL.path) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 260, maxHeight: 320)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .accessibilityLabel(kindLabel)
+                    .accessibilityValue(byteCountLabel)
+                    .accessibilityIdentifier(identifier + ".preview")
+            }
             ShareLink(item: downloaded.fileURL) {
-                Label("分享附件", systemImage: "square.and.arrow.up")
+                Label("分享\(kindLabel)", systemImage: "square.and.arrow.up")
             }
             .font(.caption)
             .frame(minWidth: 44, minHeight: 44)
-            .accessibilityLabel("分享附件")
+            .accessibilityLabel("分享\(kindLabel)")
             .accessibilityHint("打开系统分享菜单")
             .accessibilityIdentifier(identifier)
-        case .failed:
-            downloadButton(title: "重新下载附件", systemImage: "arrow.clockwise")
         }
     }
 
@@ -2420,8 +2557,26 @@ private struct V2ConversationMediaAttachmentRow: View {
         }
         .font(.caption)
         .frame(minWidth: 44, minHeight: 44)
-        .accessibilityHint("重新验证权限后下载到此设备")
+        .accessibilityHint("重新验证权限后下载\(kindLabel)到此设备，\(byteCountLabel)")
         .accessibilityIdentifier(identifier)
+    }
+
+    private var kindLabel: String {
+        switch presentation.kind {
+        case .image: "图片"
+        case .animatedImage: "动图"
+        case .video: "视频"
+        case .audio: "音频"
+        case .file: "文件"
+        }
+    }
+
+    private var downloadTitle: String {
+        "下载\(kindLabel)"
+    }
+
+    private var byteCountLabel: String {
+        ByteCountFormatter.string(fromByteCount: presentation.byteCount, countStyle: .file)
     }
 
     private var identifier: String {

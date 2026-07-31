@@ -5,6 +5,41 @@ import Testing
 
 @Suite("V2 client sync")
 struct V2SyncEngineTests {
+    @Test("media presentation metadata survives durable message projection")
+    func mediaPresentationProjectionIsApplied() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let roomID = "00000000-0000-0000-0000-000000000218"
+        let mediaID = "00000000-0000-0000-0000-000000000219"
+        let record = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-00000000021a"),
+            projectionKind: "message",
+            payload: try JSONSerialization.data(withJSONObject: [
+                "event_type": "message.accepted",
+                "message_id": "00000000-0000-0000-0000-00000000021b",
+                "room_id": roomID,
+                "room_sequence": 1,
+                "message_revision": 1,
+                "sender_user_id": "00000000-0000-0000-0000-00000000021c",
+                "text": "图片",
+                "media_ids": [mediaID],
+                "media_presentations": [[
+                    "media_id": mediaID,
+                    "kind": "image",
+                    "content_type": "image/jpeg",
+                    "byte_count": 2_048,
+                ]],
+                "mention_user_ids": [],
+                "mentions_everyone": false,
+                "server_created_at_ms": 1_750_000_000_000,
+            ])
+        )
+        _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("media-token"), receipt: .init("media-receipt"), hasMore: false, capabilityProfile: "base"))
+
+        let message = try #require(await store.messages(in: .init(roomID)).first)
+        #expect(message.mediaPresentations == [try .init(mediaID: .init(mediaID), kind: .image, contentType: "image/jpeg", byteCount: 2_048)])
+    }
+
     @Test("moderation sync facts are durably projected before acknowledgement")
     func moderationProjectionIsApplied() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)

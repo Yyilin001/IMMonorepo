@@ -10,26 +10,87 @@ public protocol V2AuthenticatedFrameTransport: Sendable {
     func request(_ frame: V2Frame) async throws -> V2Frame
 }
 
+private func v2MediaPresentation(from wire: IMV2MediaPresentation) throws -> V2MediaPresentation {
+    let kind: V2MediaPresentation.Kind
+    switch wire.kind {
+    case .image: kind = .image
+    case .animatedImage: kind = .animatedImage
+    case .video: kind = .video
+    case .audio: kind = .audio
+    case .file: kind = .file
+    case .unspecified, .UNRECOGNIZED:
+        throw V2RealtimeTransportError.unexpectedResponse
+    }
+    return try .init(
+        mediaID: .init(wire.mediaID),
+        kind: kind,
+        contentType: wire.contentType,
+        byteCount: wire.byteCount
+    )
+}
+
+private func v2MessageEntity(from wire: IMV2MessageEntity) throws -> V2MessageEntity {
+    let kind: V2MessageEntity.Kind
+    switch wire.kind {
+    case .bold: kind = .bold
+    case .italic: kind = .italic
+    case .underline: kind = .underline
+    case .strikethrough: kind = .strikethrough
+    case .spoiler: kind = .spoiler
+    case .code: kind = .code
+    case .preformatted: kind = .preformatted
+    case .link: kind = .link
+    case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse
+    }
+    return try .init(offsetUTF16: Int(wire.offsetUtf16), lengthUTF16: Int(wire.lengthUtf16), kind: kind, linkURL: wire.linkURL.isEmpty ? nil : URL(string: wire.linkURL))
+}
+
+private func v2MessageEntityWire(_ entity: V2MessageEntity) -> IMV2MessageEntity {
+    var wire = IMV2MessageEntity()
+    wire.offsetUtf16 = UInt32(entity.offsetUTF16)
+    wire.lengthUtf16 = UInt32(entity.lengthUTF16)
+    wire.kind = switch entity.kind {
+    case .bold: .bold
+    case .italic: .italic
+    case .underline: .underline
+    case .strikethrough: .strikethrough
+    case .spoiler: .spoiler
+    case .code: .code
+    case .preformatted: .preformatted
+    case .link: .link
+    }
+    wire.linkURL = entity.linkURL?.absoluteString ?? ""
+    return wire
+}
+
 public struct V2ClientMessageAcceptance: Equatable, Sendable {
     public let messageID: MessageID
     public let roomID: RoomID
     public let roomSequence: UInt64
     public let media: [V2MediaReference]
+    public let mediaPresentations: [V2MediaPresentation]
     public let mentions: [V2MentionTarget]
+    public let entities: [V2MessageEntity]
+    public let replyTo: V2MessageReplyReference?
     public let createdAt: Date
 
-    public init(messageID: MessageID, roomID: RoomID, roomSequence: UInt64, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], createdAt: Date) {
+    public init(messageID: MessageID, roomID: RoomID, roomSequence: UInt64, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date) {
         self.messageID = messageID
         self.roomID = roomID
         self.roomSequence = roomSequence
         self.media = media
+        self.mediaPresentations = mediaPresentations.isEmpty && !media.isEmpty
+            ? media.map(V2MediaPresentation.legacy)
+            : mediaPresentations
         self.mentions = mentions
+        self.entities = entities
+        self.replyTo = replyTo
         self.createdAt = createdAt
     }
 }
 
 public protocol V2ClientMessageTransport: Sendable {
-    func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference], mentions: [V2MentionTarget]) async throws -> V2ClientMessageAcceptance
+    func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?) async throws -> V2ClientMessageAcceptance
 }
 
 public struct V2ClientMembershipChange: Equatable, Sendable {
@@ -466,7 +527,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         }
     }
 
-    public func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference], mentions: [V2MentionTarget]) async throws -> V2ClientMessageAcceptance {
+    public func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil) async throws -> V2ClientMessageAcceptance {
         var request = IMV2Envelope()
         request.sendMessage = .init()
         request.sendMessage.roomID = roomID.rawValue
@@ -476,16 +537,27 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         request.sendMessage.content.mediaIds = media.map { $0.mediaID.rawValue }
         request.sendMessage.content.mentionedUserIds = mentions.compactMap { if case .user(let userID) = $0 { userID.rawValue } else { nil } }
         request.sendMessage.content.mentionEveryone = mentions.contains(.everyone)
+        request.sendMessage.content.entities = entities.map(v2MessageEntityWire)
+        request.sendMessage.content.replyToMessageID = replyTo?.messageID.rawValue ?? ""
         let response = try await requestEnvelope(request)
         guard case .messageAccepted(let accepted)? = response.body else {
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
         }
         let acceptedMedia = try accepted.mediaIds.map { try V2MediaReference(mediaID: .init($0)) }
+        let acceptedPresentations = try accepted.mediaPresentations.map(v2MediaPresentation(from:))
         var acceptedMentions = try accepted.mentionedUserIds.map { try V2MentionTarget.user(.init($0)) }
         if accepted.mentionsEveryone { acceptedMentions.append(.everyone) }
-        guard acceptedMedia == media, acceptedMentions == mentions else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(messageID: .init(accepted.messageID), roomID: .init(accepted.roomID), roomSequence: accepted.roomSequence, media: acceptedMedia, mentions: acceptedMentions, createdAt: Date(timeIntervalSince1970: TimeInterval(accepted.serverCreatedAtMs) / 1_000))
+        let acceptedEntities = try accepted.entities.map(v2MessageEntity(from:))
+        let acceptedReplyTo = try accepted.replyToMessageID.isEmpty ? nil : V2MessageReplyReference(messageID: .init(accepted.replyToMessageID))
+        guard acceptedMedia == media,
+              acceptedPresentations.map(\.mediaID) == acceptedMedia.map(\.mediaID),
+              acceptedMentions == mentions,
+              acceptedEntities == entities,
+              acceptedReplyTo == replyTo
+        else { throw V2RealtimeTransportError.unexpectedResponse }
+        try V2RichMessageContent.validate(text: text, entities: acceptedEntities)
+        return try .init(messageID: .init(accepted.messageID), roomID: .init(accepted.roomID), roomSequence: accepted.roomSequence, media: acceptedMedia, mediaPresentations: acceptedPresentations, mentions: acceptedMentions, entities: acceptedEntities, replyTo: acceptedReplyTo, createdAt: Date(timeIntervalSince1970: TimeInterval(accepted.serverCreatedAtMs) / 1_000))
     }
 
     public func changeMembership(roomID: RoomID, operationID: MembershipOperationID, targetUserID: UserID, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2ClientMembershipChange {

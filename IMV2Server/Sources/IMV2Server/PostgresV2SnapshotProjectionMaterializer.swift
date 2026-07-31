@@ -323,7 +323,7 @@ private func replayDeliveredHistory(_ rows: [SnapshotProjectionSyncLogRow]) thro
                 }
             }
             roomProfiles[profile.roomID] = profile
-        case "relationship", "user_block", "stranger_message_permission", "direct_room_profile":
+        case "relationship", "user_block", "stranger_message_permission", "user_add_permission", "direct_room_profile":
             // Social state is rebuilt from its authoritative tables. ClientKit
             // intentionally stores membership records only as sync history.
             // Direct-room public identities are similarly rebuilt from active
@@ -370,6 +370,7 @@ private func replayMessage(
               let text = event.text, !text.isEmpty
         else { throw V2SnapshotProjectionMaterializerError.invalidDeliveredHistory }
         message.text = text
+        message.entities = event.entities ?? []
         message.revision = revision
         messages[messageID] = message
     case "message.reaction_changed":
@@ -415,7 +416,10 @@ private struct ReplayedMessage {
     let senderUserID: UserID
     var text: String
     let media: [V2MediaReference]
+    let mediaPresentations: [V2MediaPresentation]
     let mentions: [V2MentionTarget]
+    var entities: [V2MessageEntity]
+    let replyTo: V2MessageReplyReference?
     let createdAt: Date
     var isWithdrawn = false
     var reactions: [String: V2SnapshotMessageReaction] = [:]
@@ -427,11 +431,16 @@ private struct ReplayedMessage {
               let text = event.text, !text.isEmpty || !(event.mediaIDs ?? []).isEmpty
         else { throw V2SnapshotProjectionMaterializerError.invalidDeliveredHistory }
         let media = try (event.mediaIDs ?? []).map { try V2MediaReference(mediaID: .init($0)) }
+        let mediaPresentations = try (event.mediaPresentations ?? []).map { try $0.presentation() }
         let mentions = try (event.mentionUserIDs ?? []).map { try V2MentionTarget.user(.init($0)) }
             + ((event.mentionsEveryone ?? false) ? [.everyone] : [])
+        let entities = event.entities ?? []
+        let replyTo = try event.replyToMessageID.map { V2MessageReplyReference(messageID: try .init($0)) }
         guard Set(media).count == media.count, media.count <= V2MessageCommandLimits.maxMediaAttachments,
+              (mediaPresentations.isEmpty || mediaPresentations.map(\.mediaID) == media.map(\.mediaID)),
               Set(mentions).count == mentions.count, mentions.count <= V2MessageCommandLimits.maxMentions
         else { throw V2SnapshotProjectionMaterializerError.invalidDeliveredHistory }
+        try V2RichMessageContent.validate(text: text, entities: entities)
         self.sourceEventID = sourceEventID
         self.messageID = try .init(messageID)
         self.roomID = try .init(event.roomID)
@@ -440,12 +449,15 @@ private struct ReplayedMessage {
         self.senderUserID = try .init(senderUserID)
         self.text = text
         self.media = media
+        self.mediaPresentations = mediaPresentations.isEmpty ? media.map(V2MediaPresentation.legacy) : mediaPresentations
         self.mentions = mentions
+        self.entities = entities
+        self.replyTo = replyTo
         self.createdAt = Date(timeIntervalSince1970: TimeInterval(event.serverCreatedAtMilliseconds) / 1_000)
     }
 
     func projection() throws -> V2SnapshotMessageProjection {
-        try .init(sourceEventID: sourceEventID, messageID: messageID, roomID: roomID, roomSequence: roomSequence, messageRevision: revision, senderUserID: senderUserID, text: text, media: media, mentions: mentions, createdAt: createdAt, isWithdrawn: isWithdrawn, reactions: reactions.values.sorted())
+        try .init(sourceEventID: sourceEventID, messageID: messageID, roomID: roomID, roomSequence: roomSequence, messageRevision: revision, senderUserID: senderUserID, text: text, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, createdAt: createdAt, isWithdrawn: isWithdrawn, reactions: reactions.values.sorted())
     }
 }
 
@@ -463,18 +475,39 @@ private struct SnapshotProjectionMessageWire: Decodable {
     let senderUserID: String?
     let text: String?
     let mediaIDs: [String]?
+    let mediaPresentations: [MediaPresentation]?
     let mentionUserIDs: [String]?
     let mentionsEveryone: Bool?
+    let entities: [V2MessageEntity]?
+    let replyToMessageID: String?
     let serverCreatedAtMilliseconds: Int64
     let actorUserID: String?
     let reaction: String?
     let action: String?
     enum CodingKeys: String, CodingKey {
-        case eventType = "event_type"; case messageID = "message_id"; case roomID = "room_id"; case roomSequence = "room_sequence"; case messageRevision = "message_revision"; case senderUserID = "sender_user_id"; case text; case mediaIDs = "media_ids"; case mentionUserIDs = "mention_user_ids"; case mentionsEveryone = "mentions_everyone"; case serverCreatedAtMilliseconds = "server_created_at_ms"; case actorUserID = "actor_user_id"; case reaction; case action
+        case eventType = "event_type"; case messageID = "message_id"; case roomID = "room_id"; case roomSequence = "room_sequence"; case messageRevision = "message_revision"; case senderUserID = "sender_user_id"; case text; case mediaIDs = "media_ids"; case mediaPresentations = "media_presentations"; case mentionUserIDs = "mention_user_ids"; case mentionsEveryone = "mentions_everyone"; case entities; case replyToMessageID = "reply_to_message_id"; case serverCreatedAtMilliseconds = "server_created_at_ms"; case actorUserID = "actor_user_id"; case reaction; case action
     }
     func requiredMessageID() throws -> MessageID {
         guard let messageID else { throw V2SnapshotProjectionMaterializerError.invalidDeliveredHistory }
         return try .init(messageID)
+    }
+
+    struct MediaPresentation: Decodable {
+        let mediaID: String
+        let kind: V2MediaPresentation.Kind
+        let contentType: String
+        let byteCount: Int64
+
+        func presentation() throws -> V2MediaPresentation {
+            try .init(mediaID: .init(mediaID), kind: kind, contentType: contentType, byteCount: byteCount)
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case mediaID = "media_id"
+            case kind
+            case contentType = "content_type"
+            case byteCount = "byte_count"
+        }
     }
 }
 

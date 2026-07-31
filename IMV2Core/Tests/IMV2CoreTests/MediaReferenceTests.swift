@@ -34,6 +34,20 @@ struct MediaReferenceTests {
         #expect(command.media == [media])
     }
 
+    @Test("presentation facts classify scanned media without carrying a URL")
+    func mediaPresentationClassification() throws {
+        let mediaID = try MediaID("media")
+        let image = try V2MediaPresentation(mediaID: mediaID, kind: V2MediaPresentation.kind(forContentType: "image/png"), contentType: "image/png", byteCount: 128)
+        #expect(image.kind == .image)
+        #expect(V2MediaPresentation.kind(forContentType: "image/gif") == .animatedImage)
+        #expect(V2MediaPresentation.kind(forContentType: "video/mp4") == .video)
+        #expect(V2MediaPresentation.kind(forContentType: "audio/ogg") == .audio)
+        #expect(V2MediaPresentation.kind(forContentType: "application/pdf") == .file)
+        #expect(throws: V2MediaValidationError.invalidPresentation) {
+            _ = try V2MediaPresentation(mediaID: mediaID, kind: .image, contentType: "Image/PNG", byteCount: 128)
+        }
+    }
+
     @Test("the media edge envelope is HTTPS-only and uses stable millisecond expiry")
     func downloadTargetEnvelope() throws {
         let expiry = Date(timeIntervalSince1970: 1_750_000_000.123)

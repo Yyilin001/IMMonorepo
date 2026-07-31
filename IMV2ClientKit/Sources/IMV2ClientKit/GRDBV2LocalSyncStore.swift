@@ -803,21 +803,25 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             else { throw V2ClientCommandError.commandConflict }
             let mediaIDs = try Self.encodeMedia(command.media)
             let mentionTargets = try Self.encodeMentions(command.mentions)
-            if let existing = try Row.fetchOne(db, sql: "SELECT room_id, text, media_ids, mention_targets FROM v2_pending_message_commands WHERE client_message_id = ?", arguments: [command.clientMessageID.rawValue]) {
+            let entities = try Self.encodeEntities(command.entities, text: command.text)
+            let replyToMessageID = command.replyTo?.messageID.rawValue
+            if let existing = try Row.fetchOne(db, sql: "SELECT room_id, text, media_ids, mention_targets, entities, reply_to_message_id FROM v2_pending_message_commands WHERE client_message_id = ?", arguments: [command.clientMessageID.rawValue]) {
                 let roomID: String = existing["room_id"]
                 let text: String = existing["text"]
                 let existingMedia: String = existing["media_ids"]
                 let existingMentions: String = existing["mention_targets"]
-                guard roomID == command.roomID.rawValue, text == command.text, existingMedia == mediaIDs, existingMentions == mentionTargets else { throw V2ClientCommandError.commandConflict }
+                let existingEntities: String = existing["entities"]
+                let existingReplyToMessageID: String? = existing["reply_to_message_id"]
+                guard roomID == command.roomID.rawValue, text == command.text, existingMedia == mediaIDs, existingMentions == mentionTargets, existingEntities == entities, existingReplyToMessageID == replyToMessageID else { throw V2ClientCommandError.commandConflict }
                 return
             }
             try db.execute(
                 sql: """
                 INSERT INTO v2_pending_message_commands
-                    (client_message_id, room_id, text, media_ids, mention_targets, state, attempt_count, next_attempt_at, created_at)
-                VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                    (client_message_id, room_id, text, media_ids, mention_targets, entities, reply_to_message_id, state, attempt_count, next_attempt_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
                 """,
-                arguments: [command.clientMessageID.rawValue, command.roomID.rawValue, command.text, mediaIDs, mentionTargets, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970]
+                arguments: [command.clientMessageID.rawValue, command.roomID.rawValue, command.text, mediaIDs, mentionTargets, entities, replyToMessageID, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970]
             )
         }
     }
@@ -2163,7 +2167,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             guard decoded.sourceEventID == projection.sourceEventID, decoded.messageID == projection.messageID,
                   decoded.roomID == projection.roomID, decoded.roomSequence == projection.roomSequence,
                   decoded.messageRevision == projection.messageRevision, decoded.senderUserID == projection.senderUserID,
-                  decoded.text == projection.text, decoded.media == projection.media, decoded.mentions == projection.mentions, decoded.createdAt == projection.createdAt,
+                  decoded.text == projection.text, decoded.media == projection.media, decoded.mediaPresentations == projection.mediaPresentations,
+                  decoded.mentions == projection.mentions, decoded.entities == projection.entities, decoded.replyTo == projection.replyTo, decoded.createdAt == projection.createdAt,
                   decoded.isWithdrawn == projection.isWithdrawn
             else { throw V2ClientProjectionError.invalidMessagePayload }
             return
@@ -2171,11 +2176,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try db.execute(
             sql: """
             INSERT INTO v2_message_projections
-                (message_id, source_event_id, room_id, room_sequence, message_revision, sender_user_id, text_body, media_ids, mention_targets, server_created_at, is_withdrawn)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (message_id, source_event_id, room_id, room_sequence, message_revision, sender_user_id, text_body, media_ids, media_presentations, mention_targets, entities, reply_to_message_id, server_created_at, is_withdrawn)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [projection.messageID.rawValue, projection.sourceEventID.rawValue, projection.roomID.rawValue,
-                        try storageInteger(projection.roomSequence), try storageInteger(projection.messageRevision), projection.senderUserID.rawValue, projection.text, try encodeMedia(projection.media), try encodeMentions(projection.mentions),
+                        try storageInteger(projection.roomSequence), try storageInteger(projection.messageRevision), projection.senderUserID.rawValue, projection.text, try encodeMedia(projection.media), try encodeMediaPresentations(projection.mediaPresentations), try encodeMentions(projection.mentions), try encodeEntities(projection.entities, text: projection.text), projection.replyTo?.messageID.rawValue,
                         projection.createdAt.timeIntervalSince1970, projection.isWithdrawn]
         )
         if let tombstone = try Row.fetchOne(db, sql: "SELECT room_id, message_revision FROM v2_message_tombstones WHERE message_id = ?", arguments: [projection.messageID.rawValue]) {
@@ -2364,7 +2369,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
               revision < Int64.max,
               edit.messageRevision == UInt64(revision + 1)
         else { throw V2ClientProjectionError.invalidMessagePayload }
-        try db.execute(sql: "UPDATE v2_message_projections SET text_body = ?, message_revision = ? WHERE message_id = ?", arguments: [edit.text, try storageInteger(edit.messageRevision), edit.messageID.rawValue])
+        try db.execute(sql: "UPDATE v2_message_projections SET text_body = ?, entities = '[]', message_revision = ? WHERE message_id = ?", arguments: [edit.text, try storageInteger(edit.messageRevision), edit.messageID.rawValue])
         try refreshMessageSearchIndex(messageID: edit.messageID, db: db)
     }
 
@@ -2386,7 +2391,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             senderUserID: .init(row["sender_user_id"] as String),
             text: row["text_body"],
             media: try decodeMedia(row["media_ids"]),
+            mediaPresentations: try decodeMediaPresentations(row["media_presentations"]),
             mentions: try decodeMentions(row["mention_targets"]),
+            entities: try decodeEntities(row["entities"], text: row["text_body"]),
+            replyTo: try (row["reply_to_message_id"] as String?).map { try V2MessageReplyReference(messageID: .init($0)) },
             createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double),
             isWithdrawn: (row["is_withdrawn"] as Int64) != 0
         )
@@ -2451,6 +2459,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             text: row["text"],
             media: try decodeMedia(row["media_ids"]),
             mentions: try decodeMentions(row["mention_targets"]),
+            entities: try decodeEntities(row["entities"], text: row["text"]),
+            replyTo: try (row["reply_to_message_id"] as String?).map { try V2MessageReplyReference(messageID: .init($0)) },
             state: state,
             attemptCount: Int(row["attempt_count"] as Int64),
             nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double),
@@ -2479,6 +2489,45 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         return media
     }
 
+    private struct MediaPresentationWire: Codable {
+        let mediaID: String
+        let kind: V2MediaPresentation.Kind
+        let contentType: String
+        let byteCount: Int64
+
+        init(_ presentation: V2MediaPresentation) {
+            mediaID = presentation.mediaID.rawValue
+            kind = presentation.kind
+            contentType = presentation.contentType
+            byteCount = presentation.byteCount
+        }
+
+        func presentation() throws -> V2MediaPresentation {
+            try .init(mediaID: .init(mediaID), kind: kind, contentType: contentType, byteCount: byteCount)
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case mediaID = "media_id"
+            case kind
+            case contentType = "content_type"
+            case byteCount = "byte_count"
+        }
+    }
+
+    private static func encodeMediaPresentations(_ presentations: [V2MediaPresentation]) throws -> String {
+        guard let encoded = String(data: try JSONEncoder().encode(presentations.map(MediaPresentationWire.init)), encoding: .utf8) else {
+            throw V2ClientCommandError.commandConflict
+        }
+        return encoded
+    }
+
+    private static func decodeMediaPresentations(_ encoded: String) throws -> [V2MediaPresentation] {
+        let wire: [MediaPresentationWire]
+        do { wire = try JSONDecoder().decode([MediaPresentationWire].self, from: Data(encoded.utf8)) }
+        catch { throw V2ClientCommandError.commandConflict }
+        return try wire.map { try $0.presentation() }
+    }
+
     private struct MentionWire: Codable { let kind: String; let userID: String?; enum CodingKeys: String, CodingKey { case kind; case userID = "user_id" } }
     private static func encodeMentions(_ mentions: [V2MentionTarget]) throws -> String {
         guard mentions.count <= V2MessageCommandLimits.maxMentions,
@@ -2499,6 +2548,20 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
         guard mentions.count <= V2MessageCommandLimits.maxMentions, Set(mentions).count == mentions.count else { throw V2ClientCommandError.commandConflict }
         return mentions
+    }
+
+    private static func encodeEntities(_ entities: [V2MessageEntity], text: String) throws -> String {
+        try V2RichMessageContent.validate(text: text, entities: entities)
+        guard let encoded = String(data: try JSONEncoder().encode(entities), encoding: .utf8) else { throw V2ClientCommandError.commandConflict }
+        return encoded
+    }
+
+    private static func decodeEntities(_ encoded: String, text: String) throws -> [V2MessageEntity] {
+        let entities: [V2MessageEntity]
+        do { entities = try JSONDecoder().decode([V2MessageEntity].self, from: Data(encoded.utf8)) }
+        catch { throw V2ClientCommandError.commandConflict }
+        try V2RichMessageContent.validate(text: text, entities: entities)
+        return entities
     }
 
     private static func decodePendingMembershipCommand(_ row: Row) throws -> V2PendingMembershipCommand {
@@ -3131,6 +3194,15 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
         migrator.registerMigration("addV2MessageProjectionMentions") { db in
             try db.execute(sql: "ALTER TABLE v2_message_projections ADD COLUMN mention_targets TEXT NOT NULL DEFAULT '[]'")
+        }
+        migrator.registerMigration("addV2MessageMediaPresentations") { db in
+            try db.execute(sql: "ALTER TABLE v2_message_projections ADD COLUMN media_presentations TEXT NOT NULL DEFAULT '[]'")
+        }
+        migrator.registerMigration("addV2RichMessageContent") { db in
+            try db.execute(sql: "ALTER TABLE v2_message_projections ADD COLUMN entities TEXT NOT NULL DEFAULT '[]'")
+            try db.execute(sql: "ALTER TABLE v2_message_projections ADD COLUMN reply_to_message_id TEXT")
+            try db.execute(sql: "ALTER TABLE v2_pending_message_commands ADD COLUMN entities TEXT NOT NULL DEFAULT '[]'")
+            try db.execute(sql: "ALTER TABLE v2_pending_message_commands ADD COLUMN reply_to_message_id TEXT")
         }
         migrator.registerMigration("addV2PendingMessageRedactions") { db in
             try db.execute(sql: """

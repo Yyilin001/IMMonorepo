@@ -7,6 +7,53 @@ public struct V2MediaReference: Hashable, Codable, Sendable {
     public init(mediaID: MediaID) { self.mediaID = mediaID }
 }
 
+/// A server-derived, durable description of a message attachment. It exposes
+/// only presentation facts that are already available from the scanned media
+/// object; object locations and download credentials remain outside message
+/// events and local projections.
+public struct V2MediaPresentation: Hashable, Codable, Sendable {
+    public enum Kind: String, Codable, CaseIterable, Sendable {
+        case image
+        case animatedImage = "animated_image"
+        case video
+        case audio
+        case file
+    }
+
+    public let mediaID: MediaID
+    public let kind: Kind
+    public let contentType: String
+    public let byteCount: Int64
+
+    public init(mediaID: MediaID, kind: Kind, contentType: String, byteCount: Int64) throws {
+        let normalizedContentType = contentType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedContentType == contentType,
+              normalizedContentType.contains("/"),
+              !normalizedContentType.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }),
+              normalizedContentType.utf8.count <= 127,
+              byteCount >= 0
+        else { throw V2MediaValidationError.invalidPresentation }
+        self.mediaID = mediaID
+        self.kind = kind
+        self.contentType = normalizedContentType
+        self.byteCount = byteCount
+    }
+
+    /// Older retained events contain opaque IDs only. This safe fallback keeps
+    /// those messages readable while new server events carry richer metadata.
+    public static func legacy(_ reference: V2MediaReference) -> Self {
+        try! .init(mediaID: reference.mediaID, kind: .file, contentType: "application/octet-stream", byteCount: 0)
+    }
+
+    public static func kind(forContentType contentType: String) -> Kind {
+        if contentType.hasPrefix("image/gif") { return .animatedImage }
+        if contentType.hasPrefix("image/") { return .image }
+        if contentType.hasPrefix("video/") { return .video }
+        if contentType.hasPrefix("audio/") { return .audio }
+        return .file
+    }
+}
+
 public struct V2MediaUploadLimits: Equatable, Sendable {
     public let maximumBytes: Int64
     public let temporaryLifetime: TimeInterval
@@ -248,4 +295,5 @@ public enum V2MediaValidationError: Error, Equatable, Sendable {
     case invalidAttachmentSet
     case invalidDownloadTarget
     case invalidUploadTarget
+    case invalidPresentation
 }

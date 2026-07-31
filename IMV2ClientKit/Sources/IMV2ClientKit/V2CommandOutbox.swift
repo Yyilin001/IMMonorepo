@@ -8,6 +8,8 @@ public struct V2PendingMessageCommand: Equatable, Sendable {
     public let text: String
     public let media: [V2MediaReference]
     public let mentions: [V2MentionTarget]
+    public let entities: [V2MessageEntity]
+    public let replyTo: V2MessageReplyReference?
     public let state: State
     public let attemptCount: Int
     public let nextAttemptAt: Date
@@ -18,12 +20,14 @@ public struct V2PendingMessageCommand: Equatable, Sendable {
     public let acceptedRoomSequence: UInt64?
     public let terminalCode: String?
 
-    public init(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], state: State, attemptCount: Int, nextAttemptAt: Date, acceptedMessageID: MessageID?, acceptedRoomSequence: UInt64?, terminalCode: String?) {
+    public init(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, state: State, attemptCount: Int, nextAttemptAt: Date, acceptedMessageID: MessageID?, acceptedRoomSequence: UInt64?, terminalCode: String?) {
         self.roomID = roomID
         self.clientMessageID = clientMessageID
         self.text = text
         self.media = media
         self.mentions = mentions
+        self.entities = entities
+        self.replyTo = replyTo
         self.state = state
         self.attemptCount = attemptCount
         self.nextAttemptAt = nextAttemptAt
@@ -82,14 +86,15 @@ public actor V2CommandOutboxEngine {
     }
 
     @discardableResult
-    public func enqueueMessage(roomID: RoomID, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = []) async throws -> V2PendingMessageCommand {
+    public func enqueueMessage(roomID: RoomID, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil) async throws -> V2PendingMessageCommand {
         guard !text.isEmpty || !media.isEmpty,
               media.count <= V2MessageCommandLimits.maxMediaAttachments,
               Set(media).count == media.count,
               mentions.count <= V2MessageCommandLimits.maxMentions,
               Set(mentions).count == mentions.count
         else { throw V2ClientCommandError.invalidText }
-        let command = try V2PendingMessageCommand(roomID: roomID, clientMessageID: .init(makeUUID().uuidString), text: text, media: media, mentions: mentions, state: .pending, attemptCount: 0, nextAttemptAt: now(), acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
+        try V2RichMessageContent.validate(text: text, entities: entities)
+        let command = try V2PendingMessageCommand(roomID: roomID, clientMessageID: .init(makeUUID().uuidString), text: text, media: media, mentions: mentions, entities: entities, replyTo: replyTo, state: .pending, attemptCount: 0, nextAttemptAt: now(), acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
         try await store.enqueue(command)
         return command
     }
@@ -97,7 +102,7 @@ public actor V2CommandOutboxEngine {
     public func flushOnce() async throws -> V2CommandFlushResult {
         guard let command = try await store.nextReadyMessage(now: now()) else { return .idle }
         do {
-            let accepted = try await transport.sendMessage(roomID: command.roomID, clientMessageID: command.clientMessageID, text: command.text, media: command.media, mentions: command.mentions)
+            let accepted = try await transport.sendMessage(roomID: command.roomID, clientMessageID: command.clientMessageID, text: command.text, media: command.media, mentions: command.mentions, entities: command.entities, replyTo: command.replyTo)
             try Task.checkCancellation()
             try await store.markMessageAccepted(clientMessageID: command.clientMessageID, messageID: accepted.messageID, roomSequence: accepted.roomSequence)
             return .accepted(command.clientMessageID)

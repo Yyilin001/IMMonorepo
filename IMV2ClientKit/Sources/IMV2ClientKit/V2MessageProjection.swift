@@ -13,11 +13,14 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
     public let senderUserID: UserID
     public let text: String
     public let media: [V2MediaReference]
+    public let mediaPresentations: [V2MediaPresentation]
     public let mentions: [V2MentionTarget]
+    public let entities: [V2MessageEntity]
+    public let replyTo: V2MessageReplyReference?
     public let createdAt: Date
     public let isWithdrawn: Bool
 
-    public init(sourceEventID: EventID, messageID: MessageID, roomID: RoomID, roomSequence: UInt64, messageRevision: UInt64 = 1, senderUserID: UserID, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], createdAt: Date, isWithdrawn: Bool = false) {
+    public init(sourceEventID: EventID, messageID: MessageID, roomID: RoomID, roomSequence: UInt64, messageRevision: UInt64 = 1, senderUserID: UserID, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date, isWithdrawn: Bool = false) {
         self.sourceEventID = sourceEventID
         self.messageID = messageID
         self.roomID = roomID
@@ -26,7 +29,15 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
         self.senderUserID = senderUserID
         self.text = text
         self.media = media
+        let presentations = mediaPresentations.isEmpty && !media.isEmpty
+            ? media.map(V2MediaPresentation.legacy)
+            : mediaPresentations
+        precondition(presentations.map(\.mediaID) == media.map(\.mediaID))
+        self.mediaPresentations = presentations
         self.mentions = mentions
+        precondition((try? V2RichMessageContent.validate(text: text, entities: entities)) != nil)
+        self.entities = entities
+        self.replyTo = replyTo
         self.createdAt = createdAt
         self.isWithdrawn = isWithdrawn
     }
@@ -41,7 +52,10 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
             senderUserID: snapshotProjection.senderUserID,
             text: snapshotProjection.text,
             media: snapshotProjection.media,
+            mediaPresentations: snapshotProjection.mediaPresentations,
             mentions: snapshotProjection.mentions,
+            entities: snapshotProjection.entities,
+            replyTo: snapshotProjection.replyTo,
             createdAt: snapshotProjection.createdAt,
             isWithdrawn: snapshotProjection.isWithdrawn
         )
@@ -58,12 +72,17 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
         else { throw V2ClientProjectionError.invalidMessagePayload }
         do {
             let media = try (payload.mediaIDs ?? []).map { try V2MediaReference(mediaID: .init($0)) }
+            let mediaPresentations = try (payload.mediaPresentations ?? []).map { try $0.presentation() }
             let mentions = try (payload.mentionedUserIDs ?? []).map { try V2MentionTarget.user(.init($0)) }
                 + ((payload.mentionsEveryone ?? false) ? [.everyone] : [])
+            let entities = payload.entities ?? []
+            let replyTo = try payload.replyToMessageID.map { V2MessageReplyReference(messageID: try .init($0)) }
             guard Set(media).count == media.count, media.count <= V2MessageCommandLimits.maxMediaAttachments,
+                  (mediaPresentations.isEmpty || mediaPresentations.map(\.mediaID) == media.map(\.mediaID)),
                   Set(mentions).count == mentions.count, mentions.count <= V2MessageCommandLimits.maxMentions
             else { throw V2ClientProjectionError.invalidMessagePayload }
-            self.init(sourceEventID: record.sourceEventID, messageID: try .init(payload.messageID), roomID: try .init(payload.roomID), roomSequence: payload.roomSequence, messageRevision: payload.messageRevision, senderUserID: try .init(payload.senderUserID), text: payload.text, media: media, mentions: mentions, createdAt: Date(timeIntervalSince1970: TimeInterval(payload.serverCreatedAtMilliseconds) / 1_000))
+            try V2RichMessageContent.validate(text: payload.text, entities: entities)
+            self.init(sourceEventID: record.sourceEventID, messageID: try .init(payload.messageID), roomID: try .init(payload.roomID), roomSequence: payload.roomSequence, messageRevision: payload.messageRevision, senderUserID: try .init(payload.senderUserID), text: payload.text, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, createdAt: Date(timeIntervalSince1970: TimeInterval(payload.serverCreatedAtMilliseconds) / 1_000))
         } catch { throw V2ClientProjectionError.invalidMessagePayload }
     }
 
@@ -76,8 +95,11 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
         let senderUserID: String
         let text: String
         let mediaIDs: [String]?
+        let mediaPresentations: [MediaPresentation]?
         let mentionedUserIDs: [String]?
         let mentionsEveryone: Bool?
+        let entities: [V2MessageEntity]?
+        let replyToMessageID: String?
         let serverCreatedAtMilliseconds: Int64
         enum CodingKeys: String, CodingKey {
             case eventType = "event_type"
@@ -88,9 +110,30 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
             case senderUserID = "sender_user_id"
             case text
             case mediaIDs = "media_ids"
+            case mediaPresentations = "media_presentations"
             case mentionedUserIDs = "mention_user_ids"
             case mentionsEveryone = "mentions_everyone"
+            case entities
+            case replyToMessageID = "reply_to_message_id"
             case serverCreatedAtMilliseconds = "server_created_at_ms"
+        }
+
+        struct MediaPresentation: Decodable {
+            let mediaID: String
+            let kind: V2MediaPresentation.Kind
+            let contentType: String
+            let byteCount: Int64
+
+            func presentation() throws -> V2MediaPresentation {
+                try .init(mediaID: .init(mediaID), kind: kind, contentType: contentType, byteCount: byteCount)
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case mediaID = "media_id"
+                case kind
+                case contentType = "content_type"
+                case byteCount = "byte_count"
+            }
         }
     }
 }

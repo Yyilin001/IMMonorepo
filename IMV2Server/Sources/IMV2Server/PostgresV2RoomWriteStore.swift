@@ -55,19 +55,28 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             // clients cannot safely retain their immutable operation ID.
             if let existing = try await sql.raw("""
                 SELECT message_id, room_id, room_sequence, sender_user_id,
-                       client_message_id, text_body, created_at
+                       client_message_id, text_body, rich_entities::text AS rich_entities,
+                       reply_to_message_id, created_at
                 FROM im_v2.messages
                 WHERE sender_user_id = \(bind: senderID)
                   AND client_message_id = \(bind: clientMessageID)
                 """).first(decoding: MessageRow.self) {
-                let priorMedia = try await sql.raw("SELECT media_id FROM im_v2.message_media_references WHERE message_id = \(bind: existing.messageID) ORDER BY ordinal").all(decoding: MediaReferenceRow.self)
+                let priorMedia = try await sql.raw("""
+                    SELECT reference.media_id, media.content_type, media.byte_count
+                    FROM im_v2.message_media_references AS reference
+                    INNER JOIN im_v2.media_objects AS media ON media.media_id = reference.media_id
+                    WHERE reference.message_id = \(bind: existing.messageID)
+                    ORDER BY reference.ordinal
+                    """).all(decoding: MessageMediaPresentationRow.self)
                 let priorMentions = try await sql.raw("SELECT mention_kind, mentioned_user_id FROM im_v2.message_mentions WHERE message_id = \(bind: existing.messageID) ORDER BY ordinal").all(decoding: MentionRow.self)
                 let accepted = try existing.acceptedMessage(
-                    media: priorMedia.map { try .init(mediaID: .init($0.mediaID.uuidString)) },
+                    media: try priorMedia.map { try .init(mediaID: .init($0.mediaID.uuidString)) },
+                    mediaPresentations: try priorMedia.map { try $0.presentation },
                     mentions: try priorMentions.map { try $0.target },
                     groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
                 )
                 return accepted.roomID == command.roomID && accepted.text == command.text && accepted.media == command.media && accepted.mentions == command.mentions
+                    && accepted.entities == command.entities && accepted.replyTo == command.replyTo
                     ? .idempotent(accepted)
                     : .idempotencyConflict
             }
@@ -123,7 +132,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 throw V2RoomWriteStoreError.actorMuted
             }
             try await assertMentionsAuthorized(command.mentions, roomID: roomID, membershipRevision: room.membershipRevision, senderID: senderID, sql: sql)
-            try await assertAvailableMedia(command.media, ownerID: senderID, now: now, sql: sql)
+            let mediaPresentations = try await assertAvailableMedia(command.media, ownerID: senderID, now: now, sql: sql)
+            try await assertReplyTarget(command.replyTo, roomID: roomID, sql: sql)
             // Hybrid delivery never expands @everyone. Explicit user mentions
             // are bounded by the command limit and receive a finite reliable
             // projection; everyone else observes the canonical room event.
@@ -166,7 +176,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 try await enforceDirectMessagePolicy(roomID: roomID, senderID: senderID, policy: strangerMessagePolicy, now: now, sql: sql)
             }
 
-            try await persist(writeSet, command: command, room: room, sql: sql)
+            try await persist(writeSet, command: command, mediaPresentations: mediaPresentations, room: room, sql: sql)
             if room.kind == "direct" {
                 try await appendRecipientDirectRoomProfile(
                     roomID: roomID,
@@ -189,7 +199,10 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 clientMessageID: message.clientMessageID,
                 text: message.text,
                 media: message.media,
+                mediaPresentations: mediaPresentations,
                 mentions: message.mentions,
+                entities: message.entities,
+                replyTo: message.replyTo,
                 groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil,
                 createdAt: message.createdAt
             ))
@@ -317,6 +330,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private func persist(
         _ writeSet: V2MessageAcceptanceTransaction,
         command: V2SendMessageCommand,
+        mediaPresentations: [V2MediaPresentation],
         room: RoomRow,
         sql: any SQLDatabase
     ) async throws {
@@ -341,6 +355,21 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             WHERE room_id = \(bind: roomID)
             """).run()
         guard let mediaJSON = String(data: try JSONEncoder().encode(message.media.map { $0.mediaID.rawValue }), encoding: .utf8) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        guard let entitiesJSON = String(data: try JSONEncoder().encode(message.entities), encoding: .utf8) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let replyToMessageID = message.replyTo?.messageID.rawValue ?? ""
+        let mediaPresentationWire: [[String: Any]] = mediaPresentations.map { presentation in
+            [
+                "media_id": presentation.mediaID.rawValue,
+                "kind": presentation.kind.rawValue,
+                "content_type": presentation.contentType,
+                "byte_count": presentation.byteCount,
+            ]
+        }
+        guard let mediaPresentationsJSON = String(data: try JSONSerialization.data(withJSONObject: mediaPresentationWire), encoding: .utf8) else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         let mentionedUserIDs = message.mentions.compactMap { target -> String? in
@@ -374,9 +403,9 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             """).run()
         try await sql.raw("""
             INSERT INTO im_v2.messages
-                (message_id, room_id, room_sequence, sender_user_id, client_message_id, text_body, created_at)
+                (message_id, room_id, room_sequence, sender_user_id, client_message_id, text_body, rich_entities, reply_to_message_id, created_at)
             VALUES
-                (\(bind: messageID), \(bind: roomID), \(bind: roomSequence), \(bind: senderID), \(bind: clientMessageID), \(bind: message.text), \(bind: message.createdAt))
+                (\(bind: messageID), \(bind: roomID), \(bind: roomSequence), \(bind: senderID), \(bind: clientMessageID), \(bind: message.text), \(bind: entitiesJSON)::jsonb, NULLIF(\(bind: replyToMessageID), '')::uuid, \(bind: message.createdAt))
             """).run()
         for (ordinal, reference) in message.media.enumerated() {
             try await sql.raw("INSERT INTO im_v2.message_media_references (message_id, media_id, ordinal, referenced_at) VALUES (\(bind: messageID), \(bind: try uuid(reference.mediaID)), \(bind: ordinal), \(bind: message.createdAt))").run()
@@ -402,8 +431,11 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     'sender_user_id', \(bind: senderID.uuidString),
                     'text', \(bind: message.text),
                     'media_ids', \(bind: mediaJSON)::jsonb,
+                    'media_presentations', \(bind: mediaPresentationsJSON)::jsonb,
                     'mention_user_ids', \(bind: mentionedUsersJSON)::jsonb,
                     'mentions_everyone', \(bind: message.mentions.contains(.everyone)),
+                    'entities', \(bind: entitiesJSON)::jsonb,
+                    'reply_to_message_id', NULLIF(\(bind: replyToMessageID), ''),
                     'message_revision', 1,
                     'server_created_at_ms', \(bind: Int64(message.createdAt.timeIntervalSince1970 * 1_000)
                  )),
@@ -463,12 +495,15 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         }
     }
 
-    private func assertAvailableMedia(_ media: [V2MediaReference], ownerID: UUID, now: Date, sql: any SQLDatabase) async throws {
+    private func assertAvailableMedia(_ media: [V2MediaReference], ownerID: UUID, now: Date, sql: any SQLDatabase) async throws -> [V2MediaPresentation] {
         guard Set(media).count == media.count else { throw V2MediaStoreError.invalidReferenceSet }
+        var presentations: [V2MediaPresentation] = []
         for reference in media {
             let mediaID = try uuid(reference.mediaID)
-            guard try await sql.raw("SELECT media_id FROM im_v2.media_objects WHERE media_id = \(bind: mediaID) AND owner_user_id = \(bind: ownerID) AND state = 'available' AND expires_at > \(bind: now) FOR UPDATE").first(decoding: MediaReferenceRow.self) != nil else { throw V2MediaStoreError.mediaUnavailable }
+            guard let row = try await sql.raw("SELECT media_id, content_type, byte_count FROM im_v2.media_objects WHERE media_id = \(bind: mediaID) AND owner_user_id = \(bind: ownerID) AND state = 'available' AND expires_at > \(bind: now) FOR UPDATE").first(decoding: MessageMediaPresentationRow.self) else { throw V2MediaStoreError.mediaUnavailable }
+            presentations.append(try row.presentation)
         }
+        return presentations
     }
 
     private func assertMentionsAuthorized(_ mentions: [V2MentionTarget], roomID: UUID, membershipRevision: Int64, senderID: UUID, sql: any SQLDatabase) async throws {
@@ -523,6 +558,13 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             mentionableUsers: Set(try rows.filter(\.mentionable).map { try UserID($0.userID.uuidString) })
         )
         try V2MentionAuthorization.authorize(mentions, visibility: visibility, limits: .init(maximumTargets: V2MessageCommandLimits.maxMentions))
+    }
+
+    private func assertReplyTarget(_ replyTo: V2MessageReplyReference?, roomID: UUID, sql: any SQLDatabase) async throws {
+        guard let replyTo else { return }
+        guard let targetID = UUID(uuidString: replyTo.messageID.rawValue),
+              (try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.messages WHERE message_id = \(bind: targetID) AND room_id = \(bind: roomID)) AS authorized").first(decoding: AuthorizationRow.self)?.authorized ?? false)
+        else { throw V2RoomWriteStoreError.replyTargetNotFound }
     }
 }
 
@@ -593,6 +635,8 @@ private func hybridReduction(
             text: command.text,
             media: command.media,
             mentions: command.mentions,
+            entities: command.entities,
+            replyTo: command.replyTo,
             createdAt: now
         )
         let nextRoom = V2RoomCommandState(
@@ -673,14 +717,27 @@ private struct MessageRow: Decodable {
     let senderUserID: UUID
     let clientMessageID: UUID
     let textBody: String
+    let richEntities: String
+    let replyToMessageID: UUID?
     let createdAt: Date
-    enum CodingKeys: String, CodingKey { case messageID = "message_id", roomID = "room_id", roomSequence = "room_sequence", senderUserID = "sender_user_id", clientMessageID = "client_message_id", textBody = "text_body", createdAt = "created_at" }
+    enum CodingKeys: String, CodingKey { case messageID = "message_id", roomID = "room_id", roomSequence = "room_sequence", senderUserID = "sender_user_id", clientMessageID = "client_message_id", textBody = "text_body", richEntities = "rich_entities", replyToMessageID = "reply_to_message_id", createdAt = "created_at" }
     func acceptedMessage(
         media: [V2MediaReference] = [],
+        mediaPresentations: [V2MediaPresentation] = [],
         mentions: [V2MentionTarget] = [],
+        entities: [V2MessageEntity] = [],
+        replyTo: V2MessageReplyReference? = nil,
         groupDeliveryMode: V2GroupDeliveryMode? = nil
     ) throws -> V2AcceptedMessage {
-        try .init(messageID: .init(messageID.uuidString), roomID: .init(roomID.uuidString), roomSequence: unsigned(roomSequence), senderUserID: .init(senderUserID.uuidString), clientMessageID: .init(clientMessageID.uuidString), text: textBody, media: media, mentions: mentions, groupDeliveryMode: groupDeliveryMode, createdAt: createdAt)
+        let entities = try JSONDecoder().decode([V2MessageEntity].self, from: Data(richEntities.utf8))
+        try V2RichMessageContent.validate(text: textBody, entities: entities)
+        let replyTo: V2MessageReplyReference?
+        if let replyToMessageID {
+            replyTo = .init(messageID: try .init(replyToMessageID.uuidString))
+        } else {
+            replyTo = nil
+        }
+        return try .init(messageID: .init(messageID.uuidString), roomID: .init(roomID.uuidString), roomSequence: unsigned(roomSequence), senderUserID: .init(senderUserID.uuidString), clientMessageID: .init(clientMessageID.uuidString), text: textBody, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, groupDeliveryMode: groupDeliveryMode, createdAt: createdAt)
     }
 }
 
@@ -713,7 +770,28 @@ private struct DirectMessageEventRow: Decodable {
     enum CodingKeys: String, CodingKey { case eventID = "event_id" }
 }
 private struct DirectMessageWindowRow: Decodable { let messageCount: Int; enum CodingKeys: String, CodingKey { case messageCount = "message_count" } }
-private struct MediaReferenceRow: Decodable { let mediaID: UUID; enum CodingKeys: String, CodingKey { case mediaID = "media_id" } }
+private struct MessageMediaPresentationRow: Decodable {
+    let mediaID: UUID
+    let contentType: String
+    let byteCount: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case mediaID = "media_id"
+        case contentType = "content_type"
+        case byteCount = "byte_count"
+    }
+
+    var presentation: V2MediaPresentation {
+        get throws {
+            try .init(
+                mediaID: .init(mediaID.uuidString),
+                kind: V2MediaPresentation.kind(forContentType: contentType),
+                contentType: contentType,
+                byteCount: byteCount
+            )
+        }
+    }
+}
 private struct MentionSenderMembershipRow: Decodable { let role: String }
 private struct MentionMembershipRow: Decodable { let userID: UUID; let mentionable: Bool; enum CodingKeys: String, CodingKey { case userID = "user_id", mentionable } }
 private struct MentionRow: Decodable {

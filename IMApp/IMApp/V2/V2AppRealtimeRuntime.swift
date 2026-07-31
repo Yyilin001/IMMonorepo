@@ -11,11 +11,17 @@ enum V2ConversationSendOutcome: Equatable, Sendable {
 protocol V2ConversationSending: Sendable {
     func send(text: String, media: [V2MediaReference], in roomID: String) async throws -> V2ConversationSendOutcome
     func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], in roomID: String) async throws -> V2ConversationSendOutcome
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome
 }
 
 extension V2ConversationSending {
     func send(text: String, in roomID: String) async throws -> V2ConversationSendOutcome {
         try await send(text: text, media: [], in: roomID)
+    }
+
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome {
+        guard entities.isEmpty, replyTo == nil else { throw V2RichMessageContentError.invalidEntity }
+        return try await send(text: text, media: media, mentions: mentions, in: roomID)
     }
 }
 
@@ -228,7 +234,11 @@ actor V2OutboxConversationSender: V2ConversationSending {
     }
 
     func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], in roomID: String) async throws -> V2ConversationSendOutcome {
-        _ = try await outbox.enqueueMessage(roomID: .init(roomID), text: text, media: media, mentions: mentions)
+        try await send(text: text, media: media, mentions: mentions, entities: [], replyTo: nil, in: roomID)
+    }
+
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome {
+        _ = try await outbox.enqueueMessage(roomID: .init(roomID), text: text, media: media, mentions: mentions, entities: entities, replyTo: replyTo)
         switch try await outbox.flushOnce() {
         case .accepted:
             return .accepted

@@ -29,12 +29,15 @@ public struct V2SnapshotMessageProjection: Equatable, Sendable {
     public let senderUserID: UserID
     public let text: String
     public let media: [V2MediaReference]
+    public let mediaPresentations: [V2MediaPresentation]
     public let mentions: [V2MentionTarget]
+    public let entities: [V2MessageEntity]
+    public let replyTo: V2MessageReplyReference?
     public let createdAt: Date
     public let isWithdrawn: Bool
     public let reactions: [V2SnapshotMessageReaction]
 
-    public init(sourceEventID: EventID, messageID: MessageID, roomID: RoomID, roomSequence: UInt64, messageRevision: UInt64 = 1, senderUserID: UserID, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], createdAt: Date, isWithdrawn: Bool = false, reactions: [V2SnapshotMessageReaction] = []) throws {
+    public init(sourceEventID: EventID, messageID: MessageID, roomID: RoomID, roomSequence: UInt64, messageRevision: UInt64 = 1, senderUserID: UserID, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date, isWithdrawn: Bool = false, reactions: [V2SnapshotMessageReaction] = []) throws {
         guard roomSequence > 0, messageRevision > 0, (!text.isEmpty || !media.isEmpty),
               media.count <= V2MessageCommandLimits.maxMediaAttachments,
               Set(media).count == media.count,
@@ -51,7 +54,17 @@ public struct V2SnapshotMessageProjection: Equatable, Sendable {
         self.senderUserID = senderUserID
         self.text = text
         self.media = media
+        let presentations = mediaPresentations.isEmpty && !media.isEmpty
+            ? media.map(V2MediaPresentation.legacy)
+            : mediaPresentations
+        guard presentations.map(\.mediaID) == media.map(\.mediaID) else {
+            throw V2SnapshotProjectionError.invalidPage
+        }
+        try V2RichMessageContent.validate(text: text, entities: entities)
+        self.mediaPresentations = presentations
         self.mentions = mentions
+        self.entities = entities
+        self.replyTo = replyTo
         self.createdAt = createdAt
         self.isWithdrawn = isWithdrawn
         self.reactions = reactions.sorted()
@@ -211,7 +224,7 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
 public enum V2SnapshotProjectionCodec {
     /// V2 snapshot schema. There is deliberately no reader for the earlier
     /// draft page shape: this product has no released data to migrate.
-    public static let schemaVersion: UInt32 = 12
+    public static let schemaVersion: UInt32 = 14
 
     public static func encode(messages: [V2SnapshotMessageProjection]) throws -> Data {
         try encode(.init(messages: messages))
@@ -261,8 +274,11 @@ public enum V2SnapshotProjectionCodec {
         let senderUserID: String
         let text: String
         let mediaIDs: [String]
+        let mediaPresentations: [MediaPresentation]?
         let mentionedUserIDs: [String]
         let mentionsEveryone: Bool
+        let entities: [V2MessageEntity]
+        let replyToMessageID: String?
         let serverCreatedAtMilliseconds: Int64
         let isWithdrawn: Bool
         let reactions: [Reaction]
@@ -276,11 +292,14 @@ public enum V2SnapshotProjectionCodec {
             senderUserID = projection.senderUserID.rawValue
             text = projection.text
             mediaIDs = projection.media.map { $0.mediaID.rawValue }
+            mediaPresentations = projection.mediaPresentations.map(MediaPresentation.init)
             mentionedUserIDs = projection.mentions.compactMap {
                 guard case .user(let userID) = $0 else { return nil }
                 return userID.rawValue
             }
             mentionsEveryone = projection.mentions.contains(.everyone)
+            entities = projection.entities
+            replyToMessageID = projection.replyTo?.messageID.rawValue
             serverCreatedAtMilliseconds = Int64(projection.createdAt.timeIntervalSince1970 * 1_000)
             isWithdrawn = projection.isWithdrawn
             reactions = projection.reactions.map(Reaction.init)
@@ -290,7 +309,9 @@ public enum V2SnapshotProjectionCodec {
             guard serverCreatedAtMilliseconds >= 0 else { throw V2SnapshotProjectionError.invalidPage }
             let mentions = try mentionedUserIDs.map { try V2MentionTarget.user(.init($0)) }
                 + (mentionsEveryone ? [.everyone] : [])
-            return try .init(sourceEventID: .init(sourceEventID), messageID: .init(messageID), roomID: .init(roomID), roomSequence: roomSequence, messageRevision: messageRevision, senderUserID: .init(senderUserID), text: text, media: try mediaIDs.map { try .init(mediaID: .init($0)) }, mentions: mentions, createdAt: Date(timeIntervalSince1970: TimeInterval(serverCreatedAtMilliseconds) / 1_000), isWithdrawn: isWithdrawn, reactions: try reactions.map { try $0.projection() })
+            let media = try mediaIDs.map { try V2MediaReference(mediaID: .init($0)) }
+            let presentations = try (mediaPresentations ?? []).map { try $0.presentation() }
+            return try .init(sourceEventID: .init(sourceEventID), messageID: .init(messageID), roomID: .init(roomID), roomSequence: roomSequence, messageRevision: messageRevision, senderUserID: .init(senderUserID), text: text, media: media, mediaPresentations: presentations, mentions: mentions, entities: entities, replyTo: try replyToMessageID.map { .init(messageID: try .init($0)) }, createdAt: Date(timeIntervalSince1970: TimeInterval(serverCreatedAtMilliseconds) / 1_000), isWithdrawn: isWithdrawn, reactions: try reactions.map { try $0.projection() })
         }
 
         enum CodingKeys: String, CodingKey {
@@ -302,11 +323,39 @@ public enum V2SnapshotProjectionCodec {
             case senderUserID = "sender_user_id"
             case text
             case mediaIDs = "media_ids"
+            case mediaPresentations = "media_presentations"
             case mentionedUserIDs = "mentioned_user_ids"
             case mentionsEveryone = "mentions_everyone"
+            case entities
+            case replyToMessageID = "reply_to_message_id"
             case serverCreatedAtMilliseconds = "server_created_at_ms"
             case isWithdrawn = "is_withdrawn"
             case reactions
+        }
+
+        struct MediaPresentation: Codable {
+            let mediaID: String
+            let kind: V2MediaPresentation.Kind
+            let contentType: String
+            let byteCount: Int64
+
+            init(_ value: V2MediaPresentation) {
+                mediaID = value.mediaID.rawValue
+                kind = value.kind
+                contentType = value.contentType
+                byteCount = value.byteCount
+            }
+
+            func presentation() throws -> V2MediaPresentation {
+                try .init(mediaID: .init(mediaID), kind: kind, contentType: contentType, byteCount: byteCount)
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case mediaID = "media_id"
+                case kind
+                case contentType = "content_type"
+                case byteCount = "byte_count"
+            }
         }
 
         struct Reaction: Codable {

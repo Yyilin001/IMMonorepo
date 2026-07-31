@@ -14,6 +14,8 @@ struct SnapshotProjectionCodecTests {
             messageRevision: 2,
             senderUserID: .init("00000000-0000-0000-0000-000000000704"),
             text: "snapshot message",
+            media: [.init(mediaID: .init("00000000-0000-0000-0000-000000000730"))],
+            mediaPresentations: [try .init(mediaID: .init("00000000-0000-0000-0000-000000000730"), kind: .image, contentType: "image/jpeg", byteCount: 1_024)],
             mentions: [.user(try .init("00000000-0000-0000-0000-000000000709")), .everyone],
             createdAt: Date(timeIntervalSince1970: 1_750_000_000),
             isWithdrawn: true,

@@ -70,7 +70,9 @@ private actor OutboxSenderMessageTransportSpy: V2ClientMessageTransport {
         clientMessageID _: ClientMessageID,
         text _: String,
         media _: [V2MediaReference],
-        mentions: [V2MentionTarget]
+        mentions: [V2MentionTarget],
+        entities _: [V2MessageEntity],
+        replyTo _: V2MessageReplyReference?
     ) throws -> V2ClientMessageAcceptance {
         mentionTargets.append(mentions)
         return try .init(

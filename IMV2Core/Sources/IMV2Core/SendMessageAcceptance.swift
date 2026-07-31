@@ -20,6 +20,8 @@ public struct V2SendMessageCommand: Equatable, Sendable {
     public let text: String
     public let media: [V2MediaReference]
     public let mentions: [V2MentionTarget]
+    public let entities: [V2MessageEntity]
+    public let replyTo: V2MessageReplyReference?
     public let targetRule: FanoutTargetRule
 
     public init(
@@ -29,6 +31,8 @@ public struct V2SendMessageCommand: Equatable, Sendable {
         text: String,
         media: [V2MediaReference] = [],
         mentions: [V2MentionTarget] = [],
+        entities: [V2MessageEntity] = [],
+        replyTo: V2MessageReplyReference? = nil,
         targetRule: FanoutTargetRule = .eligibleMemberCount,
         limits: V2MessageCommandLimits
     ) throws {
@@ -42,12 +46,15 @@ public struct V2SendMessageCommand: Equatable, Sendable {
         else {
             throw V2SendMessageValidationError.invalidTextLength
         }
+        try V2RichMessageContent.validate(text: text, entities: entities)
         self.roomID = roomID
         self.senderUserID = senderUserID
         self.clientMessageID = clientMessageID
         self.text = text
         self.media = media
         self.mentions = mentions
+        self.entities = entities
+        self.replyTo = replyTo
         self.targetRule = targetRule
     }
 }
@@ -74,7 +81,10 @@ public struct V2AcceptedMessage: Equatable, Sendable {
     public let clientMessageID: ClientMessageID
     public let text: String
     public let media: [V2MediaReference]
+    public let mediaPresentations: [V2MediaPresentation]
     public let mentions: [V2MentionTarget]
+    public let entities: [V2MessageEntity]
+    public let replyTo: V2MessageReplyReference?
     /// Present only for a group room. It is acceptance metadata used for
     /// non-authoritative foreground availability hints; it does not change
     /// the durable fan-out or acknowledgement contract.
@@ -89,7 +99,10 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         clientMessageID: ClientMessageID,
         text: String,
         media: [V2MediaReference] = [],
+        mediaPresentations: [V2MediaPresentation] = [],
         mentions: [V2MentionTarget] = [],
+        entities: [V2MessageEntity] = [],
+        replyTo: V2MessageReplyReference? = nil,
         groupDeliveryMode: V2GroupDeliveryMode? = nil,
         createdAt: Date
     ) {
@@ -100,7 +113,15 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         self.clientMessageID = clientMessageID
         self.text = text
         self.media = media
+        let presentations = mediaPresentations.isEmpty && !media.isEmpty
+            ? media.map(V2MediaPresentation.legacy)
+            : mediaPresentations
+        precondition(presentations.map(\.mediaID) == media.map(\.mediaID))
+        self.mediaPresentations = presentations
         self.mentions = mentions
+        precondition((try? V2RichMessageContent.validate(text: text, entities: entities)) != nil)
+        self.entities = entities
+        self.replyTo = replyTo
         self.groupDeliveryMode = groupDeliveryMode
         self.createdAt = createdAt
     }
@@ -210,7 +231,7 @@ public enum V2SendMessageReducer {
             clientMessageID: command.clientMessageID
         )
         if let prior = roomState.acceptedCommands[deduplicationKey] {
-            return prior.text == command.text && prior.media == command.media && prior.mentions == command.mentions ? .idempotent(prior) : .idempotencyConflict
+            return prior.text == command.text && prior.media == command.media && prior.mentions == command.mentions && prior.entities == command.entities && prior.replyTo == command.replyTo ? .idempotent(prior) : .idempotencyConflict
         }
 
         let admission = try FanoutAdmissionEvaluator.reserve(
@@ -235,6 +256,8 @@ public enum V2SendMessageReducer {
                 text: command.text,
                 media: command.media,
                 mentions: command.mentions,
+                entities: command.entities,
+                replyTo: command.replyTo,
                 createdAt: now
             )
             var acceptedCommands = roomState.acceptedCommands

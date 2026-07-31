@@ -87,4 +87,5 @@ public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
     case directMessageBlocked
     case strangerMessagePermissionDenied
     case strangerMessageLimitReached
+    case replyTargetNotFound
 }

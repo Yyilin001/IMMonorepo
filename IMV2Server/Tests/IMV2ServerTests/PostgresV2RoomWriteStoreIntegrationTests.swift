@@ -752,6 +752,19 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let snapshot = try await PostgresV2SnapshotProjectionMaterializer(database: app.db(.psql)).materialize(userID: senderID, now: now)
             let snapshotDirectProfiles = try snapshot.pages.flatMap { try V2SnapshotProjectionCodec.decodePage($0.payload).directRoomProfiles }
             #expect(snapshotDirectProfiles == [try .init(sourceEventID: .init(room.roomID.rawValue), roomID: room.roomID, publicIdentity: .init(userID: recipient, handle: .init("member015"), displayName: "成员二"), revision: 1, updatedAt: now)])
+            // Account-owned add permissions are present in delivered history,
+            // but a reset must rebuild them from their authoritative table.
+            // This also proves the materializer accepts the non-message record.
+            _ = try await directService.setUserAddPermission(
+                actorUserID: senderID,
+                operationID: try .init("00000000-0000-0000-0000-000000000082"),
+                permission: .deny
+            )
+            let preferenceSnapshot = try await PostgresV2SnapshotProjectionMaterializer(database: app.db(.psql)).materialize(userID: senderID, now: now)
+            let userAddPreferences = try preferenceSnapshot.pages.compactMap {
+                try V2SnapshotProjectionCodec.decodePage($0.payload).userAddPreference
+            }
+            #expect(userAddPreferences == [.init(allowsBeingAdded: false, updatedAt: now)])
 
             _ = try await directService.setStrangerMessagePermission(actorUserID: recipient, operationID: try .init("00000000-0000-0000-0000-000000000073"), permission: .deny)
             let writer = PostgresV2RoomWriteStore(database: app.db(.psql), strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400))

@@ -184,7 +184,7 @@ private actor ScriptedMessageTransport: V2ClientMessageTransport {
 
     init(results: [Result]) { self.results = results }
 
-    func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text _: String, media: [V2MediaReference], mentions: [V2MentionTarget]) throws -> V2ClientMessageAcceptance {
+    func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text _: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities _: [V2MessageEntity], replyTo _: V2MessageReplyReference?) throws -> V2ClientMessageAcceptance {
         receivedIDs.append(clientMessageID)
         receivedAttachments.append(media)
         receivedMentionTargets.append(mentions)
@@ -222,7 +222,9 @@ private actor LateSuccessMessageTransport: V2ClientMessageTransport {
         clientMessageID _: ClientMessageID,
         text _: String,
         media _: [V2MediaReference],
-        mentions _: [V2MentionTarget]
+        mentions _: [V2MentionTarget],
+        entities _: [V2MessageEntity],
+        replyTo _: V2MessageReplyReference?
     ) async throws -> V2ClientMessageAcceptance {
         let acceptance = try V2ClientMessageAcceptance(
             messageID: .init("00000000-0000-0000-0000-000000000514"),

@@ -25,6 +25,121 @@ fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobu
   typealias Version = _2
 }
 
+public nonisolated enum IMV2MessageEntityKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case bold // = 1
+  case italic // = 2
+  case underline // = 3
+  case strikethrough // = 4
+  case spoiler // = 5
+  case code // = 6
+  case preformatted // = 7
+  case link // = 8
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .bold
+    case 2: self = .italic
+    case 3: self = .underline
+    case 4: self = .strikethrough
+    case 5: self = .spoiler
+    case 6: self = .code
+    case 7: self = .preformatted
+    case 8: self = .link
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .bold: return 1
+    case .italic: return 2
+    case .underline: return 3
+    case .strikethrough: return 4
+    case .spoiler: return 5
+    case .code: return 6
+    case .preformatted: return 7
+    case .link: return 8
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [IMV2MessageEntityKind] = [
+    .unspecified,
+    .bold,
+    .italic,
+    .underline,
+    .strikethrough,
+    .spoiler,
+    .code,
+    .preformatted,
+    .link,
+  ]
+
+}
+
+/// Presentation facts are derived from the scanned media object at acceptance
+/// time. They intentionally omit object locations, upload metadata and bearer
+/// credentials, which are issued only by the authenticated media edge.
+public nonisolated enum IMV2MediaKind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case image // = 1
+  case animatedImage // = 2
+  case video // = 3
+  case audio // = 4
+  case file // = 5
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .image
+    case 2: self = .animatedImage
+    case 3: self = .video
+    case 4: self = .audio
+    case 5: self = .file
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .image: return 1
+    case .animatedImage: return 2
+    case .video: return 3
+    case .audio: return 4
+    case .file: return 5
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [IMV2MediaKind] = [
+    .unspecified,
+    .image,
+    .animatedImage,
+    .video,
+    .audio,
+    .file,
+  ]
+
+}
+
 public nonisolated enum IMV2MembershipChangeAction: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
@@ -1126,12 +1241,54 @@ public nonisolated struct IMV2MessageContent: Sendable {
 
   public var mentionEveryone: Bool = false
 
+  public var entities: [IMV2MessageEntity] = []
+
+  /// The gateway resolves this opaque ID in the same room while accepting the
+  /// message; a client may never select a cross-room reply target.
+  public var replyToMessageID: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Body: Equatable, Sendable {
     case text(String)
 
   }
+
+  public init() {}
+}
+
+public nonisolated struct IMV2MessageEntity: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var offsetUtf16: UInt32 = 0
+
+  public var lengthUtf16: UInt32 = 0
+
+  public var kind: IMV2MessageEntityKind = .unspecified
+
+  public var linkURL: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct IMV2MediaPresentation: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var mediaID: String = String()
+
+  public var kind: IMV2MediaKind = .unspecified
+
+  public var contentType: String = String()
+
+  public var byteCount: Int64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 }
@@ -1156,6 +1313,12 @@ public nonisolated struct IMV2MessageAccepted: Sendable {
   public var mentionedUserIds: [String] = []
 
   public var mentionsEveryone: Bool = false
+
+  public var mediaPresentations: [IMV2MediaPresentation] = []
+
+  public var entities: [IMV2MessageEntity] = []
+
+  public var replyToMessageID: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2228,6 +2391,14 @@ public nonisolated struct IMV2Error: Sendable {
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
 fileprivate nonisolated let _protobuf_package = "im.realtime.v2"
+
+nonisolated extension IMV2MessageEntityKind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0MESSAGE_ENTITY_KIND_UNSPECIFIED\0\u{1}MESSAGE_ENTITY_KIND_BOLD\0\u{1}MESSAGE_ENTITY_KIND_ITALIC\0\u{1}MESSAGE_ENTITY_KIND_UNDERLINE\0\u{1}MESSAGE_ENTITY_KIND_STRIKETHROUGH\0\u{1}MESSAGE_ENTITY_KIND_SPOILER\0\u{1}MESSAGE_ENTITY_KIND_CODE\0\u{1}MESSAGE_ENTITY_KIND_PREFORMATTED\0\u{1}MESSAGE_ENTITY_KIND_LINK\0")
+}
+
+nonisolated extension IMV2MediaKind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0MEDIA_KIND_UNSPECIFIED\0\u{1}MEDIA_KIND_IMAGE\0\u{1}MEDIA_KIND_ANIMATED_IMAGE\0\u{1}MEDIA_KIND_VIDEO\0\u{1}MEDIA_KIND_AUDIO\0\u{1}MEDIA_KIND_FILE\0")
+}
 
 nonisolated extension IMV2MembershipChangeAction: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0MEMBERSHIP_CHANGE_ACTION_UNSPECIFIED\0\u{1}MEMBERSHIP_CHANGE_ACTION_ADD\0\u{1}MEMBERSHIP_CHANGE_ACTION_REMOVE\0")
@@ -3659,7 +3830,7 @@ nonisolated extension IMV2SendMessage: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 nonisolated extension IMV2MessageContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MessageContent"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{3}media_ids\0\u{3}mentioned_user_ids\0\u{3}mention_everyone\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{3}media_ids\0\u{3}mentioned_user_ids\0\u{3}mention_everyone\0\u{1}entities\0\u{3}reply_to_message_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3678,6 +3849,8 @@ nonisolated extension IMV2MessageContent: SwiftProtobuf.Message, SwiftProtobuf._
       case 2: try { try decoder.decodeRepeatedStringField(value: &self.mediaIds) }()
       case 3: try { try decoder.decodeRepeatedStringField(value: &self.mentionedUserIds) }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.mentionEveryone) }()
+      case 5: try { try decoder.decodeRepeatedMessageField(value: &self.entities) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.replyToMessageID) }()
       default: break
       }
     }
@@ -3700,6 +3873,12 @@ nonisolated extension IMV2MessageContent: SwiftProtobuf.Message, SwiftProtobuf._
     if self.mentionEveryone != false {
       try visitor.visitSingularBoolField(value: self.mentionEveryone, fieldNumber: 4)
     }
+    if !self.entities.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.entities, fieldNumber: 5)
+    }
+    if !self.replyToMessageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.replyToMessageID, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3708,6 +3887,98 @@ nonisolated extension IMV2MessageContent: SwiftProtobuf.Message, SwiftProtobuf._
     if lhs.mediaIds != rhs.mediaIds {return false}
     if lhs.mentionedUserIds != rhs.mentionedUserIds {return false}
     if lhs.mentionEveryone != rhs.mentionEveryone {return false}
+    if lhs.entities != rhs.entities {return false}
+    if lhs.replyToMessageID != rhs.replyToMessageID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageEntity"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}offset_utf16\0\u{3}length_utf16\0\u{1}kind\0\u{3}link_url\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.offsetUtf16) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.lengthUtf16) }()
+      case 3: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.linkURL) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.offsetUtf16 != 0 {
+      try visitor.visitSingularUInt32Field(value: self.offsetUtf16, fieldNumber: 1)
+    }
+    if self.lengthUtf16 != 0 {
+      try visitor.visitSingularUInt32Field(value: self.lengthUtf16, fieldNumber: 2)
+    }
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 3)
+    }
+    if !self.linkURL.isEmpty {
+      try visitor.visitSingularStringField(value: self.linkURL, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageEntity, rhs: IMV2MessageEntity) -> Bool {
+    if lhs.offsetUtf16 != rhs.offsetUtf16 {return false}
+    if lhs.lengthUtf16 != rhs.lengthUtf16 {return false}
+    if lhs.kind != rhs.kind {return false}
+    if lhs.linkURL != rhs.linkURL {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MediaPresentation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MediaPresentation"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}media_id\0\u{1}kind\0\u{3}content_type\0\u{3}byte_count\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.mediaID) }()
+      case 2: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.contentType) }()
+      case 4: try { try decoder.decodeSingularInt64Field(value: &self.byteCount) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.mediaID.isEmpty {
+      try visitor.visitSingularStringField(value: self.mediaID, fieldNumber: 1)
+    }
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 2)
+    }
+    if !self.contentType.isEmpty {
+      try visitor.visitSingularStringField(value: self.contentType, fieldNumber: 3)
+    }
+    if self.byteCount != 0 {
+      try visitor.visitSingularInt64Field(value: self.byteCount, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MediaPresentation, rhs: IMV2MediaPresentation) -> Bool {
+    if lhs.mediaID != rhs.mediaID {return false}
+    if lhs.kind != rhs.kind {return false}
+    if lhs.contentType != rhs.contentType {return false}
+    if lhs.byteCount != rhs.byteCount {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3715,7 +3986,7 @@ nonisolated extension IMV2MessageContent: SwiftProtobuf.Message, SwiftProtobuf._
 
 nonisolated extension IMV2MessageAccepted: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MessageAccepted"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}room_id\0\u{3}room_sequence\0\u{3}server_created_at_ms\0\u{3}media_ids\0\u{3}mentioned_user_ids\0\u{3}mentions_everyone\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}room_id\0\u{3}room_sequence\0\u{3}server_created_at_ms\0\u{3}media_ids\0\u{3}mentioned_user_ids\0\u{3}mentions_everyone\0\u{3}media_presentations\0\u{1}entities\0\u{3}reply_to_message_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3730,6 +4001,9 @@ nonisolated extension IMV2MessageAccepted: SwiftProtobuf.Message, SwiftProtobuf.
       case 5: try { try decoder.decodeRepeatedStringField(value: &self.mediaIds) }()
       case 6: try { try decoder.decodeRepeatedStringField(value: &self.mentionedUserIds) }()
       case 7: try { try decoder.decodeSingularBoolField(value: &self.mentionsEveryone) }()
+      case 8: try { try decoder.decodeRepeatedMessageField(value: &self.mediaPresentations) }()
+      case 9: try { try decoder.decodeRepeatedMessageField(value: &self.entities) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.replyToMessageID) }()
       default: break
       }
     }
@@ -3757,6 +4031,15 @@ nonisolated extension IMV2MessageAccepted: SwiftProtobuf.Message, SwiftProtobuf.
     if self.mentionsEveryone != false {
       try visitor.visitSingularBoolField(value: self.mentionsEveryone, fieldNumber: 7)
     }
+    if !self.mediaPresentations.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.mediaPresentations, fieldNumber: 8)
+    }
+    if !self.entities.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.entities, fieldNumber: 9)
+    }
+    if !self.replyToMessageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.replyToMessageID, fieldNumber: 10)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3768,6 +4051,9 @@ nonisolated extension IMV2MessageAccepted: SwiftProtobuf.Message, SwiftProtobuf.
     if lhs.mediaIds != rhs.mediaIds {return false}
     if lhs.mentionedUserIds != rhs.mentionedUserIds {return false}
     if lhs.mentionsEveryone != rhs.mentionsEveryone {return false}
+    if lhs.mediaPresentations != rhs.mediaPresentations {return false}
+    if lhs.entities != rhs.entities {return false}
+    if lhs.replyToMessageID != rhs.replyToMessageID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

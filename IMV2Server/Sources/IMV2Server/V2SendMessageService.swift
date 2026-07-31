@@ -11,14 +11,18 @@ public struct V2AuthenticatedSendMessage: Sendable {
     public let text: String
     public let media: [V2MediaReference]
     public let mentions: [V2MentionTarget]
+    public let entities: [V2MessageEntity]
+    public let replyTo: V2MessageReplyReference?
 
-    public init(roomID: RoomID, actorUserID: UserID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = []) {
+    public init(roomID: RoomID, actorUserID: UserID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil) {
         self.roomID = roomID
         self.actorUserID = actorUserID
         self.clientMessageID = clientMessageID
         self.text = text
         self.media = media
         self.mentions = mentions
+        self.entities = entities
+        self.replyTo = replyTo
     }
 }
 
@@ -103,6 +107,8 @@ public struct V2SendMessageService: Sendable {
             text: request.text,
             media: request.media,
             mentions: request.mentions,
+            entities: request.entities,
+            replyTo: request.replyTo,
             limits: limits
         )
         return try await store.accept(

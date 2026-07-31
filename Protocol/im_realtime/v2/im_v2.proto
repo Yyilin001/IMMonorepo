@@ -133,6 +133,48 @@ message MessageContent {
   repeated string media_ids = 2;
   repeated string mentioned_user_ids = 3;
   bool mention_everyone = 4;
+  repeated MessageEntity entities = 5;
+  // The gateway resolves this opaque ID in the same room while accepting the
+  // message; a client may never select a cross-room reply target.
+  string reply_to_message_id = 6;
+}
+
+enum MessageEntityKind {
+  MESSAGE_ENTITY_KIND_UNSPECIFIED = 0;
+  MESSAGE_ENTITY_KIND_BOLD = 1;
+  MESSAGE_ENTITY_KIND_ITALIC = 2;
+  MESSAGE_ENTITY_KIND_UNDERLINE = 3;
+  MESSAGE_ENTITY_KIND_STRIKETHROUGH = 4;
+  MESSAGE_ENTITY_KIND_SPOILER = 5;
+  MESSAGE_ENTITY_KIND_CODE = 6;
+  MESSAGE_ENTITY_KIND_PREFORMATTED = 7;
+  MESSAGE_ENTITY_KIND_LINK = 8;
+}
+
+message MessageEntity {
+  uint32 offset_utf16 = 1;
+  uint32 length_utf16 = 2;
+  MessageEntityKind kind = 3;
+  string link_url = 4;
+}
+
+// Presentation facts are derived from the scanned media object at acceptance
+// time. They intentionally omit object locations, upload metadata and bearer
+// credentials, which are issued only by the authenticated media edge.
+enum MediaKind {
+  MEDIA_KIND_UNSPECIFIED = 0;
+  MEDIA_KIND_IMAGE = 1;
+  MEDIA_KIND_ANIMATED_IMAGE = 2;
+  MEDIA_KIND_VIDEO = 3;
+  MEDIA_KIND_AUDIO = 4;
+  MEDIA_KIND_FILE = 5;
+}
+
+message MediaPresentation {
+  string media_id = 1;
+  MediaKind kind = 2;
+  string content_type = 3;
+  int64 byte_count = 4;
 }
 
 // Acceptance proves only the atomic room-shard write. It does not prove that a
@@ -145,6 +187,9 @@ message MessageAccepted {
   repeated string media_ids = 5;
   repeated string mentioned_user_ids = 6;
   bool mentions_everyone = 7;
+  repeated MediaPresentation media_presentations = 8;
+  repeated MessageEntity entities = 9;
+  string reply_to_message_id = 10;
 }
 
 // The initial gateway-exposed moderation action is explicit message redaction.

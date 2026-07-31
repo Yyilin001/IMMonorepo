@@ -1,6 +1,40 @@
 import Foundation
 import IMV2Core
 
+private func v2MessageEntity(_ wire: IMV2MessageEntity) throws -> V2MessageEntity {
+    let kind: V2MessageEntity.Kind
+    switch wire.kind {
+    case .bold: kind = .bold
+    case .italic: kind = .italic
+    case .underline: kind = .underline
+    case .strikethrough: kind = .strikethrough
+    case .spoiler: kind = .spoiler
+    case .code: kind = .code
+    case .preformatted: kind = .preformatted
+    case .link: kind = .link
+    case .unspecified, .UNRECOGNIZED: throw V2RichMessageContentError.invalidEntity
+    }
+    return try .init(offsetUTF16: Int(wire.offsetUtf16), lengthUTF16: Int(wire.lengthUtf16), kind: kind, linkURL: wire.linkURL.isEmpty ? nil : URL(string: wire.linkURL))
+}
+
+private func v2MessageEntityWire(_ entity: V2MessageEntity) -> IMV2MessageEntity {
+    var wire = IMV2MessageEntity()
+    wire.offsetUtf16 = UInt32(entity.offsetUTF16)
+    wire.lengthUtf16 = UInt32(entity.lengthUTF16)
+    wire.kind = switch entity.kind {
+    case .bold: .bold
+    case .italic: .italic
+    case .underline: .underline
+    case .strikethrough: .strikethrough
+    case .spoiler: .spoiler
+    case .code: .code
+    case .preformatted: .preformatted
+    case .link: .link
+    }
+    wire.linkURL = entity.linkURL?.absoluteString ?? ""
+    return wire
+}
+
 /// Routes validated authenticated protobuf commands to the V2 domain services.
 public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     private let sendMessage: V2SendMessageService
@@ -208,7 +242,10 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         let media = try request.content.mediaIds.map { try V2MediaReference(mediaID: .init($0)) }
         var mentions = try request.content.mentionedUserIds.map { try V2MentionTarget.user(.init($0)) }
         if request.content.mentionEveryone { mentions.append(.everyone) }
-        let outcome = try await sendMessage.send(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, clientMessageID: try .init(request.clientMessageID), text: text, media: media, mentions: mentions))
+        let entities = try request.content.entities.map(v2MessageEntity)
+        try V2RichMessageContent.validate(text: text, entities: entities)
+        let replyTo = try request.content.replyToMessageID.isEmpty ? nil : V2MessageReplyReference(messageID: .init(request.content.replyToMessageID))
+        let outcome = try await sendMessage.send(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, clientMessageID: try .init(request.clientMessageID), text: text, media: media, mentions: mentions, entities: entities, replyTo: replyTo))
         switch outcome {
         case .accepted(let message):
             if message.groupDeliveryMode != nil {
@@ -232,6 +269,22 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             response.messageAccepted.mediaIds = message.media.map { $0.mediaID.rawValue }
             response.messageAccepted.mentionedUserIds = message.mentions.compactMap { if case .user(let userID) = $0 { userID.rawValue } else { nil } }
             response.messageAccepted.mentionsEveryone = message.mentions.contains(.everyone)
+            response.messageAccepted.mediaPresentations = message.mediaPresentations.map { presentation in
+                var wire = IMV2MediaPresentation()
+                wire.mediaID = presentation.mediaID.rawValue
+                wire.kind = switch presentation.kind {
+                case .image: .image
+                case .animatedImage: .animatedImage
+                case .video: .video
+                case .audio: .audio
+                case .file: .file
+                }
+                wire.contentType = presentation.contentType
+                wire.byteCount = presentation.byteCount
+                return wire
+            }
+            response.messageAccepted.entities = message.entities.map(v2MessageEntityWire)
+            response.messageAccepted.replyToMessageID = message.replyTo?.messageID.rawValue ?? ""
             return response
     }
 

@@ -50,6 +50,10 @@ struct V2GatewayDomainCommandHandlerTests {
         attachmentOnly.sendMessage.content.mediaIds = [mediaID]
         let attachmentResponse = try await handler.handle(envelope: attachmentOnly, identity: fixture.identity)
         #expect(attachmentResponse.messageAccepted.mediaIds == [mediaID])
+        #expect(attachmentResponse.messageAccepted.mediaPresentations.count == 1)
+        #expect(attachmentResponse.messageAccepted.mediaPresentations.first?.mediaID == mediaID)
+        #expect(attachmentResponse.messageAccepted.mediaPresentations.first?.kind == .file)
+        #expect(attachmentResponse.messageAccepted.mediaPresentations.first?.contentType == "application/octet-stream")
         let state = try #require(await store.state(for: fixture.roomID))
         let accepted = try #require(state.0.acceptedCommands.values.first)
         #expect(accepted.senderUserID == fixture.identity.userID)
