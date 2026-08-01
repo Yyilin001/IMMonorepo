@@ -71,10 +71,6 @@ public actor V2OneTimePasswordAccountAssertionProvider: V2DeviceBoundAccountAsse
         self.authenticator = authenticator
     }
 
-    public func accountAssertion() throws -> String {
-        throw V2AccountAuthenticationError.authenticationRejected
-    }
-
     public func accountAssertion(for deviceID: DeviceID) async throws -> String {
         guard let password else { throw V2AccountAuthenticationError.authenticationRejected }
         self.password = nil

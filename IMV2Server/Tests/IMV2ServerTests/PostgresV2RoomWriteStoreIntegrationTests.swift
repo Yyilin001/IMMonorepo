@@ -30,29 +30,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 throw TestConfigurationError.schemaAlreadyExists
             }
             try await installSchema(on: sql)
-            // The primary key already supplies this exact `(user, sequence)`
-            // ordering for sync pulls. A second B-tree would only amplify
-            // every fan-out projection's WAL and index-maintenance cost.
-            let redundantSyncPullIndexIsAbsent = try #require(try await sql.raw("""
-                SELECT to_regclass('im_v2.user_sync_log_pull_idx') IS NULL AS exists
-                """).first(decoding: ExistsRow.self))
-            #expect(redundantSyncPullIndexIsAbsent.exists)
-            let legacyFanoutClaimIndexIsAbsent = try #require(try await sql.raw("""
-                SELECT to_regclass('im_v2.fanout_deliveries_claim_idx') IS NULL AS exists
-                """).first(decoding: ExistsRow.self))
-            #expect(legacyFanoutClaimIndexIsAbsent.exists)
-            let legacyFanoutRetryClaimIndexIsAbsent = try #require(try await sql.raw("""
-                SELECT to_regclass('im_v2.fanout_deliveries_retry_claim_idx') IS NULL AS exists
-                """).first(decoding: ExistsRow.self))
-            #expect(legacyFanoutRetryClaimIndexIsAbsent.exists)
-            let redundantFanoutEventForeignKeyIsAbsent = try #require(try await sql.raw("""
-                SELECT NOT EXISTS (
-                    SELECT 1 FROM pg_constraint
-                    WHERE conname = 'fanout_deliveries_source_event_id_fkey'
-                      AND conrelid = 'im_v2.fanout_deliveries'::regclass
-                ) AS exists
-                """).first(decoding: ExistsRow.self))
-            #expect(redundantFanoutEventForeignKeyIsAbsent.exists)
             let nonFanoutSyncIdentityIndexExists = try #require(try await sql.raw("""
                 SELECT to_regclass('im_v2.user_sync_log_nonfanout_identity_idx') IS NOT NULL AS exists
                 """).first(decoding: ExistsRow.self))
@@ -1316,54 +1293,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await installSchema(on: sql)
 
             let workload = try V2ConcurrentRoomWorkloadConfiguration()
-            if workload.injectRedundantSyncPullIndex {
-                // A measurement-only A/B control for migration 0024. This
-                // never changes application code or the normal schema; it
-                // recreates the exact historical duplicate index before the
-                // profiler baseline is reset.
-                try await sql.raw("""
-                    CREATE INDEX imv2_capacity_legacy_user_sync_log_pull_idx
-                    ON im_v2.user_sync_log (user_id, user_sync_sequence)
-                    """).run()
-            }
-            if workload.injectLegacyFanoutClaimIndex {
-                // Measurement-only A/B control for migration 0025. The
-                // current lane indexes remain present, reproducing the old
-                // redundant-index write amplification exactly.
-                try await sql.raw("""
-                    CREATE INDEX imv2_capacity_legacy_fanout_claim_idx
-                    ON im_v2.fanout_deliveries
-                        (target_shard_bucket, state, lease_expires_at, source_event_id)
-                    """).run()
-            }
-            if workload.injectLegacyFanoutRetryClaimIndex {
-                // Measurement-only A/B control for migration 0026.
-                try await sql.raw("""
-                    CREATE INDEX imv2_capacity_legacy_fanout_retry_claim_idx
-                    ON im_v2.fanout_deliveries
-                        (target_shard_bucket, next_attempt_at, source_event_id)
-                    WHERE state = 'pending'
-                    """).run()
-            }
-            if workload.injectRedundantFanoutEventForeignKey {
-                // Measurement-only A/B control for migration 0027. The
-                // composite completion-unit FK remains in place, so this
-                // recreates only the redundant direct room-event lookup.
-                try await sql.raw("""
-                    ALTER TABLE im_v2.fanout_deliveries
-                    ADD CONSTRAINT imv2_capacity_legacy_fanout_event_fkey
-                    FOREIGN KEY (source_event_id) REFERENCES im_v2.room_events(event_id)
-                    """).run()
-            }
-            if workload.injectFullFanoutSyncIdentityIndex {
-                // Measurement-only A/B control for migration 0028. It
-                // restores the historical all-projection identity B-tree;
-                // the normal partial non-fan-out index remains present.
-                try await sql.raw("""
-                    CREATE UNIQUE INDEX imv2_capacity_legacy_full_sync_identity_idx
-                    ON im_v2.user_sync_log (user_id, source_event_id, projection_kind)
-                    """).run()
-            }
             let messageCount = workload.messageCount
             let memberCount = workload.memberCount
             let plannerPageSize = workload.plannerPageSize
@@ -1678,11 +1607,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     "delivery_claim_batch_size=\(deliveryClaimBatchSize) " +
                     "delivery_worker_count=\(workload.deliveryWorkerCount) " +
                     "event_payload_bytes=\(eventPayloadBytes) " +
-                    "redundant_sync_pull_index=\(workload.injectRedundantSyncPullIndex) " +
-                    "legacy_fanout_claim_index=\(workload.injectLegacyFanoutClaimIndex) " +
-                    "legacy_fanout_retry_claim_index=\(workload.injectLegacyFanoutRetryClaimIndex) " +
-                    "redundant_fanout_event_foreign_key=\(workload.injectRedundantFanoutEventForeignKey) " +
-                    "full_fanout_sync_identity_index=\(workload.injectFullFanoutSyncIdentityIndex) " +
                     "force_generic_projection_sequence_reservation=\(workload.forceGenericProjectionSequenceReservation) " +
                     "receiver_projections=\(messageCount * memberCount)"
             )
@@ -5629,11 +5553,6 @@ private struct V2ConcurrentRoomWorkloadConfiguration {
     /// event payload into each recipient's durable sync log. Zero keeps the
     /// ordinary short-message workload.
     let eventPayloadBytes: Int
-    let injectRedundantSyncPullIndex: Bool
-    let injectLegacyFanoutClaimIndex: Bool
-    let injectLegacyFanoutRetryClaimIndex: Bool
-    let injectRedundantFanoutEventForeignKey: Bool
-    let injectFullFanoutSyncIdentityIndex: Bool
     let forceGenericProjectionSequenceReservation: Bool
 
     init() throws {
@@ -5655,11 +5574,6 @@ private struct V2ConcurrentRoomWorkloadConfiguration {
         eventPayloadBytes = try Self.read(
             "IMV2_CONCURRENT_ROOM_EVENT_PAYLOAD_BYTES", defaultValue: 0, range: 0...16_384
         )
-        injectRedundantSyncPullIndex = Environment.get("IMV2_INJECT_REDUNDANT_SYNC_PULL_INDEX") == "1"
-        injectLegacyFanoutClaimIndex = Environment.get("IMV2_INJECT_LEGACY_FANOUT_CLAIM_INDEX") == "1"
-        injectLegacyFanoutRetryClaimIndex = Environment.get("IMV2_INJECT_LEGACY_FANOUT_RETRY_CLAIM_INDEX") == "1"
-        injectRedundantFanoutEventForeignKey = Environment.get("IMV2_INJECT_REDUNDANT_FANOUT_EVENT_FOREIGN_KEY") == "1"
-        injectFullFanoutSyncIdentityIndex = Environment.get("IMV2_INJECT_FULL_FANOUT_SYNC_IDENTITY_INDEX") == "1"
         forceGenericProjectionSequenceReservation = Environment.get("IMV2_FORCE_GENERIC_PROJECTION_SEQUENCE_RESERVATION") == "1"
     }
 

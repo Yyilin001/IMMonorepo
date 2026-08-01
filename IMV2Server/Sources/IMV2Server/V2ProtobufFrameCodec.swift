@@ -86,7 +86,6 @@ public enum V2ServerProtobufFrameCodec {
         case .readReceiptRecorded?: return .readReceiptRecorded
         case .openDirectRoom?: return .openDirectRoom
         case .directRoomOpened?: return .directRoomOpened
-        case .createGroupRoom?: return .createGroupRoom
         case .groupRoomCreated?: return .groupRoomCreated
         case .listRoomMembers?: return .listRoomMembers
         case .roomMembersPage?: return .roomMembersPage

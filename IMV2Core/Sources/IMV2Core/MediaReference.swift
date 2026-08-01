@@ -39,12 +39,6 @@ public struct V2MediaPresentation: Hashable, Codable, Sendable {
         self.byteCount = byteCount
     }
 
-    /// Older retained events contain opaque IDs only. This safe fallback keeps
-    /// those messages readable while new server events carry richer metadata.
-    public static func legacy(_ reference: V2MediaReference) -> Self {
-        try! .init(mediaID: reference.mediaID, kind: .file, contentType: "application/octet-stream", byteCount: 0)
-    }
-
     public static func kind(forContentType contentType: String) -> Kind {
         if contentType.hasPrefix("image/gif") { return .animatedImage }
         if contentType.hasPrefix("image/") { return .image }

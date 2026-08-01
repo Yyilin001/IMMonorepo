@@ -137,11 +137,6 @@ public actor V2GroupEventSyncEngine {
         return .init(appliedEventCount: page.events.count, hasMore: page.hasMore)
     }
 
-    /// Compatibility convenience for bounded background catch-up callers.
-    public func synchronizeOnce(roomID: RoomID) async throws -> Bool {
-        (try await synchronizeOnePage(roomID: roomID)).hasMore
-    }
-
     public func synchronizeUntilCaughtUp(roomID: RoomID) async throws {
         while (try await synchronizeOnePage(roomID: roomID)).hasMore {
             try Task.checkCancellation()

@@ -112,9 +112,6 @@ migration_marker() {
     0016_account_password_authentication_audit.sql)
       printf "%s" "SELECT to_regclass('im_v2.account_password_authentication_audit') IS NOT NULL"
       ;;
-    0017_public_profile_update_outbox.sql)
-      printf "%s" "SELECT to_regclass('im_v2.public_profile_update_outbox') IS NOT NULL"
-      ;;
     0018_account_edge_client_rate_limit.sql)
       printf "%s" "SELECT to_regclass('im_v2.account_edge_client_rate_limits') IS NOT NULL"
       ;;
@@ -132,21 +129,6 @@ migration_marker() {
       ;;
     0023_fanout_set_based_planner.sql)
       printf "%s" "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'fanout_plans' AND column_name = 'enumerated_target_count')"
-      ;;
-    0024_drop_redundant_user_sync_pull_index.sql)
-      printf "%s" "SELECT to_regclass('im_v2.user_sync_log_pull_idx') IS NULL"
-      ;;
-    0025_drop_legacy_fanout_delivery_claim_index.sql)
-      printf "%s" "SELECT to_regclass('im_v2.fanout_deliveries_claim_idx') IS NULL"
-      ;;
-    0026_drop_legacy_fanout_retry_claim_index.sql)
-      printf "%s" "SELECT to_regclass('im_v2.fanout_deliveries_retry_claim_idx') IS NULL"
-      ;;
-    0027_drop_redundant_fanout_delivery_event_foreign_key.sql)
-      printf "%s" "SELECT NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fanout_deliveries_source_event_id_fkey' AND conrelid = 'im_v2.fanout_deliveries'::regclass)"
-      ;;
-    0028_narrow_user_sync_log_identity_uniqueness.sql)
-      printf "%s" "SELECT to_regclass('im_v2.user_sync_log_nonfanout_identity_idx') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_sync_log_user_id_source_event_id_projection_kind_key' AND conrelid = 'im_v2.user_sync_log'::regclass)"
       ;;
     0029_shared_fanout_sync_payloads.sql)
       printf "%s" "SELECT to_regclass('im_v2.fanout_sync_payloads') IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'user_sync_log' AND column_name = 'payload_storage')"

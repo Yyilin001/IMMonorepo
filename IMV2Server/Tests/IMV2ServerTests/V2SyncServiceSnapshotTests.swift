@@ -25,7 +25,9 @@ struct V2SyncServiceSnapshotTests {
             messages: [],
             relationships: [try .init(targetUserID: .init("00000000-0000-0000-0000-000000000804"), state: .accepted, requestedByUserID: nil, updatedAt: .distantFuture)],
             userBlocks: [.init(targetUserID: try .init("00000000-0000-0000-0000-000000000805"), isBlocked: true, updatedAt: .distantFuture)],
-            strangerMessagePreference: .init(allowsStrangerMessages: true, updatedAt: .distantFuture)
+            strangerMessagePreference: .init(allowsStrangerMessages: true, updatedAt: .distantFuture),
+            moderationActions: [],
+            roomControls: []
         ))
         let stage = try validStage(page: page)
 
@@ -38,8 +40,8 @@ struct V2SyncServiceSnapshotTests {
         let store = RecordingSnapshotStore()
         let service = V2SyncService(store: store, now: { Date(timeIntervalSince1970: 1_750_000_000) })
         let target = try UserID("00000000-0000-0000-0000-000000000806")
-        let first = try V2SnapshotProjectionCodec.encode(.init(messages: [], relationships: [try .init(targetUserID: target, state: .accepted, requestedByUserID: nil, updatedAt: .distantFuture)]))
-        let second = try V2SnapshotProjectionCodec.encode(.init(messages: [], relationships: [try .init(targetUserID: target, state: .accepted, requestedByUserID: nil, updatedAt: .distantFuture)]))
+        let first = try V2SnapshotProjectionCodec.encode(.init(messages: [], relationships: [try .init(targetUserID: target, state: .accepted, requestedByUserID: nil, updatedAt: .distantFuture)], userBlocks: [], strangerMessagePreference: nil, moderationActions: [], roomControls: []))
+        let second = try V2SnapshotProjectionCodec.encode(.init(messages: [], relationships: [try .init(targetUserID: target, state: .accepted, requestedByUserID: nil, updatedAt: .distantFuture)], userBlocks: [], strangerMessagePreference: nil, moderationActions: [], roomControls: []))
         let stage = try validStage(pages: [first, second])
 
         await #expect(throws: V2SnapshotProjectionError.invalidPage) {
@@ -55,7 +57,7 @@ struct V2SyncServiceSnapshotTests {
         let roomID = try RoomID("00000000-0000-0000-0000-000000000807")
         let message = try V2SnapshotMessageProjection(sourceEventID: .init("00000000-0000-0000-0000-000000000808"), messageID: .init("00000000-0000-0000-0000-000000000809"), roomID: roomID, roomSequence: 3, senderUserID: .init("00000000-0000-0000-0000-000000000810"), text: "message", createdAt: Date(timeIntervalSince1970: 1_750_000_000))
         let action = try V2SnapshotModerationProjection(sourceEventID: .init("00000000-0000-0000-0000-000000000811"), roomID: roomID, roomSequence: 3, actorUserID: .init("00000000-0000-0000-0000-000000000812"), targetUserID: .init("00000000-0000-0000-0000-000000000813"), muteUntil: Date(timeIntervalSince1970: 1_750_000_100), createdAt: Date(timeIntervalSince1970: 1_750_000_001))
-        let page = try V2SnapshotProjectionCodec.encode(.init(messages: [message], moderationActions: [action]))
+        let page = try V2SnapshotProjectionCodec.encode(.init(messages: [message], relationships: [], userBlocks: [], strangerMessagePreference: nil, moderationActions: [action], roomControls: []))
 
         await #expect(throws: V2SnapshotProjectionError.invalidPage) {
             _ = try await service.stageReset(userID: .init("00000000-0000-0000-0000-000000000801"), deviceID: .init("00000000-0000-0000-0000-000000000802"), snapshot: validStage(page: page))

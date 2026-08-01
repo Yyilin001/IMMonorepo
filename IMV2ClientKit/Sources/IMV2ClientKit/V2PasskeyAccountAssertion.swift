@@ -87,10 +87,6 @@ public struct V2PasskeyAccountAssertionProvider: V2DeviceBoundAccountAssertionPr
         self.submitter = submitter
     }
 
-    public func accountAssertion() async throws -> String {
-        throw V2PasskeyAccountAssertionError.unavailable
-    }
-
     public func accountAssertion(for deviceID: DeviceID) async throws -> String {
         let request = try await requestProvider.assertionRequest(accountHandle: accountHandle, deviceID: deviceID)
         let result = try await authorizer.authorize(request)

@@ -752,6 +752,28 @@ CREATE TABLE im_v2.sync_receipts (
 CREATE INDEX sync_receipts_scope_idx
     ON im_v2.sync_receipts (user_id, device_id, reset_generation, expires_at);
 
+CREATE TABLE im_v2.public_profile_update_outbox (
+    source_event_id UUID PRIMARY KEY,
+    source_user_id UUID NOT NULL,
+    public_handle TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    revision BIGINT NOT NULL CHECK (revision > 0),
+    profile_updated_at TIMESTAMPTZ NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'claimed', 'completed')),
+    claim_token UUID NULL,
+    lease_expires_at TIMESTAMPTZ NULL,
+    enumeration_checkpoint UUID NULL,
+    retry_count BIGINT NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    created_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ NULL,
+    CHECK ((state = 'claimed') = (claim_token IS NOT NULL)),
+    CHECK ((state = 'claimed') = (lease_expires_at IS NOT NULL)),
+    CHECK ((state = 'completed') = (completed_at IS NOT NULL))
+);
+CREATE INDEX public_profile_update_outbox_claim_idx
+    ON im_v2.public_profile_update_outbox (state, lease_expires_at, created_at)
+    WHERE state <> 'completed';
+
 -- The message command path locks rooms, room_admission, and the matching
 -- shard_admission_pools row, validates an unexpired lease, and writes messages,
 -- room_events, fanout_plans, and room_outbox in the same transaction.

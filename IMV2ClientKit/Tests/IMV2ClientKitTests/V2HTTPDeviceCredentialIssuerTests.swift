@@ -150,14 +150,13 @@ private actor RegistrationOperationStore: V2DeviceCredentialRegistrationOperatio
     func value() -> V2PendingDeviceCredentialRegistration? { pending }
 }
 
-private struct FixedAssertionProvider: V2AccountAssertionProvider {
+private struct FixedAssertionProvider: V2DeviceBoundAccountAssertionProvider {
     let value: String
-    func accountAssertion() -> String { value }
+    func accountAssertion(for _: DeviceID) async throws -> String { value }
 }
 
 private struct ThrowingDeviceBoundAssertionProvider: V2DeviceBoundAccountAssertionProvider {
     let error: V2AccountAuthenticationError
-    func accountAssertion() throws -> String { throw error }
     func accountAssertion(for _: DeviceID) async throws -> String { throw error }
 }
 

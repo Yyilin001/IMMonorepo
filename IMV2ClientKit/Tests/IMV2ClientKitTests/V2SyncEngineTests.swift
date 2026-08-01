@@ -627,7 +627,7 @@ struct V2SyncEngineTests {
         let relationship = try V2SnapshotRelationshipProjection(targetUserID: .init("00000000-0000-0000-0000-000000000247"), state: .accepted, requestedByUserID: nil, updatedAt: Date(timeIntervalSince1970: 1_750_000_010))
         let userBlock = V2SnapshotUserBlockProjection(targetUserID: try .init("00000000-0000-0000-0000-000000000248"), isBlocked: true, updatedAt: Date(timeIntervalSince1970: 1_750_000_011))
         let preference = V2SnapshotStrangerMessagePreference(allowsStrangerMessages: true, updatedAt: Date(timeIntervalSince1970: 1_750_000_012))
-        let page = try V2SnapshotProjectionPage(messages: [], relationships: [relationship], userBlocks: [userBlock], strangerMessagePreference: preference)
+        let page = try V2SnapshotProjectionPage(messages: [], relationships: [relationship], userBlocks: [userBlock], strangerMessagePreference: preference, moderationActions: [], roomControls: [])
         let engine = V2SyncEngine(transport: ProjectionSnapshotTransport(reset: reset, payload: try V2SnapshotProjectionCodec.encode(page)), store: store, capabilityProfile: "base")
 
         #expect(try await engine.synchronizeOnce() == .resetPending(reset))

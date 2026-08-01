@@ -522,13 +522,18 @@ final class IMAppLocalAccountUITests: XCTestCase {
                 wire: addedMemberConnection,
                 protocolVersion: addedMemberSession.protocolVersion
             )
-            let group = try await ownerTransport.createGroupRoom(
-                operationID: try GroupRoomOperationID(UUID().uuidString.lowercased()),
-                title: "  Local gateway group  ",
-                initialMemberUserIDs: [initialMember.userID]
+            let groupOperationID = try GroupRoomOperationID(UUID().uuidString.lowercased())
+            _ = try await ownerTransport.beginGroupRoomCreation(
+                operationID: groupOperationID,
+                title: "  Local gateway group  "
             )
+            _ = try await ownerTransport.appendGroupRoomCreationMembers(
+                operationID: groupOperationID,
+                memberUserIDs: [initialMember.userID]
+            )
+            let group = try await ownerTransport.finalizeGroupRoomCreation(operationID: groupOperationID)
             XCTAssertEqual(group.title, "Local gateway group")
-            XCTAssertEqual(Set(group.memberUserIDs), Set([owner.userID, initialMember.userID]))
+            XCTAssertEqual(group.memberCount, 2)
 
             let ownerPage = try await ownerTransport.listRoomMembers(
                 roomID: group.roomID,

@@ -3639,22 +3639,21 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         migrator.registerMigration("addV2PendingGroupRoomCreations") { db in
             try db.execute(sql: """
                 CREATE TABLE v2_pending_group_room_creations (
-                    operation_id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
+                    operation_id TEXT PRIMARY KEY, title TEXT NOT NULL,
                     initial_member_user_ids TEXT NOT NULL,
-                    state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-                    next_attempt_at REAL NOT NULL,
-                    created_at REAL NOT NULL,
+                    delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid')),
+                    uploaded_member_count INTEGER NOT NULL DEFAULT 0 CHECK (uploaded_member_count >= 0),
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'cancelling', 'finalizing', 'cancelled', 'acknowledged', 'rejected')),
+                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL,
                     created_room_id TEXT,
                     terminal_code TEXT,
-                    CHECK ((state = 'pending' AND created_room_id IS NULL AND terminal_code IS NULL)
+                    CHECK ((state IN ('pending', 'cancelling', 'finalizing', 'cancelled') AND created_room_id IS NULL AND terminal_code IS NULL)
                         OR (state = 'acknowledged' AND created_room_id IS NOT NULL AND terminal_code IS NULL)
                         OR (state = 'rejected' AND created_room_id IS NULL AND terminal_code IS NOT NULL))
                 );
                 CREATE INDEX v2_pending_group_room_creations_ready_idx
                     ON v2_pending_group_room_creations (state, next_attempt_at, created_at)
-                    WHERE state = 'pending';
+                    WHERE state IN ('pending', 'finalizing', 'cancelling');
             """)
         }
         migrator.registerMigration("addV2RoomProfileProjections") { db in
@@ -3737,10 +3736,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     ON v2_pending_social_commands
                     (command_kind, target_user_id, relationship_action, block_action, stranger_permission, created_at, operation_id)
                     WHERE state = 'pending';
-                CREATE INDEX v2_pending_group_room_creations_intent_idx
+                CREATE INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx
                     ON v2_pending_group_room_creations
-                    (title, initial_member_user_ids, created_at, operation_id)
-                    WHERE state = 'pending';
+                    (title, delivery_mode, initial_member_user_ids, created_at, operation_id)
+                    WHERE state IN ('pending', 'finalizing');
             """)
         }
         migrator.registerMigration("addV2ProfileViews") { db in
@@ -3762,70 +3761,6 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     minimum_revision INTEGER NOT NULL CHECK (minimum_revision > 0),
                     updated_at REAL NOT NULL
                 );
-                """)
-        }
-        migrator.registerMigration("addV2PendingGroupRoomCreationDeliveryMode") { db in
-            try db.execute(sql: "ALTER TABLE v2_pending_group_room_creations ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'standard_fanout' CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid'))")
-            try db.execute(sql: "DROP INDEX v2_pending_group_room_creations_intent_idx")
-            try db.execute(sql: "CREATE INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx ON v2_pending_group_room_creations (title, delivery_mode, initial_member_user_ids, created_at, operation_id) WHERE state = 'pending'")
-        }
-        migrator.registerMigration("addV2PendingGroupRoomCreationUploadProgress") { db in
-            try db.execute(sql: "ALTER TABLE v2_pending_group_room_creations ADD COLUMN uploaded_member_count INTEGER NOT NULL DEFAULT 0 CHECK (uploaded_member_count >= 0)")
-        }
-        migrator.registerMigration("addV2PendingGroupRoomCreationCancellation") { db in
-            try db.execute(sql: "DROP INDEX v2_pending_group_room_creations_ready_idx")
-            try db.execute(sql: "DROP INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx")
-            try db.execute(sql: "ALTER TABLE v2_pending_group_room_creations RENAME TO v2_pending_group_room_creations_legacy")
-            try db.execute(sql: """
-                CREATE TABLE v2_pending_group_room_creations (
-                    operation_id TEXT PRIMARY KEY, title TEXT NOT NULL,
-                    initial_member_user_ids TEXT NOT NULL,
-                    delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid')),
-                    uploaded_member_count INTEGER NOT NULL DEFAULT 0 CHECK (uploaded_member_count >= 0),
-                    state TEXT NOT NULL CHECK (state IN ('pending', 'cancelling', 'cancelled', 'acknowledged', 'rejected')),
-                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL,
-                    created_room_id TEXT, terminal_code TEXT,
-                    CHECK ((state IN ('pending', 'cancelling', 'cancelled') AND created_room_id IS NULL AND terminal_code IS NULL)
-                        OR (state = 'acknowledged' AND created_room_id IS NOT NULL AND terminal_code IS NULL)
-                        OR (state = 'rejected' AND created_room_id IS NULL AND terminal_code IS NOT NULL))
-                );
-                INSERT INTO v2_pending_group_room_creations
-                    (operation_id, title, initial_member_user_ids, delivery_mode, uploaded_member_count, state, attempt_count, next_attempt_at, created_at, created_room_id, terminal_code)
-                SELECT operation_id, title, initial_member_user_ids, delivery_mode, uploaded_member_count, state, attempt_count, next_attempt_at, created_at, created_room_id, terminal_code
-                FROM v2_pending_group_room_creations_legacy;
-                DROP TABLE v2_pending_group_room_creations_legacy;
-                CREATE INDEX v2_pending_group_room_creations_ready_idx
-                    ON v2_pending_group_room_creations (state, next_attempt_at, created_at) WHERE state IN ('pending', 'cancelling');
-                CREATE INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx
-                    ON v2_pending_group_room_creations (title, delivery_mode, initial_member_user_ids, created_at, operation_id) WHERE state = 'pending';
-                """)
-        }
-        migrator.registerMigration("preserveFrozenGroupCreationCancellationOutcome") { db in
-            try db.execute(sql: "DROP INDEX v2_pending_group_room_creations_ready_idx")
-            try db.execute(sql: "DROP INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx")
-            try db.execute(sql: "ALTER TABLE v2_pending_group_room_creations RENAME TO v2_pending_group_room_creations_legacy")
-            try db.execute(sql: """
-                CREATE TABLE v2_pending_group_room_creations (
-                    operation_id TEXT PRIMARY KEY, title TEXT NOT NULL,
-                    initial_member_user_ids TEXT NOT NULL,
-                    delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid')),
-                    uploaded_member_count INTEGER NOT NULL DEFAULT 0 CHECK (uploaded_member_count >= 0),
-                    state TEXT NOT NULL CHECK (state IN ('pending', 'cancelling', 'finalizing', 'cancelled', 'acknowledged', 'rejected')),
-                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL,
-                    created_room_id TEXT, terminal_code TEXT,
-                    CHECK ((state IN ('pending', 'cancelling', 'finalizing', 'cancelled') AND created_room_id IS NULL AND terminal_code IS NULL)
-                        OR (state = 'acknowledged' AND created_room_id IS NOT NULL AND terminal_code IS NULL)
-                        OR (state = 'rejected' AND created_room_id IS NULL AND terminal_code IS NOT NULL))
-                );
-                INSERT INTO v2_pending_group_room_creations
-                    (operation_id, title, initial_member_user_ids, delivery_mode, uploaded_member_count, state, attempt_count, next_attempt_at, created_at, created_room_id, terminal_code)
-                SELECT operation_id, title, initial_member_user_ids, delivery_mode, uploaded_member_count, state, attempt_count, next_attempt_at, created_at, created_room_id, terminal_code
-                FROM v2_pending_group_room_creations_legacy;
-                DROP TABLE v2_pending_group_room_creations_legacy;
-                CREATE INDEX v2_pending_group_room_creations_ready_idx
-                    ON v2_pending_group_room_creations (state, next_attempt_at, created_at) WHERE state IN ('pending', 'finalizing', 'cancelling');
-                CREATE INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx
-                    ON v2_pending_group_room_creations (title, delivery_mode, initial_member_user_ids, created_at, operation_id) WHERE state IN ('pending', 'finalizing');
                 """)
         }
         migrator.registerMigration("addV2HybridGroupEventCursors") { db in

@@ -225,28 +225,6 @@ public actor V2DeviceConnectionRegistry {
         }
     }
 
-    // Compatibility entry points retained for existing integrations. Their
-    // behavior is now mode-agnostic because authorization occurs before a
-    // connection is registered as a foreground viewer.
-    public func configureHybridGroupInterestManager(_ manager: any V2GroupEventWakeInterestManaging) async {
-        await configureForegroundGroupInterestManager(manager)
-    }
-
-    public func subscribeHybridGroup(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID) async {
-        await subscribeForegroundGroup(stream, connectionID: connectionID, roomID: roomID)
-    }
-
-    public func unsubscribeHybridGroup(connectionID: UUID, roomID: RoomID) async {
-        await unsubscribeForegroundGroup(connectionID: connectionID, roomID: roomID)
-    }
-
-    public func notifyHybridGroupAvailable(roomID: RoomID, highWatermark: UInt64) async {
-        await notifyForegroundGroupAvailable(roomID: roomID, highWatermark: highWatermark)
-    }
-
-    public func activeHybridGroupMetrics() -> (rooms: Int, viewers: Int) {
-        activeForegroundGroupMetrics()
-    }
 }
 
 extension V2DeviceConnectionRegistry: V2LiveSyncNotifier {}

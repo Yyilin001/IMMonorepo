@@ -3,8 +3,10 @@ import Foundation
 
 /// Runtime-only storage lookup. The logical router remains the sole owner of
 /// user assignment; this registry merely resolves its selected bucket to a
-/// configured connection and schema.
-public struct V2UserShardStorageLocation: @unchecked Sendable {
+/// configured connection and schema. Fluent's `Database` capability is
+/// already `Sendable`; this immutable value deliberately carries no mutable
+/// routing or connection-pool state of its own.
+public struct V2UserShardStorageLocation: Sendable {
     public let bucket: String
     public let database: any Database
     public let schema: String
@@ -40,7 +42,7 @@ public extension V2UserShardMigrationExecuting {
     }
 }
 
-public struct V2StaticUserShardStorageRegistry: V2UserShardStorageResolving, @unchecked Sendable {
+public struct V2StaticUserShardStorageRegistry: V2UserShardStorageResolving, Sendable {
     private let locations: [String: V2UserShardStorageLocation]
 
     public init(locations: [V2UserShardStorageLocation]) throws {

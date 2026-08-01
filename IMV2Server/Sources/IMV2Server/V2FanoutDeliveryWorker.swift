@@ -69,8 +69,7 @@ public protocol V2FanoutDeliveryStore: Sendable {
 /// Optional topology-specific cap for concurrent claim passes against one
 /// logical bucket. The pipeline's global delivery concurrency is a capacity
 /// ceiling, not permission to create contention within a single physical
-/// target database. Stores that do not declare a cap retain the historical
-/// concurrency behavior.
+/// target database. Stores that do not declare a cap use the global ceiling.
 public protocol V2FanoutDeliveryBucketConcurrencyControlling: Sendable {
     var maximumConcurrentClaimsPerBucket: Int { get }
 }
@@ -88,7 +87,7 @@ public extension V2FanoutDeliveryStore {
         return commits
     }
 
-    /// Compatibility helper for one-off administrative and integration-test
+    /// Convenience helper for one-off administrative and integration-test
     /// callers. The runtime uses `V2FanoutDeliveryClaimScheduler` instead so
     /// a busy fresh lane cannot indefinitely postpone recovery work.
     func claimPending(bucket: String?, now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2FanoutDeliveryLease] {

@@ -4,16 +4,9 @@ import FoundationNetworking
 #endif
 import IMV2Core
 
-/// A separately approved account system returns a short-lived opaque assertion
-/// through this boundary. ClientKit neither interprets nor persists it.
-public protocol V2AccountAssertionProvider: Sendable {
-    func accountAssertion() async throws -> String
-}
-
-/// New V2 account factors bind their short-lived result to the installation
-/// before it reaches the credential issuer. The legacy unbound form remains
-/// only for independently managed adapters during migration.
-public protocol V2DeviceBoundAccountAssertionProvider: V2AccountAssertionProvider {
+/// A separately approved account factor returns a short-lived opaque assertion
+/// bound to the installation. ClientKit neither interprets nor persists it.
+public protocol V2DeviceBoundAccountAssertionProvider: Sendable {
     func accountAssertion(for deviceID: DeviceID) async throws -> String
 }
 
@@ -69,7 +62,7 @@ public enum V2AccountAssertionCredentialProviderError: Error, Equatable, Sendabl
 /// durable, preserving safe server replay across response loss.
 public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCredentialProvider, V2AccountDeviceCredentialIssueFinalizer {
     private let issueEndpoint: URL
-    private let assertionProvider: any V2AccountAssertionProvider
+    private let assertionProvider: any V2DeviceBoundAccountAssertionProvider
     private let deviceIdentityProvider: any V2DeviceIdentityProvider
     private let operationStore: any V2DeviceCredentialRegistrationOperationStore
     private let transport: any V2AuthHTTPTransport
@@ -78,7 +71,7 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
 
     public init(
         issueEndpoint: URL,
-        assertionProvider: any V2AccountAssertionProvider,
+        assertionProvider: any V2DeviceBoundAccountAssertionProvider,
         deviceIdentityProvider: any V2DeviceIdentityProvider,
         operationStore: any V2DeviceCredentialRegistrationOperationStore,
         transport: any V2AuthHTTPTransport = V2URLSessionAuthHTTPTransport(),
@@ -103,13 +96,8 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
         catch { throw V2AccountAssertionCredentialProviderError.deviceIdentityUnavailable }
 
         let assertion: String
-        do {
-            if let deviceBoundProvider = assertionProvider as? any V2DeviceBoundAccountAssertionProvider {
-                assertion = try await deviceBoundProvider.accountAssertion(for: deviceID)
-            } else {
-                assertion = try await assertionProvider.accountAssertion()
-            }
-        } catch is CancellationError { throw CancellationError() }
+        do { assertion = try await assertionProvider.accountAssertion(for: deviceID) }
+        catch is CancellationError { throw CancellationError() }
         // Password/passkey factors can report actionable account errors before
         // any device credential is requested. Preserve those errors for the
         // app instead of presenting a misleading generic assertion failure.

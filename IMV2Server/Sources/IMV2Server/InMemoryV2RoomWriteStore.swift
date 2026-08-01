@@ -9,12 +9,22 @@ public actor InMemoryV2RoomWriteStore: V2RoomWriteStore {
     private var shardStates: [RoomID: ShardAdmissionState]
     private var capacityProfileIDs: [RoomID: String]
     private let authorizedActors: Set<UserID>
+    private let mediaPresentationResolver: @Sendable ([V2MediaReference]) throws -> [V2MediaPresentation]
 
-    public init(seed: [(V2RoomCommandState, ShardAdmissionState)], authorizedActors: Set<UserID>, capacityProfileID: String = "standard") {
+    public init(
+        seed: [(V2RoomCommandState, ShardAdmissionState)],
+        authorizedActors: Set<UserID>,
+        capacityProfileID: String = "standard",
+        mediaPresentationResolver: @escaping @Sendable ([V2MediaReference]) throws -> [V2MediaPresentation] = { media in
+            guard media.isEmpty else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            return []
+        }
+    ) {
         self.rooms = Dictionary(uniqueKeysWithValues: seed.map { ($0.0.roomID, $0.0) })
         self.shardStates = Dictionary(uniqueKeysWithValues: seed.map { ($0.0.roomID, $0.1) })
         self.capacityProfileIDs = Dictionary(uniqueKeysWithValues: seed.map { ($0.0.roomID, capacityProfileID) })
         self.authorizedActors = authorizedActors
+        self.mediaPresentationResolver = mediaPresentationResolver
     }
 
     public func accept(
@@ -57,11 +67,16 @@ public actor InMemoryV2RoomWriteStore: V2RoomWriteStore {
         )
         switch result {
         case .accepted(let transaction):
+            let accepted = transaction.acceptedMessage.materialized(
+                mediaPresentations: try mediaPresentationResolver(transaction.acceptedMessage.media)
+            )
             rooms[command.roomID] = transaction.nextRoomState
             shardStates[command.roomID] = transaction.nextShardState
-            return .accepted(transaction.acceptedMessage)
+            return .accepted(accepted)
         case .idempotent(let message):
-            return .idempotent(message)
+            return .idempotent(message.materialized(
+                mediaPresentations: try mediaPresentationResolver(message.media)
+            ))
         case .idempotencyConflict:
             return .idempotencyConflict
         case .rateLimited(let seconds):

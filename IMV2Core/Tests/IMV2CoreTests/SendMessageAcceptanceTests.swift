@@ -61,6 +61,41 @@ struct SendMessageAcceptanceTests {
         #expect(retry == .idempotent(transaction.acceptedMessage))
     }
 
+    @Test("only materialized messages carry attachment presentation facts")
+    func acceptedDraftMaterializesExactAttachmentPresentations() throws {
+        let mediaID = try MediaID("00000000-0000-0000-0000-000000000401")
+        let result = try V2SendMessageReducer.reduce(
+            command: try V2SendMessageCommand(
+                roomID: RoomID("room-1"),
+                senderUserID: UserID("user-1"),
+                clientMessageID: ClientMessageID("client-media"),
+                text: "",
+                media: [.init(mediaID: mediaID)],
+                limits: try .init(maxUTF8Bytes: 128)
+            ),
+            roomState: try initialRoomState(),
+            shardState: try shardState(),
+            profile: try profile(),
+            identifiers: try identifiers(),
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+        guard case let .accepted(transaction) = result else {
+            Issue.record("Expected acceptance")
+            return
+        }
+
+        let presentation = try V2MediaPresentation(
+            mediaID: mediaID,
+            kind: .image,
+            contentType: "image/jpeg",
+            byteCount: 42
+        )
+        let accepted = transaction.acceptedMessage.materialized(mediaPresentations: [presentation])
+
+        #expect(accepted.media == [.init(mediaID: mediaID)])
+        #expect(accepted.mediaPresentations == [presentation])
+    }
+
     @Test
     func capacityRejectionDoesNotAllocateSequenceOrDedupeRecord() throws {
         var profile = try profile()

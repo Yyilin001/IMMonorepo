@@ -39,7 +39,7 @@ public struct V2MessageSearchRequest: Equatable, Sendable {
     public let query: String
     public let scope: V2MessageSearchScope
     public let contentFilter: V2MessageSearchContentFilter
-    /// This can be combined with a room scope, unlike the legacy sender scope.
+    /// This can be combined with a room scope.
     public let senderUserID: UserID?
     public let limit: Int
     public let cursor: V2MessageSearchCursor?

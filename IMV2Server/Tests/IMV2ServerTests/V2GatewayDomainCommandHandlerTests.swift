@@ -8,7 +8,15 @@ struct V2GatewayDomainCommandHandlerTests {
     @Test("send validates client data and takes the actor exclusively from the session")
     func sendValidationAndAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
-        let store = InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])
+        let store = InMemoryV2RoomWriteStore(
+            seed: [(fixture.roomState, fixture.shardState)],
+            authorizedActors: [fixture.userID],
+            mediaPresentationResolver: { media in
+                try media.map {
+                    try .init(mediaID: $0.mediaID, kind: .file, contentType: "application/octet-stream", byteCount: 1)
+                }
+            }
+        )
         let telemetry = V2InMemoryTelemetrySink()
         let handler = V2GatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: store),
@@ -50,10 +58,7 @@ struct V2GatewayDomainCommandHandlerTests {
         attachmentOnly.sendMessage.content.mediaIds = [mediaID]
         let attachmentResponse = try await handler.handle(envelope: attachmentOnly, identity: fixture.identity)
         #expect(attachmentResponse.messageAccepted.mediaIds == [mediaID])
-        #expect(attachmentResponse.messageAccepted.mediaPresentations.count == 1)
-        #expect(attachmentResponse.messageAccepted.mediaPresentations.first?.mediaID == mediaID)
-        #expect(attachmentResponse.messageAccepted.mediaPresentations.first?.kind == .file)
-        #expect(attachmentResponse.messageAccepted.mediaPresentations.first?.contentType == "application/octet-stream")
+        #expect(attachmentResponse.messageAccepted.mediaPresentations.map(\.mediaID) == [mediaID])
         let state = try #require(await store.state(for: fixture.roomID))
         let accepted = try #require(state.0.acceptedCommands.values.first)
         #expect(accepted.senderUserID == fixture.identity.userID)
@@ -80,6 +85,7 @@ struct V2GatewayDomainCommandHandlerTests {
             senderUserID: fixture.userID,
             clientMessageID: fixture.clientMessageID,
             text: "hello",
+            mediaPresentations: [],
             groupDeliveryMode: .standardFanout,
             createdAt: fixture.now
         )
@@ -143,36 +149,6 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(response.membershipChanged.roomID == fixture.roomID.rawValue)
         #expect(response.membershipChanged.action == .add)
         #expect(await membershipStore.actor() == fixture.userID)
-    }
-
-    @Test("group creation takes its owner exclusively from the authenticated session")
-    func groupCreationUsesAuthenticatedActor() async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = GatewayGroupStore()
-        let handler = V2GatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            groupMessaging: try .init(
-                store: store,
-                capacityProfile: .init(id: "standard", limits: fixture.profile),
-                roomShardID: "rooms-primary",
-                identifiers: .init(makeUUID: UUID.init),
-                now: { fixture.now }
-            ),
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope(); request.createGroupRoom = .init()
-        request.createGroupRoom.operationID = "00000000-0000-0000-0000-000000000034"
-        request.createGroupRoom.title = " 项目群 "
-        request.createGroupRoom.initialMemberUserIds = ["00000000-0000-0000-0000-000000000035"]
-        // A wire caller may claim hybrid for a two-member room; the server
-        // must derive the immutable mode from the audience instead.
-        request.createGroupRoom.deliveryMode = .largeGroupHybrid
-
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.groupRoomCreated.title == "项目群")
-        #expect(response.groupRoomCreated.memberUserIds.isEmpty)
-        #expect(response.groupRoomCreated.deliveryMode == .standardFanout)
-        #expect(await store.actor() == fixture.userID)
     }
 
     @Test("staged group creation binds every page and finalization to the authenticated owner")

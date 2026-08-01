@@ -196,7 +196,6 @@ enum IMV2ServerApp {
                 readReceipt: readReceipt,
                 liveActivity: liveActivity,
                 directMessaging: directMessaging,
-                groupMessaging: groupMessaging,
                 groupAudienceImports: groupAudienceImports,
                 groupEventLog: groupEventLog,
                 foregroundGroupEventHints: foregroundGroupEventHints,

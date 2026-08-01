@@ -3,8 +3,7 @@ import IMV2Core
 import IMV2Server
 import Vapor
 
-/// Authenticated own-profile mutation. This is intentionally separate from
-/// the legacy display-name endpoint: it requires both a revision fence and a
+/// Authenticated own-profile mutation requires both a revision fence and a
 /// retry-safe operation ID, and treats avatar replacement as the same atomic
 /// profile fact.
 public struct V2VaporProfileUpdateRoutes: Sendable {

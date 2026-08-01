@@ -6,8 +6,7 @@ option swift_prefix = "IMV2";
 option java_package = "com.xmtx.imclientkit.generated.im.realtime.v2";
 option java_multiple_files = true;
 
-// V2 is an independent protocol. It intentionally has no V1 compatibility
-// fields or fallback messages.
+// V2 owns an independent wire shape and a single current protocol version.
 message Envelope {
   uint64 request_id = 1;
   uint32 protocol_version = 2;
@@ -56,7 +55,6 @@ message Envelope {
     MemberMuted member_muted = 54;
     ModerateMemberRemoval moderate_member_removal = 55;
     MemberRemovedByModerator member_removed_by_moderator = 56;
-    CreateGroupRoom create_group_room = 57;
     GroupRoomCreated group_room_created = 58;
     ListRoomMembers list_room_members = 59;
     RoomMembersPage room_members_page = 60;
@@ -481,16 +479,6 @@ message DirectRoomOpened {
   string room_id = 1;
   string target_user_id = 2;
   int64 created_at_ms = 3;
-}
-
-// Legacy one-frame bootstrap. New clients must use the bounded staged import
-// below; keeping this message lets the gateway reject oversized legacy calls
-// explicitly instead of silently exceeding its frame contract.
-message CreateGroupRoom {
-  string operation_id = 1;
-  string title = 2;
-  repeated string initial_member_user_ids = 3;
-  GroupDeliveryMode delivery_mode = 4;
 }
 
 message GroupRoomCreated {

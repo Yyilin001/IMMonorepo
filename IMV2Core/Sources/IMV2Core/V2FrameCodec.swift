@@ -40,7 +40,6 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     public static let memberMuted = Self(rawValue: 54)
     public static let moderateMemberRemoval = Self(rawValue: 55)
     public static let memberRemovedByModerator = Self(rawValue: 56)
-    public static let createGroupRoom = Self(rawValue: 57)
     public static let groupRoomCreated = Self(rawValue: 58)
     public static let listRoomMembers = Self(rawValue: 59)
     public static let roomMembersPage = Self(rawValue: 60)

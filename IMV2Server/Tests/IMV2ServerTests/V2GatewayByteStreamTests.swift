@@ -125,16 +125,16 @@ struct V2GatewayByteStreamTests {
         _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
 
         let roomID = try RoomID("00000000-0000-0000-0000-000000000c01")
-        await registry.subscribeHybridGroup(stream, connectionID: connectionID, roomID: roomID)
-        await registry.notifyHybridGroupAvailable(roomID: roomID, highWatermark: 42)
+        await registry.subscribeForegroundGroup(stream, connectionID: connectionID, roomID: roomID)
+        await registry.notifyForegroundGroupAvailable(roomID: roomID, highWatermark: 42)
         let frame = try #require(await recorder.waitForFirst())
         let wake = try decode(frame)
         #expect(wake.requestID == 0)
         #expect(wake.groupEventAvailable.roomID == roomID.rawValue)
         #expect(wake.groupEventAvailable.highWatermark == 42)
 
-        await registry.unsubscribeHybridGroup(connectionID: connectionID, roomID: roomID)
-        await registry.notifyHybridGroupAvailable(roomID: roomID, highWatermark: 43)
+        await registry.unsubscribeForegroundGroup(connectionID: connectionID, roomID: roomID)
+        await registry.notifyForegroundGroupAvailable(roomID: roomID, highWatermark: 43)
         try await Task.sleep(for: .milliseconds(20))
         #expect(await recorder.count() == 1)
     }

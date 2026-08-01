@@ -191,7 +191,10 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 )
             }
             guard case .accepted(let writeSet) = result else {
-                return result.outcome
+                return result.outcome(
+                    mediaPresentations: mediaPresentations,
+                    groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
+                )
             }
             // Do this only after the generic admission reducer accepts. A
             // capacity rejection returns normally from this transaction, so
@@ -217,20 +220,9 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             // is exactly the immutable mode that committed the event.  It is
             // used only to avoid emitting foreground-group hints for direct
             // rooms after the source transaction succeeds.
-            return .accepted(.init(
-                messageID: message.messageID,
-                roomID: message.roomID,
-                roomSequence: message.roomSequence,
-                senderUserID: message.senderUserID,
-                clientMessageID: message.clientMessageID,
-                text: message.text,
-                media: message.media,
+            return .accepted(message.materialized(
                 mediaPresentations: mediaPresentations,
-                mentions: message.mentions,
-                entities: message.entities,
-                replyTo: message.replyTo,
-                groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil,
-                createdAt: message.createdAt
+                groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
             ))
         }
         try await shadowDirectRoomProfileIfNeeded(command: command, outcome: outcome)
@@ -606,10 +598,17 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
 }
 
 private extension V2SendMessageAcceptanceResult {
-    var outcome: V2SendMessageOutcome {
+    func outcome(
+        mediaPresentations: [V2MediaPresentation] = [],
+        groupDeliveryMode: V2GroupDeliveryMode? = nil
+    ) -> V2SendMessageOutcome {
         switch self {
-        case .accepted(let transaction): .accepted(transaction.acceptedMessage)
-        case .idempotent(let message): .idempotent(message)
+        case .accepted:
+            preconditionFailure("accepted transactions must be persisted before becoming a send outcome")
+        case .idempotent(let message): .idempotent(message.materialized(
+            mediaPresentations: mediaPresentations,
+            groupDeliveryMode: groupDeliveryMode
+        ))
         case .idempotencyConflict: .idempotencyConflict
         case .rateLimited(let seconds): .rateLimited(retryAfterSeconds: seconds)
         case .unavailable(let reason): .unavailable(reason)
@@ -663,7 +662,7 @@ private func hybridReduction(
     case .unavailable(let reason):
         return .unavailable(reason)
     case .accepted(let reservation, let nextAdmission, let nextShard):
-        let accepted = V2AcceptedMessage(
+        let accepted = V2AcceptedMessageDraft(
             messageID: identifiers.messageID,
             roomID: command.roomID,
             roomSequence: roomState.nextRoomSequence,

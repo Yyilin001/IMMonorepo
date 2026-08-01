@@ -84,6 +84,83 @@ public struct V2CommandDeduplicationKey: Hashable, Sendable {
     }
 }
 
+/// A message accepted by the pure admission reducer but not yet materialized
+/// against a media store.  It is deliberately separate from
+/// ``V2AcceptedMessage``: attachment presentation data is authoritative
+/// storage metadata, not something the reducer can invent safely.
+public struct V2AcceptedMessageDraft: Equatable, Sendable {
+    public let messageID: MessageID
+    public let roomID: RoomID
+    public let roomSequence: UInt64
+    public let senderUserID: UserID
+    public let clientMessageID: ClientMessageID
+    public let text: String
+    public let media: [V2MediaReference]
+    public let mentions: [V2MentionTarget]
+    public let entities: [V2MessageEntity]
+    public let replyTo: V2MessageReplyReference?
+    /// Present only for a group room. It is acceptance metadata used for
+    /// non-authoritative foreground availability hints; it does not change
+    /// the durable fan-out or acknowledgement contract.
+    public let groupDeliveryMode: V2GroupDeliveryMode?
+    public let createdAt: Date
+
+    public init(
+        messageID: MessageID,
+        roomID: RoomID,
+        roomSequence: UInt64,
+        senderUserID: UserID,
+        clientMessageID: ClientMessageID,
+        text: String,
+        media: [V2MediaReference] = [],
+        mentions: [V2MentionTarget] = [],
+        entities: [V2MessageEntity] = [],
+        replyTo: V2MessageReplyReference? = nil,
+        groupDeliveryMode: V2GroupDeliveryMode? = nil,
+        createdAt: Date
+    ) {
+        self.messageID = messageID
+        self.roomID = roomID
+        self.roomSequence = roomSequence
+        self.senderUserID = senderUserID
+        self.clientMessageID = clientMessageID
+        self.text = text
+        self.media = media
+        self.mentions = mentions
+        precondition((try? V2RichMessageContent.validate(text: text, entities: entities)) != nil)
+        self.entities = entities
+        self.replyTo = replyTo
+        self.groupDeliveryMode = groupDeliveryMode
+        self.createdAt = createdAt
+    }
+
+    /// Produces the only message type that may leave the acceptance/storage
+    /// boundary.  The exact ordered media identity check makes a missing or
+    /// substituted presentation unrepresentable in the response model.
+    public func materialized(
+        mediaPresentations: [V2MediaPresentation],
+        groupDeliveryMode: V2GroupDeliveryMode? = nil
+    ) -> V2AcceptedMessage {
+        V2AcceptedMessage(
+            messageID: messageID,
+            roomID: roomID,
+            roomSequence: roomSequence,
+            senderUserID: senderUserID,
+            clientMessageID: clientMessageID,
+            text: text,
+            media: media,
+            mediaPresentations: mediaPresentations,
+            mentions: mentions,
+            entities: entities,
+            replyTo: replyTo,
+            groupDeliveryMode: groupDeliveryMode,
+            createdAt: createdAt
+        )
+    }
+}
+
+/// The complete, storage-materialized result of a successful send command.
+/// A value of this type is safe to serialize, project, or render.
 public struct V2AcceptedMessage: Equatable, Sendable {
     public let messageID: MessageID
     public let roomID: RoomID
@@ -110,7 +187,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         clientMessageID: ClientMessageID,
         text: String,
         media: [V2MediaReference] = [],
-        mediaPresentations: [V2MediaPresentation] = [],
+        mediaPresentations: [V2MediaPresentation],
         mentions: [V2MentionTarget] = [],
         entities: [V2MessageEntity] = [],
         replyTo: V2MessageReplyReference? = nil,
@@ -124,11 +201,8 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         self.clientMessageID = clientMessageID
         self.text = text
         self.media = media
-        let presentations = mediaPresentations.isEmpty && !media.isEmpty
-            ? media.map(V2MediaPresentation.legacy)
-            : mediaPresentations
-        precondition(presentations.map(\.mediaID) == media.map(\.mediaID))
-        self.mediaPresentations = presentations
+        precondition(mediaPresentations.map(\.mediaID) == media.map(\.mediaID))
+        self.mediaPresentations = mediaPresentations
         self.mentions = mentions
         precondition((try? V2RichMessageContent.validate(text: text, entities: entities)) != nil)
         self.entities = entities
@@ -164,14 +238,14 @@ public struct V2FanoutPlanDraft: Equatable, Sendable {
 /// room-shard transaction: canonical message, dedupe record, event, outbox,
 /// plan, room admission and shard admission. Storage adapters must not split it.
 public struct V2MessageAcceptanceTransaction: Equatable, Sendable {
-    public let acceptedMessage: V2AcceptedMessage
+    public let acceptedMessage: V2AcceptedMessageDraft
     public let eventID: EventID
     public let fanoutPlan: V2FanoutPlanDraft
     public let nextRoomState: V2RoomCommandState
     public let nextShardState: ShardAdmissionState
 
     public init(
-        acceptedMessage: V2AcceptedMessage,
+        acceptedMessage: V2AcceptedMessageDraft,
         eventID: EventID,
         fanoutPlan: V2FanoutPlanDraft,
         nextRoomState: V2RoomCommandState,
@@ -189,13 +263,13 @@ public struct V2RoomCommandState: Equatable, Sendable {
     public let roomID: RoomID
     public let nextRoomSequence: UInt64
     public let admission: RoomAdmissionState
-    public let acceptedCommands: [V2CommandDeduplicationKey: V2AcceptedMessage]
+    public let acceptedCommands: [V2CommandDeduplicationKey: V2AcceptedMessageDraft]
 
     public init(
         roomID: RoomID,
         nextRoomSequence: UInt64,
         admission: RoomAdmissionState,
-        acceptedCommands: [V2CommandDeduplicationKey: V2AcceptedMessage] = [:]
+        acceptedCommands: [V2CommandDeduplicationKey: V2AcceptedMessageDraft] = [:]
     ) {
         self.roomID = roomID
         self.nextRoomSequence = nextRoomSequence
@@ -218,7 +292,7 @@ public struct V2AcceptanceIdentifiers: Equatable, Sendable {
 
 public enum V2SendMessageAcceptanceResult: Equatable, Sendable {
     case accepted(V2MessageAcceptanceTransaction)
-    case idempotent(V2AcceptedMessage)
+    case idempotent(V2AcceptedMessageDraft)
     case idempotencyConflict
     case rateLimited(retryAfterSeconds: Int)
     case unavailable(FanoutAdmissionUnavailableReason)
@@ -258,7 +332,7 @@ public enum V2SendMessageReducer {
         case .unavailable(let reason):
             return .unavailable(reason)
         case .accepted(let reservation, let reservedRoomAdmission, let reservedShardState):
-            let accepted = V2AcceptedMessage(
+            let accepted = V2AcceptedMessageDraft(
                 messageID: identifiers.messageID,
                 roomID: command.roomID,
                 roomSequence: roomState.nextRoomSequence,

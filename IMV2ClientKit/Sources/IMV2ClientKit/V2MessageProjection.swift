@@ -30,11 +30,8 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
         self.senderUserID = senderUserID
         self.text = text
         self.media = media
-        let presentations = mediaPresentations.isEmpty && !media.isEmpty
-            ? media.map(V2MediaPresentation.legacy)
-            : mediaPresentations
-        precondition(presentations.map(\.mediaID) == media.map(\.mediaID))
-        self.mediaPresentations = presentations
+        precondition(mediaPresentations.map(\.mediaID) == media.map(\.mediaID))
+        self.mediaPresentations = mediaPresentations
         self.mentions = mentions
         precondition((try? V2RichMessageContent.validate(text: text, entities: entities)) != nil)
         self.entities = entities
@@ -82,9 +79,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
             let replyTo = try payload.replyToMessageID.map { V2MessageReplyReference(messageID: try .init($0)) }
             let forwardedFrom: V2ForwardedMessageAttribution?
             switch (payload.forwardedFromMessageID, payload.forwardedFromUserID) {
-            case (nil, nil), (.some(""), .some("")):
-                // Pre-v18 accepted-message events encoded an absent attribution
-                // as two empty strings. Keep them replayable during rollout.
+            case (nil, nil):
                 forwardedFrom = nil
             case let (.some(messageID), .some(userID)) where !messageID.isEmpty && !userID.isEmpty:
                 forwardedFrom = try .init(messageID: .init(messageID), senderUserID: .init(userID))
@@ -92,7 +87,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
                 throw V2ClientProjectionError.invalidMessagePayload
             }
             guard Set(media).count == media.count, media.count <= V2MessageCommandLimits.maxMediaAttachments,
-                  (mediaPresentations.isEmpty || mediaPresentations.map(\.mediaID) == media.map(\.mediaID)),
+                  mediaPresentations.map(\.mediaID) == media.map(\.mediaID),
                   Set(mentions).count == mentions.count, mentions.count <= V2MessageCommandLimits.maxMentions
             else { throw V2ClientProjectionError.invalidMessagePayload }
             try V2RichMessageContent.validate(text: payload.text, entities: entities)

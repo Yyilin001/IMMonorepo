@@ -55,14 +55,11 @@ public struct V2SnapshotMessageProjection: Equatable, Sendable {
         self.senderUserID = senderUserID
         self.text = text
         self.media = media
-        let presentations = mediaPresentations.isEmpty && !media.isEmpty
-            ? media.map(V2MediaPresentation.legacy)
-            : mediaPresentations
-        guard presentations.map(\.mediaID) == media.map(\.mediaID) else {
+        guard mediaPresentations.map(\.mediaID) == media.map(\.mediaID) else {
             throw V2SnapshotProjectionError.invalidPage
         }
         try V2RichMessageContent.validate(text: text, entities: entities)
-        self.mediaPresentations = presentations
+        self.mediaPresentations = mediaPresentations
         self.mentions = mentions
         self.entities = entities
         self.replyTo = replyTo
@@ -246,12 +243,6 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
     public let directReadReceipts: [V2SnapshotDirectReadReceiptProjection]
     public let conversationStates: [V2SnapshotConversationState]
     public let messageFavorites: [V2SnapshotMessageFavorite]
-    /// Compatibility overload retained for incremental build products compiled
-    /// against snapshot schema v7. New callers may provide room controls.
-    public init(messages: [V2SnapshotMessageProjection], relationships: [V2SnapshotRelationshipProjection] = [], userBlocks: [V2SnapshotUserBlockProjection] = [], strangerMessagePreference: V2SnapshotStrangerMessagePreference? = nil, moderationActions: [V2SnapshotModerationProjection] = []) throws {
-        try self.init(messages: messages, relationships: relationships, userBlocks: userBlocks, strangerMessagePreference: strangerMessagePreference, moderationActions: moderationActions, roomControls: [], roomProfiles: [], directRoomProfiles: [], userAddPreference: nil, readReceiptPreference: nil, directReadReceipts: [], conversationStates: [], messageFavorites: [])
-    }
-
     public init(messages: [V2SnapshotMessageProjection], relationships: [V2SnapshotRelationshipProjection], userBlocks: [V2SnapshotUserBlockProjection], strangerMessagePreference: V2SnapshotStrangerMessagePreference?, moderationActions: [V2SnapshotModerationProjection], roomControls: [V2SnapshotRoomControlProjection], roomProfiles: [V2SnapshotRoomProfileProjection] = [], directRoomProfiles: [V2SnapshotDirectRoomProfileProjection] = [], userAddPreference: V2SnapshotUserAddPreference? = nil, readReceiptPreference: V2SnapshotReadReceiptPreference? = nil, directReadReceipts: [V2SnapshotDirectReadReceiptProjection] = [], conversationStates: [V2SnapshotConversationState] = [], messageFavorites: [V2SnapshotMessageFavorite] = []) throws {
         guard Set(relationships.map(\.targetUserID)).count == relationships.count,
               Set(userBlocks.map(\.targetUserID)).count == userBlocks.count,
@@ -273,10 +264,10 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
 public enum V2SnapshotProjectionCodec {
     /// V2 snapshot schema. There is deliberately no reader for the earlier
     /// draft page shape: this product has no released data to migrate.
-    public static let schemaVersion: UInt32 = 18
+    public static let schemaVersion: UInt32 = 19
 
     public static func encode(messages: [V2SnapshotMessageProjection]) throws -> Data {
-        try encode(.init(messages: messages))
+        try encode(.init(messages: messages, relationships: [], userBlocks: [], strangerMessagePreference: nil, moderationActions: [], roomControls: []))
     }
 
     public static func encode(_ page: V2SnapshotProjectionPage) throws -> Data {

@@ -79,9 +79,8 @@ public struct V2ClientMessageAcceptance: Equatable, Sendable {
         self.roomID = roomID
         self.roomSequence = roomSequence
         self.media = media
-        self.mediaPresentations = mediaPresentations.isEmpty && !media.isEmpty
-            ? media.map(V2MediaPresentation.legacy)
-            : mediaPresentations
+        precondition(mediaPresentations.map(\.mediaID) == media.map(\.mediaID))
+        self.mediaPresentations = mediaPresentations
         self.mentions = mentions
         self.entities = entities
         self.replyTo = replyTo
@@ -137,8 +136,8 @@ public struct V2ClientRoomMember: Equatable, Sendable {
     public let userID: UserID
     public let role: V2RoomMembershipRole
     /// Public profile authorized by the active-room roster read.  It is not a
-    /// replacement for a durable contact graph and may be absent while an
-    /// older server deployment is being rolled forward.
+    /// replacement for a durable contact graph and may be absent when the
+    /// member has no public profile.
     public let publicIdentity: V2PublicIdentity?
 
     public init(userID: UserID, role: V2RoomMembershipRole, publicIdentity: V2PublicIdentity? = nil) {
@@ -375,10 +374,8 @@ public enum V2ClientReadReceiptLimits {
     public static let maximumPageSize = 100
 }
 
-/// Existing receipt reporters need only implement the durable watermark
-/// command. The richer privacy/detail surface is opt-in for transports that
-/// negotiate protocol v10, keeping older test and embedding adapters honest
-/// without silently fabricating a receipt result.
+/// Receipt transports that do not support the detail surface fail closed
+/// instead of fabricating a receipt result.
 public extension V2ClientReadReceiptTransport {
     func setReadReceiptPreferences(operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferences {
         _ = operationID; _ = allowsDirectReadReceipts; _ = allowsGroupReadReceipts

@@ -1611,6 +1611,10 @@ private actor V2ActiveHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchroniz
         return outcomes.removeFirst()
     }
 
+    func subscribe(roomID _: String) -> V2ActiveHybridGroupSubscriptionOutcome { .notHybridRoom }
+    func nextWake() async throws -> V2ActiveHybridGroupWake { throw CancellationError() }
+    func unsubscribe(roomID _: String) {}
+
     func requestedRoomIDs() -> [String] { roomIDs }
 }
 

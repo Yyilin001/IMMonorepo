@@ -1,0 +1,42 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  swift-and-postgres:
+    name: Swift packages and PostgreSQL integration
+    runs-on: ubuntu-latest
+    container: swift:6.2-jammy
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: im_v2_test
+          POSTGRES_USER: im_v2_test
+          POSTGRES_PASSWORD: im_v2_test
+        options: >-
+          --health-cmd "pg_isready -U im_v2_test -d im_v2_test"
+          --health-interval 1s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run package tests
+        run: ./scripts/run_v2_swift_tests.sh
+      - name: Run PostgreSQL integration tests
+        env:
+          IMV2_POSTGRES_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+          IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE: "1"
+        run: swift test --package-path IMV2Server
+
+  ios-build-for-testing:
+    name: iOS build-for-testing
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app and test bundles without signing
+        run: ./IMApp/Scripts/verify_generic_simulator_build.sh

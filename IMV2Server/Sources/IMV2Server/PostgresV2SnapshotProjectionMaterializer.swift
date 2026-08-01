@@ -487,9 +487,7 @@ private struct ReplayedMessage {
         let replyTo = try event.replyToMessageID.map { V2MessageReplyReference(messageID: try .init($0)) }
         let forwardedFrom: V2ForwardedMessageAttribution?
         switch (event.forwardedFromMessageID, event.forwardedFromUserID) {
-        case (nil, nil), (.some(""), .some("")):
-            // Historical delivered events used empty strings for an absent
-            // attribution; later writes use JSON nulls.
+        case (nil, nil):
             forwardedFrom = nil
         case let (.some(messageID), .some(userID)) where !messageID.isEmpty && !userID.isEmpty:
             forwardedFrom = try .init(messageID: .init(messageID), senderUserID: .init(userID))
@@ -497,7 +495,7 @@ private struct ReplayedMessage {
             throw V2SnapshotProjectionMaterializerError.invalidDeliveredHistory
         }
         guard Set(media).count == media.count, media.count <= V2MessageCommandLimits.maxMediaAttachments,
-              (mediaPresentations.isEmpty || mediaPresentations.map(\.mediaID) == media.map(\.mediaID)),
+              mediaPresentations.map(\.mediaID) == media.map(\.mediaID),
               Set(mentions).count == mentions.count, mentions.count <= V2MessageCommandLimits.maxMentions
         else { throw V2SnapshotProjectionMaterializerError.invalidDeliveredHistory }
         try V2RichMessageContent.validate(text: text, entities: entities)
@@ -509,7 +507,7 @@ private struct ReplayedMessage {
         self.senderUserID = try .init(senderUserID)
         self.text = text
         self.media = media
-        self.mediaPresentations = mediaPresentations.isEmpty ? media.map(V2MediaPresentation.legacy) : mediaPresentations
+        self.mediaPresentations = mediaPresentations
         self.mentions = mentions
         self.entities = entities
         self.replyTo = replyTo
