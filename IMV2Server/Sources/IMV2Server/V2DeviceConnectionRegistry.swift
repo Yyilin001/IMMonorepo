@@ -15,13 +15,24 @@ public actor V2DeviceConnectionRegistry {
     private var streamsByForegroundGroup: [RoomID: [UUID: V2GatewayByteStream]] = [:]
     private var foregroundGroupByConnection: [UUID: RoomID] = [:]
     private var foregroundGroupInterestManager: (any V2GroupEventWakeInterestManaging)?
+    private var livePresenceLeases: (any V2LivePresenceLeaseManaging)?
+    private var liveActivityBroker: (any V2LiveActivityInterestManaging & V2LiveActivityPublishing)?
+    private var presenceByConnection: [UUID: (roomID: RoomID, targetUserID: UserID)] = [:]
+    private var presenceWatchersByTarget: [UserID: [UUID: V2GatewayByteStream]] = [:]
+    private var typingRoomByConnection: [UUID: RoomID] = [:]
+    private var typingWatchersByRoom: [RoomID: [UUID: V2GatewayByteStream]] = [:]
 
     public init() {}
 
-    public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection) {
+    public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection) async {
         identityByConnection[connectionID] = identity
         streamsByDevice[identity.deviceID, default: [:]][connectionID] = stream
         streamsByUser[identity.userID, default: [:]][connectionID] = stream
+        guard let livePresenceLeases,
+              let expiresAt = try? await livePresenceLeases.refreshPresence(identity: identity, connectionID: connectionID, now: Date()),
+              (try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)) == true
+        else { return }
+        await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
     }
 
     public func unregister(connectionID: UUID) async {
@@ -31,6 +42,12 @@ public actor V2DeviceConnectionRegistry {
         streamsByUser[identity.userID]?.removeValue(forKey: connectionID)
         if streamsByUser[identity.userID]?.isEmpty == true { streamsByUser.removeValue(forKey: identity.userID) }
         await removeForegroundGroupSubscription(connectionID: connectionID)
+        await removePresenceSubscription(connectionID: connectionID)
+        await removeTypingSubscription(connectionID: connectionID)
+        let remainsOnline = (try? await livePresenceLeases?.removePresence(connectionID: connectionID, now: Date())) ?? (streamsByUser[identity.userID] != nil)
+        if !remainsOnline {
+            await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
+        }
     }
 
     public func revoke(deviceID: DeviceID) async {
@@ -92,6 +109,109 @@ public actor V2DeviceConnectionRegistry {
 
     public func activeForegroundGroupMetrics() -> (rooms: Int, viewers: Int) {
         (streamsByForegroundGroup.count, foregroundGroupByConnection.count)
+    }
+
+    public func configureLivePresenceLeases(_ leases: any V2LivePresenceLeaseManaging) {
+        livePresenceLeases = leases
+    }
+
+    public func configureLiveActivityBroker(_ broker: any V2LiveActivityInterestManaging & V2LiveActivityPublishing) async {
+        liveActivityBroker = broker
+        for userID in presenceWatchersByTarget.keys { try? await broker.activatePresence(targetUserID: userID) }
+        for roomID in typingWatchersByRoom.keys { try? await broker.activateTyping(roomID: roomID) }
+    }
+
+    public func refreshLivePresence(connectionID: UUID) async {
+        guard let identity = identityByConnection[connectionID], let livePresenceLeases,
+              let expiresAt = try? await livePresenceLeases.refreshPresence(identity: identity, connectionID: connectionID, now: Date()),
+              (try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)) == true
+        else { return }
+        await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
+    }
+
+    public func subscribePresence(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID, targetUserID: UserID) async {
+        await removePresenceSubscription(connectionID: connectionID)
+        presenceByConnection[connectionID] = (roomID, targetUserID)
+        presenceWatchersByTarget[targetUserID, default: [:]][connectionID] = stream
+        if presenceWatchersByTarget[targetUserID]?.count == 1 { try? await liveActivityBroker?.activatePresence(targetUserID: targetUserID) }
+    }
+
+    public func unsubscribePresence(connectionID: UUID, roomID: RoomID) async {
+        guard presenceByConnection[connectionID]?.roomID == roomID else { return }
+        await removePresenceSubscription(connectionID: connectionID)
+    }
+
+    public func subscribeTyping(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID) async {
+        await removeTypingSubscription(connectionID: connectionID)
+        typingRoomByConnection[connectionID] = roomID
+        typingWatchersByRoom[roomID, default: [:]][connectionID] = stream
+        if typingWatchersByRoom[roomID]?.count == 1 { try? await liveActivityBroker?.activateTyping(roomID: roomID) }
+    }
+
+    public func unsubscribeTyping(connectionID: UUID, roomID: RoomID) async {
+        guard typingRoomByConnection[connectionID] == roomID else { return }
+        await removeTypingSubscription(connectionID: connectionID)
+    }
+
+    public func notifyTyping(roomID: RoomID, actorUserID: UserID, isTyping: Bool, expiresAt: Date) async {
+        let state = V2TypingState(roomID: roomID, userID: actorUserID, isTyping: isTyping, expiresAt: expiresAt)
+        await notifyTypingWatchers(state)
+        await liveActivityBroker?.publishTyping(state)
+    }
+
+    public func receivePresence(targetUserID: UserID, isOnline: Bool, expiresAt: Date) async {
+        await notifyPresenceWatchers(targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt)
+    }
+
+    public func receiveTyping(_ state: V2TypingState) async {
+        await notifyTypingWatchers(state)
+    }
+
+    public func applyLiveActivityPreferences(connectionID: UUID, allowsOnlinePresence: Bool) async {
+        guard let identity = identityByConnection[connectionID] else { return }
+        if allowsOnlinePresence {
+            await refreshLivePresence(connectionID: connectionID)
+        } else {
+            await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
+        }
+    }
+
+    private func notifyTypingWatchers(_ state: V2TypingState) async {
+        let streams = typingWatchersByRoom[state.roomID].map { Array($0) } ?? []
+        for (connectionID, stream) in streams where identityByConnection[connectionID]?.userID != state.userID {
+            await stream.sendTypingState(state)
+        }
+    }
+
+    private func routePresence(targetUserID: UserID, isOnline: Bool, expiresAt: Date) async {
+        await notifyPresenceWatchers(targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt)
+        await liveActivityBroker?.publishPresence(targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt)
+    }
+
+    private func notifyPresenceWatchers(targetUserID: UserID, isOnline: Bool, expiresAt: Date) async {
+        let streams = presenceWatchersByTarget[targetUserID].map { Array($0) } ?? []
+        for (connectionID, stream) in streams {
+            guard let watch = presenceByConnection[connectionID], watch.targetUserID == targetUserID else { continue }
+            await stream.sendPresenceState(.init(roomID: watch.roomID, targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt))
+        }
+    }
+
+    private func removePresenceSubscription(connectionID: UUID) async {
+        guard let previous = presenceByConnection.removeValue(forKey: connectionID) else { return }
+        presenceWatchersByTarget[previous.targetUserID]?.removeValue(forKey: connectionID)
+        if presenceWatchersByTarget[previous.targetUserID]?.isEmpty == true {
+            presenceWatchersByTarget.removeValue(forKey: previous.targetUserID)
+            await liveActivityBroker?.deactivatePresence(targetUserID: previous.targetUserID)
+        }
+    }
+
+    private func removeTypingSubscription(connectionID: UUID) async {
+        guard let roomID = typingRoomByConnection.removeValue(forKey: connectionID) else { return }
+        typingWatchersByRoom[roomID]?.removeValue(forKey: connectionID)
+        if typingWatchersByRoom[roomID]?.isEmpty == true {
+            typingWatchersByRoom.removeValue(forKey: roomID)
+            await liveActivityBroker?.deactivateTyping(roomID: roomID)
+        }
     }
 
     private func removeForegroundGroupSubscription(connectionID: UUID) async {

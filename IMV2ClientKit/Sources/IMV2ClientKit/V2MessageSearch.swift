@@ -10,6 +10,18 @@ public enum V2MessageSearchScope: Equatable, Sendable {
     case sender(UserID)
 }
 
+/// An indexed, local content constraint.  It intentionally describes the
+/// presentation type recorded at acceptance time rather than a filename or a
+/// MIME string supplied by the sender.
+public enum V2MessageSearchContentFilter: String, CaseIterable, Equatable, Sendable {
+    case all
+    case media
+    case image
+    case video
+    case file
+    case audio
+}
+
 public struct V2MessageSearchCursor: Equatable, Sendable {
     enum Storage: Equatable, Sendable {
         case room(roomID: RoomID, roomSequence: UInt64, messageID: MessageID)
@@ -17,22 +29,33 @@ public struct V2MessageSearchCursor: Equatable, Sendable {
     }
 
     let storage: Storage
+    /// A continuation is valid only for precisely the same set of filters.
+    /// Otherwise a client could silently skip or repeat records after a user
+    /// changes the selected member or media category.
+    let filterFingerprint: String
 }
 
 public struct V2MessageSearchRequest: Equatable, Sendable {
     public let query: String
     public let scope: V2MessageSearchScope
+    public let contentFilter: V2MessageSearchContentFilter
+    /// This can be combined with a room scope, unlike the legacy sender scope.
+    public let senderUserID: UserID?
     public let limit: Int
     public let cursor: V2MessageSearchCursor?
 
     public init(
         query: String,
         scope: V2MessageSearchScope = .allMessages,
+        contentFilter: V2MessageSearchContentFilter = .all,
+        senderUserID: UserID? = nil,
         limit: Int = 50,
         cursor: V2MessageSearchCursor? = nil
     ) {
         self.query = query
         self.scope = scope
+        self.contentFilter = contentFilter
+        self.senderUserID = senderUserID
         self.limit = limit
         self.cursor = cursor
     }

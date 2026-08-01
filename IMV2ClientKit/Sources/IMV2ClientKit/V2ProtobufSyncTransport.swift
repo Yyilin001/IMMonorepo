@@ -93,6 +93,22 @@ public protocol V2ClientMessageTransport: Sendable {
     func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?) async throws -> V2ClientMessageAcceptance
 }
 
+public protocol V2ClientConversationCapabilitiesTransport: Sendable {
+    func setConversationState(command: V2ConversationStateCommand) async throws -> V2ConversationState
+    func setMessageFavorite(command: V2MessageFavoriteCommand) async throws -> V2MessageFavorite
+}
+
+public protocol V2ClientGroupCapabilitiesTransport: Sendable {
+    func setPinnedMessage(command: V2PinnedMessageCommand) async throws -> V2PinnedMessage
+    func setGroupAnnouncement(command: V2GroupAnnouncementCommand) async throws -> V2GroupAnnouncement
+    func setGroupRolePermissions(command: V2GroupRolePermissionsCommand) async throws -> V2GroupRolePermissionsChange
+    func changeGroupMemberRole(command: V2GroupMemberRoleCommand) async throws -> V2GroupMemberRoleChange
+}
+
+public protocol V2ClientForwardMessagesTransport: Sendable {
+    func forwardMessages(command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult]
+}
+
 public struct V2ClientMembershipChange: Equatable, Sendable {
     public let roomID: RoomID
     public let targetUserID: UserID
@@ -351,6 +367,38 @@ public struct V2ClientReadReceipt: Equatable, Sendable {
 
 public protocol V2ClientReadReceiptTransport: Sendable {
     func recordReadReceipt(roomID: RoomID, operationID: ReadReceiptOperationID, readThroughRoomSequence: UInt64) async throws -> V2ClientReadReceipt
+    func setReadReceiptPreferences(operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferences
+    func listReadReceiptReaders(roomID: RoomID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage
+}
+
+public enum V2ClientReadReceiptLimits {
+    public static let maximumPageSize = 100
+}
+
+/// Existing receipt reporters need only implement the durable watermark
+/// command. The richer privacy/detail surface is opt-in for transports that
+/// negotiate protocol v10, keeping older test and embedding adapters honest
+/// without silently fabricating a receipt result.
+public extension V2ClientReadReceiptTransport {
+    func setReadReceiptPreferences(operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferences {
+        _ = operationID; _ = allowsDirectReadReceipts; _ = allowsGroupReadReceipts
+        throw V2RealtimeTransportError.unexpectedResponse
+    }
+
+    func listReadReceiptReaders(roomID: RoomID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
+        _ = roomID; _ = messageRoomSequence; _ = cursor; _ = pageSize
+        throw V2RealtimeTransportError.unexpectedResponse
+    }
+}
+
+public protocol V2ClientLiveActivityTransport: Sendable {
+    func liveActivityPreferences() async throws -> V2LiveActivityPreferences
+    func setLiveActivityPreferences(operationID: LiveActivityPreferenceOperationID, allowsOnlinePresence: Bool, allowsTypingIndicators: Bool) async throws -> V2LiveActivityPreferences
+    func subscribePresence(roomID: RoomID) async throws -> V2PresenceState
+    func unsubscribePresence(roomID: RoomID) async throws
+    func subscribeTyping(roomID: RoomID) async throws
+    func unsubscribeTyping(roomID: RoomID) async throws
+    func setTyping(roomID: RoomID, isTyping: Bool) async throws
 }
 
 public struct V2ClientMessageReactionChange: Equatable, Sendable {
@@ -399,7 +447,7 @@ public struct V2SHA256SnapshotPageDigestVerifier: V2SnapshotPageDigestVerifier {
 /// Maps protobuf envelopes at the authenticated frame boundary onto the
 /// SyncEngine transport protocol. DTO validation happens here; the engine only
 /// sees V2 value types suitable for durable local application.
-public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTransport, V2ClientMembershipTransport, V2ClientMembershipDirectoryTransport, V2ClientDirectMessagingTransport, V2ClientGroupMessagingTransport, V2ClientGroupEventTransport, V2ClientGroupEventSubscriptionTransport, V2ClientSocialRelationshipTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageRedactionTransport, V2ClientMemberMuteTransport, V2ClientModeratedMemberRemovalTransport, V2ClientMessageEditTransport, V2ClientMessageReactionTransport, V2ClientReadReceiptTransport, V2HeartbeatSender {
+public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTransport, V2ClientConversationCapabilitiesTransport, V2ClientGroupCapabilitiesTransport, V2ClientForwardMessagesTransport, V2ClientMembershipTransport, V2ClientMembershipDirectoryTransport, V2ClientDirectMessagingTransport, V2ClientGroupMessagingTransport, V2ClientGroupEventTransport, V2ClientGroupEventSubscriptionTransport, V2ClientSocialRelationshipTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageRedactionTransport, V2ClientMemberMuteTransport, V2ClientModeratedMemberRemovalTransport, V2ClientMessageEditTransport, V2ClientMessageReactionTransport, V2ClientReadReceiptTransport, V2ClientLiveActivityTransport, V2HeartbeatSender {
     private let wire: any V2AuthenticatedFrameTransport
     private let protocolVersion: UInt8
     private let maximumSnapshotPages: Int
@@ -558,6 +606,75 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         else { throw V2RealtimeTransportError.unexpectedResponse }
         try V2RichMessageContent.validate(text: text, entities: acceptedEntities)
         return try .init(messageID: .init(accepted.messageID), roomID: .init(accepted.roomID), roomSequence: accepted.roomSequence, media: acceptedMedia, mediaPresentations: acceptedPresentations, mentions: acceptedMentions, entities: acceptedEntities, replyTo: acceptedReplyTo, createdAt: Date(timeIntervalSince1970: TimeInterval(accepted.serverCreatedAtMs) / 1_000))
+    }
+
+    public func setConversationState(command: V2ConversationStateCommand) async throws -> V2ConversationState {
+        var request = IMV2Envelope(); request.setConversationState = .init()
+        request.setConversationState.operationID = command.operationID.rawValue; request.setConversationState.roomID = command.roomID.rawValue
+        request.setConversationState.isPinned = command.isPinned; request.setConversationState.isArchived = command.isArchived
+        request.setConversationState.muteUntilMs = command.muteUntil.map { Int64($0.timeIntervalSince1970 * 1_000) } ?? 0
+        let response = try await requestEnvelope(request)
+        guard case .conversationStateSet(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+        guard value.roomID == command.roomID.rawValue, value.isPinned == command.isPinned, value.isArchived == command.isArchived else { throw V2RealtimeTransportError.unexpectedResponse }
+        let muteUntil = value.muteUntilMs == 0 ? nil : Date(timeIntervalSince1970: TimeInterval(value.muteUntilMs) / 1_000)
+        guard muteUntil == command.muteUntil else { throw V2RealtimeTransportError.unexpectedResponse }
+        return try .init(roomID: .init(value.roomID), isPinned: value.isPinned, isArchived: value.isArchived, muteUntil: muteUntil, updatedAt: Date(timeIntervalSince1970: TimeInterval(value.updatedAtMs) / 1_000))
+    }
+
+    public func setMessageFavorite(command: V2MessageFavoriteCommand) async throws -> V2MessageFavorite {
+        var request = IMV2Envelope(); request.setMessageFavorite = .init()
+        request.setMessageFavorite.operationID = command.operationID.rawValue; request.setMessageFavorite.roomID = command.roomID.rawValue; request.setMessageFavorite.messageID = command.messageID.rawValue; request.setMessageFavorite.isFavorited = command.isFavorited
+        let response = try await requestEnvelope(request)
+        guard case .messageFavoriteChanged(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+        guard value.roomID == command.roomID.rawValue, value.messageID == command.messageID.rawValue, value.isFavorited == command.isFavorited else { throw V2RealtimeTransportError.unexpectedResponse }
+        return try .init(roomID: .init(value.roomID), messageID: .init(value.messageID), isFavorited: value.isFavorited, updatedAt: Date(timeIntervalSince1970: TimeInterval(value.updatedAtMs) / 1_000))
+    }
+
+    public func setPinnedMessage(command: V2PinnedMessageCommand) async throws -> V2PinnedMessage {
+        var request = IMV2Envelope(); request.setPinnedMessage = .init(); request.setPinnedMessage.operationID = command.operationID.rawValue; request.setPinnedMessage.roomID = command.roomID.rawValue; request.setPinnedMessage.messageID = command.messageID.rawValue; request.setPinnedMessage.isPinned = command.isPinned
+        let response = try await requestEnvelope(request)
+        guard case .pinnedMessageChanged(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+        guard value.roomID == command.roomID.rawValue, value.messageID == command.messageID.rawValue, value.isPinned == command.isPinned else { throw V2RealtimeTransportError.unexpectedResponse }
+        return try .init(roomID: .init(value.roomID), messageID: .init(value.messageID), isPinned: value.isPinned, roomSequence: value.roomSequence, updatedAt: Date(timeIntervalSince1970: TimeInterval(value.updatedAtMs) / 1_000))
+    }
+
+    public func setGroupAnnouncement(command: V2GroupAnnouncementCommand) async throws -> V2GroupAnnouncement {
+        var request = IMV2Envelope(); request.setGroupAnnouncement = .init(); request.setGroupAnnouncement.operationID = command.operationID.rawValue; request.setGroupAnnouncement.roomID = command.roomID.rawValue; request.setGroupAnnouncement.body = command.body; request.setGroupAnnouncement.expectedRevision = command.expectedRevision
+        let response = try await requestEnvelope(request)
+        guard case .groupAnnouncementChanged(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+        guard value.roomID == command.roomID.rawValue, value.body == command.body else { throw V2RealtimeTransportError.unexpectedResponse }
+        return try .init(roomID: .init(value.roomID), body: value.body, revision: value.revision, roomSequence: value.roomSequence, updatedAt: Date(timeIntervalSince1970: TimeInterval(value.updatedAtMs) / 1_000))
+    }
+
+    public func setGroupRolePermissions(command: V2GroupRolePermissionsCommand) async throws -> V2GroupRolePermissionsChange {
+        var request = IMV2Envelope(); request.setGroupRolePermissions = .init(); request.setGroupRolePermissions.operationID = command.operationID.rawValue; request.setGroupRolePermissions.roomID = command.roomID.rawValue; request.setGroupRolePermissions.role = command.role.rawValue; request.setGroupRolePermissions.expectedRevision = command.expectedRevision; request.setGroupRolePermissions.permissions = command.permissions.sorted { $0.rawValue < $1.rawValue }.map { var item = IMV2GroupRolePermission(); item.permission = $0.rawValue; return item }
+        let response = try await requestEnvelope(request)
+        guard case .groupRolePermissionsChanged(let value)? = response.body, value.roomID == command.roomID.rawValue, value.role == command.role.rawValue else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+        let permissions = Set(value.permissions.compactMap { V2GroupPermission(rawValue: $0.permission) })
+        guard permissions.count == value.permissions.count, permissions == command.permissions else { throw V2RealtimeTransportError.unexpectedResponse }
+        return try .init(roomID: .init(value.roomID), role: command.role, permissions: permissions, revision: value.revision, roomSequence: value.roomSequence)
+    }
+
+    public func changeGroupMemberRole(command: V2GroupMemberRoleCommand) async throws -> V2GroupMemberRoleChange {
+        var request = IMV2Envelope(); request.changeGroupMemberRole = .init(); request.changeGroupMemberRole.operationID = command.operationID.rawValue; request.changeGroupMemberRole.roomID = command.roomID.rawValue; request.changeGroupMemberRole.userID = command.targetUserID.rawValue; request.changeGroupMemberRole.role = command.role.rawValue; request.changeGroupMemberRole.expectedMembershipRevision = command.expectedMembershipRevision
+        let response = try await requestEnvelope(request)
+        guard case .groupMemberRoleChanged(let value)? = response.body, value.roomID == command.roomID.rawValue, value.userID == command.targetUserID.rawValue, value.role == command.role.rawValue else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+        return try .init(roomID: .init(value.roomID), targetUserID: .init(value.userID), role: command.role, membershipRevision: value.membershipRevision, roomSequence: value.roomSequence)
+    }
+
+    public func forwardMessages(command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] {
+        var request = IMV2Envelope(); request.forwardMessages = .init(); request.forwardMessages.operationID = command.operationID.rawValue; request.forwardMessages.sourceMessageIds = command.sourceMessageIDs.map(\.rawValue); request.forwardMessages.targetRoomIds = command.targetRoomIDs.map(\.rawValue)
+        let response = try await requestEnvelope(request)
+        guard case .messagesForwarded(let body)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+        let expected = Set(command.sourceMessageIDs.flatMap { source in command.targetRoomIDs.map { source.rawValue + "|" + $0.rawValue } })
+        let results = try body.results.map { value -> V2ForwardMessageResult in
+            let source = try MessageID(value.sourceMessageID), target = try RoomID(value.targetRoomID)
+            if value.errorCode.isEmpty { guard !value.messageID.isEmpty, value.roomSequence > 0 else { throw V2RealtimeTransportError.unexpectedResponse }; return .init(sourceMessageID: source, targetRoomID: target, messageID: try .init(value.messageID), roomSequence: value.roomSequence, errorCode: nil) }
+            guard value.messageID.isEmpty, value.roomSequence == 0 else { throw V2RealtimeTransportError.unexpectedResponse }
+            return .init(sourceMessageID: source, targetRoomID: target, messageID: nil, roomSequence: nil, errorCode: value.errorCode)
+        }
+        guard Set(results.map { $0.sourceMessageID.rawValue + "|" + $0.targetRoomID.rawValue }) == expected, results.count == expected.count else { throw V2RealtimeTransportError.unexpectedResponse }
+        return results
     }
 
     public func changeMembership(roomID: RoomID, operationID: MembershipOperationID, targetUserID: UserID, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2ClientMembershipChange {
@@ -923,6 +1040,99 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
               recorded.readThroughRoomSequence > 0
         else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(recorded.roomID), userID: .init(recorded.userID), readThroughRoomSequence: recorded.readThroughRoomSequence, recordedAt: Date(timeIntervalSince1970: TimeInterval(recorded.recordedAtMs) / 1_000))
+    }
+
+    public func setReadReceiptPreferences(operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferences {
+        var request = IMV2Envelope(); request.setReadReceiptPreferences = .init()
+        request.setReadReceiptPreferences.operationID = operationID.rawValue
+        request.setReadReceiptPreferences.allowsDirectReadReceipts = allowsDirectReadReceipts
+        request.setReadReceiptPreferences.allowsGroupReadReceipts = allowsGroupReadReceipts
+        let response = try await requestEnvelope(request)
+        guard case .readReceiptPreferencesSet(let result)? = response.body, result.updatedAtMs >= 0 else {
+            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
+        }
+        return .init(allowsDirectReadReceipts: result.allowsDirectReadReceipts, allowsGroupReadReceipts: result.allowsGroupReadReceipts, updatedAt: Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000))
+    }
+
+    public func listReadReceiptReaders(roomID: RoomID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
+        guard messageRoomSequence > 0, (1 ... V2ClientReadReceiptLimits.maximumPageSize).contains(pageSize) else { throw V2RealtimeTransportError.unexpectedResponse }
+        var request = IMV2Envelope(); request.listReadReceiptReaders = .init()
+        request.listReadReceiptReaders.roomID = roomID.rawValue
+        request.listReadReceiptReaders.messageRoomSequence = messageRoomSequence
+        request.listReadReceiptReaders.cursor = cursor ?? ""
+        request.listReadReceiptReaders.pageSize = UInt32(pageSize)
+        let response = try await requestEnvelope(request)
+        guard case .readReceiptReadersPage(let page)? = response.body,
+              page.roomID == roomID.rawValue, page.messageRoomSequence == messageRoomSequence,
+              page.readerCount >= page.readers.count
+        else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+        let readers = try page.readers.map { reader -> V2ReadReceiptReader in
+            guard reader.readThroughRoomSequence >= messageRoomSequence, reader.recordedAtMs >= 0 else { throw V2RealtimeTransportError.unexpectedResponse }
+            let userID = try UserID(reader.userID)
+            let identity: V2PublicIdentity?
+            if reader.publicHandle.isEmpty && reader.displayName.isEmpty {
+                identity = nil
+            } else {
+                guard !reader.publicHandle.isEmpty, !reader.displayName.isEmpty else { throw V2RealtimeTransportError.unexpectedResponse }
+                identity = try .init(userID: userID, handle: .init(reader.publicHandle), displayName: reader.displayName)
+            }
+            return .init(userID: userID, publicIdentity: identity, readThroughRoomSequence: reader.readThroughRoomSequence, recordedAt: Date(timeIntervalSince1970: TimeInterval(reader.recordedAtMs) / 1_000))
+        }
+        return try .init(roomID: roomID, messageRoomSequence: messageRoomSequence, readerCount: Int(page.readerCount), readers: readers, nextCursor: page.nextCursor.isEmpty ? nil : page.nextCursor)
+    }
+
+    public func setLiveActivityPreferences(operationID: LiveActivityPreferenceOperationID, allowsOnlinePresence: Bool, allowsTypingIndicators: Bool) async throws -> V2LiveActivityPreferences {
+        var request = IMV2Envelope(); request.setLiveActivityPreferences = .init()
+        request.setLiveActivityPreferences.operationID = operationID.rawValue
+        request.setLiveActivityPreferences.allowsOnlinePresence = allowsOnlinePresence
+        request.setLiveActivityPreferences.allowsTypingIndicators = allowsTypingIndicators
+        let response = try await requestEnvelope(request)
+        guard case .liveActivityPreferencesSet(let result)? = response.body, result.updatedAtMs >= 0 else {
+            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
+        }
+        return .init(allowsOnlinePresence: result.allowsOnlinePresence, allowsTypingIndicators: result.allowsTypingIndicators, updatedAt: Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000))
+    }
+
+    public func liveActivityPreferences() async throws -> V2LiveActivityPreferences {
+        var request = IMV2Envelope(); request.getLiveActivityPreferences = .init()
+        let response = try await requestEnvelope(request)
+        guard case .liveActivityPreferences(let result)? = response.body, result.updatedAtMs >= 0 else {
+            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
+        }
+        return .init(allowsOnlinePresence: result.allowsOnlinePresence, allowsTypingIndicators: result.allowsTypingIndicators, updatedAt: Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000))
+    }
+
+    public func subscribePresence(roomID: RoomID) async throws -> V2PresenceState {
+        var request = IMV2Envelope(); request.subscribePresence = .init(); request.subscribePresence.roomID = roomID.rawValue
+        let response = try await requestEnvelope(request)
+        guard case .presenceSubscribed(let state)? = response.body, state.roomID == roomID.rawValue, state.expiresAtMs >= 0 else {
+            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
+        }
+        return try .init(roomID: roomID, targetUserID: .init(state.targetUserID), isOnline: state.isOnline, expiresAt: Date(timeIntervalSince1970: TimeInterval(state.expiresAtMs) / 1_000))
+    }
+
+    public func unsubscribePresence(roomID: RoomID) async throws {
+        var request = IMV2Envelope(); request.unsubscribePresence = .init(); request.unsubscribePresence.roomID = roomID.rawValue
+        let response = try await requestEnvelope(request)
+        guard case .acknowledged? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+    }
+
+    public func subscribeTyping(roomID: RoomID) async throws {
+        var request = IMV2Envelope(); request.subscribeTyping = .init(); request.subscribeTyping.roomID = roomID.rawValue
+        let response = try await requestEnvelope(request)
+        guard case .acknowledged? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+    }
+
+    public func unsubscribeTyping(roomID: RoomID) async throws {
+        var request = IMV2Envelope(); request.unsubscribeTyping = .init(); request.unsubscribeTyping.roomID = roomID.rawValue
+        let response = try await requestEnvelope(request)
+        guard case .acknowledged? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+    }
+
+    public func setTyping(roomID: RoomID, isTyping: Bool) async throws {
+        var request = IMV2Envelope(); request.setTypingState = .init(); request.setTypingState.roomID = roomID.rawValue; request.setTypingState.isTyping = isTyping
+        let response = try await requestEnvelope(request)
+        guard case .acknowledged? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
     }
 
     public func changeMessageReaction(roomID: RoomID, operationID: MessageReactionOperationID, messageID: MessageID, reaction: String, action: V2MessageReactionAction) async throws -> V2ClientMessageReactionChange {

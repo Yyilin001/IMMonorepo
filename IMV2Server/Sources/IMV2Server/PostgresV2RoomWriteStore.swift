@@ -108,18 +108,24 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            let actorIsEligible = try await sql.raw("""
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM im_v2.room_memberships
-                    WHERE room_id = \(bind: roomID)
-                      AND user_id = \(bind: senderID)
-                      AND joined_revision <= \(bind: room.membershipRevision)
-                      AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))
-                ) AS authorized
-                """).first(decoding: AuthorizationRow.self)?.authorized ?? false
-            guard actorIsEligible else {
+            guard let actor = try await sql.raw("""
+                SELECT role
+                FROM im_v2.room_memberships
+                WHERE room_id = \(bind: roomID)
+                  AND user_id = \(bind: senderID)
+                  AND joined_revision <= \(bind: room.membershipRevision)
+                  AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))
+                FOR UPDATE
+                """).first(decoding: MembershipRoleRow.self),
+                let actorRole = V2RoomMembershipRole(rawValue: actor.role)
+            else {
                 throw V2RoomWriteStoreError.actorNotEligible
+            }
+            if room.kind == "group" {
+                let configuredPermissions = try await groupPermissions(roomID: roomID, role: actorRole, sql: sql)
+                guard V2GroupPermissionDefaults.allows(role: actorRole, permission: .sendMessages, configured: configuredPermissions) else {
+                    throw V2RoomWriteStoreError.actorNotEligible
+                }
             }
             let actorIsMuted = try await sql.raw("""
                 SELECT EXISTS (
@@ -132,7 +138,27 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 throw V2RoomWriteStoreError.actorMuted
             }
             try await assertMentionsAuthorized(command.mentions, roomID: roomID, membershipRevision: room.membershipRevision, senderID: senderID, sql: sql)
-            let mediaPresentations = try await assertAvailableMedia(command.media, ownerID: senderID, now: now, sql: sql)
+            let mediaOwnerID: UUID
+            if let forwarded = command.forwardedFrom {
+                guard let sourceMessageID = UUID(uuidString: forwarded.messageID.rawValue), let sourceSenderID = UUID(uuidString: forwarded.senderUserID.rawValue),
+                      // Lock the source message, but not its room.  The
+                      // destination room is already locked above; locking a
+                      // second room here creates an A→B / B→A cycle when two
+                      // users forward in opposite directions.  A withdrawal
+                      // serializes on this message row, so the attribution
+                      // remains valid at commit without broadening the lock.
+                      let source = try await sql.raw("SELECT message.room_id, message.sender_user_id, message.text_body, message.withdrawn_at, room.membership_revision FROM im_v2.messages AS message INNER JOIN im_v2.rooms AS room ON room.room_id = message.room_id WHERE message.message_id = \(bind: sourceMessageID) FOR UPDATE OF message").first(decoding: ForwardSourceRow.self),
+                      source.senderUserID == sourceSenderID, source.withdrawnAt == nil, source.text == command.text
+                else { throw V2RoomWriteStoreError.actorNotEligible }
+                let canReadSource = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.room_memberships WHERE room_id = \(bind: source.roomID) AND user_id = \(bind: senderID) AND joined_revision <= \(bind: source.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: source.membershipRevision))) AS value").first(decoding: ForwardVisibilityRow.self)?.value ?? false
+                guard canReadSource else { throw V2RoomWriteStoreError.actorNotEligible }
+                // A forward may only reuse an attachment from the exact
+                // source message; attribution is not a general media grant.
+                let sourceMedia = try await sql.raw("SELECT media_id FROM im_v2.message_media_references WHERE message_id = \(bind: sourceMessageID) ORDER BY ordinal").all(decoding: ForwardMediaRow.self).map(\.mediaID)
+                guard sourceMedia == (try command.media.map { try uuid($0.mediaID) }) else { throw V2RoomWriteStoreError.actorNotEligible }
+                mediaOwnerID = sourceSenderID
+            } else { mediaOwnerID = senderID }
+            let mediaPresentations = try await assertAvailableMedia(command.media, ownerID: mediaOwnerID, now: now, sql: sql)
             try await assertReplyTarget(command.replyTo, roomID: roomID, sql: sql)
             // Hybrid delivery never expands @everyone. Explicit user mentions
             // are bounded by the command limit and receive a finite reliable
@@ -361,6 +387,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         let replyToMessageID = message.replyTo?.messageID.rawValue ?? ""
+        let forwardedFromMessageID = try command.forwardedFrom.map { try uuid($0.messageID) }
+        let forwardedFromUserID = try command.forwardedFrom.map { try uuid($0.senderUserID) }
         let mediaPresentationWire: [[String: Any]] = mediaPresentations.map { presentation in
             [
                 "media_id": presentation.mediaID.rawValue,
@@ -403,9 +431,9 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             """).run()
         try await sql.raw("""
             INSERT INTO im_v2.messages
-                (message_id, room_id, room_sequence, sender_user_id, client_message_id, text_body, rich_entities, reply_to_message_id, created_at)
+                (message_id, room_id, room_sequence, sender_user_id, client_message_id, text_body, rich_entities, reply_to_message_id, forwarded_from_message_id, forwarded_from_user_id, created_at)
             VALUES
-                (\(bind: messageID), \(bind: roomID), \(bind: roomSequence), \(bind: senderID), \(bind: clientMessageID), \(bind: message.text), \(bind: entitiesJSON)::jsonb, NULLIF(\(bind: replyToMessageID), '')::uuid, \(bind: message.createdAt))
+                (\(bind: messageID), \(bind: roomID), \(bind: roomSequence), \(bind: senderID), \(bind: clientMessageID), \(bind: message.text), \(bind: entitiesJSON)::jsonb, NULLIF(\(bind: replyToMessageID), '')::uuid, \(bind: forwardedFromMessageID), \(bind: forwardedFromUserID), \(bind: message.createdAt))
             """).run()
         for (ordinal, reference) in message.media.enumerated() {
             try await sql.raw("INSERT INTO im_v2.message_media_references (message_id, media_id, ordinal, referenced_at) VALUES (\(bind: messageID), \(bind: try uuid(reference.mediaID)), \(bind: ordinal), \(bind: message.createdAt))").run()
@@ -436,6 +464,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     'mentions_everyone', \(bind: message.mentions.contains(.everyone)),
                     'entities', \(bind: entitiesJSON)::jsonb,
                     'reply_to_message_id', NULLIF(\(bind: replyToMessageID), ''),
+                    'forwarded_from_message_id', NULLIF(\(bind: command.forwardedFrom?.messageID.rawValue ?? ""), ''),
+                    'forwarded_from_user_id', NULLIF(\(bind: command.forwardedFrom?.senderUserID.rawValue ?? ""), ''),
                     'message_revision', 1,
                     'server_created_at_ms', \(bind: Int64(message.createdAt.timeIntervalSince1970 * 1_000)
                  )),
@@ -504,6 +534,13 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             presentations.append(try row.presentation)
         }
         return presentations
+    }
+
+    private func groupPermissions(roomID: UUID, role: V2RoomMembershipRole, sql: any SQLDatabase) async throws -> Set<V2GroupPermission>? {
+        guard role != .owner else { return nil }
+        let rows = try await sql.raw("SELECT permission FROM im_v2.group_role_permissions WHERE room_id = \(bind: roomID) AND role = \(bind: role.rawValue)").all(decoding: GroupPermissionRow.self)
+        guard rows.allSatisfy({ V2GroupPermission(rawValue: $0.permission) != nil }) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        return Set(rows.compactMap { V2GroupPermission(rawValue: $0.permission) })
     }
 
     private func assertMentionsAuthorized(_ mentions: [V2MentionTarget], roomID: UUID, membershipRevision: Int64, senderID: UUID, sql: any SQLDatabase) async throws {
@@ -741,6 +778,8 @@ private struct MessageRow: Decodable {
     }
 }
 
+private struct MembershipRoleRow: Decodable { let role: String }
+private struct GroupPermissionRow: Decodable { let permission: String }
 private struct AuthorizationRow: Decodable { let authorized: Bool }
 private struct MuteAuthorizationRow: Decodable { let muted: Bool }
 private struct DirectRoomPairRow: Decodable {
@@ -793,6 +832,9 @@ private struct MessageMediaPresentationRow: Decodable {
     }
 }
 private struct MentionSenderMembershipRow: Decodable { let role: String }
+private struct ForwardSourceRow: Decodable { let roomID: UUID; let senderUserID: UUID; let text: String; let withdrawnAt: Date?; let membershipRevision: Int64; enum CodingKeys: String, CodingKey { case roomID = "room_id", senderUserID = "sender_user_id", text = "text_body", withdrawnAt = "withdrawn_at", membershipRevision = "membership_revision" } }
+private struct ForwardMediaRow: Decodable { let mediaID: UUID; enum CodingKeys: String, CodingKey { case mediaID = "media_id" } }
+private struct ForwardVisibilityRow: Decodable { let value: Bool }
 private struct MentionMembershipRow: Decodable { let userID: UUID; let mentionable: Bool; enum CodingKeys: String, CodingKey { case userID = "user_id", mentionable } }
 private struct MentionRow: Decodable {
     let kind: String; let userID: UUID?

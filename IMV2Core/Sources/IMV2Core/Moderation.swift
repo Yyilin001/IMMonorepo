@@ -66,7 +66,7 @@ public struct V2ModerationCommand: Equatable, Sendable {
 /// authenticated server-to-server/admin APIs and cannot be impersonated by a
 /// gateway connection.
 public enum V2ModerationAuthorization {
-    public static func authorize(actorRole: V2RoomMembershipRole, action: V2ModerationAction, now: Date, command: V2ModerationCommand) throws {
+    public static func authorize(actorRole: V2RoomMembershipRole, configuredPermissions: Set<V2GroupPermission>? = nil, action: V2ModerationAction, now: Date, command: V2ModerationCommand) throws {
         // A member-authenticated gateway connection never represents the
         // separately authenticated safety-service authority. Freeze/unfreeze
         // therefore cannot accidentally be granted to an owner or admin by
@@ -74,7 +74,15 @@ public enum V2ModerationAuthorization {
         guard action != .freezeRoom, action != .unfreezeRoom else {
             throw V2ModerationAuthorizationError.notAuthorized
         }
-        guard actorRole == .owner || actorRole == .admin else { throw V2ModerationAuthorizationError.notAuthorized }
+        let required: V2GroupPermission = switch action {
+        case .redactMessage: .moderateMessages
+        case .removeMember: .removeMembers
+        case .muteMember: .muteMembers
+        case .freezeRoom, .unfreezeRoom: preconditionFailure("trusted actions are rejected above")
+        }
+        guard V2GroupPermissionDefaults.allows(role: actorRole, permission: required, configured: configuredPermissions) else {
+            throw V2ModerationAuthorizationError.notAuthorized
+        }
         if action == .muteMember {
             guard let muteUntil = command.muteUntil, muteUntil > now else { throw V2ModerationValidationError.invalidMuteExpiry }
         }

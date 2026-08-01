@@ -17,10 +17,11 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
     public let mentions: [V2MentionTarget]
     public let entities: [V2MessageEntity]
     public let replyTo: V2MessageReplyReference?
+    public let forwardedFrom: V2ForwardedMessageAttribution?
     public let createdAt: Date
     public let isWithdrawn: Bool
 
-    public init(sourceEventID: EventID, messageID: MessageID, roomID: RoomID, roomSequence: UInt64, messageRevision: UInt64 = 1, senderUserID: UserID, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date, isWithdrawn: Bool = false) {
+    public init(sourceEventID: EventID, messageID: MessageID, roomID: RoomID, roomSequence: UInt64, messageRevision: UInt64 = 1, senderUserID: UserID, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, forwardedFrom: V2ForwardedMessageAttribution? = nil, createdAt: Date, isWithdrawn: Bool = false) {
         self.sourceEventID = sourceEventID
         self.messageID = messageID
         self.roomID = roomID
@@ -38,6 +39,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
         precondition((try? V2RichMessageContent.validate(text: text, entities: entities)) != nil)
         self.entities = entities
         self.replyTo = replyTo
+        self.forwardedFrom = forwardedFrom
         self.createdAt = createdAt
         self.isWithdrawn = isWithdrawn
     }
@@ -56,6 +58,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
             mentions: snapshotProjection.mentions,
             entities: snapshotProjection.entities,
             replyTo: snapshotProjection.replyTo,
+            forwardedFrom: snapshotProjection.forwardedFrom,
             createdAt: snapshotProjection.createdAt,
             isWithdrawn: snapshotProjection.isWithdrawn
         )
@@ -77,12 +80,23 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
                 + ((payload.mentionsEveryone ?? false) ? [.everyone] : [])
             let entities = payload.entities ?? []
             let replyTo = try payload.replyToMessageID.map { V2MessageReplyReference(messageID: try .init($0)) }
+            let forwardedFrom: V2ForwardedMessageAttribution?
+            switch (payload.forwardedFromMessageID, payload.forwardedFromUserID) {
+            case (nil, nil), (.some(""), .some("")):
+                // Pre-v18 accepted-message events encoded an absent attribution
+                // as two empty strings. Keep them replayable during rollout.
+                forwardedFrom = nil
+            case let (.some(messageID), .some(userID)) where !messageID.isEmpty && !userID.isEmpty:
+                forwardedFrom = try .init(messageID: .init(messageID), senderUserID: .init(userID))
+            default:
+                throw V2ClientProjectionError.invalidMessagePayload
+            }
             guard Set(media).count == media.count, media.count <= V2MessageCommandLimits.maxMediaAttachments,
                   (mediaPresentations.isEmpty || mediaPresentations.map(\.mediaID) == media.map(\.mediaID)),
                   Set(mentions).count == mentions.count, mentions.count <= V2MessageCommandLimits.maxMentions
             else { throw V2ClientProjectionError.invalidMessagePayload }
             try V2RichMessageContent.validate(text: payload.text, entities: entities)
-            self.init(sourceEventID: record.sourceEventID, messageID: try .init(payload.messageID), roomID: try .init(payload.roomID), roomSequence: payload.roomSequence, messageRevision: payload.messageRevision, senderUserID: try .init(payload.senderUserID), text: payload.text, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, createdAt: Date(timeIntervalSince1970: TimeInterval(payload.serverCreatedAtMilliseconds) / 1_000))
+            self.init(sourceEventID: record.sourceEventID, messageID: try .init(payload.messageID), roomID: try .init(payload.roomID), roomSequence: payload.roomSequence, messageRevision: payload.messageRevision, senderUserID: try .init(payload.senderUserID), text: payload.text, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, forwardedFrom: forwardedFrom, createdAt: Date(timeIntervalSince1970: TimeInterval(payload.serverCreatedAtMilliseconds) / 1_000))
         } catch { throw V2ClientProjectionError.invalidMessagePayload }
     }
 
@@ -100,6 +114,8 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
         let mentionsEveryone: Bool?
         let entities: [V2MessageEntity]?
         let replyToMessageID: String?
+        let forwardedFromMessageID: String?
+        let forwardedFromUserID: String?
         let serverCreatedAtMilliseconds: Int64
         enum CodingKeys: String, CodingKey {
             case eventType = "event_type"
@@ -115,6 +131,8 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
             case mentionsEveryone = "mentions_everyone"
             case entities
             case replyToMessageID = "reply_to_message_id"
+            case forwardedFromMessageID = "forwarded_from_message_id"
+            case forwardedFromUserID = "forwarded_from_user_id"
             case serverCreatedAtMilliseconds = "server_created_at_ms"
         }
 

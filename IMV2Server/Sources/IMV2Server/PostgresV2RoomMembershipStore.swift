@@ -57,11 +57,11 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
                 """).first(decoding: MembershipTargetRow.self),
                 let actorRole = V2RoomMembershipRole(rawValue: actor.role)
             else { throw V2RoomMembershipStoreError.actorNotOwner }
-            switch command.action {
-            case .add:
-                guard actorRole == .owner else { throw V2RoomMembershipStoreError.actorNotOwner }
-            case .remove:
-                guard actorRole == .owner || actorRole == .admin else { throw V2RoomMembershipStoreError.actorNotOwner }
+            let requiredPermission: V2GroupPermission = command.action == .add ? .inviteMembers : .removeMembers
+            if actorRole != .owner {
+                let configured = try await sql.raw("SELECT permission FROM im_v2.group_role_permissions WHERE room_id = \(bind: roomID) AND role = \(bind: actorRole.rawValue)").all(decoding: MembershipPermissionRow.self)
+                let permissions = Set(configured.compactMap { V2GroupPermission(rawValue: $0.permission) })
+                guard V2GroupPermissionDefaults.allows(role: actorRole, permission: requiredPermission, configured: permissions) else { throw V2RoomMembershipStoreError.actorNotOwner }
             }
             let currentTargets = try await sql.raw("""
                 SELECT user_id, role FROM im_v2.room_memberships
@@ -219,6 +219,7 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
 private struct MembershipRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let deliveryMode: V2GroupDeliveryMode; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", deliveryMode = "delivery_mode" } }
 private struct MembershipGroupRow: Decodable { let ownerUserID: UUID; let title: String; let createdAt: Date; enum CodingKeys: String, CodingKey { case ownerUserID = "owner_user_id", title, createdAt = "created_at" } }
 private struct MembershipTargetRow: Decodable { let userID: UUID; let role: String; enum CodingKeys: String, CodingKey { case userID = "user_id", role } }
+private struct MembershipPermissionRow: Decodable { let permission: String }
 private struct MembershipBooleanRow: Decodable { let value: Bool }
 private struct MembershipOperationRow: Decodable {
     let roomID: UUID; let targetUserID: UUID; let action: String; let expectedMembershipRevision: Int64; let resultingMembershipRevision: Int64; let roomSequence: Int64; let eventID: UUID; let planID: UUID; let createdAt: Date

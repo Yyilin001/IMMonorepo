@@ -441,6 +441,7 @@ private extension PostgresV2FanoutPlanStore {
         case "membership_changed": return "membership"
         case "member.muted", "room.frozen", "room.unfrozen": return "moderation"
         case "room.created": return "room"
+        case "message.pinned_changed", "group.announcement_changed", "group.role_permissions_changed", "group.member_role_changed": return "group_capability"
         default: return "message"
         }
     }

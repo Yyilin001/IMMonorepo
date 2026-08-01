@@ -82,4 +82,30 @@ struct V2ProtobufFrameCodecTests {
         #expect(frame.command == .syncAvailable)
         #expect(try V2ProtobufFrameCodec.decode(frame) == envelope)
     }
+
+    @Test("live activity frames preserve request correlation and server-push semantics")
+    func roundTripsLiveActivityFrames() throws {
+        var preference = IMV2Envelope()
+        preference.requestID = 17
+        preference.protocolVersion = IMV2ProtocolVersion.current
+        preference.setLiveActivityPreferences = .init()
+        preference.setLiveActivityPreferences.operationID = "00000000-0000-0000-0000-000000000017"
+        preference.setLiveActivityPreferences.allowsOnlinePresence = false
+        preference.setLiveActivityPreferences.allowsTypingIndicators = true
+        let preferenceFrame = try V2ProtobufFrameCodec.encode(preference, frameVersion: UInt8(IMV2ProtocolVersion.current))
+        #expect(preferenceFrame.command == .setLiveActivityPreferences)
+        #expect(try V2ProtobufFrameCodec.decode(preferenceFrame) == preference)
+
+        var presence = IMV2Envelope()
+        presence.requestID = 0
+        presence.protocolVersion = IMV2ProtocolVersion.current
+        presence.presenceChanged = .init()
+        presence.presenceChanged.roomID = "00000000-0000-0000-0000-000000000018"
+        presence.presenceChanged.targetUserID = "00000000-0000-0000-0000-000000000019"
+        presence.presenceChanged.isOnline = true
+        presence.presenceChanged.expiresAtMs = 1_750_000_000_000
+        let presenceFrame = try V2ProtobufFrameCodec.encode(presence, frameVersion: UInt8(IMV2ProtocolVersion.current))
+        #expect(presenceFrame.command == .presenceChanged)
+        #expect(try V2ProtobufFrameCodec.decode(presenceFrame) == presence)
+    }
 }

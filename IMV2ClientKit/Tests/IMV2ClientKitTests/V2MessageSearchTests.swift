@@ -82,6 +82,26 @@ struct V2MessageSearchTests {
         #expect(try await store.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.isEmpty)
     }
 
+    @Test("media and sender filters can be combined without a text query")
+    func mediaAndMemberFilters() async throws {
+        let store = try makeStore()
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000d01")
+        let imageSender = try UserID("00000000-0000-0000-0000-000000000d02")
+        let fileSender = try UserID("00000000-0000-0000-0000-000000000d03")
+        let imageMessage = try MessageID("00000000-0000-0000-0000-000000000d11")
+        let fileMessage = try MessageID("00000000-0000-0000-0000-000000000d12")
+        try await apply(store, records: [
+            mediaRecord(sequence: 1, sourceEvent: "00000000-0000-0000-0000-000000000d21", roomID: roomID, senderID: imageSender, messageID: imageMessage, roomSequence: 1, mediaID: "00000000-0000-0000-0000-000000000d31", kind: "image"),
+            mediaRecord(sequence: 2, sourceEvent: "00000000-0000-0000-0000-000000000d22", roomID: roomID, senderID: fileSender, messageID: fileMessage, roomSequence: 2, mediaID: "00000000-0000-0000-0000-000000000d32", kind: "file")
+        ], token: "search-token-media")
+        try await store.rebuildMessageSearchIndex()
+
+        let images = try await store.searchMessages(.init(query: "", scope: .room(roomID), contentFilter: .image))
+        #expect(images.hits.map(\.messageID) == [imageMessage])
+        let senderFiles = try await store.searchMessages(.init(query: "", scope: .room(roomID), contentFilter: .media, senderUserID: fileSender))
+        #expect(senderFiles.hits.map(\.messageID) == [fileMessage])
+    }
+
     @Test("snapshot commit atomically replaces the FTS projection")
     func snapshotCommitReplacesTheSearchIndex() async throws {
         let store = try makeStore()
@@ -178,6 +198,26 @@ struct V2MessageSearchTests {
                 "message_id": messageID.rawValue,
                 "message_revision": revision,
                 "text": text
+            ])
+        )
+    }
+
+    private func mediaRecord(sequence: UInt64, sourceEvent: String, roomID: RoomID, senderID: UserID, messageID: MessageID, roomSequence: UInt64, mediaID: String, kind: String) throws -> V2ClientSyncRecord {
+        try .init(
+            sequence: sequence,
+            sourceEventID: .init(sourceEvent),
+            projectionKind: "message",
+            payload: try JSONSerialization.data(withJSONObject: [
+                "event_type": "message.accepted",
+                "message_id": messageID.rawValue,
+                "room_id": roomID.rawValue,
+                "room_sequence": roomSequence,
+                "message_revision": 1,
+                "sender_user_id": senderID.rawValue,
+                "text": "",
+                "media_ids": [mediaID],
+                "media_presentations": [["media_id": mediaID, "kind": kind, "content_type": "application/octet-stream", "byte_count": 1]],
+                "server_created_at_ms": Int64(1_750_000_000_000 + Int64(sequence))
             ])
         )
     }

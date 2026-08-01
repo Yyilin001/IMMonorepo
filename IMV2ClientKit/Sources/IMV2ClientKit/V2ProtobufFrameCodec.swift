@@ -109,6 +109,36 @@ public enum V2ProtobufFrameCodec {
         case .strangerMessagePermissionSet?: return .strangerMessagePermissionSet
         case .setUserAddPermission?: return .setUserAddPermission
         case .userAddPermissionSet?: return .userAddPermissionSet
+        case .setReadReceiptPreferences?: return .setReadReceiptPreferences
+        case .readReceiptPreferencesSet?: return .readReceiptPreferencesSet
+        case .listReadReceiptReaders?: return .listReadReceiptReaders
+        case .readReceiptReadersPage?: return .readReceiptReadersPage
+        case .setLiveActivityPreferences?: return .setLiveActivityPreferences
+        case .liveActivityPreferencesSet?: return .liveActivityPreferencesSet
+        case .subscribePresence?: return .subscribePresence
+        case .presenceSubscribed?: return .presenceSubscribed
+        case .unsubscribePresence?: return .unsubscribePresence
+        case .subscribeTyping?: return .subscribeTyping
+        case .unsubscribeTyping?: return .unsubscribeTyping
+        case .setTypingState?: return .setTypingState
+        case .typingStateChanged?: return .typingStateChanged
+        case .presenceChanged?: return .presenceChanged
+        case .getLiveActivityPreferences?: return .getLiveActivityPreferences
+        case .liveActivityPreferences?: return .liveActivityPreferences
+        case .setConversationState?: return .setConversationState
+        case .conversationStateSet?: return .conversationStateSet
+        case .setMessageFavorite?: return .setMessageFavorite
+        case .messageFavoriteChanged?: return .messageFavoriteChanged
+        case .setPinnedMessage?: return .setPinnedMessage
+        case .pinnedMessageChanged?: return .pinnedMessageChanged
+        case .setGroupAnnouncement?: return .setGroupAnnouncement
+        case .groupAnnouncementChanged?: return .groupAnnouncementChanged
+        case .setGroupRolePermissions?: return .setGroupRolePermissions
+        case .groupRolePermissionsChanged?: return .groupRolePermissionsChanged
+        case .changeGroupMemberRole?: return .changeGroupMemberRole
+        case .groupMemberRoleChanged?: return .groupMemberRoleChanged
+        case .forwardMessages?: return .forwardMessages
+        case .messagesForwarded?: return .messagesForwarded
         case .changeRelationship?: return .changeRelationship
         case .relationshipChanged?: return .relationshipChanged
         case .changeUserBlock?: return .changeUserBlock

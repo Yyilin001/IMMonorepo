@@ -43,6 +43,20 @@ struct ModerationTests {
         }
     }
 
+    @Test("configured group capability can narrow an administrator without narrowing the owner")
+    func configuredCapabilities() throws {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let reason = try V2ModerationReasonCode("policy")
+        let command = try V2ModerationCommand(
+            roomID: roomID, actorUserID: actorID, operationID: operationID,
+            action: .redactMessage, messageID: .init("00000000-0000-0000-0000-000000000805"), reasonCode: reason
+        )
+        #expect(throws: V2ModerationAuthorizationError.notAuthorized) {
+            try V2ModerationAuthorization.authorize(actorRole: .admin, configuredPermissions: [.sendMessages], action: command.action, now: now, command: command)
+        }
+        try V2ModerationAuthorization.authorize(actorRole: .owner, configuredPermissions: [], action: command.action, now: now, command: command)
+    }
+
     @Test("reason codes are bounded opaque labels")
     func reasonCodeIsPrivacySafe() {
         #expect(throws: V2ModerationValidationError.invalidReasonCode) { try V2ModerationReasonCode("free form reason leaks content") }

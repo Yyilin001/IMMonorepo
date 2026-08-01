@@ -11,6 +11,7 @@ protocol V2StrangerMessagePreferenceReading: Sendable {
 protocol V2UserAddPreferenceReading: Sendable {
     func userAddPreference() async throws -> Bool?
 }
+protocol V2ReadReceiptPreferenceReading: Sendable { func readReceiptPreference() async throws -> V2ReadReceiptPreferences? }
 
 @MainActor
 @Observable
@@ -95,6 +96,11 @@ actor V2GRDBUserAddPreferenceDataSource: V2UserAddPreferenceReading {
         try await localStore.userAddPreference()?.allowsBeingAdded
     }
 }
+actor V2GRDBReadReceiptPreferenceDataSource: V2ReadReceiptPreferenceReading {
+    private let localStore: GRDBV2LocalSyncStore
+    init(localStore: GRDBV2LocalSyncStore) { self.localStore = localStore }
+    func readReceiptPreference() async throws -> V2ReadReceiptPreferences? { try await localStore.readReceiptPreference() }
+}
 
 @MainActor
 @Observable
@@ -109,9 +115,17 @@ final class V2PrivacySettingsStore {
     private let updater: any V2StrangerMessagePreferenceUpdating
     private let userAddReader: (any V2UserAddPreferenceReading)?
     private let userAddUpdater: (any V2UserAddPreferenceUpdating)?
+    private let readReceiptUpdater: (any V2ReadReceiptPreferenceUpdating)?
+    private let readReceiptReader: (any V2ReadReceiptPreferenceReading)?
+    private let liveActivityUpdater: (any V2LiveActivityPreferenceUpdating)?
+    private let liveActivityReader: (any V2LiveActivityPreferenceReading)?
     private(set) var state: State = .loading
     private(set) var allowsStrangerMessages = true
     private(set) var allowsBeingAdded = true
+    private(set) var allowsDirectReadReceipts = true
+    private(set) var allowsGroupReadReceipts = true
+    private(set) var allowsOnlinePresence = true
+    private(set) var allowsTypingIndicators = true
     private(set) var isSaving = false
     private(set) var feedback: String?
     private var refreshGeneration = 0
@@ -120,12 +134,20 @@ final class V2PrivacySettingsStore {
         reader: any V2StrangerMessagePreferenceReading,
         updater: any V2StrangerMessagePreferenceUpdating,
         userAddReader: (any V2UserAddPreferenceReading)? = nil,
-        userAddUpdater: (any V2UserAddPreferenceUpdating)? = nil
+        userAddUpdater: (any V2UserAddPreferenceUpdating)? = nil,
+        readReceiptUpdater: (any V2ReadReceiptPreferenceUpdating)? = nil,
+        readReceiptReader: (any V2ReadReceiptPreferenceReading)? = nil,
+        liveActivityUpdater: (any V2LiveActivityPreferenceUpdating)? = nil,
+        liveActivityReader: (any V2LiveActivityPreferenceReading)? = nil
     ) {
         self.reader = reader
         self.updater = updater
         self.userAddReader = userAddReader
         self.userAddUpdater = userAddUpdater
+        self.readReceiptUpdater = readReceiptUpdater
+        self.readReceiptReader = readReceiptReader
+        self.liveActivityUpdater = liveActivityUpdater
+        self.liveActivityReader = liveActivityReader
     }
 
     func refresh() async {
@@ -137,10 +159,16 @@ final class V2PrivacySettingsStore {
             // not yet received a projection, not that the preference is deny.
             let refreshedPreference = try await reader.strangerMessagePreference() ?? true
             let refreshedUserAddPreference = try await userAddReader?.userAddPreference() ?? true
+            let receiptPreference = try await readReceiptReader?.readReceiptPreference()
+            let liveActivityPreference = try await liveActivityReader?.preferences()
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
             allowsStrangerMessages = refreshedPreference
             allowsBeingAdded = refreshedUserAddPreference
+            allowsDirectReadReceipts = receiptPreference?.allowsDirectReadReceipts ?? true
+            allowsGroupReadReceipts = receiptPreference?.allowsGroupReadReceipts ?? true
+            allowsOnlinePresence = liveActivityPreference?.allowsOnlinePresence ?? true
+            allowsTypingIndicators = liveActivityPreference?.allowsTypingIndicators ?? true
             state = .loaded
         } catch is CancellationError {
             return
@@ -199,6 +227,56 @@ final class V2PrivacySettingsStore {
             feedback = "无法保存设置，请稍后重试。"
         }
     }
+
+    func setReadReceiptPermission(direct: Bool? = nil, group: Bool? = nil) async {
+        let desiredDirect = direct ?? allowsDirectReadReceipts
+        let desiredGroup = group ?? allowsGroupReadReceipts
+        guard !isSaving, (desiredDirect != allowsDirectReadReceipts || desiredGroup != allowsGroupReadReceipts), let readReceiptUpdater else { return }
+        isSaving = true; feedback = nil; defer { isSaving = false }
+        do {
+            switch try await readReceiptUpdater.update(allowsDirectReadReceipts: desiredDirect, allowsGroupReadReceipts: desiredGroup) {
+            case .accepted:
+                allowsDirectReadReceipts = desiredDirect; allowsGroupReadReceipts = desiredGroup
+                feedback = "已更新已读回执设置。"
+            case .queuedForRetry:
+                allowsDirectReadReceipts = desiredDirect; allowsGroupReadReceipts = desiredGroup
+                feedback = "已保存已读回执设置，连接恢复后会同步。"
+            case .rejected:
+                feedback = "无法保存设置，请稍后重试。"
+            }
+        } catch is CancellationError { return }
+        catch { feedback = "连接恢复后请重试保存已读回执设置。" }
+    }
+
+    func setLiveActivityPermission(online: Bool? = nil, typing: Bool? = nil) async {
+        let desiredOnline = online ?? allowsOnlinePresence
+        let desiredTyping = typing ?? allowsTypingIndicators
+        guard !isSaving,
+              desiredOnline != allowsOnlinePresence || desiredTyping != allowsTypingIndicators,
+              let liveActivityUpdater
+        else { return }
+
+        isSaving = true
+        feedback = nil
+        defer { isSaving = false }
+        do {
+            switch try await liveActivityUpdater.update(
+                allowsOnlinePresence: desiredOnline,
+                allowsTypingIndicators: desiredTyping
+            ) {
+            case .accepted:
+                allowsOnlinePresence = desiredOnline
+                allowsTypingIndicators = desiredTyping
+                feedback = "已更新在线与输入状态设置。"
+            case .rejected(let code):
+                feedback = "设置被拒绝（\(code)）。"
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            feedback = "无法保存在线与输入状态设置，请稍后重试。"
+        }
+    }
 }
 
 struct V2PrivacySettingsView: View {
@@ -249,6 +327,33 @@ struct V2PrivacySettingsView: View {
                     .disabled(store.isSaving)
                     .accessibilityIdentifier("v2.privacy.allow-being-added")
                     Text("关闭后，新的添加请求会被拒绝；已有好友和待处理请求不受影响。")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                }
+                Section("已读回执") {
+                    Toggle("在单聊中共享已读状态", isOn: Binding(get: { store.allowsDirectReadReceipts }, set: { value in run { await store.setReadReceiptPermission(direct: value) } }))
+                        .disabled(store.isSaving)
+                        .accessibilityIdentifier("v2.privacy.share-direct-read-receipts")
+                    Toggle("在群聊中共享已读状态", isOn: Binding(get: { store.allowsGroupReadReceipts }, set: { value in run { await store.setReadReceiptPermission(group: value) } }))
+                        .disabled(store.isSaving)
+                        .accessibilityIdentifier("v2.privacy.share-group-read-receipts")
+                    Text("关闭单聊共享后，双方都不会看到彼此的已读状态；群聊已读详情仅在需要时查询。")
+                        .font(.body).foregroundStyle(.secondary)
+                }
+                Section("在线与输入状态") {
+                    Toggle("允许他人查看我的在线状态", isOn: Binding(
+                        get: { store.allowsOnlinePresence },
+                        set: { value in run { await store.setLiveActivityPermission(online: value) } }
+                    ))
+                    .disabled(store.isSaving)
+                    .accessibilityIdentifier("v2.privacy.share-online-presence")
+                    Toggle("允许他人查看我正在输入", isOn: Binding(
+                        get: { store.allowsTypingIndicators },
+                        set: { value in run { await store.setLiveActivityPermission(typing: value) } }
+                    ))
+                    .disabled(store.isSaving)
+                    .accessibilityIdentifier("v2.privacy.share-typing-indicators")
+                    Text("关闭后，不再向会话成员共享你的在线状态或正在输入提示；这些状态不会写入聊天记录。")
                         .font(.body)
                         .foregroundStyle(.secondary)
                 }

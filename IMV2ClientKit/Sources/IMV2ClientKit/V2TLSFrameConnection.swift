@@ -75,6 +75,17 @@ public protocol V2GroupEventAvailabilityHintSource: Sendable {
     func nextGroupEventAvailabilityHint() async throws -> V2GroupEventAvailabilityHint
 }
 
+public enum V2LiveActivityEvent: Equatable, Sendable {
+    case presence(V2PresenceState)
+    case typing(V2TypingState)
+}
+
+/// A foreground conversation owns the single consumer. Activity events are
+/// lossy leases, never a substitute for durable message synchronization.
+public protocol V2LiveActivityEventSource: Sendable {
+    func nextLiveActivityEvent() async throws -> V2LiveActivityEvent
+}
+
 /// Narrow connection lifecycle boundary used by the app-facing coordinator.
 /// It keeps session/keychain policy out of Network.framework and lets tests
 /// verify handshake identity handling without opening a local socket.
@@ -100,7 +111,7 @@ public protocol V2RealtimeSessionConnecting: Sendable {
 /// reaches `.ready`. Requests are serialized by this actor, matching the
 /// SyncEngine's deterministic apply/ACK behavior.
 #if canImport(Network) && canImport(Security)
-public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2RealtimeConnection {
+public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2LiveActivityEventSource, V2RealtimeConnection {
     private let endpoint: V2RealtimeEndpoint
     private let limits: V2FrameLimits
     private let maximumProtobufMessageDepth: Int
@@ -114,6 +125,8 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     private var pendingAvailabilityHint: V2SyncAvailabilityHint?
     private var groupEventAvailabilityWaiter: CheckedContinuation<V2GroupEventAvailabilityHint, Error>?
     private var pendingGroupEventAvailabilityHint: V2GroupEventAvailabilityHint?
+    private var liveActivityWaiter: CheckedContinuation<V2LiveActivityEvent, Error>?
+    private var pendingLiveActivityEvents: [V2LiveActivityEvent] = []
     private var readerTask: Task<Void, Never>?
 
     public init(
@@ -190,6 +203,22 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             }
         }, onCancel: {
             Task { await self.cancelAvailabilityWait() }
+        })
+    }
+
+    public func nextLiveActivityEvent() async throws -> V2LiveActivityEvent {
+        guard authenticatedVersion != nil, connection != nil else { throw V2TLSFrameConnectionError.notConnected }
+        if !pendingLiveActivityEvents.isEmpty { return pendingLiveActivityEvents.removeFirst() }
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                guard liveActivityWaiter == nil else {
+                    continuation.resume(throwing: V2TLSFrameConnectionError.concurrentAvailabilityConsumer)
+                    return
+                }
+                liveActivityWaiter = continuation
+            }
+        }, onCancel: {
+            Task { await self.cancelLiveActivityWait() }
         })
     }
 
@@ -404,6 +433,12 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                 } else if pendingGroupEventAvailabilityHint == nil || value.highWatermark >= pendingGroupEventAvailabilityHint!.highWatermark {
                     pendingGroupEventAvailabilityHint = value
                 }
+            case .presenceChanged(let state):
+                let value = try V2LiveActivityEvent.presence(.init(roomID: .init(state.roomID), targetUserID: .init(state.targetUserID), isOnline: state.isOnline, expiresAt: Date(timeIntervalSince1970: TimeInterval(state.expiresAtMs) / 1_000)))
+                acceptLiveActivityEvent(value)
+            case .typingStateChanged(let state):
+                let value = try V2LiveActivityEvent.typing(.init(roomID: .init(state.roomID), userID: .init(state.userID), isTyping: state.isTyping, expiresAt: Date(timeIntervalSince1970: TimeInterval(state.expiresAtMs) / 1_000)))
+                acceptLiveActivityEvent(value)
             default:
                 throw V2TLSFrameConnectionError.unexpectedResponse
             }
@@ -438,6 +473,21 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         groupEventAvailabilityWaiter = nil
     }
 
+    private func cancelLiveActivityWait() {
+        liveActivityWaiter?.resume(throwing: CancellationError())
+        liveActivityWaiter = nil
+    }
+
+    private func acceptLiveActivityEvent(_ event: V2LiveActivityEvent) {
+        if let liveActivityWaiter {
+            self.liveActivityWaiter = nil
+            liveActivityWaiter.resume(returning: event)
+        } else {
+            pendingLiveActivityEvents.append(event)
+            if pendingLiveActivityEvents.count > 16 { pendingLiveActivityEvents.removeFirst(pendingLiveActivityEvents.count - 16) }
+        }
+    }
+
     private func closeTransport(error: Error) {
         readerTask?.cancel()
         readerTask = nil
@@ -455,6 +505,9 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         groupEventAvailabilityWaiter?.resume(throwing: error)
         groupEventAvailabilityWaiter = nil
         pendingGroupEventAvailabilityHint = nil
+        liveActivityWaiter?.resume(throwing: error)
+        liveActivityWaiter = nil
+        pendingLiveActivityEvents.removeAll(keepingCapacity: false)
     }
 
     private func nextFrame(connection: NWConnection) async throws -> V2Frame {

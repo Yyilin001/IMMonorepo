@@ -131,6 +131,28 @@ public actor V2GatewayByteStream {
         outboundWriter(bytes)
     }
 
+    public func sendPresenceState(_ state: V2PresenceState) async {
+        guard let version = await session.authenticatedProtocolVersion(), let outboundWriter else { return }
+        var envelope = IMV2Envelope(); envelope.requestID = 0; envelope.protocolVersion = UInt32(version); envelope.presenceChanged = .init()
+        envelope.presenceChanged.roomID = state.roomID.rawValue
+        envelope.presenceChanged.targetUserID = state.targetUserID.rawValue
+        envelope.presenceChanged.isOnline = state.isOnline
+        envelope.presenceChanged.expiresAtMs = Int64(state.expiresAt.timeIntervalSince1970 * 1_000)
+        guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return }
+        outboundWriter(bytes)
+    }
+
+    public func sendTypingState(_ state: V2TypingState) async {
+        guard let version = await session.authenticatedProtocolVersion(), let outboundWriter else { return }
+        var envelope = IMV2Envelope(); envelope.requestID = 0; envelope.protocolVersion = UInt32(version); envelope.typingStateChanged = .init()
+        envelope.typingStateChanged.roomID = state.roomID.rawValue
+        envelope.typingStateChanged.userID = state.userID.rawValue
+        envelope.typingStateChanged.isTyping = state.isTyping
+        envelope.typingStateChanged.expiresAtMs = Int64(state.expiresAt.timeIntervalSince1970 * 1_000)
+        guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return }
+        outboundWriter(bytes)
+    }
+
     private func registerAuthenticatedDeviceIfNeeded() async throws {
         guard registeredIdentity == nil, let registry, let identity = await session.authenticatedIdentity() else { return }
         registeredIdentity = identity
@@ -146,6 +168,14 @@ public actor V2GatewayByteStream {
     private func updateHybridGroupSubscription(inbound: IMV2Envelope, response: V2Frame) async throws {
         guard let registry else { return }
         switch inbound.body {
+        case .setLiveActivityPreferences:
+            let responseEnvelope = try V2ServerProtobufFrameCodec.decode(response)
+            guard case .liveActivityPreferencesSet(let updated)? = responseEnvelope.body
+            else { return }
+            await registry.applyLiveActivityPreferences(
+                connectionID: connectionID,
+                allowsOnlinePresence: updated.allowsOnlinePresence
+            )
         case .groupEventSubscribe(let request):
             let responseEnvelope = try V2ServerProtobufFrameCodec.decode(response)
             guard case .groupEventSubscribed(let subscribed)? = responseEnvelope.body,
@@ -154,6 +184,26 @@ public actor V2GatewayByteStream {
             await registry.subscribeForegroundGroup(self, connectionID: connectionID, roomID: try .init(request.roomID))
         case .groupEventUnsubscribe(let request):
             await registry.unsubscribeForegroundGroup(connectionID: connectionID, roomID: try .init(request.roomID))
+        case .subscribePresence(let request):
+            let responseEnvelope = try V2ServerProtobufFrameCodec.decode(response)
+            guard case .presenceSubscribed(let subscribed)? = responseEnvelope.body,
+                  subscribed.roomID == request.roomID,
+                  let roomID = try? RoomID(request.roomID), let targetUserID = try? UserID(subscribed.targetUserID)
+            else { return }
+            await registry.subscribePresence(self, connectionID: connectionID, roomID: roomID, targetUserID: targetUserID)
+        case .unsubscribePresence(let request):
+            await registry.unsubscribePresence(connectionID: connectionID, roomID: try .init(request.roomID))
+        case .subscribeTyping(let request):
+            await registry.subscribeTyping(self, connectionID: connectionID, roomID: try .init(request.roomID))
+        case .unsubscribeTyping(let request):
+            await registry.unsubscribeTyping(connectionID: connectionID, roomID: try .init(request.roomID))
+        case .setTypingState(let request):
+            guard case .acknowledged? = try V2ServerProtobufFrameCodec.decode(response).body,
+                  let identity = registeredIdentity
+            else { return }
+            await registry.notifyTyping(roomID: try .init(request.roomID), actorUserID: identity.userID, isTyping: request.isTyping, expiresAt: request.isTyping ? Date().addingTimeInterval(6) : Date())
+        case .heartbeat:
+            await registry.refreshLivePresence(connectionID: connectionID)
         default:
             return
         }

@@ -4,7 +4,7 @@ import IMV2Core
 
 /// V2's local database is intentionally separate from the V1 conversation
 /// cache. It applies sync records incrementally in one SQLite transaction.
-public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2LocalForegroundGroupEventPreviewStore, V2ClientProfileProjectionStore {
+public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalConversationCapabilitiesStore, V2LocalGroupCapabilitiesStore, V2LocalForwardMessagesStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2LocalForegroundGroupEventPreviewStore, V2ClientProfileProjectionStore {
     private let databasePool: DatabasePool
     private let databaseURL: URL
 
@@ -211,6 +211,16 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     try Self.applyStrangerMessagePermission(record, db: db)
                 } else if record.projectionKind == "user_add_permission" {
                     try Self.applyUserAddPermission(record, db: db)
+                } else if record.projectionKind == "direct_read_receipt" {
+                    try Self.applyDirectReadReceipt(record, db: db)
+                } else if record.projectionKind == "read_receipt_preferences" {
+                    try Self.applyReadReceiptPreference(record, db: db)
+                } else if record.projectionKind == "conversation_state" {
+                    try Self.persist(V2ClientConversationState(record: record), db: db)
+                } else if record.projectionKind == "message_favorite" {
+                    try Self.persist(V2ClientMessageFavorite(record: record), db: db)
+                } else if record.projectionKind == "group_capability" {
+                    try Self.applyGroupCapability(record, db: db)
                 } else if record.projectionKind == "room" || record.projectionKind == "membership" {
                     try Self.persist(V2ClientRoomProfileProjection(record: record), db: db)
                 } else if record.projectionKind == "direct_room_profile" {
@@ -355,6 +365,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             let snapshotRoomControls = snapshotPages.flatMap(\.roomControls)
             let snapshotRoomProfiles = snapshotPages.flatMap(\.roomProfiles)
             let snapshotDirectRoomProfiles = snapshotPages.flatMap(\.directRoomProfiles)
+            let snapshotDirectReadReceipts = snapshotPages.flatMap(\.directReadReceipts)
+            let snapshotReadReceiptPreferences = snapshotPages.compactMap(\.readReceiptPreference)
+            let snapshotConversationStates = snapshotPages.flatMap(\.conversationStates)
+            let snapshotMessageFavorites = snapshotPages.flatMap(\.messageFavorites)
             var seenMessageIDs = Set<MessageID>()
             var seenRoomPositions = Set<String>()
             var seenSourceEventIDs = Set<EventID>()
@@ -390,7 +404,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             guard Set(snapshotRelationships.map(\.targetUserID)).count == snapshotRelationships.count,
                   Set(snapshotUserBlocks.map(\.targetUserID)).count == snapshotUserBlocks.count,
                   snapshotPreferences.count <= 1,
-                  snapshotUserAddPreferences.count <= 1
+                  snapshotUserAddPreferences.count <= 1, snapshotReadReceiptPreferences.count <= 1,
+                  Set(snapshotDirectReadReceipts.map(\.roomID)).count == snapshotDirectReadReceipts.count,
+                  Set(snapshotConversationStates.map(\.roomID)).count == snapshotConversationStates.count,
+                  Set(snapshotMessageFavorites.map(\.messageID)).count == snapshotMessageFavorites.count
             else { throw V2ClientSocialProjectionError.invalidPayload }
             try Self.resetMessageSearchIndex(db: db)
             try db.execute(sql: "DELETE FROM v2_sync_events")
@@ -401,12 +418,16 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try db.execute(sql: "DELETE FROM v2_room_control_projections")
             try db.execute(sql: "DELETE FROM v2_room_profile_projections")
             try db.execute(sql: "DELETE FROM v2_direct_room_profile_projections")
+            try db.execute(sql: "DELETE FROM v2_direct_read_receipt_projections")
+            try db.execute(sql: "DELETE FROM v2_read_receipt_preference")
             try db.execute(sql: "DELETE FROM v2_profile_views")
             try db.execute(sql: "DELETE FROM v2_profile_invalidations")
             try db.execute(sql: "DELETE FROM v2_relationship_projections")
             try db.execute(sql: "DELETE FROM v2_user_block_projections")
             try db.execute(sql: "DELETE FROM v2_stranger_message_preference")
             try db.execute(sql: "DELETE FROM v2_user_add_preference")
+            try db.execute(sql: "DELETE FROM v2_conversation_states")
+            try db.execute(sql: "DELETE FROM v2_message_favorites")
             for message in snapshotMessages {
                 let projection = V2ClientMessageProjection(snapshotProjection: message)
                 try Self.persist(projection, db: db)
@@ -417,9 +438,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             for relationship in snapshotRelationships { try Self.persist(relationship, db: db) }
             for profile in snapshotRoomProfiles { try Self.persist(V2ClientRoomProfileProjection(snapshotProjection: profile), db: db) }
             for profile in snapshotDirectRoomProfiles { try Self.persist(V2ClientDirectRoomProfileProjection(snapshotProjection: profile), db: db) }
+            for receipt in snapshotDirectReadReceipts { try Self.persist(receipt, db: db) }
+            for state in snapshotConversationStates { try Self.persist(.init(roomID: state.roomID, isPinned: state.isPinned, isArchived: state.isArchived, muteUntil: state.muteUntil, updatedAt: state.updatedAt), db: db) }
+            for favorite in snapshotMessageFavorites { try Self.persist(.init(roomID: favorite.roomID, messageID: favorite.messageID, isFavorited: favorite.isFavorited, updatedAt: favorite.updatedAt), db: db) }
             for userBlock in snapshotUserBlocks { try Self.persist(userBlock, db: db) }
             if let preference = snapshotPreferences.first { try Self.persist(preference, db: db) }
             if let preference = snapshotUserAddPreferences.first { try Self.persist(preference, db: db) }
+            if let preference = snapshotReadReceiptPreferences.first { try Self.persist(preference, db: db) }
             for action in snapshotModerationActions { try Self.persist(.init(snapshotProjection: action), db: db) }
             for control in snapshotRoomControls { try Self.persist(.init(snapshotProjection: control), db: db) }
             try Self.finishMessageSearchIndexRebuild(
@@ -480,6 +505,75 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     public func messages(in roomID: RoomID) throws -> [V2ClientMessageProjection] {
         try databasePool.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM v2_message_projections WHERE room_id = ? ORDER BY room_sequence, message_id", arguments: [roomID.rawValue]).map(Self.decodeMessageProjection)
+        }
+    }
+
+    public func conversationState(roomID: RoomID) throws -> V2ClientConversationState? {
+        try databasePool.read { db in
+            guard let row = try Row.fetchOne(db, sql: "SELECT room_id, is_pinned, is_archived, mute_until, updated_at FROM v2_conversation_states WHERE room_id = ?", arguments: [roomID.rawValue]) else { return nil }
+            let storedRoomID: String = row["room_id"]
+            let isPinned: Bool = row["is_pinned"]
+            let isArchived: Bool = row["is_archived"]
+            let muteUntil: Double = row["mute_until"]
+            let updatedAt: Double = row["updated_at"]
+            let payload = try JSONSerialization.data(withJSONObject: ["room_id": storedRoomID, "is_pinned": isPinned, "is_archived": isArchived, "mute_until_ms": Int64(muteUntil * 1_000), "updated_at_ms": Int64(updatedAt * 1_000)])
+            return try .init(record: .init(sequence: 1, sourceEventID: .init("local-conversation-state"), projectionKind: "conversation_state", payload: payload))
+        }
+    }
+
+    public func isMessageFavorited(_ messageID: MessageID) throws -> Bool {
+        try databasePool.read { db in (try Bool.fetchOne(db, sql: "SELECT is_favorited FROM v2_message_favorites WHERE message_id = ?", arguments: [messageID.rawValue])) ?? false }
+    }
+
+    /// The latest room-scoped announcement is a materialized sync projection,
+    /// not a cached response from the command that happened to create it.
+    public func groupAnnouncement(roomID: RoomID) throws -> V2ClientGroupAnnouncement? {
+        try databasePool.read { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT room_id, body, revision, updated_at FROM v2_group_announcements WHERE room_id = ?",
+                arguments: [roomID.rawValue]
+            ) else { return nil }
+            return try .init(
+                roomID: .init(row["room_id"] as String),
+                body: row["body"],
+                revision: try Self.storageUnsigned(row["revision"] as Int64),
+                updatedAt: .init(timeIntervalSince1970: row["updated_at"] as Double)
+            )
+        }
+    }
+
+    public func pinnedMessageIDs(roomID: RoomID) throws -> Set<MessageID> {
+        try databasePool.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT message_id FROM v2_group_pinned_messages WHERE room_id = ? AND is_pinned = 1",
+                arguments: [roomID.rawValue]
+            )
+            return try Set(rows.map { try MessageID($0["message_id"] as String) })
+        }
+    }
+
+    public func groupRolePolicies(roomID: RoomID) throws -> [V2ClientGroupRolePolicy] {
+        try databasePool.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT role, permission FROM v2_group_role_permissions WHERE room_id = ? ORDER BY role, permission",
+                arguments: [roomID.rawValue]
+            )
+            let permissionsByRole = Dictionary(grouping: rows, by: { $0["role"] as String })
+                .mapValues { rows in Set(rows.compactMap { V2GroupPermission(rawValue: $0["permission"] as String) }) }
+            let revision = try Self.storageUnsigned(
+                (try Int64.fetchOne(db, sql: "SELECT revision FROM v2_group_permission_revisions WHERE room_id = ?", arguments: [roomID.rawValue])) ?? 1
+            )
+            return [.admin, .member].map { role in
+                .init(
+                    roomID: roomID,
+                    role: role,
+                    permissions: permissionsByRole[role.rawValue] ?? V2GroupPermissionDefaults.permissions(for: role),
+                    revision: revision
+                )
+            }
         }
     }
 
@@ -570,7 +664,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         guard (1 ... 100).contains(request.limit) else { throw V2MessageSearchError.invalidPageSize }
         let tokenizer = V2CharacterGramTokenizer()
         let query = tokenizer.tokenize(request.query)
-        guard !query.unigrams.isEmpty else { throw V2MessageSearchError.emptyQuery }
+        // Media-category search is useful even before a text term is entered.
+        // Keep an unbounded all-message browse impossible on large histories.
+        guard !query.unigrams.isEmpty || request.contentFilter != .all else {
+            throw V2MessageSearchError.emptyQuery
+        }
         return try databasePool.read { db in
             let state = try Self.readMessageSearchIndexState(db: db)
             guard state == .ready else { throw V2MessageSearchError.indexUnavailable(state) }
@@ -647,6 +745,19 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try databasePool.read { db in
             guard let row = try Row.fetchOne(db, sql: "SELECT allows_being_added, updated_at FROM v2_user_add_preference WHERE singleton = 1") else { return nil }
             return .init(allowsBeingAdded: row["allows_being_added"], updatedAt: Date(timeIntervalSince1970: row["updated_at"]))
+        }
+    }
+
+    public func directReadReceipt(roomID: RoomID) throws -> V2DirectReadReceiptProjection? {
+        try databasePool.read { db -> V2DirectReadReceiptProjection? in
+            guard let row = try Row.fetchOne(db, sql: "SELECT room_id, reader_user_id, read_through_room_sequence, recorded_at FROM v2_direct_read_receipt_projections WHERE room_id = ?", arguments: [roomID.rawValue]) else { return nil }
+            return try .init(roomID: .init(row["room_id"] as String), readerUserID: .init(row["reader_user_id"] as String), readThroughRoomSequence: try Self.storageUnsigned(row["read_through_room_sequence"] as Int64), recordedAt: Date(timeIntervalSince1970: row["recorded_at"] as Double), isVisible: true)
+        }
+    }
+    public func readReceiptPreference() throws -> V2ReadReceiptPreferences? {
+        try databasePool.read { db -> V2ReadReceiptPreferences? in
+            guard let row = try Row.fetchOne(db, sql: "SELECT allows_direct_read_receipts, allows_group_read_receipts, updated_at FROM v2_read_receipt_preference WHERE singleton = 1") else { return nil }
+            return .init(allowsDirectReadReceipts: row["allows_direct_read_receipts"], allowsGroupReadReceipts: row["allows_group_read_receipts"], updatedAt: Date(timeIntervalSince1970: row["updated_at"]))
         }
     }
 
@@ -1618,19 +1729,66 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try databasePool.read { db in try Row.fetchAll(db, sql: "SELECT * FROM v2_pending_message_reactions ORDER BY created_at, operation_id").map(Self.decodePendingMessageReaction) }
     }
 
+    public func enqueueOrReuseConversationState(_ pending: V2PendingConversationStateCommand) throws -> V2PendingConversationStateCommand { try databasePool.write { db in
+        guard pending.state == .pending, pending.attemptCount == 0, pending.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
+        let command = pending.command
+        if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_conversation_states WHERE operation_id = ?", arguments: [command.operationID.rawValue]) {
+            let existing = try Self.decodePendingConversationState(row)
+            guard existing.command == command, existing.state == .pending else { throw V2ClientCommandError.commandConflict }; return existing
+        }
+        if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_conversation_states WHERE room_id = ? AND is_pinned = ? AND is_archived = ? AND mute_until = ? AND state = 'pending' ORDER BY created_at, operation_id LIMIT 1", arguments: [command.roomID.rawValue, command.isPinned, command.isArchived, command.muteUntil?.timeIntervalSince1970 ?? 0]) { return try Self.decodePendingConversationState(row) }
+        try db.execute(sql: "INSERT INTO v2_pending_conversation_states (operation_id, room_id, is_pinned, is_archived, mute_until, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.isPinned, command.isArchived, command.muteUntil?.timeIntervalSince1970 ?? 0, pending.nextAttemptAt.timeIntervalSince1970, pending.nextAttemptAt.timeIntervalSince1970])
+        return pending
+    } }
+    public func nextReadyConversationState(now: Date) throws -> V2PendingConversationStateCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_conversation_states WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingConversationState(row) } }
+    public func markConversationStateAcknowledged(operationID: ConversationPreferenceOperationID) throws { try databasePool.write { db in try Self.requirePendingConversationState(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_conversation_states SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue]) } }
+    public func scheduleConversationStateRetry(operationID: ConversationPreferenceOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingConversationState(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_conversation_states SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
+    public func rejectConversationState(operationID: ConversationPreferenceOperationID, code: String) throws { guard !code.isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingConversationState(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_conversation_states SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue]) } }
+
+    public func enqueueOrReuseMessageFavorite(_ pending: V2PendingMessageFavoriteCommand) throws -> V2PendingMessageFavoriteCommand { try databasePool.write { db in
+        guard pending.state == .pending, pending.attemptCount == 0, pending.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
+        let command = pending.command
+        if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_favorites WHERE operation_id = ?", arguments: [command.operationID.rawValue]) { let existing = try Self.decodePendingMessageFavorite(row); guard existing.command == command, existing.state == .pending else { throw V2ClientCommandError.commandConflict }; return existing }
+        if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_favorites WHERE room_id = ? AND message_id = ? AND is_favorited = ? AND state = 'pending' ORDER BY created_at, operation_id LIMIT 1", arguments: [command.roomID.rawValue, command.messageID.rawValue, command.isFavorited]) { return try Self.decodePendingMessageFavorite(row) }
+        try db.execute(sql: "INSERT INTO v2_pending_message_favorites (operation_id, room_id, message_id, is_favorited, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, command.isFavorited, pending.nextAttemptAt.timeIntervalSince1970, pending.nextAttemptAt.timeIntervalSince1970]); return pending
+    } }
+    public func nextReadyMessageFavorite(now: Date) throws -> V2PendingMessageFavoriteCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_favorites WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingMessageFavorite(row) } }
+    public func markMessageFavoriteAcknowledged(operationID: MessageFavoriteOperationID) throws { try databasePool.write { db in try Self.requirePendingMessageFavorite(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_favorites SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue]) } }
+    public func scheduleMessageFavoriteRetry(operationID: MessageFavoriteOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingMessageFavorite(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_favorites SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
+    public func rejectMessageFavorite(operationID: MessageFavoriteOperationID, code: String) throws { guard !code.isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingMessageFavorite(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_favorites SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue]) } }
+
+    public func enqueueOrReuseGroupCapability(_ command: V2PendingGroupCapabilityCommand) throws -> V2PendingGroupCapabilityCommand { try databasePool.write { db in
+        guard command.state == .pending, command.attemptCount == 0, command.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
+        if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_capabilities WHERE operation_id = ?", arguments: [command.operationID]) { let existing = try Self.decodePendingGroupCapability(row); guard existing == command else { throw V2ClientCommandError.commandConflict }; return existing }
+        let permissions = String(decoding: try JSONEncoder().encode(command.permissions.map(\.rawValue).sorted()), as: UTF8.self)
+        try db.execute(sql: "INSERT INTO v2_pending_group_capabilities (operation_id, kind, room_id, message_id, is_pinned, body, role, permissions, target_user_id, expected_revision, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID, command.kind.rawValue, command.roomID.rawValue, command.messageID?.rawValue, command.isPinned, command.body, command.role?.rawValue, permissions, command.targetUserID?.rawValue, try Self.storageInteger(command.expectedRevision), command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+        return command
+    } }
+    public func nextReadyGroupCapability(now: Date) throws -> V2PendingGroupCapabilityCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_capabilities WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingGroupCapability(row) } }
+    public func markGroupCapabilityAcknowledged(operationID: String) throws { try databasePool.write { db in guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_pending_group_capabilities WHERE operation_id = ? AND state = 'pending')", arguments: [operationID]) == true else { throw V2ClientCommandError.commandConflict }; try db.execute(sql: "UPDATE v2_pending_group_capabilities SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID]) } }
+    public func scheduleGroupCapabilityRetry(operationID: String, nextAttemptAt: Date) throws { try databasePool.write { db in guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_pending_group_capabilities WHERE operation_id = ? AND state = 'pending')", arguments: [operationID]) == true else { throw V2ClientCommandError.commandConflict }; try db.execute(sql: "UPDATE v2_pending_group_capabilities SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID]) } }
+    public func rejectGroupCapability(operationID: String, code: String) throws { guard !code.isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_pending_group_capabilities WHERE operation_id = ? AND state = 'pending')", arguments: [operationID]) == true else { throw V2ClientCommandError.commandConflict }; try db.execute(sql: "UPDATE v2_pending_group_capabilities SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID]) } }
+
+    public func enqueueOrReuseForwardMessages(_ pending: V2PendingForwardMessagesCommand) throws -> V2PendingForwardMessagesCommand { try databasePool.write { db in let command = pending.command; if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_forward_messages WHERE operation_id = ?", arguments: [command.operationID.rawValue]) { let existing = try Self.decodePendingForwardMessages(row); guard existing.command == command else { throw V2ClientCommandError.commandConflict }; return existing }; let sources = String(decoding: try JSONEncoder().encode(command.sourceMessageIDs.map(\.rawValue)), as: UTF8.self); let targets = String(decoding: try JSONEncoder().encode(command.targetRoomIDs.map(\.rawValue)), as: UTF8.self); try db.execute(sql: "INSERT INTO v2_pending_forward_messages (operation_id, source_message_ids, target_room_ids, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, sources, targets, pending.nextAttemptAt.timeIntervalSince1970, pending.nextAttemptAt.timeIntervalSince1970]); return pending } }
+    public func nextReadyForwardMessages(now: Date) throws -> V2PendingForwardMessagesCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_forward_messages WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingForwardMessages(row) } }
+    public func markForwardMessagesAcknowledged(operationID: MessageForwardOperationID) throws { try databasePool.write { db in try Self.requirePendingForwardMessages(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_forward_messages SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue]) } }
+    public func scheduleForwardMessagesRetry(operationID: MessageForwardOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingForwardMessages(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_forward_messages SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
+    public func rejectForwardMessages(operationID: MessageForwardOperationID, code: String) throws { guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingForwardMessages(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_forward_messages SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue]) } }
+
     public func enqueue(_ command: V2PendingSocialCommand) throws {
         try databasePool.write { db in
-            if let row = try Row.fetchOne(db, sql: "SELECT command_kind, target_user_id, relationship_action, block_action, stranger_permission, user_add_permission FROM v2_pending_social_commands WHERE operation_id = ?", arguments: [command.operationID]) {
+            if let row = try Row.fetchOne(db, sql: "SELECT command_kind, target_user_id, relationship_action, block_action, stranger_permission, user_add_permission, allows_direct_read_receipts, allows_group_read_receipts FROM v2_pending_social_commands WHERE operation_id = ?", arguments: [command.operationID]) {
                 let kind: String = row["command_kind"]
                 let target: String? = row["target_user_id"]
                 let relationship: String? = row["relationship_action"]
                 let block: String? = row["block_action"]
                 let permission: String? = row["stranger_permission"]
                 let addPermission: String? = row["user_add_permission"]
-                guard kind == command.kind.rawValue, target == command.targetUserID?.rawValue, relationship == command.relationshipAction?.rawValue, block == command.blockAction?.rawValue, permission == command.strangerPermission?.rawValue, addPermission == command.userAddPermission?.rawValue else { throw V2ClientCommandError.commandConflict }
+                let direct: Bool? = row["allows_direct_read_receipts"], group: Bool? = row["allows_group_read_receipts"]
+                guard kind == command.kind.rawValue, target == command.targetUserID?.rawValue, relationship == command.relationshipAction?.rawValue, block == command.blockAction?.rawValue, permission == command.strangerPermission?.rawValue, addPermission == command.userAddPermission?.rawValue, direct == command.allowsDirectReadReceipts, group == command.allowsGroupReadReceipts else { throw V2ClientCommandError.commandConflict }
                 return
             }
-            try db.execute(sql: "INSERT INTO v2_pending_social_commands (operation_id, command_kind, target_user_id, relationship_action, block_action, stranger_permission, user_add_permission, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID, command.kind.rawValue, command.targetUserID?.rawValue, command.relationshipAction?.rawValue, command.blockAction?.rawValue, command.strangerPermission?.rawValue, command.userAddPermission?.rawValue, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+            try db.execute(sql: "INSERT INTO v2_pending_social_commands (operation_id, command_kind, target_user_id, relationship_action, block_action, stranger_permission, user_add_permission, allows_direct_read_receipts, allows_group_read_receipts, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID, command.kind.rawValue, command.targetUserID?.rawValue, command.relationshipAction?.rawValue, command.blockAction?.rawValue, command.strangerPermission?.rawValue, command.userAddPermission?.rawValue, command.allowsDirectReadReceipts, command.allowsGroupReadReceipts, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
         }
     }
 
@@ -1650,6 +1808,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                       decoded.blockAction == command.blockAction,
                       decoded.strangerPermission == command.strangerPermission,
                       decoded.userAddPermission == command.userAddPermission,
+                      decoded.allowsDirectReadReceipts == command.allowsDirectReadReceipts,
+                      decoded.allowsGroupReadReceipts == command.allowsGroupReadReceipts,
                       decoded.state == .pending
                 else { throw V2ClientCommandError.commandConflict }
                 return decoded
@@ -1664,6 +1824,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                   AND block_action IS ?
                   AND stranger_permission IS ?
                   AND user_add_permission IS ?
+                  AND allows_direct_read_receipts IS ?
+                  AND allows_group_read_receipts IS ?
                   AND state = 'pending'
                 ORDER BY created_at, operation_id
                 LIMIT 1
@@ -1674,7 +1836,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     command.relationshipAction?.rawValue,
                     command.blockAction?.rawValue,
                     command.strangerPermission?.rawValue
-                    , command.userAddPermission?.rawValue
+                    , command.userAddPermission?.rawValue, command.allowsDirectReadReceipts, command.allowsGroupReadReceipts
                 ]
             ) {
                 return try Self.decodePendingSocialCommand(existing)
@@ -1683,9 +1845,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 sql: """
                 INSERT INTO v2_pending_social_commands
                 (operation_id, command_kind, target_user_id, relationship_action,
-                 block_action, stranger_permission, user_add_permission, state, attempt_count,
+                 block_action, stranger_permission, user_add_permission, allows_direct_read_receipts, allows_group_read_receipts, state, attempt_count,
                  next_attempt_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
                 """,
                 arguments: [
                     command.operationID,
@@ -1695,6 +1857,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     command.blockAction?.rawValue,
                     command.strangerPermission?.rawValue,
                     command.userAddPermission?.rawValue,
+                    command.allowsDirectReadReceipts, command.allowsGroupReadReceipts,
                     command.nextAttemptAt.timeIntervalSince1970,
                     command.nextAttemptAt.timeIntervalSince1970
                 ]
@@ -2083,6 +2246,35 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         case "message": try applyMessage(record, db: db)
         case "moderation": try applyModeration(record, db: db)
         case "room", "membership": try persist(V2ClientRoomProfileProjection(record: record), db: db)
+        case "group_capability": try applyGroupCapability(record, db: db)
+        default: throw V2ClientProjectionError.invalidMessagePayload
+        }
+    }
+
+    private static func applyGroupCapability(_ record: V2ClientSyncRecord, db: Database) throws {
+        let header = try V2ClientGroupCapabilityProjection.header(record.payload)
+        switch header.eventType {
+        case "message.pinned_changed":
+            let value = try JSONDecoder().decode(V2ClientGroupCapabilityProjection.Pin.self, from: record.payload)
+            _ = try RoomID(value.roomID); _ = try MessageID(value.messageID)
+            try db.execute(sql: "INSERT INTO v2_group_pinned_messages (room_id, message_id, is_pinned, room_sequence, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(room_id, message_id) DO UPDATE SET is_pinned = excluded.is_pinned, room_sequence = excluded.room_sequence, updated_at = excluded.updated_at", arguments: [value.roomID, value.messageID, value.isPinned, try storageInteger(record.sequence), Double(value.serverCreatedAtMilliseconds) / 1_000])
+        case "group.announcement_changed":
+            let value = try JSONDecoder().decode(V2ClientGroupCapabilityProjection.Announcement.self, from: record.payload)
+            _ = try RoomID(value.roomID)
+            try db.execute(sql: "INSERT INTO v2_group_announcements (room_id, body, revision, room_sequence, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET body = excluded.body, revision = excluded.revision, room_sequence = excluded.room_sequence, updated_at = excluded.updated_at WHERE excluded.revision >= v2_group_announcements.revision", arguments: [value.roomID, value.body, try storageInteger(value.revision), try storageInteger(record.sequence), Double(value.serverCreatedAtMilliseconds) / 1_000])
+        case "group.role_permissions_changed":
+            let value = try JSONDecoder().decode(V2ClientGroupCapabilityProjection.Permissions.self, from: record.payload)
+            guard let role = V2RoomMembershipRole(rawValue: value.role), role != .owner, Set(value.permissions).count == value.permissions.count else { throw V2ClientProjectionError.invalidMessagePayload }
+            let permissions = value.permissions.compactMap(V2GroupPermission.init(rawValue:))
+            guard permissions.count == value.permissions.count else { throw V2ClientProjectionError.invalidMessagePayload }
+            try db.execute(sql: "DELETE FROM v2_group_role_permissions WHERE room_id = ? AND role = ?", arguments: [value.roomID, value.role])
+            for permission in permissions { try db.execute(sql: "INSERT INTO v2_group_role_permissions (room_id, role, permission, revision, room_sequence) VALUES (?, ?, ?, ?, ?)", arguments: [value.roomID, value.role, permission.rawValue, try storageInteger(value.revision), try storageInteger(record.sequence)]) }
+            try db.execute(sql: "INSERT INTO v2_group_permission_revisions (room_id, revision) VALUES (?, ?) ON CONFLICT(room_id) DO UPDATE SET revision = MAX(v2_group_permission_revisions.revision, excluded.revision)", arguments: [value.roomID, try storageInteger(value.revision)])
+        case "group.member_role_changed":
+            let value = try JSONDecoder().decode(V2ClientGroupCapabilityProjection.MemberRole.self, from: record.payload)
+            _ = try RoomID(value.roomID); _ = try UserID(value.targetUserID)
+            guard let role = V2RoomMembershipRole(rawValue: value.role) else { throw V2ClientProjectionError.invalidMessagePayload }
+            try db.execute(sql: "INSERT INTO v2_group_member_roles (room_id, user_id, role, membership_revision, room_sequence) VALUES (?, ?, ?, ?, ?) ON CONFLICT(room_id, user_id) DO UPDATE SET role = excluded.role, membership_revision = excluded.membership_revision, room_sequence = excluded.room_sequence WHERE excluded.membership_revision >= v2_group_member_roles.membership_revision", arguments: [value.roomID, value.targetUserID, role.rawValue, try storageInteger(value.membershipRevision), try storageInteger(record.sequence)])
         default: throw V2ClientProjectionError.invalidMessagePayload
         }
     }
@@ -2119,6 +2311,31 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let payload: Payload
         do { payload = try JSONDecoder().decode(Payload.self, from: record.payload) } catch { throw V2ClientSocialProjectionError.invalidPayload }
         try db.execute(sql: "INSERT INTO v2_user_add_preference (singleton, allows_being_added, updated_at) VALUES (1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET allows_being_added = excluded.allows_being_added, updated_at = excluded.updated_at", arguments: [payload.allowsBeingAdded, Double(payload.updatedAtMilliseconds) / 1_000])
+    }
+
+    private static func applyDirectReadReceipt(_ record: V2ClientSyncRecord, db: Database) throws {
+        struct Payload: Decodable { let roomID: String; let readerUserID: String; let readThroughRoomSequence: UInt64; let recordedAtMilliseconds: Int64; let isVisible: Bool; enum CodingKeys: String, CodingKey { case roomID = "room_id", readerUserID = "reader_user_id", readThroughRoomSequence = "read_through_room_sequence", recordedAtMilliseconds = "recorded_at_ms", isVisible = "is_visible" } }
+        let payload: Payload
+        do { payload = try JSONDecoder().decode(Payload.self, from: record.payload) } catch { throw V2ClientSocialProjectionError.invalidPayload }
+        let roomID: RoomID; let readerID: UserID
+        do { roomID = try .init(payload.roomID); readerID = try .init(payload.readerUserID) } catch { throw V2ClientSocialProjectionError.invalidPayload }
+        guard payload.readThroughRoomSequence > 0, payload.readThroughRoomSequence <= UInt64(Int64.max), payload.recordedAtMilliseconds >= 0 else { throw V2ClientSocialProjectionError.invalidPayload }
+        if payload.isVisible {
+            try db.execute(sql: "INSERT INTO v2_direct_read_receipt_projections (room_id, reader_user_id, read_through_room_sequence, recorded_at) VALUES (?, ?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET reader_user_id = excluded.reader_user_id, read_through_room_sequence = MAX(v2_direct_read_receipt_projections.read_through_room_sequence, excluded.read_through_room_sequence), recorded_at = CASE WHEN excluded.read_through_room_sequence >= v2_direct_read_receipt_projections.read_through_room_sequence THEN excluded.recorded_at ELSE v2_direct_read_receipt_projections.recorded_at END", arguments: [roomID.rawValue, readerID.rawValue, try Self.storageInteger(payload.readThroughRoomSequence), Double(payload.recordedAtMilliseconds) / 1_000])
+        } else {
+            try db.execute(sql: "DELETE FROM v2_direct_read_receipt_projections WHERE room_id = ? AND reader_user_id = ?", arguments: [roomID.rawValue, readerID.rawValue])
+        }
+    }
+    private static func applyReadReceiptPreference(_ record: V2ClientSyncRecord, db: Database) throws {
+        struct Payload: Decodable { let allowsDirect: Bool; let allowsGroup: Bool; let updatedAt: Int64; enum CodingKeys: String, CodingKey { case allowsDirect = "allows_direct_read_receipts", allowsGroup = "allows_group_read_receipts", updatedAt = "updated_at_ms" } }
+        guard let payload = try? JSONDecoder().decode(Payload.self, from: record.payload), payload.updatedAt >= 0 else { throw V2ClientSocialProjectionError.invalidPayload }
+        try db.execute(sql: "INSERT INTO v2_read_receipt_preference (singleton, allows_direct_read_receipts, allows_group_read_receipts, updated_at) VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET allows_direct_read_receipts = excluded.allows_direct_read_receipts, allows_group_read_receipts = excluded.allows_group_read_receipts, updated_at = excluded.updated_at", arguments: [payload.allowsDirect, payload.allowsGroup, Double(payload.updatedAt) / 1_000])
+    }
+    private static func persist(_ projection: V2ClientConversationState, db: Database) throws {
+        try db.execute(sql: "INSERT INTO v2_conversation_states (room_id, is_pinned, is_archived, mute_until, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET is_pinned = excluded.is_pinned, is_archived = excluded.is_archived, mute_until = excluded.mute_until, updated_at = excluded.updated_at", arguments: [projection.roomID.rawValue, projection.isPinned, projection.isArchived, projection.muteUntil?.timeIntervalSince1970 ?? 0, projection.updatedAt.timeIntervalSince1970])
+    }
+    private static func persist(_ projection: V2ClientMessageFavorite, db: Database) throws {
+        try db.execute(sql: "INSERT INTO v2_message_favorites (message_id, room_id, is_favorited, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET room_id = excluded.room_id, is_favorited = excluded.is_favorited, updated_at = excluded.updated_at", arguments: [projection.messageID.rawValue, projection.roomID.rawValue, projection.isFavorited, projection.updatedAt.timeIntervalSince1970])
     }
 
     private static func applyModeration(_ record: V2ClientSyncRecord, db: Database) throws {
@@ -2161,6 +2378,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         )
     }
 
+    private static func persist(_ projection: V2SnapshotDirectReadReceiptProjection, db: Database) throws {
+        try db.execute(sql: "INSERT INTO v2_direct_read_receipt_projections (room_id, reader_user_id, read_through_room_sequence, recorded_at) VALUES (?, ?, ?, ?)", arguments: [projection.roomID.rawValue, projection.readerUserID.rawValue, try Self.storageInteger(projection.readThroughRoomSequence), projection.recordedAt.timeIntervalSince1970])
+    }
+    private static func persist(_ projection: V2SnapshotReadReceiptPreference, db: Database) throws { try db.execute(sql: "INSERT INTO v2_read_receipt_preference (singleton, allows_direct_read_receipts, allows_group_read_receipts, updated_at) VALUES (1, ?, ?, ?)", arguments: [projection.allowsDirectReadReceipts, projection.allowsGroupReadReceipts, projection.updatedAt.timeIntervalSince1970]) }
+
     private static func persist(_ projection: V2ClientMessageProjection, db: Database) throws {
         if let existing = try Row.fetchOne(db, sql: "SELECT * FROM v2_message_projections WHERE message_id = ?", arguments: [projection.messageID.rawValue]) {
             let decoded = try decodeMessageProjection(existing)
@@ -2168,7 +2390,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                   decoded.roomID == projection.roomID, decoded.roomSequence == projection.roomSequence,
                   decoded.messageRevision == projection.messageRevision, decoded.senderUserID == projection.senderUserID,
                   decoded.text == projection.text, decoded.media == projection.media, decoded.mediaPresentations == projection.mediaPresentations,
-                  decoded.mentions == projection.mentions, decoded.entities == projection.entities, decoded.replyTo == projection.replyTo, decoded.createdAt == projection.createdAt,
+                  decoded.mentions == projection.mentions, decoded.entities == projection.entities, decoded.replyTo == projection.replyTo, decoded.forwardedFrom == projection.forwardedFrom, decoded.createdAt == projection.createdAt,
                   decoded.isWithdrawn == projection.isWithdrawn
             else { throw V2ClientProjectionError.invalidMessagePayload }
             return
@@ -2176,11 +2398,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try db.execute(
             sql: """
             INSERT INTO v2_message_projections
-                (message_id, source_event_id, room_id, room_sequence, message_revision, sender_user_id, text_body, media_ids, media_presentations, mention_targets, entities, reply_to_message_id, server_created_at, is_withdrawn)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (message_id, source_event_id, room_id, room_sequence, message_revision, sender_user_id, text_body, media_ids, media_presentations, mention_targets, entities, reply_to_message_id, forwarded_from_message_id, forwarded_from_user_id, server_created_at, is_withdrawn)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [projection.messageID.rawValue, projection.sourceEventID.rawValue, projection.roomID.rawValue,
-                        try storageInteger(projection.roomSequence), try storageInteger(projection.messageRevision), projection.senderUserID.rawValue, projection.text, try encodeMedia(projection.media), try encodeMediaPresentations(projection.mediaPresentations), try encodeMentions(projection.mentions), try encodeEntities(projection.entities, text: projection.text), projection.replyTo?.messageID.rawValue,
+                        try storageInteger(projection.roomSequence), try storageInteger(projection.messageRevision), projection.senderUserID.rawValue, projection.text, try encodeMedia(projection.media), try encodeMediaPresentations(projection.mediaPresentations), try encodeMentions(projection.mentions), try encodeEntities(projection.entities, text: projection.text), projection.replyTo?.messageID.rawValue, projection.forwardedFrom?.messageID.rawValue, projection.forwardedFrom?.senderUserID.rawValue,
                         projection.createdAt.timeIntervalSince1970, projection.isWithdrawn]
         )
         if let tombstone = try Row.fetchOne(db, sql: "SELECT room_id, message_revision FROM v2_message_tombstones WHERE message_id = ?", arguments: [projection.messageID.rawValue]) {
@@ -2382,19 +2604,43 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     }
 
     private static func decodeMessageProjection(_ row: Row) throws -> V2ClientMessageProjection {
-        try .init(
-            sourceEventID: .init(row["source_event_id"] as String),
-            messageID: .init(row["message_id"] as String),
-            roomID: .init(row["room_id"] as String),
-            roomSequence: UInt64(row["room_sequence"] as Int64),
-            messageRevision: UInt64(row["message_revision"] as Int64),
-            senderUserID: .init(row["sender_user_id"] as String),
-            text: row["text_body"],
-            media: try decodeMedia(row["media_ids"]),
-            mediaPresentations: try decodeMediaPresentations(row["media_presentations"]),
-            mentions: try decodeMentions(row["mention_targets"]),
-            entities: try decodeEntities(row["entities"], text: row["text_body"]),
-            replyTo: try (row["reply_to_message_id"] as String?).map { try V2MessageReplyReference(messageID: .init($0)) },
+        let sourceEventID = try EventID(row["source_event_id"] as String)
+        let messageID = try MessageID(row["message_id"] as String)
+        let roomID = try RoomID(row["room_id"] as String)
+        let senderUserID = try UserID(row["sender_user_id"] as String)
+        let text: String = row["text_body"]
+        let roomSequence = UInt64(row["room_sequence"] as Int64)
+        let messageRevision = UInt64(row["message_revision"] as Int64)
+        let media = try decodeMedia(row["media_ids"])
+        let mediaPresentations = try decodeMediaPresentations(row["media_presentations"])
+        let mentions = try decodeMentions(row["mention_targets"])
+        let entities = try decodeEntities(row["entities"], text: text)
+        let replyTo = try (row["reply_to_message_id"] as String?).map { try V2MessageReplyReference(messageID: .init($0)) }
+        let forwardedFromMessageID: String? = row["forwarded_from_message_id"]
+        let forwardedFromUserID: String? = row["forwarded_from_user_id"]
+        let forwardedFrom: V2ForwardedMessageAttribution?
+        switch (forwardedFromMessageID, forwardedFromUserID) {
+        case (nil, nil):
+            forwardedFrom = nil
+        case let (.some(messageID), .some(userID)) where !messageID.isEmpty && !userID.isEmpty:
+            forwardedFrom = try .init(messageID: .init(messageID), senderUserID: .init(userID))
+        default:
+            throw V2ClientProjectionError.invalidMessagePayload
+        }
+        return .init(
+            sourceEventID: sourceEventID,
+            messageID: messageID,
+            roomID: roomID,
+            roomSequence: roomSequence,
+            messageRevision: messageRevision,
+            senderUserID: senderUserID,
+            text: text,
+            media: media,
+            mediaPresentations: mediaPresentations,
+            mentions: mentions,
+            entities: entities,
+            replyTo: replyTo,
+            forwardedFrom: forwardedFrom,
             createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double),
             isWithdrawn: (row["is_withdrawn"] as Int64) != 0
         )
@@ -2437,6 +2683,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     private static func requirePendingMessageReaction(_ operationID: MessageReactionOperationID, db: Database) throws {
         guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_message_reactions WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMessageReaction.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending }
     }
+    private static func requirePendingConversationState(_ operationID: ConversationPreferenceOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_conversation_states WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingConversationStateCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
+    private static func requirePendingMessageFavorite(_ operationID: MessageFavoriteOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_message_favorites WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMessageFavoriteCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
+    private static func requirePendingForwardMessages(_ operationID: MessageForwardOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_forward_messages WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingForwardMessagesCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
     private static func requirePendingMessageEdit(_ operationID: MessageEditOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_message_edits WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMessageEdit.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
     private static func requirePendingReadReceipt(_ operationID: ReadReceiptOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_read_receipts WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingReadReceipt.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
     private static func requirePendingSocialCommand(_ operationID: String, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_social_commands WHERE operation_id = ?", arguments: [operationID])?["state"], state == V2PendingSocialCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
@@ -2650,6 +2899,24 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         guard let state = V2PendingMessageReaction.State(rawValue: row["state"] as String), let action = V2MessageReactionAction(rawValue: row["action"] as String) else { throw V2ClientCommandError.commandConflict }
         return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String), reaction: row["reaction"], action: action, state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init), terminalCode: row["terminal_code"])
     }
+    private static func decodePendingConversationState(_ row: Row) throws -> V2PendingConversationStateCommand {
+        guard let state = V2PendingConversationStateCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
+        let muteUntil = (row["mute_until"] as Double) == 0 ? nil : Date(timeIntervalSince1970: row["mute_until"] as Double)
+        return try .init(command: .init(operationID: .init(row["operation_id"] as String), roomID: .init(row["room_id"] as String), isPinned: row["is_pinned"], isArchived: row["is_archived"], muteUntil: muteUntil), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
+    }
+    private static func decodePendingMessageFavorite(_ row: Row) throws -> V2PendingMessageFavoriteCommand {
+        guard let state = V2PendingMessageFavoriteCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
+        return try .init(command: .init(operationID: .init(row["operation_id"] as String), roomID: .init(row["room_id"] as String), messageID: .init(row["message_id"] as String), isFavorited: row["is_favorited"]), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
+    }
+    private static func decodePendingGroupCapability(_ row: Row) throws -> V2PendingGroupCapabilityCommand {
+        guard let kind = V2PendingGroupCapabilityCommand.Kind(rawValue: row["kind"] as String), let state = V2PendingGroupCapabilityCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
+        let role = (row["role"] as String?).flatMap(V2RoomMembershipRole.init(rawValue:))
+        let rawPermissions = try JSONDecoder().decode([String].self, from: Data((row["permissions"] as String).utf8))
+        let permissions = Set(rawPermissions.compactMap(V2GroupPermission.init(rawValue:)))
+        guard permissions.count == rawPermissions.count else { throw V2ClientCommandError.commandConflict }
+        return try .init(kind: kind, operationID: row["operation_id"], roomID: .init(row["room_id"] as String), messageID: try (row["message_id"] as String?).map(MessageID.init), isPinned: row["is_pinned"], body: row["body"], role: role, permissions: permissions, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), expectedRevision: try storageUnsigned(row["expected_revision"] as Int64), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
+    }
+    private static func decodePendingForwardMessages(_ row: Row) throws -> V2PendingForwardMessagesCommand { guard let state = V2PendingForwardMessagesCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; let sources = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8)).map(MessageID.init); let targets = try JSONDecoder().decode([String].self, from: Data((row["target_room_ids"] as String).utf8)).map(RoomID.init); return try .init(command: .init(operationID: .init(row["operation_id"] as String), sourceMessageIDs: sources, targetRoomIDs: targets), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"]) }
     private static func decodePendingMessageEdit(_ row: Row) throws -> V2PendingMessageEdit {
         guard let state = V2PendingMessageEdit.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
         return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String), expectedMessageRevision: UInt64(row["expected_message_revision"] as Int64), text: row["text_body"], state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), resultingMessageRevision: (row["resulting_message_revision"] as Int64?).map(UInt64.init), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init), terminalCode: row["terminal_code"], terminalCurrentRevision: (row["terminal_current_revision"] as Int64?).map(UInt64.init))
@@ -2657,7 +2924,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     private static func decodePendingReadReceipt(_ row: Row) throws -> V2PendingReadReceipt { guard let state = V2PendingReadReceipt.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), readThroughRoomSequence: UInt64(row["read_through_room_sequence"] as Int64), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init), terminalCode: row["terminal_code"]) }
     private static func decodePendingSocialCommand(_ row: Row) throws -> V2PendingSocialCommand {
         guard let kind = V2PendingSocialCommandKind(rawValue: row["command_kind"] as String), let state = V2PendingSocialCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(operationID: row["operation_id"], kind: kind, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), relationshipAction: (row["relationship_action"] as String?).flatMap(V2RelationshipAction.init), blockAction: (row["block_action"] as String?).flatMap(V2UserBlockAction.init), strangerPermission: (row["stranger_permission"] as String?).flatMap(V2StrangerMessagePermission.init), userAddPermission: (row["user_add_permission"] as String?).flatMap(V2UserAddPermission.init), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
+        return try .init(operationID: row["operation_id"], kind: kind, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), relationshipAction: (row["relationship_action"] as String?).flatMap(V2RelationshipAction.init), blockAction: (row["block_action"] as String?).flatMap(V2UserBlockAction.init), strangerPermission: (row["stranger_permission"] as String?).flatMap(V2StrangerMessagePermission.init), userAddPermission: (row["user_add_permission"] as String?).flatMap(V2UserAddPermission.init), allowsDirectReadReceipts: row["allows_direct_read_receipts"], allowsGroupReadReceipts: row["allows_group_read_receipts"], state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
     }
     private static func encodeGroupMemberUserIDs(_ members: [UserID]) throws -> String {
         guard let encoded = String(data: try JSONEncoder().encode(members.map(\.rawValue)), encoding: .utf8) else { throw V2ClientCommandError.commandConflict }
@@ -2751,18 +3018,19 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
     private static func searchMessages(_ request: V2MessageSearchRequest, query: V2CharacterGramTokenizer.Tokens, db: Database) throws -> V2MessageSearchPage {
         let match = messageSearchMatch(scope: request.scope, query: query)
-        var cursor = try validatedSearchCursor(request.cursor, for: request.scope)
+        let filterFingerprint = searchFilterFingerprint(request)
+        var cursor = try validatedSearchCursor(request.cursor, for: request.scope, filterFingerprint: filterFingerprint)
         var scanCursor = cursor
         var hits: [V2MessageSearchHit] = []
         let batchSize = max(128, request.limit * 2)
         while true {
-            let rows = try searchCandidateRows(match: match, scope: request.scope, cursor: scanCursor, limit: batchSize, db: db)
+            let rows = try searchCandidateRows(match: match, request: request, cursor: scanCursor, limit: batchSize, db: db)
             guard !rows.isEmpty else { return .init(hits: hits, nextCursor: nil) }
             for row in rows {
                 let candidate = try searchCandidate(row)
-                let candidateCursor = searchCursor(for: candidate, scope: request.scope)
+                let candidateCursor = searchCursor(for: candidate, scope: request.scope, filterFingerprint: filterFingerprint)
                 scanCursor = candidateCursor
-                guard V2CharacterGramTokenizer.normalize(candidate.text).range(of: query.normalized) != nil else { continue }
+                guard query.characterCount == 0 || V2CharacterGramTokenizer.normalize(candidate.text).range(of: query.normalized) != nil else { continue }
                 if hits.count == request.limit {
                     // The query has at least one further verified result, so
                     // the cursor after the final included hit is meaningful.
@@ -2775,7 +3043,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    private static func messageSearchMatch(scope: V2MessageSearchScope, query: V2CharacterGramTokenizer.Tokens) -> String {
+    private static func messageSearchMatch(scope: V2MessageSearchScope, query: V2CharacterGramTokenizer.Tokens) -> String? {
         var clauses: [String] = []
         switch scope {
         case .room(let roomID):
@@ -2785,7 +3053,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         case .sender(let userID):
             clauses.append("sender_scope : " + V2CharacterGramTokenizer.scopeToken(prefix: "s", identifier: userID.rawValue))
         }
-        if query.characterCount == 1 {
+        if query.characterCount == 0 {
+            // Room and sender constraints are applied to the projection SQL.
+            // Do not join FTS here: media-only messages intentionally have no
+            // text token and consequently no FTS row.
+            return nil
+        } else if query.characterCount == 1 {
             clauses.append("unigrams : " + query.unigrams[0])
         } else {
             clauses.append("bigrams : \"" + query.bigrams.joined(separator: " ") + "\"")
@@ -2793,8 +3066,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         return clauses.joined(separator: " AND ")
     }
 
-    private static func validatedSearchCursor(_ cursor: V2MessageSearchCursor?, for scope: V2MessageSearchScope) throws -> V2MessageSearchCursor? {
+    private static func validatedSearchCursor(_ cursor: V2MessageSearchCursor?, for scope: V2MessageSearchScope, filterFingerprint: String) throws -> V2MessageSearchCursor? {
         guard let cursor else { return nil }
+        guard cursor.filterFingerprint == filterFingerprint else { throw V2MessageSearchError.cursorDoesNotMatchScope }
         switch (scope, cursor.storage) {
         case (.room(let scopeRoomID), .room(let cursorRoomID, _, _)) where scopeRoomID == cursorRoomID:
             return cursor
@@ -2805,17 +3079,47 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    private static func searchCandidateRows(match: String, scope: V2MessageSearchScope, cursor: V2MessageSearchCursor?, limit: Int, db: Database) throws -> [Row] {
-        let base = "SELECT p.message_id, p.room_id, p.room_sequence, p.sender_user_id, p.text_body, p.server_created_at FROM v2_message_char_fts JOIN v2_message_projections p ON p.rowid = v2_message_char_fts.rowid WHERE v2_message_char_fts MATCH ? AND p.is_withdrawn = 0 AND length(p.text_body) > 0"
-        switch (scope, cursor?.storage) {
+    private static func searchCandidateRows(match: String?, request: V2MessageSearchRequest, cursor: V2MessageSearchCursor?, limit: Int, db: Database) throws -> [Row] {
+        var clauses = ["p.is_withdrawn = 0"]
+        var arguments: [DatabaseValueConvertible] = []
+        let from: String
+        if let match {
+            from = "v2_message_char_fts JOIN v2_message_projections p ON p.rowid = v2_message_char_fts.rowid"
+            clauses.append("v2_message_char_fts MATCH ?")
+            arguments.append(match)
+        } else {
+            from = "v2_message_projections p"
+        }
+        switch request.scope {
+        case .room(let roomID): clauses.append("p.room_id = ?"); arguments.append(roomID.rawValue)
+        case .allMessages: break
+        case .sender(let userID): clauses.append("p.sender_user_id = ?"); arguments.append(userID.rawValue)
+        }
+        if let senderUserID = request.senderUserID {
+            clauses.append("p.sender_user_id = ?")
+            arguments.append(senderUserID.rawValue)
+        }
+        switch request.contentFilter {
+        case .all: break
+        case .media: clauses.append("json_array_length(p.media_ids) > 0")
+        case .image, .video, .file, .audio:
+            clauses.append("EXISTS (SELECT 1 FROM json_each(p.media_presentations) WHERE json_extract(json_each.value, '$.kind') = ?)")
+            arguments.append(request.contentFilter.rawValue)
+        }
+        let base = "SELECT p.message_id, p.room_id, p.room_sequence, p.sender_user_id, p.text_body, p.server_created_at FROM \(from) WHERE \(clauses.joined(separator: " AND "))"
+        switch (request.scope, cursor?.storage) {
         case (.room, nil):
-            return try Row.fetchAll(db, sql: base + " ORDER BY p.room_sequence DESC, p.message_id DESC LIMIT ?", arguments: [match, limit])
+            arguments.append(limit)
+            return try Row.fetchAll(db, sql: base + " ORDER BY p.room_sequence DESC, p.message_id DESC LIMIT ?", arguments: StatementArguments(arguments))
         case (.room, .room(_, let sequence, let messageID)):
-            return try Row.fetchAll(db, sql: base + " AND (p.room_sequence < ? OR (p.room_sequence = ? AND p.message_id < ?)) ORDER BY p.room_sequence DESC, p.message_id DESC LIMIT ?", arguments: [match, try storageInteger(sequence), try storageInteger(sequence), messageID.rawValue, limit])
+            arguments += [try storageInteger(sequence), try storageInteger(sequence), messageID.rawValue, limit]
+            return try Row.fetchAll(db, sql: base + " AND (p.room_sequence < ? OR (p.room_sequence = ? AND p.message_id < ?)) ORDER BY p.room_sequence DESC, p.message_id DESC LIMIT ?", arguments: StatementArguments(arguments))
         case (.allMessages, nil), (.sender, nil):
-            return try Row.fetchAll(db, sql: base + " ORDER BY p.server_created_at DESC, p.message_id DESC LIMIT ?", arguments: [match, limit])
+            arguments.append(limit)
+            return try Row.fetchAll(db, sql: base + " ORDER BY p.server_created_at DESC, p.message_id DESC LIMIT ?", arguments: StatementArguments(arguments))
         case (.allMessages, .global(let createdAt, let messageID)), (.sender, .global(let createdAt, let messageID)):
-            return try Row.fetchAll(db, sql: base + " AND (p.server_created_at < ? OR (p.server_created_at = ? AND p.message_id < ?)) ORDER BY p.server_created_at DESC, p.message_id DESC LIMIT ?", arguments: [match, createdAt.timeIntervalSince1970, createdAt.timeIntervalSince1970, messageID.rawValue, limit])
+            arguments += [createdAt.timeIntervalSince1970, createdAt.timeIntervalSince1970, messageID.rawValue, limit]
+            return try Row.fetchAll(db, sql: base + " AND (p.server_created_at < ? OR (p.server_created_at = ? AND p.message_id < ?)) ORDER BY p.server_created_at DESC, p.message_id DESC LIMIT ?", arguments: StatementArguments(arguments))
         default:
             throw V2MessageSearchError.cursorDoesNotMatchScope
         }
@@ -2825,13 +3129,22 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try .init(messageID: .init(row["message_id"] as String), roomID: .init(row["room_id"] as String), roomSequence: UInt64(row["room_sequence"] as Int64), senderUserID: .init(row["sender_user_id"] as String), text: row["text_body"], createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double))
     }
 
-    private static func searchCursor(for hit: V2MessageSearchHit, scope: V2MessageSearchScope) -> V2MessageSearchCursor {
+    private static func searchCursor(for hit: V2MessageSearchHit, scope: V2MessageSearchScope, filterFingerprint: String) -> V2MessageSearchCursor {
         switch scope {
         case .room:
-            .init(storage: .room(roomID: hit.roomID, roomSequence: hit.roomSequence, messageID: hit.messageID))
+            .init(storage: .room(roomID: hit.roomID, roomSequence: hit.roomSequence, messageID: hit.messageID), filterFingerprint: filterFingerprint)
         case .allMessages, .sender:
-            .init(storage: .global(createdAt: hit.createdAt, messageID: hit.messageID))
+            .init(storage: .global(createdAt: hit.createdAt, messageID: hit.messageID), filterFingerprint: filterFingerprint)
         }
+    }
+
+    private static func searchFilterFingerprint(_ request: V2MessageSearchRequest) -> String {
+        let scope: String = switch request.scope {
+        case .room(let roomID): "room:\(roomID.rawValue)"
+        case .allMessages: "all"
+        case .sender(let userID): "sender:\(userID.rawValue)"
+        }
+        return "\(scope)|\(request.contentFilter.rawValue)|\(request.senderUserID?.rawValue ?? "")"
     }
 
     private static let migrator: DatabaseMigrator = {
@@ -3135,6 +3448,46 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     ON v2_pending_social_commands (state, next_attempt_at, created_at)
                     WHERE state = 'pending';
                 """)
+        }
+        migrator.registerMigration("addV2DirectReadReceiptProjections") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_direct_read_receipt_projections (
+                    room_id TEXT PRIMARY KEY,
+                    reader_user_id TEXT NOT NULL,
+                    read_through_room_sequence INTEGER NOT NULL CHECK (read_through_room_sequence > 0),
+                    recorded_at REAL NOT NULL
+                );
+            """)
+        }
+        migrator.registerMigration("addV2ReadReceiptPreferenceOutbox") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_pending_social_commands_new (
+                    operation_id TEXT PRIMARY KEY,
+                    command_kind TEXT NOT NULL CHECK (command_kind IN ('relationship', 'userBlock', 'strangerMessagePreference', 'userAddPreference', 'readReceiptPreference')),
+                    target_user_id TEXT, relationship_action TEXT, block_action TEXT,
+                    stranger_permission TEXT, user_add_permission TEXT,
+                    allows_direct_read_receipts INTEGER CHECK (allows_direct_read_receipts IN (0, 1)),
+                    allows_group_read_receipts INTEGER CHECK (allows_group_read_receipts IN (0, 1)),
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
+                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL, terminal_code TEXT,
+                    CHECK (
+                        (command_kind = 'relationship' AND target_user_id IS NOT NULL AND relationship_action IN ('request', 'accept', 'reject', 'remove') AND block_action IS NULL AND stranger_permission IS NULL AND user_add_permission IS NULL AND allows_direct_read_receipts IS NULL AND allows_group_read_receipts IS NULL)
+                        OR (command_kind = 'userBlock' AND target_user_id IS NOT NULL AND relationship_action IS NULL AND block_action IN ('block', 'unblock') AND stranger_permission IS NULL AND user_add_permission IS NULL AND allows_direct_read_receipts IS NULL AND allows_group_read_receipts IS NULL)
+                        OR (command_kind = 'strangerMessagePreference' AND target_user_id IS NULL AND relationship_action IS NULL AND block_action IS NULL AND stranger_permission IN ('allow', 'deny') AND user_add_permission IS NULL AND allows_direct_read_receipts IS NULL AND allows_group_read_receipts IS NULL)
+                        OR (command_kind = 'userAddPreference' AND target_user_id IS NULL AND relationship_action IS NULL AND block_action IS NULL AND stranger_permission IS NULL AND user_add_permission IN ('allow', 'deny') AND allows_direct_read_receipts IS NULL AND allows_group_read_receipts IS NULL)
+                        OR (command_kind = 'readReceiptPreference' AND target_user_id IS NULL AND relationship_action IS NULL AND block_action IS NULL AND stranger_permission IS NULL AND user_add_permission IS NULL AND allows_direct_read_receipts IS NOT NULL AND allows_group_read_receipts IS NOT NULL)
+                    ),
+                    CHECK ((state IN ('pending', 'acknowledged') AND terminal_code IS NULL) OR (state = 'rejected' AND terminal_code IS NOT NULL))
+                );
+                INSERT INTO v2_pending_social_commands_new (operation_id, command_kind, target_user_id, relationship_action, block_action, stranger_permission, user_add_permission, state, attempt_count, next_attempt_at, created_at, terminal_code)
+                SELECT operation_id, command_kind, target_user_id, relationship_action, block_action, stranger_permission, user_add_permission, state, attempt_count, next_attempt_at, created_at, terminal_code FROM v2_pending_social_commands;
+                DROP TABLE v2_pending_social_commands;
+                ALTER TABLE v2_pending_social_commands_new RENAME TO v2_pending_social_commands;
+                CREATE INDEX v2_pending_social_ready_idx ON v2_pending_social_commands (state, next_attempt_at, created_at) WHERE state = 'pending';
+            """)
+        }
+        migrator.registerMigration("addV2ReadReceiptPreferenceProjection") { db in
+            try db.execute(sql: "CREATE TABLE v2_read_receipt_preference (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), allows_direct_read_receipts INTEGER NOT NULL CHECK (allows_direct_read_receipts IN (0, 1)), allows_group_read_receipts INTEGER NOT NULL CHECK (allows_group_read_receipts IN (0, 1)), updated_at REAL NOT NULL);")
         }
         migrator.registerMigration("addV2MessageMediaReferences") { db in
             try db.execute(sql: """
@@ -3550,6 +3903,109 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 VALUES (1, 1, 'building', 1);
                 """)
         }
+        migrator.registerMigration("addV2ConversationCapabilityProjections") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_conversation_states (
+                    room_id TEXT PRIMARY KEY,
+                    is_pinned INTEGER NOT NULL CHECK (is_pinned IN (0, 1)),
+                    is_archived INTEGER NOT NULL CHECK (is_archived IN (0, 1)),
+                    mute_until REAL NOT NULL CHECK (mute_until >= 0),
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX v2_conversation_states_list_idx ON v2_conversation_states (is_archived, is_pinned DESC, updated_at DESC);
+                CREATE TABLE v2_message_favorites (
+                    message_id TEXT PRIMARY KEY,
+                    room_id TEXT NOT NULL,
+                    is_favorited INTEGER NOT NULL CHECK (is_favorited IN (0, 1)),
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX v2_message_favorites_room_idx ON v2_message_favorites (room_id, is_favorited, updated_at DESC);
+                """)
+        }
+        migrator.registerMigration("addV2ConversationCapabilityOutbox") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_pending_conversation_states (
+                    operation_id TEXT PRIMARY KEY,
+                    room_id TEXT NOT NULL,
+                    is_pinned INTEGER NOT NULL CHECK (is_pinned IN (0, 1)),
+                    is_archived INTEGER NOT NULL CHECK (is_archived IN (0, 1)),
+                    mute_until REAL NOT NULL CHECK (mute_until >= 0),
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
+                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+                    next_attempt_at REAL NOT NULL,
+                    created_at REAL NOT NULL,
+                    terminal_code TEXT,
+                    CHECK ((state = 'pending' AND terminal_code IS NULL) OR (state = 'acknowledged' AND terminal_code IS NULL) OR (state = 'rejected' AND terminal_code IS NOT NULL))
+                );
+                CREATE INDEX v2_pending_conversation_states_ready_idx ON v2_pending_conversation_states (state, next_attempt_at, created_at) WHERE state = 'pending';
+                CREATE INDEX v2_pending_conversation_states_terminal_idx ON v2_pending_conversation_states (created_at) WHERE state <> 'pending';
+                CREATE TABLE v2_pending_message_favorites (
+                    operation_id TEXT PRIMARY KEY,
+                    room_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    is_favorited INTEGER NOT NULL CHECK (is_favorited IN (0, 1)),
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
+                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+                    next_attempt_at REAL NOT NULL,
+                    created_at REAL NOT NULL,
+                    terminal_code TEXT,
+                    CHECK ((state = 'pending' AND terminal_code IS NULL) OR (state = 'acknowledged' AND terminal_code IS NULL) OR (state = 'rejected' AND terminal_code IS NOT NULL))
+                );
+                CREATE INDEX v2_pending_message_favorites_ready_idx ON v2_pending_message_favorites (state, next_attempt_at, created_at) WHERE state = 'pending';
+                CREATE INDEX v2_pending_message_favorites_terminal_idx ON v2_pending_message_favorites (created_at) WHERE state <> 'pending';
+            """)
+        }
+        migrator.registerMigration("addV2GroupCapabilityProjections") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_group_pinned_messages (
+                    room_id TEXT NOT NULL, message_id TEXT NOT NULL,
+                    is_pinned INTEGER NOT NULL CHECK (is_pinned IN (0, 1)),
+                    room_sequence INTEGER NOT NULL CHECK (room_sequence > 0), updated_at REAL NOT NULL,
+                    PRIMARY KEY (room_id, message_id)
+                );
+                CREATE INDEX v2_group_pinned_messages_room_idx ON v2_group_pinned_messages (room_id, is_pinned DESC, updated_at DESC);
+                CREATE TABLE v2_group_announcements (
+                    room_id TEXT PRIMARY KEY, body TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0),
+                    room_sequence INTEGER NOT NULL CHECK (room_sequence > 0), updated_at REAL NOT NULL
+                );
+                CREATE TABLE v2_group_role_permissions (
+                    room_id TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+                    permission TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0),
+                    room_sequence INTEGER NOT NULL CHECK (room_sequence > 0), PRIMARY KEY (room_id, role, permission)
+                );
+                CREATE TABLE v2_group_member_roles (
+                    room_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+                    membership_revision INTEGER NOT NULL CHECK (membership_revision > 0),
+                    room_sequence INTEGER NOT NULL CHECK (room_sequence > 0), PRIMARY KEY (room_id, user_id)
+                );
+            """)
+        }
+        migrator.registerMigration("addV2GroupCapabilityOutbox") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_pending_group_capabilities (
+                    operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('pin', 'announcement', 'rolePermissions', 'memberRole')),
+                    room_id TEXT NOT NULL, message_id TEXT, is_pinned INTEGER CHECK (is_pinned IN (0, 1)), body TEXT,
+                    role TEXT CHECK (role IN ('owner', 'admin', 'member')), permissions TEXT NOT NULL,
+                    target_user_id TEXT, expected_revision INTEGER NOT NULL CHECK (expected_revision >= 0),
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
+                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL,
+                    terminal_code TEXT,
+                    CHECK ((state = 'pending' AND terminal_code IS NULL) OR (state = 'acknowledged' AND terminal_code IS NULL) OR (state = 'rejected' AND terminal_code IS NOT NULL))
+                );
+                CREATE INDEX v2_pending_group_capabilities_ready_idx ON v2_pending_group_capabilities (state, next_attempt_at, created_at) WHERE state = 'pending';
+                CREATE INDEX v2_pending_group_capabilities_terminal_idx ON v2_pending_group_capabilities (created_at) WHERE state <> 'pending';
+            """)
+        }
+        migrator.registerMigration("addV2ForwardMessagesOutbox") { db in
+            try db.execute(sql: "CREATE TABLE v2_pending_forward_messages (operation_id TEXT PRIMARY KEY, source_message_ids TEXT NOT NULL, target_room_ids TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('pending','acknowledged','rejected')), attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL, terminal_code TEXT); CREATE INDEX v2_pending_forward_messages_ready_idx ON v2_pending_forward_messages (state, next_attempt_at, created_at) WHERE state = 'pending';")
+        }
+        migrator.registerMigration("addV2GroupPermissionRevisions") { db in
+            try db.execute(sql: "CREATE TABLE v2_group_permission_revisions (room_id TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK (revision > 0)); INSERT INTO v2_group_permission_revisions (room_id, revision) SELECT room_id, MAX(revision) FROM v2_group_role_permissions GROUP BY room_id;")
+        }
+        migrator.registerMigration("addV2MessageForwardAttribution") { db in
+            try db.execute(sql: "ALTER TABLE v2_message_projections ADD COLUMN forwarded_from_message_id TEXT; ALTER TABLE v2_message_projections ADD COLUMN forwarded_from_user_id TEXT;")
+        }
         return migrator
     }()
 
@@ -3563,6 +4019,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         "v2_pending_message_edits",
         "v2_pending_read_receipts",
         "v2_pending_message_reactions",
+        "v2_pending_conversation_states",
+        "v2_pending_message_favorites",
+        "v2_pending_group_capabilities",
+        "v2_pending_forward_messages",
         "v2_pending_social_commands",
         "v2_pending_group_room_creations"
     ]

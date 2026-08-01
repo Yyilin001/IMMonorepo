@@ -613,6 +613,15 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             messageReactionChanger: realtime.messageReactionChanger,
             messageEditor: realtime.messageEditor,
             readReceiptReporter: realtime.readReceiptReporter,
+            conversationStateChanger: realtime.conversationStateChanger,
+            messageFavoriter: realtime.messageFavoriter,
+            groupMessagePinner: realtime.groupMessagePinner,
+            messageForwarder: realtime.messageForwarder,
+            groupAnnouncementManager: realtime.groupAnnouncementManager,
+            groupMemberRoleChanger: realtime.groupMemberRoleChanger,
+            groupRolePolicyChanger: realtime.groupRolePolicyChanger,
+            groupReadReceiptReader: realtime.groupReadReceiptReader,
+            conversationLiveActivity: realtime.conversationLiveActivity,
             directConversationOpener: realtime.directConversationOpener,
             publicIdentityResolver: publicIdentityDirectory,
             groupConversationCreator: realtime.groupConversationCreator,
@@ -630,7 +639,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             reader: V2GRDBStrangerMessagePreferenceDataSource(localStore: localStore),
             updater: realtime.strangerMessagePreferenceUpdater,
             userAddReader: V2GRDBUserAddPreferenceDataSource(localStore: localStore),
-            userAddUpdater: realtime.userAddPreferenceUpdater
+            userAddUpdater: realtime.userAddPreferenceUpdater,
+            readReceiptUpdater: realtime.readReceiptPreferenceUpdater,
+            readReceiptReader: V2GRDBReadReceiptPreferenceDataSource(localStore: localStore),
+            liveActivityUpdater: realtime.liveActivityPreferenceUpdater,
+            liveActivityReader: realtime.liveActivityPreferenceReader
         )
         let contacts = V2ContactsStore(
             dataSource: contactsDataSource,

@@ -17,6 +17,7 @@ struct SnapshotProjectionCodecTests {
             media: [.init(mediaID: .init("00000000-0000-0000-0000-000000000730"))],
             mediaPresentations: [try .init(mediaID: .init("00000000-0000-0000-0000-000000000730"), kind: .image, contentType: "image/jpeg", byteCount: 1_024)],
             mentions: [.user(try .init("00000000-0000-0000-0000-000000000709")), .everyone],
+            forwardedFrom: try .init(messageID: .init("00000000-0000-0000-0000-000000000731"), senderUserID: .init("00000000-0000-0000-0000-000000000732")),
             createdAt: Date(timeIntervalSince1970: 1_750_000_000),
             isWithdrawn: true,
             reactions: [try .init(actorUserID: .init("00000000-0000-0000-0000-000000000705"), reaction: "👍")]
@@ -78,7 +79,20 @@ struct SnapshotProjectionCodecTests {
             userAddPreference: .init(
                 allowsBeingAdded: false,
                 updatedAt: Date(timeIntervalSince1970: 1_750_000_008)
-            )
+            ),
+            conversationStates: [try .init(
+                roomID: .init("00000000-0000-0000-0000-000000000703"),
+                isPinned: true,
+                isArchived: false,
+                muteUntil: Date(timeIntervalSince1970: 1_750_003_600),
+                updatedAt: Date(timeIntervalSince1970: 1_750_000_009)
+            )],
+            messageFavorites: [try .init(
+                roomID: .init("00000000-0000-0000-0000-000000000703"),
+                messageID: .init("00000000-0000-0000-0000-000000000702"),
+                isFavorited: true,
+                updatedAt: Date(timeIntervalSince1970: 1_750_000_010)
+            )]
         )
         let first = try V2SnapshotProjectionCodec.encode(page)
         let second = try V2SnapshotProjectionCodec.encode(page)

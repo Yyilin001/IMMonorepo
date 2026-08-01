@@ -23,6 +23,9 @@ public struct V2SendMessageCommand: Equatable, Sendable {
     public let entities: [V2MessageEntity]
     public let replyTo: V2MessageReplyReference?
     public let targetRule: FanoutTargetRule
+    /// Server-created attribution for a copied message. It is never decoded
+    /// from the ordinary send-message protocol surface.
+    public let forwardedFrom: V2ForwardedMessageAttribution?
 
     public init(
         roomID: RoomID,
@@ -34,6 +37,7 @@ public struct V2SendMessageCommand: Equatable, Sendable {
         entities: [V2MessageEntity] = [],
         replyTo: V2MessageReplyReference? = nil,
         targetRule: FanoutTargetRule = .eligibleMemberCount,
+        forwardedFrom: V2ForwardedMessageAttribution? = nil,
         limits: V2MessageCommandLimits
     ) throws {
         let byteCount = text.lengthOfBytes(using: .utf8)
@@ -56,7 +60,14 @@ public struct V2SendMessageCommand: Equatable, Sendable {
         self.entities = entities
         self.replyTo = replyTo
         self.targetRule = targetRule
+        self.forwardedFrom = forwardedFrom
     }
+}
+
+public struct V2ForwardedMessageAttribution: Equatable, Sendable {
+    public let messageID: MessageID
+    public let senderUserID: UserID
+    public init(messageID: MessageID, senderUserID: UserID) { self.messageID = messageID; self.senderUserID = senderUserID }
 }
 
 public enum V2SendMessageValidationError: Error, Equatable, Sendable {

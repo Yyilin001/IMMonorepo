@@ -14,6 +14,27 @@ protocol V2ConversationSending: Sendable {
     func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome
 }
 
+/// Group receipt details are fetched only after an explicit user action; they
+/// are intentionally not retained in the normal timeline projection.
+protocol V2GroupReadReceiptReading: Sendable {
+    func readers(roomID: String, messageRoomSequence: UInt64, cursor: String?) async throws -> V2ReadReceiptReadersPage
+}
+
+enum V2LiveActivityPreferenceUpdateOutcome: Equatable, Sendable { case accepted, rejected(code: String) }
+protocol V2LiveActivityPreferenceUpdating: Sendable {
+    func update(allowsOnlinePresence: Bool, allowsTypingIndicators: Bool) async throws -> V2LiveActivityPreferenceUpdateOutcome
+}
+protocol V2LiveActivityPreferenceReading: Sendable {
+    func preferences() async throws -> V2LiveActivityPreferences
+}
+
+protocol V2ConversationLiveActivityManaging: Sendable {
+    func activate(roomID: String, includesPresence: Bool) async throws -> V2PresenceState?
+    func deactivate(roomID: String, includesPresence: Bool) async
+    func setTyping(roomID: String, isTyping: Bool) async throws
+    func nextEvent() async throws -> V2LiveActivityEvent
+}
+
 extension V2ConversationSending {
     func send(text: String, in roomID: String) async throws -> V2ConversationSendOutcome {
         try await send(text: text, media: [], in: roomID)
@@ -70,6 +91,46 @@ enum V2ReadReceiptReportOutcome: Equatable, Sendable {
 
 protocol V2ConversationReadReporting: Sendable {
     func recordReadThrough(roomID: String, roomSequence: UInt64) async throws -> V2ReadReceiptReportOutcome
+}
+
+enum V2ConversationCapabilityOutcome: Equatable, Sendable { case accepted, queuedForRetry, rejected(code: String) }
+
+/// Private per-user presentation state. The server projection, not an
+/// optimistic list mutation, remains the source of truth after reconnect.
+protocol V2ConversationStateChanging: Sendable {
+    func setState(roomID: String, isPinned: Bool, isArchived: Bool, muteUntil: Date?) async throws -> V2ConversationCapabilityOutcome
+}
+
+protocol V2MessageFavoriting: Sendable {
+    func setFavorite(roomID: String, messageID: String, isFavorited: Bool) async throws -> V2ConversationCapabilityOutcome
+}
+
+protocol V2GroupMessagePinning: Sendable {
+    func setPinned(roomID: String, messageID: String, isPinned: Bool) async throws -> V2ConversationCapabilityOutcome
+}
+
+enum V2MessageForwardingOutcome: Equatable, Sendable {
+    case completed(succeeded: Int, failed: Int)
+    case queuedForRetry
+    case rejected(code: String)
+}
+
+/// The UI submits only opaque message and room IDs.  The outbox holds the
+/// actual retry record, so leaving the destination picker never loses work.
+protocol V2MessageForwarding: Sendable {
+    func forward(sourceMessageIDs: [String], targetRoomIDs: [String]) async throws -> V2MessageForwardingOutcome
+}
+
+protocol V2GroupAnnouncementManaging: Sendable {
+    func setAnnouncement(roomID: String, body: String, expectedRevision: UInt64) async throws -> V2ConversationCapabilityOutcome
+}
+
+protocol V2GroupMemberRoleChanging: Sendable {
+    func setRole(roomID: String, userID: String, role: V2RoomMembershipRole, expectedMembershipRevision: UInt64) async throws -> V2ConversationCapabilityOutcome
+}
+
+protocol V2GroupRolePolicyChanging: Sendable {
+    func setPolicy(roomID: String, role: V2RoomMembershipRole, permissions: Set<V2GroupPermission>, expectedRevision: UInt64) async throws -> V2ConversationCapabilityOutcome
 }
 
 /// Opens the deterministic direct room for the signed-in user and a target
@@ -177,6 +238,11 @@ enum V2UserAddPreferenceUpdateOutcome: Equatable, Sendable {
 
 protocol V2UserAddPreferenceUpdating: Sendable {
     func update(allowsBeingAdded: Bool) async throws -> V2UserAddPreferenceUpdateOutcome
+}
+
+enum V2ReadReceiptPreferenceUpdateOutcome: Equatable, Sendable { case accepted, queuedForRetry, rejected(code: String) }
+protocol V2ReadReceiptPreferenceUpdating: Sendable {
+    func update(allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferenceUpdateOutcome
 }
 
 enum V2UserBlockChangeOutcome: Equatable, Sendable {
@@ -332,6 +398,131 @@ actor V2OutboxConversationReadReporter: V2ConversationReadReporting {
     }
 }
 
+actor V2OutboxConversationStateChanger: V2ConversationStateChanging {
+    private let outbox: V2ConversationCapabilitiesOutboxEngine
+    init(outbox: V2ConversationCapabilitiesOutboxEngine) { self.outbox = outbox }
+    func setState(roomID: String, isPinned: Bool, isArchived: Bool, muteUntil: Date?) async throws -> V2ConversationCapabilityOutcome {
+        let pending = try await outbox.enqueueConversationState(roomID: .init(roomID), isPinned: isPinned, isArchived: isArchived, muteUntil: muteUntil)
+        switch try await outbox.flushOnce() {
+        case .conversationStateAcknowledged(let operationID) where operationID == pending.command.operationID: return .accepted
+        case .conversationStateRejected(let operationID, let code) where operationID == pending.command.operationID: return .rejected(code: code)
+        case .conversationStateRetryScheduled, .conversationStateAcknowledged, .conversationStateRejected, .idle: return .queuedForRetry
+        case .messageFavoriteAcknowledged, .messageFavoriteRetryScheduled, .messageFavoriteRejected: return .queuedForRetry
+        }
+    }
+}
+
+actor V2OutboxMessageFavoriter: V2MessageFavoriting {
+    private let outbox: V2ConversationCapabilitiesOutboxEngine
+    init(outbox: V2ConversationCapabilitiesOutboxEngine) { self.outbox = outbox }
+    func setFavorite(roomID: String, messageID: String, isFavorited: Bool) async throws -> V2ConversationCapabilityOutcome {
+        let pending = try await outbox.enqueueMessageFavorite(roomID: .init(roomID), messageID: .init(messageID), isFavorited: isFavorited)
+        switch try await outbox.flushOnce() {
+        case .messageFavoriteAcknowledged(let operationID) where operationID == pending.command.operationID: return .accepted
+        case .messageFavoriteRejected(let operationID, let code) where operationID == pending.command.operationID: return .rejected(code: code)
+        case .messageFavoriteRetryScheduled, .messageFavoriteAcknowledged, .messageFavoriteRejected, .idle: return .queuedForRetry
+        case .conversationStateAcknowledged, .conversationStateRetryScheduled, .conversationStateRejected: return .queuedForRetry
+        }
+    }
+}
+
+actor V2OutboxGroupMessagePinner: V2GroupMessagePinning {
+    private let outbox: V2GroupCapabilitiesOutboxEngine
+    init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
+    func setPinned(roomID: String, messageID: String, isPinned: Bool) async throws -> V2ConversationCapabilityOutcome {
+        let pending = try await outbox.enqueuePin(roomID: .init(roomID), messageID: .init(messageID), isPinned: isPinned)
+        switch try await outbox.flushOnce() {
+        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
+        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
+        case .acknowledged, .retryScheduled, .rejected, .idle: return .queuedForRetry
+        }
+    }
+}
+
+actor V2OutboxMessageForwarder: V2MessageForwarding {
+    private let outbox: V2ForwardMessagesOutboxEngine
+
+    init(outbox: V2ForwardMessagesOutboxEngine) { self.outbox = outbox }
+
+    func forward(sourceMessageIDs: [String], targetRoomIDs: [String]) async throws -> V2MessageForwardingOutcome {
+        let sourceIDs = try sourceMessageIDs.map(MessageID.init)
+        let targetIDs = try targetRoomIDs.map(RoomID.init)
+        let pending = try await outbox.enqueue(sourceMessageIDs: sourceIDs, targetRoomIDs: targetIDs)
+        switch try await outbox.flushOnce() {
+        case .acknowledged(let operationID, let results) where operationID == pending.command.operationID:
+            return .completed(
+                succeeded: results.filter { $0.errorCode == nil }.count,
+                failed: results.filter { $0.errorCode != nil }.count
+            )
+        case .acknowledged, .retryScheduled, .idle:
+            return .queuedForRetry
+        case .rejected(let operationID, let code) where operationID == pending.command.operationID:
+            return .rejected(code: code)
+        case .rejected:
+            return .queuedForRetry
+        }
+    }
+}
+
+actor V2OutboxGroupAnnouncementManager: V2GroupAnnouncementManaging {
+    private let outbox: V2GroupCapabilitiesOutboxEngine
+
+    init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
+
+    func setAnnouncement(roomID: String, body: String, expectedRevision: UInt64) async throws -> V2ConversationCapabilityOutcome {
+        let pending = try await outbox.enqueueAnnouncement(
+            roomID: .init(roomID),
+            body: body,
+            expectedRevision: expectedRevision
+        )
+        switch try await outbox.flushOnce() {
+        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
+        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
+        case .acknowledged, .retryScheduled, .rejected, .idle: return .queuedForRetry
+        }
+    }
+}
+
+actor V2OutboxGroupMemberRoleChanger: V2GroupMemberRoleChanging {
+    private let outbox: V2GroupCapabilitiesOutboxEngine
+
+    init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
+
+    func setRole(roomID: String, userID: String, role: V2RoomMembershipRole, expectedMembershipRevision: UInt64) async throws -> V2ConversationCapabilityOutcome {
+        let pending = try await outbox.enqueueMemberRole(
+            roomID: .init(roomID),
+            targetUserID: .init(userID),
+            role: role,
+            expectedMembershipRevision: expectedMembershipRevision
+        )
+        switch try await outbox.flushOnce() {
+        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
+        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
+        case .acknowledged, .retryScheduled, .rejected, .idle: return .queuedForRetry
+        }
+    }
+}
+
+actor V2OutboxGroupRolePolicyChanger: V2GroupRolePolicyChanging {
+    private let outbox: V2GroupCapabilitiesOutboxEngine
+
+    init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
+
+    func setPolicy(roomID: String, role: V2RoomMembershipRole, permissions: Set<V2GroupPermission>, expectedRevision: UInt64) async throws -> V2ConversationCapabilityOutcome {
+        let pending = try await outbox.enqueueRolePermissions(
+            roomID: .init(roomID),
+            role: role,
+            permissions: permissions,
+            expectedRevision: expectedRevision
+        )
+        switch try await outbox.flushOnce() {
+        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
+        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
+        case .acknowledged, .retryScheduled, .rejected, .idle: return .queuedForRetry
+        }
+    }
+}
+
 actor V2RealtimeDirectConversationOpener: V2DirectConversationOpening {
     private let transport: any V2ClientDirectMessagingTransport
     private let localStore: GRDBV2LocalSyncStore
@@ -462,6 +653,65 @@ actor V2RealtimeGroupMemberDirectory: V2GroupMemberDirectoryReading {
     }
 }
 
+actor V2RealtimeGroupReadReceiptReader: V2GroupReadReceiptReading {
+    private let transport: any V2ClientReadReceiptTransport
+
+    init(transport: any V2ClientReadReceiptTransport) { self.transport = transport }
+
+    func readers(roomID: String, messageRoomSequence: UInt64, cursor: String?) async throws -> V2ReadReceiptReadersPage {
+        try await transport.listReadReceiptReaders(
+            roomID: .init(roomID),
+            messageRoomSequence: messageRoomSequence,
+            cursor: cursor,
+            pageSize: 50
+        )
+    }
+}
+
+actor V2RealtimeLiveActivityPreferenceUpdater: V2LiveActivityPreferenceUpdating {
+    private let transport: any V2ClientLiveActivityTransport
+    init(transport: any V2ClientLiveActivityTransport) { self.transport = transport }
+
+    func update(allowsOnlinePresence: Bool, allowsTypingIndicators: Bool) async throws -> V2LiveActivityPreferenceUpdateOutcome {
+        do {
+            _ = try await transport.setLiveActivityPreferences(operationID: .init(UUID().uuidString), allowsOnlinePresence: allowsOnlinePresence, allowsTypingIndicators: allowsTypingIndicators)
+            return .accepted
+        } catch let error as V2RealtimeTransportError {
+            if case .server(let code, let retryable, _, _) = error, !retryable { return .rejected(code: code) }
+            throw error
+        }
+    }
+}
+
+extension V2RealtimeLiveActivityPreferenceUpdater: V2LiveActivityPreferenceReading {
+    func preferences() async throws -> V2LiveActivityPreferences { try await transport.liveActivityPreferences() }
+}
+
+actor V2RealtimeConversationLiveActivity: V2ConversationLiveActivityManaging {
+    private let transport: any V2ClientLiveActivityTransport
+    private let events: any V2LiveActivityEventSource
+
+    init(transport: any V2ClientLiveActivityTransport, events: any V2LiveActivityEventSource) {
+        self.transport = transport; self.events = events
+    }
+
+    func activate(roomID: String, includesPresence: Bool) async throws -> V2PresenceState? {
+        let room = try RoomID(roomID)
+        try await transport.subscribeTyping(roomID: room)
+        return includesPresence ? try await transport.subscribePresence(roomID: room) : nil
+    }
+
+    func deactivate(roomID: String, includesPresence: Bool) async {
+        guard let room = try? RoomID(roomID) else { return }
+        try? await transport.setTyping(roomID: room, isTyping: false)
+        try? await transport.unsubscribeTyping(roomID: room)
+        if includesPresence { try? await transport.unsubscribePresence(roomID: room) }
+    }
+
+    func setTyping(roomID: String, isTyping: Bool) async throws { try await transport.setTyping(roomID: .init(roomID), isTyping: isTyping) }
+    func nextEvent() async throws -> V2LiveActivityEvent { try await events.nextLiveActivityEvent() }
+}
+
 /// Records a membership operation before attempting the realtime request. The
 /// server remains the authorization authority; the UI merely avoids showing
 /// controls it already knows cannot apply to the signed-in member role.
@@ -561,6 +811,21 @@ actor V2OutboxUserAddPreferenceUpdater: V2UserAddPreferenceUpdating {
         case .acknowledged: return .accepted
         case .retryScheduled, .idle: return .queuedForRetry
         case .rejected(_, let code): return .rejected(code: code)
+        }
+    }
+}
+
+/// Receipt preference changes are idempotent protocol commands. The server
+/// remains the authority and its sync projection reconciles other devices.
+actor V2RealtimeReadReceiptPreferenceUpdater: V2ReadReceiptPreferenceUpdating {
+    private let outbox: V2SocialCommandOutboxEngine
+    init(outbox: V2SocialCommandOutboxEngine) { self.outbox = outbox }
+    func update(allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferenceUpdateOutcome {
+        let command = try await outbox.enqueueReadReceiptPreferences(allowsDirect: allowsDirectReadReceipts, allowsGroup: allowsGroupReadReceipts)
+        switch try await outbox.flushIfReady(operationID: command.operationID) {
+        case .acknowledged: return .accepted
+        case .rejected(_, let code): return .rejected(code: code)
+        case .retryScheduled, .idle, nil: return .queuedForRetry
         }
     }
 }
@@ -712,6 +977,15 @@ struct V2AppRealtimeRuntime {
     let messageReactionChanger: any V2MessageReactionChanging
     let messageEditor: any V2MessageEditing
     let readReceiptReporter: any V2ConversationReadReporting
+    let conversationStateChanger: any V2ConversationStateChanging
+    let messageFavoriter: any V2MessageFavoriting
+    let groupMessagePinner: any V2GroupMessagePinning
+    let messageForwarder: any V2MessageForwarding
+    let groupAnnouncementManager: any V2GroupAnnouncementManaging
+    let groupMemberRoleChanger: any V2GroupMemberRoleChanging
+    let groupRolePolicyChanger: any V2GroupRolePolicyChanging
+    let groupReadReceiptReader: any V2GroupReadReceiptReading
+    let conversationLiveActivity: any V2ConversationLiveActivityManaging
     let attachmentUploader: any V2ConversationAttachmentUploading
     let mediaDownloader: any V2ConversationMediaDownloading
     let mediaCacheMaintenance: V2ForegroundConversationMediaDownloader
@@ -737,7 +1011,8 @@ struct V2AppRealtimeRuntime {
         let socialOutbox = V2SocialCommandOutboxEngine(
             store: localStore,
             socialTransport: transport,
-            directTransport: transport
+            directTransport: transport,
+            readReceiptTransport: transport
         )
         let groupOutbox = V2GroupRoomCommandOutboxEngine(store: localStore, transport: transport)
         let membershipOutbox = V2MembershipCommandOutboxEngine(store: localStore, transport: transport)
@@ -747,6 +1022,9 @@ struct V2AppRealtimeRuntime {
         let reactionOutbox = V2MessageReactionOutboxEngine(store: localStore, transport: transport)
         let editOutbox = V2MessageEditOutboxEngine(store: localStore, transport: transport)
         let readReceiptOutbox = V2ReadReceiptOutboxEngine(store: localStore, transport: transport)
+        let conversationCapabilitiesOutbox = V2ConversationCapabilitiesOutboxEngine(store: localStore, transport: transport)
+        let groupCapabilitiesOutbox = V2GroupCapabilitiesOutboxEngine(store: localStore, transport: transport)
+        let forwardMessagesOutbox = V2ForwardMessagesOutboxEngine(store: localStore, transport: transport)
         let mediaEdge = try V2HTTPMediaUploadEdgeClient(
             endpoint: configuration.mediaEdgeEndpoint,
             credentials: authSession
@@ -807,12 +1085,15 @@ struct V2AppRealtimeRuntime {
                     .init { if case .idle = try await moderatedMemberRemovalOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await memberMuteOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await membershipOutbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await groupCapabilitiesOutbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await forwardMessagesOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await outbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await groupOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await socialOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await editOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await reactionOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await readReceiptOutbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await conversationCapabilitiesOutbox.flushOnce() { return false }; return true },
                 ])
                 _ = try await scheduler.flush(maximumWorkItems: 256)
             },
@@ -849,6 +1130,15 @@ struct V2AppRealtimeRuntime {
         messageReactionChanger = V2OutboxMessageReactionChanger(outbox: reactionOutbox)
         messageEditor = V2OutboxMessageEditor(outbox: editOutbox)
         readReceiptReporter = V2OutboxConversationReadReporter(outbox: readReceiptOutbox)
+        conversationStateChanger = V2OutboxConversationStateChanger(outbox: conversationCapabilitiesOutbox)
+        messageFavoriter = V2OutboxMessageFavoriter(outbox: conversationCapabilitiesOutbox)
+        groupMessagePinner = V2OutboxGroupMessagePinner(outbox: groupCapabilitiesOutbox)
+        messageForwarder = V2OutboxMessageForwarder(outbox: forwardMessagesOutbox)
+        groupAnnouncementManager = V2OutboxGroupAnnouncementManager(outbox: groupCapabilitiesOutbox)
+        groupMemberRoleChanger = V2OutboxGroupMemberRoleChanger(outbox: groupCapabilitiesOutbox)
+        groupRolePolicyChanger = V2OutboxGroupRolePolicyChanger(outbox: groupCapabilitiesOutbox)
+        groupReadReceiptReader = V2RealtimeGroupReadReceiptReader(transport: transport)
+        conversationLiveActivity = V2RealtimeConversationLiveActivity(transport: transport, events: connection)
         attachmentUploader = V2ForegroundConversationAttachmentUploader(uploader: mediaUploader)
         let foregroundMediaDownloader = try V2ForegroundConversationMediaDownloader(
             downloader: mediaDownloader,
@@ -864,6 +1154,10 @@ struct V2AppRealtimeRuntime {
         moderatedGroupMemberRemover = V2OutboxModeratedGroupMemberRemover(outbox: moderatedMemberRemovalOutbox)
         strangerMessagePreferenceUpdater = V2OutboxStrangerMessagePreferenceUpdater(outbox: socialOutbox)
         userAddPreferenceUpdater = V2OutboxUserAddPreferenceUpdater(outbox: socialOutbox)
+        readReceiptPreferenceUpdater = V2RealtimeReadReceiptPreferenceUpdater(outbox: socialOutbox)
+        let liveActivityPreferenceService = V2RealtimeLiveActivityPreferenceUpdater(transport: transport)
+        liveActivityPreferenceUpdater = liveActivityPreferenceService
+        liveActivityPreferenceReader = liveActivityPreferenceService
         userBlockChanger = V2OutboxUserBlockChanger(outbox: socialOutbox)
         relationshipChanger = V2OutboxRelationshipChanger(outbox: socialOutbox)
     }
@@ -876,6 +1170,9 @@ struct V2AppRealtimeRuntime {
     let moderatedGroupMemberRemover: any V2ModeratedGroupMemberRemoving
     let strangerMessagePreferenceUpdater: any V2StrangerMessagePreferenceUpdating
     let userAddPreferenceUpdater: any V2UserAddPreferenceUpdating
+    let readReceiptPreferenceUpdater: any V2ReadReceiptPreferenceUpdating
+    let liveActivityPreferenceUpdater: any V2LiveActivityPreferenceUpdating
+    let liveActivityPreferenceReader: any V2LiveActivityPreferenceReading
     let userBlockChanger: any V2UserBlockChanging
     let relationshipChanger: any V2RelationshipChanging
 }

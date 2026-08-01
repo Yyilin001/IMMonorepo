@@ -121,6 +121,7 @@ private func groupEventProjectionKind(for eventType: String) -> String {
     case "room.created": "room"
     case "membership_changed": "membership"
     case "member.muted", "room.frozen", "room.unfrozen": "moderation"
+    case "message.pinned_changed", "group.announcement_changed", "group.role_permissions_changed", "group.member_role_changed": "group_capability"
     default: "message"
     }
 }

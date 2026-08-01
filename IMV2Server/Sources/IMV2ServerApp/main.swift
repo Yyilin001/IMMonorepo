@@ -101,7 +101,7 @@ enum IMV2ServerApp {
                 capacityProfile: configuration.capacityProfile,
                 maximumTextUTF8Bytes: configuration.messageLimits.maxUTF8Bytes
             )
-            let readReceipt = V2ReadReceiptService(store: PostgresV2ReadReceiptStore(database: database))
+            let readReceipt = V2ReadReceiptService(store: PostgresV2ReadReceiptStore(database: database, shadowForwarder: userShardShadowForwarder))
             let directMessaging = try V2DirectMessagingService(
                 store: PostgresV2DirectMessagingStore(database: database, shadowForwarder: userShardShadowForwarder),
                 capacityProfile: configuration.capacityProfile,
@@ -141,6 +141,20 @@ enum IMV2ServerApp {
                     }
                 )
                 await connectionRegistry.configureForegroundGroupInterestManager(broker)
+                let liveActivityBroker = V2NATSLiveActivityBroker(
+                    configuration: nats,
+                    receivePresence: { userID, isOnline, expiresAt in
+                        await connectionRegistry.receivePresence(
+                            targetUserID: userID,
+                            isOnline: isOnline,
+                            expiresAt: expiresAt
+                        )
+                    },
+                    receiveTyping: { state in
+                        await connectionRegistry.receiveTyping(state)
+                    }
+                )
+                await connectionRegistry.configureLiveActivityBroker(liveActivityBroker)
                 groupEventWakePublisher = broker
                 foregroundGroupEventHintPublisher = broker
             }
@@ -157,6 +171,22 @@ enum IMV2ServerApp {
                 store: PostgresV2ModerationStore(database: database),
                 capacityProfile: configuration.capacityProfile
             )
+            let conversationCapabilities = V2ConversationCapabilitiesService(
+                store: PostgresV2ConversationCapabilitiesStore(database: database, shadowForwarder: userShardShadowForwarder)
+            )
+            let groupCapabilities = V2GroupCapabilitiesService(
+                store: PostgresV2GroupCapabilitiesStore(database: database),
+                capacityProfile: configuration.capacityProfile
+            )
+            let forwardMessages = V2ForwardMessagesService(
+                database: database,
+                writeStore: PostgresV2RoomWriteStore(database: database, strangerMessagePolicy: configuration.strangerMessagePolicy, shadowForwarder: userShardShadowForwarder),
+                capacityProfile: configuration.capacityProfile,
+                limits: configuration.messageLimits
+            )
+            let liveActivityStore = PostgresV2LiveActivityStore(database: database)
+            let liveActivity = V2LiveActivityService(store: liveActivityStore)
+            await connectionRegistry.configureLivePresenceLeases(liveActivityStore)
             let handler = V2GatewayDomainCommandHandler(
                 sendMessage: sendMessage,
                 membership: membership,
@@ -164,6 +194,7 @@ enum IMV2ServerApp {
                 reaction: reaction,
                 edit: edit,
                 readReceipt: readReceipt,
+                liveActivity: liveActivity,
                 directMessaging: directMessaging,
                 groupMessaging: groupMessaging,
                 groupAudienceImports: groupAudienceImports,
@@ -172,6 +203,9 @@ enum IMV2ServerApp {
                 membershipDirectory: membershipDirectory,
                 socialRelationships: socialRelationships,
                 moderation: moderation,
+                conversationCapabilities: conversationCapabilities,
+                groupCapabilities: groupCapabilities,
+                forwardMessages: forwardMessages,
                 sync: .init(store: V2RoutedSyncStore(router: userShardRouter, registry: userShardStorage)),
                 telemetry: telemetry
             )

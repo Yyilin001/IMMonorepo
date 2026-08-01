@@ -79,9 +79,77 @@ message Envelope {
     GroupRoomCreationCancelled group_room_creation_cancelled = 73;
     SetUserAddPermission set_user_add_permission = 74;
     UserAddPermissionSet user_add_permission_set = 75;
+    SetReadReceiptPreferences set_read_receipt_preferences = 76;
+    ReadReceiptPreferencesSet read_receipt_preferences_set = 77;
+    ListReadReceiptReaders list_read_receipt_readers = 78;
+    ReadReceiptReadersPage read_receipt_readers_page = 79;
+    SetLiveActivityPreferences set_live_activity_preferences = 80;
+    LiveActivityPreferencesSet live_activity_preferences_set = 81;
+    SubscribePresence subscribe_presence = 82;
+    PresenceSubscribed presence_subscribed = 83;
+    UnsubscribePresence unsubscribe_presence = 84;
+    SubscribeTyping subscribe_typing = 85;
+    UnsubscribeTyping unsubscribe_typing = 86;
+    SetTypingState set_typing_state = 87;
+    TypingStateChanged typing_state_changed = 88;
+    PresenceChanged presence_changed = 89;
     Error error = 90;
+    GetLiveActivityPreferences get_live_activity_preferences = 91;
+    LiveActivityPreferences live_activity_preferences = 92;
+    SetConversationState set_conversation_state = 93;
+    ConversationStateSet conversation_state_set = 94;
+    SetMessageFavorite set_message_favorite = 95;
+    MessageFavoriteChanged message_favorite_changed = 96;
+    SetPinnedMessage set_pinned_message = 97;
+    PinnedMessageChanged pinned_message_changed = 98;
+    SetGroupAnnouncement set_group_announcement = 99;
+    GroupAnnouncementChanged group_announcement_changed = 100;
+    SetGroupRolePermissions set_group_role_permissions = 101;
+    GroupRolePermissionsChanged group_role_permissions_changed = 102;
+    ChangeGroupMemberRole change_group_member_role = 103;
+    GroupMemberRoleChanged group_member_role_changed = 104;
+    ForwardMessages forward_messages = 105;
+    MessagesForwarded messages_forwarded = 106;
   }
 }
+
+// These user-owned controls are synced only to the actor's devices. They
+// never fan out to other room members and each operation is durable/retryable.
+message SetConversationState {
+  string operation_id = 1;
+  string room_id = 2;
+  bool is_pinned = 3;
+  bool is_archived = 4;
+  int64 mute_until_ms = 5; // zero means not muted
+}
+message ConversationStateSet {
+  string room_id = 1;
+  bool is_pinned = 2;
+  bool is_archived = 3;
+  int64 mute_until_ms = 4;
+  int64 updated_at_ms = 5;
+}
+message SetMessageFavorite { string operation_id = 1; string room_id = 2; string message_id = 3; bool is_favorited = 4; }
+message MessageFavoriteChanged { string room_id = 1; string message_id = 2; bool is_favorited = 3; int64 updated_at_ms = 4; }
+
+// Group state is a room event. All changes are sequenced and delivered using
+// the room's existing fan-out mode; the gateway never trusts a client role.
+message SetPinnedMessage { string operation_id = 1; string room_id = 2; string message_id = 3; bool is_pinned = 4; }
+message PinnedMessageChanged { string room_id = 1; string message_id = 2; bool is_pinned = 3; uint64 room_sequence = 4; int64 updated_at_ms = 5; }
+message SetGroupAnnouncement { string operation_id = 1; string room_id = 2; string body = 3; uint64 expected_revision = 4; }
+message GroupAnnouncementChanged { string room_id = 1; string body = 2; uint64 revision = 3; uint64 room_sequence = 4; int64 updated_at_ms = 5; }
+message GroupRolePermission { string permission = 1; }
+message SetGroupRolePermissions { string operation_id = 1; string room_id = 2; string role = 3; repeated GroupRolePermission permissions = 4; uint64 expected_revision = 5; }
+message GroupRolePermissionsChanged { string room_id = 1; string role = 2; repeated GroupRolePermission permissions = 3; uint64 revision = 4; uint64 room_sequence = 5; }
+message ChangeGroupMemberRole { string operation_id = 1; string room_id = 2; string user_id = 3; string role = 4; uint64 expected_membership_revision = 5; }
+message GroupMemberRoleChanged { string room_id = 1; string user_id = 2; string role = 3; uint64 membership_revision = 4; uint64 room_sequence = 5; }
+
+// A forward creates a distinct message for each source/target pair. Results
+// are per pair so callers can report partial target failures without retrying
+// successful output. Source message order is preserved inside each target.
+message ForwardMessages { string operation_id = 1; repeated string source_message_ids = 2; repeated string target_room_ids = 3; }
+message ForwardMessageResult { string source_message_id = 1; string target_room_id = 2; string message_id = 3; uint64 room_sequence = 4; string error_code = 5; }
+message MessagesForwarded { repeated ForwardMessageResult results = 1; }
 
 message Acknowledged {}
 
@@ -116,6 +184,59 @@ message Heartbeat {
 
 message HeartbeatAck {
   int64 server_time_ms = 1;
+}
+
+// Live activity is intentionally ephemeral. It is never appended to a room
+// log, user sync stream, or notification payload. A client must explicitly
+// subscribe while the relevant conversation is visible.
+message SetLiveActivityPreferences {
+  string operation_id = 1;
+  bool allows_online_presence = 2;
+  bool allows_typing_indicators = 3;
+}
+
+message LiveActivityPreferencesSet {
+  bool allows_online_presence = 1;
+  bool allows_typing_indicators = 2;
+  int64 updated_at_ms = 3;
+}
+
+message GetLiveActivityPreferences {}
+message LiveActivityPreferences {
+  bool allows_online_presence = 1;
+  bool allows_typing_indicators = 2;
+  int64 updated_at_ms = 3;
+}
+
+// Presence is deliberately limited to one direct room. The server derives
+// the counterpart from active membership; callers may not name arbitrary
+// users to watch.
+message SubscribePresence { string room_id = 1; }
+message PresenceSubscribed {
+  string room_id = 1;
+  string target_user_id = 2;
+  bool is_online = 3;
+  int64 expires_at_ms = 4;
+}
+message UnsubscribePresence { string room_id = 1; }
+
+// Typing may be observed only while subscribed to a currently authorized
+// room. `is_typing=true` is lease based and expires server-side; clients send
+// an explicit false value when a draft is cleared or the view disappears.
+message SubscribeTyping { string room_id = 1; }
+message UnsubscribeTyping { string room_id = 1; }
+message SetTypingState { string room_id = 1; bool is_typing = 2; }
+message TypingStateChanged {
+  string room_id = 1;
+  string user_id = 2;
+  bool is_typing = 3;
+  int64 expires_at_ms = 4;
+}
+message PresenceChanged {
+  string room_id = 1;
+  string target_user_id = 2;
+  bool is_online = 3;
+  int64 expires_at_ms = 4;
 }
 
 message SendMessage {
@@ -548,6 +669,49 @@ message SetUserAddPermission {
 message UserAddPermissionSet {
   UserAddPermission permission = 1;
   int64 updated_at_ms = 2;
+}
+
+// Receipt sharing affects disclosure only; the server still accepts a
+// member's local viewing watermark while sharing is disabled. For direct
+// rooms, visibility is reciprocal and requires both peers to allow it.
+message SetReadReceiptPreferences {
+  string operation_id = 1;
+  bool allows_direct_read_receipts = 2;
+  bool allows_group_read_receipts = 3;
+}
+
+message ReadReceiptPreferencesSet {
+  bool allows_direct_read_receipts = 1;
+  bool allows_group_read_receipts = 2;
+  int64 updated_at_ms = 3;
+}
+
+// Group read details are queried on demand instead of broadcasting a receipt
+// to every member. The cursor is opaque and may only be reused for this exact
+// room/sequence query.
+message ListReadReceiptReaders {
+  string room_id = 1;
+  uint64 message_room_sequence = 2;
+  string cursor = 3;
+  uint32 page_size = 4;
+}
+
+message ReadReceiptReader {
+  string user_id = 1;
+  uint64 read_through_room_sequence = 2;
+  int64 recorded_at_ms = 3;
+  // Same bounded public identity policy as RoomMember. These values are
+  // returned only to a current member of the queried group.
+  string public_handle = 4;
+  string display_name = 5;
+}
+
+message ReadReceiptReadersPage {
+  string room_id = 1;
+  uint64 message_room_sequence = 2;
+  uint32 reader_count = 3;
+  repeated ReadReceiptReader readers = 4;
+  string next_cursor = 5;
 }
 
 enum RelationshipAction {

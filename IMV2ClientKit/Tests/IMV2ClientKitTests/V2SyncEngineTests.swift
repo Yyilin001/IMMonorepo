@@ -40,6 +40,37 @@ struct V2SyncEngineTests {
         #expect(message.mediaPresentations == [try .init(mediaID: .init(mediaID), kind: .image, contentType: "image/jpeg", byteCount: 2_048)])
     }
 
+    @Test("forward attribution survives live sync and local projection")
+    func forwardAttributionProjectionIsApplied() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let roomID = "00000000-0000-0000-0000-000000000250"
+        let sourceMessageID = "00000000-0000-0000-0000-000000000251"
+        let sourceSenderID = "00000000-0000-0000-0000-000000000252"
+        let record = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000253"),
+            projectionKind: "message",
+            payload: try JSONSerialization.data(withJSONObject: [
+                "event_type": "message.accepted",
+                "message_id": "00000000-0000-0000-0000-000000000254",
+                "room_id": roomID,
+                "room_sequence": 1,
+                "message_revision": 1,
+                "sender_user_id": "00000000-0000-0000-0000-000000000255",
+                "text": "转发内容",
+                "forwarded_from_message_id": sourceMessageID,
+                "forwarded_from_user_id": sourceSenderID,
+                "server_created_at_ms": 1_750_000_000_000,
+            ])
+        )
+
+        _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("forward-token"), receipt: .init("forward-receipt"), hasMore: false, capabilityProfile: "base"))
+
+        let message = try #require(await store.messages(in: .init(roomID)).first)
+        let expectedAttribution = try V2ForwardedMessageAttribution(messageID: .init(sourceMessageID), senderUserID: .init(sourceSenderID))
+        #expect(message.forwardedFrom == expectedAttribution)
+    }
+
     @Test("moderation sync facts are durably projected before acknowledgement")
     func moderationProjectionIsApplied() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)

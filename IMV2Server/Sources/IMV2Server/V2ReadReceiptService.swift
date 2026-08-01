@@ -8,8 +8,31 @@ public struct V2AuthenticatedReadReceipt: Sendable {
 
 public enum V2ReadReceiptOutcome: Equatable, Sendable { case recorded(V2ReadReceipt), idempotent(V2ReadReceipt), idempotencyConflict }
 
+public enum V2SetReadReceiptPreferencesOutcome: Equatable, Sendable {
+    case updated(V2ReadReceiptPreferences)
+    case idempotent(V2ReadReceiptPreferences)
+    case idempotencyConflict
+}
+
 public protocol V2ReadReceiptStore: Sendable {
     func record(command: V2RecordReadReceiptCommand, now: Date) async throws -> V2ReadReceiptOutcome
+    func setPreferences(command: V2SetReadReceiptPreferencesCommand, now: Date) async throws -> V2SetReadReceiptPreferencesOutcome
+    func readers(roomID: RoomID, actorUserID: UserID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage
+}
+
+/// The original receipt-store seam remains useful for focused watermark
+/// tests. Production storage implements these v10 operations; old in-memory
+/// fakes fail closed if a caller attempts the richer surface.
+public extension V2ReadReceiptStore {
+    func setPreferences(command: V2SetReadReceiptPreferencesCommand, now: Date) async throws -> V2SetReadReceiptPreferencesOutcome {
+        _ = command; _ = now
+        throw V2ReadReceiptStoreError.corruptPersistenceState
+    }
+
+    func readers(roomID: RoomID, actorUserID: UserID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
+        _ = roomID; _ = actorUserID; _ = messageRoomSequence; _ = cursor; _ = pageSize
+        throw V2ReadReceiptStoreError.corruptPersistenceState
+    }
 }
 
 public struct V2ReadReceiptService: Sendable {
@@ -18,6 +41,14 @@ public struct V2ReadReceiptService: Sendable {
     public func record(_ request: V2AuthenticatedReadReceipt) async throws -> V2ReadReceiptOutcome {
         try await store.record(command: .init(roomID: request.roomID, actorUserID: request.actorUserID, operationID: request.operationID, readThroughRoomSequence: request.readThroughRoomSequence), now: now())
     }
+
+    public func setPreferences(actorUserID: UserID, operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2SetReadReceiptPreferencesOutcome {
+        try await store.setPreferences(command: .init(actorUserID: actorUserID, operationID: operationID, allowsDirectReadReceipts: allowsDirectReadReceipts, allowsGroupReadReceipts: allowsGroupReadReceipts), now: now())
+    }
+
+    public func readers(roomID: RoomID, actorUserID: UserID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
+        try await store.readers(roomID: roomID, actorUserID: actorUserID, messageRoomSequence: messageRoomSequence, cursor: cursor, pageSize: pageSize)
+    }
 }
 
-public enum V2ReadReceiptStoreError: Error, Equatable, Sendable { case roomNotFound, actorNotMember, roomSequenceNotFound, corruptPersistenceState }
+public enum V2ReadReceiptStoreError: Error, Equatable, Sendable { case roomNotFound, actorNotMember, roomSequenceNotFound, invalidRequest, corruptPersistenceState }
