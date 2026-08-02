@@ -3663,15 +3663,25 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     source_event_id TEXT NOT NULL UNIQUE,
                     title TEXT NOT NULL,
                     owner_user_id TEXT NOT NULL,
+                    membership_revision INTEGER NOT NULL DEFAULT 1 CHECK (membership_revision > 0),
+                    delivery_mode TEXT CHECK (delivery_mode IS NULL OR delivery_mode IN ('standard_fanout', 'large_group_hybrid')),
                     created_at REAL NOT NULL
                 );
             """)
         }
         migrator.registerMigration("addV2RoomProfileMembershipRevision") { db in
-            try db.execute(sql: "ALTER TABLE v2_room_profile_projections ADD COLUMN membership_revision INTEGER NOT NULL DEFAULT 1 CHECK (membership_revision > 0)")
+            // The V2 baseline already contains this column. Keep the named
+            // migration only for a database interrupted between the old table
+            // creation and this follow-up migration; SQLite 3.37 rejects the
+            // prior ADD COLUMN ... CHECK form on this path.
+            if try !db.columns(in: "v2_room_profile_projections").contains(where: { $0.name == "membership_revision" }) {
+                try db.execute(sql: "ALTER TABLE v2_room_profile_projections ADD COLUMN membership_revision INTEGER NOT NULL DEFAULT 1")
+            }
         }
         migrator.registerMigration("addV2RoomProfileDeliveryMode") { db in
-            try db.execute(sql: "ALTER TABLE v2_room_profile_projections ADD COLUMN delivery_mode TEXT CHECK (delivery_mode IS NULL OR delivery_mode IN ('standard_fanout', 'large_group_hybrid'))")
+            if try !db.columns(in: "v2_room_profile_projections").contains(where: { $0.name == "delivery_mode" }) {
+                try db.execute(sql: "ALTER TABLE v2_room_profile_projections ADD COLUMN delivery_mode TEXT CHECK (delivery_mode IS NULL OR delivery_mode IN ('standard_fanout', 'large_group_hybrid'))")
+            }
         }
         migrator.registerMigration("addV2DirectRoomIdentityCache") { db in
             try db.execute(sql: """
