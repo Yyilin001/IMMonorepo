@@ -168,6 +168,7 @@ struct V2ConversationStoreTests {
             revision: 1,
             text: "附件说明",
             media: [reference],
+            mediaPresentations: [try testPresentation(for: reference)],
             createdAt: .now,
             isOutgoing: false,
             isWithdrawn: false
@@ -193,6 +194,7 @@ struct V2ConversationStoreTests {
             revision: 1,
             text: "附件说明",
             media: [reference],
+            mediaPresentations: [try testPresentation(for: reference)],
             createdAt: .now,
             isOutgoing: false,
             isWithdrawn: false
@@ -226,6 +228,7 @@ struct V2ConversationStoreTests {
             revision: 1,
             text: "附件说明",
             media: [reference],
+            mediaPresentations: [try testPresentation(for: reference)],
             createdAt: .now,
             isOutgoing: false,
             isWithdrawn: false
@@ -787,7 +790,7 @@ struct V2ConversationStoreTests {
         #expect(store.messageActionFeedback == "编辑被拒绝（REVISION_CONFLICT），请刷新后重试。")
     }
 
-    @Test func messageRefreshReportsTheNewestVisibleRoomSequence() async {
+    @Test func visibleMessageReportsTheNewestVisibleRoomSequence() async throws {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [
             .init(id: "message-a", roomSequence: 4, revision: 1, text: "较早", createdAt: .now, isOutgoing: false, isWithdrawn: false),
             .init(id: "message-b", roomSequence: 9, revision: 1, text: "最新", createdAt: .now, isOutgoing: true, isWithdrawn: false)
@@ -796,6 +799,7 @@ struct V2ConversationStoreTests {
         let store = V2ConversationDetailStore(dataSource: source, sender: nil, readReceiptReporter: reporter, userID: "current-user", roomID: "room-a")
 
         await store.refresh()
+        await store.reportVisibleMessage(try #require(store.messages.last))
 
         #expect(store.state == .loaded)
         #expect(await reporter.requests() == [.init(roomID: "room-a", roomSequence: 9)])
@@ -1513,7 +1517,7 @@ struct V2ConversationStoreTests {
 
         await store.pollVisibleHybridGroupEvents()
 
-        #expect(await synchronizer.requestedRoomIDs() == ["room-standard"])
+        #expect(await synchronizer.subscriptionRequests() == ["room-standard"])
     }
 
     @Test func visibleHybridGroupUsesATLSWakeBeforeTheNextCursorPullAndUnsubscribesOnExit() async {
@@ -1597,9 +1601,19 @@ struct V2ConversationStoreTests {
     }
 }
 
+private func testPresentation(for reference: V2MediaReference) throws -> V2MediaPresentation {
+    try .init(
+        mediaID: reference.mediaID,
+        kind: .file,
+        contentType: "application/octet-stream",
+        byteCount: 0
+    )
+}
+
 private actor V2ActiveHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchronizing {
     private var outcomes: [V2ActiveHybridGroupSyncOutcome]
     private var roomIDs: [String] = []
+    private var subscriptionRoomIDs: [String] = []
 
     init(outcomes: [V2ActiveHybridGroupSyncOutcome]) {
         self.outcomes = outcomes
@@ -1611,11 +1625,15 @@ private actor V2ActiveHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchroniz
         return outcomes.removeFirst()
     }
 
-    func subscribe(roomID _: String) -> V2ActiveHybridGroupSubscriptionOutcome { .notHybridRoom }
+    func subscribe(roomID: String) -> V2ActiveHybridGroupSubscriptionOutcome {
+        subscriptionRoomIDs.append(roomID)
+        return .notHybridRoom
+    }
     func nextWake() async throws -> V2ActiveHybridGroupWake { throw CancellationError() }
     func unsubscribe(roomID _: String) {}
 
     func requestedRoomIDs() -> [String] { roomIDs }
+    func subscriptionRequests() -> [String] { subscriptionRoomIDs }
 }
 
 private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchronizing {

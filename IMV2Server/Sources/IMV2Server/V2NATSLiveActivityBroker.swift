@@ -159,6 +159,8 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
     }
 }
 
+/// NIO serializes callbacks for a channel on one event loop. Keep parser
+/// fields event-loop-confined; only the Sendable payload callback may leave it.
 private final class V2NATSLiveActivityInboundHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer

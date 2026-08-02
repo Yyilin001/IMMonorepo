@@ -87,7 +87,9 @@ public protocol V2GatewayTransportMetricsRecorder: V2GatewayTransportMetricsSour
 /// Process-local transport metrics. Gateway channels update it without using
 /// connection, user, device, room or request identifiers. The peak queue value
 /// is deliberately a process lifetime high-water mark, not a per-channel
-/// label, so a scrape cannot create unbounded time series.
+/// label, so a scrape cannot create unbounded time series. `NSLock` protects
+/// every mutable field and is the sole reason this reference type can cross
+/// gateway event loops; do not add unprotected mutable state here.
 public final class V2GatewayTransportMetrics: V2GatewayTransportMetricsRecorder, @unchecked Sendable {
     private let lock = NSLock()
     private var activeConnections = 0
