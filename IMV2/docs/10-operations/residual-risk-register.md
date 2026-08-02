@@ -8,7 +8,7 @@
 
 | 项目 | 处置 | 验证 |
 | --- | --- | --- |
-| Linux CI 无法启动 Swift 测试脚本、编译 GRDB 或建立当前 V2 SQLite 基线 | workflow 统一用 `bash` 调用受版本控制的脚本，并在 Swift 容器安装 `libsqlite3-dev`；fresh V2 schema 不再走 SQLite 3.37 不兼容的 `ADD COLUMN ... CHECK` 路径 | GitHub Actions `swift-and-postgres` job |
+| Linux CI 无法启动 Swift 测试脚本、编译 GRDB 或建立当前 V2 SQLite/PostgreSQL 基线 | workflow 统一用 `bash` 调用受版本控制的脚本，并在 Swift 容器安装 `libsqlite3-dev`；fresh SQLite schema 不再走 SQLite 3.37 不兼容的 `ADD COLUMN ... CHECK` 路径；PostgreSQL migration 移除指向不存在 `users` 表的外键，并用设备复合外键约束 presence 身份 | 本机 disposable PostgreSQL 全量 245 项 Server 测试；GitHub Actions `swift-and-postgres` job |
 | 会话搜索状态与会话 UI 同文件 | `V2ConversationSearchStore` 独立为主线程状态对象；UI 仅消费其快照 | iOS generic simulator build |
 
 ## 仍打开的项目

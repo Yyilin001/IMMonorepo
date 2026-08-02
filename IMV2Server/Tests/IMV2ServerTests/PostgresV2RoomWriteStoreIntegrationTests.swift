@@ -347,6 +347,21 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(cascadedFence.shardLeaseID.uuidString == replacement.id.rawValue)
             #expect(cascadedFence.shardLeaseGeneration == 2)
 
+            // No policy rows means this pre-policy group still uses its role
+            // default. An explicit empty policy has the same materialized
+            // row shape, so its durable operation is the deny-all marker.
+            #expect(try await v2ResolvedGroupPermissions(roomID: roomUUID, role: .member, sql: sql) == nil)
+            try await sql.raw("""
+                INSERT INTO im_v2.group_permission_operations
+                    (actor_user_id, operation_id, room_id, expected_revision, resulting_revision,
+                     role, permissions, room_sequence, event_id, plan_id, created_at)
+                VALUES
+                    (\(bind: senderUUID), '00000000-0000-0000-0000-00000000001a', \(bind: roomUUID), 1, 2,
+                     'member', '[]'::jsonb, 2, '00000000-0000-0000-0000-00000000001b',
+                     '00000000-0000-0000-0000-00000000001c', \(bind: Date(timeIntervalSince1970: 1_750_000_000)))
+                """).run()
+            #expect(try await v2ResolvedGroupPermissions(roomID: roomUUID, role: .member, sql: sql) == [])
+
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
         } catch {

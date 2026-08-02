@@ -122,7 +122,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 throw V2RoomWriteStoreError.actorNotEligible
             }
             if room.kind == "group" {
-                let configuredPermissions = try await groupPermissions(roomID: roomID, role: actorRole, sql: sql)
+                let configuredPermissions = try await v2ResolvedGroupPermissions(roomID: roomID, role: actorRole, sql: sql)
                 guard V2GroupPermissionDefaults.allows(role: actorRole, permission: .sendMessages, configured: configuredPermissions) else {
                     throw V2RoomWriteStoreError.actorNotEligible
                 }
@@ -528,13 +528,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         return presentations
     }
 
-    private func groupPermissions(roomID: UUID, role: V2RoomMembershipRole, sql: any SQLDatabase) async throws -> Set<V2GroupPermission>? {
-        guard role != .owner else { return nil }
-        let rows = try await sql.raw("SELECT permission FROM im_v2.group_role_permissions WHERE room_id = \(bind: roomID) AND role = \(bind: role.rawValue)").all(decoding: GroupPermissionRow.self)
-        guard rows.allSatisfy({ V2GroupPermission(rawValue: $0.permission) != nil }) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        return Set(rows.compactMap { V2GroupPermission(rawValue: $0.permission) })
-    }
-
     private func assertMentionsAuthorized(_ mentions: [V2MentionTarget], roomID: UUID, membershipRevision: Int64, senderID: UUID, sql: any SQLDatabase) async throws {
         guard !mentions.isEmpty else { return }
         guard mentions.count <= V2MessageCommandLimits.maxMentions,
@@ -778,7 +771,6 @@ private struct MessageRow: Decodable {
 }
 
 private struct MembershipRoleRow: Decodable { let role: String }
-private struct GroupPermissionRow: Decodable { let permission: String }
 private struct AuthorizationRow: Decodable { let authorized: Bool }
 private struct MuteAuthorizationRow: Decodable { let muted: Bool }
 private struct DirectRoomPairRow: Decodable {
