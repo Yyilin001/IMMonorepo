@@ -25,6 +25,8 @@ jobs:
           --health-interval 1s --health-timeout 3s --health-retries 30
     steps:
       - uses: actions/checkout@v4
+      - name: Install SQLite development headers
+        run: apt-get update && apt-get install --yes --no-install-recommends libsqlite3-dev
       - name: Run package tests
         run: bash ./scripts/run_v2_swift_tests.sh
       - name: Run PostgreSQL integration tests
