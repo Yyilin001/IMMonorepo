@@ -67,6 +67,26 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
         let expiry = now.addingTimeInterval(leaseDuration)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            // Push carries only a generic wake hint, so suppressing it for a
+            // muted room cannot affect durable user-sync correctness. Perform
+            // this before admission so a muted wake never consumes device
+            // budget. Expired leases are included because their provider work
+            // is no longer active and they may otherwise be reclaimed.
+            try await sql.raw("""
+                UPDATE im_v2.push_wake_outbox AS wake
+                SET state = 'suppressed', suppression_reason = 'conversation_muted',
+                    claim_token = NULL, lease_expires_at = NULL
+                FROM im_v2.room_events AS event,
+                     im_v2.user_room_preferences AS preference
+                WHERE wake.source_event_id = event.event_id
+                  AND preference.user_id = wake.target_user_id
+                  AND preference.room_id = event.room_id
+                  AND preference.mute_until > \(bind: now)
+                  AND (
+                    wake.state = 'pending'
+                    OR (wake.state = 'claimed' AND wake.lease_expires_at <= \(bind: now))
+                  )
+                """).run()
             guard let pending = try await sql.raw("""
                 SELECT dispatch_id, target_device_id, campaign_id, budget_window_started_at,
                        requires_new_key_operation, admitted_at
@@ -141,6 +161,7 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
     private func suppressionCode(_ reason: V2PushSuppressionReason) -> String {
         switch reason {
         case .campaignDisabled: return "campaign_disabled"
+        case .conversationMuted: return "conversation_muted"
         case .deviceBudgetUnavailable: return "device_budget_unavailable"
         case .deviceWorkBudgetExhausted: return "device_work_budget_exhausted"
         case .deviceNewKeyBudgetExhausted: return "device_new_key_budget_exhausted"

@@ -35,6 +35,10 @@ public struct V2PushAdmissionRequest: Equatable, Sendable {
 
 public enum V2PushSuppressionReason: Equatable, Sendable {
     case campaignDisabled
+    /// The target user has muted the conversation that produced this wake.
+    /// This suppresses only the best-effort Push hint; durable synchronization
+    /// remains available when the app next connects.
+    case conversationMuted
     case deviceBudgetUnavailable
     case deviceWorkBudgetExhausted
     case deviceNewKeyBudgetExhausted

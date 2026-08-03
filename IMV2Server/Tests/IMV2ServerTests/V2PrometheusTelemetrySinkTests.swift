@@ -74,6 +74,30 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(!rendered.contains("device_id"))
     }
 
+    @Test("transport metrics remain exact under concurrent gateway callbacks")
+    func serializesConcurrentTransportMetricUpdates() async {
+        let metrics = V2GatewayTransportMetrics()
+        let workers = 12
+        let iterations = 400
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<workers {
+                group.addTask {
+                    for value in 0..<iterations {
+                        metrics.connectionOpened()
+                        metrics.observeQueuedInboundBytes(value)
+                        metrics.connectionClosed(reason: .requestFailure)
+                    }
+                }
+            }
+        }
+
+        let snapshot = metrics.gatewayTransportMetricsSnapshot()
+        #expect(snapshot.activeConnections == 0)
+        #expect(snapshot.peakQueuedInboundBytes == iterations - 1)
+        #expect(snapshot.closureCount(for: .requestFailure) == UInt64(workers * iterations))
+    }
+
     @Test("durable-work metrics use fixed aggregate labels and advertise a failed scrape")
     func rendersDurableWorkMetrics() {
         let snapshot = V2DurableWorkMetricsSnapshot(

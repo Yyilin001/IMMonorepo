@@ -3,7 +3,7 @@ import IMV2Core
 
 public struct V2ClientConversationState: Equatable, Sendable {
     public let roomID: RoomID; public let isPinned: Bool; public let isArchived: Bool; public let muteUntil: Date?; public let updatedAt: Date
-    init(roomID: RoomID, isPinned: Bool, isArchived: Bool, muteUntil: Date?, updatedAt: Date) { self.roomID = roomID; self.isPinned = isPinned; self.isArchived = isArchived; self.muteUntil = muteUntil; self.updatedAt = updatedAt }
+    public init(roomID: RoomID, isPinned: Bool, isArchived: Bool, muteUntil: Date?, updatedAt: Date) { self.roomID = roomID; self.isPinned = isPinned; self.isArchived = isArchived; self.muteUntil = muteUntil; self.updatedAt = updatedAt }
     init(record: V2ClientSyncRecord) throws {
         struct Wire: Decodable { let roomID: String; let isPinned: Bool; let isArchived: Bool; let muteUntilMs: Int64; let updatedAtMs: Int64; enum CodingKeys: String, CodingKey { case roomID = "room_id", isPinned = "is_pinned", isArchived = "is_archived", muteUntilMs = "mute_until_ms", updatedAtMs = "updated_at_ms" } }
         guard record.projectionKind == "conversation_state", let wire = try? JSONDecoder().decode(Wire.self, from: record.payload), wire.muteUntilMs >= 0, wire.updatedAtMs >= 0 else { throw V2ClientProjectionError.invalidMessagePayload }

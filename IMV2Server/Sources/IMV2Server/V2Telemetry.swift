@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// A deliberately small observability boundary. Its fields are enumerated or
 /// aggregate values only: callers must not attach room IDs, user IDs, message
@@ -87,44 +88,45 @@ public protocol V2GatewayTransportMetricsRecorder: V2GatewayTransportMetricsSour
 /// Process-local transport metrics. Gateway channels update it without using
 /// connection, user, device, room or request identifiers. The peak queue value
 /// is deliberately a process lifetime high-water mark, not a per-channel
-/// label, so a scrape cannot create unbounded time series. `NSLock` protects
-/// every mutable field and is the sole reason this reference type can cross
-/// gateway event loops; do not add unprotected mutable state here.
-public final class V2GatewayTransportMetrics: V2GatewayTransportMetricsRecorder, @unchecked Sendable {
-    private let lock = NSLock()
-    private var activeConnections = 0
-    private var peakQueuedInboundBytes = 0
-    private var closures: [V2GatewayConnectionClosure: UInt64] = [:]
+/// label, so a scrape cannot create unbounded time series. `Mutex` is the
+/// explicit synchronization boundary for every mutable field, allowing this
+/// process-wide recorder to be Sendable without an unchecked conformance.
+public final class V2GatewayTransportMetrics: V2GatewayTransportMetricsRecorder, Sendable {
+    private struct Storage: Sendable {
+        var activeConnections = 0
+        var peakQueuedInboundBytes = 0
+        var closures: [V2GatewayConnectionClosure: UInt64] = [:]
+    }
+
+    private let storage = Mutex(Storage())
 
     public init() {}
 
     public func connectionOpened() {
-        lock.lock()
-        defer { lock.unlock() }
-        activeConnections += 1
+        storage.withLock { $0.activeConnections += 1 }
     }
 
     public func connectionClosed(reason: V2GatewayConnectionClosure) {
-        lock.lock()
-        defer { lock.unlock() }
-        activeConnections = max(0, activeConnections - 1)
-        closures[reason] = v2SaturatingAdd(closures[reason, default: 0], 1)
+        storage.withLock { storage in
+            storage.activeConnections = max(0, storage.activeConnections - 1)
+            storage.closures[reason] = v2SaturatingAdd(storage.closures[reason, default: 0], 1)
+        }
     }
 
     public func observeQueuedInboundBytes(_ bytes: Int) {
-        lock.lock()
-        defer { lock.unlock() }
-        peakQueuedInboundBytes = max(peakQueuedInboundBytes, max(0, bytes))
+        storage.withLock {
+            $0.peakQueuedInboundBytes = max($0.peakQueuedInboundBytes, max(0, bytes))
+        }
     }
 
     public func gatewayTransportMetricsSnapshot() -> V2GatewayTransportMetricsSnapshot {
-        lock.lock()
-        defer { lock.unlock() }
-        return .init(
-            activeConnections: activeConnections,
-            peakQueuedInboundBytes: peakQueuedInboundBytes,
-            closures: closures
-        )
+        storage.withLock { storage in
+            .init(
+                activeConnections: storage.activeConnections,
+                peakQueuedInboundBytes: storage.peakQueuedInboundBytes,
+                closures: storage.closures
+            )
+        }
     }
 }
 

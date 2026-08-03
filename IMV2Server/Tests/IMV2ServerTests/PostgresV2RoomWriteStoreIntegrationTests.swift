@@ -503,6 +503,73 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("muted conversation suppresses a generic Push wake before budget admission")
+    func mutedConversationSuppressesPushWake() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let room = UUID(uuidString: "00000000-0000-0000-0000-000000000311")!
+            let event = UUID(uuidString: "00000000-0000-0000-0000-000000000312")!
+            let user = UUID(uuidString: "00000000-0000-0000-0000-000000000313")!
+            let device = UUID(uuidString: "00000000-0000-0000-0000-000000000314")!
+            let dispatch = UUID(uuidString: "00000000-0000-0000-0000-000000000315")!
+            try await sql.raw("""
+                INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id)
+                VALUES (\(bind: room), 'room-muted', 'standard')
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_events
+                    (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at)
+                VALUES (\(bind: event), \(bind: room), 1, 'message.accepted', \(bind: user), '{}'::jsonb, 0, \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.user_room_preferences (user_id, room_id, pinned_at, archived_at, mute_until, updated_at)
+                VALUES (\(bind: user), \(bind: room), NULL, NULL, \(bind: now.addingTimeInterval(3600)), \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.push_campaigns (campaign_id, state, updated_at)
+                VALUES ('wake', 'enabled', \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.push_device_budgets
+                    (device_id, campaign_id, window_started_at, max_work_units, max_new_key_operations)
+                VALUES (\(bind: device), 'wake', \(bind: now), 1, 1)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.push_wake_outbox
+                    (dispatch_id, source_event_id, target_user_id, target_device_id, campaign_id, budget_window_started_at, created_at)
+                VALUES (\(bind: dispatch), \(bind: event), \(bind: user), \(bind: device), 'wake', \(bind: now), \(bind: now))
+                """).run()
+
+            let store = PostgresV2PushWakeStore(database: app.db(.psql))
+            #expect(try await store.claimAdmitted(now: now, leaseDuration: 30, limit: 1).isEmpty)
+            let state = try #require(try await sql.raw("SELECT state, suppression_reason FROM im_v2.push_wake_outbox WHERE dispatch_id = \(bind: dispatch)").first(decoding: PushSuppressionStateRow.self))
+            let budget = try #require(try await sql.raw("SELECT used_work_units, used_new_key_operations FROM im_v2.push_device_budgets WHERE device_id = \(bind: device)").first(decoding: PushBudgetRow.self))
+            #expect(state.state == "suppressed")
+            #expect(state.suppressionReason == "conversation_muted")
+            #expect(budget.usedWorkUnits == 0)
+            #expect(budget.usedNewKeyOperations == 0)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("Push endpoint encryption is device-bound and late rejection cannot disable a fresh registration")
     func pushEndpointRegistrationUsesGenerationFence() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
@@ -6186,6 +6253,11 @@ private struct ReceiptStateAssertionRow: Decodable {
     enum CodingKeys: String, CodingKey { case sequence = "read_through_room_sequence" }
 }
 private struct PushStateRow: Decodable { let state: String }
+private struct PushSuppressionStateRow: Decodable {
+    let state: String
+    let suppressionReason: String?
+    enum CodingKeys: String, CodingKey { case state; case suppressionReason = "suppression_reason" }
+}
 private struct SyncKindRow: Decodable {
     let sequence: Int64
     let kind: String

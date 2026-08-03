@@ -25,6 +25,35 @@ struct V2ConversationStoreTests {
         ])
     }
 
+    @Test func emptyConversationKeepsItsDurablePinnedArchiveAndMuteState() throws {
+        let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000e12")
+        let identity = try V2PublicIdentity(
+            userID: .init("00000000-0000-0000-0000-000000000e13"),
+            handle: .init("empty_state"),
+            displayName: "空会话"
+        )
+        let updatedAt = Date(timeIntervalSince1970: 1_750_000_000)
+        let muteUntil = updatedAt.addingTimeInterval(3_600)
+        let state = V2ClientConversationState(
+            roomID: roomID,
+            isPinned: true,
+            isArchived: true,
+            muteUntil: muteUntil,
+            updatedAt: updatedAt
+        )
+
+        let items = V2GRDBConversationDataSource.mergingEmptyProjectionItems(
+            messageItems: [],
+            profiles: [],
+            directIdentities: [.init(roomID: roomID, publicIdentity: identity, updatedAt: updatedAt)],
+            conversationStates: [roomID: state]
+        )
+
+        #expect(items == [
+            .init(id: roomID.rawValue, title: "空会话", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false, kind: .direct, isPinned: true, isArchived: true, muteUntil: muteUntil)
+        ])
+    }
+
     @Test func detailStoreExposesGroupControlsOnlyForKnownGroupRooms() async {
         let date = Date(timeIntervalSince1970: 1_700_000_000)
         let source = V2ConversationDataSourceFake(
@@ -1569,6 +1598,57 @@ struct V2ConversationStoreTests {
         #expect(store.hits == [hit])
         #expect(!store.canLoadMore)
         #expect(await searcher.requests().map(\.query) == ["你好"])
+    }
+
+    @Test func messageSearchStorePassesTheSelectedSenderFilter() async throws {
+        let senderID: UserID = try .init("00000000-0000-0000-0000-000000000f04")
+        let searcher = V2MessageSearchFake(result: .success(.init(hits: [], nextCursor: nil)))
+        let store = V2ConversationSearchStore(searcher: searcher)
+        store.query = "你好"
+        store.filterToSender(senderID)
+
+        await store.search()
+
+        #expect(await searcher.requests().map(\.senderUserID) == [senderID])
+    }
+
+    @Test func typingStateExpiresAndAnOlderLeaseCannotClearANewerOne() throws {
+        let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000f05")
+        let peerID: UserID = try .init("00000000-0000-0000-0000-000000000f06")
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let store = V2ConversationDetailStore(
+            dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil,
+            userID: "current-user",
+            roomID: roomID.rawValue
+        )
+        let firstExpiry = now.addingTimeInterval(3)
+        let secondExpiry = now.addingTimeInterval(6)
+
+        store.applyTypingState(.init(roomID: roomID, userID: peerID, isTyping: true, expiresAt: firstExpiry), now: now)
+        store.applyTypingState(.init(roomID: roomID, userID: peerID, isTyping: true, expiresAt: secondExpiry), now: now)
+        store.expireTypingState(for: peerID, expectedExpiry: firstExpiry)
+        #expect(store.typingUserIDs == [peerID])
+
+        store.expireTypingState(for: peerID, expectedExpiry: secondExpiry)
+        #expect(store.typingUserIDs.isEmpty)
+    }
+
+    @Test func conversationListSeparatesArchivedItemsFromTheInbox() async {
+        let date = Date(timeIntervalSince1970: 1_750_000_000)
+        let source = V2ConversationDataSourceFake(
+            summaries: [
+                .init(id: "inbox", title: "收件箱", preview: "消息", lastActivity: date, isOutgoing: false),
+                .init(id: "archive", title: "归档", preview: "消息", lastActivity: date, isOutgoing: false, isArchived: true)
+            ],
+            messages: []
+        )
+        let store = V2ConversationListStore(dataSource: source, userID: "current-user")
+
+        await store.refresh()
+        #expect(store.visibleItems.map(\.id) == ["inbox"])
+        store.isShowingArchived = true
+        #expect(store.visibleItems.map(\.id) == ["archive"])
     }
 
     @Test func messageSearchStoreShowsIndexingUntilTheBackgroundBuildCompletes() async {

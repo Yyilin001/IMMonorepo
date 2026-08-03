@@ -203,7 +203,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2RoomMembershipDirectoryError.actorNotMember {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
-        } catch V2LiveActivityStoreError.actorNotMember, V2LiveActivityStoreError.typingNotAllowed {
+        } catch V2LiveActivityStoreError.actorNotMember, V2LiveActivityStoreError.typingNotAllowed, V2LiveActivityStoreError.interactionBlocked {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2LiveActivityStoreError.notDirectRoom {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)

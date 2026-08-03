@@ -24,6 +24,7 @@ final class V2ConversationSearchStore {
 
     var query = ""
     var contentFilter: V2MessageSearchContentFilter = .all
+    private(set) var senderFilter: UserID?
     private(set) var hits: [V2MessageSearchHit] = []
     private(set) var state: State = .idle
     private(set) var canLoadMore = false
@@ -47,7 +48,7 @@ final class V2ConversationSearchStore {
         do {
             try await Task.sleep(for: .milliseconds(200))
             try Task.checkCancellation()
-            let page = try await searcher.searchMessages(.init(query: query, scope: scope, contentFilter: contentFilter))
+            let page = try await searcher.searchMessages(.init(query: query, scope: scope, contentFilter: contentFilter, senderUserID: senderFilter))
             try Task.checkCancellation()
             guard requestGeneration == generation else { return }
             hits = page.hits
@@ -70,7 +71,7 @@ final class V2ConversationSearchStore {
         let requestGeneration = generation
         do {
             let page = try await searcher.searchMessages(
-                .init(query: query, scope: scope, contentFilter: contentFilter, cursor: cursor)
+                .init(query: query, scope: scope, contentFilter: contentFilter, senderUserID: senderFilter, cursor: cursor)
             )
             try Task.checkCancellation()
             guard requestGeneration == generation else { return }
@@ -86,5 +87,15 @@ final class V2ConversationSearchStore {
             guard requestGeneration == generation else { return }
             state = .failed
         }
+    }
+
+    func filterToSender(_ userID: UserID) {
+        guard senderFilter != userID else { return }
+        senderFilter = userID
+    }
+
+    func clearSenderFilter() {
+        guard senderFilter != nil else { return }
+        senderFilter = nil
     }
 }

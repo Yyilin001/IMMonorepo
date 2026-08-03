@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 @preconcurrency import NIOCore
 @preconcurrency import NIOPosix
 
@@ -95,14 +96,25 @@ public actor V2NATSFanoutPlanHintPublisher: V2FanoutPlanHintPublishing {
     }
 }
 
-/// All parser state is confined to the single NIO event loop. Its future is
-/// the only hand-off from the channel to the publisher actor.
-private final class V2NATSPublishAcknowledgement: ChannelInboundHandler, @unchecked Sendable {
+/// The acknowledgement can be completed by an event-loop callback, the
+/// watchdog, or channel shutdown. A mutex makes that one-shot state explicit
+/// instead of relying on an unchecked Sendable conformance.
+private final class V2NATSPublishAcknowledgement: ChannelInboundHandler, Sendable {
     typealias InboundIn = ByteBuffer
 
+    private struct State: Sendable {
+        var pendingBytes = Data()
+        var didResolve = false
+    }
+
+    private enum InboundResolution {
+        case confirmed
+        case invalidFrame
+        case brokerRejected
+    }
+
     private let confirmation: EventLoopPromise<Void>
-    private var pendingBytes = Data()
-    private var didResolve = false
+    private let state = Mutex(State())
 
     init(eventLoop: any EventLoop) {
         confirmation = eventLoop.makePromise(of: Void.self)
@@ -111,8 +123,16 @@ private final class V2NATSPublishAcknowledgement: ChannelInboundHandler, @unchec
     func channelRead(context _: ChannelHandlerContext, data: NIOAny) {
         var buffer = unwrapInboundIn(data)
         guard let received = buffer.readData(length: buffer.readableBytes) else { return }
-        pendingBytes.append(received)
-        consumeLines()
+        switch consumeLines(received) {
+        case .confirmed:
+            confirmation.succeed(())
+        case .invalidFrame:
+            confirmation.fail(V2NATSPublishError.invalidBrokerFrame)
+        case .brokerRejected:
+            confirmation.fail(V2NATSPublishError.brokerRejected)
+        case nil:
+            break
+        }
     }
 
     func channelInactive(context _: ChannelHandlerContext) {
@@ -133,38 +153,42 @@ private final class V2NATSPublishAcknowledgement: ChannelInboundHandler, @unchec
         failIfPending(V2NATSPublishError.acknowledgementTimedOut)
     }
 
-    private func consumeLines() {
-        while let delimiter = pendingBytes.range(of: Data([13, 10])) {
-            let line = String(data: pendingBytes[..<delimiter.lowerBound], encoding: .utf8)
-            pendingBytes.removeSubrange(..<delimiter.upperBound)
-            guard let line else {
-                failIfPending(V2NATSPublishError.invalidBrokerFrame)
-                return
+    private func consumeLines(_ received: Data) -> InboundResolution? {
+        state.withLock { state in
+            guard !state.didResolve else { return nil }
+            state.pendingBytes.append(received)
+            while let delimiter = state.pendingBytes.range(of: Data([13, 10])) {
+                let line = String(data: state.pendingBytes[..<delimiter.lowerBound], encoding: .utf8)
+                state.pendingBytes.removeSubrange(..<delimiter.upperBound)
+                guard let line else {
+                    state.didResolve = true
+                    return .invalidFrame
+                }
+                switch line {
+                case "PONG":
+                    state.didResolve = true
+                    return .confirmed
+                case let error where error.hasPrefix("-ERR"):
+                    state.didResolve = true
+                    return .brokerRejected
+                default:
+                    // Initial INFO and optional +OK lines precede the PONG.
+                    continue
+                }
             }
-            switch line {
-            case "PONG":
-                succeedIfPending()
-                return
-            case let error where error.hasPrefix("-ERR"):
-                failIfPending(V2NATSPublishError.brokerRejected)
-                return
-            default:
-                // Initial INFO and optional +OK lines precede the PONG.
-                continue
-            }
+            return nil
         }
     }
 
-    private func succeedIfPending() {
-        guard !didResolve else { return }
-        didResolve = true
-        confirmation.succeed(())
-    }
-
     private func failIfPending(_ error: any Error) {
-        guard !didResolve else { return }
-        didResolve = true
-        confirmation.fail(error)
+        let shouldFail = state.withLock { state in
+            guard !state.didResolve else { return false }
+            state.didResolve = true
+            return true
+        }
+        if shouldFail {
+            confirmation.fail(error)
+        }
     }
 }
 

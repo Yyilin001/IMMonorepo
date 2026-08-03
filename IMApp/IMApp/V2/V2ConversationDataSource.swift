@@ -4,7 +4,7 @@ import IMV2Core
 
 /// Boundary from the UI feature to the V2 SQLite projection. All IDs are
 /// parsed at this boundary; invalid data can never become a navigation route.
-actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMessageSearching, V2GroupAnnouncementReading, V2GroupRolePolicyReading {
+actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2GroupAnnouncementReading, V2GroupRolePolicyReading {
     private let localStore: GRDBV2LocalSyncStore
 
     init(localStore: GRDBV2LocalSyncStore) {
@@ -30,12 +30,25 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMess
         })
         let groupRoomIDs = Set(profiles.map(\.roomID))
         let directRoomIDs = Set(directIdentities.map(\.roomID))
+        let knownRoomIDs = groupRoomIDs.union(directRoomIDs)
+        var states: [RoomID: V2ClientConversationState] = [:]
+        states.reserveCapacity(knownRoomIDs.count)
+        for roomID in knownRoomIDs {
+            if let state = try await localStore.conversationState(roomID: roomID) {
+                states[roomID] = state
+            }
+        }
         let summaries = try await localStore.conversationSummaries()
         var messageItems: [V2ConversationListItem] = []
         messageItems.reserveCapacity(summaries.count)
         for summary in summaries {
             let message = summary.lastMessage
-            let state = try await localStore.conversationState(roomID: summary.roomID)
+            let state: V2ClientConversationState?
+            if let knownState = states[summary.roomID] {
+                state = knownState
+            } else {
+                state = try await localStore.conversationState(roomID: summary.roomID)
+            }
             messageItems.append(V2ConversationListItem(
                 id: summary.roomID.rawValue,
                 title: titles[summary.roomID] ?? directTitles[summary.roomID] ?? Self.roomTitle(summary.roomID.rawValue),
@@ -52,7 +65,8 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMess
             messageItems: messageItems,
             profiles: profiles,
             directIdentities: directIdentities,
-            directTitles: directTitles
+            directTitles: directTitles,
+            conversationStates: states
         )
     }
 
@@ -60,7 +74,8 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMess
         messageItems: [V2ConversationListItem],
         profiles: [V2ClientRoomProfileProjection],
         directIdentities: [V2ClientDirectRoomIdentity],
-        directTitles: [RoomID: String]? = nil
+        directTitles: [RoomID: String]? = nil,
+        conversationStates: [RoomID: V2ClientConversationState] = [:]
     ) -> [V2ConversationListItem] {
         let messageRoomIDs = Set(messageItems.map(\.id))
         let emptyProfileItems: [V2ConversationListItem] = profiles.compactMap { profile in
@@ -71,7 +86,10 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMess
                 preview: "暂无消息",
                 lastActivity: profile.createdAt,
                 isOutgoing: false,
-                kind: .group
+                kind: .group,
+                isPinned: conversationStates[profile.roomID]?.isPinned ?? false,
+                isArchived: conversationStates[profile.roomID]?.isArchived ?? false,
+                muteUntil: conversationStates[profile.roomID]?.muteUntil
             )
         }
         let representedRoomIDs = messageRoomIDs.union(emptyProfileItems.map(\.id))
@@ -87,7 +105,10 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMess
                 preview: "暂无消息",
                 lastActivity: identity.updatedAt,
                 isOutgoing: false,
-                kind: .direct
+                kind: .direct,
+                isPinned: conversationStates[identity.roomID]?.isPinned ?? false,
+                isArchived: conversationStates[identity.roomID]?.isArchived ?? false,
+                muteUntil: conversationStates[identity.roomID]?.muteUntil
             )
         }
         return (messageItems + emptyProfileItems + emptyDirectItems).sorted { lhs, rhs in
@@ -143,6 +164,22 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationMess
 
     func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage {
         try await localStore.searchMessages(request)
+    }
+
+    func favoriteMessages(for _: String) async throws -> [V2FavoriteConversationMessageItem] {
+        let profiles = try await localStore.roomProfiles()
+        let groupTitles = Dictionary(uniqueKeysWithValues: profiles.map { ($0.roomID, $0.title) })
+        let directIdentities = try await localStore.directRoomIdentities()
+        let directTitles = Dictionary(uniqueKeysWithValues: directIdentities.map { ($0.roomID, $0.publicIdentity.displayName) })
+        return try await localStore.favoritedMessages().map { message in
+            .init(
+                id: message.messageID.rawValue,
+                roomID: message.roomID.rawValue,
+                roomTitle: groupTitles[message.roomID] ?? directTitles[message.roomID] ?? Self.roomTitle(message.roomID.rawValue),
+                text: Self.preview(for: message),
+                createdAt: message.createdAt
+            )
+        }
     }
 
     private static func roomTitle(_ roomID: String) -> String {

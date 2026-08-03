@@ -11,6 +11,9 @@ public enum V2LiveActivityStoreError: Error, Equatable, Sendable {
     case roomNotFound
     case actorNotMember
     case typingNotAllowed
+    /// A direct-room block intentionally has the same externally observable
+    /// effect as any other authorization denial.
+    case interactionBlocked
     case notDirectRoom
     case corruptPersistenceState
 }
@@ -23,6 +26,10 @@ public protocol V2LiveActivityStore: Sendable {
     func preferences(userID: UserID, now: Date) async throws -> V2LiveActivityPreferences
     func presence(roomID: RoomID, viewerUserID: UserID, now: Date) async throws -> V2PresenceState
     func authorizeTyping(roomID: RoomID, actorUserID: UserID, now: Date) async throws
+    /// Re-checks delivery authorization for ephemeral events.  This is
+    /// separate from subscribing because a user can block someone after a
+    /// socket has already subscribed.
+    func authorizeObservation(roomID: RoomID, viewerUserID: UserID, subjectUserID: UserID, now: Date) async throws
     func allowsOnlinePresence(userID: UserID) async throws -> Bool
 }
 
@@ -36,7 +43,14 @@ public protocol V2LivePresenceLeaseManaging: Sendable {
     func allowsOnlinePresence(userID: UserID) async throws -> Bool
 }
 
-public struct V2LiveActivityService: Sendable {
+/// Registry-side delivery policy for best-effort activity.  The registry owns
+/// sockets, while the database-backed service remains the authority for room
+/// membership and direct-room block state.
+public protocol V2LiveActivityObservationAuthorizing: Sendable {
+    func authorizeObservation(roomID: RoomID, viewerUserID: UserID, subjectUserID: UserID, now: Date) async throws
+}
+
+public struct V2LiveActivityService: Sendable, V2LiveActivityObservationAuthorizing {
     private let store: any V2LiveActivityStore
 
     public init(store: any V2LiveActivityStore) { self.store = store }
@@ -57,6 +71,15 @@ public struct V2LiveActivityService: Sendable {
         try await store.authorizeTyping(roomID: roomID, actorUserID: actorUserID, now: now)
     }
 
+    public func authorizeObservation(roomID: RoomID, viewerUserID: UserID, subjectUserID: UserID, now: Date) async throws {
+        try await store.authorizeObservation(
+            roomID: roomID,
+            viewerUserID: viewerUserID,
+            subjectUserID: subjectUserID,
+            now: now
+        )
+    }
+
     public func allowsOnlinePresence(userID: UserID) async throws -> Bool {
         try await store.allowsOnlinePresence(userID: userID)
     }
@@ -66,4 +89,5 @@ extension PostgresV2LiveActivityStore: V2LivePresenceLeaseManaging {}
 
 extension V2LiveActivityStore {
     public func allowsOnlinePresence(userID _: UserID) async throws -> Bool { true }
+    public func authorizeObservation(roomID _: RoomID, viewerUserID _: UserID, subjectUserID _: UserID, now _: Date) async throws {}
 }

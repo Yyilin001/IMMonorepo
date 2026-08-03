@@ -123,15 +123,19 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
 
     private func connectedChannel() async throws -> Channel {
         if let channel, channel.isActive { return channel }
-        let handler = V2NATSGroupEventWakeInboundHandler { [receiveWake] payload in
-            guard let wire = try? JSONDecoder().decode(WireWake.self, from: payload),
-                  let roomID = try? RoomID(wire.roomID)
-            else { return }
-            await receiveWake(.init(roomID: roomID, highWatermark: wire.highWatermark))
-        }
         do {
             let channel = try await ClientBootstrap(group: eventLoopGroup)
-                .channelInitializer { channel in channel.pipeline.addHandler(handler) }
+                .channelInitializer { [receiveWake] channel in
+                    let handler = V2NATSGroupEventWakeInboundHandler(
+                        eventLoop: channel.eventLoop
+                    ) { payload in
+                        guard let wire = try? JSONDecoder().decode(WireWake.self, from: payload),
+                              let roomID = try? RoomID(wire.roomID)
+                        else { return }
+                        await receiveWake(.init(roomID: roomID, highWatermark: wire.highWatermark))
+                    }
+                    return channel.pipeline.addHandler(handler)
+                }
                 .connect(host: configuration.url.host!, port: configuration.url.port ?? 4222)
                 .get()
             let connect = String(decoding: try JSONEncoder().encode(Connect(token: configuration.token)), as: UTF8.self)
@@ -174,59 +178,35 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     }
 }
 
-/// Confined to the NIO event loop. It parses only Core NATS control lines and
-/// `MSG` payload framing; all application state crosses into an actor via the
-/// supplied Sendable callback.
-private final class V2NATSGroupEventWakeInboundHandler: ChannelInboundHandler, @unchecked Sendable {
+/// Its parser state is runtime-checked against its owning event loop; all
+/// application state crosses into an actor via the supplied Sendable callback.
+private final class V2NATSGroupEventWakeInboundHandler: ChannelInboundHandler, Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
 
     private let onPayload: @Sendable (Data) async -> Void
-    private var pending = Data()
-    private var remainingPayloadBytes: Int?
+    private let parser: NIOLoopBoundBox<V2NATSInboundFrameParser>
 
-    init(onPayload: @escaping @Sendable (Data) async -> Void) {
+    init(eventLoop: any EventLoop, onPayload: @escaping @Sendable (Data) async -> Void) {
         self.onPayload = onPayload
+        parser = .init(.init(invalidMessagePolicy: .closeChannel), eventLoop: eventLoop)
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buffer = unwrapInboundIn(data)
-        if let bytes = buffer.readData(length: buffer.readableBytes) { pending.append(bytes) }
-        consume(context: context)
-    }
-
-    private func consume(context: ChannelHandlerContext) {
-        while true {
-            if let remainingPayloadBytes {
-                guard pending.count >= remainingPayloadBytes + 2 else { return }
-                let payload = Data(pending.prefix(remainingPayloadBytes))
-                guard pending.dropFirst(remainingPayloadBytes).starts(with: [13, 10]) else {
-                    pending.removeAll(keepingCapacity: false)
-                    self.remainingPayloadBytes = nil
-                    context.close(promise: nil)
-                    return
-                }
-                pending.removeFirst(remainingPayloadBytes + 2)
-                self.remainingPayloadBytes = nil
+        guard let bytes = buffer.readData(length: buffer.readableBytes) else { return }
+        for output in parser.withValue({ $0.consume(bytes) }) {
+            switch output {
+            case .payload(let payload):
                 Task { await onPayload(payload) }
-                continue
-            }
-            guard let range = pending.range(of: Data([13, 10])) else { return }
-            let line = String(decoding: pending[..<range.lowerBound], as: UTF8.self)
-            pending.removeFirst(range.upperBound)
-            if line == "PING" {
+            case .pong:
                 var pong = context.channel.allocator.buffer(capacity: 6)
                 pong.writeString("PONG\r\n")
                 context.writeAndFlush(wrapOutboundOut(pong), promise: nil)
-                continue
-            }
-            guard line.hasPrefix("MSG ") else { continue }
-            let parts = line.split(separator: " ")
-            guard parts.count == 4, let count = Int(parts[3]), count >= 0 else {
+            case .closeChannel:
                 context.close(promise: nil)
                 return
             }
-            remainingPayloadBytes = count
         }
     }
 }

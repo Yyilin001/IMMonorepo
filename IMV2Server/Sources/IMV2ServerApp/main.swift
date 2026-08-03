@@ -187,6 +187,7 @@ enum IMV2ServerApp {
             let liveActivityStore = PostgresV2LiveActivityStore(database: database)
             let liveActivity = V2LiveActivityService(store: liveActivityStore)
             await connectionRegistry.configureLivePresenceLeases(liveActivityStore)
+            await connectionRegistry.configureLiveActivityObservationAuthorizer(liveActivity)
             let handler = V2GatewayDomainCommandHandler(
                 sendMessage: sendMessage,
                 membership: membership,

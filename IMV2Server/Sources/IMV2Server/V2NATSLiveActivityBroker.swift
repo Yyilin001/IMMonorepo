@@ -118,22 +118,24 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
 
     private func connectedChannel() async throws -> Channel {
         if let channel, channel.isActive { return channel }
-        let handler = V2NATSLiveActivityInboundHandler { [sourceID, receivePresence, receiveTyping] payload in
-            guard let event = try? JSONDecoder().decode(WireEvent.self, from: payload), event.sourceID != sourceID,
-                  let userID = try? UserID(event.userID)
-            else { return }
-            switch event.kind {
-            case .presence:
-                guard let isOnline = event.isOnline else { return }
-                await receivePresence(userID, isOnline, event.expiresAt)
-            case .typing:
-                guard let room = event.roomID.flatMap({ try? RoomID($0) }), let isTyping = event.isTyping else { return }
-                await receiveTyping(.init(roomID: room, userID: userID, isTyping: isTyping, expiresAt: event.expiresAt))
-            }
-        }
         do {
             let channel = try await ClientBootstrap(group: eventLoopGroup)
-                .channelInitializer { channel in channel.pipeline.addHandler(handler) }
+                .channelInitializer { [sourceID, receivePresence, receiveTyping] channel in
+                    let handler = V2NATSLiveActivityInboundHandler(eventLoop: channel.eventLoop) { payload in
+                        guard let event = try? JSONDecoder().decode(WireEvent.self, from: payload), event.sourceID != sourceID,
+                              let userID = try? UserID(event.userID)
+                        else { return }
+                        switch event.kind {
+                        case .presence:
+                            guard let isOnline = event.isOnline else { return }
+                            await receivePresence(userID, isOnline, event.expiresAt)
+                        case .typing:
+                            guard let room = event.roomID.flatMap({ try? RoomID($0) }), let isTyping = event.isTyping else { return }
+                            await receiveTyping(.init(roomID: room, userID: userID, isTyping: isTyping, expiresAt: event.expiresAt))
+                        }
+                    }
+                    return channel.pipeline.addHandler(handler)
+                }
                 .connect(host: configuration.url.host!, port: configuration.url.port ?? 4222).get()
             let connect = String(decoding: try JSONEncoder().encode(Connect(token: configuration.token)), as: UTF8.self)
             try await write("CONNECT \(connect)\r\n", channel: channel)
@@ -159,36 +161,32 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
     }
 }
 
-/// NIO serializes callbacks for a channel on one event loop. Keep parser
-/// fields event-loop-confined; only the Sendable payload callback may leave it.
-private final class V2NATSLiveActivityInboundHandler: ChannelInboundHandler, @unchecked Sendable {
+/// Its parser state is runtime-checked against its owning event loop; only the
+/// Sendable payload callback may leave it.
+private final class V2NATSLiveActivityInboundHandler: ChannelInboundHandler, Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
     private let onPayload: @Sendable (Data) async -> Void
-    private var pending = Data()
-    private var remainingPayloadBytes: Int?
-    init(onPayload: @escaping @Sendable (Data) async -> Void) { self.onPayload = onPayload }
+    private let parser: NIOLoopBoundBox<V2NATSInboundFrameParser>
+    init(eventLoop: any EventLoop, onPayload: @escaping @Sendable (Data) async -> Void) {
+        self.onPayload = onPayload
+        parser = .init(.init(invalidMessagePolicy: .ignore), eventLoop: eventLoop)
+    }
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buffer = unwrapInboundIn(data)
-        if let bytes = buffer.readData(length: buffer.readableBytes) { pending.append(bytes) }
-        consume(context: context)
-    }
-    private func consume(context: ChannelHandlerContext) {
-        while true {
-            if let remainingPayloadBytes {
-                guard pending.count >= remainingPayloadBytes + 2 else { return }
-                let payload = Data(pending.prefix(remainingPayloadBytes))
-                guard pending.dropFirst(remainingPayloadBytes).starts(with: [13, 10]) else { pending.removeAll(); self.remainingPayloadBytes = nil; context.close(promise: nil); return }
-                pending.removeFirst(remainingPayloadBytes + 2); self.remainingPayloadBytes = nil
-                Task { await onPayload(payload) }; continue
+        guard let bytes = buffer.readData(length: buffer.readableBytes) else { return }
+        for output in parser.withValue({ $0.consume(bytes) }) {
+            switch output {
+            case .payload(let payload):
+                Task { await onPayload(payload) }
+            case .pong:
+                var pong = context.channel.allocator.buffer(capacity: 6)
+                pong.writeString("PONG\r\n")
+                context.writeAndFlush(wrapOutboundOut(pong), promise: nil)
+            case .closeChannel:
+                context.close(promise: nil)
+                return
             }
-            guard let range = pending.range(of: Data([13, 10])) else { return }
-            let line = String(decoding: pending[..<range.lowerBound], as: UTF8.self)
-            pending.removeFirst(range.upperBound)
-            if line == "PING" { var pong = context.channel.allocator.buffer(capacity: 6); pong.writeString("PONG\r\n"); context.writeAndFlush(wrapOutboundOut(pong), promise: nil); continue }
-            let parts = line.split(separator: " ")
-            guard parts.count == 4, parts[0] == "MSG", let count = Int(parts[3]), count >= 0 else { continue }
-            remainingPayloadBytes = count
         }
     }
 }

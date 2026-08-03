@@ -55,6 +55,8 @@ for package in "${package_list[@]}"; do
 done
 
 bash "${repo_root}/scripts/check_v2_sql_migration_manifest.sh"
+bash "${repo_root}/scripts/check_v2_sql_migration_baseline_lock.sh"
+bash "${repo_root}/scripts/test_v2_sql_migration_baseline_lock.sh"
 bash "${repo_root}/scripts/check_v2_protobuf_generated.sh"
 bash "${repo_root}/scripts/check_v2_local_schema_migration_markers.sh"
 bash "${repo_root}/scripts/check_v2_schema_readiness_tables.sh"

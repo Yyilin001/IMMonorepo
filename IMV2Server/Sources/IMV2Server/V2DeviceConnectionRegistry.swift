@@ -16,6 +16,7 @@ public actor V2DeviceConnectionRegistry {
     private var foregroundGroupByConnection: [UUID: RoomID] = [:]
     private var foregroundGroupInterestManager: (any V2GroupEventWakeInterestManaging)?
     private var livePresenceLeases: (any V2LivePresenceLeaseManaging)?
+    private var liveActivityObservationAuthorizer: (any V2LiveActivityObservationAuthorizing)?
     private var liveActivityBroker: (any V2LiveActivityInterestManaging & V2LiveActivityPublishing)?
     private var presenceByConnection: [UUID: (roomID: RoomID, targetUserID: UserID)] = [:]
     private var presenceWatchersByTarget: [UserID: [UUID: V2GatewayByteStream]] = [:]
@@ -115,6 +116,10 @@ public actor V2DeviceConnectionRegistry {
         livePresenceLeases = leases
     }
 
+    public func configureLiveActivityObservationAuthorizer(_ authorizer: any V2LiveActivityObservationAuthorizing) {
+        liveActivityObservationAuthorizer = authorizer
+    }
+
     public func configureLiveActivityBroker(_ broker: any V2LiveActivityInterestManaging & V2LiveActivityPublishing) async {
         liveActivityBroker = broker
         for userID in presenceWatchersByTarget.keys { try? await broker.activatePresence(targetUserID: userID) }
@@ -178,7 +183,10 @@ public actor V2DeviceConnectionRegistry {
 
     private func notifyTypingWatchers(_ state: V2TypingState) async {
         let streams = typingWatchersByRoom[state.roomID].map { Array($0) } ?? []
-        for (connectionID, stream) in streams where identityByConnection[connectionID]?.userID != state.userID {
+        for (connectionID, stream) in streams {
+            guard let observer = identityByConnection[connectionID]?.userID, observer != state.userID,
+                  await mayObserve(roomID: state.roomID, observerUserID: observer, subjectUserID: state.userID)
+            else { continue }
             await stream.sendTypingState(state)
         }
     }
@@ -191,8 +199,27 @@ public actor V2DeviceConnectionRegistry {
     private func notifyPresenceWatchers(targetUserID: UserID, isOnline: Bool, expiresAt: Date) async {
         let streams = presenceWatchersByTarget[targetUserID].map { Array($0) } ?? []
         for (connectionID, stream) in streams {
-            guard let watch = presenceByConnection[connectionID], watch.targetUserID == targetUserID else { continue }
+            guard let watch = presenceByConnection[connectionID],
+                  let observer = identityByConnection[connectionID]?.userID,
+                  watch.targetUserID == targetUserID,
+                  await mayObserve(roomID: watch.roomID, observerUserID: observer, subjectUserID: targetUserID)
+            else { continue }
             await stream.sendPresenceState(.init(roomID: watch.roomID, targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt))
+        }
+    }
+
+    private func mayObserve(roomID: RoomID, observerUserID: UserID, subjectUserID: UserID) async -> Bool {
+        guard let liveActivityObservationAuthorizer else { return true }
+        do {
+            try await liveActivityObservationAuthorizer.authorizeObservation(
+                roomID: roomID,
+                viewerUserID: observerUserID,
+                subjectUserID: subjectUserID,
+                now: Date()
+            )
+            return true
+        } catch {
+            return false
         }
     }
 

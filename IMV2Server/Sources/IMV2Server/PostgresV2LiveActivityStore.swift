@@ -41,6 +41,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             let room = try liveActivityUUID(roomID), viewer = try liveActivityUUID(viewerUserID)
             guard let peer = try await sql.raw("SELECT CASE WHEN lower_user_id = \(bind: viewer) THEN higher_user_id ELSE lower_user_id END AS user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: room) AND (lower_user_id = \(bind: viewer) OR higher_user_id = \(bind: viewer))").first(decoding: LiveActivityUserRow.self) else { throw V2LiveActivityStoreError.notDirectRoom }
             guard try await activeMember(room: room, user: viewer, sql: sql) else { throw V2LiveActivityStoreError.actorNotMember }
+            guard !(try await usersAreBlocked(viewer, peer.userID, sql: sql)) else { throw V2LiveActivityStoreError.interactionBlocked }
             let preference = try await sql.raw("SELECT allows_online_presence FROM im_v2.user_live_activity_preferences WHERE user_id = \(bind: peer.userID)").first(decoding: LiveActivityOnlinePreferenceRow.self)?.allowsOnlinePresence ?? true
             let expiry = try await sql.raw("SELECT MAX(expires_at) AS expires_at FROM im_v2.user_live_presence_leases WHERE user_id = \(bind: peer.userID) AND expires_at > \(bind: now)").first(decoding: LiveActivityExpiryRow.self)?.expiresAt
             return try .init(roomID: roomID, targetUserID: .init(peer.userID.uuidString), isOnline: preference && expiry != nil, expiresAt: preference ? (expiry ?? now) : now)
@@ -52,8 +53,24 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
             let room = try liveActivityUUID(roomID), actor = try liveActivityUUID(actorUserID)
             guard try await activeMember(room: room, user: actor, sql: sql) else { throw V2LiveActivityStoreError.actorNotMember }
+            if let peer = try await directPeer(room: room, user: actor, sql: sql) {
+                guard !(try await usersAreBlocked(actor, peer, sql: sql)) else { throw V2LiveActivityStoreError.interactionBlocked }
+            }
             let allowed = try await sql.raw("SELECT allows_typing_indicators FROM im_v2.user_live_activity_preferences WHERE user_id = \(bind: actor)").first(decoding: LiveActivityTypingPreferenceRow.self)?.allowsTypingIndicators ?? true
             guard allowed else { throw V2LiveActivityStoreError.typingNotAllowed }
+        }
+    }
+
+    public func authorizeObservation(roomID: RoomID, viewerUserID: UserID, subjectUserID: UserID, now _: Date) async throws {
+        try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            let room = try liveActivityUUID(roomID)
+            let viewer = try liveActivityUUID(viewerUserID)
+            let subject = try liveActivityUUID(subjectUserID)
+            guard try await activeMember(room: room, user: viewer, sql: sql) else { throw V2LiveActivityStoreError.actorNotMember }
+            guard let peer = try await directPeer(room: room, user: viewer, sql: sql) else { return }
+            guard peer == subject else { throw V2LiveActivityStoreError.actorNotMember }
+            guard !(try await usersAreBlocked(viewer, subject, sql: sql)) else { throw V2LiveActivityStoreError.interactionBlocked }
         }
     }
 
@@ -74,14 +91,36 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     public func removePresence(connectionID: UUID, now: Date) async throws -> Bool {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            try await sql.raw("DELETE FROM im_v2.user_live_presence_leases WHERE connection_id = \(bind: connectionID)").run()
-            return try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.user_live_presence_leases WHERE expires_at > \(bind: now)) AS exists").first(decoding: LiveActivityBooleanRow.self)?.exists ?? false
+            // Preserve the owner from the deleted row, then ask only whether
+            // that same user has another live connection.  A global EXISTS
+            // would incorrectly keep Alice online whenever Bob is online.
+            return try await sql.raw("""
+                WITH removed AS (
+                    DELETE FROM im_v2.user_live_presence_leases
+                    WHERE connection_id = \(bind: connectionID)
+                    RETURNING user_id
+                )
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM im_v2.user_live_presence_leases AS lease
+                    INNER JOIN removed ON removed.user_id = lease.user_id
+                    WHERE lease.expires_at > \(bind: now)
+                ) AS exists
+                """).first(decoding: LiveActivityBooleanRow.self)?.exists ?? false
         }
     }
 
     private func activeMember(room: UUID, user: UUID, sql: any SQLDatabase) async throws -> Bool {
         guard let row = try await sql.raw("SELECT room.membership_revision FROM im_v2.rooms AS room WHERE room.room_id = \(bind: room)").first(decoding: LiveActivityMembershipRevisionRow.self) else { throw V2LiveActivityStoreError.roomNotFound }
         return try await sql.raw("SELECT 1 AS exists FROM im_v2.room_memberships WHERE room_id = \(bind: room) AND user_id = \(bind: user) AND joined_revision <= \(bind: row.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: row.membershipRevision))").first(decoding: LiveActivityExistsRow.self) != nil
+    }
+
+    private func directPeer(room: UUID, user: UUID, sql: any SQLDatabase) async throws -> UUID? {
+        try await sql.raw("SELECT CASE WHEN lower_user_id = \(bind: user) THEN higher_user_id ELSE lower_user_id END AS user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: room) AND (lower_user_id = \(bind: user) OR higher_user_id = \(bind: user))").first(decoding: LiveActivityUserRow.self)?.userID
+    }
+
+    private func usersAreBlocked(_ lhs: UUID, _ rhs: UUID, sql: any SQLDatabase) async throws -> Bool {
+        try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.user_blocks WHERE (blocker_user_id = \(bind: lhs) AND blocked_user_id = \(bind: rhs)) OR (blocker_user_id = \(bind: rhs) AND blocked_user_id = \(bind: lhs))) AS exists").first(decoding: LiveActivityBooleanRow.self)?.exists ?? true
     }
 }
 

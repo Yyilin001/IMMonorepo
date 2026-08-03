@@ -21,10 +21,32 @@ struct V2LiveActivityServiceTests {
         #expect(!preference.allowsOnlinePresence)
         #expect(preference.allowsTypingIndicators)
     }
+
+    @Test("observation authorization is delegated to the durable policy store")
+    func forwardsObservationAuthorization() async throws {
+        let store = LiveActivityStoreSpy()
+        let service = V2LiveActivityService(store: store)
+        let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000091")
+        let viewer: UserID = try .init("00000000-0000-0000-0000-000000000092")
+        let subject: UserID = try .init("00000000-0000-0000-0000-000000000093")
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+
+        try await service.authorizeObservation(roomID: roomID, viewerUserID: viewer, subjectUserID: subject, now: now)
+
+        #expect(await store.observation() == .init(roomID: roomID, viewerUserID: viewer, subjectUserID: subject, now: now))
+    }
 }
 
 private actor LiveActivityStoreSpy: V2LiveActivityStore {
+    struct Observation: Equatable, Sendable {
+        let roomID: RoomID
+        let viewerUserID: UserID
+        let subjectUserID: UserID
+        let now: Date
+    }
+
     private var captured: V2SetLiveActivityPreferencesCommand?
+    private var capturedObservation: Observation?
 
     func setPreferences(command: V2SetLiveActivityPreferencesCommand, now: Date) async throws -> V2SetLiveActivityPreferencesOutcome {
         captured = command
@@ -44,6 +66,10 @@ private actor LiveActivityStoreSpy: V2LiveActivityStore {
     }
 
     func authorizeTyping(roomID: RoomID, actorUserID: UserID, now: Date) async throws {}
+    func authorizeObservation(roomID: RoomID, viewerUserID: UserID, subjectUserID: UserID, now: Date) async throws {
+        capturedObservation = .init(roomID: roomID, viewerUserID: viewerUserID, subjectUserID: subjectUserID, now: now)
+    }
     func allowsOnlinePresence(userID: UserID) async throws -> Bool { true }
     func command() -> V2SetLiveActivityPreferencesCommand? { captured }
+    func observation() -> Observation? { capturedObservation }
 }
